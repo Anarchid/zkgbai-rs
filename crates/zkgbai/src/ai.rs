@@ -14,7 +14,7 @@ use crate::kgbutil::Pathfinder;
 use crate::los::LosManager;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
-use crate::terrain::TerrainModel;
+use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
 /// The `shortName` this AI is registered under (see `data/AIInfo.lua`).
@@ -53,6 +53,8 @@ pub struct Ai {
     /// Regions, chokepoints and connectivity per movement tier (built in the
     /// background; see [`Ai::terrain`]).
     pub terrain: TerrainModel,
+    /// The latest strategic analysis, once the terrain model is ready.
+    pub strategy: Option<Strategy>,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -123,6 +125,7 @@ impl SkirmishAi for Ai {
             fac: FactoryManager::new(cb),
             pathfinder,
             terrain,
+            strategy: None,
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -312,6 +315,7 @@ impl Ai {
             ai.terrain_update();
             ai.terrain_dump(frame);
         });
+        self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }

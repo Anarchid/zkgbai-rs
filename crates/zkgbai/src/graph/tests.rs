@@ -146,6 +146,23 @@ fn territory_inference_along_a_chain() {
 }
 
 #[test]
+fn shadows_spread_along_ground_links_only() {
+    // A - B - C - D, with a cliff between B and C
+    let mut g = graph(&[(640.0, 640.0), (1280.0, 640.0), (1920.0, 640.0), (2560.0, 640.0)]);
+    let cliff = g.links.iter().position(|l| (l.v0.min(l.v1), l.v0.max(l.v1)) == (1, 2)).unwrap();
+    g.ground_links = (0..g.links.len()).map(|li| li != cliff).collect();
+
+    g.set_hostile(2);
+    assert!(g.metal_spots[3].enemy_shadowed && !g.metal_spots[1].enemy_shadowed);
+    g.set_owned(1);
+    assert!(g.metal_spots[0].ally_shadowed && !g.metal_spots[2].ally_shadowed);
+    // C is hostile across the cliff only: B keeps no enemy shadow
+    g.metal_spots[1].enemy_shadowed = true;
+    g.clean_shadows(1);
+    assert!(!g.metal_spots[1].enemy_shadowed);
+}
+
+#[test]
 fn closest_queries_on_an_empty_graph() {
     let g = graph(&[]);
     assert!(g.get_closest_spot(Vec3::ZERO).is_none());

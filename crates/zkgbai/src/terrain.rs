@@ -2,12 +2,17 @@
 //! movement tier (see the `zk-terrain` crate). It is built on a background
 //! thread at startup; until it is ready, `Ai::terrain` yields nothing and
 //! callers fall back to the metal-spot graph.
+//!
+//! Once it is ready, a strategic analysis of the game (which chokepoints
+//! guard our territory) is refreshed periodically, and the metal-spot
+//! graph learns which of its links ground forces travel directly.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use springai::{Callback, UnitDef, Vec3};
-use zk_terrain::{MoveClass, Pos, SpringMapData, Terrain, Tier};
+use zk_terrain::strategy::{Analysis, Asset, Scenario, Side, ground_distance};
+use zk_terrain::{MoveClass, Pos, SpringMapData, Terrain, Tier, TierMap};
 
 use crate::Ai;
 use crate::defs::Defs;
@@ -110,8 +115,11 @@ impl Ai {
         self.terrain.get()
     }
 
-    /// Pick up the finished analysis.
+    /// Pick up the finished analysis; keep the link classification current.
     pub fn terrain_update(&mut self) {
+        if self.terrain().is_some() && self.graph.ground_links.len() != self.graph.links.len() {
+            self.terrain_classify_links();
+        }
         let TerrainModel::Pending { rx } = &self.terrain else { return };
         match rx.try_recv() {
             Ok((terrain, compute)) => {
@@ -136,14 +144,19 @@ impl Ai {
     }
 
     /// Draw a tier's chokepoints, gates and regions as map markers
-    /// (`kgbterrain <tier>` chat command).
+    /// (`kgbterrain <tier>` chat command), or with `strategy` the
+    /// chokepoints of the latest strategic analysis.
     pub fn terrain_draw(&self, tier_name: &str) {
         let Some(terrain) = self.terrain() else {
             self.say("Terrain analysis is not ready.");
             return;
         };
+        if tier_name == "strategy" {
+            self.strategy_draw();
+            return;
+        }
         let Some(tier) = Tier::ALL.into_iter().find(|t| t.name() == tier_name) else {
-            self.say("Usage: kgbterrain spider|bot|vehicle|hover|ship|amphib");
+            self.say("Usage: kgbterrain spider|bot|vehicle|hover|ship|amphib|strategy");
             return;
         };
         let Some(map) = terrain.tier(tier) else { return };
@@ -203,30 +216,26 @@ impl Ai {
             }
         }
         let spots: Vec<serde_json::Value> = self
-            .graph
-            .metal_spots
+            .strategy_assets()
             .iter()
-            .map(|s| {
-                let side = if s.owned || (s.ally_shadowed && !s.hostile) {
-                    "ally"
-                } else if s.hostile || s.enemy_shadowed {
-                    "enemy"
-                } else {
-                    "neutral"
+            .map(|a| {
+                let side = match a.side {
+                    Side::Ally => "ally",
+                    Side::Enemy => "enemy",
+                    Side::Neutral => "neutral",
                 };
-                serde_json::json!({ "x": s.position.x, "z": s.position.z, "value": s.value, "side": side })
+                serde_json::json!({ "x": a.pos.x, "z": a.pos.z, "value": a.value, "side": side })
             })
             .collect();
+        let (ally, enemy) = self.strategy_bases().unwrap_or_default();
         let base = |v: Vec3| serde_json::json!([v.x, v.z]);
-        let ally =
-            if self.graph.get_start_pos().is_zero() { self.graph.get_ally_base() } else { self.graph.get_start_pos() };
         let scenario = serde_json::json!({
             "map": map.name(),
             "frame": frame,
             "team": self.team_id,
             "zktamap": map_file.file_name().map(|f| f.to_string_lossy().into_owned()),
             "ally_base": base(ally),
-            "enemy_base": base(self.graph.get_enemy_center()),
+            "enemy_base": base(enemy),
             "assets": spots,
         });
         let file = dir.join(format!("{name}-f{frame}-team{}.json", self.team_id));
@@ -235,4 +244,193 @@ impl Ai {
             Err(e) => self.log(&format!("terrain: cannot write {}: {e}", file.display())),
         }
     }
+}
+
+/// Tiers whose routes make two metal spots neighbours for territory
+/// inference: whoever holds one can walk, drive or hover to the other.
+const GROUND_TIERS: [Tier; 4] = [Tier::Bot, Tier::Vehicle, Tier::Hover, Tier::Amphib];
+
+/// A link is direct if ground travel along it is at most this many times
+/// its length (plus [`DETOUR_SLACK`] elmos).
+const MAX_DETOUR: f32 = 2.0;
+const DETOUR_SLACK: f32 = 300.0;
+
+impl Ai {
+    /// Mark the metal-spot links that ground forces travel directly, so
+    /// territory shadows do not spread across cliffs and water.
+    fn terrain_classify_links(&mut self) {
+        let Some(terrain) = self.terrain.get() else { return };
+        let maps: Vec<&TierMap> = GROUND_TIERS.iter().filter_map(|&t| terrain.tier(t)).collect();
+        let spots = &self.graph.metal_spots;
+        let ground: Vec<bool> = self
+            .graph
+            .links
+            .iter()
+            .map(|l| {
+                let (a, b) = (pos(spots[l.v0].position), pos(spots[l.v1].position));
+                let limit = l.length * MAX_DETOUR + DETOUR_SLACK;
+                maps.is_empty() || maps.iter().any(|m| ground_distance(m, a, b).is_some_and(|d| d <= limit))
+            })
+            .collect();
+        let indirect = ground.iter().filter(|&&g| !g).count();
+        self.graph.ground_links = ground;
+        self.log(&format!(
+            "terrain: {indirect} of {} metal-spot links cross impassable terrain",
+            self.graph.links.len()
+        ));
+    }
+}
+
+/// Frames between strategic re-analyses.
+const STRATEGY_PERIOD: i32 = 900;
+
+/// How far behind a chokepoint (on our side) its defenses stand, elmos.
+const FORTIFY_SETBACK: f32 = 120.0;
+
+/// The latest strategic analysis of the game, on the movement tier of the
+/// enemy's ground army.
+pub struct Strategy {
+    pub frame: i32,
+    pub tier: Tier,
+    pub analysis: Analysis,
+    /// Chokepoints worth fortifying, nearest the enemy first.
+    pub fortify: Vec<Fortification>,
+}
+
+/// A chokepoint guarding our territory from enemy ground forces.
+pub struct Fortification {
+    pub choke: usize,
+    /// Where its defenses go: just behind the gate on our side.
+    pub pos: Vec3,
+    /// Passage width, elmos.
+    pub width: f32,
+    /// No build site near `pos` (until the next analysis).
+    pub blocked: bool,
+}
+
+impl Ai {
+    /// Our base and the enemy's for strategic purposes: the enemy's is the
+    /// center of their seen mexes, or of their presumed territory before
+    /// any are seen. `None` while the enemy's whereabouts are unknown.
+    fn strategy_bases(&self) -> Option<(Vec3, Vec3)> {
+        let ally =
+            if self.graph.get_start_pos().is_zero() { self.graph.get_ally_base() } else { self.graph.get_start_pos() };
+        let mut enemy = self.graph.get_enemy_center();
+        if enemy.is_zero() {
+            let territory = self.graph.get_enemy_territory();
+            let n = territory.len() as f32;
+            enemy = territory
+                .iter()
+                .fold(Vec3::ZERO, |c, s| Vec3::new(c.x + s.position.x / n, 0.0, c.z + s.position.z / n));
+        }
+        (!ally.is_zero() && !enemy.is_zero()).then_some((ally, enemy))
+    }
+
+    /// The movement tier most of the enemy's seen ground army (by cost)
+    /// belongs to; bots until we know better.
+    fn enemy_ground_tier(&self) -> Tier {
+        let mut cost: Vec<(Tier, f32)> = Vec::new();
+        for e in self.war.targets.values().filter(|e| !e.is_static) {
+            let Some((ud, tier)) = e.ud.and_then(|ud| Some((ud, tier_of(ud)?))) else { continue };
+            match cost.iter_mut().find(|(t, _)| *t == tier) {
+                Some((_, c)) => *c += ud.cost(self.metal),
+                None => cost.push((tier, ud.cost(self.metal))),
+            }
+        }
+        cost.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map_or(Tier::Bot, |(t, _)| t)
+    }
+
+    /// Metal spots as assets of the side that holds (or probably holds)
+    /// them.
+    fn strategy_assets(&self) -> Vec<Asset> {
+        self.graph
+            .metal_spots
+            .iter()
+            .map(|s| {
+                let side = if s.owned || (s.ally_shadowed && !s.hostile) {
+                    Side::Ally
+                } else if s.hostile || s.enemy_shadowed {
+                    Side::Enemy
+                } else {
+                    Side::Neutral
+                };
+                Asset { pos: pos(s.position), value: s.value, side }
+            })
+            .collect()
+    }
+
+    /// Re-run the strategic analysis every [`STRATEGY_PERIOD`] frames.
+    pub fn strategy_update(&mut self, frame: i32) {
+        if (frame + self.offset) % STRATEGY_PERIOD != 0 {
+            return;
+        }
+        let Some((ally, enemy)) = self.strategy_bases() else { return };
+        let tier = self.enemy_ground_tier();
+        let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
+        let assets = self.strategy_assets();
+        let analysis = Analysis::run(&Scenario { map, ally_base: pos(ally), enemy_base: pos(enemy), assets: &assets });
+        let elevation = self.cb.map();
+        // Spiders climb around any chokepoint.
+        let fortify = if tier == Tier::Spider { Vec::new() } else { fortifications(map, &analysis) };
+        let fortify = fortify
+            .into_iter()
+            .map(|(choke, p, width)| Fortification {
+                choke,
+                pos: Vec3::new(p.x, elevation.elevation_at(p.x, p.z), p.z),
+                width,
+                blocked: false,
+            })
+            .collect();
+        self.strategy = Some(Strategy { frame, tier, analysis, fortify });
+    }
+
+    /// Mark the held chokepoints and the fortification sites.
+    fn strategy_draw(&self) {
+        let (Some(strategy), Some(terrain)) = (&self.strategy, self.terrain()) else {
+            self.say("No strategic analysis yet.");
+            return;
+        };
+        let Some(map) = terrain.tier(strategy.tier) else { return };
+        let draw = self.cb.map();
+        for &c in &strategy.analysis.hold {
+            let p = map.chokes[c].pos;
+            draw.add_point(Vec3::new(p.x, draw.elevation_at(p.x, p.z), p.z), &format!("hold C{c}"));
+        }
+        for f in &strategy.fortify {
+            draw.add_point(f.pos, &format!("fortify C{} ({:.0} wide)", f.choke, f.width));
+        }
+        self.say(&format!(
+            "Frame {} ({} tier): hold {} chokepoints, fortifying {}.",
+            strategy.frame,
+            strategy.tier.name(),
+            strategy.analysis.hold.len(),
+            strategy.fortify.len()
+        ));
+    }
+}
+
+/// The chokepoints worth holding (see [`Analysis::hold`]) that lie between
+/// our base and theirs: (choke, defense position, width), nearest the enemy
+/// first.
+fn fortifications(map: &TierMap, a: &Analysis) -> Vec<(usize, Pos, f32)> {
+    let Some(base) = a.ally_base else { return Vec::new() };
+    let mut sites: Vec<_> = a
+        .hold
+        .iter()
+        .filter_map(|&c| {
+            let choke = &map.chokes[c];
+            // Not in a pocket behind our base, which the enemy can only
+            // reach through it anyway.
+            if a.choke_distance(map, c, false) >= a.dist_from_enemy[base] {
+                return None;
+            }
+            let home = map.regions[a.home_side(map, c)?].center;
+            let d = choke.pos.distance(home);
+            let t = if d > 0.0 { (FORTIFY_SETBACK / d).min(0.5) } else { 0.0 };
+            let p = Pos::new(choke.pos.x + (home.x - choke.pos.x) * t, choke.pos.z + (home.z - choke.pos.z) * t);
+            Some((a.choke_distance(map, c, false), (c, p, choke.width)))
+        })
+        .collect();
+    sites.sort_by(|x, y| x.0.total_cmp(&y.0));
+    sites.into_iter().map(|(_, site)| site).collect()
 }

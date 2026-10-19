@@ -89,6 +89,11 @@ pub struct GraphManager {
     pub metal_spots: Vec<MetalSpot>,
     /// All graph edges; a link's `index` is its position in this vector.
     pub links: Vec<Link>,
+    /// Per link: whether ground forces travel directly between its spots
+    /// (no cliff or water in between; see `Ai::terrain_classify_links`).
+    /// Territory shadows spread along these links only. Empty until the
+    /// terrain model is ready, when every link counts.
+    pub ground_links: Vec<bool>,
     /// Energy-grid buildings by unit id.
     pub pylons: BTreeMap<i32, Pylon>,
     /// Width + height above 1536 heightmap squares.
@@ -149,6 +154,7 @@ impl GraphManager {
             pylon_defs: BTreeMap::new(),
             metal_spots: Vec::new(),
             links: Vec::new(),
+            ground_links: Vec::new(),
             pylons: BTreeMap::new(),
             big_map: w + h > 1536,
             mex_def_id: -1,
@@ -348,7 +354,13 @@ impl GraphManager {
         u.def().is_some_and(|d| d.id() == self.mex_def_id)
     }
 
-    /// Mark a spot as enemy-held and its neighbours as enemy-shadowed.
+    /// Whether territory shadows spread along a link (see `ground_links`).
+    fn is_ground_link(&self, link: usize) -> bool {
+        self.ground_links.get(link).copied().unwrap_or(true)
+    }
+
+    /// Mark a spot as enemy-held and its ground neighbours as
+    /// enemy-shadowed.
     fn set_hostile(&mut self, spot: usize) {
         let ms = &mut self.metal_spots[spot];
         ms.hostile = true;
@@ -363,6 +375,9 @@ impl GraphManager {
         // set adjacent spots as enemyShadowed if they aren't already hostile
         for k in 0..self.metal_spots[spot].links.len() {
             let li = self.metal_spots[spot].links[k];
+            if !self.is_ground_link(li) {
+                continue;
+            }
             for v in [self.links[li].v0, self.links[li].v1] {
                 if !self.metal_spots[v].hostile {
                     self.metal_spots[v].enemy_shadowed = true;
@@ -371,7 +386,7 @@ impl GraphManager {
         }
     }
 
-    /// Mark a spot as ours and its neighbours as ally-shadowed.
+    /// Mark a spot as ours and its ground neighbours as ally-shadowed.
     fn set_owned(&mut self, spot: usize) {
         let ms = &mut self.metal_spots[spot];
         ms.hostile = false;
@@ -386,6 +401,9 @@ impl GraphManager {
         // set adjacent spots as allyShadowed if they aren't already owned
         for k in 0..self.metal_spots[spot].links.len() {
             let li = self.metal_spots[spot].links[k];
+            if !self.is_ground_link(li) {
+                continue;
+            }
             for v in [self.links[li].v0, self.links[li].v1] {
                 if !self.metal_spots[v].owned {
                     self.metal_spots[v].ally_shadowed = true;
@@ -418,7 +436,7 @@ impl GraphManager {
     fn clean_shadows(&mut self, spot: usize) {
         let mut has_adjacent_owned = false;
         let mut has_adjacent_hostile = false;
-        for &li in &self.metal_spots[spot].links {
+        for &li in self.metal_spots[spot].links.iter().filter(|&&li| self.is_ground_link(li)) {
             let (a, b) = (&self.metal_spots[self.links[li].v0], &self.metal_spots[self.links[li].v1]);
             if a.hostile || b.hostile {
                 has_adjacent_hostile = true;

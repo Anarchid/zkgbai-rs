@@ -8,6 +8,10 @@ use crate::Ai;
 use crate::defs::cmd;
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
 
+/// Turrets within this distance of a chokepoint's defense position count as
+/// its defenses.
+const CHOKE_PORC_RADIUS: f32 = 300.0;
+
 impl Ai {
     /// The common `FindClosestBuildSite(def, pos, 600, 3, facing)`.
     fn eco_build_site(&self, def: UnitDef, pos: Vec3, facing: i32) -> Vec3 {
@@ -150,6 +154,7 @@ impl Ai {
 
         // porc push against nearby enemy porc and defend the front line
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
+            self.eco_defend_chokes();
             self.eco_porc_push(position);
             if self.graph.eminent_territory {
                 self.eco_defend_front(position);
@@ -794,6 +799,64 @@ impl Ai {
         // build an llt
         let pos = self.eco_build_site(llt, position, 0);
         self.eco_add_simple(llt, pos, List::Porc, Some(List::Porc));
+    }
+
+    /// Fortify the chokepoints guarding our territory (see
+    /// `Strategy::fortify`): at most one new turret per call, more per
+    /// chokepoint as income grows.
+    fn eco_defend_chokes(&mut self) {
+        let income = self.eco.adjusted_income;
+        if income < 10.0 {
+            return;
+        }
+        let wanted = 1 + usize::from(income > 25.0) + usize::from(income > 45.0);
+        let Some(strategy) = &self.strategy else {
+            return;
+        };
+        let sites: Vec<(usize, Vec3, f32)> =
+            strategy.fortify.iter().enumerate().filter(|(_, f)| !f.blocked).map(|(i, f)| (i, f.pos, f.width)).collect();
+        for (i, pos, width) in sites {
+            let have = self.eco_porc_count(pos, CHOKE_PORC_RADIUS);
+            if have >= wanted {
+                continue;
+            }
+            let Some(turret) = self.eco_choke_turret(width, have) else {
+                continue;
+            };
+            let site = self.eco_build_site(turret, pos, 0);
+            // a site that far away could be on the wrong side of the gate
+            if distance(site, pos) > CHOKE_PORC_RADIUS * 0.6 {
+                if let Some(f) = self.strategy.as_mut().and_then(|s| s.fortify.get_mut(i)) {
+                    f.blocked = true;
+                }
+                continue;
+            }
+            if self.eco_add_simple(turret, site, List::Porc, Some(List::Porc)).is_some() {
+                let choke = self.strategy.as_ref().and_then(|s| s.fortify.get(i)).map_or(0, |f| f.choke);
+                self.log(&format!("terrain: fortifying chokepoint C{choke} with {}", turret.name()));
+                return;
+            }
+        }
+    }
+
+    /// The `nth` turret for a chokepoint `width` elmos wide: a riot turret
+    /// for narrow gates or an LLT first, then an HLT, then heavier porc.
+    fn eco_choke_turret(&self, width: f32, nth: usize) -> Option<UnitDef> {
+        let income = self.eco.adjusted_income;
+        self.defs.get(match nth {
+            0 if width < 250.0 && income > 20.0 => "turretriot",
+            0 => "turretlaser",
+            1 => "turretheavylaser",
+            _ if income > 60.0 => "turretgauss",
+            _ if width < 250.0 => "turretemp",
+            _ => "turretlaser",
+        })
+    }
+
+    /// Porc (built or queued) within `radius` of `pos`.
+    fn eco_porc_count(&self, pos: Vec3, radius: f32) -> usize {
+        self.eco.porcs.iter().filter(|u| distance(pos, u.pos()) < radius).count()
+            + self.eco.porc_tasks.iter().filter(|&&c| distance(pos, self.eco.task_pos(c)) < radius).count()
     }
 
     /// Whether existing porc (built or queued) is within `porcdist` of `pos`.
