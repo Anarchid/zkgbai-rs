@@ -31,9 +31,9 @@ const SLOW: f32 = 75.0;
 /// From this income on (with the economy not losing) a silo is affordable.
 const NUKE_INCOME: f32 = 50.0;
 
-/// How a silo is told to fire: an attack order at a position. (Its weapon
-/// is `commandfire`, but the manual-fire command is refused; see the test
-/// below.)
+/// How a silo is told to fire: an attack order at a position (an area
+/// attack works as well). Its weapon is `commandfire`, but the manual-fire
+/// command is refused; see the test below.
 const CMD_ATTACK: i32 = 20;
 const CMD_MANUALFIRE: i32 = 105;
 
@@ -201,8 +201,8 @@ impl Ai {
 
 /// Development aid (`ZKGBAI_NUKE_TEST`): cheat a silo and metal, and fire its
 /// missiles at the far side of the map, ordering each a different way in
-/// turn, to log which way launches. (Against NullAI on Comet Catcher:
-/// manual fire nothing, attack launched.)
+/// turn, to log which way launches. (Against NullAI on Comet Catcher: an
+/// area attack and an attack launched, manual fire did nothing.)
 #[derive(Default)]
 pub struct NukeTest {
     silo: Option<Unit>,
@@ -211,8 +211,8 @@ pub struct NukeTest {
     pending: Option<(i32, i32)>,
 }
 
-/// The ways tried: manual fire, attack a position, attack an area.
-const TEST_VARIANTS: [&str; 3] = ["manual fire", "attack", "attack area"];
+/// The ways tried: attack an area, manual fire, attack a position.
+const TEST_VARIANTS: [&str; 3] = ["attack area", "manual fire", "attack"];
 
 impl Ai {
     fn nukes_test_update(&mut self, frame: i32) {
@@ -265,9 +265,9 @@ impl Ai {
                 let target = Vec3::new(target.x, map.elevation_at(target.x, target.z), target.z);
                 let stock = silo.stockpile();
                 match t.variant {
-                    0 => silo.execute_custom_command(CMD_MANUALFIRE, &[target.x, target.y, target.z], 0, NO_TIMEOUT),
-                    1 => silo.execute_custom_command(CMD_ATTACK, &[target.x, target.y, target.z], 0, NO_TIMEOUT),
-                    _ => silo.attack_area(target, 0.0, 0),
+                    0 => silo.attack_area(target, 0.0, 0),
+                    1 => silo.execute_custom_command(CMD_MANUALFIRE, &[target.x, target.y, target.z], 0, NO_TIMEOUT),
+                    _ => silo.execute_custom_command(CMD_ATTACK, &[target.x, target.y, target.z], 0, NO_TIMEOUT),
                 };
                 let after: Vec<i32> = silo.current_commands().iter().map(|c| c.id()).collect();
                 t.pending = Some((frame, stock));
