@@ -1,13 +1,17 @@
-//! Air drops: Charons (light air transports, one unit each) fly raiders
-//! past the chokepoints guarding the enemy's value and drop them where
-//! that value is far by ground (see
-//! [`Analysis::drops`](zk_terrain::strategy::Analysis)).
+//! Air drops: Charons (light air transports, one unit each) land a strike
+//! force where it can do damage and should not be able to get: past the
+//! chokepoints guarding the enemy's value, deep in its territory.
 //!
 //! With a gunship factory, the AI keeps a flight of Charons. Once they are
-//! all at home and enough light raiders are about, they load one each, fly
-//! along a path that avoids anti-air to an undefended enemy metal spot, and
-//! drop them; the raiders then raid from there on their own and the
-//! Charons fly home for the next sortie.
+//! home, they pick up the strongest units that ride light (Zero-K slows a
+//! Charon to 0.7 with cargo up to 500 metal, to 0.4 above, and it is too
+//! slow to live then) — assaults and riots of squads still gathering,
+//! light raiders only to fill up — and
+//! land them by the enemy's most valuable buildings that two things hold
+//! for: no anti-air on the way or there (most of the flight must get
+//! through), and fewer defenders on the ground, turrets and units together,
+//! than the drop force takes on. Landed, the force is an attacking squad on
+//! its own; the Charons fly home for the next sortie.
 
 use std::collections::BTreeMap;
 
@@ -43,28 +47,31 @@ const ORDER_TIMEOUT: i32 = 30 * 60;
 const LOAD_TIMEOUT: i32 = 30 * 30;
 const SORTIE_TIMEOUT: i32 = 30 * 120;
 
-/// Raiders this far from the Charons are not picked up.
+/// Units this far from the Charons are not picked up.
 const PICKUP_RANGE: f32 = 2000.0;
-
-/// What a Charon can carry (its `transportMass` and `transportSize`).
-const MAX_MASS: f32 = 330.0;
-const MAX_SIZE: i32 = 4;
 
 /// Unload radius around the drop point, elmos.
 const DROP_RADIUS: f32 = 120.0;
 
-/// Enemy mobile strength a flight of raiders takes on at the drop (on the
-/// scale of enemy danger).
-const CARGO_POWER: f32 = 120.0;
+/// The enemy's ground strength at the landing (turrets and units, on the
+/// scale of enemy danger) may be this share of the drop force's.
+const GROUND_ODDS: f32 = 0.6;
 
-/// Drop regions considered, best first.
-const DROP_REGIONS: usize = 8;
+/// Enemy value within this of the landing counts as at stake, elmos.
+const DAMAGE_RADIUS: f32 = 600.0;
 
-/// A Charon and the raider it carries.
+/// A landing must put at least this much enemy value at stake.
+const MIN_DROP_VALUE: f32 = 800.0;
+
+/// The way in is checked for anti-air this often, elmos.
+const ROUTE_STEP: f32 = 250.0;
+
+/// A Charon and the unit it carries (`squad`: an assault, not a raider).
 #[derive(Clone, Copy)]
 struct Load {
     charon: Unit,
     cargo: Unit,
+    squad: bool,
     landed: bool,
 }
 
@@ -91,6 +98,14 @@ pub struct Drops {
     last_sortie: i32,
 }
 
+/// A unit that fits a seat, and what it brings (on the scale of enemy
+/// danger); `squad`: an assault or riot, not a raider.
+struct Seat {
+    unit: Unit,
+    power: f32,
+    squad: bool,
+}
+
 impl Ai {
     /// Whether a gunship factory should build a Charon now.
     pub fn drops_want_charon(&self) -> bool {
@@ -99,10 +114,10 @@ impl Ai {
             && d.charons.len() < FLIGHT
             && d.ordered.is_none_or(|f| self.frame - f > ORDER_TIMEOUT)
             && self.eco.adjusted_income >= MIN_INCOME
-            && self.raider_handler.small_raiders.len() >= FLIGHT
+            && self.drops_cargo(self.graph.get_ally_center()).len() >= FLIGHT
             // Somewhere guarded by chokepoints, or out of reach, by ground.
             && self.strategy.as_ref().is_some_and(|s| {
-                s.analysis.drops.iter().take(DROP_REGIONS).any(|d| d.guards > 0 || d.ground_distance.is_none())
+                s.analysis.drops.iter().any(|d| d.guards > 0 || d.ground_distance.is_none())
             })
     }
 
@@ -138,65 +153,118 @@ impl Ai {
         }
     }
 
-    /// An enemy metal spot without static or anti-air defenses, and with
-    /// no more enemies about than the raiders take on, in the best drop
-    /// region that has one (the most valuable, least defended there).
-    fn drops_target(&self) -> Option<Vec3> {
-        let s = self.strategy.as_ref()?;
-        let map = self.terrain()?.tier(s.tier)?;
-        let war = &self.war;
-        s.analysis.drops.iter().take(DROP_REGIONS).find_map(|d| {
-            self.graph
-                .metal_spots
-                .iter()
-                .filter(|m| m.hostile && map.region_near(pos(m.position), SNAP) == Some(d.region))
-                .filter(|m| {
-                    war.get_porc_threat(m.position) <= 0.0
-                        && war.get_aa_threat(m.position) <= 0.0
-                        && war.get_threat(m.position) <= CARGO_POWER
-                })
-                .max_by(|a, b| {
-                    let score = |m: &&crate::graph::MetalSpot| m.value / (1.0 + war.get_threat(m.position));
-                    score(a).total_cmp(&score(b))
-                })
-                .map(|m| m.position)
-        })
+    /// How many units near `at` would fit a Charon's seat.
+    pub fn drops_cargo_count(&self, at: Vec3) -> usize {
+        self.drops_cargo(at).len()
     }
 
-    /// Pick up a raider each and set off, if there is somewhere to go.
+    /// Units near `at` that ride a Charon light, the most useful first:
+    /// assaults and riots of squads still gathering, then light raiders.
+    fn drops_cargo(&self, at: Vec3) -> Vec<Seat> {
+        let Some(charon) = self.defs.get("gunshiptrans") else { return Vec::new() };
+        let max_size = 2 * charon.transport_size();
+        let light = |d: springai::UnitDef| {
+            d.custom_param("requiremediumtrans").is_none() && d.custom_param("requireheavytrans").is_none()
+        };
+        let fits = |f: &Fighter| {
+            f.unit.def().is_some_and(|d| light(d) && d.x_size() <= max_size && !d.is_able_to_fly())
+                && !self.retreat_is_retreating(f.unit)
+                && distance(f.get_pos(), at) <= PICKUP_RANGE
+        };
+        let gathering = |f: &Fighter| f.squad.and_then(|s| self.squads.get(s)).is_none_or(|s| s.status != 'a');
+        let seat = |f: &Fighter, squad| Seat { unit: f.unit, power: (f.power + f.unit.max_health()) / 10.0, squad };
+        let h = &self.raider_handler;
+        let mut squads: Vec<Seat> = (self.squad_handler.fighters.iter())
+            .filter_map(|id| self.fighters.get(id))
+            .filter(|f| !f.shield_mob && gathering(f) && fits(f))
+            .map(|f| seat(f, true))
+            .collect();
+        let mut raiders: Vec<Seat> = (h.small_raiders.iter().chain(&h.medium_raiders))
+            .filter_map(|id| self.fighters.get(id))
+            .filter(|f| gathering(f) && fits(f))
+            .map(|f| seat(f, false))
+            .collect();
+        squads.sort_by(|a, b| b.power.total_cmp(&a.power));
+        raiders.sort_by(|a, b| b.power.total_cmp(&a.power));
+        squads.extend(raiders);
+        squads
+    }
+
+    /// Where to land a force `power` strong flying from `from`, and the
+    /// enemy value at stake there: by the enemy's buildings, where no
+    /// anti-air covers the way in or the landing, the defenders are well
+    /// short of the force, and the most value is at stake — the more so
+    /// behind chokepoints that guard it from the ground.
+    fn drops_target(&self, from: Vec3, power: f32) -> Option<(Vec3, f32)> {
+        let war = &self.war;
+        let guards = |p: Vec3| -> f32 {
+            let Some(s) = &self.strategy else { return 1.0 };
+            let region = self.terrain().and_then(|t| t.tier(s.tier)).and_then(|m| m.region_near(pos(p), SNAP));
+            let d = s.analysis.drops.iter().find(|d| Some(d.region) == region);
+            d.map_or(1.0, |d| if d.ground_distance.is_none() { 3.0 } else { 1.0 + (d.guards as f32).min(2.0) })
+        };
+        let clear_sky = |to: Vec3| {
+            let d = distance(from, to);
+            let steps = (d / ROUTE_STEP).ceil().max(1.0) as usize;
+            (0..=steps).all(|k| {
+                let t = k as f32 / steps as f32;
+                war.get_aa_threat(Vec3::xz(from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t)) <= 0.0
+            })
+        };
+        war.targets
+            .values()
+            .filter(|e| e.identified && e.is_static && !e.is_dead && !self.graph.is_ally_territory(e.position))
+            .map(|e| e.position)
+            .filter(|&p| war.get_enemy_power(p) <= GROUND_ODDS * power)
+            .filter_map(|p| {
+                let at_stake: f32 = war
+                    .targets
+                    .values()
+                    .filter(|e| e.identified && !e.is_dead && !e.can_fly() && distance(e.position, p) <= DAMAGE_RADIUS)
+                    .map(|e| e.value)
+                    .sum();
+                (at_stake >= MIN_DROP_VALUE).then_some((p, at_stake))
+            })
+            .map(|(p, v)| (p, v, v * guards(p)))
+            .filter(|&(p, ..)| clear_sky(p))
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(p, v, _)| (p, v))
+    }
+
+    /// Pick up a flight's worth of strike force and set off, if there is
+    /// somewhere to go.
     fn drops_launch(&mut self, frame: i32) {
-        let Some(drop) = self.drops_target() else { return };
         let charons: Vec<Unit> = self.drops.charons.values().copied().collect();
         let Some(&first) = charons.first() else { return };
         let base = first.pos();
-        // Light raiders still forming squads near the Charons, nearest first.
-        let mut cargo: Vec<(f32, Unit)> = self
-            .raider_handler
-            .small_raiders
-            .iter()
-            .filter_map(|id| self.fighters.get(id))
-            .filter(|f| f.squad.and_then(|s| self.squads.get(s)).is_none_or(|s| s.status == 'f'))
-            .map(|f| f.unit)
-            .filter(|u| {
-                u.def().is_some_and(|d| d.mass() <= MAX_MASS && d.move_data().is_some_and(|m| m.x_size() <= MAX_SIZE))
-                    && !self.retreat_is_retreating(*u)
-            })
-            .map(|u| (distance(u.pos(), base), u))
-            .filter(|&(d, _)| d <= PICKUP_RANGE)
-            .collect();
+        let mut cargo = self.drops_cargo(base);
         if cargo.len() < FLIGHT {
             return;
         }
-        cargo.sort_by(|a, b| a.0.total_cmp(&b.0));
+        cargo.truncate(FLIGHT);
+        let power: f32 = cargo.iter().map(|s| s.power).sum();
+        let Some((drop, value)) = self.drops_target(base, power) else { return };
         let mut loads = Vec::new();
-        for (&charon, &(_, raider)) in charons.iter().zip(&cargo).take(FLIGHT) {
-            self.raider_remove_unit(raider);
-            self.retreat_remove_unit(raider);
-            raider.stop(0);
-            charon.execute_custom_command(CMD_LOAD_UNITS, &[raider.id() as f32], 0, NO_TIMEOUT);
-            loads.push(Load { charon, cargo: raider, landed: false });
+        for (&charon, seat) in charons.iter().zip(&cargo) {
+            let u = seat.unit;
+            if seat.squad {
+                self.squad_remove_unit(u);
+            } else {
+                self.raider_remove_unit(u);
+            }
+            self.retreat_remove_unit(u);
+            u.stop(0);
+            charon.execute_custom_command(CMD_LOAD_UNITS, &[u.id() as f32], 0, NO_TIMEOUT);
+            loads.push(Load { charon, cargo: u, squad: seat.squad, landed: false });
         }
-        self.log(&format!("drops: {} Charons loading raiders for ({:.0}, {:.0})", loads.len(), drop.x, drop.z));
+        let names: Vec<&str> = loads.iter().map(|l| self.defs.name_of(l.cargo)).collect();
+        self.log(&format!(
+            "drops: {} Charons loading {} (power {power:.0}) for ({:.0}, {:.0}), {value:.0} metal at stake",
+            loads.len(),
+            names.join(", "),
+            drop.x,
+            drop.z
+        ));
         self.drops.sortie = Some(Sortie { loads, drop, stage: Stage::Loading, since: frame });
     }
 
@@ -204,13 +272,15 @@ impl Ai {
         let Some(s) = self.drops.sortie.as_ref() else { return };
         let (drop, stage, since) = (s.drop, s.stage, s.since);
         let mut loads = s.loads.clone();
-        let map = self.cb.map();
-        let carried = |l: &Load| {
-            let p = l.cargo.pos();
-            distance(p, l.charon.pos()) < 40.0 && p.y > map.elevation_at(p.x, p.z).max(0.0) + 10.0
-        };
         let team = self.team_id;
         let alive = |u: Unit| u.health() > 0.0 && u.team() == team;
+        // Zero-K's transport gadget weighs a loaded transport with its cargo.
+        let own_mass = self.defs.get("gunshiptrans").map_or(0.0, |d| d.mass());
+        let carried = |l: &Load| {
+            alive(l.charon)
+                && l.charon.rules_param_float("massOverride", 0.0) > own_mass + 1.0
+                && distance(l.cargo.pos(), l.charon.pos()) < 100.0
+        };
 
         match stage {
             Stage::Loading => {
@@ -220,9 +290,9 @@ impl Ai {
                         if alive(l.charon) && alive(l.cargo) && carried(l) {
                             self.drops_route(l.charon, drop);
                         } else {
-                            // Not picked up: back to raiding.
+                            // Not picked up: back to what it was doing.
                             l.landed = true;
-                            self.drops_release(l.cargo);
+                            self.drops_return(l.cargo, l.squad);
                             if alive(l.charon) {
                                 self.drops_go_home(l.charon);
                             }
@@ -238,12 +308,9 @@ impl Ai {
             Stage::Flying => {
                 let late = frame - since > SORTIE_TIMEOUT;
                 for l in loads.iter_mut().filter(|l| !l.landed) {
-                    if !alive(l.cargo) {
+                    if !alive(l.cargo) || !carried(l) {
+                        // Dropped (or shot down with its Charon).
                         l.landed = true;
-                    } else if !carried(l) {
-                        // Dropped (or its Charon was shot down over it).
-                        l.landed = true;
-                        self.drops_release(l.cargo);
                         if alive(l.charon) {
                             self.drops_go_home(l.charon);
                         }
@@ -259,11 +326,20 @@ impl Ai {
         if let Some(s) = self.drops.sortie.as_mut() {
             s.loads = loads;
         }
-        if done {
-            self.log("drops: sortie over");
-            self.drops.sortie = None;
-            self.drops.last_sortie = frame;
+        if !done {
+            return;
         }
+        // Those on the ground by the drop fight on together.
+        let landed: Vec<Unit> = (self.drops.sortie.take().map(|s| s.loads).unwrap_or_default().iter())
+            .filter(|l| l.cargo.health() > 0.0 && distance(l.cargo.pos(), drop) < 2.0 * DAMAGE_RADIUS)
+            .map(|l| l.cargo)
+            .collect();
+        let squad = self.squad_adopt(&landed);
+        for &u in &landed {
+            self.retreat_add_coward(u);
+        }
+        self.log(&format!("drops: {} landed (squad {squad:?})", landed.len()));
+        self.drops.last_sortie = frame;
     }
 
     /// Fly a loaded Charon to the drop along a path that avoids anti-air,
@@ -283,14 +359,18 @@ impl Ai {
         charon.execute_custom_command(CMD_UNLOAD_UNITS, &[drop.x, drop.y, drop.z, DROP_RADIUS], opts, NO_TIMEOUT);
     }
 
-    /// A raider is on the ground again: it raids on its own from here.
-    fn drops_release(&mut self, raider: Unit) {
-        if raider.health() <= 0.0 || raider.team() != self.team_id {
+    /// A unit that was not picked up goes back to its handler.
+    fn drops_return(&mut self, u: Unit, squad: bool) {
+        if u.health() <= 0.0 || u.team() != self.team_id {
             return;
         }
-        let Some(def) = raider.def() else { return };
+        let Some(def) = u.def() else { return };
         let cost = def.cost(self.metal);
-        self.raider_add_solo_raider(Fighter::new_raider(raider, cost, self.team_id));
-        self.retreat_add_coward(raider);
+        if squad {
+            self.squad_add_assault(Fighter::new(u, cost, self.team_id));
+        } else {
+            self.raider_add_small_raider(Fighter::new_raider(u, cost, self.team_id));
+        }
+        self.retreat_add_coward(u);
     }
 }

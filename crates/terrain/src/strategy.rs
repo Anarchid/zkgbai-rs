@@ -82,6 +82,9 @@ pub struct DropOption {
     pub ground_distance: Option<f32>,
     /// Chokepoints our ground forces would have to pass.
     pub guards: usize,
+    /// Ground travel over straight-line distance from our base (4 if out of
+    /// ground reach).
+    pub detour: f32,
     pub score: f32,
 }
 
@@ -372,6 +375,7 @@ impl Analysis {
                     enemy_value: self.values[r].enemy,
                     ground_distance: ground.is_finite().then_some(ground),
                     guards,
+                    detour,
                     score: self.values[r].enemy * detour * (1.0 + guards as f32),
                 }
             })

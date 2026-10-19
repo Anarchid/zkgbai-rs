@@ -99,6 +99,9 @@ getters!(UnitDef.def_id {
     /// Footprint in heightmap squares (8 elmos).
     fn z_size() -> i32 = UnitDef_getZSize;
     fn transport_capacity() -> i32 = UnitDef_getTransportCapacity;
+    /// Largest footprint a transport carries (in footprint squares, half
+    /// of [`x_size`](Self::x_size)'s units).
+    fn transport_size() -> i32 = UnitDef_getTransportSize;
     fn is_air_base() -> bool = UnitDef_isAirBase;
     fn is_need_geo() -> bool = UnitDef_isNeedGeo;
     fn is_feature() -> bool = UnitDef_isFeature;

@@ -264,6 +264,35 @@ impl Ai {
         self.squad_assign_assault(id);
     }
 
+    /// Make `units` (no longer any handler's) an attacking squad where they
+    /// stand: a force landed by air, say.
+    pub fn squad_adopt(&mut self, units: &[Unit]) -> Option<SquadId> {
+        let team = self.team_id;
+        let fresh: Vec<Fighter> = units
+            .iter()
+            .filter(|u| u.health() > 0.0 && u.team() == team && !self.fighters.contains_key(&u.id()))
+            .filter_map(|&u| Some(Fighter::new(u, u.def()?.cost(self.metal), team)))
+            .collect();
+        if fresh.is_empty() {
+            return None;
+        }
+        let sid = self.squads.create(SquadKind::Assault, team, &self.defs);
+        for f in fresh {
+            let id = f.id;
+            self.fighters.insert(id, f);
+            self.squad_handler.fighters.insert(id);
+            let mut nav = nav!(self);
+            if let Some(s) = self.squads.get_mut(sid) {
+                s.add_unit_nav(id, &mut self.fighters, &mut nav);
+            }
+        }
+        if let Some(s) = self.squads.get_mut(sid) {
+            s.status = 'a';
+        }
+        self.squad_handler.squads.push_back(sid);
+        Some(sid)
+    }
+
     fn squad_assign_shield_mob(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit);

@@ -94,6 +94,34 @@ impl Callback {
         (!s.is_empty()).then_some(s)
     }
 
+    // ── cheats (development only) ───────────────────────────────────────
+
+    /// Ask to cheat; whether cheating is now on (the game may refuse).
+    pub fn cheats_set_enabled(&self, enable: bool) -> bool {
+        ffi!(self, Cheats_setEnabled, enable)
+    }
+
+    /// Cheat: a finished unit of type `def` at `pos`.
+    pub fn cheat_new_unit(&self, def: UnitDef, pos: Vec3) -> Option<Unit> {
+        let mut p = [pos.x, pos.y, pos.z];
+        let mut cmd =
+            sys::SGiveMeNewUnitCheatCommand { unitDefId: def.id(), pos_posF3: p.as_mut_ptr(), ret_newUnitId: -1 };
+        self.handle_command(
+            CommandTopic::COMMAND_CHEATS_GIVE_ME_NEW_UNIT,
+            (&mut cmd as *mut sys::SGiveMeNewUnitCheatCommand).cast(),
+        );
+        Unit::from_id(*self, cmd.ret_newUnitId)
+    }
+
+    /// Cheat: `amount` more of a resource.
+    pub fn cheat_resource(&self, res: Resource, amount: f32) {
+        let mut cmd = sys::SGiveMeResourceCheatCommand { resourceId: res.id, amount };
+        self.handle_command(
+            CommandTopic::COMMAND_CHEATS_GIVE_ME_RESOURCE,
+            (&mut cmd as *mut sys::SGiveMeResourceCheatCommand).cast(),
+        );
+    }
+
     // ── unit queries ────────────────────────────────────────────────────
 
     fn units_from(&self, ids: Vec<i32>) -> Vec<Unit> {

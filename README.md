@@ -70,7 +70,8 @@ With `ZKGBAI_TERRAFORM_TEST` set, the AI does nothing but have its commander dig
 several depths and log how steep they come out and which movement tiers can cross them (play it
 against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, comma-separated:
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
-targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`.
+targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `requisition`.
+`ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
 
 In-game commands
 ----------------

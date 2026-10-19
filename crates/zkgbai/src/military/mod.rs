@@ -219,6 +219,13 @@ impl MilitaryManager {
         self.ally_porc_graphics.get_value(x, y)
     }
 
+    /// Strength of the enemy's units and defenses covering `position`, on
+    /// the scale of [`Enemy::get_danger`].
+    pub fn get_enemy_power(&self, position: Vec3) -> f32 {
+        let (x, y) = cell(position);
+        self.threat_graphics.get_value(x, y)
+    }
+
     /// Strength of our units and defenses covering `position`, on the scale
     /// of [`Enemy::get_danger`].
     pub fn get_total_friendly_power(&self, position: Vec3) -> f32 {

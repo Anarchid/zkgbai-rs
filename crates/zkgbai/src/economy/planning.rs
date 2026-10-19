@@ -30,9 +30,13 @@ const REACH_GAP: f32 = 0.25;
 /// when its units get to this share of the metal out of reach.
 const AIR_FALLBACK: f32 = 0.7;
 
-/// A gunship factory is asked for when this share of the enemy's value is
-/// behind guarded chokepoints (or out of ground reach).
+/// A gunship factory is asked for, from income `DROP_INCOME` on, when this
+/// share of the enemy's value is out of ground reach or behind guarded
+/// chokepoints the long way round (ground route this many times the
+/// straight line).
 const DROP_SHARE: f32 = 0.25;
+const DROP_DETOUR: f32 = 1.5;
+const DROP_INCOME: f32 = 30.0;
 
 /// From this income on, a factory asked for is built (the usual second
 /// factory waits for 50 and a few caretakers); and how often the asking is
@@ -786,8 +790,8 @@ impl Ai {
     }
 
     /// The factory the modules would have built next, and why: one whose
-    /// units get to metal ours cannot, or a gunship factory for air drops
-    /// past the chokepoints guarding much of the enemy's value.
+    /// units get to metal ours cannot, or a gunship factory to drop our
+    /// assaults past the chokepoints guarding much of the enemy's value.
     fn eco_find_requisition(&self) -> Option<(String, String)> {
         if let Some((f, gap, fills)) = self.eco_reach_gap() {
             return Some((
@@ -801,20 +805,26 @@ impl Ai {
         }
         let owned = |name: &str| self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
         let s = self.strategy.as_ref()?;
-        if !self.dev_off("drops") && !owned("factorygunship") && self.raider_handler.small_raiders.len() >= 4 {
+        if !self.dev_off("drops")
+            && !owned("factorygunship")
+            && self.eco.static_income > DROP_INCOME
+            && self.drops_cargo_count(self.graph.get_ally_center()) >= 4
+        {
+            // Value the ground forces cannot get to, or only the long way
+            // round through guarded chokepoints.
             let total: f32 = s.analysis.values.iter().map(|v| v.enemy).sum();
             let guarded: f32 = s
                 .analysis
                 .drops
                 .iter()
-                .filter(|d| d.guards > 0 || d.ground_distance.is_none())
+                .filter(|d| d.ground_distance.is_none() || (d.guards > 0 && d.detour >= DROP_DETOUR))
                 .map(|d| d.enemy_value)
                 .sum();
             if total > 0.0 && guarded >= DROP_SHARE * total {
                 return Some((
                     "factorygunship".to_owned(),
                     format!(
-                        "{:.0}% of the enemy's value is behind guarded chokepoints: air drops",
+                        "{:.0}% of the enemy's value is out of ground reach or far round guarded chokepoints: air drops",
                         100.0 * guarded / total
                     ),
                 ));
@@ -825,7 +835,10 @@ impl Ai {
 
     /// Re-assess what factory the modules would have, now and then.
     pub(super) fn eco_update_requisition(&mut self, frame: i32) {
-        if (frame + self.offset) % REQUISITION_PERIOD != 0 || self.fac.factories.is_empty() {
+        if (frame + self.offset) % REQUISITION_PERIOD != 0
+            || self.fac.factories.is_empty()
+            || self.dev_off("requisition")
+        {
             return;
         }
         let r = self.eco_find_requisition();
