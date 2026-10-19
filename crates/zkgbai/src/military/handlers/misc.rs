@@ -224,6 +224,11 @@ impl Ai {
         self.misc_handler.nuke.is_some()
     }
 
+    /// Our nuke silo, if any.
+    pub fn misc_nuke(&self) -> Option<Unit> {
+        self.misc_handler.nuke
+    }
+
     pub fn misc_add_nuke(&mut self, u: Unit) {
         self.misc_handler.nuke = Some(u);
     }
