@@ -49,8 +49,9 @@ impl FlowNet {
         self.edges[b].push(FlowEdge { to: a, cap, rev: ia, choke });
     }
 
-    /// A minimum cut between `s` and `t`; `None` if it is infinite.
-    pub fn min_cut(&mut self, s: usize, t: usize) -> Option<Cut> {
+    /// The chokepoints of a minimum cut between `s` and `t`; `None` if it
+    /// is infinite.
+    pub fn min_cut(&mut self, s: usize, t: usize) -> Option<Vec<usize>> {
         loop {
             // BFS for an augmenting path.
             let mut prev: Vec<Option<(usize, usize)>> = vec![None; self.edges.len()];
@@ -80,7 +81,7 @@ impl FlowNet {
                 }
                 chokes.sort_unstable();
                 chokes.dedup();
-                return Some(Cut { chokes, source_side: seen });
+                return Some(chokes);
             }
             // Bottleneck.
             let mut bottleneck = f64::INFINITY;
@@ -103,14 +104,6 @@ impl FlowNet {
     }
 }
 
-/// A minimum cut.
-pub(crate) struct Cut {
-    /// Chokepoints on cut edges.
-    pub chokes: Vec<usize>,
-    /// Nodes still reachable from the source.
-    pub source_side: Vec<bool>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,12 +117,12 @@ mod tests {
         f.add_edge(1, 3, 5.0, Some(7));
         f.add_edge(0, 2, 100.0, Some(2));
         f.add_edge(2, 3, 50.0, Some(8));
-        assert_eq!(f.min_cut(0, 3).unwrap().chokes, vec![7, 8]);
+        assert_eq!(f.min_cut(0, 3).unwrap(), vec![7, 8]);
 
         let mut g = FlowNet::new(3);
         g.add_edge(0, 1, 3.0, Some(4));
         g.add_edge(1, 2, f64::INFINITY, None);
-        assert_eq!(g.min_cut(0, 2).unwrap().chokes, vec![4]);
+        assert_eq!(g.min_cut(0, 2).unwrap(), vec![4]);
 
         let mut h = FlowNet::new(2);
         h.add_edge(0, 1, f64::INFINITY, None);

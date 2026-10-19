@@ -3,6 +3,7 @@
 
 pub mod enemy;
 pub mod handlers;
+pub mod incursions;
 pub mod radar;
 pub mod tasks;
 pub mod unit_classes;
@@ -76,6 +77,8 @@ pub struct MilitaryManager {
     pub enemy_has_nuke: bool,
 
     defense_targets: Vec<DefenseTarget>,
+    /// Where enemy incursions will strike first (see [`incursions`]).
+    pub predicted_defense_targets: Vec<DefenseTarget>,
     air_defense_targets: Vec<DefenseTarget>,
 
     radar_id: RadarIdentifier,
@@ -137,6 +140,7 @@ impl MilitaryManager {
             enemy_has_anti_nuke: false,
             enemy_has_nuke: false,
             defense_targets: Vec::new(),
+            predicted_defense_targets: Vec::new(),
             air_defense_targets: Vec::new(),
             radar_id: RadarIdentifier::new(cb),
             threat_graphics: ArrayGraphics::new(width, height),
@@ -249,6 +253,11 @@ impl MilitaryManager {
 
     pub fn add_defense_target(&mut self, d: DefenseTarget) {
         self.defense_targets.push(d);
+    }
+
+    /// Places attacked lately and places about to be.
+    fn all_defense_targets(&self) -> impl Iterator<Item = &DefenseTarget> {
+        self.defense_targets.iter().chain(&self.predicted_defense_targets)
     }
 
     /// Id (into `targets`) of the closest known enemy porc.
@@ -1326,7 +1335,7 @@ impl Ai {
 
         // first check defense targets
         if defend {
-            for d in &war.defense_targets {
+            for d in war.all_defense_targets() {
                 if water_targets_only && !war.is_water(d.position) {
                     continue;
                 }
@@ -1486,7 +1495,7 @@ impl Ai {
 
         // first check defense targets
         if defend {
-            for d in &war.defense_targets {
+            for d in war.all_defense_targets() {
                 if war.get_effective_aa_threat(d.position) > fthreat {
                     continue;
                 }
@@ -1840,7 +1849,7 @@ impl Ai {
         let mut found = false;
 
         // check for defense targets first
-        for d in &war.defense_targets {
+        for d in war.all_defense_targets() {
             if war.get_porc_threat(d.position) > 0.0
                 || war.get_tactical_threat(d.position) > war.available_mobile_threat
                 || !self.graph.is_ally_territory(d.position)
@@ -1931,7 +1940,7 @@ impl Ai {
         let mut found = false;
 
         // check for defense targets first
-        for d in &war.defense_targets {
+        for d in war.all_defense_targets() {
             if war.get_effective_aa_threat(d.position) > fthreat || war.get_porc_threat(d.position) > 0.0 {
                 continue;
             }
@@ -2013,7 +2022,7 @@ impl Ai {
         let mut found = false;
 
         // check for defense targets first
-        for d in &war.defense_targets {
+        for d in war.all_defense_targets() {
             if ((war.get_effective_threat(d.position) > fthreat
                 || war.get_porc_threat(d.position) > 0.0
                 || war.get_riot_threat(d.position) > 0.0)

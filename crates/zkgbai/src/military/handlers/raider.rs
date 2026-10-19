@@ -1011,7 +1011,8 @@ impl Ai {
                         || war.get_porc_threat(rpos) > 0.0
                 });
             if !over_threat {
-                let rally = self.war_get_raider_rally(pos);
+                // Rallying squads may be sent to block an incursion's way.
+                let rally = self.incursion_block(sid).unwrap_or_else(|| self.war_get_raider_rally(pos));
                 self.raider_squad_raid(sid, rally);
             } else {
                 let haven = self.graph_get_closest_haven(pos);
@@ -1049,6 +1050,13 @@ impl Ai {
             self.raider_squad_sneak(sid, haven);
             return;
         }
+
+        // Sent to block an incursion's way.
+        if let Some(block) = self.incursion_block(sid) {
+            self.raider_squad_raid(sid, block);
+            return;
+        }
+        let war = &self.war;
 
         // For ready squads, assign to a target.
         let Some((leader, leader_unit, leader_pos)) =

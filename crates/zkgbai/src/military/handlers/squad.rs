@@ -501,8 +501,9 @@ impl Ai {
                 }
             }
             'r' => {
-                // Set rallying for squads that are finished forming and gathering to attack.
-                let rally = self.war_get_rally_point(pos);
+                // Set rallying for squads that are finished forming and gathering to attack
+                // (where an incursion needs blocking, if one does).
+                let rally = self.incursion_block(sid).unwrap_or_else(|| self.war_get_rally_point(pos));
                 self.squad_set_target(sid, rally);
                 if self.squad_is_rallied(sid) {
                     self.squad_set_status(sid, 'a');
@@ -514,6 +515,11 @@ impl Ai {
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
+                }
+                // Sent to block an incursion's way.
+                if let Some(block) = self.incursion_block(sid) {
+                    self.squad_set_target(sid, block);
+                    return;
                 }
                 let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return };
                 let target = self.war_get_target(leader, true);

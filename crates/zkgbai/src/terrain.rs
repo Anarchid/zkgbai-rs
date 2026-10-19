@@ -109,6 +109,16 @@ pub fn pos(v: Vec3) -> Pos {
     Pos::new(v.x, v.z)
 }
 
+/// The point `dist` elmos from a chokepoint towards the middle of one of
+/// its regions (at most halfway there): where to stand to hold it from
+/// that side.
+pub fn setback(map: &TierMap, choke: usize, region: usize, dist: f32) -> Pos {
+    let (c, home) = (map.chokes[choke].pos, map.regions[region].center);
+    let d = c.distance(home);
+    let t = if d > 0.0 { (dist / d).min(0.5) } else { 0.0 };
+    Pos::new(c.x + (home.x - c.x) * t, c.z + (home.z - c.z) * t)
+}
+
 impl Ai {
     /// The terrain model, if its analysis has finished.
     pub fn terrain(&self) -> Option<&Terrain> {
@@ -144,8 +154,9 @@ impl Ai {
     }
 
     /// Draw a tier's chokepoints, gates and regions as map markers
-    /// (`kgbterrain <tier>` chat command), or with `strategy` the
-    /// chokepoints of the latest strategic analysis.
+    /// (`kgbterrain <tier>` chat command), with `strategy` the chokepoints
+    /// of the latest strategic analysis, or with `threat` the enemy's
+    /// incursions and our blocks.
     pub fn terrain_draw(&self, tier_name: &str) {
         let Some(terrain) = self.terrain() else {
             self.say("Terrain analysis is not ready.");
@@ -155,8 +166,12 @@ impl Ai {
             self.strategy_draw();
             return;
         }
+        if tier_name == "threat" {
+            self.incursions_draw();
+            return;
+        }
         let Some(tier) = Tier::ALL.into_iter().find(|t| t.name() == tier_name) else {
-            self.say("Usage: kgbterrain spider|bot|vehicle|hover|ship|amphib|strategy");
+            self.say("Usage: kgbterrain spider|bot|vehicle|hover|ship|amphib|strategy|threat");
             return;
         };
         let Some(map) = terrain.tier(tier) else { return };
@@ -342,7 +357,7 @@ impl Ai {
 
     /// Metal spots as assets of the side that holds (or probably holds)
     /// them.
-    fn strategy_assets(&self) -> Vec<Asset> {
+    pub(crate) fn strategy_assets(&self) -> Vec<Asset> {
         self.graph
             .metal_spots
             .iter()
@@ -418,17 +433,13 @@ fn fortifications(map: &TierMap, a: &Analysis) -> Vec<(usize, Pos, f32)> {
         .hold
         .iter()
         .filter_map(|&c| {
-            let choke = &map.chokes[c];
             // Not in a pocket behind our base, which the enemy can only
             // reach through it anyway.
             if a.choke_distance(map, c, false) >= a.dist_from_enemy[base] {
                 return None;
             }
-            let home = map.regions[a.home_side(map, c)?].center;
-            let d = choke.pos.distance(home);
-            let t = if d > 0.0 { (FORTIFY_SETBACK / d).min(0.5) } else { 0.0 };
-            let p = Pos::new(choke.pos.x + (home.x - choke.pos.x) * t, choke.pos.z + (home.z - choke.pos.z) * t);
-            Some((a.choke_distance(map, c, false), (c, p, choke.width)))
+            let p = setback(map, c, a.home_side(map, c)?, FORTIFY_SETBACK);
+            Some((a.choke_distance(map, c, false), (c, p, map.chokes[c].width)))
         })
         .collect();
     sites.sort_by(|x, y| x.0.total_cmp(&y.0));

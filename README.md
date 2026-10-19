@@ -19,8 +19,8 @@ Layout
 |------|------|
 | `crates/springai-sys` | Raw bindings to the engine's Skirmish AI C interface, pre-generated from the Recoil headers (no libclang or engine checkout needed to build). Regenerate with `tools/regen-bindings.sh`. |
 | `crates/springai` | Safe Rust interface: `Copy` handles for units/defs/features, engine queries and orders, decoded events, and `export_ai!`, which contains every panic at the FFI boundary, supports several AI instances per process and queues re-entrant events. |
-| `crates/terrain` | `zk-terrain`: engine-independent terrain model. For each movement tier (spider, bot, vehicle, hover, ship, amphibious) the map is split by [zkta](https://github.com/Anarchid/zkta-rust) into regions joined by chokepoints, with a region lookup per position and static connectivity. `strategy` analyses the region graph against the game state: which chokepoints guard which regions, which to hold or wall, and where bridges, air drops or teleports would hurt the enemy most. |
-| `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories), `military` (enemy tracking, threat maps, targeting, unit handlers), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread, and the periodic strategic analysis), `los`. |
+| `crates/terrain` | `zk-terrain`: engine-independent terrain model. For each movement tier (spider, bot, vehicle, hover, ship, amphibious) the map is split by [zkta](https://github.com/Anarchid/zkta-rust) into regions joined by chokepoints, with a region lookup per position and static connectivity. `strategy` analyses the region graph against the game state: which chokepoints guard which regions, which to hold or wall, and where bridges, air drops or teleports would hurt the enemy most. `threat` reasons about forces on the move: how soon a raid can reach each region (chokepoints held against it stop it) and where defenders can stand first to keep it from the most value. |
+| `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories), `military` (enemy tracking, threat maps, targeting, unit handlers, enemy incursions and the squads sent to block them), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread, and the periodic strategic analysis), `los`. |
 | `tools/arena` | Headless match harness: `match.sh` plays one game, `series.sh` plays a map pool in parallel and summarises win rates. |
 | `tools/terrain-view` | Renders a tier's regions and chokepoints to PNG and, given a scenario dumped by the AI (`ZKGBAI_DUMP_TERRAIN=<dir>`), overlays and prints the strategic analysis. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
@@ -73,7 +73,8 @@ Type these in chat in a game with the AI:
 - `kgbgraph` — dump the metal-spot graph as ASCII art to `zkgbai_graph.txt`.
 - `kgbmap threat|porc|riot` — dump a threat map as ASCII art.
 - `kgbterrain spider|bot|vehicle|hover|ship|amphib` — mark a tier's regions, chokepoints and gates
-  on the map; `kgbterrain strategy` marks the chokepoints the AI holds.
+  on the map; `kgbterrain strategy` marks the chokepoints the AI holds, `kgbterrain threat` the enemy
+  incursions, the regions they reach within 30 s and the squads blocking them.
 - `kgbfac veh|hover|tank|cloak|shield|amph|spider` — choose the AI's first factory (1v1 only).
 
 Lineage

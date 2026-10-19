@@ -112,6 +112,26 @@ pub fn rooms() -> TierMap {
     )
 }
 
+/// Two rooms a and b side by side with a door between them, and a long
+/// corridor c below joining their far ends: a ring, so closing the door
+/// makes the way round long but not impossible. At 4x scale (~1600 x 320
+/// elmos).
+pub fn ring() -> TierMap {
+    let rows = scaled(
+        &[
+            "aaaaaaaaaaaa#bbbbbbbbbbbb",
+            "aaaaaaaaaaaaabbbbbbbbbbbb",
+            "aaaaaaaaaaaa#bbbbbbbbbbbb",
+            "a#######################b",
+            "ccccccccccccccccccccccccc",
+        ],
+        4,
+    );
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let k = 4.0;
+    grid_map(&rows, &[('a', 'b', 12.0 * k, 1.0 * k, k), ('a', 'c', 0.0, 3.0 * k, k), ('b', 'c', 24.0 * k, 3.0 * k, k)])
+}
+
 /// Center of a layout position (in unscaled layout cells).
 pub fn at(x: f32, z: f32) -> Pos {
     Pos::new((x * 4.0 + 2.0) * CELL, (z * 4.0 + 2.0) * CELL)

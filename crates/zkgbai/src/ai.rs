@@ -13,6 +13,7 @@ use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
 use crate::los::LosManager;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
+use crate::military::incursions::Incursions;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
@@ -55,6 +56,8 @@ pub struct Ai {
     pub terrain: TerrainModel,
     /// The latest strategic analysis, once the terrain model is ready.
     pub strategy: Option<Strategy>,
+    /// Enemy forces on the move and the squads sent to block them.
+    pub incursions: Incursions,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -126,6 +129,7 @@ impl SkirmishAi for Ai {
             pathfinder,
             terrain,
             strategy: None,
+            incursions: Incursions::default(),
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -316,6 +320,7 @@ impl Ai {
             ai.terrain_dump(frame);
         });
         self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
+        self.guard("war.incursions", |ai| ai.incursions_update(frame));
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }

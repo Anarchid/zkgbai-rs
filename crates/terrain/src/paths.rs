@@ -7,7 +7,7 @@ use crate::graph::HeapItem;
 use crate::{Pos, TierMap};
 
 /// Snap radius for placing positions onto passable ground.
-pub(crate) const SNAP: f32 = 96.0;
+pub const SNAP: f32 = 96.0;
 
 /// Shortest ground routes from one position to every chokepoint, and so to
 /// any position on the map.
@@ -74,6 +74,23 @@ impl<'a> Paths<'a> {
             return 0.0;
         }
         self.map.regions[region].chokes.iter().map(|&c| self.to_choke[c]).fold(f32::INFINITY, f32::min)
+    }
+
+    /// Which chokepoints the routes to `regions` pass (each region entered
+    /// through its nearest chokepoint).
+    pub(crate) fn chokes_towards(&self, regions: impl IntoIterator<Item = usize>) -> Vec<bool> {
+        let mut on = vec![false; self.to_choke.len()];
+        for r in regions.into_iter().filter(|&r| Some(r) != self.region) {
+            let chokes = self.map.regions[r].chokes.iter().copied();
+            let mut at = chokes
+                .filter(|&c| self.to_choke[c].is_finite())
+                .min_by(|&a, &b| self.to_choke[a].total_cmp(&self.to_choke[b]));
+            while let Some(c) = at.filter(|&c| !on[c]) {
+                on[c] = true;
+                at = self.from[c];
+            }
+        }
+        on
     }
 
     /// Route length to `p`, `None` if unreachable.

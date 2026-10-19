@@ -275,7 +275,7 @@ impl Analysis {
         for &t in &targets {
             flow.add_edge(t, sink, value(t) as f64, None);
         }
-        flow.min_cut(source, sink).map(|c| c.chokes).unwrap_or_default()
+        flow.min_cut(source, sink).unwrap_or_default()
     }
 
     fn bridge_options(&self, map: &TierMap, graph: &RegionGraph) -> Vec<BridgeOption> {
