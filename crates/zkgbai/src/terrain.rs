@@ -414,8 +414,10 @@ const STRATEGY_PERIOD: i32 = 900;
 const FORTIFY_SETBACK: f32 = 120.0;
 
 /// A chokepoint is held when our defenses covering it are this strong
-/// (about two light laser turrets, on the scale of enemy danger).
+/// (about two light laser turrets, on the scale of enemy danger), and a
+/// region when they cover its middle this strongly (four).
 const HELD_POWER: f32 = 150.0;
+const HELD_REGION_POWER: f32 = 400.0;
 
 /// Enemy ground forces threaten what is within this many elmos of ground
 /// they can stand on (a typical weapon range).
@@ -538,7 +540,12 @@ impl Ai {
             let p = map.chokes[c].pos;
             self.war.get_friendly_porc_threat(Vec3::xz(p.x, p.z)) >= HELD_POWER
         };
-        let sheltered = analysis.sheltered(map, pos(enemy), held);
+        // A region our defenses cover in strength holds like a chokepoint.
+        let held_region = |r: usize| {
+            let c = map.regions[r].center;
+            self.war.get_friendly_porc_threat(Vec3::xz(c.x, c.z)) >= HELD_REGION_POWER
+        };
+        let sheltered = analysis.sheltered(map, pos(enemy), held, held_region);
         let other_tiers = tiers[1..].to_vec();
         let strategy = Strategy { frame, tier, analysis, fortify, sheltered, enemy_base: pos(enemy), other_tiers };
         // The first analysis, and whenever what is sheltered changes much.

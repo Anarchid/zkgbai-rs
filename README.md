@@ -72,6 +72,7 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `requisition`.
 `ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
+`ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
 
 In-game commands
 ----------------

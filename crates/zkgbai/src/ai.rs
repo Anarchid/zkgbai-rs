@@ -116,7 +116,13 @@ impl SkirmishAi for Ai {
         let map = cb.map();
         let (w, h) = (map.width() as f32, map.height() as f32);
         let defs = Defs::new(cb);
-        let seed = (cb.ai_id() as u64) << 32 ^ std::process::id() as u64 ^ game.my_team() as u64;
+        // The lobby runs games in its own process (one pid for all of them),
+        // so the clock goes in too; ZKGBAI_SEED fixes it for tests.
+        let clock =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        let entropy = std::env::var("ZKGBAI_SEED").ok().and_then(|s| s.trim().parse::<u64>().ok());
+        let seed =
+            (cb.ai_id() as u64) << 32 ^ entropy.unwrap_or(std::process::id() as u64 ^ clock) ^ game.my_team() as u64;
         seed_rand(seed ^ 0x2545_F491_4F6C_DD1D);
         let pathfinder = Pathfinder::new(cb, &defs);
         let terrain = TerrainModel::start(cb, &defs);

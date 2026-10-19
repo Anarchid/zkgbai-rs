@@ -8,6 +8,7 @@ use crate::Ai;
 use crate::defs::Defs;
 use crate::graph::MetalSpot;
 use crate::kgbutil::kgb_move_to;
+use crate::military::arsenal::SUBMERGED;
 use crate::military::{Enemy, Fighter, MilitaryManager, ScoutTask, ScoutTaskId, ScoutTasks, SquadId, SquadKind};
 use crate::nav;
 use crate::util::{NULLPOS, distance};
@@ -779,6 +780,7 @@ impl Ai {
         // Where the terrain lets the raider get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
         let engage = crate::terrain::engage_test(terrain, unit);
+        let hits_sub = unit.def().is_some_and(|d| self.hits_under_water(d));
         for &tid in &h.solo_scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
                 continue;
@@ -814,6 +816,7 @@ impl Ai {
                     || war.get_effective_threat(e.position) > friendly_threat
                     || (!e.is_porc && war.get_porc_threat(e.position) > 0.0)
                     || !engage(e.position)
+                    || (e.position.y < SUBMERGED && !hits_sub)
                 {
                     continue;
                 }
@@ -1088,6 +1091,7 @@ impl Ai {
         // Where the terrain lets the squad get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
         let engage = crate::terrain::engage_test(terrain, leader_unit);
+        let hits_sub = leader_unit.def().is_some_and(|d| self.hits_under_water(d));
         let h = &self.raider_handler;
         for &tid in &h.scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
@@ -1130,7 +1134,11 @@ impl Ai {
                 continue;
             }
             let ethreat = war.get_threat(e.position) * (1.0 + war.get_riot_threat(e.position));
-            if ethreat > threat || (!e.is_porc && war.get_porc_threat(e.position) > 0.0) || !engage(e.position) {
+            if ethreat > threat
+                || (!e.is_porc && war.get_porc_threat(e.position) > 0.0)
+                || !engage(e.position)
+                || (e.position.y < SUBMERGED && !hits_sub)
+            {
                 continue;
             }
             let tmpcost = raid_cost(war, &self.defs, e, pos, ethreat);

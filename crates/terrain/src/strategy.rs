@@ -202,17 +202,25 @@ impl Analysis {
     }
 
     /// The regions the enemy can reach from `enemy` only through our base's
-    /// region or past chokepoints `held` against it, or not at all: where
-    /// ground defenses are wasted.
-    pub fn sheltered(&self, map: &TierMap, enemy: Pos, held: impl Fn(usize) -> bool) -> Vec<bool> {
+    /// region, regions `held_region` (covered by our defenses) or past
+    /// chokepoints `held` against it, or not at all — and the held regions
+    /// themselves: where more ground defenses are wasted.
+    pub fn sheltered(
+        &self,
+        map: &TierMap,
+        enemy: Pos,
+        held: impl Fn(usize) -> bool,
+        held_region: impl Fn(usize) -> bool,
+    ) -> Vec<bool> {
         let n = map.regions.len();
         let (Some(base), Some(theirs)) = (self.ally_base, self.enemy_base) else { return vec![false; n] };
         if base == theirs {
             return vec![false; n];
         }
-        let through_base = &map.regions[base].chokes;
-        let paths = Paths::new(map, enemy, |c| held(c) || through_base.contains(&c));
-        (0..n).map(|r| r != base && paths.to_region(r).is_infinite()).collect()
+        let walls: Vec<bool> = (0..n).map(|r| r == base || (r != theirs && held_region(r))).collect();
+        let through_wall = |c: usize| map.chokes[c].regions.iter().any(|&r| walls[r]);
+        let paths = Paths::new(map, enemy, |c| held(c) || through_wall(c));
+        (0..n).map(|r| r != base && (walls[r] || paths.to_region(r).is_infinite())).collect()
     }
 
     /// The region next to a chokepoint on our side of it.
@@ -622,9 +630,11 @@ mod tests {
         let a = Analysis::run(&s);
         let (bc, enemy) = (1, at(22.0, 1.0));
         // Strip d is only reachable through our base, room a.
-        assert_eq!(a.sheltered(&map, enemy, |_| false), vec![false, false, false, true, false]);
+        assert_eq!(a.sheltered(&map, enemy, |_| false, |_| false), vec![false, false, false, true, false]);
         // Holding bc shelters room b too; strip e stays the enemy's.
-        assert_eq!(a.sheltered(&map, enemy, |c| c == bc), vec![false, true, false, true, false]);
+        assert_eq!(a.sheltered(&map, enemy, |c| c == bc, |_| false), vec![false, true, false, true, false]);
+        // So does covering room b itself with defenses.
+        assert_eq!(a.sheltered(&map, enemy, |_| false, |r| r == 1), vec![false, true, false, true, false]);
     }
 
     #[test]

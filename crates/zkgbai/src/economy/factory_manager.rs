@@ -511,6 +511,11 @@ impl Ai {
         if kind == FacKind::StriderHub {
             unit.stop(0);
         }
+        if let Some(con) = self.defs.get(choice).filter(|d| !d.build_options().is_empty())
+            && let Some(n) = self.eco_wants_stranded_con(con, pos)
+        {
+            self.log(&format!("economy: {choice} for {n} metal spots only it gets to"));
+        }
         let Some(def) = self.defs.get(choice) else {
             if self.fac.missing_defs.insert(choice) {
                 self.log(&format!("FactoryManager: unknown unit def '{choice}', not building it."));
@@ -541,6 +546,15 @@ impl Ai {
         let fm = &self.fac;
         let eco = &self.eco;
         let merged = self.merged_allies;
+
+        // Constructors for metal only they get to (aircraft for the sea).
+        let con = fac.unit.def().and_then(|d| d.build_options().into_iter().find(|u| !u.build_options().is_empty()));
+        if !self.dev_off("reach")
+            && let Some(con) = con
+            && self.eco_wants_stranded_con(con, fac.get_pos()).is_some()
+        {
+            return true;
+        }
 
         // At most one worker per merged team from air factories.
         if matches!(fac.kind(), FacKind::Plane | FacKind::Gunship) && fm.num_workers > merged {

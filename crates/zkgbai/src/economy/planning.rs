@@ -803,6 +803,15 @@ impl Ai {
                 ),
             ));
         }
+        if let Some((f, gap, seen, closes)) = self.arsenal_gap() {
+            return Some((
+                f.to_owned(),
+                format!(
+                    "{gap:.0} of {seen:.0} metal of the enemy seen lately is out of our units' reach or under water; \
+                     its units get to {closes:.0}"
+                ),
+            ));
+        }
         let owned = |name: &str| self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
         let s = self.strategy.as_ref()?;
         if !self.dev_off("drops")
@@ -833,6 +842,36 @@ impl Ai {
         None
     }
 
+    /// Sonar where enemies were seen under water lately (we cannot see them
+    /// there otherwise), by the nearest of our metal spots, if none covers
+    /// it yet.
+    fn eco_plan_sonar(&mut self) {
+        let Some(sighting) = self.arsenal_submerged_sighting() else { return };
+        let Some(sonar) = self.defs.get("staticsonar") else { return };
+        let range = sonar.sonar_radius() as f32;
+        let covered = self
+            .cb
+            .team_units()
+            .into_iter()
+            .any(|u| u.def().is_some_and(|d| d.id() == sonar.id()) && distance(u.pos(), sighting) < 2.0 * range);
+        let Some(spot) = self
+            .graph
+            .get_owned_spots()
+            .iter()
+            .map(|m| m.get_pos())
+            .min_by(|a, b| distance(*a, sighting).total_cmp(&distance(*b, sighting)))
+        else {
+            return;
+        };
+        if covered || distance(spot, sighting) > 3.0 * range {
+            return;
+        }
+        let site = self.eco_build_site(sonar, spot, 0);
+        if self.eco_add_simple(sonar, site, List::Radar, Some(List::Radar)).is_some() {
+            self.log(&format!("economy: sonar at ({:.0}, {:.0}) for enemies under water", site.x, site.z));
+        }
+    }
+
     /// Re-assess what factory the modules would have, now and then.
     pub(super) fn eco_update_requisition(&mut self, frame: i32) {
         if (frame + self.offset) % REQUISITION_PERIOD != 0
@@ -841,11 +880,13 @@ impl Ai {
         {
             return;
         }
+        self.eco_plan_sonar();
         let r = self.eco_find_requisition();
-        if r.as_ref().map(|r| &r.0) != self.eco.requisition.as_ref().map(|r| &r.0)
-            && let Some((f, why)) = &r
+        if let Some((f, why)) = &r
+            && self.eco.requisition_logged.as_ref() != Some(f)
         {
             self.log(&format!("economy: requisitioning a {f}: {why}"));
+            self.eco.requisition_logged = Some(f.clone());
         }
         self.eco.requisition = r;
     }

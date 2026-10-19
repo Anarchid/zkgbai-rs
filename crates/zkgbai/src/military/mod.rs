@@ -1,6 +1,7 @@
 //! Military: enemy tracking, threat/value maps, targeting, and the unit
 //! handlers (raiders, squads, retreat, misc, bombers).
 
+pub mod arsenal;
 pub mod drops;
 pub mod enemy;
 pub mod handlers;
@@ -1387,6 +1388,9 @@ impl Ai {
         // Where the terrain lets the unit get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
         let engage = crate::terrain::engage_test_from(terrain, u.def(), origin);
+        // Under water only torpedoes and the like hit.
+        let hits_sub = u.def().is_some_and(|d| self.hits_under_water(d));
+        let under = |p: Vec3| p.y < arsenal::SUBMERGED && !hits_sub;
 
         // first check defense targets
         if defend {
@@ -1408,7 +1412,7 @@ impl Ai {
         // then look for enemy mexes to kill, and see which is cheaper
         for ms in self.graph.get_enemy_spots() {
             let p = ms.get_pos();
-            if (water_targets_only && !war.is_water(p)) || !engage(p) {
+            if (water_targets_only && !war.is_water(p)) || !engage(p) || under(p) {
                 continue;
             }
             if war.get_threat(p) > fthreat
@@ -1428,7 +1432,7 @@ impl Ai {
         // then look for enemy units to kill, and see if any are better targets
         // then check for nearby enemies that aren't raiders.
         for e in war.targets.values() {
-            if (water_targets_only && !war.is_water(e.position)) || !engage(e.position) {
+            if (water_targets_only && !war.is_water(e.position)) || !engage(e.position) || under(e.position) {
                 continue;
             }
             let ally_territory = self.graph.is_ally_territory(e.position);

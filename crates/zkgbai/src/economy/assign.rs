@@ -15,6 +15,13 @@ use crate::util::{OPTION_SHIFT_KEY, distance};
 // comparisons is restored.
 const NEVER: f32 = f32::MAX;
 
+/// Metal spots only one type of our constructors gets to (out at sea, say,
+/// for aircraft): one of those for every so many spots, up to a few, and a
+/// discount, as distance/4, for them to take those first.
+const STRANDED_PER_CON: usize = 3;
+const STRANDED_CONS: usize = 3;
+const STRANDED_BONUS: f32 = 400.0;
+
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
     Build(UnitDef, Vec3, i32),
@@ -222,13 +229,22 @@ impl Ai {
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let reaches = |t: &WorkerTask| def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range));
+        // Metal only this type of constructor gets to goes first.
+        let others = match def {
+            Some(d) if !worker.is_com => self.eco_other_builders(d),
+            _ => Vec::new(),
+        };
+        let stranded = |t: &WorkerTask| {
+            let mex = t.as_construction().is_some_and(|c| c.build_type.id() == eco.build_ids.mex_id);
+            if mex && self.eco_out_of_reach(&others, t.get_pos()) { STRANDED_BONUS } else { 0.0 }
+        };
 
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
 
         if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)).filter(|&t| reaches(t)) {
             task = Some(t.id);
-            cost = self.eco_cost_of_job(worker, wpos, t);
+            cost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
             if let Some(target) = t.as_construction().and_then(|c| c.target) {
                 let p = target.build_progress();
                 cost -= 1000.0 * (p * p);
@@ -241,7 +257,7 @@ impl Ai {
                 if skip(t) || !reaches(t) {
                     continue;
                 }
-                let mut tmpcost = self.eco_cost_of_job(worker, wpos, t);
+                let mut tmpcost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
                 if with_threat {
                     tmpcost += threat_cost(t);
                 }
@@ -273,6 +289,47 @@ impl Ai {
         consider(&eco.repair_tasks, true, &own);
 
         task
+    }
+
+    /// The types of our constructors other than `def` (commanders aside:
+    /// they have better things to do), once each.
+    fn eco_other_builders(&self, def: UnitDef) -> Vec<UnitDef> {
+        let mut defs: Vec<UnitDef> = Vec::new();
+        for d in self.eco.workers.values().filter(|w| !w.is_com).filter_map(|w| w.unit.def()) {
+            if d.id() != def.id() && !defs.iter().any(|o| o.id() == d.id()) {
+                defs.push(d);
+            }
+        }
+        defs
+    }
+
+    /// Whether some types of constructor, `others`, and none of them get to
+    /// build at `p` from our base.
+    fn eco_out_of_reach(&self, others: &[UnitDef], p: Vec3) -> bool {
+        let from = self.graph.get_ally_center();
+        !others.is_empty() && others.iter().all(|&d| !self.terrain_reaches(d, from, p, d.build_distance() + 32.0))
+    }
+
+    /// The free metal spots no enemy defenses cover that constructors of
+    /// type `def` get to from `from` and none of our other ones do.
+    pub(super) fn eco_stranded_spots(&self, def: UnitDef, from: Vec3) -> usize {
+        let others = self.eco_other_builders(def);
+        let range = def.build_distance() + 32.0;
+        (self.graph.get_neutral_spots().iter().map(|s| s.get_pos()))
+            .filter(|&p| self.war.get_porc_threat(p) == 0.0 && self.terrain_reaches(def, from, p, range))
+            .filter(|&p| self.eco_out_of_reach(&others, p))
+            .count()
+    }
+
+    /// Whether factory-built constructors of type `def` (from `from`) are
+    /// wanted for metal only they get to: how many spots, if so.
+    pub(super) fn eco_wants_stranded_con(&self, def: UnitDef, from: Vec3) -> Option<usize> {
+        let have = self.eco.workers.values().filter(|w| w.unit.def().is_some_and(|d| d.id() == def.id())).count();
+        if have >= STRANDED_CONS {
+            return None;
+        }
+        let spots = self.eco_stranded_spots(def, from);
+        (have < spots.div_ceil(STRANDED_PER_CON)).then_some(spots)
     }
 
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {

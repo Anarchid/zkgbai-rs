@@ -66,6 +66,11 @@ const MIN_DROP_VALUE: f32 = 800.0;
 /// The way in is checked for anti-air this often, elmos.
 const ROUTE_STEP: f32 = 250.0;
 
+/// How deep in the enemy's land a landing must be: its share of the ground
+/// way from our base to theirs (where our ground forces would not get by
+/// walking).
+const BACKLAND: f32 = 0.6;
+
 /// A Charon and the unit it carries (`squad`: an assault, not a raider).
 #[derive(Clone, Copy)]
 struct Load {
@@ -73,6 +78,8 @@ struct Load {
     cargo: Unit,
     squad: bool,
     landed: bool,
+    /// Where the Charon was last seen alive.
+    last: Vec3,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -191,17 +198,30 @@ impl Ai {
     }
 
     /// Where to land a force `power` strong flying from `from`, and the
-    /// enemy value at stake there: by the enemy's buildings, where no
-    /// anti-air covers the way in or the landing, the defenders are well
-    /// short of the force, and the most value is at stake — the more so
-    /// behind chokepoints that guard it from the ground.
+    /// enemy value at stake there: by the enemy's buildings deep in its
+    /// land, where no anti-air covers the way in or the landing, the
+    /// defenders are well short of the force, and the most value is at
+    /// stake — the more so the deeper, and behind chokepoints that guard it
+    /// from the ground.
     fn drops_target(&self, from: Vec3, power: f32) -> Option<(Vec3, f32)> {
         let war = &self.war;
-        let guards = |p: Vec3| -> f32 {
-            let Some(s) = &self.strategy else { return 1.0 };
-            let region = self.terrain().and_then(|t| t.tier(s.tier)).and_then(|m| m.region_near(pos(p), SNAP));
-            let d = s.analysis.drops.iter().find(|d| Some(d.region) == region);
-            d.map_or(1.0, |d| if d.ground_distance.is_none() { 3.0 } else { 1.0 + (d.guards as f32).min(2.0) })
+        let s = self.strategy.as_ref()?;
+        let map = self.terrain().and_then(|t| t.tier(s.tier))?;
+        let a = &s.analysis;
+        // How far into the enemy's land (by ground, from our base to
+        // theirs), and how well guarded: (depth, guard bonus).
+        let backland = |p: Vec3| -> Option<(f32, f32)> {
+            let r = map.region_near(pos(p), SNAP)?;
+            let (ours, theirs) = (a.dist_from_ally[r], a.dist_from_enemy[r]);
+            let depth = match (ours.is_finite(), theirs.is_finite()) {
+                (false, _) => 1.0,
+                (true, false) => return None,
+                _ => ours / (ours + theirs).max(1.0),
+            };
+            let d = a.drops.iter().find(|d| d.region == r);
+            let guards =
+                d.map_or(1.0, |d| if d.ground_distance.is_none() { 3.0 } else { 1.0 + (d.guards as f32).min(2.0) });
+            (depth >= BACKLAND).then_some((depth, guards))
         };
         let clear_sky = |to: Vec3| {
             let d = distance(from, to);
@@ -225,7 +245,7 @@ impl Ai {
                     .sum();
                 (at_stake >= MIN_DROP_VALUE).then_some((p, at_stake))
             })
-            .map(|(p, v)| (p, v, v * guards(p)))
+            .filter_map(|(p, v)| backland(p).map(|(depth, guards)| (p, v, v * guards * depth * depth)))
             .filter(|&(p, ..)| clear_sky(p))
             .max_by(|a, b| a.2.total_cmp(&b.2))
             .map(|(p, v, _)| (p, v))
@@ -255,7 +275,7 @@ impl Ai {
             self.retreat_remove_unit(u);
             u.stop(0);
             charon.execute_custom_command(CMD_LOAD_UNITS, &[u.id() as f32], 0, NO_TIMEOUT);
-            loads.push(Load { charon, cargo: u, squad: seat.squad, landed: false });
+            loads.push(Load { charon, cargo: u, squad: seat.squad, landed: false, last: charon.pos() });
         }
         let names: Vec<&str> = loads.iter().map(|l| self.defs.name_of(l.cargo)).collect();
         self.log(&format!(
@@ -274,12 +294,18 @@ impl Ai {
         let mut loads = s.loads.clone();
         let team = self.team_id;
         let alive = |u: Unit| u.health() > 0.0 && u.team() == team;
-        // Zero-K's transport gadget weighs a loaded transport with its cargo.
+        // Aboard: Zero-K's transport gadget weighs the Charon with its
+        // cargo, or the cargo is up in the air beside it.
         let own_mass = self.defs.get("gunshiptrans").map_or(0.0, |d| d.mass());
+        let map = self.cb.map();
+        let lifted = |u: Unit| {
+            let p = u.pos();
+            p.y > map.elevation_at(p.x, p.z).max(0.0) + 15.0
+        };
         let carried = |l: &Load| {
             alive(l.charon)
-                && l.charon.rules_param_float("massOverride", 0.0) > own_mass + 1.0
-                && distance(l.cargo.pos(), l.charon.pos()) < 100.0
+                && (l.charon.rules_param_float("massOverride", 0.0) > own_mass + 1.0
+                    || (lifted(l.cargo) && distance(l.cargo.pos(), l.charon.pos()) < 60.0))
         };
 
         match stage {
@@ -308,9 +334,26 @@ impl Ai {
             Stage::Flying => {
                 let late = frame - since > SORTIE_TIMEOUT;
                 for l in loads.iter_mut().filter(|l| !l.landed) {
+                    if alive(l.charon) {
+                        l.last = l.charon.pos();
+                    }
+                    // Off the Charon but still falling: not down yet.
+                    if alive(l.cargo) && !carried(l) && lifted(l.cargo) {
+                        continue;
+                    }
                     if !alive(l.cargo) || !carried(l) {
                         // Dropped (or shot down with its Charon).
                         l.landed = true;
+                        let what = self.defs.name_of(l.cargo);
+                        let fate = if alive(l.cargo) {
+                            let p = l.cargo.pos();
+                            format!("landed {:.0} from the drop at ({:.0}, {:.0})", distance(p, drop), p.x, p.z)
+                        } else if alive(l.charon) {
+                            "died aboard".to_owned()
+                        } else {
+                            format!("went down with its Charon {:.0} from the drop", distance(l.last, drop))
+                        };
+                        self.log(&format!("drops: {what} {fate}"));
                         if alive(l.charon) {
                             self.drops_go_home(l.charon);
                         }

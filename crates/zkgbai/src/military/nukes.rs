@@ -3,10 +3,13 @@
 //! get away) that no anti-nuke known or suspected covers, a silo pays.
 //!
 //! The AI cannot see a missile intercepted, but it can see what is left:
-//! if the buildings in the blast still stand once the missile is due, an
-//! anti-nuke must be guarding the aim point (antis guard what is within
+//! if the buildings in the blast are seen standing once the missile is due,
+//! an anti-nuke must be guarding the aim point (antis guard what is within
 //! their coverage of them), and the area is suspect until one is seen there
-//! or a while has passed.
+//! or a while has passed. Only what is seen counts: the AI hears of no
+//! death it does not see, so unseen buildings stay on the books whether
+//! the missile landed or not. Until a look tells (scouts are sent), the
+//! area waits.
 
 use springai::{NO_TIMEOUT, Unit, Vec3};
 
@@ -48,26 +51,35 @@ const HIT_SHARE: f32 = 0.3;
 /// Frames an interception keeps an area suspect.
 const SUSPICION_FRAMES: i32 = 30 * 600;
 
-/// A missile in the air.
+/// Frames to wait for a look at what a missile did, after it is due.
+const VERIFY_FRAMES: i32 = 30 * 180;
+
+/// Frames between reports of why missiles in store stay there.
+const HOLD_REPORT: i32 = 30 * 120;
+
+/// A missile fired.
 struct Launch {
     silo: Unit,
     /// Missiles in store before it.
     stock: i32,
     target: Vec3,
-    /// Building value in the blast at launch.
-    standing: f32,
+    /// The buildings in the blast at launch, and their value.
+    buildings: Vec<(i32, f32)>,
     due: i32,
 }
 
 #[derive(Default)]
 pub struct Nukes {
     launch: Option<Launch>,
+    /// Missiles fired whose effect is not seen yet.
+    unverified: Vec<Launch>,
     /// Development aid: the firing test, when on.
     test: Option<NukeTest>,
     /// Aim points where missiles were intercepted, until when an anti-nuke
     /// is suspected within its coverage of them, and whether a scout has
     /// been there since.
     intercepted: Vec<(Vec3, i32, bool)>,
+    last_hold_report: i32,
 }
 
 /// A scout has looked at an aim point when it came this close, elmos.
@@ -92,20 +104,30 @@ impl Ai {
         (all, buildings)
     }
 
-    /// Whether an anti-nuke guards `at`, or may.
-    fn nukes_covered(&self, at: Vec3) -> bool {
+    /// Whether an anti-nuke guards `at`, or may: why, if so.
+    fn nukes_guard(&self, at: Vec3) -> Option<&'static str> {
         let known = self
             .war
             .targets
             .values()
             .any(|e| !e.is_dead && e.def_name == "staticantinuke" && distance(e.position, at) <= ANTI_COVERAGE);
         // The anti is within its coverage of the intercepted aim point.
-        let suspected = self
-            .nukes
-            .intercepted
-            .iter()
-            .any(|&(p, until, _)| until > self.frame && distance(p, at) <= 2.0 * ANTI_COVERAGE);
-        known || suspected
+        let near = |p: Vec3| distance(p, at) <= 2.0 * ANTI_COVERAGE;
+        let suspected = self.nukes.intercepted.iter().any(|&(p, until, _)| until > self.frame && near(p));
+        let unverified = self.nukes.unverified.iter().any(|l| near(l.target));
+        if known {
+            Some("a known anti-nuke")
+        } else if suspected {
+            Some("an interception")
+        } else if unverified {
+            Some("a strike not seen yet")
+        } else {
+            None
+        }
+    }
+
+    fn nukes_covered(&self, at: Vec3) -> bool {
+        self.nukes_guard(at).is_some()
     }
 
     /// What an anti-nuke at `anti` denies our nukes: the best blast it
@@ -121,13 +143,35 @@ impl Ai {
 
     /// The best aim point no anti-nuke guards, and the value there.
     pub fn nukes_target(&self) -> Option<(Vec3, f32)> {
-        self.war
-            .targets
-            .values()
+        self.nukes_aim_points().filter(|&(p, _)| !self.nukes_covered(p)).max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// Enemy buildings to aim at, and the value in the blast at each.
+    fn nukes_aim_points(&self) -> impl Iterator<Item = (Vec3, f32)> + '_ {
+        (self.war.targets.values())
             .filter(|e| e.identified && e.is_static && !e.is_dead && !self.graph.is_ally_territory(e.position))
             .map(|e| (e.position, self.nukes_blast_value(e.position).0))
-            .filter(|&(p, _)| !self.nukes_covered(p))
-            .max_by(|a, b| a.1.total_cmp(&b.1))
+    }
+
+    /// Say now and then why missiles in store stay there.
+    fn nukes_report_hold(&mut self, silo: Unit) {
+        if self.frame - self.nukes.last_hold_report < HOLD_REPORT {
+            return;
+        }
+        self.nukes.last_hold_report = self.frame;
+        let best = |guarded: bool| {
+            (self.nukes_aim_points())
+                .filter(|&(p, _)| self.nukes_covered(p) == guarded)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+        };
+        let open = best(false).map_or(0.0, |b| b.1);
+        let guarded = best(true).map(|(p, v)| format!("; {v:.0} behind {}", self.nukes_guard(p).unwrap_or("?")));
+        let flying = if self.nukes.launch.is_some() { "; one in the air" } else { "" };
+        self.log(&format!(
+            "nukes: holding {} missiles: best open blast {open:.0} (fire at {FIRE_VALUE:.0}){}{flying}",
+            silo.stockpile(),
+            guarded.unwrap_or_default()
+        ));
     }
 
     /// Whether to build a silo: a strike would pay and we can afford one.
@@ -141,15 +185,19 @@ impl Ai {
     /// Fire `silo` at the best uncovered target worth a missile; whether it
     /// fired.
     pub fn nukes_fire(&mut self, silo: Unit) -> bool {
-        if self.nukes.launch.is_some() {
+        let target = self.nukes_target().filter(|&(_, v)| v >= FIRE_VALUE);
+        let Some((target, value)) = target.filter(|_| self.nukes.launch.is_none()) else {
+            self.nukes_report_hold(silo);
             return false;
-        }
-        let Some((target, value)) = self.nukes_target().filter(|&(_, v)| v >= FIRE_VALUE) else { return false };
+        };
         let stock = silo.stockpile();
         silo.execute_custom_command(CMD_ATTACK, &[target.x, target.y, target.z], 0, NO_TIMEOUT);
         let due = self.frame + (30.0 * (distance(silo.pos(), target) / MISSILE_SPEED + FLIGHT_EXTRA)) as i32;
-        let standing = self.nukes_blast_value(target).1;
-        self.nukes.launch = Some(Launch { silo, stock, target, standing, due });
+        let buildings = (self.war.targets.values())
+            .filter(|e| e.identified && e.is_static && !e.is_dead && distance(e.position, target) <= BLAST)
+            .map(|e| (e.unit_id, e.value))
+            .collect();
+        self.nukes.launch = Some(Launch { silo, stock, target, buildings, due });
         self.log(&format!("nukes: missile away at ({:.0}, {:.0}), {value:.0} metal in the blast", target.x, target.z));
         true
     }
@@ -163,28 +211,49 @@ impl Ai {
             self.nukes_test_update(frame);
         }
         self.nukes.intercepted.retain(|&(_, until, _)| until > frame);
-        let Some(l) = self.nukes.launch.as_ref().filter(|l| frame >= l.due) else { return };
-        let (target, standing) = (l.target, l.standing);
-        let fired = l.silo.health() > 0.0 && l.silo.stockpile() < l.stock;
-        self.nukes.launch = None;
-        if !fired {
-            self.log("nukes: the missile never left");
-            return;
+        if let Some(l) = self.nukes.launch.take_if(|l| frame >= l.due) {
+            if l.silo.health() > 0.0 && l.silo.stockpile() < l.stock {
+                self.nukes.unverified.push(l);
+            } else {
+                self.log("nukes: the missile never left");
+            }
         }
-        let left = self.nukes_blast_value(target).1;
-        if standing > 0.0 && left > (1.0 - HIT_SHARE) * standing {
+        if frame % 30 == 0 {
+            let unverified = std::mem::take(&mut self.nukes.unverified);
+            self.nukes.unverified = unverified.into_iter().filter(|l| !self.nukes_verify(l)).collect();
+        }
+    }
+
+    /// See what missile `l` did, by the buildings in its blast seen gone or
+    /// seen standing since it was due; whether that is known now (or never
+    /// will be).
+    fn nukes_verify(&mut self, l: &Launch) -> bool {
+        let (target, frame) = (l.target, self.frame);
+        let standing: f32 = l.buildings.iter().map(|b| b.1).sum();
+        let (mut gone, mut seen) = (0.0, 0.0);
+        for &(id, v) in &l.buildings {
+            match self.war.targets.get(&id) {
+                Some(e) if e.is_dead => gone += v,
+                Some(e) if e.last_seen > l.due => seen += v,
+                Some(_) => {}
+                None => gone += v,
+            }
+        }
+        let at = format!("({:.0}, {:.0})", target.x, target.z);
+        if standing <= 0.0 || gone >= HIT_SHARE * standing {
+            self.log(&format!("nukes: missile at {at} landed, {gone:.0} of {standing:.0} metal of buildings gone"));
+        } else if seen > (1.0 - HIT_SHARE) * standing {
             self.nukes.intercepted.push((target, frame + SUSPICION_FRAMES, false));
             self.log(&format!(
-                "nukes: missile at ({:.0}, {:.0}) did not land ({left:.0} of {standing:.0} still standing): \
-                 an anti-nuke must be within {ANTI_COVERAGE:.0} of it",
-                target.x, target.z
+                "nukes: missile at {at} did not land ({seen:.0} of {standing:.0} seen standing): \
+                 an anti-nuke must be within {ANTI_COVERAGE:.0} of it"
             ));
+        } else if frame - l.due > VERIFY_FRAMES {
+            self.log(&format!("nukes: missile at {at}: no look at what it did ({gone:.0} gone, {seen:.0} seen)"));
         } else {
-            self.log(&format!(
-                "nukes: missile landed, {:.0} of {standing:.0} metal of buildings gone",
-                standing - left
-            ));
+            return false;
         }
+        true
     }
 
     /// Where a scout at `from` should look for the anti-nuke that stopped a
@@ -194,8 +263,10 @@ impl Ai {
         for s in self.nukes.intercepted.iter_mut().filter(|s| distance(s.0, from) < SCOUTED) {
             s.2 = true;
         }
-        let todo = self.nukes.intercepted.iter().filter(|s| !s.2);
-        todo.map(|s| s.0).min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
+        // What a missile did first, then where an anti-nuke must be.
+        let todo = self.nukes.unverified.iter().map(|l| l.target);
+        let todo = todo.chain(self.nukes.intercepted.iter().filter(|s| !s.2).map(|s| s.0));
+        todo.min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
     }
 }
 

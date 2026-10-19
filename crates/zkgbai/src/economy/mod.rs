@@ -129,8 +129,9 @@ pub struct EconomyManager {
     dev_facs: Vec<String>,
     /// Development aid: open with the n-th viable factory.
     dev_pick: Option<usize>,
-    /// A factory a module asked for, and why.
+    /// A factory a module asked for, and why; and the last one logged.
     pub requisition: Option<(String, String)>,
+    pub requisition_logged: Option<String>,
     /// Terraform commands issued (for their tags).
     pub terraform_tags: i32,
     /// Development aid: the terraform test, when on.
@@ -299,6 +300,7 @@ impl EconomyManager {
             dev_facs: Vec::new(),
             dev_pick: None,
             requisition: None,
+            requisition_logged: None,
             terraform_tags: 0,
             terraform_test: None,
             ditch: None,
@@ -830,6 +832,10 @@ impl Ai {
         if def_name == "staticmex" {
             self.eco.mexes.push(unit);
             erase_one(&mut self.eco.new_mexes, &unit);
+            let p = unit.pos();
+            if p.y < 0.0 {
+                self.log(&format!("economy: mex under water at ({:.0}, {:.0})", p.x, p.z));
+            }
             unit.execute_custom_command(cmd::PRIORITY, &[1.0], 0, NO_TIMEOUT);
 
             if !self.eco.defended_fac

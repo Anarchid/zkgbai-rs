@@ -208,6 +208,12 @@ impl Callback {
 }
 
 impl Game {
+    /// The bit of a unit category (e.g. `"SUB"`), 0 if there is none.
+    pub fn category_flag(&self, name: &str) -> i32 {
+        let n = c_string(name);
+        ffi!(self.cb, Game_getCategoryFlag, n.as_ptr())
+    }
+
     pub fn current_frame(&self) -> i32 {
         ffi!(self.cb, Game_getCurrentFrame)
     }
