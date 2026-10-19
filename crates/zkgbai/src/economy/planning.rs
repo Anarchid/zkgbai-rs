@@ -18,6 +18,9 @@ const SHELTERED_SPACING: f32 = 2.0;
 /// (about a constructor's build range).
 const FACTORY_REACH: f32 = 150.0;
 
+/// Water at least this deep takes a sonar station, elmos.
+const SONAR_DEPTH: f32 = 12.0;
+
 /// An opening factory is ruled out when its units reach less than this
 /// share of what the best one's do.
 const REACH_RIVAL: f32 = 0.8;
@@ -281,8 +284,9 @@ impl Ai {
 
         // do we need a protector? (also when the enemy could be hiding one)
         let suspicious = self.intel_wants_anti();
-        if !self.eco.anti_nuke && (self.war.enemy_has_nuke || self.eco.got_nuked || suspicious) {
-            if suspicious && !self.war.enemy_has_nuke && !self.eco.got_nuked {
+        let nuked = self.eco.got_nuked || self.nukes.enemy_detonation;
+        if !self.eco.anti_nuke && (self.war.enemy_has_nuke || nuked || suspicious) {
+            if suspicious && !self.war.enemy_has_nuke && !nuked {
                 self.log(&format!(
                     "intel: {:.0} metal of the enemy's suspiciously unaccounted for; building an anti-nuke",
                     self.intel.suspicious()
@@ -866,7 +870,19 @@ impl Ai {
         if covered || distance(spot, sighting) > 3.0 * range {
             return;
         }
-        let site = self.eco_build_site(sonar, spot, 0);
+        // It floats, on water this deep (`minWaterDepth` 10): the first such
+        // on the way out from our metal to the sighting.
+        let map = self.cb.map();
+        let steps = (distance(spot, sighting) / 64.0).ceil().max(1.0) as usize;
+        let water = (0..=steps)
+            .map(|i| i as f32 / steps as f32)
+            .map(|t| Vec3::xz(spot.x + t * (sighting.x - spot.x), spot.z + t * (sighting.z - spot.z)))
+            .find(|p| map.elevation_at(p.x, p.z) < -SONAR_DEPTH);
+        let Some(water) = water else { return };
+        let site = self.eco_build_site(sonar, water, 0);
+        if site.x < 0.0 {
+            return;
+        }
         if self.eco_add_simple(sonar, site, List::Radar, Some(List::Radar)).is_some() {
             self.log(&format!("economy: sonar at ({:.0}, {:.0}) for enemies under water", site.x, site.z));
         }

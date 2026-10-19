@@ -58,6 +58,13 @@ impl Defs {
         self.names.get(def.id() as usize).map(String::as_str).unwrap_or("")
     }
 
+    /// Whether `def` is a commander (Zero-K's are all `dyn*`, the dynamic
+    /// commanders). The original told them by build power over 8, which the
+    /// gunship constructor (10) has now.
+    pub fn is_commander(&self, def: UnitDef) -> bool {
+        self.name(def).starts_with("dyn")
+    }
+
     /// Internal name of a unit's definition; empty if not visible.
     pub fn name_of(&self, unit: Unit) -> &str {
         unit.def().map(|d| self.name(d)).unwrap_or("")

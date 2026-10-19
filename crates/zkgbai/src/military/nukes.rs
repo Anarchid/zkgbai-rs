@@ -8,8 +8,15 @@
 //! coverage circle), so a target is open only if the line from our silo to
 //! it keeps clear of every anti.
 //!
-//! The AI cannot see a missile intercepted (it gets no explosion events),
-//! but it can see what is left: if the buildings in the blast are seen
+//! Zero-K tells AIs where every nuke goes off ("NUKE_EXPLOSION:x,y,z", as
+//! players see them): a ground burst on our missile's line is a hit, an
+//! airburst an interception, with the anti within its coverage of the
+//! burst. Buildings in a hit too frail for the blast at their distance are
+//! counted dead; a burst on our ground not of ours means the enemy has
+//! nukes.
+//!
+//! Without those messages (older versions; the engine has no explosion
+//! events for AIs), the AI can only see what is left: if the buildings in the blast are seen
 //! standing once the missile is due, an anti-nuke must be within its
 //! coverage of the flight line, short of our own ground, and lines passing
 //! near that stretch are suspect until the anti is found or a while has
@@ -69,6 +76,7 @@ struct Launch {
     silo: Unit,
     /// Missiles in store before it.
     stock: i32,
+    fired: i32,
     from: Vec3,
     target: Vec3,
     /// The buildings in the blast at launch, and their value.
@@ -86,18 +94,31 @@ pub struct Nukes {
     /// Flights that were intercepted.
     intercepted: Vec<Interception>,
     last_hold_report: i32,
+    /// Whether a nuke not ours went off on our ground.
+    pub enemy_detonation: bool,
 }
 
-/// An intercepted flight: an anti-nuke is within its coverage of the
-/// stretch of it beyond our ground (sampled), suspected until when, and
-/// whether a scout has flown out to the aim point since.
+/// An intercepted flight: an anti-nuke is within its coverage of some of
+/// `stretch` (the burst, or the flight beyond our ground, sampled),
+/// suspected until when; where a scout should look, and whether one has.
 struct Interception {
-    from: Vec3,
-    target: Vec3,
     stretch: Vec<Vec3>,
     until: i32,
+    look: Vec3,
     scouted: bool,
 }
+
+/// A burst this high above the ground (or sea) is an airburst, elmos (as
+/// Zero-K's nuke explosion chooser has it).
+const AIRBURST: f32 = 200.0;
+
+/// A burst this close to a missile's flight line is that missile's, elmos.
+const ON_LINE: f32 = 400.0;
+
+/// The missile's damage, and the share of it left at the edge of the blast
+/// (`staticnuke`'s `damage.default` and `edgeEffectiveness`).
+const DAMAGE: f32 = 11501.0;
+const EDGE: f32 = 0.3;
 
 /// Flight lines are sampled this often, elmos.
 const SAMPLE: f32 = 250.0;
@@ -244,7 +265,7 @@ impl Ai {
             .filter(|e| e.identified && e.is_static && !e.is_dead && distance(e.position, target) <= BLAST)
             .map(|e| (e.unit_id, e.value))
             .collect();
-        self.nukes.launch = Some(Launch { silo, stock, from, target, buildings, due });
+        self.nukes.launch = Some(Launch { silo, stock, fired: self.frame, from, target, buildings, due });
         self.log(&format!("nukes: missile away at ({:.0}, {:.0}), {value:.0} metal in the blast", target.x, target.z));
         true
     }
@@ -260,8 +281,9 @@ impl Ai {
         // An interception is explained once an anti is seen within reach of
         // the line.
         let antis: Vec<Vec3> = self.nukes_antis().collect();
-        let explained =
-            |i: &Interception| antis.iter().any(|&a| segment_distance(a, i.from, i.target) <= ANTI_COVERAGE);
+        let explained = |i: &Interception| {
+            antis.iter().any(|&a| i.stretch.iter().any(|&p| distance(a, p) <= ANTI_COVERAGE + SAMPLE))
+        };
         self.nukes.intercepted.retain(|i| i.until > frame && !explained(i));
         if let Some(l) = self.nukes.launch.take_if(|l| frame >= l.due) {
             if l.silo.health() > 0.0 && l.silo.stockpile() < l.stock {
@@ -297,7 +319,7 @@ impl Ai {
         } else if seen > (1.0 - HIT_SHARE) * standing {
             let stretch = self.nukes_stretch(l.from, target);
             let until = frame + SUSPICION_FRAMES;
-            self.nukes.intercepted.push(Interception { from: l.from, target, stretch, until, scouted: false });
+            self.nukes.intercepted.push(Interception { stretch, until, look: target, scouted: false });
             self.log(&format!(
                 "nukes: missile at {at} did not land ({seen:.0} of {standing:.0} seen standing): \
                  an anti-nuke must be within {ANTI_COVERAGE:.0} of its flight"
@@ -310,15 +332,69 @@ impl Ai {
         true
     }
 
+    /// A message from the game: where a nuke went off.
+    pub fn nukes_lua_message(&mut self, data: &str) {
+        let Some(rest) = data.strip_prefix("NUKE_EXPLOSION:") else { return };
+        let v: Vec<f32> = rest.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        let [x, y, z] = v[..] else { return };
+        let at = Vec3::new(x, y, z);
+        let airburst = y - self.cb.map().elevation_at(x, z).max(0.0) > AIRBURST;
+        let frame = self.frame;
+        let ours = |l: &Launch| frame > l.fired && segment_distance(at, l.from, l.target) <= ON_LINE;
+        let launch = match self.nukes.launch.take_if(|l| ours(l)) {
+            Some(l) => Some(l),
+            None => self.nukes.unverified.iter().position(ours).map(|i| self.nukes.unverified.remove(i)),
+        };
+        let place = format!("({x:.0}, {z:.0})");
+        let Some(l) = launch else {
+            let home = self.graph.is_ally_territory(at);
+            self.nukes.enemy_detonation |= home;
+            let kind = if airburst { "airburst" } else { "ground burst" };
+            self.log(&format!(
+                "nukes: a nuke not ours went off at {place} ({kind}{})",
+                if home { ", on our ground" } else { "" }
+            ));
+            return;
+        };
+        if airburst {
+            let until = frame + SUSPICION_FRAMES;
+            self.nukes.intercepted.push(Interception { stretch: vec![at], until, look: at, scouted: false });
+            self.log(&format!(
+                "nukes: missile at ({:.0}, {:.0}) burst in the air at {place}: an anti-nuke must be within \
+                 {ANTI_COVERAGE:.0} of there",
+                l.target.x, l.target.z
+            ));
+            return;
+        }
+        // Buildings too frail for the blast where they stand are gone.
+        let dead: Vec<(springai::Unit, f32)> = (self.war.targets.values())
+            .filter(|e| e.is_static && !e.is_dead && distance(e.position, at) < BLAST)
+            .filter_map(|e| {
+                let d = distance(e.position, at);
+                let damage = DAMAGE * (BLAST - d) / (BLAST - d * EDGE);
+                e.ud.filter(|ud| ud.health() < damage).map(|_| (e.unit, e.value))
+            })
+            .collect();
+        let value: f32 = dead.iter().map(|d| d.1).sum();
+        for (u, _) in &dead {
+            self.war_enemy_destroyed(*u, None);
+        }
+        self.log(&format!(
+            "nukes: missile hit {place}, {:.0} from its aim: {} buildings worth {value:.0} count as gone",
+            distance(at, l.target),
+            dead.len()
+        ));
+    }
+
     /// Where a scout at `from` should look: at what a missile did, or for
     /// the anti-nuke that stopped one, flying out along its line to the
     /// aim point (one within reach now counts as looked at).
     pub fn nukes_scout_target(&mut self, from: Vec3) -> Option<Vec3> {
-        for i in self.nukes.intercepted.iter_mut().filter(|i| distance(i.target, from) < SCOUTED) {
+        for i in self.nukes.intercepted.iter_mut().filter(|i| distance(i.look, from) < SCOUTED) {
             i.scouted = true;
         }
         let todo = self.nukes.unverified.iter().map(|l| l.target);
-        let todo = todo.chain(self.nukes.intercepted.iter().filter(|i| !i.scouted).map(|i| i.target));
+        let todo = todo.chain(self.nukes.intercepted.iter().filter(|i| !i.scouted).map(|i| i.look));
         todo.min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
     }
 }

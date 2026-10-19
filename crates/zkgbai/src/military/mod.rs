@@ -1804,7 +1804,7 @@ impl Ai {
                 continue;
             }
             let name = e.def_name.as_str();
-            if (name == "staticantinuke" && !war.has_nuke) || (e.def_speed() > 0.0 && ud.build_speed() > 8.0) {
+            if (name == "staticantinuke" && !war.has_nuke) || e.is_com {
                 // we also ignore antinuke unless we actually have nukes.
                 continue;
             }

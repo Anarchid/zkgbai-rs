@@ -17,10 +17,12 @@ const NEVER: f32 = f32::MAX;
 
 /// Metal spots only one type of our constructors gets to (out at sea, say,
 /// for aircraft): one of those for every so many spots, up to a few, and a
-/// discount, as distance/4, for them to take those first.
+/// discount that puts those ahead of their other jobs (the factory built
+/// them for it), unless it is dangerous out there (threat costs 500 a
+/// point).
 const STRANDED_PER_CON: usize = 3;
 const STRANDED_CONS: usize = 3;
-const STRANDED_BONUS: f32 = 400.0;
+const STRANDED_BONUS: f32 = 3000.0;
 
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {

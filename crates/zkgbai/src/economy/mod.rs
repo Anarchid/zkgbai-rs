@@ -691,7 +691,7 @@ impl Ai {
             self.eco.sparrow = Some(unit);
         }
 
-        if def.speed() > 0.0 && !def.build_options().is_empty() && def.build_speed() <= 8.0 {
+        if def.speed() > 0.0 && !def.build_options().is_empty() && !self.defs.is_commander(def) {
             unit.set_move_state(0, 0);
             self.eco.new_workers.insert(unit.id());
         }
@@ -832,9 +832,10 @@ impl Ai {
         if def_name == "staticmex" {
             self.eco.mexes.push(unit);
             erase_one(&mut self.eco.new_mexes, &unit);
+            // Mexes float: the ground under it tells.
             let p = unit.pos();
-            if p.y < 0.0 {
-                self.log(&format!("economy: mex under water at ({:.0}, {:.0})", p.x, p.z));
+            if self.cb.map().elevation_at(p.x, p.z) < 0.0 {
+                self.log(&format!("economy: mex at sea at ({:.0}, {:.0})", p.x, p.z));
             }
             unit.execute_custom_command(cmd::PRIORITY, &[1.0], 0, NO_TIMEOUT);
 
@@ -901,7 +902,7 @@ impl Ai {
             self.eco.has_super_wep = true;
         }
 
-        if def.speed() > 0.0 && !def.build_options().is_empty() && def.build_speed() > 8.0 {
+        if def.speed() > 0.0 && !def.build_options().is_empty() && self.defs.is_commander(def) {
             let mut w = Worker::new(unit, self.team_id);
             w.is_com = true;
             let id = w.id;
@@ -1078,7 +1079,8 @@ impl Ai {
             return;
         };
         if def.speed() > 0.0 && !def.build_options().is_empty() {
-            let w = Worker::new(unit, self.team_id);
+            let mut w = Worker::new(unit, self.team_id);
+            w.is_com = self.defs.is_commander(def);
             let id = w.id;
             self.eco.insert_worker(w);
             self.eco.new_workers.remove(&id);
@@ -1086,7 +1088,7 @@ impl Ai {
             self.eco_assign_worker(id);
             self.eco.assigned.push_back(id);
             self.eco.seeders.push_back(id);
-            if def.build_speed() > 8.0 {
+            if self.defs.is_commander(def) {
                 self.eco.commanders.push(id);
             }
         }

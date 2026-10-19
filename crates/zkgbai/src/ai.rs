@@ -194,6 +194,7 @@ impl SkirmishAi for Ai {
             Event::LuaMessage { data } => {
                 if self.active() {
                     self.guard("graph.luaMessage", |ai| ai.graph_lua_message(&data));
+                    self.guard("nukes.luaMessage", |ai| ai.nukes_lua_message(&data));
                 }
             }
             Event::UnitCreated { unit, builder } => self.unit_created(unit, builder),

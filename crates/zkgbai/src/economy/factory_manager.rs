@@ -256,6 +256,7 @@ impl Ai {
         let Some(def) = unit.def() else { return };
         let name = self.defs.name(def);
         let cost = def.cost(self.metal);
+        let is_com = self.defs.is_commander(def);
         let fm = &mut self.fac;
 
         if name.contains("hub") {
@@ -280,7 +281,7 @@ impl Ai {
         let is_aa = self.unit_classes.aas.contains(name);
         if build_speed > 0.0 && speed > 0.0 {
             fm.num_workers += 1;
-            if build_speed < 8.0 {
+            if !is_com {
                 fm.worker_value += cost;
             }
             fm.mobile_bp += build_speed;
@@ -368,6 +369,7 @@ impl Ai {
             let name = self.defs.name(def);
             let cost = def.cost(self.metal);
             let is_aa = self.unit_classes.aas.contains(name);
+            let is_com = self.defs.is_commander(def);
             let fm = &mut self.fac;
 
             if name == "striderhub" {
@@ -376,7 +378,7 @@ impl Ai {
 
             if def.is_builder() && def.speed() > 0.0 {
                 fm.num_workers -= 1;
-                if def.build_speed() < 8.0 {
+                if !is_com {
                     fm.worker_value -= cost;
                 }
                 fm.mobile_bp -= def.build_speed();
