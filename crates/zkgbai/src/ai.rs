@@ -206,7 +206,7 @@ impl Ai {
             total.as_secs_f64() * 1e3 / frames as f64
         ));
         let mut rows: Vec<_> = self.profile.iter().collect();
-        rows.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.total));
         for (what, t) in rows.iter().take(12) {
             self.log(&format!(
                 "profile: {:<28} calls={:<7} total={:>9.1}ms avg={:>7.3}ms max={:>7.2}ms",
