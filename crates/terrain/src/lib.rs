@@ -16,6 +16,7 @@
 //! works on the engine's slope-map grid, one cell per 16 elmos.
 
 mod build;
+pub mod strategy;
 mod tier;
 
 pub use tier::{MoveClass, Tier, engine_max_slope};

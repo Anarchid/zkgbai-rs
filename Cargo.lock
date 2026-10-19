@@ -652,6 +652,7 @@ name = "terrain-view"
 version = "0.1.0"
 dependencies = [
  "image",
+ "serde_json",
  "zk-terrain",
 ]
 

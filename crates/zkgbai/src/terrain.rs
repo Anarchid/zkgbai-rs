@@ -164,3 +164,75 @@ impl Ai {
         self.say(&format!("Drew {} regions, {} chokepoints for {}.", map.regions.len(), map.chokes.len(), tier.name()));
     }
 }
+
+/// Frames at which the scenario is dumped when `ZKGBAI_DUMP_TERRAIN` is set.
+const DUMP_FRAMES: [i32; 3] = [1800, 9000, 18000];
+
+impl Ai {
+    /// Development aid: with `ZKGBAI_DUMP_TERRAIN=<dir>` in the environment,
+    /// write the map data (`<map>.zktamap`) and the AI's view of the game
+    /// (`<map>-f<frame>-team<n>.json`: bases and metal spots with sides) for
+    /// offline analysis with `tools/terrain-view`.
+    pub fn terrain_dump(&self, frame: i32) {
+        if !DUMP_FRAMES.contains(&frame) {
+            return;
+        }
+        let Some(dir) = std::env::var_os("ZKGBAI_DUMP_TERRAIN") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let map = self.cb.map();
+        let name: String =
+            map.name().chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '_' }).collect();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.log(&format!("terrain: cannot create dump dir: {e}"));
+            return;
+        }
+        let map_file = dir.join(format!("{name}.zktamap"));
+        if !map_file.exists() {
+            let (w, h) = (map.width().max(0) as u32, map.height().max(0) as u32);
+            let data = SpringMapData {
+                map_width: w,
+                map_height: h,
+                slope_width: w / 2,
+                slope_height: h / 2,
+                slope_map: map.slope_map(),
+                height_map: map.height_map(),
+            };
+            if let Err(e) = data.save(&map_file) {
+                self.log(&format!("terrain: cannot write {}: {e}", map_file.display()));
+                return;
+            }
+        }
+        let spots: Vec<serde_json::Value> = self
+            .graph
+            .metal_spots
+            .iter()
+            .map(|s| {
+                let side = if s.owned || (s.ally_shadowed && !s.hostile) {
+                    "ally"
+                } else if s.hostile || s.enemy_shadowed {
+                    "enemy"
+                } else {
+                    "neutral"
+                };
+                serde_json::json!({ "x": s.position.x, "z": s.position.z, "value": s.value, "side": side })
+            })
+            .collect();
+        let base = |v: Vec3| serde_json::json!([v.x, v.z]);
+        let ally =
+            if self.graph.get_start_pos().is_zero() { self.graph.get_ally_base() } else { self.graph.get_start_pos() };
+        let scenario = serde_json::json!({
+            "map": map.name(),
+            "frame": frame,
+            "team": self.team_id,
+            "zktamap": map_file.file_name().map(|f| f.to_string_lossy().into_owned()),
+            "ally_base": base(ally),
+            "enemy_base": base(self.graph.get_enemy_center()),
+            "assets": spots,
+        });
+        let file = dir.join(format!("{name}-f{frame}-team{}.json", self.team_id));
+        match std::fs::write(&file, serde_json::to_string_pretty(&scenario).unwrap_or_default()) {
+            Ok(()) => self.log(&format!("terrain: dumped scenario to {}", file.display())),
+            Err(e) => self.log(&format!("terrain: cannot write {}: {e}", file.display())),
+        }
+    }
+}

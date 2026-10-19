@@ -308,7 +308,10 @@ impl Ai {
         if !self.initialized {
             return;
         }
-        self.guard("terrain.update", |ai| ai.terrain_update());
+        self.guard("terrain.update", |ai| {
+            ai.terrain_update();
+            ai.terrain_dump(frame);
+        });
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }
