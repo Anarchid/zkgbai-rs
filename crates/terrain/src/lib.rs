@@ -10,13 +10,24 @@
 //!   approximate;
 //! - static *connectivity* (connected components of passable cells), so
 //!   "can units of this tier get from A to B at all" is a lookup;
-//! - the region graph (regions as nodes, chokepoints as edges).
+//! - the region graph (regions as nodes, chokepoints as edges), with
+//!   shortest ground routes over it ([`paths`]).
+//!
+//! On top of the model, [`strategy`] analyses the game's territory (what
+//! guards what, which chokepoints to hold or wall, where bridges, drops and
+//! teleports pay) and [`threat`] reasons about forces on the move (where a
+//! raid can get to and when, and where defenders can block it first).
 //!
 //! Positions are world coordinates in elmos (`x`, `z`); internally the model
 //! works on the engine's slope-map grid, one cell per 16 elmos.
 
 mod build;
+mod graph;
+pub mod paths;
 pub mod strategy;
+#[cfg(test)]
+mod testmaps;
+pub mod threat;
 mod tier;
 
 pub use tier::{MoveClass, Tier, engine_max_slope};

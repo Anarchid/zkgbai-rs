@@ -6,9 +6,10 @@
 //! chokepoints (edges, weighted by travel distance through the choke);
 //! only bridge discovery looks at the cell grid.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
+use crate::graph::{FlowNet, HeapItem};
+use crate::paths::{Paths, SNAP};
 use crate::{CELL, Choke, NONE, Pos, TierMap};
 
 /// Whose an asset is.
@@ -136,9 +137,6 @@ pub const MAX_HOLD_WIDTH: f32 = 600.0;
 /// Cost of holding a chokepoint, in average asset values (plus up to half
 /// an asset for width).
 pub const HOLD_COST: f32 = 1.0;
-
-/// Snap radius for placing assets and bases onto passable ground.
-const SNAP: f32 = 96.0;
 
 impl Analysis {
     pub fn run(s: &Scenario) -> Analysis {
@@ -277,7 +275,7 @@ impl Analysis {
         for &t in &targets {
             flow.add_edge(t, sink, value(t) as f64, None);
         }
-        flow.min_cut(source, sink)
+        flow.min_cut(source, sink).map(|c| c.chokes).unwrap_or_default()
     }
 
     fn bridge_options(&self, map: &TierMap, graph: &RegionGraph) -> Vec<BridgeOption> {
@@ -398,39 +396,9 @@ impl Analysis {
 }
 
 /// Ground travel distance between two positions, or `None` if no ground
-/// route exists: straight lines within a region, chokepoint to chokepoint
-/// between regions.
+/// route exists (see [`Paths`]).
 pub fn ground_distance(map: &TierMap, a: Pos, b: Pos) -> Option<f32> {
-    let (ra, rb) = (map.region_near(a, SNAP)?, map.region_near(b, SNAP)?);
-    if ra == rb {
-        return Some(a.distance(b));
-    }
-    let mut dist = vec![f32::INFINITY; map.chokes.len()];
-    let mut heap = BinaryHeap::new();
-    for &c in &map.regions[ra].chokes {
-        dist[c] = a.distance(map.chokes[c].pos);
-        heap.push(HeapItem(dist[c], c));
-    }
-    let mut best = f32::INFINITY;
-    while let Some(HeapItem(d, c)) = heap.pop() {
-        if d > dist[c] || d >= best {
-            continue;
-        }
-        let choke = &map.chokes[c];
-        if choke.regions.contains(&rb) {
-            best = best.min(d + choke.pos.distance(b));
-        }
-        for &r in &choke.regions {
-            for &n in &map.regions[r].chokes {
-                let nd = d + choke.pos.distance(map.chokes[n].pos);
-                if nd < dist[n] {
-                    dist[n] = nd;
-                    heap.push(HeapItem(nd, n));
-                }
-            }
-        }
-    }
-    best.is_finite().then_some(best)
+    Paths::new(map, a, |_| false).distance_to(b)
 }
 
 /// Regions as nodes, chokepoints as weighted edges.
@@ -531,23 +499,6 @@ impl RegionGraph {
     }
 }
 
-#[derive(PartialEq)]
-struct HeapItem(f32, usize);
-
-impl Eq for HeapItem {}
-
-impl Ord for HeapItem {
-    fn cmp(&self, o: &Self) -> Ordering {
-        o.0.total_cmp(&self.0).then_with(|| self.1.cmp(&o.1))
-    }
-}
-
-impl PartialOrd for HeapItem {
-    fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        Some(self.cmp(o))
-    }
-}
-
 /// A pair of regions separated by a short impassable stretch.
 struct BridgeCandidate {
     from: usize,
@@ -624,206 +575,10 @@ fn bridge_candidates(map: &TierMap) -> Vec<BridgeCandidate> {
     best.into_values().filter(|b| b.span <= MAX_BRIDGE_SPAN).collect()
 }
 
-/// Max-flow network (Edmonds-Karp) for the wall seal computation.
-struct FlowNet {
-    edges: Vec<Vec<FlowEdge>>,
-}
-
-#[derive(Clone, Copy)]
-struct FlowEdge {
-    to: usize,
-    cap: f64,
-    /// Index of the reverse edge in `edges[to]`.
-    rev: usize,
-    choke: Option<usize>,
-}
-
-impl FlowNet {
-    fn new(n: usize) -> Self {
-        FlowNet { edges: vec![Vec::new(); n] }
-    }
-
-    /// Undirected edge with capacity `cap` both ways.
-    fn add_edge(&mut self, a: usize, b: usize, cap: f64, choke: Option<usize>) {
-        let (ia, ib) = (self.edges[a].len(), self.edges[b].len());
-        self.edges[a].push(FlowEdge { to: b, cap, rev: ib, choke });
-        self.edges[b].push(FlowEdge { to: a, cap, rev: ia, choke });
-    }
-
-    /// Chokepoints on a minimum cut between `s` and `t`; empty if the
-    /// cut is infinite.
-    fn min_cut(&mut self, s: usize, t: usize) -> Vec<usize> {
-        loop {
-            // BFS for an augmenting path.
-            let mut prev: Vec<Option<(usize, usize)>> = vec![None; self.edges.len()];
-            let mut queue = VecDeque::from([s]);
-            let mut seen = vec![false; self.edges.len()];
-            seen[s] = true;
-            while let Some(u) = queue.pop_front() {
-                for (i, e) in self.edges[u].iter().enumerate() {
-                    if e.cap > 1e-9 && !seen[e.to] {
-                        seen[e.to] = true;
-                        prev[e.to] = Some((u, i));
-                        queue.push_back(e.to);
-                    }
-                }
-            }
-            if !seen[t] {
-                // Cut: edges from the source side to the sink side.
-                let mut cut: Vec<usize> = Vec::new();
-                for u in (0..self.edges.len()).filter(|&u| seen[u]) {
-                    for e in &self.edges[u] {
-                        if !seen[e.to]
-                            && let Some(c) = e.choke
-                        {
-                            cut.push(c);
-                        }
-                    }
-                }
-                cut.sort_unstable();
-                cut.dedup();
-                return cut;
-            }
-            // Bottleneck.
-            let mut bottleneck = f64::INFINITY;
-            let mut v = t;
-            while let Some((u, i)) = prev[v] {
-                bottleneck = bottleneck.min(self.edges[u][i].cap);
-                v = u;
-            }
-            if !bottleneck.is_finite() {
-                return Vec::new();
-            }
-            let mut v = t;
-            while let Some((u, i)) = prev[v] {
-                self.edges[u][i].cap -= bottleneck;
-                let rev = self.edges[u][i].rev;
-                self.edges[v][rev].cap += bottleneck;
-                v = u;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Region, Tier};
-
-    /// A hand-built map: `#` obstacle, letters regions; chokes are given as
-    /// (region, region, cell x, cell z, width in cells).
-    fn grid_map(rows: &[&str], chokes: &[(char, char, f32, f32, f32)]) -> TierMap {
-        let (w, h) = (rows[0].len(), rows.len());
-        let mut region = vec![NONE; w * h];
-        for (z, row) in rows.iter().enumerate() {
-            for (x, ch) in row.chars().enumerate() {
-                if ch != '#' {
-                    region[z * w + x] = (ch as u8 - b'a') as u32;
-                }
-            }
-        }
-        let n = region.iter().filter(|&&r| r != NONE).max().unwrap() + 1;
-        // Components: 4-connected passable cells.
-        let mut component = vec![NONE; w * h];
-        let mut next = 0;
-        for start in 0..w * h {
-            if region[start] == NONE || component[start] != NONE {
-                continue;
-            }
-            let mut stack = vec![start];
-            component[start] = next;
-            while let Some(c) = stack.pop() {
-                let (x, z) = (c % w, c / w);
-                for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let (nx, nz) = (x as i32 + dx, z as i32 + dz);
-                    if nx < 0 || nz < 0 || nx >= w as i32 || nz >= h as i32 {
-                        continue;
-                    }
-                    let nc = nz as usize * w + nx as usize;
-                    if region[nc] != NONE && component[nc] == NONE {
-                        component[nc] = next;
-                        stack.push(nc);
-                    }
-                }
-            }
-            next += 1;
-        }
-        let mut regions: Vec<Region> = (0..n as usize)
-            .map(|r| {
-                let cells: Vec<usize> = (0..w * h).filter(|&c| region[c] == r as u32).collect();
-                let (sx, sz) = cells.iter().fold((0.0, 0.0), |(a, b), &c| (a + (c % w) as f32, b + (c / w) as f32));
-                let k = cells.len() as f32;
-                Region {
-                    id: r,
-                    center: Pos::new((sx / k + 0.5) * CELL, (sz / k + 0.5) * CELL),
-                    cells: cells.len(),
-                    component: component[cells[0]],
-                    chokes: Vec::new(),
-                }
-            })
-            .collect();
-        let chokes: Vec<Choke> = chokes
-            .iter()
-            .enumerate()
-            .map(|(i, &(a, b, x, z, width))| {
-                let (ra, rb) = ((a as u8 - b'a') as usize, (b as u8 - b'a') as usize);
-                regions[ra].chokes.push(i);
-                regions[rb].chokes.push(i);
-                Choke {
-                    id: i,
-                    pos: Pos::new((x + 0.5) * CELL, (z + 0.5) * CELL),
-                    width: width * CELL,
-                    gate: None,
-                    regions: vec![ra.min(rb), ra.max(rb)],
-                }
-            })
-            .collect();
-        TierMap { tier: Tier::Vehicle, width: w, height: h, regions, chokes, component, region, passable_fraction: 1.0 }
-    }
-
-    /// Scale a layout up: every character becomes a `k` x `k` block.
-    fn scaled(rows: &[&str], k: usize) -> Vec<String> {
-        rows.iter()
-            .flat_map(|r| {
-                let wide: String = r.chars().flat_map(|c| std::iter::repeat_n(c, k)).collect();
-                std::iter::repeat_n(wide, k)
-            })
-            .collect()
-    }
-
-    /// Three rooms a-b-c in a row, and below them two strips d (under a)
-    /// and e (under c) split by a thin wall; laid out at 4x scale so travel
-    /// distances are realistic (~1700 x 450 elmos).
-    fn rooms() -> TierMap {
-        let rows = scaled(
-            &[
-                "aaaaaaaa#bbbbbbbb#cccccccc",
-                "aaaaaaaa#bbbbbbbb#cccccccc",
-                "aaaaaaaaabbbbbbbbbcccccccc",
-                "aaaaaaaa#bbbbbbbb#cccccccc",
-                "#dd#####################ee",
-                "dddddddddddd##eeeeeeeeeeee",
-                "dddddddddddd##eeeeeeeeeeee",
-            ],
-            4,
-        );
-        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-        let k = 4.0;
-        grid_map(
-            &rows,
-            &[
-                ('a', 'b', 8.0 * k, 2.0 * k, k),
-                ('b', 'c', 17.0 * k, 2.0 * k, k),
-                ('a', 'd', 1.0 * k, 4.0 * k, 2.0 * k),
-                ('c', 'e', 24.0 * k, 4.0 * k, 2.0 * k),
-            ],
-        )
-    }
-
-    /// Center of a layout position (in unscaled layout cells).
-    fn at(x: f32, z: f32) -> Pos {
-        Pos::new((x * 4.0 + 2.0) * CELL, (z * 4.0 + 2.0) * CELL)
-    }
+    use crate::testmaps::{at, rooms};
 
     #[test]
     fn ground_distance_follows_chokepoints() {
@@ -893,22 +648,5 @@ mod tests {
         assert_eq!(a.drops.iter().map(|d| d.region).collect::<Vec<_>>(), vec![re]);
         // A teleporter exit next to their value beats walking there.
         assert!(a.teleports.first().is_some_and(|t| t.region == re || t.region == rb));
-    }
-
-    #[test]
-    fn min_cut_prefers_narrow_chokes() {
-        let mut f = FlowNet::new(4);
-        // Two routes 0 -> 3; the cheapest cut takes the narrow choke on
-        // each (7 and 8), not the wide entries (1 and 2).
-        f.add_edge(0, 1, 100.0, Some(1));
-        f.add_edge(1, 3, 5.0, Some(7));
-        f.add_edge(0, 2, 100.0, Some(2));
-        f.add_edge(2, 3, 50.0, Some(8));
-        assert_eq!(f.min_cut(0, 3), vec![7, 8]);
-
-        let mut g = FlowNet::new(3);
-        g.add_edge(0, 1, 3.0, Some(4));
-        g.add_edge(1, 2, f64::INFINITY, None);
-        assert_eq!(g.min_cut(0, 2), vec![4]);
     }
 }
