@@ -12,8 +12,12 @@ use crate::economy::{EconomyManager, FactoryManager};
 use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
 use crate::los::LosManager;
+use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::incursions::Incursions;
+use crate::military::intel::Intel;
+use crate::military::nukes::Nukes;
+use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
@@ -58,6 +62,14 @@ pub struct Ai {
     pub strategy: Option<Strategy>,
     /// Enemy forces on the move and the squads sent to block them.
     pub incursions: Incursions,
+    /// Our teleport bridge and the squads going through it.
+    pub teleports: Teleports,
+    /// Our air transports and the drop under way.
+    pub drops: Drops,
+    /// What we know, and can guess, of the enemy's metal.
+    pub intel: Intel,
+    /// Our nuclear strikes, and where they were intercepted.
+    pub nukes: Nukes,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -71,6 +83,9 @@ pub struct Ai {
     enemy_teams: BTreeSet<i32>,
     enemy_ally_teams: BTreeSet<i32>,
     pub debug_activated: bool,
+    /// Development aid: features switched off, for A/B tests (the AI
+    /// option `disable`, else `ZKGBAI_DISABLE`; comma separated).
+    disabled: BTreeSet<String>,
     rsgn: bool,
     resigned: bool,
     initialized: bool,
@@ -130,6 +145,10 @@ impl SkirmishAi for Ai {
             terrain,
             strategy: None,
             incursions: Incursions::default(),
+            teleports: Teleports::default(),
+            drops: Drops::default(),
+            intel: Intel::default(),
+            nukes: Nukes::default(),
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -141,6 +160,11 @@ impl SkirmishAi for Ai {
             enemy_teams: BTreeSet::new(),
             enemy_ally_teams: BTreeSet::new(),
             debug_activated: false,
+            disabled: cb
+                .option("disable")
+                .or_else(|| std::env::var("ZKGBAI_DISABLE").ok())
+                .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
+                .unwrap_or_default(),
             rsgn: false,
             resigned: false,
             initialized: false,
@@ -291,6 +315,10 @@ impl Ai {
 
         self.select_random_commander();
         self.choose_start_pos();
+        if !self.disabled.is_empty() {
+            let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
+            self.log(&format!("dev: features off: {}", off.join(", ")));
+        }
         self.initialized = true;
         0
     }
@@ -316,7 +344,7 @@ impl Ai {
             return;
         }
         self.guard("terrain.update", |ai| {
-            ai.terrain_update();
+            ai.terrain_update(frame);
             ai.terrain_dump(frame);
         });
         self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
@@ -333,7 +361,11 @@ impl Ai {
 
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
-        self.guard("eco.update", |ai| ai.eco_update(frame));
+        if self.terraform_testing() {
+            self.guard("eco.terraformTest", |ai| ai.terraform_test_update(frame));
+        } else {
+            self.guard("eco.update", |ai| ai.eco_update(frame));
+        }
         self.guard("war.update", |ai| ai.war_update(frame));
         self.guard("fac.update", |ai| ai.fac_update(frame));
     }
@@ -643,6 +675,11 @@ impl Ai {
 
     pub fn get_enemy_team_ids(&self) -> &BTreeSet<i32> {
         &self.enemy_teams
+    }
+
+    /// Whether a feature is switched off for testing (see `disabled`).
+    pub fn dev_off(&self, feature: &str) -> bool {
+        self.disabled.contains(feature)
     }
 
     pub fn log(&self, s: &str) {

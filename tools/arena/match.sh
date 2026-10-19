@@ -4,7 +4,8 @@
 # usage: match.sh [options] <AI> <AI> [<AI>...]
 #   One AI spec per team slot; slots fill allyteams in order of the layout
 #   (-L 2v2 with A B C D: A,B on allyteam 0 and C,D on allyteam 1).
-#   AI spec:  ShortName[:Version][@/path/to/libSkirmishAI.so]
+#   AI spec:  ShortName[:Version][@/path/to/libSkirmishAI.so][?key=value&key=value...]
+#             (?...: the AI's start-script options)
 #             With @path, the library is installed into the match's private
 #             write-dir under AI/Skirmish/<ShortName>/<Version>/ together with
 #             AIInfo.lua/AIOptions.lua from the library's crate `data/` dir
@@ -82,10 +83,12 @@ ln -s "$CACHE" "$WD/cache"
 mkdir -p "$WD/LuaUI/Widgets"
 sed "s/@MAX_FRAMES@/$MAX_FRAMES/" "$(dirname "$0")/arena_widget.lua" > "$WD/LuaUI/Widgets/arena_widget.lua"
 
-# parse "Short[:Ver][@lib]" -> sets SHORT VER LIB
+# parse "Short[:Ver][@lib][?opts]" -> sets SHORT VER LIB OPTS
 parse_ai() {
     local spec=$1
     LIB=""
+    OPTS=""
+    if [[ $spec == *\?* ]]; then OPTS=${spec#*\?}; spec=${spec%%\?*}; fi
     if [[ $spec == *@* ]]; then LIB=${spec#*@}; spec=${spec%%@*}; fi
     SHORT=${spec%%:*}
     if [[ $spec == *:* ]]; then VER=${spec#*:}; else VER=""; fi
@@ -110,7 +113,7 @@ return infos
 EOF
 }
 
-declare -a SHORTS VERS
+declare -a SHORTS VERS OPTSS
 i=0
 for spec in "$@"; do
     parse_ai "$spec"
@@ -120,11 +123,12 @@ for spec in "$@"; do
     fi
     SHORTS[$i]=$SHORT
     VERS[$i]=$VER
+    OPTSS[$i]=$OPTS
     i=$((i + 1))
 done
 
 ai_block() {
-    local idx=$1 short=$2 ver=$3
+    local idx=$1 short=$2 ver=$3 opts=$4
     echo "    [AI$idx]"
     echo "    {"
     echo "        Name=${short}_$idx;"
@@ -132,6 +136,14 @@ ai_block() {
     [ -n "$ver" ] && echo "        Version=$ver;"
     echo "        Team=$idx;"
     echo "        Host=0;"
+    if [ -n "$opts" ]; then
+        echo "        [Options]"
+        echo "        {"
+        local kv
+        IFS='&' read -ra kvs <<< "$opts"
+        for kv in "${kvs[@]}"; do echo "            $kv;"; done
+        echo "        }"
+    fi
     echo "    }"
 }
 
@@ -160,7 +172,7 @@ cat <<EOF
     }
 EOF
 for ((t = 0; t < NUM_TEAMS; t++)); do
-    ai_block "$t" "${SHORTS[$t]}" "${VERS[$t]}"
+    ai_block "$t" "${SHORTS[$t]}" "${VERS[$t]}" "${OPTSS[$t]}"
 done
 t=0
 for ((a = 0; a < ${#ALLY_SIZES[@]}; a++)); do

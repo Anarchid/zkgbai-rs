@@ -3,8 +3,11 @@
 # alternating sides, and summarise the results.
 #
 # usage: series.sh [-n games-per-map] [-j parallel] [-f max-frames] [-t timeout]
-#                  [-M maps-file] [-o out-dir] [-P base-port] <AI_A> <AI_B>
+#                  [-M maps-file] [-o out-dir] [-P base-port] [-R] <AI_A> <AI_B>
 # AI specs as for match.sh. Maps file: one map name per line.
+# -R: ZKGBAI opens with the n-th factory viable on the n-th map (AI option
+#     factory_pick), so every series faces the same matchups and both games
+#     on a map the same one, sides swapped (in self-play: a mirror).
 # Writes <out-dir>/results.csv and prints a summary.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -15,7 +18,8 @@ TIMEOUT=1500
 MAPS="$here/maps.txt"
 OUT=""
 PORT_BASE=40000
-while getopts "n:j:f:t:M:o:P:" opt; do
+ROTATE=0
+while getopts "n:j:f:t:M:o:P:R" opt; do
     case $opt in
         n) N=$OPTARG ;;
         j) J=$OPTARG ;;
@@ -24,26 +28,40 @@ while getopts "n:j:f:t:M:o:P:" opt; do
         M) MAPS=$OPTARG ;;
         o) OUT=$OPTARG ;;
         P) PORT_BASE=$OPTARG ;;
-        *) sed -n '2,9p' "$0"; exit 2 ;;
+        R) ROTATE=1 ;;
+        *) sed -n '2,12p' "$0"; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
-[ $# -eq 2 ] || { sed -n '2,9p' "$0"; exit 2; }
+[ $# -eq 2 ] || { sed -n '2,12p' "$0"; exit 2; }
 A=$1
 B=$2
 OUT=${OUT:-$(mktemp -d "${TMPDIR:-/tmp}/zk-series.XXXXXX")}
 mkdir -p "$OUT"
 
+# With -R, a ZKGBAI spec gets the AI option factory_pick=<n>.
+with_pick() {
+    case $1 in
+        ZKGBAI*) if [[ $1 == *\?* ]]; then echo "$1&factory_pick=$2"; else echo "$1?factory_pick=$2"; fi ;;
+        *) echo "$1" ;;
+    esac
+}
+
 jobs_file="$OUT/jobs.txt"
 : > "$jobs_file"
 i=0
+mapn=0
 while IFS= read -r map; do
     [ -z "$map" ] && continue
     case $map in \#*) continue ;; esac
+    mapn=$((mapn + 1))
+    a=$A
+    b=$B
+    if [ "$ROTATE" = 1 ]; then a=$(with_pick "$A" $mapn); b=$(with_pick "$B" $mapn); fi
     for g in $(seq 1 "$N"); do
         i=$((i + 1))
         # Alternate sides so start-position bias cancels out.
-        if [ $((g % 2)) -eq 1 ]; then echo "$i|$map|A|$A|$B"; else echo "$i|$map|B|$B|$A"; fi >> "$jobs_file"
+        if [ $((g % 2)) -eq 1 ]; then echo "$i|$map|A|$a|$b"; else echo "$i|$map|B|$b|$a"; fi >> "$jobs_file"
     done
 done < "$MAPS"
 

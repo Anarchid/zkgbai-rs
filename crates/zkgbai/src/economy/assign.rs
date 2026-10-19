@@ -82,6 +82,11 @@ impl Ai {
         let Some(w) = self.eco.workers.get(&wid) else {
             return;
         };
+        // Busy terraforming: leave it to it.
+        if !w.is_chicken && super::terraform::is_terraforming(unit) {
+            self.eco.assigned.push_back(wid);
+            return;
+        }
         let (is_chicken, chicken_frame, last_retreat_frame) = (w.is_chicken, w.chicken_frame, w.last_retreat_frame);
         if is_chicken {
             if self.war.get_threat(pos) == 0.0
@@ -90,7 +95,8 @@ impl Ai {
             {
                 self.eco_stop_chickening(wid);
             } else if frame - last_retreat_frame > 15 {
-                let haven = self.graph_get_closest_haven(pos);
+                // Ahead of the enemy to where it gets last, if it pays.
+                let haven = self.incursion_refuge(unit).unwrap_or_else(|| self.graph_get_closest_haven(pos));
                 if distance(pos, haven) > 25.0 {
                     let mut nav = crate::nav!(self);
                     if let Some(w) = self.eco.workers.get_mut(&wid) {
@@ -212,11 +218,15 @@ impl Ai {
         let worker = eco.workers.get(&wid)?;
         let wpos = worker.get_pos();
         let threat_cost = |t: &WorkerTask| 500.0 * self.war.get_effective_threat(t.get_pos()).max(0.0);
+        // Only jobs the worker can get to (bots cannot build out at sea).
+        let def = worker.unit.def();
+        let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
+        let reaches = |t: &WorkerTask| def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range));
 
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
 
-        if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)) {
+        if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)).filter(|&t| reaches(t)) {
             task = Some(t.id);
             cost = self.eco_cost_of_job(worker, wpos, t);
             if let Some(target) = t.as_construction().and_then(|c| c.target) {
@@ -228,7 +238,7 @@ impl Ai {
 
         let mut consider = |ids: &[TaskId], with_threat: bool, skip: &dyn Fn(&WorkerTask) -> bool| {
             for t in ids.iter().filter_map(|&id| eco.tasks.get(id)) {
-                if skip(t) {
+                if skip(t) || !reaches(t) {
                     continue;
                 }
                 let mut tmpcost = self.eco_cost_of_job(worker, wpos, t);

@@ -124,17 +124,13 @@ impl Ai {
         }
 
         if frame % 300 == (self.offset + 10) % 300 {
-            // Use nukes.
+            // Use nukes: where no anti-nuke guards enough value.
             if let Some(nuke) = self.misc_handler.nuke
-                && !self.war.enemy_has_anti_nuke
                 && nuke.stockpile() > 0
                 && frame - self.misc_handler.last_nuke_frame > 1800
+                && self.nukes_fire(nuke)
             {
-                let target = self.war_get_super_wep_target(nuke, true);
-                if target != NULLPOS {
-                    nuke.attack_area(target, 0.0, 0);
-                    self.misc_handler.last_nuke_frame = frame;
-                }
+                self.misc_handler.last_nuke_frame = frame;
             }
         }
 
@@ -221,6 +217,11 @@ impl Ai {
     pub fn misc_add_bertha(&mut self, u: Unit) {
         self.misc_handler.berthas.insert(u.id(), u);
         u.set_fire_state(0, 0);
+    }
+
+    /// Whether we have a nuke silo.
+    pub fn misc_has_nuke(&self) -> bool {
+        self.misc_handler.nuke.is_some()
     }
 
     pub fn misc_add_nuke(&mut self, u: Unit) {

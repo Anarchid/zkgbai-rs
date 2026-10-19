@@ -334,6 +334,7 @@ impl Ai {
         }
 
         if name.contains("factory") || name.contains("hub") {
+            self.log(&format!("economy: {name} finished"));
             let first_fac = (self.fac.factories.len() as i32) < 1 + self.merged_allies;
             let mut fac = Factory::new(unit, name, first_fac, self.map_diag);
             if !name.contains("hub") {
@@ -501,6 +502,11 @@ impl Ai {
         };
         let (unit, pos) = (fac.unit, fac.get_pos());
         self.fac.factories.insert(fac_id, fac);
+        match choice {
+            "amphtele" => self.teleport_ordered(),
+            "gunshiptrans" => self.drops_ordered(),
+            _ => {}
+        }
 
         if kind == FacKind::StriderHub {
             unit.stop(0);
@@ -832,6 +838,10 @@ impl Ai {
 
         if self.fac_need_workers(fac) {
             return "amphcon";
+        }
+
+        if self.teleport_wants_djinn() {
+            return "amphtele";
         }
 
         if war.slasher_spam as f32 * 140.0 > fm.assault_value {
@@ -1183,6 +1193,10 @@ impl Ai {
 
         if self.fac_need_workers(fac) {
             return "gunshipcon";
+        }
+
+        if self.drops_want_charon() {
+            return "gunshiptrans";
         }
 
         if eminent && self.fac_aa_roll() {

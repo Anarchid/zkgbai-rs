@@ -5,26 +5,39 @@
 //!
 //! Once it is ready, a strategic analysis of the game (which chokepoints
 //! guard our territory) is refreshed periodically, and the metal-spot
-//! graph learns which of its links ground forces travel directly.
+//! graph learns which of its links ground forces travel directly. The
+//! terrain itself is re-analysed every [`REANALYSIS_PERIOD`] frames, so
+//! terraforming (ours or the enemy's: walls, ditches, ramps) shows up.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use springai::{Callback, UnitDef, Vec3};
+use springai::{Callback, Unit, UnitDef, Vec3};
+use zk_terrain::paths::{Paths, SNAP};
 use zk_terrain::strategy::{Analysis, Asset, Scenario, Side, ground_distance};
 use zk_terrain::{MoveClass, Pos, SpringMapData, Terrain, Tier, TierMap};
 
 use crate::Ai;
 use crate::defs::Defs;
 
+/// A model and its compute time, from the analysis thread.
+type Analysed = Receiver<(Terrain, Duration)>;
+
 pub enum TerrainModel {
-    /// Analysis running; the thread sends the model and its compute time.
+    /// First analysis running.
     Pending {
-        rx: Receiver<(Terrain, Duration)>,
+        rx: Analysed,
     },
-    Ready(Terrain),
+    Ready {
+        terrain: Terrain,
+        /// A re-analysis under way.
+        rebuild: Option<Analysed>,
+    },
     Unavailable,
 }
+
+/// Frames between re-analyses of the terrain.
+const REANALYSIS_PERIOD: i32 = 30 * 60;
 
 /// Constructor whose movement class stands for each tier.
 const TIER_UNITS: [(Tier, &str); 6] = [
@@ -39,39 +52,10 @@ const TIER_UNITS: [(Tier, &str); 6] = [
 impl TerrainModel {
     /// Fetch the map data and start the analysis thread.
     pub fn start(cb: Callback, defs: &Defs) -> Self {
-        let map = cb.map();
-        let (w, h) = (map.width().max(0) as u32, map.height().max(0) as u32);
-        let data = SpringMapData {
-            map_width: w,
-            map_height: h,
-            slope_width: w / 2,
-            slope_height: h / 2,
-            slope_map: map.slope_map(),
-            height_map: map.height_map(),
-        };
-        if data.slope_map.len() != (data.slope_width * data.slope_height) as usize
-            || data.height_map.len() != (w * h) as usize
-            || data.slope_map.is_empty()
-        {
-            cb.log("terrain: unexpected map data sizes; terrain analysis disabled");
-            return TerrainModel::Unavailable;
-        }
-        let classes: Vec<(Tier, MoveClass)> = TIER_UNITS
-            .iter()
-            .map(|&(tier, unit)| (tier, defs.get(unit).and_then(move_class).unwrap_or_else(|| tier.zero_k_class())))
-            .collect();
-
-        let (tx, rx) = mpsc::channel();
-        // Pure computation: the thread must never call into the engine.
-        let spawned = std::thread::Builder::new().name("zkgbai-terrain".into()).spawn(move || {
-            let start = Instant::now();
-            let terrain = Terrain::build_with(&data, &classes);
-            let _ = tx.send((terrain, start.elapsed()));
-        });
-        match spawned {
-            Ok(_) => TerrainModel::Pending { rx },
+        match analyse(cb, defs) {
+            Ok(rx) => TerrainModel::Pending { rx },
             Err(e) => {
-                cb.log(&format!("terrain: cannot start analysis thread ({e}); terrain analysis disabled"));
+                cb.log(&format!("terrain: {e}; terrain analysis disabled"));
                 TerrainModel::Unavailable
             }
         }
@@ -80,10 +64,51 @@ impl TerrainModel {
     /// The model, once the analysis has finished.
     pub fn get(&self) -> Option<&Terrain> {
         match self {
-            TerrainModel::Ready(t) => Some(t),
+            TerrainModel::Ready { terrain, .. } => Some(terrain),
             _ => None,
         }
     }
+}
+
+/// The map as it is now.
+fn map_data(cb: Callback) -> Result<SpringMapData, String> {
+    let map = cb.map();
+    let (w, h) = (map.width().max(0) as u32, map.height().max(0) as u32);
+    let data = SpringMapData {
+        map_width: w,
+        map_height: h,
+        slope_width: w / 2,
+        slope_height: h / 2,
+        slope_map: map.slope_map(),
+        height_map: map.height_map(),
+    };
+    if data.slope_map.len() != (data.slope_width * data.slope_height) as usize
+        || data.height_map.len() != (w * h) as usize
+        || data.slope_map.is_empty()
+    {
+        return Err("unexpected map data sizes".into());
+    }
+    Ok(data)
+}
+
+/// Analyse the map as it is now on a background thread.
+fn analyse(cb: Callback, defs: &Defs) -> Result<Analysed, String> {
+    let data = map_data(cb)?;
+    let classes: Vec<(Tier, MoveClass)> = TIER_UNITS
+        .iter()
+        .map(|&(tier, unit)| (tier, defs.get(unit).and_then(move_class).unwrap_or_else(|| tier.zero_k_class())))
+        .collect();
+    let (tx, rx) = mpsc::channel();
+    // Pure computation: the thread must never call into the engine.
+    std::thread::Builder::new()
+        .name("zkgbai-terrain".into())
+        .spawn(move || {
+            let start = Instant::now();
+            let terrain = Terrain::build_with(&data, &classes);
+            let _ = tx.send((terrain, start.elapsed()));
+        })
+        .map_err(|e| format!("cannot start analysis thread ({e})"))?;
+    Ok(rx)
 }
 
 /// The terrain limits of a ground unit type; `None` for aircraft and
@@ -109,14 +134,24 @@ pub fn pos(v: Vec3) -> Pos {
     Pos::new(v.x, v.z)
 }
 
-/// The point `dist` elmos from a chokepoint towards the middle of one of
-/// its regions (at most halfway there): where to stand to hold it from
-/// that side.
-pub fn setback(map: &TierMap, choke: usize, region: usize, dist: f32) -> Pos {
-    let (c, home) = (map.chokes[choke].pos, map.regions[region].center);
-    let d = c.distance(home);
-    let t = if d > 0.0 { (dist / d).min(0.5) } else { 0.0 };
-    Pos::new(c.x + (home.x - c.x) * t, c.z + (home.z - c.z) * t)
+/// Whether a ground unit of type `def` at `from` can get within `range`
+/// elmos of `to` (a worker within build range of a site, say); true for
+/// aircraft and wherever the terrain model cannot tell.
+pub fn reaches(terrain: Option<&Terrain>, def: UnitDef, from: Vec3, to: Vec3, range: f32) -> bool {
+    let Some(map) = tier_of(def).and_then(|t| terrain?.tier(t)) else { return true };
+    map.region_near(pos(from), SNAP).is_none() || map.reaches_within(pos(from), pos(to), range.max(SNAP), SNAP)
+}
+
+/// Whether unit `u` (from where it is) can get within weapon range of a
+/// target, by [`reaches`].
+pub fn engage_test(terrain: Option<&Terrain>, u: Unit) -> impl Fn(Vec3) -> bool + '_ {
+    engage_test_from(terrain, u.def(), u.pos())
+}
+
+/// [`engage_test`] for a unit of type `def` at `from`.
+pub fn engage_test_from(terrain: Option<&Terrain>, def: Option<UnitDef>, from: Vec3) -> impl Fn(Vec3) -> bool + '_ {
+    let range = def.map_or(0.0, |d| d.max_weapon_range()).clamp(SNAP, MAX_ENGAGE_RANGE);
+    move |target| def.is_none_or(|d| reaches(terrain, d, from, target, range))
 }
 
 impl Ai {
@@ -125,15 +160,46 @@ impl Ai {
         self.terrain.get()
     }
 
-    /// Pick up the finished analysis; keep the link classification current.
-    pub fn terrain_update(&mut self) {
+    /// Whether the first terrain analysis is still running.
+    pub fn terrain_pending(&self) -> bool {
+        matches!(self.terrain, TerrainModel::Pending { .. })
+    }
+
+    /// See [`reaches`].
+    pub fn terrain_reaches(&self, def: UnitDef, from: Vec3, to: Vec3, range: f32) -> bool {
+        reaches(self.reach_terrain(), def, from, to, range)
+    }
+
+    /// The terrain model for reachability checks (none when they are off).
+    pub fn reach_terrain(&self) -> Option<&Terrain> {
+        if self.dev_off("reach") { None } else { self.terrain.get() }
+    }
+
+    /// Pick up the finished analysis; keep the link classification current;
+    /// re-analyse now and then.
+    pub fn terrain_update(&mut self, frame: i32) {
         if self.terrain().is_some() && self.graph.ground_links.len() != self.graph.links.len() {
             self.terrain_classify_links();
+        }
+        let reanalyse = !self.dev_off("reanalysis");
+        if let TerrainModel::Ready { rebuild, .. } = &mut self.terrain {
+            match rebuild.as_ref().map(|rx| rx.try_recv()) {
+                None if reanalyse && (frame + self.offset) % REANALYSIS_PERIOD == 0 => {
+                    match analyse(self.cb, &self.defs) {
+                        Ok(rx) => *rebuild = Some(rx),
+                        Err(e) => self.cb.log(&format!("terrain: re-analysis failed: {e}")),
+                    }
+                }
+                Some(Ok((terrain, _))) => self.terrain_replace(terrain),
+                Some(Err(TryRecvError::Disconnected)) => *rebuild = None,
+                _ => {}
+            }
+            return;
         }
         let TerrainModel::Pending { rx } = &self.terrain else { return };
         match rx.try_recv() {
             Ok((terrain, compute)) => {
-                self.terrain = TerrainModel::Ready(terrain);
+                self.terrain = TerrainModel::Ready { terrain, rebuild: None };
                 self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
                 for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
                     self.log(&format!(
@@ -216,16 +282,8 @@ impl Ai {
         }
         let map_file = dir.join(format!("{name}.zktamap"));
         if !map_file.exists() {
-            let (w, h) = (map.width().max(0) as u32, map.height().max(0) as u32);
-            let data = SpringMapData {
-                map_width: w,
-                map_height: h,
-                slope_width: w / 2,
-                slope_height: h / 2,
-                slope_map: map.slope_map(),
-                height_map: map.height_map(),
-            };
-            if let Err(e) = data.save(&map_file) {
+            let saved = map_data(self.cb).and_then(|data| data.save(&map_file).map_err(|e| e.to_string()));
+            if let Err(e) = saved {
                 self.log(&format!("terrain: cannot write {}: {e}", map_file.display()));
                 return;
             }
@@ -260,6 +318,59 @@ impl Ai {
         }
     }
 }
+
+impl Ai {
+    /// Swap in a re-analysed model: report what terraforming changed, and
+    /// redo what refers to the old model's regions and chokepoints.
+    fn terrain_replace(&mut self, terrain: Terrain) {
+        let changes = self.terrain_changes(&terrain);
+        self.terrain = TerrainModel::Ready { terrain, rebuild: None };
+        if let Some(changes) = changes {
+            self.log(&format!("terrain: re-analysis: {changes}"));
+        }
+        self.graph.ground_links.clear();
+        self.incursions.forget_terrain();
+        self.strategy = None;
+        self.strategy_refresh(self.frame);
+    }
+
+    /// How ground routes from our base to the metal spots changed between
+    /// the model in use and `new`, by tier; `None` if they did not.
+    fn terrain_changes(&self, new: &Terrain) -> Option<String> {
+        let old = self.terrain()?;
+        let (home, _) = self.strategy_bases()?;
+        let spots: Vec<Pos> = self.graph.metal_spots.iter().map(|m| pos(m.position)).collect();
+        let mut report = Vec::new();
+        for tier in GROUND_TIERS {
+            let (Some(a), Some(b)) = (old.tier(tier), new.tier(tier)) else { continue };
+            let (before, after) = (Paths::new(a, pos(home), |_| false), Paths::new(b, pos(home), |_| false));
+            let (mut longer, mut cut, mut shorter) = (0, 0, 0);
+            for &p in &spots {
+                match (before.distance_to(p), after.distance_to(p)) {
+                    (Some(_), None) => cut += 1,
+                    (None, Some(_)) => shorter += 1,
+                    (Some(x), Some(y)) if y > x * CHANGED + DETOUR_SLACK => longer += 1,
+                    (Some(x), Some(y)) if x > y * CHANGED + DETOUR_SLACK => shorter += 1,
+                    _ => {}
+                }
+            }
+            if longer + cut + shorter > 0 {
+                report.push(format!(
+                    "{}: {longer} metal spots further from our base, {cut} cut off, {shorter} nearer \
+                     ({} -> {} regions)",
+                    tier.name(),
+                    a.regions.len(),
+                    b.regions.len()
+                ));
+            }
+        }
+        (!report.is_empty()).then(|| report.join("; "))
+    }
+}
+
+/// A route changed if it is this many times longer or shorter (plus
+/// [`DETOUR_SLACK`] elmos).
+const CHANGED: f32 = 1.3;
 
 /// Tiers whose routes make two metal spots neighbours for territory
 /// inference: whoever holds one can walk, drive or hover to the other.
@@ -302,6 +413,18 @@ const STRATEGY_PERIOD: i32 = 900;
 /// How far behind a chokepoint (on our side) its defenses stand, elmos.
 const FORTIFY_SETBACK: f32 = 120.0;
 
+/// A chokepoint is held when our defenses covering it are this strong
+/// (about two light laser turrets, on the scale of enemy danger).
+const HELD_POWER: f32 = 150.0;
+
+/// Enemy ground forces threaten what is within this many elmos of ground
+/// they can stand on (a typical weapon range).
+const STRIKE_RANGE: f32 = 400.0;
+
+/// Weapon ranges beyond this count as this much when judging whether a
+/// unit can engage a target (it bounds the search for ground in range).
+const MAX_ENGAGE_RANGE: f32 = 600.0;
+
 /// The latest strategic analysis of the game, on the movement tier of the
 /// enemy's ground army.
 pub struct Strategy {
@@ -310,6 +433,14 @@ pub struct Strategy {
     pub analysis: Analysis,
     /// Chokepoints worth fortifying, nearest the enemy first.
     pub fortify: Vec<Fortification>,
+    /// Regions (of the tier's map) the enemy's ground army can only reach
+    /// through our base or past chokepoints our defenses hold, or not at
+    /// all: ground defenses there are wasted.
+    pub sheltered: Vec<bool>,
+    /// The enemy's base, and the other movement tiers its ground forces
+    /// have shown.
+    enemy_base: Pos,
+    other_tiers: Vec<Tier>,
 }
 
 /// A chokepoint guarding our territory from enemy ground forces.
@@ -341,9 +472,9 @@ impl Ai {
         (!ally.is_zero() && !enemy.is_zero()).then_some((ally, enemy))
     }
 
-    /// The movement tier most of the enemy's seen ground army (by cost)
-    /// belongs to; bots until we know better.
-    fn enemy_ground_tier(&self) -> Tier {
+    /// The movement tiers of the enemy's seen ground army, with what it
+    /// cost, most first; bots until we know better.
+    fn enemy_ground_tiers(&self) -> Vec<Tier> {
         let mut cost: Vec<(Tier, f32)> = Vec::new();
         for e in self.war.targets.values().filter(|e| !e.is_static) {
             let Some((ud, tier)) = e.ud.and_then(|ud| Some((ud, tier_of(ud)?))) else { continue };
@@ -352,7 +483,9 @@ impl Ai {
                 None => cost.push((tier, ud.cost(self.metal))),
             }
         }
-        cost.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map_or(Tier::Bot, |(t, _)| t)
+        cost.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let tiers: Vec<Tier> = cost.into_iter().map(|(t, _)| t).collect();
+        if tiers.is_empty() { vec![Tier::Bot] } else { tiers }
     }
 
     /// Metal spots as assets of the side that holds (or probably holds)
@@ -376,11 +509,16 @@ impl Ai {
 
     /// Re-run the strategic analysis every [`STRATEGY_PERIOD`] frames.
     pub fn strategy_update(&mut self, frame: i32) {
-        if (frame + self.offset) % STRATEGY_PERIOD != 0 {
-            return;
+        if (frame + self.offset) % STRATEGY_PERIOD == 0 {
+            self.strategy_refresh(frame);
         }
+    }
+
+    /// Run the strategic analysis now.
+    fn strategy_refresh(&mut self, frame: i32) {
         let Some((ally, enemy)) = self.strategy_bases() else { return };
-        let tier = self.enemy_ground_tier();
+        let tiers = self.enemy_ground_tiers();
+        let tier = tiers[0];
         let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
         let assets = self.strategy_assets();
         let analysis = Analysis::run(&Scenario { map, ally_base: pos(ally), enemy_base: pos(enemy), assets: &assets });
@@ -396,7 +534,46 @@ impl Ai {
                 blocked: false,
             })
             .collect();
-        self.strategy = Some(Strategy { frame, tier, analysis, fortify });
+        let held = |c: usize| {
+            let p = map.chokes[c].pos;
+            self.war.get_friendly_porc_threat(Vec3::xz(p.x, p.z)) >= HELD_POWER
+        };
+        let sheltered = analysis.sheltered(map, pos(enemy), held);
+        let other_tiers = tiers[1..].to_vec();
+        let strategy = Strategy { frame, tier, analysis, fortify, sheltered, enemy_base: pos(enemy), other_tiers };
+        // The first analysis, and whenever what is sheltered changes much.
+        let before = self.strategy.as_ref().map_or(0, |s| s.sheltered.iter().filter(|&&s| s).count());
+        let now = strategy.sheltered.iter().filter(|&&s| s).count();
+        if before.abs_diff(now) > 1 || self.strategy.is_none() {
+            let spots =
+                self.graph.get_owned_spots().iter().filter(|m| self.strategy_shelters(&strategy, m.get_pos())).count();
+            self.log(&format!(
+                "terrain: {now} of {} {} regions sheltered from enemy ground forces ({spots} of our metal spots)",
+                strategy.sheltered.len(),
+                tier.name()
+            ));
+        }
+        self.strategy = Some(strategy);
+    }
+
+    /// Whether enemy ground forces can only reach `p` through our base or
+    /// past chokepoints we hold, or not at all (see [`Strategy::sheltered`]);
+    /// false before the first strategic analysis.
+    pub fn strategy_sheltered(&self, p: Vec3) -> bool {
+        !self.dev_off("porc") && self.strategy.as_ref().is_some_and(|s| self.strategy_shelters(s, p))
+    }
+
+    fn strategy_shelters(&self, s: &Strategy, p: Vec3) -> bool {
+        let Some(terrain) = self.terrain() else { return false };
+        let Some(map) = terrain.tier(s.tier) else { return false };
+        // Somewhere the enemy can stand within striking range (none: out of
+        // its reach, at sea say).
+        let main = map.region_near(pos(p), STRIKE_RANGE).is_none_or(|r| s.sheltered[r]);
+        // The enemy's other ground forces must not get there at all.
+        main && !s
+            .other_tiers
+            .iter()
+            .any(|&t| terrain.tier(t).is_some_and(|m| m.connected(s.enemy_base, pos(p), STRIKE_RANGE)))
     }
 
     /// Mark the held chokepoints and the fortification sites.
@@ -438,7 +615,7 @@ fn fortifications(map: &TierMap, a: &Analysis) -> Vec<(usize, Pos, f32)> {
             if a.choke_distance(map, c, false) >= a.dist_from_enemy[base] {
                 return None;
             }
-            let p = setback(map, c, a.home_side(map, c)?, FORTIFY_SETBACK);
+            let p = map.setback(c, a.home_side(map, c)?, FORTIFY_SETBACK);
             Some((a.choke_distance(map, c, false), (c, p, map.chokes[c].width)))
         })
         .collect();

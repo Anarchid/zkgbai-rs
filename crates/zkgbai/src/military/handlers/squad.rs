@@ -510,6 +510,10 @@ impl Ai {
                 }
             }
             'a' => {
+                // On its way through the teleporter.
+                if self.teleport_busy(sid) {
+                    return;
+                }
                 if self.war.get_effective_threat(pos) > 0.0
                     && (!self.graph.is_ally_territory(pos) || self.war.get_porc_threat(pos) > 0.0)
                 {
@@ -522,7 +526,12 @@ impl Ai {
                     return;
                 }
                 let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return };
-                let target = self.war_get_target(leader, true);
+                let (target, cost) = self.war_best_target(leader, leader.pos(), true);
+                // By teleporter, if a better target waits at its exit.
+                if self.teleport_shortcut(sid, pos, cost) {
+                    return;
+                }
+                let target = if target != NULLPOS { self.war_mark_target(target) } else { NULLPOS };
                 self.squad_set_target(sid, target);
             }
             _ => {}

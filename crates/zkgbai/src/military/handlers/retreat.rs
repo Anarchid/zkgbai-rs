@@ -198,8 +198,8 @@ impl Ai {
                 continue;
             }
 
-            let (pos, is_scythe, is_plane, is_flyer, cloaked) =
-                (c.get_pos(), c.is_scythe, c.is_plane, c.is_flyer, c.is_cloaked());
+            let (unit, pos, is_scythe, is_plane, is_flyer, cloaked) =
+                (c.unit, c.get_pos(), c.is_scythe, c.is_plane, c.is_flyer, c.is_cloaked());
 
             // Don't retreat scythes unless they're cloaked.
             if is_scythe && !cloaked && self.war.get_effective_threat(pos) <= 0.0 {
@@ -211,7 +211,13 @@ impl Ai {
                     let haven = if is_flyer {
                         self.graph_get_closest_air_haven(pos)
                     } else {
-                        self.graph_get_closest_haven(pos)
+                        // A haven an enemy group gets to first is none.
+                        let haven = self.graph_get_closest_haven(pos);
+                        if self.incursion_imminent(haven, (unit.power() + unit.health()) / 10.0) {
+                            self.incursion_refuge(unit).unwrap_or(haven)
+                        } else {
+                            haven
+                        }
                     };
                     self.retreat_coward_to(id, haven);
                 } else if !self.graph.is_enemy_territory(pos) {

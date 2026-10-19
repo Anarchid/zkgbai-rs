@@ -354,8 +354,9 @@ impl GraphManager {
         u.def().is_some_and(|d| d.id() == self.mex_def_id)
     }
 
-    /// Whether territory shadows spread along a link (see `ground_links`).
-    fn is_ground_link(&self, link: usize) -> bool {
+    /// Whether ground forces travel a link directly (and territory shadows
+    /// spread along it; see `ground_links`).
+    pub fn is_ground_link(&self, link: usize) -> bool {
         self.ground_links.get(link).copied().unwrap_or(true)
     }
 
@@ -938,8 +939,9 @@ impl GraphManager {
         let Some(&pylon_range) = self.pylon_defs.get(pylon_name) else { return NULLPOS };
         let mut radius = 0.9 * pylon_range as f32;
 
-        // First find the nearest unconnected mex
-        let best = self.closest_unconnected_spot(position).or_else(|| self.get_closest_spot_index(NULLPOS));
+        // First find the nearest unconnected mex (all connected: the nearest;
+        // port: the original took the one nearest the map's corner).
+        let best = self.closest_unconnected_spot(position).or_else(|| self.get_closest_spot_index(position));
         let Some(best) = best else { return NULLPOS };
 
         // then find the shortest unconnected link

@@ -27,15 +27,23 @@ impl<'a> Paths<'a> {
     /// Routes from `origin` that never enter a chokepoint for which `closed`
     /// is true (held by the other side, say).
     pub fn new(map: &'a TierMap, origin: Pos, closed: impl Fn(usize) -> bool) -> Self {
+        Self::search(map, origin, |c, _| !closed(c))
+    }
+
+    /// Routes from `origin` entering chokepoint `c` after `d` elmos only
+    /// where `admit(c, d)`, which must refuse every later entry once it
+    /// refuses one (a deadline per chokepoint, say).
+    pub(crate) fn search(map: &'a TierMap, origin: Pos, admit: impl Fn(usize, f32) -> bool) -> Self {
         let n = map.chokes.len();
         let mut to_choke = vec![f32::INFINITY; n];
         let mut from = vec![None; n];
         let region = map.region_near(origin, SNAP);
         let mut heap = BinaryHeap::new();
         for &c in region.map_or(&[][..], |r| &map.regions[r].chokes) {
-            if !closed(c) {
-                to_choke[c] = origin.distance(map.chokes[c].pos);
-                heap.push(HeapItem(to_choke[c], c));
+            let d = origin.distance(map.chokes[c].pos);
+            if admit(c, d) {
+                to_choke[c] = d;
+                heap.push(HeapItem(d, c));
             }
         }
         while let Some(HeapItem(d, c)) = heap.pop() {
@@ -46,7 +54,7 @@ impl<'a> Paths<'a> {
             for &r in &choke.regions {
                 for &next in &map.regions[r].chokes {
                     let nd = d + choke.pos.distance(map.chokes[next].pos);
-                    if nd < to_choke[next] && !closed(next) {
+                    if nd < to_choke[next] && admit(next, nd) {
                         to_choke[next] = nd;
                         from[next] = Some(c);
                         heap.push(HeapItem(nd, next));
@@ -76,15 +84,20 @@ impl<'a> Paths<'a> {
         self.map.regions[region].chokes.iter().map(|&c| self.to_choke[c]).fold(f32::INFINITY, f32::min)
     }
 
-    /// Which chokepoints the routes to `regions` pass (each region entered
-    /// through its nearest chokepoint).
+    /// The chokepoint the route to `region` enters it by; `None` for the
+    /// origin's region and unreachable ones.
+    pub(crate) fn entry(&self, region: usize) -> Option<usize> {
+        let chokes = self.map.regions[region].chokes.iter().copied();
+        chokes
+            .filter(|&c| self.to_choke[c].is_finite() && Some(region) != self.region)
+            .min_by(|&a, &b| self.to_choke[a].total_cmp(&self.to_choke[b]))
+    }
+
+    /// Which chokepoints the routes to `regions` pass.
     pub(crate) fn chokes_towards(&self, regions: impl IntoIterator<Item = usize>) -> Vec<bool> {
         let mut on = vec![false; self.to_choke.len()];
-        for r in regions.into_iter().filter(|&r| Some(r) != self.region) {
-            let chokes = self.map.regions[r].chokes.iter().copied();
-            let mut at = chokes
-                .filter(|&c| self.to_choke[c].is_finite())
-                .min_by(|&a, &b| self.to_choke[a].total_cmp(&self.to_choke[b]));
+        for r in regions {
+            let mut at = self.entry(r);
             while let Some(c) = at.filter(|&c| !on[c]) {
                 on[c] = true;
                 at = self.from[c];

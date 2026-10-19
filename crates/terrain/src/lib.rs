@@ -147,6 +147,46 @@ impl TierMap {
         }
     }
 
+    /// The point `dist` elmos from a chokepoint towards the middle of one of
+    /// its regions (at most halfway there): where to stand to hold it from
+    /// that side.
+    pub fn setback(&self, choke: usize, region: usize, dist: f32) -> Pos {
+        let (c, home) = (self.chokes[choke].pos, self.regions[region].center);
+        let d = c.distance(home);
+        let t = if d > 0.0 { (dist / d).min(0.5) } else { 0.0 };
+        Pos::new(c.x + (home.x - c.x) * t, c.z + (home.z - c.z) * t)
+    }
+
+    /// Whether ground connected to `from` (snapped to passable ground within
+    /// `snap` elmos) lies within `range` elmos of `to`: whether units of
+    /// this tier can get there, or close enough to strike or build.
+    pub fn reaches_within(&self, from: Pos, to: Pos, range: f32, snap: f32) -> bool {
+        let Some(home) = self.nearest_passable(from, snap).map(|c| self.component[c]) else { return false };
+        let start = self.cell_at(to);
+        if self.component[start] == home {
+            return true;
+        }
+        let (sx, sz) = ((start % self.width) as isize, (start / self.width) as isize);
+        let reach = range / CELL;
+        // Rings outwards, perimeter cells only.
+        for ring in 1..=reach.ceil() as isize {
+            for k in -ring..=ring {
+                for (dx, dz) in [(k, -ring), (k, ring), (-ring, k), (ring, k)] {
+                    let (x, z) = (sx + dx, sz + dz);
+                    if x < 0 || z < 0 || x >= self.width as isize || z >= self.height as isize {
+                        continue;
+                    }
+                    if ((dx * dx + dz * dz) as f32) <= reach * reach
+                        && self.component[z as usize * self.width + x as usize] == home
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Neighbouring regions of `region`, with the chokepoint leading there.
     pub fn neighbours(&self, region: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         self.regions[region]
@@ -215,5 +255,24 @@ impl Terrain {
 
     pub fn tiers(&self) -> &[TierMap] {
         &self.tiers
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testmaps::grid_map;
+    use crate::{CELL, Pos};
+
+    #[test]
+    fn reaching_across_a_gap_takes_range() {
+        // Two plateaus four cells apart.
+        let map = grid_map(&["aaaaaaaa####bbbbbbbb"; 4], &[]);
+        let at = |x: f32| Pos::new((x + 0.5) * CELL, 1.5 * CELL);
+        let (home, far_edge, deep) = (at(2.0), at(12.0), at(18.0));
+        assert!(map.reaches_within(home, at(6.0), 0.0, 16.0));
+        // The near edge of b is 5 cells from a's last column.
+        assert!(!map.reaches_within(home, far_edge, 3.0 * CELL, 16.0));
+        assert!(map.reaches_within(home, far_edge, 5.0 * CELL, 16.0));
+        assert!(!map.reaches_within(home, deep, 5.0 * CELL, 16.0));
     }
 }

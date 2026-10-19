@@ -776,11 +776,17 @@ impl Ai {
         let war = &self.war;
         let h = &self.raider_handler;
         let friendly_threat = war.get_friendly_threat(pos);
+        // Where the terrain lets the raider get in range at all.
+        let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
+        let engage = crate::terrain::engage_test(terrain, unit);
         for &tid in &h.solo_scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
                 continue;
             };
-            if war.get_riot_threat(s.target) > 0.0 || war.get_effective_threat(s.target) > friendly_threat {
+            if war.get_riot_threat(s.target) > 0.0
+                || war.get_effective_threat(s.target) > friendly_threat
+                || !engage(s.target)
+            {
                 continue;
             }
             let tmpcost = scout_cost(s, &self.graph.metal_spots, self.frame, id, pos);
@@ -791,7 +797,7 @@ impl Ai {
         }
 
         for d in &war.sniper_sightings {
-            if war.get_riot_threat(d.position) > 0.0 {
+            if war.get_riot_threat(d.position) > 0.0 || !engage(d.position) {
                 continue;
             }
             let tmpcost = distance(pos, d.position) / 4.0 - 100.0;
@@ -807,6 +813,7 @@ impl Ai {
                     || war.get_riot_threat(e.position) > 0.0
                     || war.get_effective_threat(e.position) > friendly_threat
                     || (!e.is_porc && war.get_porc_threat(e.position) > 0.0)
+                    || !engage(e.position)
                 {
                     continue;
                 }
@@ -820,6 +827,7 @@ impl Ai {
             }
         }
 
+        drop(engage);
         let order = if best_target != NULLPOS {
             SoloOrder::Target { pos: best_target, porc }
         } else if let Some(tid) = best_task {
@@ -866,6 +874,14 @@ impl Ai {
         let Some((unit, pos)) = self.fighters.get(&sparrow).map(|f| (f.unit, f.get_pos())) else {
             return;
         };
+        // With nukes to fire, find the anti-nukes that stopped them.
+        if self.misc_has_nuke()
+            && let Some(p) = self.nukes_scout_target(pos)
+        {
+            self.raider_clear_task(sparrow);
+            self.raider_raid(sparrow, p);
+            return;
+        }
         let mut cost = f32::MAX; // port: 65535 in the C++, see raider_assign_solo_raider
         let mut best_task = None;
         let mut reach = None;
@@ -1069,13 +1085,16 @@ impl Ai {
         let mut cost = f32::MAX; // port: 65535 in the C++, see raider_assign_solo_raider
 
         let mut reach = None;
+        // Where the terrain lets the squad get in range at all.
+        let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
+        let engage = crate::terrain::engage_test(terrain, leader_unit);
         let h = &self.raider_handler;
         for &tid in &h.scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
                 continue;
             };
             let tmpcost = scout_cost(s, &self.graph.metal_spots, self.frame, leader, leader_pos);
-            if tmpcost >= cost {
+            if tmpcost >= cost || !engage(s.target) {
                 continue;
             }
             if war.get_threat(s.target) * (1.0 + war.get_riot_threat(s.target)) > threat
@@ -1090,7 +1109,10 @@ impl Ai {
         }
 
         for d in &war.sniper_sightings {
-            if war.get_riot_threat(d.position) > 0.0 || war.get_threat(d.position) > war.available_mobile_threat {
+            if war.get_riot_threat(d.position) > 0.0
+                || war.get_threat(d.position) > war.available_mobile_threat
+                || !engage(d.position)
+            {
                 continue;
             }
             let tmpcost = distance(pos, d.position) / 4.0 - 1000.0;
@@ -1108,7 +1130,7 @@ impl Ai {
                 continue;
             }
             let ethreat = war.get_threat(e.position) * (1.0 + war.get_riot_threat(e.position));
-            if ethreat > threat || (!e.is_porc && war.get_porc_threat(e.position) > 0.0) {
+            if ethreat > threat || (!e.is_porc && war.get_porc_threat(e.position) > 0.0) || !engage(e.position) {
                 continue;
             }
             let tmpcost = raid_cost(war, &self.defs, e, pos, ethreat);
@@ -1119,6 +1141,7 @@ impl Ai {
             }
         }
 
+        drop(engage);
         let best_task = best_task.and_then(|tid| self.raider_handler.scout_tasks.get(&tid).map(|t| (tid, t.target)));
         if best_target != NULLPOS {
             if self.fighters.get(&leader).is_some_and(|f| f.task.is_some()) {

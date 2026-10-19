@@ -6,7 +6,65 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
 use crate::Ai;
 use crate::defs::cmd;
+use crate::terrain::pos as terrain_pos;
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
+use zk_terrain::Tier;
+
+/// Turrets at metal spots and links stand this many times further apart
+/// where enemy ground forces cannot get (about half as many).
+const SHELTERED_SPACING: f32 = 2.0;
+
+/// A factory's units reach a metal spot if they can get this close to it
+/// (about a constructor's build range).
+const FACTORY_REACH: f32 = 150.0;
+
+/// An opening factory is ruled out when its units reach less than this
+/// share of what the best one's do.
+const REACH_RIVAL: f32 = 0.8;
+
+/// The share of the metal we do not hold, out of our units' reach, for
+/// which another factory is asked for.
+const REACH_GAP: f32 = 0.25;
+
+/// A ground or sea factory is asked for (rather than a gunship factory)
+/// when its units get to this share of the metal out of reach.
+const AIR_FALLBACK: f32 = 0.7;
+
+/// A gunship factory is asked for when this share of the enemy's value is
+/// behind guarded chokepoints (or out of ground reach).
+const DROP_SHARE: f32 = 0.25;
+
+/// From this income on, a factory asked for is built (the usual second
+/// factory waits for 50 and a few caretakers); and how often the asking is
+/// re-assessed, in frames.
+const REQUISITION_INCOME: f32 = 20.0;
+const REQUISITION_PERIOD: i32 = 30 * 20;
+
+/// Ground and sea factories, by the tier of their units.
+const GROUND_FACTORIES: [&str; 9] = [
+    "factorycloak",
+    "factoryshield",
+    "factoryjump",
+    "factoryveh",
+    "factorytank",
+    "factoryhover",
+    "factoryamph",
+    "factoryspider",
+    "factoryship",
+];
+
+/// Movement tier of a factory's units; `None` for aircraft and striders.
+fn factory_tier(name: &str) -> Option<Tier> {
+    match name {
+        "factorycloak" | "factoryshield" | "factoryjump" => Some(Tier::Bot),
+        "factoryveh" | "factorytank" => Some(Tier::Vehicle),
+        "factoryhover" => Some(Tier::Hover),
+        "factoryamph" => Some(Tier::Amphib),
+        "factoryspider" => Some(Tier::Spider),
+        "factoryship" => Some(Tier::Ship),
+        _ => None,
+    }
+}
 
 /// Turrets within this distance of a chokepoint's defense position count as
 /// its defenses.
@@ -14,7 +72,7 @@ const CHOKE_PORC_RADIUS: f32 = 300.0;
 
 impl Ai {
     /// The common `FindClosestBuildSite(def, pos, 600, 3, facing)`.
-    fn eco_build_site(&self, def: UnitDef, pos: Vec3, facing: i32) -> Vec3 {
+    pub(super) fn eco_build_site(&self, def: UnitDef, pos: Vec3, facing: i32) -> Vec3 {
         self.cb.map().find_closest_build_site(def, pos, 600.0, 3, facing)
     }
 
@@ -38,7 +96,13 @@ impl Ai {
 
     /// Construction task for `def` at `pos` with facing 0, deduplicated
     /// against `dedup`.
-    fn eco_add_simple(&mut self, def: UnitDef, pos: Vec3, dedup: List, extra: Option<List>) -> Option<TaskId> {
+    pub(super) fn eco_add_simple(
+        &mut self,
+        def: UnitDef,
+        pos: Vec3,
+        dedup: List,
+        extra: Option<List>,
+    ) -> Option<TaskId> {
         self.eco_add_construction(WorkerTask::construction(def, pos, 0), Some(dedup), extra)
     }
 
@@ -70,6 +134,12 @@ impl Ai {
             let nnanos = eco.nanos.len();
             if (has_plop && !assigned_plop)
                 || (frame > 900 && !has_plop && nfac < 1 + merged && no_fac_tasks)
+                // a factory a module asked for
+                || (eco.requisition.is_some()
+                    && eco.static_income > REQUISITION_INCOME
+                    && nfac >= 1
+                    && nfac < 3 + merged
+                    && no_fac_tasks)
                 || (eco.static_income > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
                 || (eco.static_income > 90.0 && nfac == 2 && nnanos > 6 && eminent && no_fac_tasks)
                 || (merged > 0 && eco.static_income > 65.0 && !eco.has_striders && eminent && no_fac_tasks)
@@ -184,6 +254,19 @@ impl Ai {
             self.eco_choose_super_weapon();
         }
 
+        // A nuke, when one strike would pay for it.
+        if !self.eco.has_super_wep && self.eco.super_wep_tasks.is_empty() && self.eco.s_wep != 1 && self.nukes_wanted()
+        {
+            if let Some((p, v)) = self.nukes_target() {
+                self.log(&format!(
+                    "nukes: {v:.0} metal in one blast at ({:.0}, {:.0}) unguarded; building a silo",
+                    p.x, p.z
+                ));
+            }
+            self.eco.s_wep = 1;
+            self.eco.chose_sup_wep = true;
+        }
+
         if self.eco.chose_sup_wep {
             if (self.eco.s_wep == 0 || self.eco.has_super_wep) && self.eco.super_wep_tasks.is_empty() {
                 self.eco_create_bertha_task();
@@ -192,8 +275,15 @@ impl Ai {
             }
         }
 
-        // do we need a protector?
-        if !self.eco.anti_nuke && (self.war.enemy_has_nuke || self.eco.got_nuked) {
+        // do we need a protector? (also when the enemy could be hiding one)
+        let suspicious = self.intel_wants_anti();
+        if !self.eco.anti_nuke && (self.war.enemy_has_nuke || self.eco.got_nuked || suspicious) {
+            if suspicious && !self.war.enemy_has_nuke && !self.eco.got_nuked {
+                self.log(&format!(
+                    "intel: {:.0} metal of the enemy's suspiciously unaccounted for; building an anti-nuke",
+                    self.intel.suspicious()
+                ));
+            }
             self.eco.anti_nuke = true;
             if let Some(protector) = self.defs.get("staticantinuke") {
                 let pos = self.eco_build_site(protector, self.graph.get_ally_center(), 0);
@@ -205,6 +295,11 @@ impl Ai {
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
         let nfac = self.fac.factories.len();
         let merged = self.merged_allies;
+        // The first factory waits a moment for the terrain model, to know
+        // whose units can get to the metal.
+        if nfac == 0 && self.terrain_pending() && self.frame < 150 {
+            return;
+        }
 
         if self.eco.potential_fac_list.is_empty() && (nfac as i32) < 1 + merged {
             self.eco.potential_fac_list = self.eco.initial_fac_list.clone();
@@ -252,6 +347,13 @@ impl Ai {
             self.eco.potential_fac_list.remove(def_name);
         }
 
+        // Which factories' units can get to the metal; a factory asked for.
+        let from = self.eco.workers.get(&wid).map(|w| w.get_pos());
+        if let Some(from) = from.filter(|_| nfac == 0) {
+            self.eco_weigh_factories_by_reach(from);
+        }
+        let reach_fac = if nfac > 0 { self.eco.requisition.take().map(|(f, _)| f) } else { None };
+
         if self.eco.potential_fac_list.is_empty() {
             self.eco.added_facs = false;
             return;
@@ -270,6 +372,20 @@ impl Ai {
             factory = self.defs.get(&self.eco.user_fac);
             let user_fac = self.eco.user_fac.clone();
             self.eco.potential_fac_list.remove(&user_fac);
+        } else if let Some(k) = self.eco.dev_pick.filter(|_| nfac == 0) {
+            // The k-th of the factories viable here (in name order).
+            let list = &self.eco.potential_fac_list;
+            fac_name = list.iter().nth(k % list.len()).cloned().unwrap_or_default();
+            factory = self.defs.get(&fac_name);
+            self.eco.potential_fac_list.remove(&fac_name);
+        } else if let Some(dev_fac) = nfac.checked_sub(1).and_then(|i| self.eco.dev_facs.get(i)).cloned() {
+            factory = self.defs.get(&dev_fac);
+            self.eco.potential_fac_list.remove(&dev_fac);
+            fac_name = dev_fac;
+        } else if let Some(reach_fac) = reach_fac {
+            factory = self.defs.get(&reach_fac);
+            self.eco.potential_fac_list.remove(&reach_fac);
+            fac_name = reach_fac;
         } else if self.eco.potential_fac_list.contains("factoryship") && kgb_rand() < 0.5 {
             fac_name = "factoryship".to_owned();
             factory = self.defs.get(&fac_name);
@@ -483,6 +599,19 @@ impl Ai {
                 self.eco.s_wep = 3;
             }
         }
+        // Only what our energy can power (the grid planner links it up): a
+        // nuke needs none, a Bertha little.
+        let name = ["staticheavyarty", "staticnuke", "zenith", "raveparty"][self.eco.s_wep.clamp(0, 3) as usize];
+        let needs = self.defs.get(name).map_or(0.0, |d| self.eco.grid_defs.needs(d.id()));
+        let energy = self.eco_energy_production();
+        if needs > energy {
+            let fallback = if self.war.enemy_has_anti_nuke { 0 } else { 1 };
+            self.log(&format!(
+                "economy: {name} needs {needs:.0} energy and we make {energy:.0}; building {} instead",
+                ["staticheavyarty", "staticnuke"][fallback as usize]
+            ));
+            self.eco.s_wep = fallback;
+        }
         self.eco.chose_sup_wep = true;
     }
 
@@ -587,6 +716,127 @@ impl Ai {
         self.eco_add_construction(ct, Some(List::SuperWep), Some(List::SuperWep));
     }
 
+    /// Rule out first factories whose units get to much less of the metal
+    /// (from `from`, by the terrain model's tiers; aircraft get everywhere)
+    /// than the best one's do.
+    fn eco_weigh_factories_by_reach(&mut self, from: Vec3) {
+        let Some(terrain) = self.reach_terrain() else { return };
+        let reaches = |tier: Tier, p: Vec3| {
+            terrain.tier(tier).is_none_or(|m| m.connected(terrain_pos(from), terrain_pos(p), FACTORY_REACH))
+        };
+        let spots = &self.graph.metal_spots;
+        let share = |tier: Tier| {
+            let (total, reached) = spots
+                .iter()
+                .fold((0.0, 0.0), |(t, r), s| (t + s.value, if reaches(tier, s.position) { r + s.value } else { r }));
+            if total > 0.0 { reached / total } else { 1.0 }
+        };
+        let candidates: Vec<(String, f32)> =
+            self.eco.potential_fac_list.iter().filter_map(|f| Some((f.clone(), share(factory_tier(f)?)))).collect();
+        let best = candidates.iter().map(|c| c.1).fold(0.0, f32::max);
+        let out: Vec<String> = candidates.iter().filter(|c| c.1 < REACH_RIVAL * best).map(|c| c.0.clone()).collect();
+        if !out.is_empty() {
+            let shares: Vec<String> = candidates.iter().map(|(f, s)| format!("{f} {:.0}%", s * 100.0)).collect();
+            self.log(&format!("economy: metal within reach: {}; ruling out {}", shares.join(", "), out.join(", ")));
+            for f in out {
+                self.eco.potential_fac_list.remove(&f);
+            }
+        }
+    }
+
+    /// The factory whose units get to most of the metal we do not hold and
+    /// our factories' units cannot, when that is a good share of it: the
+    /// factory, the share out of reach and the share it gets to. A gunship
+    /// factory (its constructors fly anywhere) only when no ground or sea
+    /// factory gets to most of it.
+    fn eco_reach_gap(&self) -> Option<(&'static str, f32, f32)> {
+        let terrain = self.reach_terrain()?;
+        let from = self.graph.get_ally_center();
+        if from == NULLPOS {
+            return None;
+        }
+        let reaches = |tier: Tier, p: Vec3| {
+            terrain.tier(tier).is_none_or(|m| m.connected(terrain_pos(from), terrain_pos(p), FACTORY_REACH))
+        };
+        let factories: Vec<&str> = self.fac.factories.values().map(|f| self.defs.name_of(f.unit)).collect();
+        let ours: Vec<Tier> = factories.iter().filter_map(|f| factory_tier(f)).collect();
+        // Aircraft get everywhere already.
+        if ours.is_empty() || factories.iter().any(|f| factory_tier(f).is_none() && f.contains("factory")) {
+            return None;
+        }
+        let spots = &self.graph.metal_spots;
+        let total: f32 = spots.iter().filter(|s| !s.owned).map(|s| s.value).sum();
+        let gap: Vec<&crate::graph::MetalSpot> =
+            spots.iter().filter(|s| !s.owned && !ours.iter().any(|&t| reaches(t, s.position))).collect();
+        let gap_value: f32 = gap.iter().map(|s| s.value).sum();
+        if total <= 0.0 || gap_value < REACH_GAP * total {
+            return None;
+        }
+        let fill = |f: &str| {
+            factory_tier(f).map_or(0.0, |t| gap.iter().filter(|s| reaches(t, s.position)).map(|s| s.value).sum::<f32>())
+        };
+        let best = GROUND_FACTORIES
+            .iter()
+            .filter(|f| !factories.contains(f) && self.defs.get(f).is_some())
+            .map(|&f| (f, fill(f)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .filter(|&(_, v)| v >= AIR_FALLBACK * gap_value)
+            .unwrap_or(("factorygunship", gap_value));
+        Some((best.0, gap_value / total, best.1 / total))
+    }
+
+    /// The factory the modules would have built next, and why: one whose
+    /// units get to metal ours cannot, or a gunship factory for air drops
+    /// past the chokepoints guarding much of the enemy's value.
+    fn eco_find_requisition(&self) -> Option<(String, String)> {
+        if let Some((f, gap, fills)) = self.eco_reach_gap() {
+            return Some((
+                f.to_owned(),
+                format!(
+                    "{:.0}% of the metal we do not hold is out of our units' reach; it gets to {:.0}%",
+                    100.0 * gap,
+                    100.0 * fills
+                ),
+            ));
+        }
+        let owned = |name: &str| self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
+        let s = self.strategy.as_ref()?;
+        if !self.dev_off("drops") && !owned("factorygunship") && self.raider_handler.small_raiders.len() >= 4 {
+            let total: f32 = s.analysis.values.iter().map(|v| v.enemy).sum();
+            let guarded: f32 = s
+                .analysis
+                .drops
+                .iter()
+                .filter(|d| d.guards > 0 || d.ground_distance.is_none())
+                .map(|d| d.enemy_value)
+                .sum();
+            if total > 0.0 && guarded >= DROP_SHARE * total {
+                return Some((
+                    "factorygunship".to_owned(),
+                    format!(
+                        "{:.0}% of the enemy's value is behind guarded chokepoints: air drops",
+                        100.0 * guarded / total
+                    ),
+                ));
+            }
+        }
+        None
+    }
+
+    /// Re-assess what factory the modules would have, now and then.
+    pub(super) fn eco_update_requisition(&mut self, frame: i32) {
+        if (frame + self.offset) % REQUISITION_PERIOD != 0 || self.fac.factories.is_empty() {
+            return;
+        }
+        let r = self.eco_find_requisition();
+        if r.as_ref().map(|r| &r.0) != self.eco.requisition.as_ref().map(|r| &r.0)
+            && let Some((f, why)) = &r
+        {
+            self.log(&format!("economy: requisitioning a {f}: {why}"));
+        }
+        self.eco.requisition = r;
+    }
+
     /// Try up to ~100 random spots around `position` for one `def`.
     fn eco_ring_porc(&mut self, def: Option<UnitDef>, position: Vec3, radius: f32, dedup: List, extra: Option<List>) {
         let Some(def) = def else {
@@ -636,12 +886,14 @@ impl Ai {
 
     pub(super) fn eco_defend_mex(&mut self, position: Vec3) {
         let turret = self.eco_light_turret();
+        // Where enemy ground forces cannot get, about half as many.
+        let spacing = if self.strategy_sheltered(position) { SHELTERED_SPACING } else { 1.0 };
 
-        if self.eco.porcs.iter().any(|u| distance(position, u.pos()) < 350.0) {
+        if self.eco.porcs.iter().any(|u| distance(position, u.pos()) < 350.0 * spacing) {
             return;
         }
 
-        if self.eco.porc_tasks.iter().any(|&c| distance(position, self.eco.task_pos(c)) < 350.0) {
+        if self.eco.porc_tasks.iter().any(|&c| distance(position, self.eco.task_pos(c)) < 350.0 * spacing) {
             return;
         }
 
@@ -753,6 +1005,8 @@ impl Ai {
         }
     }
 
+    /// Turrets at our metal spots (sparser where enemy ground forces cannot
+    /// get; that metal goes into the economy instead).
     pub(super) fn eco_defend_mexes(&mut self) {
         let spots: Vec<Vec3> = self.graph.get_owned_spots().iter().map(|ms| ms.get_pos()).collect();
         for p in spots {
@@ -761,19 +1015,20 @@ impl Ai {
     }
 
     pub(super) fn eco_defend_links(&mut self) {
+        // Only links ground forces travel (not across water or cliffs).
+        let graph = &self.graph;
+        let all = self.dev_off("porc");
+        let links = graph
+            .get_links()
+            .iter()
+            .enumerate()
+            .filter(|&(i, l)| (all || graph.is_ground_link(i)) && graph.is_link_owned(l));
         let positions: Vec<Vec3> = if self.merged_allies == 0 {
-            self.graph
-                .get_links()
-                .iter()
-                .filter(|l| l.length <= 550.0 && self.graph.is_link_owned(l))
-                .map(|l| l.get_pos())
-                .collect()
+            links.filter(|(_, l)| l.length <= 550.0).map(|(_, l)| l.get_pos()).collect()
         } else {
-            self.graph
-                .get_links()
-                .iter()
-                .filter(|l| l.length < 800.0 && self.graph.is_link_owned(l) && self.graph.is_front_line(l.get_pos()))
-                .map(|l| l.get_pos())
+            links
+                .filter(|(_, l)| l.length < 800.0 && graph.is_front_line(l.get_pos()))
+                .map(|(_, l)| l.get_pos())
                 .collect()
         };
         for p in positions {
@@ -786,8 +1041,10 @@ impl Ai {
             return;
         };
 
-        // don't spam redundant porc
-        let porcdist = 300.0;
+        // don't spam redundant porc (where enemy ground forces cannot get,
+        // even less)
+        let spacing = if self.strategy_sheltered(position) { SHELTERED_SPACING } else { 1.0 };
+        let porcdist = 300.0 * spacing;
         if self.eco.porcs.iter().any(|u| distance(position, u.pos()) < porcdist) {
             return;
         }

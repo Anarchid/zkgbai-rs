@@ -198,6 +198,20 @@ impl Analysis {
         self.choke_distance(map, choke, true) < self.choke_distance(map, choke, false)
     }
 
+    /// The regions the enemy can reach from `enemy` only through our base's
+    /// region or past chokepoints `held` against it, or not at all: where
+    /// ground defenses are wasted.
+    pub fn sheltered(&self, map: &TierMap, enemy: Pos, held: impl Fn(usize) -> bool) -> Vec<bool> {
+        let n = map.regions.len();
+        let (Some(base), Some(theirs)) = (self.ally_base, self.enemy_base) else { return vec![false; n] };
+        if base == theirs {
+            return vec![false; n];
+        }
+        let through_base = &map.regions[base].chokes;
+        let paths = Paths::new(map, enemy, |c| held(c) || through_base.contains(&c));
+        (0..n).map(|r| r != base && paths.to_region(r).is_infinite()).collect()
+    }
+
     /// The region next to a chokepoint on our side of it.
     pub fn home_side(&self, map: &TierMap, choke: usize) -> Option<usize> {
         map.chokes[choke]
@@ -595,6 +609,18 @@ mod tests {
         let (d_pos, e_pos) = (at(10.0, 6.0), at(15.0, 6.0));
         let d = ground_distance(&map, d_pos, e_pos).unwrap();
         assert!(d > 4.0 * d_pos.distance(e_pos), "{d}");
+    }
+
+    #[test]
+    fn regions_behind_our_base_or_held_chokepoints_are_sheltered() {
+        let map = rooms();
+        let s = Scenario { map: &map, ally_base: at(2.0, 1.0), enemy_base: at(22.0, 1.0), assets: &[] };
+        let a = Analysis::run(&s);
+        let (bc, enemy) = (1, at(22.0, 1.0));
+        // Strip d is only reachable through our base, room a.
+        assert_eq!(a.sheltered(&map, enemy, |_| false), vec![false, false, false, true, false]);
+        // Holding bc shelters room b too; strip e stays the enemy's.
+        assert_eq!(a.sheltered(&map, enemy, |c| c == bc), vec![false, true, false, true, false]);
     }
 
     #[test]

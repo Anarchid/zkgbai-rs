@@ -1,11 +1,15 @@
 //! Military: enemy tracking, threat/value maps, targeting, and the unit
 //! handlers (raiders, squads, retreat, misc, bombers).
 
+pub mod drops;
 pub mod enemy;
 pub mod handlers;
 pub mod incursions;
+pub mod intel;
+pub mod nukes;
 pub mod radar;
 pub mod tasks;
+pub mod teleport;
 pub mod unit_classes;
 pub mod wrappers;
 
@@ -215,6 +219,13 @@ impl MilitaryManager {
         self.ally_porc_graphics.get_value(x, y)
     }
 
+    /// Strength of our units and defenses covering `position`, on the scale
+    /// of [`Enemy::get_danger`].
+    pub fn get_total_friendly_power(&self, position: Vec3) -> f32 {
+        let (x, y) = cell(position);
+        self.ally_threat_graphics.get_value(x, y) + self.ally_porc_graphics.get_value(x, y)
+    }
+
     pub fn get_total_friendly_threat(&self, position: Vec3) -> f32 {
         let (x, y) = cell(position);
         (self.ally_threat_graphics.get_value(x, y) + self.ally_porc_graphics.get_value(x, y)) / 500.0
@@ -378,6 +389,10 @@ impl Ai {
         self.guard("squad.update", |ai| ai.squad_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
         self.guard("bomber.update", |ai| ai.bomber_update(frame));
+        self.guard("teleport.update", |ai| ai.teleport_update(frame));
+        self.guard("drops.update", |ai| ai.drops_update(frame));
+        self.guard("intel.update", |ai| ai.intel_update(frame));
+        self.guard("nukes.update", |ai| ai.nukes_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -466,6 +481,15 @@ impl Ai {
 
         if name == "staticheavyarty" {
             self.misc_add_bertha(unit);
+        }
+
+        if name == "amphtele" {
+            self.teleport_add_djinn(unit);
+            return;
+        }
+        if name == "gunshiptrans" {
+            self.drops_add_charon(unit);
+            return;
         }
 
         let mobile_combat = ud.speed() > 0.0 && ud.build_options().is_empty();
@@ -860,6 +884,9 @@ impl Ai {
     pub fn war_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {
         let _ = attacker;
         let id = enemy.id();
+        // Commanders come free, so they do not count as metal destroyed.
+        let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
+        self.intel_enemy_destroyed(id, cost);
         let war = &mut self.war;
         let Some(e) = war.targets.get_mut(&id) else { return };
         e.is_dead = true;
@@ -1288,15 +1315,21 @@ impl Ai {
     }
 
     /// Record `target` as attacked now (spreads attacks around) and return it.
-    fn war_mark_target(&mut self, target: Vec3) -> Vec3 {
+    pub fn war_mark_target(&mut self, target: Vec3) -> Vec3 {
         let frame = self.war.frame;
         self.war.target_markers.push(TargetMarker::new(target, frame));
         target
     }
 
     /// Fallback target: the most promising enemy-shadowed metal spot cheaper
-    /// than `cost`, or `NULLPOS`.
-    fn war_shadowed_spot_target(&self, origin: Vec3, mut cost: f32, water_targets_only: bool) -> Vec3 {
+    /// than `cost` that `engage` accepts, or `NULLPOS`; and its cost.
+    fn war_shadowed_spot_target(
+        &self,
+        origin: Vec3,
+        mut cost: f32,
+        water_targets_only: bool,
+        engage: &dyn Fn(Vec3) -> bool,
+    ) -> (Vec3, f32) {
         let frame = self.war.frame;
         let mut target = NULLPOS;
         for ms in self.graph.get_unowned_spots() {
@@ -1304,7 +1337,7 @@ impl Ai {
                 continue;
             }
             let p = ms.get_pos();
-            if water_targets_only && !self.war.is_water(p) {
+            if (water_targets_only && !self.war.is_water(p)) || !engage(p) {
                 continue;
             }
             let mut tmpcost = distance(p, origin);
@@ -1317,26 +1350,41 @@ impl Ai {
                 cost = tmpcost;
             }
         }
-        target
+        (target, cost)
     }
 
     /// Attack target for a mobile unit (or squad leader).
     pub fn war_get_target(&mut self, u: Unit, defend: bool) -> Vec3 {
-        let origin = u.pos();
+        let (target, _) = self.war_best_target(u, u.pos(), defend);
+        if target != NULLPOS {
+            return self.war_mark_target(target);
+        }
+        NULLPOS
+    }
+
+    /// The best attack target for `u` if it were at `origin`, and its cost
+    /// (lower is better; `NULLPOS` if none).
+    pub fn war_best_target(&mut self, u: Unit, origin: Vec3, defend: bool) -> (Vec3, f32) {
         let mut target = NULLPOS;
-        let fthreat = self.war.get_friendly_threat(origin);
+        // The strength around the unit goes with it.
+        let fthreat = self.war.get_friendly_threat(u.pos());
         let mut cost = NO_COST;
         let name = self.defs.name_of(u);
         // torpedoes can only hit stuff in water.
         let water_targets_only = name == "subraider" || name == "shiptorpraider";
         let war = &self.war;
-        // Reachability for all candidates at once (one flood fill, filled lazily).
+        // Reachability for all candidates at once (one flood fill from the
+        // unit, filled lazily; elsewhere the terrain test must do).
         let mut reach = None;
+        let at_unit = distance(origin, u.pos()) < 1.0;
+        // Where the terrain lets the unit get in range at all.
+        let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
+        let engage = crate::terrain::engage_test_from(terrain, u.def(), origin);
 
         // first check defense targets
         if defend {
             for d in war.all_defense_targets() {
-                if water_targets_only && !war.is_water(d.position) {
+                if (water_targets_only && !war.is_water(d.position)) || !engage(d.position) {
                     continue;
                 }
                 if war.get_tactical_threat(d.position) > war.available_mobile_threat {
@@ -1353,11 +1401,12 @@ impl Ai {
         // then look for enemy mexes to kill, and see which is cheaper
         for ms in self.graph.get_enemy_spots() {
             let p = ms.get_pos();
-            if water_targets_only && !war.is_water(p) {
+            if (water_targets_only && !war.is_water(p)) || !engage(p) {
                 continue;
             }
             if war.get_threat(p) > fthreat
-                || !reach.get_or_insert_with(|| self.pathfinder.assault_reachability(war, u, fthreat)).reaches(p)
+                || (at_unit
+                    && !reach.get_or_insert_with(|| self.pathfinder.assault_reachability(war, u, fthreat)).reaches(p))
             {
                 continue;
             }
@@ -1372,7 +1421,7 @@ impl Ai {
         // then look for enemy units to kill, and see if any are better targets
         // then check for nearby enemies that aren't raiders.
         for e in war.targets.values() {
-            if water_targets_only && !war.is_water(e.position) {
+            if (water_targets_only && !war.is_water(e.position)) || !engage(e.position) {
                 continue;
             }
             let ally_territory = self.graph.is_ally_territory(e.position);
@@ -1390,9 +1439,10 @@ impl Ai {
                     tmpcost /= 2.0;
                     tmpcost -= e.get_danger() * (1.0 + war.get_threat(e.position));
                 } else if e.is_important
-                    && reach
-                        .get_or_insert_with(|| self.pathfinder.assault_reachability(war, u, fthreat))
-                        .reaches(e.position)
+                    && (!at_unit
+                        || reach
+                            .get_or_insert_with(|| self.pathfinder.assault_reachability(war, u, fthreat))
+                            .reaches(e.position))
                 {
                     tmpcost /= 4.0;
                     tmpcost -= 750.0;
@@ -1407,16 +1457,11 @@ impl Ai {
             }
         }
 
-        if target != NULLPOS {
-            return self.war_mark_target(target);
-        }
-
         // if no targets are available attack enemyshadowed metal spots until we find one
-        let target = self.war_shadowed_spot_target(origin, cost, water_targets_only);
         if target != NULLPOS {
-            return self.war_mark_target(target);
+            return (target, cost);
         }
-        NULLPOS
+        self.war_shadowed_spot_target(origin, cost, water_targets_only, &engage)
     }
 
     pub fn war_get_arty_target(&mut self, origin: Vec3, defend: bool) -> Vec3 {
@@ -1477,7 +1522,7 @@ impl Ai {
         }
 
         // if no targets are available attack enemyshadowed metal spots until we find one
-        let target = self.war_shadowed_spot_target(origin, cost, false);
+        let (target, _) = self.war_shadowed_spot_target(origin, cost, false, &|_| true);
         if target != NULLPOS {
             return self.war_mark_target(target);
         }
@@ -1554,7 +1599,7 @@ impl Ai {
         }
 
         // if no targets are available attack enemyshadowed metal spots until we find one
-        let target = self.war_shadowed_spot_target(origin, cost, false);
+        let (target, _) = self.war_shadowed_spot_target(origin, cost, false, &|_| true);
         if target != NULLPOS {
             return self.war_mark_target(target);
         }
@@ -1600,7 +1645,7 @@ impl Ai {
         }
 
         // if no targets are available attack enemyshadowed metal spots until we find one
-        let target = self.war_shadowed_spot_target(origin, cost, false);
+        let (target, _) = self.war_shadowed_spot_target(origin, cost, false, &|_| true);
         if target != NULLPOS {
             return self.war_mark_target(target);
         }
@@ -1759,6 +1804,10 @@ impl Ai {
                 if name.contains("hub") {
                     tmpcost *= 2.0;
                 }
+            }
+            // An anti-nuke is worth what it keeps from our nukes.
+            if name == "staticantinuke" {
+                tmpcost += self.nukes_shielded_value(e.position);
             }
             if tmpcost > cost {
                 cost = tmpcost;

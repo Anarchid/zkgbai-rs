@@ -162,6 +162,114 @@ pub fn intercept(
     Interception { blocks, protected: before - exposed, exposed }
 }
 
+/// Where one force can get to, its routes closed where held against it.
+#[derive(Clone, Debug)]
+struct Reach {
+    force: Force,
+    region: Option<usize>,
+    /// Seconds to each chokepoint.
+    to_choke: Vec<f32>,
+}
+
+impl Reach {
+    /// Seconds to `p` in region `r`, `INFINITY` if unreachable.
+    fn to(&self, map: &TierMap, r: usize, p: Pos) -> f32 {
+        if Some(r) == self.region {
+            return self.force.seconds(self.force.pos.distance(p));
+        }
+        let via = |c: usize| self.to_choke[c] + self.force.seconds(map.chokes[c].pos.distance(p));
+        map.regions[r].chokes.iter().map(|&c| via(c)).fold(f32::INFINITY, f32::min)
+    }
+}
+
+/// The enemy forces about, combined: how soon the first of them can get to
+/// each region and chokepoint, and how strong it is.
+#[derive(Clone, Debug, Default)]
+pub struct Danger {
+    reaches: Vec<Reach>,
+    /// Seconds until the first force reaches each region's edge (zero
+    /// where one is already); `INFINITY` where none can.
+    pub regions: Vec<f32>,
+    /// Power of the first force to reach each region.
+    pub first: Vec<f32>,
+    /// Seconds until the first force reaches each chokepoint.
+    pub chokes: Vec<f32>,
+}
+
+impl Danger {
+    pub fn new(map: &TierMap) -> Self {
+        Danger {
+            reaches: Vec::new(),
+            regions: vec![f32::INFINITY; map.regions.len()],
+            first: vec![0.0; map.regions.len()],
+            chokes: vec![f32::INFINITY; map.chokes.len()],
+        }
+    }
+
+    /// Add a force that never passes chokepoints `held` against it.
+    pub fn add(&mut self, map: &TierMap, force: Force, held: impl Fn(usize) -> bool) {
+        let paths = Paths::new(map, force.pos, held);
+        let to_choke: Vec<f32> = (0..map.chokes.len()).map(|c| force.seconds(paths.to_choke(c))).collect();
+        for (soonest, &t) in self.chokes.iter_mut().zip(&to_choke) {
+            *soonest = soonest.min(t);
+        }
+        for r in 0..map.regions.len() {
+            let t = force.seconds(paths.to_region(r));
+            if t < self.regions[r] {
+                self.regions[r] = t;
+                self.first[r] = force.power;
+            }
+        }
+        self.reaches.push(Reach { force, region: paths.origin_region(), to_choke });
+    }
+
+    /// How soon the first force can get to `p`, and how strong it is;
+    /// `None` if none can.
+    pub fn at(&self, map: &TierMap, p: Pos) -> Option<(f32, f32)> {
+        let region = map.region_near(p, SNAP)?;
+        self.reaches
+            .iter()
+            .map(|r| (r.to(map, region, p), r.force.power))
+            .filter(|(t, _)| t.is_finite())
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+}
+
+/// Where to flee to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Refuge {
+    pub region: usize,
+    /// Just inside the chokepoint the flight enters the region by.
+    pub pos: Pos,
+    /// Seconds to get there.
+    pub eta: f32,
+    /// Seconds until the first enemy gets there (`INFINITY`: none can).
+    pub enemy: f32,
+}
+
+/// How far inside a refuge's entrance a fleeing unit stops, elmos.
+pub const REFUGE_SETBACK: f32 = 300.0;
+
+/// Where `unit` should flee from `danger`: the region it can get to without
+/// passing a chokepoint less than `margin` seconds ahead of every enemy,
+/// with the most time to spare once there (an enemy arrival `cap` seconds
+/// or more away counts as never, so then the nearest such region); `None`
+/// if staying put is as good.
+pub fn refuge(map: &TierMap, unit: &Force, danger: &Danger, margin: f32, cap: f32) -> Option<Refuge> {
+    let paths = Paths::search(map, unit.pos, |c, d| unit.seconds(d) + margin <= danger.chokes[c]);
+    let here = paths.origin_region()?;
+    let spare = |r: usize, eta: f32| danger.regions[r].min(cap) - eta;
+    let (region, eta) = (0..map.regions.len())
+        .map(|r| (r, unit.seconds(paths.to_region(r))))
+        .filter(|&(_, eta)| eta.is_finite())
+        .max_by(|&(a, ta), &(b, tb)| spare(a, ta).total_cmp(&spare(b, tb)))?;
+    if region == here || spare(region, eta) <= spare(here, 0.0) {
+        return None;
+    }
+    let entry = paths.entry(region)?;
+    Some(Refuge { region, pos: map.setback(entry, region, REFUGE_SETBACK), eta, enemy: danger.regions[region] })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +367,55 @@ mod tests {
         assert_eq!(i.blocks.iter().map(|b| (b.choke, b.behind)).collect::<Vec<_>>(), vec![(door, 0)]);
         // Less at stake, but a is still reachable the long way.
         assert!(i.protected > 3.0 && i.exposed > 3.0, "{i:?}");
+    }
+
+    #[test]
+    fn danger_is_the_first_enemy_anywhere() {
+        let map = rooms();
+        let (raid, _) = raid();
+        let mut danger = Danger::new(&map);
+        danger.add(&map, raid, |_| false);
+        let slow = Force { pos: at(2.0, 1.0), speed: 10.0, power: 99.0 };
+        danger.add(&map, slow, |_| false);
+        // b is the raid's (3.5 s to its edge, a little more inside); a is
+        // the slow force's own room.
+        let (t, power) = danger.at(&map, at(12.0, 1.0)).unwrap();
+        assert!((6.0..7.0).contains(&t) && power == 10.0, "{t} {power}");
+        assert_eq!((danger.regions[0], danger.first[0]), (0.0, 99.0));
+        assert!((danger.regions[1] - 3.5).abs() < 0.2, "{:?}", danger.regions);
+    }
+
+    #[test]
+    fn workers_flee_behind_held_chokepoints() {
+        let map = rooms();
+        let (raid, _) = raid();
+        let worker = Force { pos: at(12.0, 1.0), speed: 50.0, power: 0.0 };
+
+        // Nothing held: a is barely safer than b, d out of reach in time.
+        let mut danger = Danger::new(&map);
+        danger.add(&map, raid, |_| false);
+        let r = refuge(&map, &worker, &danger, 2.0, 30.0).unwrap();
+        assert_eq!(r.region, 0);
+        assert!(r.enemy - r.eta < 5.0, "{r:?}");
+
+        // With ab held (or screened) against the raid, behind it is safe
+        // for good: the worker goes there, just inside the door.
+        let mut danger = Danger::new(&map);
+        danger.add(&map, raid, |c| c == AB);
+        let r = refuge(&map, &worker, &danger, 2.0, 30.0).unwrap();
+        assert_eq!(r.region, 0);
+        assert!(r.enemy.is_infinite());
+        assert!(r.pos.distance(map.chokes[AB].pos) < REFUGE_SETBACK + 1.0, "{r:?}");
+
+        // Held at bc, b itself is safe: stay.
+        let mut danger = Danger::new(&map);
+        danger.add(&map, raid, |c| c == BC);
+        assert_eq!(refuge(&map, &worker, &danger, 2.0, 30.0), None);
+
+        // Far away in d with nothing held, staying beats running at it.
+        let mut danger = Danger::new(&map);
+        danger.add(&map, raid, |_| false);
+        let far = Force { pos: at(5.0, 6.0), ..worker };
+        assert_eq!(refuge(&map, &far, &danger, 2.0, 30.0), None);
     }
 }

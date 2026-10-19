@@ -66,6 +66,14 @@ impl Callback {
         (id >= 0).then_some(Resource { id })
     }
 
+    /// This AI's start-script option `key` (its `[AIn] { [Options] }`
+    /// block), if set.
+    pub fn option(&self, key: &str) -> Option<String> {
+        let k = c_string(key);
+        let v = ffi!(self, SkirmishAI_OptionValues_getValueByKey, k.as_ptr());
+        (!v.is_null()).then(|| owned_str(v))
+    }
+
     /// Write a line to the engine's infolog.
     pub fn log(&self, msg: &str) {
         let m = c_string(msg);

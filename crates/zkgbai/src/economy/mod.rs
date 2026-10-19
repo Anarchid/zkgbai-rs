@@ -5,8 +5,10 @@ mod assign;
 pub mod build_ids;
 pub mod factory;
 pub mod factory_manager;
+pub mod grid;
 mod planning;
 pub mod tasks;
+pub mod terraform;
 pub mod worker;
 
 pub use build_ids::BuildIds;
@@ -123,6 +125,23 @@ pub struct EconomyManager {
     s_wep: i32,
     chose_sup_wep: bool,
     user_fac: String,
+    /// Development aid: the factories to build after the first.
+    dev_facs: Vec<String>,
+    /// Development aid: open with the n-th viable factory.
+    dev_pick: Option<usize>,
+    /// A factory a module asked for, and why.
+    pub requisition: Option<(String, String)>,
+    /// Terraform commands issued (for their tags).
+    pub terraform_tags: i32,
+    /// Development aid: the terraform test, when on.
+    pub terraform_test: Option<terraform::TerraformTest>,
+    /// The ditch being dug, ditches dug (their middles), and ditches tried
+    /// lately (middle, frame).
+    pub ditch: Option<terraform::Ditch>,
+    pub ditched: Vec<Vec3>,
+    pub ditch_tries: Vec<(Vec3, i32)>,
+    /// Grid ranges and power needs by unit type.
+    pub grid_defs: grid::GridDefs,
     last_repaired_unit: i32,
     nuke_wep_id: i32,
     wolv_mine_id: i32,
@@ -277,6 +296,15 @@ impl EconomyManager {
             s_wep: 0,
             chose_sup_wep: false,
             user_fac: String::new(),
+            dev_facs: Vec::new(),
+            dev_pick: None,
+            requisition: None,
+            terraform_tags: 0,
+            terraform_test: None,
+            ditch: None,
+            ditched: Vec::new(),
+            ditch_tries: Vec::new(),
+            grid_defs: grid::GridDefs::default(),
             last_repaired_unit: 0,
             nuke_wep_id: -1,
             wolv_mine_id: -1,
@@ -419,9 +447,29 @@ impl Ai {
         self.eco.bots_viable = terrain.are_bots_viable();
         self.eco.ships_viable = terrain.are_ships_viable();
         self.eco.build_ids = BuildIds::new(&self.defs);
+        self.eco.grid_defs = grid::GridDefs::new(self.cb);
 
         self.eco.nuke_wep_id = self.cb.weapon_def_by_name("staticnuke_crblmssl").map_or(-1, |w| w.id());
         self.eco.wolv_mine_id = self.defs.id("wolverine_mine");
+
+        // Development aid: the factories to build, first (as `kgbfac` sets
+        // it) to last, comma-separated.
+        if let Ok(facs) = std::env::var("ZKGBAI_FACTORY") {
+            let mut facs = facs.split(',').map(str::trim).filter(|f| self.defs.get(f).is_some()).map(str::to_owned);
+            self.eco.user_fac = facs.next().unwrap_or_default();
+            self.eco.dev_facs = facs.collect();
+        }
+        self.eco.dev_pick = (self.cb.option("factory_pick"))
+            .or_else(|| std::env::var("ZKGBAI_FACTORY_PICK").ok())
+            .and_then(|n| n.trim().parse::<f32>().ok())
+            .filter(|&n| n >= 0.0)
+            .map(|n| n as usize);
+        if let Some(n) = self.eco.dev_pick {
+            self.log(&format!("dev: opening with viable factory #{n}"));
+        }
+        if std::env::var_os("ZKGBAI_TERRAFORM_TEST").is_some() {
+            self.eco.terraform_test = Some(terraform::TerraformTest::default());
+        }
 
         self.eco_capture_mexes();
     }
@@ -459,6 +507,26 @@ impl Ai {
         }
     }
 
+    /// Metal in our economy's buildings and factories (what an enemy
+    /// rarely sees of ours, and we of its).
+    pub fn eco_infrastructure_value(&self) -> f32 {
+        let eco = &self.eco;
+        let cost = |u: &Unit| if u.health() > 0.0 { u.def().map_or(0.0, |d| d.cost(self.metal)) } else { 0.0 };
+        let lists = [
+            &eco.mexes,
+            &eco.solars,
+            &eco.windgens,
+            &eco.fusions,
+            &eco.pylons,
+            &eco.storages,
+            &eco.radars,
+            &eco.airpads,
+        ];
+        lists.iter().flat_map(|l| l.iter()).map(cost).sum::<f32>()
+            + eco.nanos.values().map(|n| cost(&n.unit)).sum::<f32>()
+            + self.fac.factories.values().map(|f| cost(&f.unit)).sum::<f32>()
+    }
+
     pub fn eco_update(&mut self, frame: i32) {
         if frame % 300 == self.offset % 300 {
             self.eco_check_nanos();
@@ -467,6 +535,10 @@ impl Ai {
         if frame % 15 == self.offset % 15 {
             self.eco_update_income(frame);
         }
+
+        self.eco_dig_ditches(frame);
+        self.eco_plan_grid(frame);
+        self.eco_update_requisition(frame);
 
         if frame % 30 == self.offset % 30 {
             self.eco_capture_mexes();
