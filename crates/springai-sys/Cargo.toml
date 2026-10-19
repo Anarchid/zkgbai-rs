@@ -1,0 +1,9 @@
+[package]
+name = "springai-sys"
+version = "0.1.0"
+description = "Raw FFI bindings to the Recoil/Spring Skirmish AI C interface"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,0 +1,18 @@
+[package]
+name = "zkgbai"
+version = "0.2.0"
+description = "Zero-K Graph-Based AI"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+# The engine expects `libSkirmishAI.so` / `SkirmishAI.dll`; packaging renames
+# the artifact (see tools/package.sh).
+name = "zkgbai"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+springai.workspace = true
+serde_json = "1"
+delaunator = "1"

@@ -1,0 +1,13 @@
+[package]
+name = "gen-bindings"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "One-off generator for crates/springai-sys/src/bindings.rs (needs libclang + engine sources)"
+
+# Deliberately not a member of the main workspace: regular builds of the AI
+# must never require libclang or a Recoil source checkout.
+[workspace]
+
+[dependencies]
+bindgen = "0.71"

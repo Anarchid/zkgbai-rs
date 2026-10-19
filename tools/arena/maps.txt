@@ -1,0 +1,11 @@
+# Benchmark map pool (subset of the Zero-K matchmaking pool).
+Comet Catcher Redux v3.1
+Fairyland 1.31
+Calamity 1.1
+Red Comet Remake 1.7
+Altair_Crossing_V4
+Trojan Hills v05
+Hide and Seek 2.2.3
+Shimmershore v1.1
+Akilon Wastelands ZK v1
+Fallendell_V4

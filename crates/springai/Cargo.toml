@@ -1,0 +1,15 @@
+[package]
+name = "springai"
+version = "0.1.0"
+description = "Safe, idiomatic Rust interface for writing Recoil/Spring Skirmish AIs"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+springai-sys.workspace = true
+
+[[example]]
+# Minimal engine smoke test: `cargo build --example hello_ai`.
+name = "hello_ai"
+crate-type = ["cdylib"]

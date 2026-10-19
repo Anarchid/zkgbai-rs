@@ -1,0 +1,41 @@
+name: rust
+
+on:
+  push:
+    branches: [master, rust-rewrite]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  package:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+      - run: tools/setup-toolchain.sh
+      - run: tools/package.sh
+      - name: Contract test (Linux library outside the engine)
+        run: cargo run --manifest-path tools/dll-smoke/Cargo.toml -- dist-rs/AI/Skirmish/ZKGBAI/*/libSkirmishAI.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZKGBAI
+          path: dist-rs/AI/Skirmish/ZKGBAI/

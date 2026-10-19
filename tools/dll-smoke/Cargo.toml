@@ -1,0 +1,12 @@
+[package]
+name = "dll-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Load a built SkirmishAI library outside the engine and check its FFI contract"
+
+[workspace]
+
+[dependencies]
+libloading = "0.8"
+springai-sys = { path = "../../crates/springai-sys" }

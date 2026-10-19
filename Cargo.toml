@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/springai-sys", "crates/springai", "crates/zkgbai"]
+
+[workspace.package]
+edition = "2024"
+license = "GPL-2.0-only"
+repository = "https://github.com/Anarchid/zkgbai-rs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+springai-sys = { path = "crates/springai-sys" }
+springai = { path = "crates/springai" }
+
+[profile.release]
+# The engine must never be taken down by an AI panic: we catch unwinds at the
+# FFI boundary, so `panic = "abort"` is not an option.
+panic = "unwind"
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+debug = false
+# Keep symbol names for the engine crash handler's backtraces; panic
+# locations are embedded regardless of debug info.
+strip = "debuginfo"
+
+[profile.dev]
+# Pathfinding and threat painting are hot loops; unoptimised builds are too
+# slow to play a real game with.
+opt-level = 1

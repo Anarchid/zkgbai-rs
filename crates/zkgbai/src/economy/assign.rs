@@ -1,0 +1,675 @@
+//! Worker assignment: job costs, the round-robin assignment loop, task
+//! validation and cleanup.
+
+use springai::{UnitDef, Vec3};
+
+use super::{TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
+use crate::Ai;
+use crate::military::DefenseTarget;
+use crate::util::{OPTION_SHIFT_KEY, distance};
+
+/// Cost of a job a worker must never take.
+// port: the C++ used 65535/65536 here together with "first task always
+// wins" (`task == nullptr || tmpcost < cost`), which could hand a worker
+// another commander's factory plop; the Java's Float.MAX_VALUE with strict
+// comparisons is restored.
+const NEVER: f32 = f32::MAX;
+
+/// An order for a worker, decided while the task store is borrowed.
+enum Order {
+    Build(UnitDef, Vec3, i32),
+    Repair(springai::Unit),
+    ReclaimFeature(springai::Feature),
+    ReclaimUnit(springai::Unit),
+}
+
+impl Ai {
+    pub(super) fn eco_assign_workers(&mut self) {
+        let frame = self.frame;
+        if frame < 8 {
+            return;
+        }
+
+        // Generate tasks and assign workers to tasks on alternating frames.
+        // Also refresh retreat paths for chickening units and process them when they're done chickening.
+        if frame % 2 == 0 {
+            if let Some(wid) = self.eco.idlers.pop_front() {
+                self.eco_service_worker(wid, false);
+            } else if let Some(wid) = self.eco.assigned.pop_front() {
+                self.eco_service_worker(wid, true);
+            }
+        } else if let Some(wid) = self.eco.seeders.pop_front() {
+            let Some(unit) = self.eco.workers.get(&wid).map(|w| w.unit) else {
+                return;
+            };
+            if unit.health() <= 0.0 || unit.team() != self.team_id {
+                self.eco.remove_worker(wid);
+            } else {
+                self.eco_generate_tasks(wid);
+                self.eco.seeders.push_back(wid);
+            }
+        }
+    }
+
+    /// One step of the idlers/assigned round robin: drop dead workers,
+    /// handle chickening (retreating from danger), otherwise (re)assign.
+    fn eco_service_worker(&mut self, wid: i32, check_stuck: bool) {
+        let frame = self.frame;
+        let Some(w) = self.eco.workers.get(&wid) else {
+            return;
+        };
+        let unit = w.unit;
+        if unit.health() <= 0.0 || unit.team() != self.team_id {
+            self.eco.remove_worker(wid);
+            return;
+        }
+
+        let pos = unit.pos();
+        if !w.is_chicken
+            && (self.war.get_effective_threat(pos) > self.war.get_total_friendly_threat(pos)
+                || ((unit.health() < unit.max_health() || w.get_shields() < 0.5)
+                    && self.war.get_threat(pos) > 0.0
+                    && !w.is_working_on_porc(&self.eco.tasks)))
+        {
+            if let Some(w) = self.eco.workers.get_mut(&wid) {
+                w.is_chicken = true;
+                w.chicken_frame = frame;
+            }
+            self.war.add_defense_target(DefenseTarget::new(pos, unit.max_health(), frame));
+            erase_one_dq(&mut self.eco.seeders, wid);
+        }
+
+        let Some(w) = self.eco.workers.get(&wid) else {
+            return;
+        };
+        let (is_chicken, chicken_frame, last_retreat_frame) = (w.is_chicken, w.chicken_frame, w.last_retreat_frame);
+        if is_chicken {
+            if self.war.get_threat(pos) == 0.0
+                && ((self.war.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
+                    || frame - chicken_frame > 150)
+            {
+                self.eco_stop_chickening(wid);
+            } else if frame - last_retreat_frame > 15 {
+                let haven = self.graph_get_closest_haven(pos);
+                if distance(pos, haven) > 25.0 {
+                    let mut nav = crate::nav!(self);
+                    if let Some(w) = self.eco.workers.get_mut(&wid) {
+                        w.retreat_to(haven, &mut nav);
+                        if self.war.get_threat(w.get_pos()) > 0.0 {
+                            w.chicken_frame = frame;
+                        }
+                    }
+                } else {
+                    self.eco_stop_chickening(wid);
+                }
+            }
+        } else if !check_stuck {
+            self.eco_assign_worker(wid);
+        } else {
+            let unstuck = match self.eco.workers.get_mut(&wid) {
+                Some(w) => w.unstick(frame, &mut self.eco.tasks),
+                None => true,
+            };
+            if !unstuck {
+                self.eco_assign_worker(wid);
+            }
+        }
+        self.eco.assigned.push_back(wid);
+    }
+
+    fn eco_stop_chickening(&mut self, wid: i32) {
+        if let Some(w) = self.eco.workers.get_mut(&wid) {
+            w.is_chicken = false;
+        }
+        self.eco_assign_worker(wid);
+        self.eco.seeders.push_back(wid);
+    }
+
+    pub(super) fn eco_assign_worker(&mut self, wid: i32) {
+        let frame = self.frame;
+        let Some(task_id) = self.eco_get_cheapest_job(wid) else {
+            return;
+        };
+        let Some(w) = self.eco.workers.get(&wid) else {
+            return;
+        };
+        let unit = w.unit;
+        let wtask = w.task;
+        let wpos = unit.pos();
+        let build_dist = unit.def().map_or(0.0, |d| d.build_distance());
+        let task_pos = self.eco.task_pos(task_id);
+
+        if wtask == Some(task_id) && distance(wpos, task_pos) <= build_dist * 1.5 {
+            return;
+        }
+
+        // remove it from its old assignment if it had one
+        if wtask != Some(task_id) {
+            if let Some(w) = self.eco.workers.get_mut(&wid) {
+                w.clear_task(&mut self.eco.tasks);
+                w.set_task(&mut self.eco.tasks, task_id, frame);
+            }
+        }
+
+        let out_of_range = distance(wpos, task_pos) > build_dist * 1.5;
+        let Some(task) = self.eco.tasks.get_mut(task_id) else {
+            return;
+        };
+        let order = match &mut task.kind {
+            TaskKind::Construction(c) => {
+                if c.target.is_some_and(|t| t.health() <= 0.0) {
+                    c.target = None;
+                }
+                match c.target {
+                    None => Order::Build(c.build_type, task_pos, c.facing),
+                    Some(t) => Order::Repair(t),
+                }
+            }
+            TaskKind::Reclaim(r) => Order::ReclaimFeature(r.target),
+            TaskKind::CombatReclaim(crt) => {
+                let target = crt.target;
+                // prevent workers from being unassigned to dangerous/invalid combat reclaim jobs
+                if (!target.is_being_built() && target.team() != self.team_id)
+                    || self.war.get_threat(task_pos) > 0.0
+                    || target.health() <= 0.0
+                {
+                    let idle = self.eco.stop_workers(task_id);
+                    for wo in idle {
+                        if wo == wid {
+                            continue;
+                        }
+                        self.eco.idlers.push_back(wo);
+                        erase_one_dq(&mut self.eco.assigned, wo);
+                    }
+                    erase_one(&mut self.eco.combat_reclaim_tasks, &task_id);
+                    self.eco.delete_task(task_id);
+                    return;
+                }
+                Order::ReclaimUnit(target)
+            }
+            TaskKind::Repair(r) => Order::Repair(r.target),
+        };
+
+        let opts = if out_of_range {
+            if let Some(w) = self.eco.workers.get(&wid) {
+                let mut nav = crate::nav!(self);
+                w.move_to(task_pos, &mut nav);
+            }
+            OPTION_SHIFT_KEY
+        } else {
+            0
+        };
+        match order {
+            Order::Build(def, pos, facing) => unit.build(def, pos, facing, opts),
+            Order::Repair(t) => unit.repair(t, opts),
+            Order::ReclaimFeature(f) => unit.reclaim_feature(f, opts),
+            Order::ReclaimUnit(t) => unit.reclaim_unit(t, opts),
+        };
+    }
+
+    fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
+        let eco = &self.eco;
+        let worker = eco.workers.get(&wid)?;
+        let wpos = worker.get_pos();
+        let threat_cost = |t: &WorkerTask| 500.0 * self.war.get_effective_threat(t.get_pos()).max(0.0);
+
+        let mut task: Option<TaskId> = None;
+        let mut cost = NEVER;
+
+        if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)) {
+            task = Some(t.id);
+            cost = self.eco_cost_of_job(worker, wpos, t);
+            if let Some(target) = t.as_construction().and_then(|c| c.target) {
+                let p = target.build_progress();
+                cost -= 1000.0 * (p * p);
+            }
+            cost += threat_cost(t);
+        }
+
+        let mut consider = |ids: &[TaskId], with_threat: bool, skip: &dyn Fn(&WorkerTask) -> bool| {
+            for t in ids.iter().filter_map(|&id| eco.tasks.get(id)) {
+                if skip(t) {
+                    continue;
+                }
+                let mut tmpcost = self.eco_cost_of_job(worker, wpos, t);
+                if with_threat {
+                    tmpcost += threat_cost(t);
+                }
+                if tmpcost < cost {
+                    cost = tmpcost;
+                    task = Some(t.id);
+                }
+            }
+        };
+        let none = |_: &WorkerTask| false;
+
+        consider(&eco.construction_tasks, true, &none);
+
+        if eco.max_storage > 1.0
+            && (eco.metal / eco.max_storage < 0.9 || !eco.hard_estalled)
+            && (!eco.energy_reclaim || eco.energy_reclaim_tasks.is_empty())
+        {
+            consider(&eco.reclaim_tasks, true, &none);
+        }
+
+        if eco.energy_reclaim {
+            consider(&eco.energy_reclaim_tasks, true, &none);
+        }
+
+        consider(&eco.combat_reclaim_tasks, false, &none);
+
+        // don't assign workers to repair themselves
+        let own = |t: &WorkerTask| matches!(&t.kind, TaskKind::Repair(r) if r.target.id() == wid);
+        consider(&eco.repair_tasks, true, &own);
+
+        task
+    }
+
+    fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+        let eco = &self.eco;
+        let mut cost_mod = 1.0f32;
+        let task_pos = task.get_pos();
+        let dist = distance(wpos, task_pos);
+
+        for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)) {
+            // increment cost mod for every other worker unassigned to the given task that isn't the worker we're assigning
+            // as long as they're closer or equaldist to the target.
+            let idist = distance(w.get_pos(), task_pos);
+            let rdist = idist.max(200.0);
+            let deltadist = (idist - dist).abs();
+            if w.id != worker.id {
+                if w.is_com {
+                    cost_mod += 2.0;
+                } else if rdist < dist || deltadist < 100.0 {
+                    cost_mod += 1.0;
+                }
+            }
+        }
+
+        match &task.kind {
+            TaskKind::Construction(ctask) => {
+                if ctask.fac_plop {
+                    // only assign facplop tasks to the commander who has the plop!
+                    return if worker.id != ctask.assigned_plop { NEVER } else { -1000.0 };
+                }
+
+                let ids = &eco.build_ids;
+                let def_id = ctask.build_type.id();
+                if def_id == ids.solar_id || def_id == ids.wind_id {
+                    // for small energy
+                    if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
+                        if worker.is_greedy {
+                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
+                        }
+                        if worker.is_com {
+                            if eco.hard_estalled {
+                                return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                            }
+                            return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                        }
+                        return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
+                    } else {
+                        if worker.is_greedy {
+                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
+                        }
+                        if worker.is_com {
+                            return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                        }
+                        return (dist / 4.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
+                    }
+                }
+
+                if def_id == ids.mex_id {
+                    // for mexes
+                    if worker.is_greedy {
+                        return ((dist / 4.0) - 100.0) + (600.0 * (cost_mod - 1.0)).max(0.0);
+                    }
+                    return ((dist / 4.0) - 100.0) + (600.0 * (cost_mod - 2.0)).max(0.0);
+                }
+
+                let cost = ctask.build_type.cost(self.metal);
+                if worker.is_greedy
+                    && !self.fac.factories.is_empty()
+                    && ((ctask.fac_def && eco.effective_income < 15.0) || (cost > 300.0 && def_id != ids.airpad_id))
+                {
+                    return dist + (10000.0 * cost_mod);
+                }
+
+                if ids.fac_ids.contains(&def_id) {
+                    // emergency facs get maximum priority
+                    if self.fac.factories.is_empty() {
+                        return -1000.0;
+                    }
+                    return ((dist / 2.0) - cost) + (500.0 * (cost_mod - 1.0));
+                }
+
+                if ctask.fac_def
+                    && worker.is_com
+                    && self.eco_get_nearest_fac(task_pos).is_some_and(|f| f.unit.health() < f.unit.max_health())
+                {
+                    return -1000.0;
+                }
+
+                if ids.expensive_ids.contains(&def_id) {
+                    // for expensive porc.
+                    if eco.hard_estalled {
+                        return dist + (250.0 * cost_mod);
+                    }
+                    if cost_mod < 4.0 {
+                        return (dist / 2.0) - cost.min(3500.0);
+                    }
+                    return ((dist / 2.0) - cost.min(3500.0)) + (500.0 * cost_mod);
+                }
+
+                if ctask.build_type.is_able_to_attack() {
+                    // for cheap porc
+                    if !eco.defended_fac || self.war.slasher_spam as f32 * 140.0 > self.war.enemy_porc_value {
+                        return dist + 300.0;
+                    }
+                    if worker.is_com && !eco.estalled {
+                        return ((dist / 4.0) - 100.0) + (600.0 * (cost_mod - 2.0)).max(0.0);
+                    }
+                    if worker.is_greedy {
+                        return ((dist / 3.0) - 200.0) + (600.0 * (cost_mod - 1.0)).max(0.0);
+                    }
+                    return ((dist / 2.0) - 200.0) + (1500.0 * (cost_mod - 2.0)).max(0.0);
+                }
+
+                if def_id == ids.airpad_id {
+                    // for airpads
+                    return (dist / 3.0) - 350.0 + (500.0 * (cost_mod - 2.0)).max(0.0);
+                }
+
+                if def_id == ids.nano_id || def_id == ids.storage_id {
+                    // for nanotowers and storages
+                    if worker.is_com || (eco.hard_estalled && !worker.is_greedy) {
+                        return dist;
+                    }
+                    return dist - 1000.0 + (500.0 * (cost_mod - 2.0));
+                }
+
+                if def_id == ids.pylon_id {
+                    // for pylons
+                    let (nfus, npyl) = (eco.fusions.len(), eco.pylons.len());
+                    if worker.is_greedy {
+                        if nfus > npyl {
+                            return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));
+                        }
+                        return dist + (10000.0 * cost_mod);
+                    }
+                    if nfus > npyl {
+                        return (dist / 4.0) - 1000.0 + (500.0 * (cost_mod - 1.0));
+                    }
+                    if nfus > 3 {
+                        return (dist / 4.0) - 600.0 + (500.0 * (cost_mod - 1.0));
+                    }
+                    if nfus > 2 {
+                        return (dist / 4.0) - 300.0 + (500.0 * (cost_mod - 1.0));
+                    }
+                    return (dist / 4.0) - 100.0 + (500.0 * (cost_mod - 1.0));
+                }
+
+                if def_id == ids.radar_id {
+                    // for radar
+                    if eco.hard_estalled && !worker.is_greedy {
+                        return dist + 300.0;
+                    }
+                    return (dist / 4.0) - 100.0 + (1500.0 * (cost_mod - 1.0));
+                }
+
+                if cost > 300.0 {
+                    // allow at least 3 builders for each expensive task, more if the cost is high.
+                    return ((dist / 2.0) - cost.min(3000.0)) + (500.0 * (cost_mod - 3.0)).max(0.0);
+                }
+
+                (dist - 250.0) + (100.0 * (cost_mod - 1.0))
+            }
+
+            TaskKind::Reclaim(rtask) => {
+                if rtask.target.def().is_none() {
+                    return NEVER;
+                }
+
+                if self.war.get_porc_threat(task_pos) > 0.0 {
+                    // don't reclaim under enemy porc
+                    return (dist * dist) + (1000.0 * cost_mod);
+                }
+
+                let mut rec_mod = 100.0;
+                if self.graph.is_ally_territory(task_pos) {
+                    let tf = self.graph.territory_fraction;
+                    rec_mod = 100.0 + (200.0 * tf * tf);
+                }
+
+                if rtask.metal_value > 50.0 {
+                    return ((dist / 4.0) - rec_mod) + (250.0 * (cost_mod - 3.0)).max(0.0);
+                }
+                ((dist / 4.0) - rec_mod) + (700.0 * (cost_mod - 1.0))
+            }
+
+            // favor combat reclaim when it's possible
+            TaskKind::CombatReclaim(_) => dist - 600.0 + (600.0 * (cost_mod - 2.0)).max(0.0),
+
+            TaskKind::Repair(rptask) => {
+                let target = rptask.target;
+                let health = target.health();
+                let Some(td) = target.def().filter(|_| health > 0.0) else {
+                    return NEVER;
+                };
+                let max_health = target.max_health();
+                if !worker.is_greedy && td.speed() > 0.0 && td.is_able_to_attack() && !td.is_builder() {
+                    // for mobile combat units
+                    if self.war.get_porc_threat(task_pos) > 0.0 {
+                        return NEVER;
+                    }
+
+                    if eco.hard_estalled {
+                        return dist;
+                    }
+
+                    if rptask.is_shield_mob && worker.has_shields {
+                        return dist + (100.0 * (cost_mod - 1.0)) - 250.0 - max_health / (5.0 * cost_mod);
+                    }
+
+                    if !self.graph.is_ally_territory(task_pos) {
+                        return dist + 500.0;
+                    }
+
+                    dist + (100.0 * (cost_mod - 1.0)) - 250.0 - (max_health + health) / (10.0 * cost_mod)
+                } else if !worker.is_greedy
+                    && td.is_able_to_attack()
+                    && !td.is_builder()
+                    && self.defs.name(td) != "turretaalaser"
+                {
+                    // for static defenses
+                    dist + (100.0 * (cost_mod - 1.0)) - (max_health * 2.0) / cost_mod
+                } else {
+                    // for everything else
+                    dist - 250.0 + (600.0 * (cost_mod - 1.0))
+                }
+            }
+        }
+    }
+
+    /// Whether a building of type `def` can be queued at `pos`: not
+    /// underwater where that is bad, not overlapping queued jobs or
+    /// factories.
+    pub(super) fn eco_build_check(&self, def: UnitDef, pos: Vec3, facing: i32) -> bool {
+        // stop things from being built underwater if the map water does damage or if water pathing is bad on the map
+        if (self.eco.water_damage || !self.graph.is_water_map) && self.cb.map().elevation_at(pos.x, pos.z) < 10.0 {
+            return false;
+        }
+
+        // get a building's footprint half-extents based on facing
+        let extents = |def: UnitDef, facing: i32, pad: f32| {
+            let (x, z) = ((def.x_size() as f32 + pad) * 4.0, (def.z_size() as f32 + pad) * 4.0);
+            if facing == 0 || facing == 2 { (x, z) } else { (z, x) }
+        };
+        let (xsize, zsize) = extents(def, facing, 0.0);
+        let overlaps = |cpos: Vec3, cxsize: f32, czsize: f32| {
+            // too close in the x dimension, and too close in the z dimension
+            (cpos.x - pos.x).abs() < xsize + cxsize && (cpos.z - pos.z).abs() < zsize + czsize
+        };
+
+        //check for overlap with existing queued jobs
+        for t in self.eco.construction_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)) {
+            if let Some(c) = t.as_construction() {
+                let (cxsize, czsize) = extents(c.build_type, c.facing, 0.0);
+                if overlaps(t.position, cxsize, czsize) {
+                    return false;
+                }
+            }
+        }
+
+        for f in self.fac.factories.values() {
+            // check fac overlap
+            let fac = f.unit;
+            let Some(fdef) = fac.def() else {
+                continue;
+            };
+            let (cxsize, czsize) = extents(fdef, fac.building_facing(), 1.0);
+            if overlaps(fac.pos(), cxsize, czsize) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Remove finished or invalid tasks, sending their workers to be reassigned.
+    pub(super) fn eco_clean_orders(&mut self) {
+        let frame = self.frame;
+        //remove invalid jobs from the queue
+        let mut invalid: Vec<TaskId> = Vec::new();
+        let map = self.cb.map();
+
+        for id in self.eco.construction_tasks.clone() {
+            let Some(t) = self.eco.tasks.get(id) else {
+                continue;
+            };
+            let Some(c) = t.as_construction() else {
+                continue;
+            };
+            let (bt, pos, facing) = (c.build_type, t.position, c.facing);
+            let mut target = c.target;
+            if target.is_none() && !map.is_possible_to_build_at(bt, pos, facing) {
+                //check to make sure it isn't our own nanoframe, since update is called before unitCreated
+                let radius = bt.x_size().min(bt.z_size()) as f32 * 4.0;
+                let nano = self.cb.friendly_units_in(pos, radius).into_iter().find(|u| {
+                    u.is_being_built() && u.def().is_some_and(|d| d.id() == bt.id()) && u.team() == self.team_id
+                });
+                match nano {
+                    Some(u) => {
+                        target = Some(u);
+                        if let Some(c) = self.eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut()) {
+                            c.target = Some(u);
+                        }
+                    }
+                    // if a construction job is blocked and it isn't our own nanoframe, remove it
+                    None => {
+                        if !invalid.contains(&id) {
+                            invalid.push(id);
+                        }
+                    }
+                }
+            }
+
+            if self.war.get_porc_threat(pos) > 0.0
+                && (target.is_none() || !bt.is_able_to_attack())
+                && !invalid.contains(&id)
+            {
+                invalid.push(id);
+            }
+        }
+
+        for &id in &self.eco.super_wep_tasks {
+            if invalid.contains(&id) {
+                continue;
+            }
+            let stale = self
+                .eco
+                .tasks
+                .get(id)
+                .and_then(|t| t.as_construction())
+                .is_some_and(|c| frame - c.frame_issued > 900 && c.target.is_none());
+            if stale {
+                invalid.push(id);
+            }
+        }
+        // remove old porc push tasks, so as not to waste metal on unneeded porc.
+        for &id in &self.eco.porc_tasks {
+            if invalid.contains(&id) {
+                continue;
+            }
+            let stale = self.eco.tasks.get(id).is_some_and(|t| {
+                t.assigned_workers.is_empty()
+                    && t.as_construction()
+                        .is_some_and(|c| c.frame_issued > 0 && frame - c.frame_issued > 600 && c.target.is_none())
+            });
+            if stale {
+                invalid.push(id);
+            }
+        }
+
+        for id in invalid {
+            self.eco.drop_construction_task(id);
+        }
+
+        let invalid: Vec<TaskId> = self
+            .eco
+            .reclaim_tasks
+            .iter()
+            .copied()
+            .filter(|&id| matches!(self.eco.tasks.get(id).map(|t| &t.kind), Some(TaskKind::Reclaim(r)) if r.target.def().is_none()))
+            .collect();
+        for id in invalid {
+            self.eco_cancel_task(id);
+        }
+
+        let invalid: Vec<TaskId> = self
+            .eco
+            .combat_reclaim_tasks
+            .iter()
+            .copied()
+            .filter(|&id| match self.eco.tasks.get(id) {
+                Some(t @ WorkerTask { kind: TaskKind::CombatReclaim(crt), .. }) => {
+                    let target = crt.target;
+                    (!target.is_being_built() && target.team() != self.team_id)
+                        || self.war.get_porc_threat(t.get_pos()) > 0.0
+                        || target.health() <= 0.0
+                }
+                _ => false,
+            })
+            .collect();
+        for id in invalid {
+            self.eco_cancel_task(id);
+        }
+
+        let invalid: Vec<TaskId> = self
+            .eco
+            .repair_tasks
+            .iter()
+            .copied()
+            .filter(|&id| match self.eco.tasks.get(id).map(|t| &t.kind) {
+                Some(TaskKind::Repair(r)) => {
+                    let health = r.target.health();
+                    health <= 0.0 || health == r.target.max_health()
+                }
+                _ => false,
+            })
+            .collect();
+        for id in invalid {
+            self.eco_cancel_task(id);
+        }
+
+        if self.eco.chose_sup_wep && self.eco.s_wep == 1 && self.war.enemy_has_anti_nuke {
+            self.eco.s_wep = 0;
+        }
+    }
+
+    /// Stop a task, send its workers to be reassigned and delete it.
+    fn eco_cancel_task(&mut self, id: TaskId) {
+        let idle = self.eco.stop_workers(id);
+        self.eco.idle_workers(&idle);
+        self.eco.delete_task(id);
+    }
+}

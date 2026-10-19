@@ -1,0 +1,5 @@
+LIBRARY SkirmishAI
+EXPORTS
+    init
+    release
+    handleEvent
