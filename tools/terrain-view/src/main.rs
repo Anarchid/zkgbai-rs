@@ -51,7 +51,9 @@ fn main() {
         let mut img = render(map, scenario.is_some());
         if let Some(sc) = &scenario {
             let s = Scenario { map, ally_base: sc.ally_base, enemy_base: sc.enemy_base, assets: &sc.assets };
+            let t0 = Instant::now();
             let analysis = Analysis::run(&s);
+            eprintln!("  analysis: {:.1} ms", t0.elapsed().as_secs_f64() * 1e3);
             overlay(&mut img, map, sc, &analysis);
             report(map, &analysis);
         }
@@ -112,6 +114,17 @@ fn report(map: &TierMap, a: &Analysis) {
         );
     }
     println!("  seal    {:?} (total width {:.0})", a.seal, a.seal.iter().map(|&c| map.chokes[c].width).sum::<f32>());
+    println!("  hold    {:?}", a.hold);
+    let base_threat = a.ally_base.map_or(f32::INFINITY, |b| a.dist_from_enemy[b]);
+    for &c in &a.hold {
+        println!(
+            "    C{:<3} width {:>4.0}  enemy distance {:>5.0} (our base {:>5.0})",
+            c,
+            map.chokes[c].width,
+            a.choke_distance(map, c, false),
+            base_threat
+        );
+    }
     for b in a.bridges.iter().take(5) {
         println!(
             "  bridge  R{}->R{} span {:>4.0}  exposes {:>5.1}  bypasses {} guards  score {:.1}",

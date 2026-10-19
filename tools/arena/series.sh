@@ -3,7 +3,7 @@
 # alternating sides, and summarise the results.
 #
 # usage: series.sh [-n games-per-map] [-j parallel] [-f max-frames] [-t timeout]
-#                  [-M maps-file] [-o out-dir] <AI_A> <AI_B>
+#                  [-M maps-file] [-o out-dir] [-P base-port] <AI_A> <AI_B>
 # AI specs as for match.sh. Maps file: one map name per line.
 # Writes <out-dir>/results.csv and prints a summary.
 set -uo pipefail
@@ -14,7 +14,8 @@ FRAMES=0
 TIMEOUT=1500
 MAPS="$here/maps.txt"
 OUT=""
-while getopts "n:j:f:t:M:o:" opt; do
+PORT_BASE=40000
+while getopts "n:j:f:t:M:o:P:" opt; do
     case $opt in
         n) N=$OPTARG ;;
         j) J=$OPTARG ;;
@@ -22,6 +23,7 @@ while getopts "n:j:f:t:M:o:" opt; do
         t) TIMEOUT=$OPTARG ;;
         M) MAPS=$OPTARG ;;
         o) OUT=$OPTARG ;;
+        P) PORT_BASE=$OPTARG ;;
         *) sed -n '2,9p' "$0"; exit 2 ;;
     esac
 done
@@ -47,7 +49,7 @@ done < "$MAPS"
 
 run_one() {
     IFS='|' read -r idx map first ai0 ai1 <<< "$1"
-    res=$("$here/match.sh" -m "$map" -f "$FRAMES" -t "$TIMEOUT" -o "$OUT/m$idx" -p $((40000 + idx)) "$ai0" "$ai1" 2>/dev/null | grep '^RESULT')
+    res=$("$here/match.sh" -m "$map" -f "$FRAMES" -t "$TIMEOUT" -o "$OUT/m$idx" -p $((PORT_BASE + idx)) "$ai0" "$ai1" 2>/dev/null | grep '^RESULT')
     w=$(sed -n 's/.*winner=\([A-Za-z]*\).*/\1/p' <<< "$res")
     # Translate slot winner (A = team 0) back to the series' A/B.
     if [ "$first" = B ]; then
@@ -58,7 +60,7 @@ run_one() {
     echo "$idx,\"$map\",$first,$w,$frame,$panics"
 }
 export -f run_one
-export OUT FRAMES TIMEOUT here
+export OUT FRAMES TIMEOUT PORT_BASE here
 
 echo "idx,map,a_slot,winner,frame,panics" > "$OUT/results.csv"
 xargs -P "$J" -I{} bash -c 'run_one "$@"' _ {} < "$jobs_file" >> "$OUT/results.csv"

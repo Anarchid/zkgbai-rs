@@ -9,7 +9,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
-use crate::{CELL, NONE, Pos, TierMap};
+use crate::{CELL, Choke, NONE, Pos, TierMap};
 
 /// Whose an asset is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +111,10 @@ pub struct Analysis {
     /// allied value cut off from the enemy base; empty if no wall is worth
     /// building.
     pub seal: Vec<usize>,
+    /// The chokepoints (on our side, at most [`MAX_HOLD_WIDTH`] wide) that
+    /// best trade the number held for allied value cut off from the enemy
+    /// base: where static defense pays.
+    pub hold: Vec<usize>,
     pub bridges: Vec<BridgeOption>,
     pub drops: Vec<DropOption>,
     pub teleports: Vec<TeleportOption>,
@@ -125,6 +129,13 @@ pub const MIN_BRIDGE_SAVING: f32 = 800.0;
 
 /// Wall length (elmos) worth one average asset when choosing a seal.
 pub const WALL_ELMOS_PER_ASSET: f32 = 300.0;
+
+/// Widest chokepoint static defense can hold, elmos.
+pub const MAX_HOLD_WIDTH: f32 = 600.0;
+
+/// Cost of holding a chokepoint, in average asset values (plus up to half
+/// an asset for width).
+pub const HOLD_COST: f32 = 1.0;
 
 /// Snap radius for placing assets and bases onto passable ground.
 const SNAP: f32 = 96.0;
@@ -169,10 +180,33 @@ impl Analysis {
         };
         a.walls = a.wall_options(map);
         a.seal = a.seal_walls(map);
+        let mean_asset = s.assets.iter().map(|a| a.value).sum::<f32>() / s.assets.len().max(1) as f32;
+        a.hold = a.hold_chokes(map, mean_asset);
         a.bridges = a.bridge_options(map, &graph);
         a.drops = a.drop_options(map);
         a.teleports = a.teleport_options(&graph);
         a
+    }
+
+    /// Travel distance from the ally (`true`) or enemy base to a chokepoint.
+    pub fn choke_distance(&self, map: &TierMap, choke: usize, ally: bool) -> f32 {
+        let d = if ally { &self.dist_from_ally } else { &self.dist_from_enemy };
+        let c = &map.chokes[choke];
+        c.regions.iter().map(|&r| d[r] + map.regions[r].center.distance(c.pos)).fold(f32::INFINITY, f32::min)
+    }
+
+    /// Whether a chokepoint is nearer our base than theirs by ground.
+    pub fn choke_on_our_side(&self, map: &TierMap, choke: usize) -> bool {
+        self.choke_distance(map, choke, true) < self.choke_distance(map, choke, false)
+    }
+
+    /// The region next to a chokepoint on our side of it.
+    pub fn home_side(&self, map: &TierMap, choke: usize) -> Option<usize> {
+        map.chokes[choke]
+            .regions
+            .iter()
+            .copied()
+            .min_by(|&a, &b| self.dist_from_ally[a].total_cmp(&self.dist_from_ally[b]))
     }
 
     fn wall_options(&self, map: &TierMap) -> Vec<WallOption> {
@@ -205,6 +239,21 @@ impl Analysis {
     /// enemy's doorstep would not survive, so the cut must not simply box
     /// them in.
     fn seal_walls(&self, map: &TierMap) -> Vec<usize> {
+        self.value_cut(map, |choke, typical| Some(choke.width * typical / WALL_ELMOS_PER_ASSET))
+    }
+
+    fn hold_chokes(&self, map: &TierMap, mean_asset: f32) -> Vec<usize> {
+        self.value_cut(map, |choke, _| {
+            (choke.width <= MAX_HOLD_WIDTH).then(|| mean_asset * (HOLD_COST + 0.5 * choke.width / MAX_HOLD_WIDTH))
+        })
+    }
+
+    /// The chokepoints on our side of the map whose closing best trades
+    /// cost for allied value cut off from the enemy base (a min-cut in
+    /// project-selection form). `cost` is the price of closing a chokepoint
+    /// given the value of a typical valued region, `None` if it cannot be
+    /// closed.
+    fn value_cut(&self, map: &TierMap, cost: impl Fn(&Choke, f32) -> Option<f32>) -> Vec<usize> {
         let Some(source) = self.enemy_base else { return Vec::new() };
         let value = |r: usize| self.values[r].ally + 0.5 * self.values[r].neutral;
         let targets: Vec<usize> = (0..map.regions.len())
@@ -214,20 +263,11 @@ impl Analysis {
             return Vec::new();
         }
         let typical = targets.iter().map(|&r| value(r)).sum::<f32>() / targets.len() as f32;
-        let per_elmo = typical / WALL_ELMOS_PER_ASSET;
         let sink = map.regions.len();
         let mut flow = FlowNet::new(sink + 1);
         for (c, choke) in map.chokes.iter().enumerate() {
-            // Travel distance from a base to the chokepoint itself.
-            let side_dist = |d: &[f32]| {
-                choke
-                    .regions
-                    .iter()
-                    .map(|&r| d[r] + map.regions[r].center.distance(choke.pos))
-                    .fold(f32::INFINITY, f32::min)
-            };
-            let ours = side_dist(&self.dist_from_ally) < side_dist(&self.dist_from_enemy);
-            let cap = if ours { (choke.width * per_elmo) as f64 } else { f64::INFINITY };
+            let cap = if self.choke_on_our_side(map, c) { cost(choke, typical) } else { None };
+            let cap = cap.map_or(f64::INFINITY, f64::from);
             for (i, &a) in choke.regions.iter().enumerate() {
                 for &b in &choke.regions[i + 1..] {
                     flow.add_edge(a, b, cap, Some(c));
@@ -355,6 +395,42 @@ impl Analysis {
         options.sort_by(|a, b| b.gain.total_cmp(&a.gain));
         options
     }
+}
+
+/// Ground travel distance between two positions, or `None` if no ground
+/// route exists: straight lines within a region, chokepoint to chokepoint
+/// between regions.
+pub fn ground_distance(map: &TierMap, a: Pos, b: Pos) -> Option<f32> {
+    let (ra, rb) = (map.region_near(a, SNAP)?, map.region_near(b, SNAP)?);
+    if ra == rb {
+        return Some(a.distance(b));
+    }
+    let mut dist = vec![f32::INFINITY; map.chokes.len()];
+    let mut heap = BinaryHeap::new();
+    for &c in &map.regions[ra].chokes {
+        dist[c] = a.distance(map.chokes[c].pos);
+        heap.push(HeapItem(dist[c], c));
+    }
+    let mut best = f32::INFINITY;
+    while let Some(HeapItem(d, c)) = heap.pop() {
+        if d > dist[c] || d >= best {
+            continue;
+        }
+        let choke = &map.chokes[c];
+        if choke.regions.contains(&rb) {
+            best = best.min(d + choke.pos.distance(b));
+        }
+        for &r in &choke.regions {
+            for &n in &map.regions[r].chokes {
+                let nd = d + choke.pos.distance(map.chokes[n].pos);
+                if nd < dist[n] {
+                    dist[n] = nd;
+                    heap.push(HeapItem(nd, n));
+                }
+            }
+        }
+    }
+    best.is_finite().then_some(best)
 }
 
 /// Regions as nodes, chokepoints as weighted edges.
@@ -632,7 +708,7 @@ impl FlowNet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Choke, Region, Tier};
+    use crate::{Region, Tier};
 
     /// A hand-built map: `#` obstacle, letters regions; chokes are given as
     /// (region, region, cell x, cell z, width in cells).
@@ -750,6 +826,23 @@ mod tests {
     }
 
     #[test]
+    fn ground_distance_follows_chokepoints() {
+        let map = rooms();
+        let (a, b) = (at(2.0, 1.0), at(6.0, 1.0));
+        assert_eq!(ground_distance(&map, a, b), Some(a.distance(b)));
+        // Room a to room c: through both doorways, barely longer than the
+        // straight line.
+        let (a, c) = (at(2.0, 1.0), at(22.0, 1.0));
+        let d = ground_distance(&map, a, c).unwrap();
+        assert!(d >= a.distance(c) && d < a.distance(c) * 1.1, "{d}");
+        // Strip d to strip e, split by a thin wall: all the way round
+        // through the rooms.
+        let (d_pos, e_pos) = (at(10.0, 6.0), at(15.0, 6.0));
+        let d = ground_distance(&map, d_pos, e_pos).unwrap();
+        assert!(d > 4.0 * d_pos.distance(e_pos), "{d}");
+    }
+
+    #[test]
     fn guards_walls_seal_bridges_drops() {
         let map = rooms();
         let assets = [
@@ -783,6 +876,10 @@ mod tests {
         ];
         let home = Analysis::run(&Scenario { assets: &home_assets, ..s });
         assert_eq!(home.seal, vec![ab]);
+        // Holding ab with static defense pays as well; nothing on our side
+        // of the map guards room b.
+        assert_eq!(home.hold, vec![ab]);
+        assert!(a.hold.is_empty(), "hold: {:?}", a.hold);
 
         // A bridge through the thin wall between d and e opens a second
         // route: it bypasses every guard on e (ab, bc, ce) and on their base
