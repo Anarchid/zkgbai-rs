@@ -21,10 +21,10 @@ pub(super) fn delaunay_edges(points: &[(f64, f64)]) -> BTreeSet<(usize, usize)> 
 
     let pts: Vec<Point> = points.iter().map(|&(x, y)| Point { x, y }).collect();
     let triangulation = triangulate(&pts);
-    for t in triangulation.triangles.chunks_exact(3) {
-        add(t[0], t[1]);
-        add(t[0], t[2]);
-        add(t[1], t[2]);
+    for &[a, b, c] in triangulation.triangles.as_chunks::<3>().0 {
+        add(a, b);
+        add(a, c);
+        add(b, c);
     }
 
     if triangulation.triangles.is_empty() && points.len() >= 2 {
