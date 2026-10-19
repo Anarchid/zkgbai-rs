@@ -26,7 +26,7 @@ Layout
 Building
 --------
 
-Development build (needs Rust ≥ 1.85):
+Development build (needs Rust ≥ 1.88):
 
     cargo build --release -p zkgbai
     cargo test -p zkgbai

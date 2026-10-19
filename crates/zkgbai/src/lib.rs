@@ -22,6 +22,7 @@ pub mod graph;
 pub mod kgbutil;
 pub mod los;
 pub mod military;
+pub mod terrain;
 pub mod util;
 
 pub use ai::Ai;

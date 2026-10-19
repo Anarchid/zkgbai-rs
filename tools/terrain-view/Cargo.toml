@@ -1,0 +1,12 @@
+[package]
+name = "terrain-view"
+version = "0.1.0"
+description = "Render the terrain model of a .zktamap to PNG images (development aid)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+zk-terrain.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -1,16 +1,19 @@
 [workspace]
 resolver = "3"
-members = ["crates/springai-sys", "crates/springai", "crates/zkgbai"]
+members = ["crates/springai-sys", "crates/springai", "crates/terrain", "crates/zkgbai", "tools/terrain-view"]
 
 [workspace.package]
 edition = "2024"
 license = "GPL-2.0-only"
 repository = "https://github.com/Anarchid/zkgbai-rs"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [workspace.dependencies]
 springai-sys = { path = "crates/springai-sys" }
 springai = { path = "crates/springai" }
+zk-terrain = { path = "crates/terrain" }
+# Terrain decomposition into regions and chokepoints.
+zkta = { package = "zkta-rs", git = "https://github.com/Anarchid/zkta-rust", rev = "828d873", default-features = false }
 
 [profile.release]
 # The engine must never be taken down by an AI panic: we catch unwinds at the
@@ -28,3 +31,9 @@ strip = "debuginfo"
 # Pathfinding and threat painting are hot loops; unoptimised builds are too
 # slow to play a real game with.
 opt-level = 1
+
+[patch.crates-io]
+# zkta's Voronoi backend (boostvoronoi) keeps its beach line in a cpp_map skip
+# list with OS-seeded levels, which made terrain analysis vary between runs;
+# zkta-rust vendors cpp_map with a fixed-seed RNG. Dependents must repeat this.
+cpp_map = { git = "https://github.com/Anarchid/zkta-rust", rev = "828d873" }

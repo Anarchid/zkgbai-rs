@@ -14,6 +14,7 @@ use crate::kgbutil::Pathfinder;
 use crate::los::LosManager;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
+use crate::terrain::TerrainModel;
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
 /// The `shortName` this AI is registered under (see `data/AIInfo.lua`).
@@ -49,6 +50,9 @@ pub struct Ai {
     pub war: MilitaryManager,
     pub fac: FactoryManager,
     pub pathfinder: Pathfinder,
+    /// Regions, chokepoints and connectivity per movement tier (built in the
+    /// background; see [`Ai::terrain`]).
+    pub terrain: TerrainModel,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -95,6 +99,7 @@ impl SkirmishAi for Ai {
         let seed = (cb.ai_id() as u64) << 32 ^ std::process::id() as u64 ^ game.my_team() as u64;
         seed_rand(seed ^ 0x2545_F491_4F6C_DD1D);
         let pathfinder = Pathfinder::new(cb, &defs);
+        let terrain = TerrainModel::start(cb, &defs);
         Ai {
             cb,
             team_id: game.my_team(),
@@ -117,6 +122,7 @@ impl SkirmishAi for Ai {
             war: MilitaryManager::new(cb),
             fac: FactoryManager::new(cb),
             pathfinder,
+            terrain,
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -302,6 +308,7 @@ impl Ai {
         if !self.initialized {
             return;
         }
+        self.guard("terrain.update", |ai| ai.terrain_update());
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }
@@ -385,6 +392,9 @@ impl Ai {
             "kgbprofile" => {
                 self.log_profile();
                 self.say("Profile written to infolog.");
+            }
+            t if t.starts_with("kgbterrain") => {
+                self.terrain_draw(t.trim_start_matches("kgbterrain").trim());
             }
             "kgbgraph" => {
                 self.graph.paint_ascii_graph();

@@ -136,10 +136,10 @@ impl Ai {
                 }
             } else {
                 let mut nav = nav!(self);
-                if let Some(b) = self.bomber_handler.bombers.get_mut(&id) {
-                    if let Some(e) = b.target.and_then(|t| self.war.targets.get(&t)) {
-                        b.bomb(e, &mut nav);
-                    }
+                if let Some(b) = self.bomber_handler.bombers.get_mut(&id)
+                    && let Some(e) = b.target.and_then(|t| self.war.targets.get(&t))
+                {
+                    b.bomb(e, &mut nav);
                 }
             }
         }

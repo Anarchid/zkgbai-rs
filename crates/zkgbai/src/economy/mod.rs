@@ -949,12 +949,12 @@ impl Ai {
             eco.nanos.remove(&uid);
 
             for &id in &eco.construction_tasks {
-                if let Some(c) = eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut()) {
-                    if c.target == Some(unit) {
-                        // if a building was killed while under construction, reset its target.
-                        c.target = None;
-                        break;
-                    }
+                if let Some(c) = eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut())
+                    && c.target == Some(unit)
+                {
+                    // if a building was killed while under construction, reset its target.
+                    c.target = None;
+                    break;
                 }
             }
         } else if self.eco.sparrow == Some(unit) && unit.rules_param_float("wasMorphedTo", 0.0) == 0.0 {

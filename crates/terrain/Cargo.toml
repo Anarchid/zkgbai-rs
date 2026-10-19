@@ -1,0 +1,10 @@
+[package]
+name = "zk-terrain"
+version = "0.1.0"
+description = "Zero-K terrain model: movement tiers, connectivity, regions and chokepoints"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zkta.workspace = true

@@ -986,11 +986,11 @@ impl Ai {
 
     pub fn graph_unit_finished(&mut self, unit: Unit) {
         let Some(def) = unit.def() else { return };
-        if def.id() == self.graph.mex_def_id {
-            if let Some(spot) = self.graph.get_closest_spot_index(unit.pos()) {
-                self.graph.set_owned(spot);
-                self.graph.metal_spots[spot].extractor = Some(unit);
-            }
+        if def.id() == self.graph.mex_def_id
+            && let Some(spot) = self.graph.get_closest_spot_index(unit.pos())
+        {
+            self.graph.set_owned(spot);
+            self.graph.metal_spots[spot].extractor = Some(unit);
         }
     }
 
@@ -1001,13 +1001,14 @@ impl Ai {
     /// When enemy porc is seen, infer that the nearest metal spot is hostile.
     pub fn graph_enemy_enter_los(&mut self, enemy: Unit) {
         let Some(def) = enemy.def() else { return };
-        if enemy.max_speed() == 0.0 && def.is_able_to_attack() {
-            if let Some(spot) = self.graph.get_closest_spot_index(enemy.pos()) {
-                // unless it's already owned by allies
-                let ms = &self.graph.metal_spots[spot];
-                if !ms.hostile && !ms.owned {
-                    self.graph.set_hostile(spot);
-                }
+        if enemy.max_speed() == 0.0
+            && def.is_able_to_attack()
+            && let Some(spot) = self.graph.get_closest_spot_index(enemy.pos())
+        {
+            // unless it's already owned by allies
+            let ms = &self.graph.metal_spots[spot];
+            if !ms.hostile && !ms.owned {
+                self.graph.set_hostile(spot);
             }
         }
     }

@@ -114,10 +114,9 @@ impl Ai {
                 + self.fac.factories.len()
                 + self.eco.factory_tasks.len()) as f32)
                 < (self.eco.static_income / 10.0).floor()
+            && let Some(target) = self.eco_get_caretaker_target()
         {
-            if let Some(target) = self.eco_get_caretaker_target() {
-                self.eco_create_nano_turret_task(wid, target);
-            }
+            self.eco_create_nano_turret_task(wid, target);
         }
 
         //do we need storages?
@@ -126,10 +125,9 @@ impl Ai {
             && (self.eco.metal / self.eco.max_storage > 0.8
                 || ((self.eco.commanders.len() + self.eco.storages.len()) as i32) < 1 + self.merged_allies)
             && self.eco.storage_tasks.is_empty()
+            && let Some(target) = self.eco_get_caretaker_target()
         {
-            if let Some(target) = self.eco_get_caretaker_target() {
-                self.eco_create_storage_task(wid, target);
-            }
+            self.eco_create_storage_task(wid, target);
         }
 
         // do we need airpads for planes
@@ -140,10 +138,9 @@ impl Ai {
             && self.eco.static_income > 15.0
             && ((self.eco.airpads.len() as f32) < (self.bomber_handler.get_bomber_size() as f32 / 8.0).round()
                 || self.eco.airpads.is_empty())
+            && let Some(target) = self.eco_get_caretaker_target()
         {
-            if let Some(target) = self.eco_get_caretaker_target() {
-                self.eco_create_air_pad_task(target);
-            }
+            self.eco_create_air_pad_task(target);
         }
 
         // do we need radar?

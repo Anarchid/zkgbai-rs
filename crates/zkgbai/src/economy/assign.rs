@@ -144,11 +144,11 @@ impl Ai {
         }
 
         // remove it from its old assignment if it had one
-        if wtask != Some(task_id) {
-            if let Some(w) = self.eco.workers.get_mut(&wid) {
-                w.clear_task(&mut self.eco.tasks);
-                w.set_task(&mut self.eco.tasks, task_id, frame);
-            }
+        if wtask != Some(task_id)
+            && let Some(w) = self.eco.workers.get_mut(&wid)
+        {
+            w.clear_task(&mut self.eco.tasks);
+            w.set_task(&mut self.eco.tasks, task_id, frame);
         }
 
         let out_of_range = distance(wpos, task_pos) > build_dist * 1.5;

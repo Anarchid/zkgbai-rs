@@ -399,10 +399,11 @@ impl Squad {
         // port: the original assumed `id` was a member; only touch the
         // bookkeeping (metal value etc.) if it actually is one.
         if !self.fighters.contains(&id) && self.leader != Some(id) {
-            if let Some(f) = fighters.get_mut(&id) {
-                if f.squad == Some(self.id) && self.kind != SquadKind::Shield {
-                    f.squad = None;
-                }
+            if let Some(f) = fighters.get_mut(&id)
+                && f.squad == Some(self.id)
+                && self.kind != SquadKind::Shield
+            {
+                f.squad = None;
             }
             return;
         }

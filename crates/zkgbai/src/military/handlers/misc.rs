@@ -125,44 +125,43 @@ impl Ai {
 
         if frame % 300 == (self.offset + 10) % 300 {
             // Use nukes.
-            if let Some(nuke) = self.misc_handler.nuke {
-                if !self.war.enemy_has_anti_nuke
-                    && nuke.stockpile() > 0
-                    && frame - self.misc_handler.last_nuke_frame > 1800
-                {
-                    let target = self.war_get_super_wep_target(nuke, true);
-                    if target != NULLPOS {
-                        nuke.attack_area(target, 0.0, 0);
-                        self.misc_handler.last_nuke_frame = frame;
-                    }
+            if let Some(nuke) = self.misc_handler.nuke
+                && !self.war.enemy_has_anti_nuke
+                && nuke.stockpile() > 0
+                && frame - self.misc_handler.last_nuke_frame > 1800
+            {
+                let target = self.war_get_super_wep_target(nuke, true);
+                if target != NULLPOS {
+                    nuke.attack_area(target, 0.0, 0);
+                    self.misc_handler.last_nuke_frame = frame;
                 }
             }
         }
 
-        if frame % 450 == (self.offset + 10) % 450 {
-            if let Some(zenith) = self.misc_handler.zenith {
-                let meteors = zenith.rules_param_float("meteorsControlled", 0.0) as i32;
-                if meteors > 75 {
-                    let target = self.war_get_super_wep_target(zenith, true);
-                    if target != NULLPOS {
-                        zenith.attack_area(target, 0.0, 0);
-                    } else {
-                        zenith.stop(0);
-                    }
+        if frame % 450 == (self.offset + 10) % 450
+            && let Some(zenith) = self.misc_handler.zenith
+        {
+            let meteors = zenith.rules_param_float("meteorsControlled", 0.0) as i32;
+            if meteors > 75 {
+                let target = self.war_get_super_wep_target(zenith, true);
+                if target != NULLPOS {
+                    zenith.attack_area(target, 0.0, 0);
                 } else {
                     zenith.stop(0);
                 }
+            } else {
+                zenith.stop(0);
             }
         }
 
-        if frame % 900 == (self.offset + 10) % 900 {
-            if let Some(derp) = self.misc_handler.derp {
-                let target = self.war_get_super_wep_target(derp, false);
-                if target != NULLPOS {
-                    derp.attack_area(target, 0.0, 0);
-                } else {
-                    derp.stop(0);
-                }
+        if frame % 900 == (self.offset + 10) % 900
+            && let Some(derp) = self.misc_handler.derp
+        {
+            let target = self.war_get_super_wep_target(derp, false);
+            if target != NULLPOS {
+                derp.attack_area(target, 0.0, 0);
+            } else {
+                derp.stop(0);
             }
         }
     }
@@ -288,14 +287,14 @@ impl Ai {
     /// Delete a support's fighter, keeping the aspis count of the shield
     /// squad it follows up to date.
     fn misc_forget_support(&mut self, id: i32) {
-        if let Some(f) = self.fighters.remove(&id) {
-            if self.defs.name_of(f.unit) == "shieldshield" {
-                // Decrement aspis count.
-                if let Some(sq) = f.squad.and_then(|s| self.squads.get_mut(s)) {
-                    if sq.kind == SquadKind::Shield {
-                        sq.num_aspis -= 1;
-                    }
-                }
+        if let Some(f) = self.fighters.remove(&id)
+            && self.defs.name_of(f.unit) == "shieldshield"
+        {
+            // Decrement aspis count.
+            if let Some(sq) = f.squad.and_then(|s| self.squads.get_mut(s))
+                && sq.kind == SquadKind::Shield
+            {
+                sq.num_aspis -= 1;
             }
         }
     }
@@ -582,10 +581,10 @@ impl Ai {
             if !matches!(self.defs.name_of(s.unit), "striderdante" | "striderscorpion" | "striderbantha") {
                 continue;
             }
-            if s.is_dgun_ready(frame) {
-                if let Some(target) = self.misc_get_dgun_target(s) {
-                    s.unit.dgun(target, 0);
-                }
+            if s.is_dgun_ready(frame)
+                && let Some(target) = self.misc_get_dgun_target(s)
+            {
+                s.unit.dgun(target, 0);
             }
         }
     }

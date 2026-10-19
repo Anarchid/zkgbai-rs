@@ -202,10 +202,10 @@ impl Ai {
     /// Delete a squad, letting go of supports that were following it.
     fn squad_delete_squad(&mut self, sid: SquadId) {
         for id in &self.misc_handler.supports {
-            if let Some(g) = self.fighters.get_mut(id) {
-                if g.squad == Some(sid) {
-                    g.squad = None;
-                }
+            if let Some(g) = self.fighters.get_mut(id)
+                && g.squad == Some(sid)
+            {
+                g.squad = None;
             }
         }
         self.squads.remove(sid);
