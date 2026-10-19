@@ -33,7 +33,7 @@ Development build (needs Rust ≥ 1.85):
 
 Release package for Linux and Windows (cross-built; the Linux library targets glibc 2.17):
 
-    tools/setup-toolchain.sh   # once: zig + cargo-zigbuild into target/toolchains
+    tools/setup-toolchain.sh   # once: zig + cargo-zigbuild into .toolchains
     tools/package.sh           # -> dist-rs/AI/Skirmish/ZKGBAI/<version>/
 
 `tools/package.sh --native` skips cross-building and only produces the `.so` for this machine.

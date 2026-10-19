@@ -31,7 +31,7 @@ if [ "$native" = 1 ]; then
     cargo build --release -p zkgbai
     cp target/release/libzkgbai.so "$ai/libSkirmishAI.so"
 else
-    export PATH="$root/target/toolchains/venv/bin:$root/target/toolchains/bin:$PATH"
+    export PATH="$root/.toolchains/venv/bin:$root/.toolchains/bin:$PATH"
     command -v cargo-zigbuild > /dev/null || { echo "run tools/setup-toolchain.sh first (or use --native)" >&2; exit 1; }
     cargo zigbuild --release -p zkgbai --target x86_64-unknown-linux-gnu.2.17
     cargo zigbuild --release -p zkgbai --target x86_64-pc-windows-gnu
