@@ -2,7 +2,7 @@ name: rust
 
 on:
   push:
-    branches: [master, rust-rewrite]
+    branches: [main]
     tags: ["v*"]
   pull_request:
 
