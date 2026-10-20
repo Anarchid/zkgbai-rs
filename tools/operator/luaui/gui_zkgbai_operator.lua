@@ -799,12 +799,16 @@ local function dropInstance(port)
 	spEcho(format("ZKGBAI Operator: lost the AI on port %d", port))
 end
 
+local panelWanted = false -- a Chili panel, once there is an AI to show
+local makeChiliPanel -- (below)
+
 local function discover()
 	local now = clock()
 	if now < nextProbe then
 		return
 	end
-	nextProbe = now + 5
+	-- Less often in games without ZKGBAI.
+	nextProbe = now + ((now > 60 and next(instances) == nil) and 15 or 5)
 	for port = FIRST_PORT, LAST_PORT do
 		if not instances[port] and not probing[port] then
 			probing[port] = true
@@ -816,6 +820,15 @@ local function discover()
 						fails = 0, busy = {}, due = {}, feed = {}, color = teamColor(value.team),
 					}
 					spEcho(format("ZKGBAI Operator: found the AI of team %d on port %d (%s)", value.team, port, tostring(value.version)))
+					if panelWanted and not panel then
+						local ok, err = pcall(function()
+							panel = makeChiliPanel()
+						end)
+						if not ok then
+							spEcho("ZKGBAI Operator: no Chili panel: " .. tostring(err))
+							panel, panelWanted = nil, false
+						end
+					end
 					-- Show our ally AI if we play, else the lowest team.
 					if not focusChosen then
 						local function rank(inst)
@@ -1471,7 +1484,7 @@ local function statusLines(inst)
 		terr and terr.spots_ours or "?", terr and terr.spots_enemy or "?", held, timeText(s.frame or 0))
 end
 
-local function makeChiliPanel()
+function makeChiliPanel()
 	local Chili = WG.Chili
 	if not Chili then
 		return nil
@@ -1629,10 +1642,6 @@ local function drawHandPanel()
 	local x0, top = 12, vsy - 140
 	local inst = focused()
 	if not inst then
-		if next(instances) == nil and clock() > 15 then
-			glColor(MUTED[1], MUTED[2], MUTED[3], 0.8)
-			glText("ZKGBAI Operator: no AI with operator=on on ports 7460-7467", x0, top, 11, "o")
-		end
 		return
 	end
 	local feedLines = show.feed and 9 or 0
@@ -1763,13 +1772,8 @@ function widget:Initialize()
 		spEcho("ZKGBAI Operator: no shader overlay, plain quads instead: " .. tostring(err))
 		overlay.ok = false
 	end
-	ok, err = pcall(function()
-		panel = makeChiliPanel()
-	end)
-	if not ok then
-		spEcho("ZKGBAI Operator: no Chili panel: " .. tostring(err))
-		panel = nil
-	end
+	-- The panel appears with the first AI found (nothing shows in other games).
+	panelWanted = WG.Chili ~= nil
 end
 
 function widget:Shutdown()
