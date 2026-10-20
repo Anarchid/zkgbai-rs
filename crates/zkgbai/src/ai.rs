@@ -77,6 +77,7 @@ pub struct Ai {
     pub sweeps: Sweeps,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
+    pub air_intel: crate::military::air_intel::AirIntel,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -167,6 +168,7 @@ impl SkirmishAi for Ai {
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
+            air_intel: Default::default(),
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -382,7 +384,7 @@ impl Ai {
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
         // A staged anti-nuke stands by (see `strike_test`).
-        if self.test.as_deref() == Some("anti") {
+        if matches!(self.test.as_deref(), Some("anti" | "aafort")) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
         }
@@ -541,6 +543,7 @@ impl Ai {
                 self.guard("eco.unitDamaged", |ai| ai.eco_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
+                self.guard("airIntel.unitDamaged", |ai| ai.air_intel_unit_damaged(unit, attacker, dir, weapon));
             }
             Event::UnitDestroyed { unit, attacker } => {
                 self.guard("graph.unitDestroyed", |ai| ai.graph_unit_destroyed(unit, attacker));

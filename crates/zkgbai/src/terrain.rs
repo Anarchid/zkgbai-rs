@@ -522,7 +522,8 @@ impl Ai {
     /// What is known to stand on the map, for who holds which region: the
     /// enemy's buildings, and its ground units seen in the last
     /// [`PRESENCE_RECENT`] frames, with their danger to ground forces or to
-    /// aircraft and their value; our fighters, and our metal spots' value.
+    /// aircraft and their value, and the anti-air known only by its fire
+    /// (see `air_intel`); our fighters, and our metal spots' value.
     pub fn region_presence(&self) -> Vec<Presence> {
         let frame = self.frame;
         let mut presence: Vec<Presence> = (self.war.targets.values())
@@ -536,15 +537,26 @@ impl Ai {
                     power: if e.is_aa && !e.is_flex_aa { 0.0 } else { danger },
                     aa: if aa { danger } else { 0.0 },
                     value: e.value,
+                    seen: e.last_seen,
                 }
             })
             .collect();
+        // Anti-air known only by its fire.
+        presence.extend(self.air_intel_presence().into_iter().map(|(p, aa, seen)| Presence {
+            pos: pos(p),
+            side: Side::Enemy,
+            power: 0.0,
+            aa,
+            value: 0.0,
+            seen,
+        }));
         presence.extend(self.fighters.values().map(|f| Presence {
             pos: pos(f.get_pos()),
             side: Side::Ally,
             power: (f.power + f.unit.max_health()) / 10.0,
             aa: 0.0,
             value: f.metal_value,
+            seen: frame,
         }));
         presence.extend(self.graph.get_owned_spots().iter().map(|m| Presence {
             pos: pos(m.get_pos()),
@@ -552,6 +564,7 @@ impl Ai {
             power: 0.0,
             aa: 0.0,
             value: m.value,
+            seen: frame,
         }));
         presence
     }
@@ -575,8 +588,13 @@ impl Ai {
             draw.add_point(
                 Vec3::new(c.x, draw.elevation_at(c.x, c.z), c.z),
                 &format!(
-                    "R{r} enemy {:.0} (aa {:.0}, {:.0}m), ours {:.0} ({:.0}m)",
-                    h.enemy_power, h.enemy_aa, h.enemy_value, h.ally_power, h.ally_value
+                    "R{r} enemy {:.0} (aa {:.0}{}, {:.0}m), ours {:.0} ({:.0}m)",
+                    h.enemy_power,
+                    h.enemy_aa,
+                    h.aa_seen.map_or(String::new(), |s| format!(" {} s old", (self.frame - s) / 30)),
+                    h.enemy_value,
+                    h.ally_power,
+                    h.ally_value
                 ),
             );
         }

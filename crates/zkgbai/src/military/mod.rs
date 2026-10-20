@@ -1,6 +1,7 @@
 //! Military: enemy tracking, threat/value maps, targeting, and the unit
 //! handlers (raiders, squads, retreat, misc, bombers).
 
+pub mod air_intel;
 pub mod arsenal;
 pub mod drops;
 pub mod enemy;
@@ -407,6 +408,7 @@ impl Ai {
         self.guard("nukes.update", |ai| ai.nukes_update(frame));
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
+        self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
@@ -994,6 +996,8 @@ impl Ai {
     fn war_paint_threat_map(&mut self) {
         let frame = self.war.frame;
         let team = self.team_id;
+        // Anti-air we know of only by its fire (see `air_intel`).
+        let unseen_aa = self.air_intel_threat();
         let fighters = &self.fighters;
         let squads = &self.squads;
         let war = &mut self.war;
@@ -1170,6 +1174,10 @@ impl Ai {
                         war.threat_graphics.paint_circle(x, y, r + 1, effective_power);
                     }
                 }
+            }
+            for &(p, radius, power) in &unseen_aa {
+                let (x, y) = cell(p);
+                war.aa_threat_graphics.paint_circle(x, y, (radius / 64.0).round() as i32 + 1, power as i32);
             }
         } else {
             war.ally_porc_graphics.clear();

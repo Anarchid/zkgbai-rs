@@ -20,17 +20,24 @@
 //! once, so its economy goes for a superweapon (a Bertha, mostly) soon.
 //! With `test=colony`, it gets a ground constructor and a Charon (or with
 //! `test=colonyair` an air constructor) to colonize the free metal far off
-//! (see `economy::colonize`).
+//! (see `economy::colonize`). With `test=aafort`, a passive defender gets
+//! static and mobile anti-air around its base; with `test=aaprobe`, the
+//! attacker keeps flying unarmed Charons over the enemy's base, to be shot
+//! at by what it does not see (see `air_intel`; cheats name every attacker,
+//! so the fixes are scored against where the shooters truly are).
 
 use springai::Vec3;
 
 use crate::Ai;
 use crate::military::missiles;
-use crate::util::{distance, get_directional_point};
+use crate::util::{OPTION_SHIFT_KEY, distance, get_directional_point};
 
 /// When the attacker gets its silo, and its radar for `eos`.
 const SILO_FRAME: i32 = 30 * 300;
 const RADAR_FRAME: i32 = 30 * 100;
+
+/// How often probing Charons come.
+const PROBE_ROUND: i32 = 30 * 40;
 
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
@@ -80,6 +87,23 @@ impl Ai {
                 units.push(("staticradar", ahead(300.0)));
                 units
             }
+            ("aafort", 60) => {
+                let aside = |d: f32, s: f32| {
+                    let p = ahead(d);
+                    Vec3::xz(p.x - dz / n * s, p.z + dx / n * s)
+                };
+                vec![
+                    ("turretaafar", aside(700.0, 0.0)),
+                    ("turretaaheavy", aside(-200.0, 900.0)),
+                    ("turretaalaser", aside(400.0, 500.0)),
+                    ("turretaalaser", aside(400.0, -500.0)),
+                    ("turretaaflak", aside(-400.0, -600.0)),
+                    ("vehaa", aside(200.0, -1300.0)),
+                    ("vehaa", aside(250.0, -1350.0)),
+                    ("vehaa", aside(150.0, -1250.0)),
+                ]
+            }
+            ("aaprobe", f) if f % PROBE_ROUND == 0 && f > 0 => vec![("gunshiptrans", ahead(-200.0)); 2],
             ("colony", 60) => vec![("cloakcon", ahead(-150.0)), ("gunshiptrans", ahead(-250.0))],
             ("colonyair", 60) => vec![("gunshipcon", ahead(-150.0))],
             ("drop" | "dropbot", f) if f >= DROP_FRAME && (f - DROP_FRAME) % DROP_ROUND == 0 => {
@@ -119,6 +143,16 @@ impl Ai {
         if frame % 300 == 0 {
             for res in [self.metal, self.energy] {
                 self.cb.cheat_resource(res, 20000.0);
+            }
+        }
+        // Probing Charons fly over the enemy's base, this way and that.
+        if test == "aaprobe" && frame % 300 == 0 {
+            let charons = self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "gunshiptrans");
+            for (k, c) in charons.enumerate() {
+                let s = if (k + (frame / 300) as usize).is_multiple_of(2) { 1.0 } else { -1.0 };
+                let across = Vec3::xz(enemy.x - s * dz / n * 1500.0, enemy.z + s * dx / n * 1500.0);
+                c.move_to(across, 0);
+                c.move_to(Vec3::xz(enemy.x + s * dz / n * 1500.0, enemy.z - s * dx / n * 1500.0), OPTION_SHIFT_KEY);
             }
         }
         // The Widows wanted, from an idle spider factory.

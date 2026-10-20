@@ -378,6 +378,10 @@ impl Ai {
     }
 
     pub fn drops_update(&mut self, frame: i32) {
+        // Staged probing Charons are the test's (see `strike_test`).
+        if self.test.as_deref() == Some("aaprobe") {
+            return;
+        }
         if frame % EJECT_CHECK == 0 {
             self.drops_eject_check();
         }

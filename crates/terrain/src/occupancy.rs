@@ -21,6 +21,8 @@ pub struct Presence {
     /// Strength against aircraft, likewise.
     pub aa: f32,
     pub value: f32,
+    /// When it was last seen (or heard of), in the caller's time.
+    pub seen: i32,
 }
 
 /// What stands in a region.
@@ -31,6 +33,9 @@ pub struct Hold {
     pub enemy_value: f32,
     pub ally_power: f32,
     pub ally_value: f32,
+    /// When the freshest word of the enemy's anti-air here is from (`None`:
+    /// none known): how stale `enemy_aa` is.
+    pub aa_seen: Option<i32>,
 }
 
 impl Hold {
@@ -71,6 +76,9 @@ impl Occupancy {
                     h.enemy_power += p.power;
                     h.enemy_aa += p.aa;
                     h.enemy_value += p.value;
+                    if p.aa > 0.0 {
+                        h.aa_seen = Some(h.aa_seen.map_or(p.seen, |s| s.max(p.seen)));
+                    }
                 }
                 Side::Ally => {
                     h.ally_power += p.power;
@@ -131,7 +139,7 @@ mod tests {
     use crate::testmaps::{at, rooms};
 
     fn enemy(pos: Pos, power: f32) -> Presence {
-        Presence { pos, side: Side::Enemy, power, aa: 0.0, value: 100.0 }
+        Presence { pos, side: Side::Enemy, power, aa: 0.0, value: 100.0, seen: 0 }
     }
 
     #[test]
@@ -160,5 +168,14 @@ mod tests {
         assert!(d[3].is_finite());
         assert!(strong.fighting_distances(&map, home, 400.0)[e].is_finite());
         assert_eq!(strong.fighting_distances(&map, home, f32::INFINITY), free);
+    }
+
+    #[test]
+    fn anti_air_is_dated_by_the_freshest_word_of_it() {
+        let map = rooms();
+        let aa = |seen| Presence { pos: at(12.0, 1.0), side: Side::Enemy, power: 0.0, aa: 50.0, value: 0.0, seen };
+        let o = Occupancy::new(&map, &[aa(100), aa(400), enemy(at(12.0, 1.0), 10.0)]);
+        assert_eq!((o.regions[1].enemy_aa, o.regions[1].aa_seen), (100.0, Some(400)));
+        assert_eq!(o.regions[0].aa_seen, None);
     }
 }

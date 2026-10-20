@@ -498,6 +498,11 @@ impl Ai {
     }
 
     /// Chat message from `player`.
+    /// The terrain heights as at the start of the game.
+    pub fn eco_height_map(&self) -> &HeightMap {
+        &self.eco.height_map
+    }
+
     pub fn eco_message(&mut self, player: i32, message: &str) {
         let _ = player;
         if self.merged_allies == 0 && message.starts_with("kgbfac") {
