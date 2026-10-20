@@ -285,7 +285,7 @@ local overlay = {} -- shader, vao, ok
 local VS_SRC = [[
 #version 420
 #line 10000
-layout (location = 0) in vec2 xyworld_xyfract;
+layout (location = 0) in vec2 meshXZ; // world x, z
 uniform sampler2D heightmapTex;
 out DataVS {
 	vec2 worldXZ;
@@ -293,7 +293,7 @@ out DataVS {
 //__ENGINEUNIFORMBUFFERDEFS__
 #line 10100
 void main() {
-	vec2 w = (xyworld_xyfract * 0.5 + 0.5) * mapSize.xy;
+	vec2 w = meshXZ;
 	vec2 uvhm = clamp(w, vec2(8.0), mapSize.xy - 8.0) / mapSize.xy;
 	float y = max(0.0, textureLod(heightmapTex, uvhm, 0.0).x) + 4.0;
 	worldXZ = w;
@@ -376,19 +376,64 @@ void main() {
 }
 ]]
 
+-- The mesh the maps are drawn on: a grid over the whole map in world
+-- coordinates, cut into tiles of whole columns, since index buffers are 16
+-- bit (one mesh of more than 65536 vertices loses all past the 65536th).
+local function buildMeshTiles()
+	local mx, mz = Game.mapSizeX, Game.mapSizeZ
+	local spacing = max(24, max(mx, mz) / 400)
+	local nx, nz = math.ceil(mx / spacing), math.ceil(mz / spacing)
+	local colsPerTile = floor(65536 / (nz + 1)) - 1
+	local tiles = {}
+	for c0 = 0, nx - 1, colsPerTile do
+		local c1 = min(nx, c0 + colsPerTile)
+		local verts, index = {}, {}
+		for c = c0, c1 do
+			local x = min(mx, c * spacing)
+			for r = 0, nz do
+				verts[#verts + 1] = x
+				verts[#verts + 1] = min(mz, r * spacing)
+			end
+		end
+		local col = nz + 1
+		for c = 0, c1 - c0 - 1 do
+			for r = 0, nz - 1 do
+				local q = c * col + r
+				index[#index + 1] = q
+				index[#index + 1] = q + 1
+				index[#index + 1] = q + col
+				index[#index + 1] = q + 1
+				index[#index + 1] = q + col + 1
+				index[#index + 1] = q + col
+			end
+		end
+		local vbo = gl.GetVBO(GL.ARRAY_BUFFER, false)
+		local ibo = gl.GetVBO(GL.ELEMENT_ARRAY_BUFFER, false)
+		if not vbo or not ibo then
+			return nil
+		end
+		vbo:Define(#verts / 2, {{id = 0, name = "meshXZ", size = 2}})
+		vbo:Upload(verts)
+		ibo:Define(#index)
+		ibo:Upload(index)
+		local vao = gl.GetVAO()
+		vao:AttachVertexBuffer(vbo)
+		vao:AttachIndexBuffer(ibo)
+		tiles[#tiles + 1] = vao
+	end
+	return tiles
+end
+
 local function initOverlay()
-	if not gl.CreateShader or not gl.GetVAO then
+	if not gl.CreateShader or not gl.GetVAO or not gl.GetVBO then
 		return "no GL4 (headless?)"
 	end
-	-- Included from here, so that their functions land in this widget.
+	-- Included from here, so that its functions land in this widget.
 	local okInclude, LuaShader = pcall(function()
 		return VFS.Include("LuaUI/Widgets/Include/LuaShader.lua")
 	end)
-	local okPlane = pcall(function()
-		VFS.Include("LuaUI/Widgets/Include/instancevbotable.lua")
-	end)
-	if not okInclude or not LuaShader or not okPlane or not makePlaneVBO then
-		return "no LuaShader.lua / instancevbotable.lua"
+	if not okInclude or not LuaShader then
+		return "no LuaShader.lua"
 	end
 	overlay.source = {
 		vsSrc = VS_SRC,
@@ -404,17 +449,10 @@ local function initOverlay()
 	if not overlay.shader then
 		return "the overlay shader did not compile"
 	end
-	-- A grid of about 24 elmos (at most 384 a side).
-	local nx = min(384, max(32, floor(Game.mapSizeX / 24)))
-	local nz = min(384, max(32, floor(Game.mapSizeZ / 24)))
-	local vbo = makePlaneVBO(1, 1, nx, nz)
-	local ibo = makePlaneIndexVBO(nx, nz)
-	if not vbo or not ibo then
+	overlay.tiles = buildMeshTiles()
+	if not overlay.tiles then
 		return "no VBOs"
 	end
-	overlay.vao = gl.GetVAO()
-	overlay.vao:AttachVertexBuffer(vbo)
-	overlay.vao:AttachIndexBuffer(ibo)
 	overlay.ok = true
 end
 
@@ -559,7 +597,9 @@ local function drawOverlayPass(tex, rect, w, h, mode, attr, regionInfo)
 	if regionInfo then
 		s:SetUniform("regionInfo", regionInfo[1], regionInfo[2], regionInfo[3], regionInfo[4])
 	end
-	overlay.vao:DrawElements(GL.TRIANGLES)
+	for i = 1, #overlay.tiles do
+		overlay.tiles[i]:DrawElements(GL.TRIANGLES)
+	end
 end
 
 local function drawOverlays(inst)
