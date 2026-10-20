@@ -171,7 +171,13 @@ impl Ai {
     /// it was adopted.
     pub(crate) fn eco_logistics_porc(&mut self, def: UnitDef, pos: Vec3, near: f32) -> Option<(TaskId, bool)> {
         let site = self.eco_build_site(def, pos, 0);
-        if site.x < 0.0 {
+        // What `eco_clean_orders` would drop at once: a blocked site, or one
+        // enemy defenses cover; and where a worker would not go.
+        if site.x < 0.0
+            || !self.cb.map().is_possible_to_build_at(def, site, 0)
+            || self.war.get_porc_threat(site) > 0.0
+            || self.war.get_effective_threat(site) > self.war.get_total_friendly_threat(site)
+        {
             return None;
         }
         let planned = (self.eco.porc_tasks.iter().copied())

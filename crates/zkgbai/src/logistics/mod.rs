@@ -548,12 +548,16 @@ impl Ai {
                 continue;
             }
             let why = format!(
-                "{:.0} enemy power {:.0}s away; {:.0} at risk, loss {:.0}% -> {:.0}%, eta {eta:.0}s, net {net:.0}",
+                "{:.0} enemy power {:.0}s away; {:.0} at risk, loss {:.0}% -> {:.0}%, eta {eta:.0}s, net {net:.0}, \
+                 threat at the site {:.1} vs ours {:.1}, {} hands",
                 p.power,
                 p.seconds,
                 var,
                 before * 100.0,
-                after * 100.0
+                after * 100.0,
+                self.war.get_effective_threat(site),
+                self.war.get_total_friendly_threat(site),
+                hands.len()
             );
             if self.logistics_open(task, Kind::Defense, Worth::Deadline { value: saved, by }, &why, p.power).is_some()
                 && adopted
