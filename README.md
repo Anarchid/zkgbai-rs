@@ -114,7 +114,8 @@ The server answers on one port:
 | `/snapshot`, `/journal`, `/journals`, `/health` | The latest positions (served even while the game is paused), this run's journal, the journal directory. |
 
 Tools that read: `status`, `economy`, `workers`, `tasks`, `factories`, `military`, `squads`,
-`units`, `unit`, `enemies`, `threat_at`, `threat_map`, `spots`, `map_info`, `terrain`, `events`,
+`units`, `unit`, `enemies`, `threat_at`, `threat_map`, `spots`, `map_info`, `terrain`, `terrain_map`
+(the segmentation of a movement tier: regions per cell, who holds them, chokepoints), `events`,
 `defs`, `snapshot`, `overrides`, `profile`. Tools that act: `say`, `mark`, `note` (into the
 journal), `feature` (switch a dev feature off or on mid-game), `fac_queue` (production orders the
 factories serve before their own choice), `requisition` (the next factory), `build` (a prioritized
@@ -136,12 +137,17 @@ In the game itself, the LuaUI widget `tools/operator/luaui/gui_zkgbai_operator.l
 on this machine over LuaSocket and draws what the one in focus thinks into the world: its squads and
 where they go, places it defends, where its other units mean to go (a worker's task, a raider's
 target), its memory of the enemy (where it last saw each unit and how long ago, and the reach of
-remembered defenses), its view of the metal spots, a threat or value map on the ground, the units the
-operator holds, and its log in a panel. Select the AI's units (as a spectator, or an AI ally's units)
-and right-click to steer them: move, attack-move with ctrl, attack or guard a unit, queue with shift;
-alt sends their whole squad, ctrl+alt makes a place to defend. `/luaui zkop` takes `focus <team>`,
-`layer <name>`, `release`, `build <unitdef>` and `defend` (at the mouse), `fac <unitdef> [n]`,
-`say`, `note`, `feature <name> on|off`. `tools/arena/match.sh` installs extra widgets for a match
+remembered defenses), its view of the metal spots, the units the operator holds, and the chokepoints
+of the terrain analysis. A GL4 shader draped over the terrain (Zero-K's `LuaShader`) shows one of
+its threat or value maps, smooth with contour lines, and the segmentation of a movement tier:
+regions by id, or by who holds them (ours blue, the enemy's red, sheltered ones hatched). Its panel
+is a Chili window: toggles, the map and terrain pickers, the AI in focus, and its log. Select the
+AI's units (as a spectator, or an AI ally's units) and right-click to steer them: move, attack-move
+with ctrl, attack or guard a unit, queue with shift; alt sends their whole squad, ctrl+alt makes a
+place to defend. `/luaui zkop` takes `focus <team>`, `layer <name>`, `terrain <off|regions|holders>
+[tier]`, `release`, `build <unitdef>` and `defend` (at the mouse), `fac <unitdef> [n]`, `say`,
+`note`, `feature <name> on|off`. Without GL4 the value map is drawn as quads, without Chili the
+panel by hand. `tools/arena/match.sh` installs extra widgets for a match
 from `ARENA_WIDGETS`.
 
 In-game commands

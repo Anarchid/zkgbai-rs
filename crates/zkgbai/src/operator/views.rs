@@ -10,6 +10,7 @@ use crate::Ai;
 use crate::economy::{TaskKind, WorkerTask};
 use crate::military::{Enemy, MilitaryManager, SquadKind};
 use crate::util::NULLPOS;
+use zk_terrain::{CELL, ChokeKind, Tier};
 
 pub type Out = Result<Value, String>;
 
@@ -784,6 +785,102 @@ pub fn terrain(ai: &mut Ai, _: &Args) -> Out {
             "teleports": a.teleports.len(),
         },
     }))
+}
+
+/// The terrain's segmentation for one movement tier: a region per cell
+/// (run-length rows), the regions with who holds them, and the chokepoints
+/// between them. See the `terrain_map` tool.
+pub fn terrain_map(ai: &mut Ai, a: &Args) -> Out {
+    let terrain = ai.terrain.get().ok_or("the terrain model is not ready yet")?;
+    let strategy_tier = ai.strategy.as_ref().map(|s| s.tier);
+    let tier = match a.opt_str("tier")? {
+        Some(name) => Tier::ALL
+            .into_iter()
+            .find(|t| t.name().eq_ignore_ascii_case(name))
+            .ok_or_else(|| format!("no tier '{name}' (spider, bot, vehicle, hover, ship, amphib)"))?,
+        None => strategy_tier.unwrap_or(Tier::Bot),
+    };
+    let map = terrain.tier(tier).ok_or_else(|| format!("no model for {}", tier.name()))?;
+    let (w, h) = (map.width, map.height);
+    let max_size = a.opt_i32("max_size")?.unwrap_or(512).clamp(32, 2048) as usize;
+    let step = w.max(h).div_ceil(max_size).max(1);
+    let (gw, gh) = (w.div_ceil(step), h.div_ceil(step));
+    // Region ids, -1 for obstacles: each output cell takes its middle's.
+    let id_at = |x: usize, z: usize| -> i64 {
+        let (cx, cz) = ((x * step + step / 2).min(w - 1), (z * step + step / 2).min(h - 1));
+        map.region_of_cell(cz * w + cx).map_or(-1, |r| r as i64)
+    };
+    let mut version: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut rows = Vec::with_capacity(gh);
+    for z in 0..gh {
+        let mut row: Vec<i64> = Vec::new();
+        for x in 0..gw {
+            let id = id_at(x, z);
+            version = (version ^ (id as u64).wrapping_add(x as u64 * 31 + z as u64)).wrapping_mul(0x100_0000_01b3);
+            match row.len() {
+                n if n >= 2 && row[n - 2] == id => row[n - 1] += 1,
+                _ => row.extend([id, 1]),
+            }
+        }
+        rows.push(row);
+    }
+    let strategy = ai.strategy.as_ref().filter(|s| s.tier == tier);
+    let regions: Vec<Value> = map
+        .regions
+        .iter()
+        .map(|r| {
+            let mut v = json!({"id": r.id, "center": [r.center.x.round() as i32, r.center.z.round() as i32],
+                               "cells": r.cells, "component": r.component});
+            if let Some(s) = strategy {
+                if let Some(hold) = s.occupancy.regions.get(r.id) {
+                    v["holder"] = json!(format!("{:?}", hold.holder()).to_lowercase());
+                    v["enemy_power"] = r1(hold.enemy_power);
+                    v["ally_power"] = r1(hold.ally_power);
+                    v["enemy_value"] = r1(hold.enemy_value);
+                    v["ally_value"] = r1(hold.ally_value);
+                    v["enemy_aa"] = r1(hold.enemy_aa);
+                }
+                v["sheltered"] = json!(s.sheltered.get(r.id).copied().unwrap_or(false));
+            }
+            v
+        })
+        .collect();
+    let chokes: Vec<Value> = map
+        .chokes
+        .iter()
+        .map(|c| {
+            let mut v = json!({
+                "id": c.id,
+                "kind": if c.kind == ChokeKind::Gate { "gate" } else { "border" },
+                "pos": [c.pos.x.round() as i32, c.pos.z.round() as i32],
+                "width": r1(c.width),
+                "gate": c.gate.map(|g| g.map(|p| [p.x.round() as i32, p.z.round() as i32])),
+                "regions": c.regions,
+                "climb": c.climb.iter().map(|&x| r1(x)).collect::<Vec<_>>(),
+            });
+            if let Some(s) = strategy {
+                v["fortify"] = json!(s.fortify.iter().any(|f| f.choke == c.id));
+                v["hold"] = json!(s.analysis.hold.contains(&c.id));
+                v["seal"] = json!(s.analysis.seal.contains(&c.id));
+            }
+            v
+        })
+        .collect();
+    let mut v = json!({
+        "tier": tier.name(),
+        "strategy_tier": strategy_tier.map(|t| t.name()),
+        "tiers": terrain.tiers().iter().map(|m| m.tier.name()).collect::<Vec<_>>(),
+        "cell": (CELL as usize * step),
+        "width": gw,
+        "height": gh,
+        "grid_version": version.to_string(),
+        "regions": regions,
+        "chokes": chokes,
+    });
+    if a.bool_or("grid", true) {
+        v["rows"] = json!(rows);
+    }
+    Ok(v)
 }
 
 pub fn events(ai: &mut Ai, a: &Args) -> Out {

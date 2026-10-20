@@ -307,6 +307,22 @@ pub static TOOLS: &[Tool] = &[
         run: views::terrain,
     },
     Tool {
+        name: "terrain_map",
+        description: "The terrain's segmentation for one movement tier: the region of every cell (rows of \
+                       [region id, run length, ...], -1 for obstacles), each region with who holds it (on the \
+                       strategy's tier), and the chokepoints between regions (gates with their lines across, \
+                       borders; those the strategy fortifies, holds or would seal). grid_version changes when \
+                       the regions do.",
+        params: &[
+            P("tier", Str, false, "spider, bot, vehicle, hover, ship or amphib (default: the strategy's tier)"),
+            P("max_size", Int, false, "at most this many cells a side (default 512; cells are 16 elmos)"),
+            P("grid", Bool, false, "include the cell rows (default true)"),
+        ],
+        writes: false,
+        needs_modules: true,
+        run: views::terrain_map,
+    },
+    Tool {
         name: "events",
         description: "Recent journal records: log lines, chat, unit births and deaths, kills, enemies first seen, \
                        operator actions and notes, per-second ticks. Filter by kind and text.",
