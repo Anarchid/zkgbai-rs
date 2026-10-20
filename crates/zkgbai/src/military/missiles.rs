@@ -45,10 +45,12 @@ pub const SILO_INCOME: f32 = 30.0;
 const SHIELDS: [&str; 2] = ["staticshield", "shieldshield"];
 const SHIELD_RADIUS: f32 = 350.0;
 
-/// A struck target is left alone this long unless seen since; a struck
-/// anti-nuke not seen for this long gets a scout.
-const STRUCK_FRAMES: i32 = 30 * 120;
+/// A struck target is left alone until seen standing this long after the
+/// strike (the AI hears of no death it does not see: a target struck and
+/// not seen since is most likely gone); a struck anti-nuke not seen for
+/// this long gets a scout. Strikes are forgotten after a while.
 const LOOK_AFTER: i32 = 30 * 20;
+const STRUCK_MEMORY: i32 = 30 * 600;
 
 const CMD_ATTACK: i32 = 20;
 
@@ -98,10 +100,7 @@ impl Ai {
     /// Enemy buildings worth Eos: unshielded, not struck lately (unless
     /// seen standing since).
     fn missiles_eos_targets(&self) -> Vec<Target> {
-        let frame = self.frame;
-        let struck = |id: i32, seen: i32| {
-            self.missiles.struck.get(&id).is_some_and(|&t| frame - t < STRUCK_FRAMES && seen < t + LOOK_AFTER)
-        };
+        let struck = |id: i32, seen: i32| self.missiles.struck.get(&id).is_some_and(|&t| seen < t + LOOK_AFTER);
         (self.war.targets.values())
             .filter(|e| e.identified && e.is_static && !e.is_dead && !struck(e.unit_id, e.last_seen))
             .filter_map(|e| {
@@ -190,7 +189,7 @@ impl Ai {
             return;
         }
         self.missiles.ready.retain(|m| m.health() > 0.0);
-        self.missiles.struck.retain(|_, t| frame - *t < 2 * STRUCK_FRAMES);
+        self.missiles.struck.retain(|_, t| frame - *t < STRUCK_MEMORY);
         let Some(silo) = self.missiles_silo() else { return };
         self.missiles_fire_eos();
         self.missiles_restock(silo);
