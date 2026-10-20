@@ -25,7 +25,8 @@ const SCYTHE: usize = 6;
 const HALBERD: usize = 7;
 const PANTHER: usize = 8;
 const SUB: usize = 9;
-const NUM_SQUAD_SLOTS: usize = 10;
+const PYRO: usize = 10;
+const NUM_SQUAD_SLOTS: usize = 11;
 
 #[derive(Default)]
 pub struct RaiderHandler {
@@ -490,6 +491,7 @@ impl Ai {
             "cloakheavyraid" => (SCYTHE, 4.min(2.max((income / 10.0).floor() as i32))),
             "tankheavyraid" => (PANTHER, 8.min(4.max((income / 5.0).floor() as i32))),
             "subraider" => (SUB, 8.min(4.max((income / 5.0).floor() as i32))),
+            "jumpraid" => (PYRO, 6.min(3.max((income / 10.0).floor() as i32))),
             _ => return,
         };
         self.raider_join_next_squad(slot, id, 'm', size);

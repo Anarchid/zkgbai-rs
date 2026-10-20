@@ -140,6 +140,8 @@ impl Ai {
                             w.chicken_frame = frame;
                         }
                     }
+                    // Constables and recon commanders jump away.
+                    self.jump_escape(unit, haven);
                 } else {
                     self.eco_stop_chickening(wid);
                 }

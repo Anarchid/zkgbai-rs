@@ -17,8 +17,10 @@ use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, Retre
 use crate::military::incursions::Incursions;
 use crate::military::intel::Intel;
 use crate::military::jaeger::Jaegers;
+use crate::military::jumps::Jumps;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
+use crate::military::puppies::Puppies;
 use crate::military::scouts::Scouts;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
@@ -81,6 +83,8 @@ pub struct Ai {
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
+    pub jumps: Jumps,
+    pub puppies: Puppies,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -178,6 +182,8 @@ impl SkirmishAi for Ai {
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
+            jumps: Jumps::default(),
+            puppies: Puppies::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,
@@ -365,7 +371,8 @@ impl Ai {
             return 1;
         }
 
-        self.select_random_commander();
+        let opening = self.eco_roll_opening();
+        self.select_commander(opening.as_deref());
         self.choose_start_pos();
         if !self.disabled.is_empty() {
             let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
@@ -610,10 +617,29 @@ impl Ai {
     }
 
     fn select_random_commander(&mut self) {
-        let name = "dyntrainer_support_base";
+        self.select_commander(None);
+    }
+
+    /// The commander for opening with factory `opening`: a recon commander
+    /// for jumpjets and spiders (it jumps too, and goes where they go), a
+    /// support commander otherwise. ZKGBAI_COMMANDER=<def> overrides.
+    fn select_commander(&mut self, opening: Option<&str>) {
+        let name = match std::env::var("ZKGBAI_COMMANDER").ok().filter(|c| self.defs.get(c).is_some()) {
+            Some(c) => c,
+            None => match opening {
+                Some("factoryjump" | "factoryspider") if self.defs.get("dyntrainer_recon_base").is_some() => {
+                    "dyntrainer_recon_base".to_owned()
+                }
+                _ => "dyntrainer_support_base".to_owned(),
+            },
+        };
+        let name = name.as_str();
         self.cb.call_lua_rules(&format!("ai_commander:{name}"));
         let human = self.defs.get(name).map(|d| d.human_name()).unwrap_or_else(|| name.to_owned());
-        self.log(&format!("Selected Commander: {human}."));
+        match opening {
+            Some(f) => self.log(&format!("Selected Commander: {human} (opening with {f}).")),
+            None => self.log(&format!("Selected Commander: {human}.")),
+        }
     }
 
     fn identify_enemy_teams(&mut self) {

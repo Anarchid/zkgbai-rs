@@ -82,12 +82,15 @@ struct Kind {
     suicide: bool,
     /// Weapon range, elmos.
     range: f32,
+    /// Only heavies of at least this much metal are worth one (a Skuttle
+    /// costs 550: not for a 600-metal Jack).
+    min_value: f32,
 }
 
 const KINDS: [Kind; 3] = [
-    Kind { name: "spiderantiheavy", alpha: Some(8000.1), stuns: true, suicide: false, range: 120.0 },
-    Kind { name: "jumpbomb", alpha: Some(8002.4), stuns: false, suicide: true, range: 25.0 },
-    Kind { name: "striderantiheavy", alpha: None, stuns: false, suicide: false, range: 250.0 },
+    Kind { name: "spiderantiheavy", alpha: Some(8000.1), stuns: true, suicide: false, range: 120.0, min_value: 0.0 },
+    Kind { name: "jumpbomb", alpha: Some(8002.4), stuns: false, suicide: true, range: 25.0, min_value: 1000.0 },
+    Kind { name: "striderantiheavy", alpha: None, stuns: false, suicide: false, range: 250.0, min_value: 0.0 },
 ];
 
 fn kind_of(name: &str) -> Option<Kind> {
@@ -168,7 +171,11 @@ impl Ai {
     /// The most of a kind that the heavies seen need, if any heavy seen
     /// is one a squad of it takes.
     fn jaeger_needed(&self, kind: Kind) -> Option<usize> {
-        (self.jaegers.seen.values()).filter_map(|s| s.heavy).filter_map(|h| needed(kind, h)).max()
+        (self.jaegers.seen.values())
+            .filter(|s| s.value >= kind.min_value)
+            .filter_map(|s| s.heavy)
+            .filter_map(|h| needed(kind, h))
+            .max()
     }
 
     /// Whether a factory that can build `name` should build it now.
@@ -360,7 +367,7 @@ impl Ai {
                 && !e.can_fly()
                 && value >= HEAVY_COST
                 && e.def_health() >= 1000.0);
-        if e.is_dead || !prey || e.position == NULLPOS || self.frame - e.last_seen > STALE {
+        if e.is_dead || !prey || value < kind.min_value || e.position == NULLPOS || self.frame - e.last_seen > STALE {
             return None;
         }
         // A stun holds on max health; damage kills what is left.
@@ -527,9 +534,14 @@ impl Ai {
     fn jaeger_strike(&mut self, sid: SquadId, target: Unit, all: bool) {
         let Some(s) = self.squads.get(sid) else { return };
         let frame = self.frame;
-        for f in s.fighters.iter().filter_map(|id| self.fighters.get(id)) {
-            if all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame)) {
-                f.unit.attack(target, 0);
+        let strikers: Vec<Unit> = (s.fighters.iter().filter_map(|id| self.fighters.get(id)))
+            .filter(|f| all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame)))
+            .map(|f| f.unit)
+            .collect();
+        for unit in strikers {
+            // Skuttles jump the last stretch onto it (see `jumps`).
+            if !self.jump_strike(unit, target, NULLPOS, "skuttle") {
+                unit.attack(target, 0);
             }
         }
     }

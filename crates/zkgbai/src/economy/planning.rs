@@ -1,6 +1,8 @@
 //! Task generation: factories, energy and grid, caretakers, storage, radar,
 //! static defenses, superweapons, reclaim, morphs.
 
+use std::collections::BTreeSet;
+
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
 use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
@@ -70,10 +72,15 @@ const SILO_CARETAKERS: usize = 2;
 /// factory waits for 50 and a few caretakers); and how often the asking is
 /// re-assessed, in frames.
 const REQUISITION_INCOME: f32 = 20.0;
+
+/// A jump factory is asked for (for Firewalkers) from this much enemy light
+/// skirmisher metal seen, when it is this share of the enemy's army.
+const FIREWALKER_REQUISITION: f32 = 1800.0;
+const FIREWALKER_SHARE: f32 = 0.3;
 const REQUISITION_PERIOD: i32 = 30 * 20;
 
 /// Ground and sea factories, by the tier of their units (not the jump
-/// factory: nothing here tells it what to build, so it would stand idle).
+/// factory: its units go where the other bots go).
 const GROUND_FACTORIES: [&str; 8] = [
     "factorycloak",
     "factoryshield",
@@ -84,6 +91,18 @@ const GROUND_FACTORIES: [&str; 8] = [
     "factoryspider",
     "factoryship",
 ];
+
+/// The `k`-th factory of `list` for the `factory_pick` option, in name
+/// order, the jump factory left out: it came later, and series mirrored
+/// against older builds keep their matchups (ZKGBAI_FACTORY=factoryjump
+/// opens with it).
+pub(crate) fn picked_factory(list: &BTreeSet<String>, k: usize) -> String {
+    let picks: Vec<&String> = list.iter().filter(|f| *f != "factoryjump").collect();
+    if picks.is_empty() {
+        return list.iter().next().cloned().unwrap_or_default();
+    }
+    picks[k % picks.len()].clone()
+}
 
 /// Movement tier of a factory's units; `None` for aircraft and striders.
 fn factory_tier(name: &str) -> Option<Tier> {
@@ -437,8 +456,7 @@ impl Ai {
             self.eco.potential_fac_list.remove(&user_fac);
         } else if let Some(k) = self.eco.dev_pick.filter(|_| nfac == 0) {
             // The k-th of the factories viable here (in name order).
-            let list = &self.eco.potential_fac_list;
-            fac_name = list.iter().nth(k % list.len()).cloned().unwrap_or_default();
+            fac_name = picked_factory(&self.eco.potential_fac_list, k);
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
         } else if let Some(dev_fac) = nfac.checked_sub(1).and_then(|i| self.eco.dev_facs.get(i)).cloned() {
@@ -461,6 +479,12 @@ impl Ai {
             let len = self.eco.potential_fac_list.len();
             let n = ((kgb_rand() * len as f64) as usize).min(len - 1);
             fac_name = self.eco.potential_fac_list.iter().nth(n).cloned().unwrap_or_default();
+            // The opening rolled at the start (the commander suits it).
+            if let Some(opening) =
+                self.eco.opening.take().filter(|f| nfac == 0 && self.eco.potential_fac_list.contains(f))
+            {
+                fac_name = opening;
+            }
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
 
@@ -879,6 +903,29 @@ impl Ai {
     /// units get to metal ours cannot, a spider factory for Widows to open
     /// the way for our nukes, or a gunship factory to drop our assaults
     /// past the chokepoints guarding much of the enemy's value.
+    /// The factory we will most likely open with, decided at the start so
+    /// the commander suits it: the one set, the one picked, else a roll
+    /// kept for the first factory (the same odds as rolling then).
+    pub(crate) fn eco_roll_opening(&mut self) -> Option<String> {
+        if !self.eco.user_fac.is_empty() {
+            return Some(self.eco.user_fac.clone());
+        }
+        let list = &self.eco.potential_fac_list;
+        if list.is_empty() {
+            return None;
+        }
+        if let Some(k) = self.eco.dev_pick {
+            return Some(picked_factory(list, k));
+        }
+        if self.merged_allies > 0 {
+            return None;
+        }
+        let n = ((kgb_rand() * list.len() as f64) as usize).min(list.len() - 1);
+        let roll = list.iter().nth(n).cloned();
+        self.eco.opening.clone_from(&roll);
+        roll
+    }
+
     fn eco_find_requisition(&self) -> Option<(String, String)> {
         if let Some((f, gap, fills)) = self.eco_reach_gap() {
             return Some((
@@ -916,6 +963,22 @@ impl Ai {
                     "{} Fusions{}: a Widow to scout the enemy's land deep",
                     self.eco.fusions.len(),
                     if self.misc_has_nuke() || self.missiles_silo().is_some() { " and a silo" } else { "" }
+                ),
+            ));
+        }
+        // Firewalkers burn masses of light skirmishers.
+        let skirms = self.war.enemy_light_skirm_value;
+        if !owned("factoryjump")
+            && self.eco.bots_viable
+            && self.defs.get("factoryjump").is_some()
+            && skirms >= FIREWALKER_REQUISITION
+            && skirms >= FIREWALKER_SHARE * self.war.enemy_fighter_value
+        {
+            return Some((
+                "factoryjump".to_owned(),
+                format!(
+                    "{skirms:.0} of the enemy's {:.0} metal of army seen is light skirmishers: Firewalkers",
+                    self.war.enemy_fighter_value
                 ),
             ));
         }
@@ -1918,5 +1981,24 @@ impl Ai {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn factory_pick_leaves_the_jump_factory_out() {
+        let with = list(&["factorycloak", "factoryjump", "factoryshield", "factoryveh"]);
+        let without = list(&["factorycloak", "factoryshield", "factoryveh"]);
+        for k in 0..7 {
+            assert_eq!(picked_factory(&with, k), picked_factory(&without, k));
+        }
+        assert_eq!(picked_factory(&list(&["factoryjump"]), 3), "factoryjump");
     }
 }

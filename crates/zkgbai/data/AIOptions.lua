@@ -44,6 +44,14 @@ local options = {
 		max    = 1000,
 		step   = 1,
 	},
+	{
+		key    = 'factory',
+		name   = 'Factories',
+		desc   = 'The factories to build, first to last, comma-separated (e.g. factoryjump,factorycloak); empty to choose freely.',
+		type   = 'string',
+		def    = '',
+		maxlen = 200,
+	},
 }
 
 return options

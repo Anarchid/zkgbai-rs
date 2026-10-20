@@ -41,6 +41,7 @@ enum Slot {
     Hover,
     Tank,
     Boat,
+    Jump,
     Brawler,
     /// Rapier/revenant and other air assaults.
     Air,
@@ -68,6 +69,8 @@ impl Slot {
             Slot::Tank
         } else if name.starts_with("ship") {
             Slot::Boat
+        } else if name.starts_with("jump") {
+            Slot::Jump
         } else if name == "gunshipheavyskirm" {
             Slot::Brawler
         } else {

@@ -135,6 +135,8 @@ pub struct EconomyManager {
     dev_facs: Vec<String>,
     /// Development aid: open with the n-th viable factory.
     dev_pick: Option<usize>,
+    /// The first factory, rolled at the start (see `eco_roll_opening`).
+    opening: Option<String>,
     /// A factory a module asked for, and why; and the last one logged.
     pub requisition: Option<(String, String)>,
     pub requisition_logged: Option<String>,
@@ -317,6 +319,7 @@ impl EconomyManager {
             user_fac: String::new(),
             dev_facs: Vec::new(),
             dev_pick: None,
+            opening: None,
             requisition: None,
             requisition_logged: None,
             terraform_tags: 0,
@@ -481,7 +484,10 @@ impl Ai {
 
         // Development aid: the factories to build, first (as `kgbfac` sets
         // it) to last, comma-separated.
-        if let Ok(facs) = std::env::var("ZKGBAI_FACTORY") {
+        // (The AI option `factory` for one AI only.)
+        if let Some(facs) =
+            self.cb.option("factory").filter(|f| !f.trim().is_empty()).or_else(|| std::env::var("ZKGBAI_FACTORY").ok())
+        {
             let mut facs = facs.split(',').map(str::trim).filter(|f| self.defs.get(f).is_some()).map(str::to_owned);
             self.eco.user_fac = facs.next().unwrap_or_default();
             self.eco.dev_facs = facs.collect();
@@ -512,7 +518,7 @@ impl Ai {
         if self.merged_allies == 0 && message.starts_with("kgbfac") {
             // port: the C++ tested `find("veh") == 6` (only "kgbfacveh");
             // the Java original accepted any suffix ("kgbfac veh").
-            const CHOICES: [(&str, &str); 7] = [
+            const CHOICES: [(&str, &str); 8] = [
                 ("veh", "factoryveh"),
                 ("hover", "factoryhover"),
                 ("tank", "factorytank"),
@@ -520,12 +526,13 @@ impl Ai {
                 ("shield", "factoryshield"),
                 ("amph", "factoryamph"),
                 ("spider", "factoryspider"),
+                ("jump", "factoryjump"),
             ];
             match CHOICES.iter().find(|(suffix, _)| message.ends_with(suffix)) {
                 Some((_, fac)) => self.eco.user_fac = (*fac).to_owned(),
                 None => {
                     self.say("Invalid factory name!");
-                    self.say("Valid choices: veh, hover, tank, cloak, shield, amph, spider");
+                    self.say("Valid choices: veh, hover, tank, cloak, shield, amph, spider, jump");
                 }
             }
 

@@ -16,6 +16,7 @@ pub(crate) enum FacKind {
     Hover,
     Tank,
     Spider,
+    Jump,
     StriderHub,
     /// A factory the AI has no production logic for.
     Other,
@@ -34,6 +35,7 @@ impl FacKind {
             "factoryhover" => FacKind::Hover,
             "factorytank" => FacKind::Tank,
             "factoryspider" => FacKind::Spider,
+            "factoryjump" => FacKind::Jump,
             "striderhub" => FacKind::StriderHub,
             _ => FacKind::Other,
         }
@@ -116,6 +118,13 @@ impl Factory {
                     fac.scout_allowance = 12;
                 }
                 FacKind::Plane => fac.raider_spam = -1.0,
+                // Pyros (220 metal) open: fewer than of the 65-metal raiders,
+                // one of them a solo raider (fire-shadow raids).
+                FacKind::Jump => {
+                    fac.raider_spam = if big_map { -5.0 } else { -4.0 };
+                    fac.scout_allowance = 1;
+                    fac.max_scout_allowance = 3;
+                }
                 _ => {}
             }
         } else if kind == FacKind::Gunship {
