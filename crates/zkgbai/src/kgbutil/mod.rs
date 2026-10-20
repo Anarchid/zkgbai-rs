@@ -3,6 +3,7 @@
 pub mod air_field;
 pub mod grid;
 pub mod height_map;
+pub mod line_of_fire;
 pub mod move_to;
 pub mod pathfinder;
 pub mod terrain_analyzer;
@@ -10,6 +11,7 @@ pub mod terrain_analyzer;
 pub use air_field::AirField;
 pub use grid::{ArrayGraphics, ByteArrayGraphics};
 pub use height_map::HeightMap;
+pub use line_of_fire::{FireGround, Flight, Gun, Shadow, Shape, Volume};
 pub use move_to::kgb_move_to;
 pub use pathfinder::{PathCost, Pathfinder, Reachability};
 pub use terrain_analyzer::TerrainAnalyzer;

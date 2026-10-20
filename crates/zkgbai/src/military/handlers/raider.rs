@@ -331,6 +331,8 @@ impl Ai {
         if frame % 30 == (offset + 8) % 30 {
             let mut ids: Vec<i32> = self.raider_handler.solo_raiders.iter().copied().collect();
             ids.extend(self.raider_handler.kodachis.iter().copied());
+            // Raiders parked at a precision spot stand still on purpose.
+            ids.retain(|id| !self.precision.missions.contains_key(id));
             for id in ids {
                 if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
                     f.unstick(frame, &mut self.raider_handler.scout_tasks);
@@ -739,6 +741,9 @@ impl Ai {
     }
 
     fn raider_assign_solo_raider(&mut self, id: i32) {
+        if self.precision_step(id) {
+            return;
+        }
         let Some(r) = self.fighters.get(&id) else {
             return;
         };
@@ -950,6 +955,12 @@ impl Ai {
                 continue;
             }
 
+            if self.precision_step(id) {
+                continue;
+            }
+            let Some(r) = self.fighters.get(&id) else {
+                continue;
+            };
             let reloading = r.is_reloading(self.frame);
             let (pos, rtarget) = (r.get_pos(), r.target);
             let max_threat = if reloading { 0.0 } else { 0.4 };

@@ -15,6 +15,10 @@ pub mod cmd {
     pub const PRIORITY: i32 = 34220;
     pub const MISC_PRIORITY: i32 = 34221;
     pub const AP_FLY_STATE: i32 = 34569;
+    /// Fire at a unit (param: its id) while doing whatever else is ordered
+    /// (ZK's unit_target_on_the_move).
+    pub const UNIT_SET_TARGET: i32 = 34923;
+    pub const UNIT_CANCEL_TARGET: i32 = 34924;
     pub const ONECLICK_WEAPON: i32 = 35000;
     pub const WANT_ONOFF: i32 = 35667;
     pub const UNIT_AI: i32 = 36214;

@@ -24,7 +24,12 @@
 //! static and mobile anti-air around its base; with `test=aaprobe`, the
 //! attacker keeps flying unarmed Charons over the enemy's base, to be shot
 //! at by what it does not see (see `air_intel`; cheats name every attacker,
-//! so the fixes are scored against where the shooters truly are).
+//! so the fixes are scored against where the shooters truly are). With
+//! `test=fort` and `test=shadowprobe`, see `shadow_probe`. With
+//! `test=precision` (against `test=fort`), the attacker gets two each of
+//! Scorchers, Scythes and Kodachis every two minutes, and a
+//! radar toward the enemy: their precision missions (see
+//! `handlers::precision`) are all that should hurt the fort.
 
 use springai::Vec3;
 
@@ -39,12 +44,32 @@ const RADAR_FRAME: i32 = 30 * 100;
 /// How often probing Charons come.
 const PROBE_ROUND: i32 = 30 * 40;
 
+/// How many metal spots the fort holds, and the defenses by them.
+const FORT_SPOTS: usize = 8;
+const FORT_GUNS: [&str; 8] = [
+    "turretlaser",
+    "turretmissile",
+    "turretriot",
+    "turretlaser",
+    "turretheavylaser",
+    "turretemp",
+    "turretgauss",
+    "turretheavy",
+];
+
+/// When precision raiders come, and how often.
+const PRECISION_FRAME: i32 = 30 * 60;
+const PRECISION_ROUND: i32 = 30 * 120;
+
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
 const DROP_ROUND: i32 = 30 * 180;
 
 impl Ai {
     pub fn strike_test_update(&mut self, frame: i32) {
+        if self.test.as_deref() == Some("shadowprobe") {
+            self.shadow_probe_update(frame);
+        }
         if frame != 60 && frame % 300 != 0 {
             return;
         }
@@ -103,6 +128,37 @@ impl Ai {
                     ("vehaa", aside(150.0, -1250.0)),
                 ]
             }
+            ("fort", 60) => {
+                let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
+                spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
+                let mut units = vec![("planescout", ahead(-100.0)), ("planescout", ahead(-200.0))];
+                for (k, &s) in spots.iter().take(FORT_SPOTS).enumerate() {
+                    let gun = get_directional_point(s, toward, 140.0);
+                    let (gx, gz) = ((gun.x - s.x) / 140.0, (gun.z - s.z) / 140.0);
+                    units.push(("staticmex", s));
+                    units.push((FORT_GUNS[k % FORT_GUNS.len()], gun));
+                    units.push(("energysolar", Vec3::xz(s.x - gz * 110.0, s.z + gx * 110.0)));
+                    units.push(("energysolar", Vec3::xz(gun.x + gz * 90.0 + gx * 50.0, gun.z - gx * 90.0 + gz * 50.0)));
+                    // A factory beside some, to hide behind.
+                    if k % 3 == 1 {
+                        units.push((
+                            "factorycloak",
+                            Vec3::xz(gun.x - gz * 160.0 + gx * 60.0, gun.z + gx * 160.0 + gz * 60.0),
+                        ));
+                    }
+                }
+                units
+            }
+            ("precision", f) if f >= PRECISION_FRAME && (f - PRECISION_FRAME) % PRECISION_ROUND == 0 => {
+                let mut units: Vec<(&str, Vec3)> = Vec::new();
+                for name in ["vehraid", "cloakheavyraid", "tankraid"] {
+                    units.extend([(name, ahead(-100.0)), (name, ahead(-160.0))]);
+                }
+                if f == PRECISION_FRAME {
+                    units.push(("staticradar", get_directional_point(enemy, base, 1500.0)));
+                }
+                units
+            }
             ("aaprobe", f) if f % PROBE_ROUND == 0 && f > 0 => vec![("gunshiptrans", ahead(-200.0)); 2],
             ("colony", 60) => vec![("cloakcon", ahead(-150.0)), ("gunshiptrans", ahead(-250.0))],
             ("colonyair", 60) => vec![("gunshipcon", ahead(-150.0))],
@@ -137,12 +193,37 @@ impl Ai {
                 let p = u.pos();
                 u.move_to(Vec3::new(p.x + 40.0, p.y, p.z + 40.0), 0);
             }
+            // Precision raiders go solo (see `handlers::precision`).
+            if let Some(u) = unit.filter(|_| test == "precision" && def.speed() > 0.0) {
+                let fighter = crate::military::Fighter::new_raider(u, def.cost(self.metal), self.team_id);
+                self.raider_add_solo_raider(fighter);
+            }
             let p = unit.map(|u| u.pos());
             self.log(&format!("strike-test: {name} at {:?}", p.map(|p| (p.x as i32, p.z as i32))));
         }
         if frame % 300 == 0 {
             for res in [self.metal, self.energy] {
                 self.cb.cheat_resource(res, 20000.0);
+            }
+        }
+        // Owls keep watch over the fort, and the commander holds its fire
+        // (it would shoot the probes; losing it ends the game).
+        if test == "fort" && frame == 300 {
+            for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
+                c.set_fire_state(0, 0);
+                c.set_move_state(0, 0);
+            }
+        }
+        if test == "fort" && frame == 60 {
+            let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
+            spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
+            spots.truncate(FORT_SPOTS);
+            let owls = self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "planescout");
+            for (k, o) in owls.enumerate() {
+                for (j, s) in spots.iter().enumerate() {
+                    o.patrol_to(spots[(j + k * 3) % spots.len()], if j == 0 { 0 } else { OPTION_SHIFT_KEY });
+                    let _ = s;
+                }
             }
         }
         // Probing Charons fly over the enemy's base, this way and that.

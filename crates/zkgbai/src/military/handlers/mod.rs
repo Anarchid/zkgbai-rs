@@ -5,6 +5,7 @@
 
 pub mod bomber;
 pub mod misc;
+pub mod precision;
 pub mod raider;
 pub mod retreat;
 pub mod squad;

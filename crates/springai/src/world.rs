@@ -74,6 +74,18 @@ impl Callback {
         (!v.is_null()).then(|| owned_str(v))
     }
 
+    /// The contents of a file in the game's virtual filesystem (the game
+    /// archive, e.g. `units/staticmex.lua`), if there is such a file.
+    pub fn file_content(&self, path: &str) -> Option<Vec<u8>> {
+        let p = c_string(path);
+        let size = ffi!(self, File_getSize, p.as_ptr());
+        if size <= 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        ffi!(self, File_getContent, p.as_ptr(), buf.as_mut_ptr().cast(), size).then_some(buf)
+    }
+
     /// Write a line to the engine's infolog.
     pub fn log(&self, msg: &str) {
         let m = c_string(msg);

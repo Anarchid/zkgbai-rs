@@ -78,6 +78,8 @@ pub struct Ai {
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     pub air_intel: crate::military::air_intel::AirIntel,
+    /// Fire shadows of enemy defenses, for precision raids.
+    pub precision: crate::military::precision::Precision,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -169,6 +171,7 @@ impl SkirmishAi for Ai {
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
             air_intel: Default::default(),
+            precision: Default::default(),
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -384,7 +387,7 @@ impl Ai {
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
         // A staged anti-nuke stands by (see `strike_test`).
-        if matches!(self.test.as_deref(), Some("anti" | "aafort")) {
+        if matches!(self.test.as_deref(), Some("anti" | "aafort" | "fort" | "shadowprobe")) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
         }

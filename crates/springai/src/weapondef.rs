@@ -50,6 +50,15 @@ getters!(WeaponDef.def_id {
     fn trajectory_height() -> f32 = WeaponDef_getTrajectoryHeight;
     fn is_shield() -> bool = WeaponDef_isShield;
     fn is_able_to_attack_ground() -> bool = WeaponDef_isAbleToAttackGround;
+    /// Holds fire rather than shoot through its own side's units.
+    fn is_avoid_friendly() -> bool = WeaponDef_isAvoidFriendly;
+    /// Holds fire rather than shoot through features (wrecks).
+    fn is_avoid_feature() -> bool = WeaponDef_isAvoidFeature;
+    /// Range is a cylinder this many ranges tall (0: a sphere).
+    fn cylinder_targeting() -> f32 = WeaponDef_getCylinderTargetting;
+    /// What its projectiles pass through (engine `Collision` bits: 1
+    /// enemies, 2 friendlies, 4 features, 64 ground).
+    fn collision_flags() -> i32 = WeaponDef_getCollisionFlags;
     fn dyn_damage_exp() -> f32 = WeaponDef_getDynDamageExp;
     fn paralyze_damage_time() -> i32 = WeaponDef_Damage_getParalyzeDamageTime;
     fn shield_radius() -> f32 = WeaponDef_Shield_getRadius;

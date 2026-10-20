@@ -10,8 +10,10 @@ pub mod incursions;
 pub mod intel;
 pub mod missiles;
 pub mod nukes;
+pub mod precision;
 pub mod radar;
 pub mod scouts;
+pub mod shadow_probe;
 pub mod strike_test;
 pub mod sweeps;
 pub mod tasks;
@@ -409,6 +411,7 @@ impl Ai {
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
+        self.guard("precision.update", |ai| ai.precision_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
@@ -656,6 +659,9 @@ impl Ai {
         paralyzer: bool,
     ) {
         let _ = (damage, paralyzer);
+        if self.test.as_deref() == Some("shadowprobe") {
+            self.shadow_probe_damaged(unit, weapon);
+        }
         let h = unit;
         let hdef = h.def();
         if hdef.is_some_and(|d| d.id() == self.war.wolv_mine_id)
@@ -673,6 +679,7 @@ impl Ai {
             if !on_fire {
                 self.raider_avoid_enemies(h, attacker, dir);
             }
+            self.precision_damaged(h, attacker, dir, weapon);
         }
 
         // create a defense task, if appropriate.
