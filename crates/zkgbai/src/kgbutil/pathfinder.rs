@@ -9,6 +9,7 @@ use springai::{Callback, Map, MoveData, Unit, UnitDef, Vec3};
 use self::astar::{AStar, Best, IMPASSABLE, Reach, SearchOpts, thin_waypoints};
 use crate::defs::Defs;
 use crate::military::MilitaryManager;
+use crate::military::water::Dive;
 use crate::util::{NULLPOS, distance};
 
 /// Engine slope-map cells merged per pathfinder cell, per axis.
@@ -20,6 +21,10 @@ const MAP_RES: i32 = MAP_COMPRESSION * ORIGINAL_MAP_RES;
 
 /// `minDepth` for units without a minimum water depth.
 const NO_MIN_DEPTH: f32 = 65535.0;
+
+/// Extra cost of a cell inside a keep-out circle (see
+/// [`Pathfinder::find_path_keepout`]): above any threat cost.
+const KEEPOUT_COST: f32 = 200.0;
 
 /// Path cost model (the original's `costSupplier` integer constants, in order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -64,6 +69,9 @@ pub struct Pathfinder {
     astar: AStar,
     /// Scratch buffer for traced paths.
     path_buf: Vec<usize>,
+    /// Extra cost per cell of the current query's keep-out circles (empty
+    /// without any).
+    keepout: Vec<f32>,
     scythe_id: i32,
     /// Spider movement class max slope; units sharing it path like spiders.
     spider_max_slope: Option<f32>,
@@ -93,6 +101,9 @@ struct Terrain {
     max_slope: f32,
     floater: bool,
     amph: bool,
+    /// From what depth the unit is all under water, where only what hits
+    /// under water threatens it (see [`crate::military::water`]).
+    dive: Dive,
 }
 
 impl Pathfinder {
@@ -116,9 +127,11 @@ impl Pathfinder {
                 max_slope: 0.0,
                 floater: false,
                 amph: false,
+                dive: Dive::SURFACE,
             },
             astar: AStar::new(0, 0),
             path_buf: Vec::with_capacity(256),
+            keepout: Vec::new(),
             scythe_id: defs.id("cloakheavyraid"),
             spider_max_slope: defs.get("spidercon").and_then(|d| d.move_data()).map(|md| md.max_slope()),
             spider_scout_id: defs.id("spiderscout"),
@@ -177,6 +190,22 @@ impl Pathfinder {
     /// `[target]`. Empty only if the unit has no position or definition.
     /// The cost model is overridden for spiders and aircraft.
     pub fn find_path(&mut self, war: &MilitaryManager, u: Unit, target: Vec3, cost: PathCost) -> VecDeque<Vec3> {
+        self.find_path_keepout(war, u, target, cost, &[])
+    }
+
+    /// [`find_path`](Self::find_path) giving a wide berth to `keepout`
+    /// (circles of centre and radius, elmos): a cell whose corner lies in
+    /// one costs [`KEEPOUT_COST`] more, so the path keeps out of them where
+    /// any way round exists, and leaves them by the shortest way where it
+    /// starts in one.
+    pub fn find_path_keepout(
+        &mut self,
+        war: &MilitaryManager,
+        u: Unit,
+        target: Vec3,
+        cost: PathCost,
+        keepout: &[(Vec3, f32)],
+    ) -> VecDeque<Vec3> {
         let start = u.pos();
         let mut result = VecDeque::new();
 
@@ -197,6 +226,7 @@ impl Pathfinder {
         let mut flyer = true;
         let mut flyheight = 0.0;
         self.terrain.max_slope = 1.0;
+        self.terrain.dive = war.dive(Some(def));
         if let Some(md) = def.move_data() {
             self.terrain.set_movement(def, md);
             flyer = false;
@@ -229,8 +259,13 @@ impl Pathfinder {
             return result;
         };
 
-        let terrain = &self.terrain;
-        match self.astar.find_path(start_pos, target_pos, &mut |c| terrain.cost(cost, war, c)) {
+        paint_keepout(self.terrain.smwidth, self.terrain.slope_map.len(), keepout, &mut self.keepout);
+        let (terrain, extra) = (&self.terrain, &self.keepout);
+        let mut cell_cost = |c: usize| match terrain.cost(cost, war, c) {
+            IMPASSABLE => IMPASSABLE,
+            base => base + extra.get(c).copied().unwrap_or(0.0),
+        };
+        match self.astar.find_path(start_pos, target_pos, &mut cell_cost) {
             // Nothing closer to the target is reachable: head straight for it.
             None => result.push_back(target),
             Some(end) => {
@@ -309,6 +344,7 @@ impl Pathfinder {
             return Reachability::none();
         };
         self.terrain.max_slope = 1.0;
+        self.terrain.dive = war.dive(Some(def));
         if let Some(md) = def.move_data() {
             self.terrain.set_movement(def, md);
         }
@@ -341,6 +377,7 @@ impl Pathfinder {
             return false;
         };
         self.terrain.max_slope = 1.0;
+        self.terrain.dive = war.dive(Some(def));
         if let Some(md) = def.move_data() {
             self.terrain.set_movement(def, md);
         }
@@ -370,6 +407,7 @@ impl Pathfinder {
             return false;
         };
         self.terrain.max_slope = 1.0;
+        self.terrain.dive = war.dive(Some(def));
         let Some(md) = def.move_data() else {
             return true;
         };
@@ -399,6 +437,7 @@ impl Pathfinder {
         }
 
         self.terrain.max_slope = 1.0;
+        self.terrain.dive = war.dive(Some(ud));
         if let Some(md) = ud.move_data() {
             self.terrain.set_movement(ud, md);
             self.terrain.floater = ud.is_floater();
@@ -466,6 +505,8 @@ impl Terrain {
         let pos = Vec3::new(x, elev, z);
         let bad_depth = elev < self.max_depth || elev > self.min_depth;
         let max_slope = self.max_slope;
+        // The threat maps as this unit sees them, under water too.
+        let war = war.view_dive(self.dive);
         match kind {
             PathCost::TestPath => {
                 if (slope > max_slope && (!self.floater || elev > 0.0)) || bad_depth {
@@ -629,6 +670,32 @@ fn cell_index(width: i32, len: usize, p: Vec3) -> Option<usize> {
     Some((row * width as i64 + col) as usize)
 }
 
+/// Fill `out` (for a grid of `len` cells in rows of `width`) with
+/// [`KEEPOUT_COST`] for the cells whose corner lies in a circle of
+/// `keepout`, zero elsewhere; empty without circles.
+fn paint_keepout(width: i32, len: usize, keepout: &[(Vec3, f32)], out: &mut Vec<f32>) {
+    out.clear();
+    if keepout.is_empty() {
+        return;
+    }
+    out.resize(len, 0.0);
+    let width = width.max(1);
+    let rows = len as i32 / width;
+    let res = MAP_RES as f32;
+    for &(c, r) in keepout {
+        let (x0, x1) = (((c.x - r) / res).ceil() as i32, ((c.x + r) / res).floor() as i32);
+        let (z0, z1) = (((c.z - r) / res).ceil() as i32, ((c.z + r) / res).floor() as i32);
+        for z in z0.max(0)..=z1.min(rows - 1) {
+            for x in x0.max(0)..=x1.min(width - 1) {
+                let (dx, dz) = (x as f32 * res - c.x, z as f32 * res - c.z);
+                if dx * dx + dz * dz <= r * r {
+                    out[(z * width + x) as usize] = KEEPOUT_COST;
+                }
+            }
+        }
+    }
+}
+
 /// World x/z of a cell's top-left corner.
 fn cell_corner(width: i32, cell: usize) -> (f32, f32) {
     let w = width.max(1) as usize;
@@ -650,5 +717,19 @@ mod tests {
         assert_eq!(cell_index(0, 12, Vec3::ZERO), None);
         assert_eq!(cell_index(4, 3, Vec3::ZERO), None);
         assert_eq!(cell_corner(4, 6), (128.0, 64.0));
+    }
+
+    #[test]
+    fn keepout_cells() {
+        // 4 x 3 grid (256 x 192 elmos): corners within 64 of (64, 64).
+        let mut out = Vec::new();
+        paint_keepout(4, 12, &[(Vec3::xz(64.0, 64.0), 64.0)], &mut out);
+        let marked: Vec<usize> = (0..12).filter(|&c| out[c] > 0.0).collect();
+        assert_eq!(marked, vec![1, 4, 5, 6, 9]);
+        // Circles past the edges clamp; none leave the buffer empty.
+        paint_keepout(4, 12, &[(Vec3::xz(-50.0, 150.0), 60.0)], &mut out);
+        assert_eq!((0..12).filter(|&c| out[c] > 0.0).collect::<Vec<_>>(), vec![8]);
+        paint_keepout(4, 12, &[], &mut out);
+        assert!(out.is_empty());
     }
 }

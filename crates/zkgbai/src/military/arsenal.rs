@@ -1,7 +1,6 @@
 //! What our forces can engage. Ground units only get where their movement
 //! tier does (in weapon range), and most weapons cannot hit anything under
-//! water: only those that target submarines (the `SUB` category) or fire
-//! through water — torpedoes and depth charges — do.
+//! water: only water weapons — torpedoes, depth charges — do (see `water`).
 //!
 //! Against the enemy seen lately, the factories we have are weighed by
 //! their units: what none of them can engage is the gap, and where it is a
@@ -20,9 +19,6 @@ use crate::terrain::{reaches, tier_of};
 /// Enemies seen within this many frames count.
 const RECENT: i32 = 30 * 180;
 
-/// An enemy below this height (the sea is at 0) is under water, elmos.
-pub const SUBMERGED: f32 = -10.0;
-
 /// A gap of this much enemy value, and this share of what we see, calls
 /// for a factory.
 const GAP_VALUE: f32 = 1500.0;
@@ -34,11 +30,11 @@ const GAP_CLOSED: f32 = 0.5;
 /// Weapon ranges count up to this for reaching targets, elmos.
 const MAX_RANGE: f32 = 600.0;
 
-/// Factories that can be asked for to close a gap.
-const CANDIDATES: [&str; 11] = [
+/// Factories that can be asked for to close a gap (not the jump factory:
+/// nothing here tells it what to build).
+const CANDIDATES: [&str; 10] = [
     "factorycloak",
     "factoryshield",
-    "factoryjump",
     "factoryveh",
     "factorytank",
     "factoryhover",
@@ -61,19 +57,6 @@ struct Kind {
 }
 
 impl Ai {
-    /// Whether an enemy is under water (submerged, not flying).
-    pub fn is_submerged(&self, e: &Enemy) -> bool {
-        e.position.y < SUBMERGED && !e.can_fly()
-    }
-
-    /// Whether units of type `def` can hit something under water.
-    pub fn hits_under_water(&self, def: UnitDef) -> bool {
-        let sub = self.cb.game().category_flag("SUB");
-        def.weapon_mounts()
-            .iter()
-            .any(|m| m.only_target_category() & sub != 0 || m.weapon_def().is_some_and(|w| w.is_water_weapon()))
-    }
-
     /// The kinds of combat unit the factories `factories` build.
     fn arsenal_kinds(&self, factories: &[UnitDef]) -> Vec<Kind> {
         let mut kinds: Vec<Kind> = Vec::new();
@@ -81,7 +64,7 @@ impl Ai {
             if def.weapon_mounts().is_empty() || !def.build_options().is_empty() {
                 continue;
             }
-            let (tier, under_water) = (tier_of(def), self.hits_under_water(def));
+            let (tier, under_water) = (tier_of(def), self.war.reach(Some(def)).under_water);
             if tier.is_none() && !def.is_able_to_fly() {
                 continue;
             }
@@ -100,7 +83,7 @@ impl Ai {
 
     /// Whether some kind of `kinds`, from `base`, engages enemy `e`.
     fn arsenal_engages(&self, kinds: &[Kind], base: Vec3, e: &Enemy) -> bool {
-        let submerged = self.is_submerged(e);
+        let submerged = e.is_submerged();
         let terrain = self.reach_terrain();
         kinds.iter().any(|k| {
             (!submerged || k.under_water)
@@ -147,7 +130,7 @@ impl Ai {
     pub fn arsenal_submerged_sighting(&self) -> Option<Vec3> {
         let frame = self.frame;
         (self.war.targets.values())
-            .filter(|e| !e.is_dead && frame - e.last_seen < RECENT && self.is_submerged(e))
+            .filter(|e| !e.is_dead && frame - e.last_seen < RECENT && e.is_submerged())
             .max_by_key(|e| e.last_seen)
             .map(|e| e.position)
     }

@@ -29,6 +29,24 @@ const STRANDED_BONUS: f32 = 3000.0;
 const SQUAD: f32 = 4.0;
 const SQUAD_PULL: f32 = 3000.0;
 
+/// A metal spot with free ones near it is worth a little more than a lone
+/// one: whoever takes it goes straight on to the next. Every free spot
+/// within the radius adds up to the bonus, the nearer the more, up to the
+/// cap (on the scale of job costs: a quarter of the elmos away, so the cap
+/// is worth 400 elmos of walking).
+const CLUSTER_RADIUS: f32 = 600.0;
+const CLUSTER_BONUS: f32 = 40.0;
+const CLUSTER_CAP: f32 = 100.0;
+
+/// How much the free spots `free` near a spot at `p` make it worth.
+fn cluster_bonus(p: Vec3, free: impl Iterator<Item = Vec3>) -> f32 {
+    let near = |q: Vec3| {
+        let d = distance(p, q);
+        if d < 1.0 { 0.0 } else { (1.0 - d / CLUSTER_RADIUS).max(0.0) }
+    };
+    (CLUSTER_BONUS * free.map(near).sum::<f32>()).min(CLUSTER_CAP)
+}
+
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
     Build(UnitDef, Vec3, i32),
@@ -79,10 +97,12 @@ impl Ai {
         }
 
         let pos = unit.pos();
+        // The threat maps as the worker sees them, under water too (see `water`).
+        let view = self.war.view(unit.def());
         if !w.is_chicken
-            && (self.war.get_effective_threat(pos) > self.war.get_total_friendly_threat(pos)
+            && (view.get_effective_threat(pos) > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() || w.get_shields() < 0.5)
-                    && self.war.get_threat(pos) > 0.0
+                    && view.get_threat(pos) > 0.0
                     && !w.is_working_on_porc(&self.eco.tasks)))
         {
             if let Some(w) = self.eco.workers.get_mut(&wid) {
@@ -103,8 +123,9 @@ impl Ai {
         }
         let (is_chicken, chicken_frame, last_retreat_frame) = (w.is_chicken, w.chicken_frame, w.last_retreat_frame);
         if is_chicken {
-            if self.war.get_threat(pos) == 0.0
-                && ((self.war.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
+            let view = self.war.view(unit.def());
+            if view.get_threat(pos) == 0.0
+                && ((view.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
                     || frame - chicken_frame > 150)
             {
                 self.eco_stop_chickening(wid);
@@ -231,7 +252,8 @@ impl Ai {
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
         let wpos = worker.get_pos();
-        let threat_cost = |t: &WorkerTask| 500.0 * self.war.get_effective_threat(t.get_pos()).max(0.0);
+        let view = self.war.view(worker.unit.def());
+        let threat_cost = |t: &WorkerTask| 500.0 * view.get_effective_threat(t.get_pos()).max(0.0);
         // Only jobs the worker can get to (bots cannot build out at sea).
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
@@ -341,6 +363,14 @@ impl Ai {
         (have < spots.div_ceil(STRANDED_PER_CON)).then_some(spots)
     }
 
+    /// What the free metal near a spot at `p` makes taking it worth (see
+    /// [`CLUSTER_BONUS`]); spots enemy defenses cover are not free.
+    fn eco_mex_cluster_bonus(&self, p: Vec3) -> f32 {
+        let free = (self.graph.get_neutral_spots().into_iter().map(|s| s.get_pos()))
+            .filter(|&q| self.war.get_porc_threat(q) == 0.0);
+        cluster_bonus(p, free)
+    }
+
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
@@ -403,10 +433,11 @@ impl Ai {
 
                 if def_id == ids.mex_id {
                     // for mexes
+                    let cluster = self.eco_mex_cluster_bonus(task_pos);
                     if worker.is_greedy {
-                        return ((dist / 4.0) - 100.0) + (600.0 * (cost_mod - 1.0)).max(0.0);
+                        return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 1.0)).max(0.0);
                     }
-                    return ((dist / 4.0) - 100.0) + (600.0 * (cost_mod - 2.0)).max(0.0);
+                    return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 2.0)).max(0.0);
                 }
 
                 let cost = ctask.build_type.cost(self.metal);
@@ -761,5 +792,25 @@ impl Ai {
         let idle = self.eco.stop_workers(id);
         self.eco.idle_workers(&idle);
         self.eco.delete_task(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clustered_spot_beats_lone_one() {
+        let spots = [Vec3::xz(0.0, 0.0), Vec3::xz(200.0, 0.0), Vec3::xz(0.0, 300.0), Vec3::xz(3000.0, 0.0)];
+        let clustered = cluster_bonus(spots[0], spots.iter().copied());
+        let lone = cluster_bonus(spots[3], spots.iter().copied());
+        assert_eq!(lone, 0.0);
+        assert!((clustered - CLUSTER_BONUS * (2.0 / 3.0 + 0.5)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn cluster_bonus_is_capped() {
+        let ring = (0..12).map(|i| Vec3::xz(50.0 * (i as f32).cos(), 50.0 * (i as f32).sin()));
+        assert_eq!(cluster_bonus(Vec3::xz(0.0, 0.0), ring), CLUSTER_CAP);
     }
 }

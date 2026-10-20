@@ -214,7 +214,9 @@ impl Ai {
                 continue;
             }
 
-            if !self.retreat_handler.retreated_units.contains(&id) || self.war.get_threat(pos) > 0.0 {
+            // (Under water, only what hits under water counts; see `water`.)
+            let threatened = self.war.view(unit.def()).get_threat(pos) > 0.0;
+            if !self.retreat_handler.retreated_units.contains(&id) || threatened {
                 if !is_plane {
                     let haven = if is_flyer {
                         self.graph_get_closest_air_haven(pos)

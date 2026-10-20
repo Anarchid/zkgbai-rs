@@ -516,7 +516,11 @@ impl Ai {
         match choice {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
-            scouts::WIDOW => self.scouts_ordered(),
+            scouts::WIDOW if self.scouts_want_widow() => self.scouts_ordered(),
+            scouts::WIDOW | "striderantiheavy" => self.jaeger_ordered(choice),
+            // (Then asked for by the scouts: the factory builds no other
+            // Scythes while they want one.)
+            scouts::SCYTHE if self.scouts_want_scythe() => self.scouts_ordered_scythe(),
             _ => {}
         }
 
@@ -638,6 +642,10 @@ impl Ai {
 
         if war.slasher_spam as f32 * 280.0 > fm.assault_value {
             return "cloakassault";
+        }
+
+        if self.scouts_want_scythe() {
+            return scouts::SCYTHE;
         }
 
         if fac.raider_spam < 0.0 || fm.scout_budget > 0 {
@@ -1183,7 +1191,7 @@ impl Ai {
             return if kgb_rand() > 0.5 { "spiderassault" } else { "spiderskirm" };
         }
 
-        if self.scouts_want_widow() {
+        if self.scouts_want_widow() || self.jaeger_wants(scouts::WIDOW) {
             return scouts::WIDOW;
         }
 
@@ -1292,6 +1300,10 @@ impl Ai {
         let fm = &self.fac;
         let eco = &self.eco;
         let war = &self.war;
+
+        if fm.has_fusion && self.jaeger_wants("striderantiheavy") {
+            return "striderantiheavy";
+        }
 
         if eco.bots_viable
             && eco.adjusted_income > 60.0

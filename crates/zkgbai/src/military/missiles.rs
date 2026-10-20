@@ -6,7 +6,12 @@
 //! 3500 range; anti-nukes do not stop them, shields do) go at those
 //! buildings, as many as it takes each. Its Shockleys (`empmissile`: stun
 //! for up to 45 s, longer than a nuke's flight) go at the anti-nukes in the
-//! way of a loaded nuke, fired together with it (see `nukes`).
+//! way of a loaded nuke, fired together with it (see `nukes`). With
+//! nothing left in reach for those, its Infernos (`napalmmissile`: 500
+//! metal) roast clusters of light things (see [`LIGHT`]) out of shields:
+//! mexes in a cluster, wind generators, caretaker farms, picket turrets,
+//! and whatever stands with them, or crowds on radar we cannot make out
+//! (the burning ground keeps their builders from repairing them).
 //!
 //! The AI hears of no death it does not see, and an Eos is gone from the
 //! game once launched: a building an Eos hit (all it took, its shield
@@ -21,11 +26,12 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 
 use crate::Ai;
 use crate::terrain::HELD_POWER;
-use crate::util::{distance, get_directional_point};
+use crate::util::{NULLPOS, distance, get_directional_point};
 
 pub const SILO: &str = "staticmissilesilo";
 const EOS: &str = "tacnuke";
 const SHOCKLEY: &str = "empmissile";
+const INFERNO: &str = "napalmmissile";
 
 /// What the silo builds: units on its pads until fired.
 pub const MISSILES: [&str; 5] = ["tacnuke", "empmissile", "napalmmissile", "seismic", "missileslow"];
@@ -75,6 +81,48 @@ const EOS_SPEED: f32 = 1000.0;
 
 const CMD_ATTACK: i32 = 20;
 
+/// An Inferno burns what is within this of its burst: 151 damage on
+/// impact, fire, and more on the burning ground for 45 s. What stays in it
+/// (buildings, units standing still) takes about `BURN_STAYING` (measured:
+/// one Inferno burnt four 500-health caretakers, and twelve wind
+/// generators; it took two for ten 600-health Solars and a mex, the first
+/// killing three), what walks out `BURN_PASSING`. It is for light
+/// things, up to `LIGHT` health, this many together at least, and worth it
+/// where what it burns comes to `INFERNO_WORTH`: each thing's value by the
+/// share of its health left that the fire takes (a mex's or an energy
+/// building's `ECONOMY` times: its income goes with it), and `NUISANCE`
+/// for each thing in the fire besides. So four caretakers are worth it
+/// (three are not), seven wind generators, three mexes with a picket and a
+/// wind generator, or ten contacts we cannot make out standing together.
+const INFERNO_RADIUS: f32 = 256.0;
+const BURN_STAYING: f32 = 520.0;
+const BURN_PASSING: f32 = 150.0;
+const LIGHT: f32 = 2000.0;
+const MIN_CLUSTER: usize = 3;
+const INFERNO_WORTH: f32 = 600.0;
+const ECONOMY: f32 = 2.0;
+const NUISANCE: f32 = 20.0;
+
+/// The health a contact of unknown type is taken to have, and how high
+/// above the ground one flies (it is not burnt), elmos.
+const UNKNOWN_HEALTH: f32 = 500.0;
+const FLYING: f32 = 60.0;
+
+/// A unit seen this lately (frames), moving slower than this (elmos a
+/// frame), stays in the fire.
+const INFERNO_SEEN: i32 = 30 * 3;
+const STILL: f32 = 0.5;
+
+/// Infernos on the pads at most (the rest are kept for Eos and
+/// Shockleys), and how long a place burnt is left alone, and its ground
+/// burns: once its fire is out, what it should have burnt and was not
+/// seen since counts as gone (seen while it burns, it may yet die).
+const MAX_INFERNOS: usize = 2;
+const BURN_FRAMES: i32 = 30 * 45;
+
+/// Frames between reports on what Infernos would burn.
+const INFERNO_REPORT: i32 = 30 * 120;
+
 /// Frames between reports of why there is no silo.
 const REPORT_FRAMES: i32 = 30 * 300;
 
@@ -93,7 +141,13 @@ pub struct Missiles {
     /// Buildings all the Eos they take are flying at: which, and when the
     /// last is due.
     strikes: Vec<(i32, i32)>,
+    /// Where Infernos burst, and when.
+    burnt: Vec<(Vec3, i32)>,
+    /// What Infernos did to enemies (by id), as far as we know: damage,
+    /// and when the fire is out (from when what is seen of them counts).
+    burns: BTreeMap<i32, (f32, i32)>,
     last_report: i32,
+    last_inferno_report: i32,
 }
 
 /// An enemy building worth Eos: how many it takes.
@@ -173,6 +227,95 @@ impl Ai {
             .collect()
     }
 
+    /// Clusters of light enemies an Inferno would roast, out of shields,
+    /// clear of our units and not burning already: where, what it would
+    /// burn (see [`INFERNO_WORTH`]) and how many things, the best first,
+    /// none overlapping a better one.
+    fn missiles_inferno_targets(&self) -> Vec<(Vec3, f32, usize)> {
+        self.missiles_clusters(INFERNO_WORTH)
+    }
+
+    /// Light enemies an Inferno would burn: their ids, where they are, what
+    /// burning them is worth (see [`INFERNO_WORTH`]) and how much damage it
+    /// would do. Contacts of unknown type count as light; what our fires
+    /// should have burnt already, unseen since, does not.
+    fn missiles_light(&self) -> Vec<(i32, Vec3, f32, f32)> {
+        let frame = self.frame;
+        let map = self.cb.map();
+        (self.war.targets.values())
+            .filter(|e| !e.is_dead && !e.can_fly() && !e.is_nano_spam && e.position != NULLPOS)
+            .filter_map(|e| {
+                let known = e.ud.is_some();
+                let health = if known { e.def_health() } else { UNKNOWN_HEALTH };
+                if health <= 0.0 || health > LIGHT {
+                    return None;
+                }
+                if !known && e.position.y - map.elevation_at(e.position.x, e.position.z).max(0.0) > FLYING {
+                    return None;
+                }
+                let burn = if e.is_static && known {
+                    BURN_STAYING
+                } else if frame - e.last_seen > INFERNO_SEEN {
+                    return None;
+                } else if e.unit.vel().x.hypot(e.unit.vel().z) < STILL {
+                    BURN_STAYING
+                } else {
+                    BURN_PASSING
+                };
+                // Less what our fires did since it was last seen.
+                let mut left = e.get_health() * health;
+                if let Some(&(done, _)) = self.missiles.burns.get(&e.unit_id).filter(|b| e.last_seen < b.1) {
+                    left -= done;
+                }
+                if left <= 0.0 {
+                    return None;
+                }
+                let economy = e.is_mex || e.def_name.starts_with("energy");
+                let value = if economy { ECONOMY * e.value } else { e.value };
+                Some((e.unit_id, e.position, value * (burn / left).min(1.0) + NUISANCE, burn))
+            })
+            .collect()
+    }
+
+    /// [`missiles_inferno_targets`](Self::missiles_inferno_targets), of
+    /// those burning more than `worth`.
+    fn missiles_clusters(&self, worth: f32) -> Vec<(Vec3, f32, usize)> {
+        let light: Vec<(Vec3, f32)> = self.missiles_light().into_iter().map(|l| (l.1, l.2)).collect();
+        let within = |c: Vec3| light.iter().filter(move |l| distance(l.0, c) <= INFERNO_RADIUS);
+        let burning = |p: Vec3| self.missiles.burnt.iter().any(|b| distance(b.0, p) <= INFERNO_RADIUS);
+        // None of ours but aircraft in the fire.
+        let clear = |p: Vec3| {
+            let ours = self.cb.friendly_units_in(p, INFERNO_RADIUS + 100.0);
+            ours.iter().all(|u| u.def().is_some_and(|d| d.is_able_to_fly()))
+        };
+        let mut clusters: Vec<(Vec3, f32, usize)> = Vec::new();
+        for &(c, _) in &light {
+            // Aimed at the middle of those around each one.
+            let n = within(c).count();
+            if n < MIN_CLUSTER {
+                continue;
+            }
+            let (x, z) = within(c).fold((0.0, 0.0), |(x, z), l| (x + l.0.x / n as f32, z + l.0.z / n as f32));
+            let mid = Vec3::new(x, self.cb.map().elevation_at(x, z), z);
+            let (burnt, n) = within(mid).fold((0.0, 0), |(v, n), l| (v + l.1, n + 1));
+            if n >= MIN_CLUSTER && burnt > worth {
+                clusters.push((mid, burnt, n));
+            }
+        }
+        clusters.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut chosen: Vec<(Vec3, f32, usize)> = Vec::new();
+        for c in clusters {
+            if chosen.iter().all(|o| distance(o.0, c.0) > 2.0 * INFERNO_RADIUS)
+                && !burning(c.0)
+                && self.missiles_shield(c.0).is_none()
+                && clear(c.0)
+            {
+                chosen.push(c);
+            }
+        }
+        chosen
+    }
+
     /// Where a silo would do most: a safe place on our ground within reach
     /// of enough to pay for it and its missiles (three Fusions, one
     /// Singularity or anti-nuke; an anti-nuke a Shockley would stun counts
@@ -241,15 +384,38 @@ impl Ai {
         ));
     }
 
+    /// Say now and then what an Inferno would find to burn.
+    fn missiles_report_infernos(&mut self, silo: Unit) {
+        if self.frame - self.missiles.last_inferno_report < INFERNO_REPORT {
+            return;
+        }
+        self.missiles.last_inferno_report = self.frame;
+        let here = silo.pos();
+        let best = (self.missiles_clusters(0.0).into_iter())
+            .filter(|c| distance(c.0, here) <= REACH)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let pads = self.missiles_ready(INFERNO).len();
+        let best = best.map_or("none".to_owned(), |(p, v, n)| {
+            format!("{v:.0} metal in {n} light things at ({:.0}, {:.0})", p.x, p.z)
+        });
+        self.log(&format!(
+            "missiles: Infernos: {pads} on the pads; best cluster in reach {best} (fire above {INFERNO_WORTH:.0})"
+        ));
+    }
+
     pub fn missiles_update(&mut self, frame: i32) {
         if (frame + self.offset) % 90 != 0 {
             return;
         }
         self.missiles.ready.retain(|m| m.health() > 0.0);
         self.missiles.struck.retain(|_, t| frame - *t < STRUCK_MEMORY);
+        self.missiles.burnt.retain(|b| frame - b.1 < BURN_FRAMES);
         self.missiles_settle_strikes();
+        self.missiles_settle_burns();
         let Some(silo) = self.missiles_silo() else { return };
         self.missiles_fire_eos();
+        self.missiles_fire_infernos();
+        self.missiles_report_infernos(silo);
         self.missiles_restock(silo);
     }
 
@@ -307,6 +473,54 @@ impl Ai {
         }
     }
 
+    /// Fire the Infernos on the pads at the clusters in reach, one each.
+    fn missiles_fire_infernos(&mut self) {
+        let mut free = self.missiles_ready(INFERNO);
+        if free.is_empty() {
+            return;
+        }
+        for (p, value, n) in self.missiles_inferno_targets() {
+            let Some(i) = free.iter().position(|m| distance(m.pos(), p) <= REACH) else { continue };
+            let m = free.remove(i);
+            // When its fire is out (an Eos's flight is taken for its own).
+            let frame = self.frame;
+            let due = frame + (30.0 * (EOS_RISE + distance(m.pos(), p) / EOS_SPEED)) as i32 + BURN_FRAMES;
+            self.missiles_launch(m, p);
+            self.missiles.burnt.push((p, frame));
+            for (id, _, _, burn) in self.missiles_light().into_iter().filter(|l| distance(l.1, p) <= INFERNO_RADIUS) {
+                let b = self.missiles.burns.entry(id).or_insert((0.0, due));
+                *b = (b.0 + burn, due);
+            }
+            self.log(&format!(
+                "missiles: an Inferno at {n} light things, {value:.0} metal of them burnt, at ({:.0}, {:.0})",
+                p.x, p.z
+            ));
+            if free.is_empty() {
+                break;
+            }
+        }
+    }
+
+    /// Once their fires are out, count the buildings our Infernos should
+    /// have burnt down gone, unless seen standing since; forget the rest.
+    fn missiles_settle_burns(&mut self) {
+        let frame = self.frame;
+        let out: Vec<(i32, f32, i32)> =
+            (self.missiles.burns.iter()).filter(|b| frame >= b.1.1).map(|(&id, &(done, at))| (id, done, at)).collect();
+        for (id, done, at) in out {
+            self.missiles.burns.remove(&id);
+            // (Of unknown type, its health is unknown too.)
+            let Some(e) = self.war.targets.get(&id).filter(|e| !e.is_dead && e.is_static && e.ud.is_some()) else {
+                continue;
+            };
+            if e.last_seen < at && done >= e.get_health() * e.def_health() {
+                let (unit, name, pos) = (e.unit, e.def_name.clone(), e.position);
+                self.war_enemy_destroyed(unit, None);
+                self.log(&format!("missiles: the {name} at ({:.0}, {:.0}) counts as burnt", pos.x, pos.z));
+            }
+        }
+    }
+
     /// All the Eos building `id` takes are flying at it from the pads.
     fn missiles_strike_due(&mut self, id: i32, at: Vec3) {
         let from = self.missiles_silo().map_or(at, |s| s.pos());
@@ -339,7 +553,8 @@ impl Ai {
     }
 
     /// Keep the pads stocked: Shockleys for the anti-nukes in the way of
-    /// our nukes, Eos for what is worth them.
+    /// our nukes, Eos for what is worth them, and with neither left in
+    /// reach, a few Infernos for clusters of light things.
     fn missiles_restock(&mut self, silo: Unit) {
         let (Some(eos), Some(shockley)) = (self.defs.get(EOS), self.defs.get(SHOCKLEY)) else { return };
         let queued: Vec<i32> = silo.current_commands().iter().map(|c| -c.id()).filter(|&id| id > 0).collect();
@@ -353,10 +568,18 @@ impl Ai {
         let needed: usize =
             self.missiles_eos_targets().iter().filter(|t| distance(t.pos, here) <= REACH).map(|t| t.needed).sum();
         let needed = needed + self.missiles.followups.iter().map(|f| f.2).sum::<usize>();
+        let infernos = || {
+            let def = self.defs.get(INFERNO)?;
+            let n = count(INFERNO, def.id());
+            let roast = self.missiles_inferno_targets().iter().filter(|c| distance(c.0, here) <= REACH).count();
+            (n < roast.min(MAX_INFERNOS)).then_some(def)
+        };
         let def = if n_shock < stun.min(2) {
             shockley
         } else if n_eos < needed.min(PADS) {
             eos
+        } else if let Some(inferno) = (stun == 0 && needed == 0).then(infernos).flatten() {
+            inferno
         } else {
             return;
         };

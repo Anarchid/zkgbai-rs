@@ -32,7 +32,22 @@
 //! attacker gets two each of Glaives, Scythes, Scorchers and Kodachis every
 //! two minutes, as solo raiders, and a
 //! radar toward the enemy: their precision missions (see
-//! `handlers::precision`) are all that should hurt the fort.
+//! `handlers::precision`) are all that should hurt the fort. With
+//! `test=deepscout` (against `test=fort`), the attacker gets a cloak
+//! factory and two Fusions at once, so it wants a deep scout and has no
+//! spider factory: the factory builds the Scythes wanted (see `scouts`).
+//! A radar by the enemy's base shows it the fort for a while, and goes. With
+//! `test=heavies`, a passive defender gets two Grizzlies and a Cyclops
+//! halfway to the enemy, and a factory behind its base; its commander holds
+//! its fire back there; with `test=jaeger`, the attacker gets a spider
+//! factory and an Owl at once, and an assault squad's worth of Knights and
+//! Wardens every few minutes: its spider factory builds the Widows its
+//! jaeger squads want (see `jaeger`), which should stun the heavies for the
+//! assaults to kill. With `test=farm`, a passive defender gets twelve
+//! wind generators, four caretakers and three more caretakers apart by its
+//! base: light things together, for the Infernos of a `test=eos` attacker,
+//! which has nothing there worth an Eos (see `missiles`): the first two
+//! are worth one, the three caretakers are not.
 
 use springai::Vec3;
 
@@ -63,6 +78,10 @@ const FORT_GUNS: [&str; 8] = [
 /// When precision raiders come, and how often.
 const PRECISION_FRAME: i32 = 30 * 60;
 const PRECISION_ROUND: i32 = 30 * 120;
+
+/// When the attacker's assaults come in a jaeger test, and how often.
+const JAEGER_ARMY_FRAME: i32 = 30 * 90;
+const JAEGER_ARMY_ROUND: i32 = 30 * 180;
 
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
@@ -105,7 +124,10 @@ impl Ai {
             ],
             ("bite", 60) => vec![("factoryspider", ahead(400.0))],
             ("bite", SILO_FRAME) => vec![("staticnuke", ahead(-500.0)), ("staticradar", enemy)],
-            ("eos", RADAR_FRAME) => vec![("staticradar", enemy)],
+            ("eos" | "deepscout", RADAR_FRAME) => vec![("staticradar", enemy)],
+            ("deepscout", 60) => {
+                vec![("factorycloak", ahead(400.0)), ("energyfusion", ahead(-300.0)), ("energyfusion", ahead(-500.0))]
+            }
             ("eos", SILO_FRAME) => vec![(missiles::SILO, get_directional_point(enemy, base, 2500.0))],
             ("bertha", 60) => {
                 let mut units = [-600.0, -400.0, -200.0, 200.0, 400.0]
@@ -173,6 +195,39 @@ impl Ai {
                 }
                 units
             }
+            ("heavies", 60) => {
+                // Halfway to the enemy; a factory keeps the AI team alive
+                // (ZK ends an AI team with no constructor or factory).
+                let half = distance(base, enemy) / 2.0;
+                vec![
+                    ("amphassault", get_directional_point(base, enemy, half)),
+                    ("amphassault", get_directional_point(base, enemy, half + 150.0)),
+                    ("tankheavyassault", get_directional_point(base, enemy, half - 150.0)),
+                    ("factorycloak", get_directional_point(base, enemy, -300.0)),
+                ]
+            }
+            ("farm", 60) => {
+                // Twelve wind generators, four caretakers, and three
+                // caretakers (too few to be worth an Inferno).
+                let mut units = Vec::new();
+                for (d, s, name, count) in
+                    [(450.0, 0.0, "energywind", 12), (300.0, 450.0, "staticcon", 4), (300.0, -450.0, "staticcon", 3)]
+                {
+                    let p = ahead(d);
+                    let c = Vec3::xz(p.x - dz / n * s, p.z + dx / n * s);
+                    for k in 0..count {
+                        let (i, j) = ((k / 4) as f32 - 1.0, (k % 4) as f32 - 1.5);
+                        units.push((name, Vec3::xz(c.x + 70.0 * i, c.z + 70.0 * j)));
+                    }
+                }
+                units
+            }
+            ("jaeger", 60) => vec![("factoryspider", ahead(400.0)), ("planescout", ahead(-100.0))],
+            ("jaeger", f) if f >= JAEGER_ARMY_FRAME && (f - JAEGER_ARMY_FRAME) % JAEGER_ARMY_ROUND == 0 => (0..6)
+                .map(|k| {
+                    (["cloakassault", "cloakriot"][k % 2], get_directional_point(base, enemy, 1200.0 - 30.0 * k as f32))
+                })
+                .collect(),
             ("aaprobe", f) if f % PROBE_ROUND == 0 && f > 0 => vec![("gunshiptrans", ahead(-200.0)); 2],
             ("colony", 60) => vec![("cloakcon", ahead(-150.0)), ("gunshiptrans", ahead(-250.0))],
             ("colonyair", 60) => vec![("gunshipcon", ahead(-150.0))],
@@ -190,7 +245,7 @@ impl Ai {
         if frame == 60 {
             self.cb.cheats_set_enabled(true);
         }
-        if test == "eos" && frame == RADAR_FRAME + 1500 {
+        if (test == "eos" || test == "deepscout") && frame == RADAR_FRAME + 1500 {
             let radars = self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "staticradar");
             for r in radars.filter(|r| distance(r.pos(), enemy) < 1500.0) {
                 r.self_destruct(0);
@@ -222,10 +277,14 @@ impl Ai {
         }
         // Owls keep watch over the fort, and the commander holds its fire
         // (it would shoot the probes; losing it ends the game).
-        if (test == "fort" || test == "radarfort") && frame == 300 {
+        if matches!(test.as_str(), "fort" | "radarfort" | "heavies" | "farm") && frame == 300 {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
                 c.set_move_state(0, 0);
+                // Out of the way of the heavies' fight.
+                if test == "heavies" {
+                    c.move_to(get_directional_point(base, enemy, -600.0), 0);
+                }
             }
         }
         if (test == "fort" || test == "radarfort") && frame == 60 {
@@ -260,6 +319,26 @@ impl Ai {
             fac.build(widow, fac.pos(), 0, 0);
             self.scouts_ordered();
             self.log("strike-test: a Widow ordered");
+        }
+        // The Scythes wanted, from an idle cloak factory.
+        let cloaks = self.fac.factories.values().map(|f| f.unit).find(|u| self.defs.name_of(*u) == "factorycloak");
+        if test == "deepscout"
+            && let Some(fac) = cloaks.filter(|f| f.current_commands().is_empty())
+            && self.scouts_want_scythe()
+            && let Some(scythe) = self.defs.get(crate::military::scouts::SCYTHE)
+        {
+            fac.build(scythe, fac.pos(), 0, 0);
+            self.scouts_ordered_scythe();
+            self.log("strike-test: a Scythe ordered");
+        }
+        if test == "jaeger"
+            && let Some(fac) = spiders.filter(|f| f.current_commands().is_empty())
+            && self.jaeger_wants(crate::military::scouts::WIDOW)
+            && let Some(widow) = self.defs.get(crate::military::scouts::WIDOW)
+        {
+            fac.build(widow, fac.pos(), 0, 0);
+            self.jaeger_ordered(crate::military::scouts::WIDOW);
+            self.log("strike-test: a jaeger Widow ordered");
         }
     }
 }

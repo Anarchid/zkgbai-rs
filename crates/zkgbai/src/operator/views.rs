@@ -50,6 +50,7 @@ fn squad_kind(k: SquadKind) -> &'static str {
         SquadKind::Raider => "raider",
         SquadKind::Shield => "shield",
         SquadKind::Hover => "hover",
+        SquadKind::Jaeger => "jaeger",
     }
 }
 

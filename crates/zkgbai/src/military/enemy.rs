@@ -5,7 +5,12 @@ use std::cell::Cell;
 use springai::{Unit, UnitDef, Vec3};
 
 use super::radar::RadarDef;
+use super::water::{is_fake, is_floater};
 use super::wrappers::weapon_power;
+
+/// Under water, a contact of unknown type is below this height (the sea is
+/// at 0), elmos.
+const UNKNOWN_SUBMERGED: f32 = -10.0;
 
 pub struct Enemy {
     pub unit: Unit,
@@ -53,6 +58,14 @@ pub struct Enemy {
     def_speed: f32,
     def_max_weapon_range: f32,
     def_builds_nothing: bool,
+    def_radius: f32,
+    /// Whether it has a weapon for targets above water (not a torpedo).
+    hits_surface: bool,
+    /// Strength and reach of its water weapons (see [`super::water`]).
+    deep_power: f32,
+    deep_range: f32,
+    /// Rises to the surface to fire (ZK's float toggle).
+    floater: bool,
 }
 
 impl Enemy {
@@ -100,6 +113,11 @@ impl Enemy {
             def_speed: 0.0,
             def_max_weapon_range: 0.0,
             def_builds_nothing: true,
+            def_radius: 0.0,
+            hits_surface: false,
+            deep_power: 0.0,
+            deep_range: 0.0,
+            floater: false,
         };
         match unit.def() {
             Some(def) => {
@@ -133,6 +151,7 @@ impl Enemy {
         self.def_health = ud.health();
         self.def_max_weapon_range = ud.max_weapon_range();
         self.def_builds_nothing = ud.build_options().is_empty();
+        self.def_radius = ud.radius();
 
         if ud.build_speed() > 0.0 {
             self.is_worker = true;
@@ -187,7 +206,21 @@ impl Enemy {
                 self.is_porc = true;
             }
 
+            self.floater = is_floater(ud);
+            for wd in mounts.iter().filter_map(|m| m.weapon_def()) {
+                if is_fake(&wd.name()) {
+                    continue;
+                }
+                if wd.weapon_type() != "TorpedoLauncher" || wd.is_sub_missile() {
+                    self.hits_surface = true;
+                }
+                if wd.is_water_weapon() {
+                    self.deep_power += weapon_power(wd, true);
+                    self.deep_range = self.deep_range.max(wd.range());
+                }
+            }
             if self.is_com {
+                self.hits_surface = true;
                 self.power = 300.0;
             } else {
                 for wd in mounts.iter().filter_map(|m| m.weapon_def()) {
@@ -265,15 +298,54 @@ impl Enemy {
     /// The original also flagged high-level commanders as strong here; that
     /// needs `&mut self`, see [`Enemy::get_danger_mut`].
     pub fn get_danger(&self) -> f32 {
+        self.danger_of(self.power)
+    }
+
+    /// [`Enemy::get_danger`] with weapons of strength `power`.
+    fn danger_of(&self, power: f32) -> f32 {
         if self.ud.is_none() || !self.can_attack || self.is_super_wep {
             return 0.0;
         }
         let health = self.current_health();
-        let mut danger = (self.power + health) / 10.0;
+        let mut danger = (power + health) / 10.0;
         if (self.is_arty && self.def_name != "amphfloater") || self.def_is_builder {
             danger /= 3.0;
         }
         danger
+    }
+
+    /// Danger to what is above water: none from torpedoes alone, nor from
+    /// under water (`submerged`) unless it is a floater, which rises to
+    /// fire.
+    pub fn surface_danger(&self, submerged: bool) -> f32 {
+        if !self.hits_surface || (submerged && !self.floater) { 0.0 } else { self.get_danger() }
+    }
+
+    /// Danger to what is under water (from its water weapons).
+    pub fn deep_danger(&self) -> f32 {
+        if self.deep_power > 0.0 { self.danger_of(self.deep_power) } else { 0.0 }
+    }
+
+    /// Whether it is all under water (not flying), where last seen: its
+    /// middle plus radius below the surface, as the engine has it.
+    pub fn is_submerged(&self) -> bool {
+        if self.can_fly {
+            return false;
+        }
+        match self.def_radius() {
+            Some(r) => self.position.y + r < 0.0,
+            None => self.position.y < UNKNOWN_SUBMERGED,
+        }
+    }
+
+    /// Range of its water weapons, elmos (0 without any).
+    pub fn deep_range(&self) -> f32 {
+        self.deep_range
+    }
+
+    /// `ud.radius()`, `None` while unidentified.
+    pub fn def_radius(&self) -> Option<f32> {
+        self.ud.map(|_| self.def_radius)
     }
 
     /// [`Enemy::get_danger`], also refreshing `is_strong` for upgraded

@@ -16,6 +16,7 @@ use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::incursions::Incursions;
 use crate::military::intel::Intel;
+use crate::military::jaeger::Jaegers;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
 use crate::military::scouts::Scouts;
@@ -78,6 +79,8 @@ pub struct Ai {
     pub sweeps: Sweeps,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
+    /// Squads hunting the enemy's heavies.
+    pub jaegers: Jaegers,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -174,6 +177,7 @@ impl SkirmishAi for Ai {
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
+            jaegers: Jaegers::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,
@@ -412,7 +416,10 @@ impl Ai {
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
         // A staged anti-nuke stands by (see `strike_test`).
-        if matches!(self.test.as_deref(), Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe")) {
+        if matches!(
+            self.test.as_deref(),
+            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm")
+        ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
         }

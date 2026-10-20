@@ -72,11 +72,11 @@ const SILO_CARETAKERS: usize = 2;
 const REQUISITION_INCOME: f32 = 20.0;
 const REQUISITION_PERIOD: i32 = 30 * 20;
 
-/// Ground and sea factories, by the tier of their units.
-const GROUND_FACTORIES: [&str; 9] = [
+/// Ground and sea factories, by the tier of their units (not the jump
+/// factory: nothing here tells it what to build, so it would stand idle).
+const GROUND_FACTORIES: [&str; 8] = [
     "factorycloak",
     "factoryshield",
-    "factoryjump",
     "factoryveh",
     "factorytank",
     "factoryhover",
@@ -908,7 +908,8 @@ impl Ai {
                 format!("{value:.0} metal is behind anti-nukes: Widows to find and stun them"),
             ));
         }
-        if !owned("factoryspider") && self.scouts_deep_wanted() && !self.scouts_have_widow() {
+        // (A cloak factory builds Scythes for it instead.)
+        if !owned("factoryspider") && !owned("factorycloak") && self.scouts_deep_wanted() && !self.scouts_have_scout() {
             return Some((
                 "factoryspider".to_owned(),
                 format!(

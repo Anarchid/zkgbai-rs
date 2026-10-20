@@ -197,7 +197,7 @@ fn anti_candidates(near: &[Vec3], size: (f32, f32), seen: impl Fn(Vec3) -> bool)
 }
 
 /// Distance from `p` to the segment from `a` to `b`, on the ground plane.
-fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
+pub(crate) fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
     let (dx, dz) = (b.x - a.x, b.z - a.z);
     let len2 = dx * dx + dz * dz;
     let t = if len2 > 0.0 { (((p.x - a.x) * dx + (p.z - a.z) * dz) / len2).clamp(0.0, 1.0) } else { 0.0 };
@@ -401,6 +401,11 @@ impl Ai {
             silo.stockpile(),
             guarded.unwrap_or_default()
         ));
+    }
+
+    /// Where a missile of ours is on its way to, and its blast radius.
+    pub fn nukes_in_flight(&self) -> Option<(Vec3, f32)> {
+        self.nukes.launch.as_ref().map(|l| (l.target, BLAST))
     }
 
     /// Whether to build a silo: a strike would pay and we can afford one.

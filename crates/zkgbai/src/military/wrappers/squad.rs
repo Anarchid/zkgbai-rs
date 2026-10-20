@@ -28,6 +28,9 @@ pub enum SquadKind {
     Raider,
     Shield,
     Hover,
+    /// Anti-heavy hunters (see `military::jaeger`): they sneak, holding
+    /// their fire, until they strike.
+    Jaeger,
 }
 
 pub struct Squad {
@@ -153,6 +156,7 @@ impl Squad {
             SquadKind::Shield => self.shield_set_target(pos, fighters, nav),
             SquadKind::Hover => self.hover_set_target(pos, fighters, nav),
             SquadKind::Assault | SquadKind::Raider => self.base_set_target(pos, fighters, nav),
+            SquadKind::Jaeger => self.raider_order(pos, fighters, nav, false),
         }
     }
 
@@ -178,7 +182,7 @@ impl Squad {
 
     pub fn get_pos(&self, fighters: &FighterStore) -> Vec3 {
         match self.kind {
-            SquadKind::Raider => self.leader_fighter(fighters).map_or(self.target, |l| l.get_pos()),
+            SquadKind::Raider | SquadKind::Jaeger => self.leader_fighter(fighters).map_or(self.target, |l| l.get_pos()),
             SquadKind::Shield => match self.leader_fighter(fighters) {
                 Some(l) if l.unit.health() > 0.0 && l.unit.team() == self.team => l.get_pos(),
                 // Otherwise if the squad has no units, return its target.
@@ -363,7 +367,7 @@ impl Squad {
     fn add_unit_inner(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, nav: Option<&mut Nav>) {
         match self.kind {
             SquadKind::Shield => self.shield_add_unit(id, fighters, frame, nav),
-            SquadKind::Raider => {
+            SquadKind::Raider | SquadKind::Jaeger => {
                 let Some(f) = fighters.get_mut(&id) else { return };
                 self.fighters.push(id);
                 f.squad = Some(self.id);
@@ -409,7 +413,7 @@ impl Squad {
         }
         match self.kind {
             SquadKind::Shield => self.shield_remove_unit(id, fighters, frame, nav),
-            SquadKind::Raider => {
+            SquadKind::Raider | SquadKind::Jaeger => {
                 if let Some(f) = fighters.get_mut(&id) {
                     f.squad = None;
                 }
@@ -746,7 +750,7 @@ impl Squad {
                 }
                 best.map(|(id, _)| id)
             }
-            SquadKind::Raider => {
+            SquadKind::Raider | SquadKind::Jaeger => {
                 // Bombs were meant to lead last, but like the original the
                 // later candidates are compared against the raw index of the
                 // best one so far, so the earliest member always leads.

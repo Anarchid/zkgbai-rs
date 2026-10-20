@@ -8,6 +8,7 @@ pub mod enemy;
 pub mod handlers;
 pub mod incursions;
 pub mod intel;
+pub mod jaeger;
 pub mod missiles;
 pub mod nukes;
 pub mod precision;
@@ -19,6 +20,7 @@ pub mod sweeps;
 pub mod tasks;
 pub mod teleport;
 pub mod unit_classes;
+pub mod water;
 pub mod wrappers;
 
 pub use enemy::Enemy;
@@ -94,6 +96,7 @@ pub struct MilitaryManager {
     air_defense_targets: Vec<DefenseTarget>,
 
     radar_id: RadarIdentifier,
+    water: water::Water,
 
     threat_graphics: ArrayGraphics,
     enemy_porc_graphics: ArrayGraphics,
@@ -102,6 +105,11 @@ pub struct MilitaryManager {
     ally_porc_graphics: ArrayGraphics,
     aa_threat_graphics: ArrayGraphics,
     aa_porc_graphics: ArrayGraphics,
+    /// Enemy threat to things under water, of it their defenses', and ours
+    /// (see [`water`]).
+    sub_threat_graphics: ArrayGraphics,
+    sub_porc_graphics: ArrayGraphics,
+    ally_sub_graphics: ArrayGraphics,
     value_graphics: ArrayGraphics,
     raider_value_graphics: ArrayGraphics,
     bp_graphics: ByteArrayGraphics,
@@ -155,6 +163,7 @@ impl MilitaryManager {
             predicted_defense_targets: Vec::new(),
             air_defense_targets: Vec::new(),
             radar_id: RadarIdentifier::new(cb),
+            water: water::Water::new(cb, width, height),
             threat_graphics: ArrayGraphics::new(width, height),
             enemy_porc_graphics: ArrayGraphics::new(width, height),
             ally_threat_graphics: ArrayGraphics::new(width, height),
@@ -162,6 +171,9 @@ impl MilitaryManager {
             ally_porc_graphics: ArrayGraphics::new(width, height),
             aa_threat_graphics: ArrayGraphics::new(width, height),
             aa_porc_graphics: ArrayGraphics::new(width, height),
+            sub_threat_graphics: ArrayGraphics::new(width, height),
+            sub_porc_graphics: ArrayGraphics::new(width, height),
+            ally_sub_graphics: ArrayGraphics::new(width, height),
             value_graphics: ArrayGraphics::new(width, height),
             raider_value_graphics: ArrayGraphics::new(width, height),
             bp_graphics: ByteArrayGraphics::new(width, height),
@@ -296,7 +308,7 @@ impl MilitaryManager {
     }
 
     /// Names of the threat and value maps, for [`MilitaryManager::grid_value`].
-    pub const GRIDS: [&'static str; 12] = [
+    pub const GRIDS: [&'static str; 15] = [
         "threat",
         "enemy_porc",
         "ally_threat",
@@ -304,6 +316,9 @@ impl MilitaryManager {
         "ally_porc",
         "aa_threat",
         "aa_porc",
+        "sub_threat",
+        "sub_porc",
+        "ally_sub",
         "value",
         "raider_value",
         "bp",
@@ -326,6 +341,9 @@ impl MilitaryManager {
             "ally_porc" => self.ally_porc_graphics.get_value(x, y),
             "aa_threat" => self.aa_threat_graphics.get_value(x, y),
             "aa_porc" => self.aa_porc_graphics.get_value(x, y),
+            "sub_threat" => self.sub_threat_graphics.get_value(x, y),
+            "sub_porc" => self.sub_porc_graphics.get_value(x, y),
+            "ally_sub" => self.ally_sub_graphics.get_value(x, y),
             "value" => self.value_graphics.get_value(x, y),
             "raider_value" => self.raider_value_graphics.get_value(x, y),
             "bp" => self.bp_graphics.get_value(x, y),
@@ -464,8 +482,10 @@ impl Ai {
         self.guard("nukes.update", |ai| ai.nukes_update(frame));
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
+        self.guard("jaeger.update", |ai| ai.jaeger_update(frame));
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
         self.guard("precision.update", |ai| ai.precision_update(frame));
+        self.guard("water.update", |ai| ai.water_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
@@ -574,17 +594,18 @@ impl Ai {
             self.drops_add_charon(unit);
             return;
         }
-        if name == scouts::WIDOW {
-            self.scouts_add_widow(unit);
+        // Anti-heavies hunt heavies (see `jaeger`); other Widows scout.
+        if self.jaeger_claims(name) {
+            self.jaeger_add(unit, cost);
+            return;
+        }
+        if name == scouts::WIDOW || (name == scouts::SCYTHE && self.scouts_adopt_scythe()) {
+            self.scouts_add(unit);
             return;
         }
 
         let mobile_combat = ud.speed() > 0.0 && ud.build_options().is_empty();
-        if name == "striderantiheavy" {
-            unit.set_move_state(0, 0);
-            unit.set_fire_state(1, 0);
-            self.misc_add_ulti(Fighter::new_raider(unit, cost, team));
-        } else if self.unit_classes.striders.contains(name) {
+        if self.unit_classes.striders.contains(name) {
             unit.set_move_state(1, 0);
             self.misc_add_strider(Fighter::new_strider(unit, cost, team));
         } else if mobile_combat {
@@ -763,11 +784,14 @@ impl Ai {
                     target
                 }
             };
-            let dt = if static_builder {
+            let mut dt = if static_builder {
                 DefenseTarget::new(target, h.max_health(), frame)
             } else {
                 DefenseTarget::new(target, wd.range(), frame)
             };
+            // Hit by a water weapon from the water: what did it may be under
+            // water, where only water weapons reach it.
+            dt.under_water = wd.is_water_weapon() && self.war.water_depth(target) > 0.0;
 
             let war = &mut self.war;
             war.last_defense_frame = frame;
@@ -802,6 +826,7 @@ impl Ai {
         self.squad_remove_unit(unit);
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);
+        self.jaeger_remove_unit(unit);
 
         if is_nuke {
             self.war.has_nuke = false;
@@ -979,6 +1004,7 @@ impl Ai {
         // Commanders come free, so they do not count as metal destroyed.
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
+        self.jaeger_enemy_destroyed(id);
         let war = &mut self.war;
         let Some(e) = war.targets.get_mut(&id) else { return };
         e.is_dead = true;
@@ -1185,9 +1211,28 @@ impl Ai {
                 war.bp_graphics.paint_circle(x, y, w.build_range, w.bp.round() as i32);
             }
 
+            // paint ally threat under water, for whatever has water weapons
+            war.ally_sub_graphics.clear();
+            if war.water.wet {
+                for f in fighters.values() {
+                    let deep = war.deep_power(f.unit.def());
+                    if deep > 0.0 && alive(f.unit) {
+                        let (x, y) = cell(f.get_pos());
+                        war.ally_sub_graphics.paint_circle(x, y, 8, ((deep + f.unit.max_health()) / 10.0) as i32);
+                    }
+                }
+                for p in self.eco.dporcs.values().filter(|p| !p.is_dead()) {
+                    if war.deep_power(p.unit.def()) > 0.0 {
+                        let (x, y) = cell(p.get_pos());
+                        war.ally_sub_graphics.paint_circle(x, y, p.radius, p.get_power());
+                    }
+                }
+            }
+
             war.threat_graphics.clear();
             war.aa_threat_graphics.clear();
             war.riot_graphics.clear();
+            war.sub_threat_graphics.clear();
             let planes = &self.unit_classes.planes;
             for t in war.targets.values_mut() {
                 let mut effective_power = t.get_danger_mut() as i32;
@@ -1205,6 +1250,11 @@ impl Ai {
                     if t.def_name == "gunshipskirm" {
                         r *= 5;
                     }
+                    // What it hits above water from where it is, and under
+                    // water (see `water`).
+                    let surface = t.surface_danger(t.is_submerged()) > 0.0;
+                    let mut deep_power = t.deep_danger();
+                    let rd = (t.deep_range() / 64.0).round() as i32;
                     if !t.is_static {
                         if !t.can_fly() {
                             // Reduce threat gradually for units that haven't been seen recently.
@@ -1212,6 +1262,7 @@ impl Ai {
                             time_mod *= time_mod;
                             time_mod = (1.0 - time_mod).max(0.0);
                             effective_power = (effective_power as f32 * time_mod) as i32;
+                            deep_power *= time_mod;
                         }
                         // paint enemy threat for mobiles
                         if t.is_aa || t.is_flex_aa {
@@ -1221,18 +1272,22 @@ impl Ai {
                                 (r as f32 * 1.25).round() as i32,
                                 effective_power,
                             );
-                        } else {
+                        } else if surface {
                             if t.is_riot {
                                 war.riot_graphics.paint_circle(x, y, r + 2, 1);
                             }
                             war.threat_graphics.paint_circle(x, y, r + 2, effective_power);
                         }
+                        war.sub_threat_graphics.paint_circle(x, y, rd + 2, deep_power as i32);
                     } else if !t.is_aa {
                         // for statics
-                        if t.is_riot {
-                            war.riot_graphics.paint_circle(x, y, r + 1, 1);
+                        if surface {
+                            if t.is_riot {
+                                war.riot_graphics.paint_circle(x, y, r + 1, 1);
+                            }
+                            war.threat_graphics.paint_circle(x, y, r + 1, effective_power);
                         }
-                        war.threat_graphics.paint_circle(x, y, r + 1, effective_power);
+                        war.sub_threat_graphics.paint_circle(x, y, rd + 1, deep_power as i32);
                     }
                 }
             }
@@ -1251,6 +1306,7 @@ impl Ai {
             }
 
             war.enemy_porc_graphics.clear();
+            war.sub_porc_graphics.clear();
             war.raider_value_graphics.clear();
             war.scythe_graphics.clear();
             let available_raider_threat = war.available_raider_threat;
@@ -1272,9 +1328,14 @@ impl Ai {
                         && t.unit.rules_param_float("disarmed", 0.0) == 0.0
                     {
                         // paint trimmed porc threat radii for workers and raiders to reference
+                        // (torpedo turrets only for what is in water, see `water`)
                         let r = (t.threat_radius / 64.0).round() as i32;
                         let effective_power = t.get_danger_mut() as i32;
-                        war.enemy_porc_graphics.paint_circle(x, y, r - 1, effective_power);
+                        if t.surface_danger(false) > 0.0 {
+                            war.enemy_porc_graphics.paint_circle(x, y, r - 1, effective_power);
+                        }
+                        let rd = (t.deep_range() / 64.0).round() as i32;
+                        war.sub_porc_graphics.paint_circle(x, y, rd - 1, t.deep_danger() as i32);
                     }
                 }
                 let r = 7;
@@ -1464,13 +1525,16 @@ impl Ai {
     /// (lower is better; `NULLPOS` if none).
     pub fn war_best_target(&mut self, u: Unit, origin: Vec3, defend: bool) -> (Vec3, f32) {
         let mut target = NULLPOS;
-        // The strength around the unit goes with it.
-        let fthreat = self.war.get_friendly_threat(u.pos());
-        let mut cost = NO_COST;
-        let name = self.defs.name_of(u);
-        // torpedoes can only hit stuff in water.
-        let water_targets_only = name == "subraider" || name == "shiptorpraider";
+        // The threat maps as the unit sees them, under water too (see `water`).
         let war = &self.war;
+        let view = war.view(u.def());
+        // The strength around the unit goes with it.
+        let fthreat = view.get_friendly_threat(u.pos());
+        let mut cost = NO_COST;
+        // What its weapons hit: torpedoes only what is in water, and under
+        // water only water weapons.
+        let hits = war.reach(u.def());
+        let water_targets_only = !hits.dry_land;
         // Reachability for all candidates at once (one flood fill from the
         // unit, filled lazily; elsewhere the terrain test must do).
         let mut reach = None;
@@ -1478,20 +1542,20 @@ impl Ai {
         // Where the terrain lets the unit get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
         let engage = crate::terrain::engage_test_from(terrain, u.def(), origin);
-        // Under water only torpedoes and the like hit.
-        let hits_sub = u.def().is_some_and(|d| self.hits_under_water(d));
-        let under = |p: Vec3| p.y < arsenal::SUBMERGED && !hits_sub;
 
         // first check defense targets
         if defend {
             for d in war.all_defense_targets() {
-                if (water_targets_only && !war.is_water(d.position)) || !engage(d.position) {
+                if (water_targets_only && !war.is_water(d.position))
+                    || (d.under_water && !hits.under_water)
+                    || !engage(d.position)
+                {
                     continue;
                 }
-                if war.get_tactical_threat(d.position) > war.available_mobile_threat {
+                if view.get_tactical_threat(d.position) > war.available_mobile_threat {
                     continue;
                 }
-                let tmpcost = distance(origin, d.position) - (d.damage * (1.0 + war.get_effective_threat(d.position)));
+                let tmpcost = distance(origin, d.position) - (d.damage * (1.0 + view.get_effective_threat(d.position)));
                 if tmpcost < cost {
                     cost = tmpcost;
                     target = d.position;
@@ -1502,17 +1566,18 @@ impl Ai {
         // then look for enemy mexes to kill, and see which is cheaper
         for ms in self.graph.get_enemy_spots() {
             let p = ms.get_pos();
-            if (water_targets_only && !war.is_water(p)) || !engage(p) || under(p) {
+            // (Mexes float: anything hits one in reach.)
+            if (water_targets_only && !war.is_water(p)) || !engage(p) {
                 continue;
             }
-            if war.get_threat(p) > fthreat
+            if view.get_threat(p) > fthreat
                 || (at_unit
                     && !reach.get_or_insert_with(|| self.pathfinder.assault_reachability(war, u, fthreat)).reaches(p))
             {
                 continue;
             }
             let mut tmpcost = (distance(p, origin) / 4.0) - 500.0;
-            tmpcost += 500.0 * war.get_threat(p);
+            tmpcost += 500.0 * view.get_threat(p);
             if tmpcost < cost {
                 target = p;
                 cost = tmpcost;
@@ -1522,13 +1587,13 @@ impl Ai {
         // then look for enemy units to kill, and see if any are better targets
         // then check for nearby enemies that aren't raiders.
         for e in war.targets.values() {
-            if (water_targets_only && !war.is_water(e.position)) || !engage(e.position) || under(e.position) {
+            if !war.can_hit(hits, e) || !engage(e.position) {
                 continue;
             }
             let ally_territory = self.graph.is_ally_territory(e.position);
-            let ethreat = war.get_effective_threat(e.position);
-            if (ethreat > fthreat && (!ally_territory || war.get_porc_threat(e.position) > 0.0))
-                || war.get_tactical_threat(e.position) > war.available_mobile_threat
+            let ethreat = view.get_effective_threat(e.position);
+            if (ethreat > fthreat && (!ally_territory || view.get_porc_threat(e.position) > 0.0))
+                || view.get_tactical_threat(e.position) > war.available_mobile_threat
                 || (e.identified && e.can_fly())
                 || ((!e.identified || e.is_raider) && distance(origin, e.position) > 1250.0)
             {
@@ -1538,7 +1603,7 @@ impl Ai {
             if !e.is_aa {
                 if e.identified && !e.is_important && !e.is_raider && ally_territory {
                     tmpcost /= 2.0;
-                    tmpcost -= e.get_danger() * (1.0 + war.get_threat(e.position));
+                    tmpcost -= e.get_danger() * (1.0 + view.get_threat(e.position));
                 } else if e.is_important
                     && (!at_unit
                         || reach
@@ -1769,32 +1834,6 @@ impl Ai {
             .collect();
         result.sort_by(|a, b| a.0.total_cmp(&b.0));
         result.into_iter().map(|(_, id)| id).collect()
-    }
-
-    /// Enemy id (into `war.targets`) for an Ultimatum to chase.
-    pub fn war_get_ulti_target(&mut self, origin: Vec3) -> Option<i32> {
-        let metal = self.metal;
-        let war = &self.war;
-        let mut target = None;
-        let mut cost = 0.0;
-        for (&id, e) in &war.targets {
-            let Some(ud) = e.ud else { continue };
-            if !e.identified || e.can_fly() {
-                continue; // unknown/impossible
-            }
-            if ud.cost(metal) < 600.0 || e.def_health() < 1000.0 {
-                continue; // not worth it
-            }
-            if !self.graph.is_ally_territory(e.position) || war.get_porc_threat(e.position) > 0.0 {
-                continue; // too risky
-            }
-            let tmpcost = distance(origin, e.position) - e.get_danger();
-            if target.is_none() || tmpcost < cost {
-                target = Some(id);
-                cost = tmpcost;
-            }
-        }
-        target
     }
 
     /// Target for an anti-air raider (fighter-store id).

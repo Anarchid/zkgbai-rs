@@ -146,7 +146,9 @@ impl Ai {
             {
                 continue;
             }
-            let danger = e.get_danger();
+            // What it can do to what is above water from where it is (a
+            // submerged Duck: nothing; see `water`).
+            let danger = e.surface_danger(e.is_submerged());
             let Some(tier) = e.ud.and_then(tier_of).filter(|_| danger > 0.0) else { continue };
             let Some(r) = terrain.tier(tier).and_then(|m| m.region_near(pos(e.position), SNAP)) else { continue };
             groups.entry((tier, r)).or_default().push((e.position, e.def_speed(), danger));

@@ -24,8 +24,6 @@ pub struct MiscHandler {
     pub arties: BTreeSet<i32>,
     /// Fighter-store ids.
     pub krows: BTreeSet<i32>,
-    /// Fighter-store ids of Ultimatums (raider-kind fighters).
-    ultis: BTreeSet<i32>,
     sappers: BTreeMap<i32, Unit>,
     berthas: BTreeMap<i32, Unit>,
     /// Swifts waiting for enough company before scouting.
@@ -49,7 +47,6 @@ impl MiscHandler {
             || self.striders.contains(&id)
             || self.arties.contains(&id)
             || self.krows.contains(&id)
-            || self.ultis.contains(&id)
     }
 }
 
@@ -97,7 +94,6 @@ impl Ai {
         self.misc_update_swifts(frame);
 
         if frame % 30 == (self.offset + 10) % 30 {
-            self.misc_assign_ultis();
             self.misc_assign_striders();
         }
 
@@ -209,12 +205,6 @@ impl Ai {
         }
     }
 
-    pub fn misc_add_ulti(&mut self, f: Fighter) {
-        if let Some(id) = self.misc_insert_fighter(f) {
-            self.misc_handler.ultis.insert(id);
-        }
-    }
-
     pub fn misc_add_bertha(&mut self, u: Unit) {
         self.misc_handler.berthas.insert(u.id(), u);
         u.set_fire_state(0, 0);
@@ -275,12 +265,7 @@ impl Ai {
             self.misc_forget_support(id);
         }
         let h = &mut self.misc_handler;
-        if h.loners.remove(&id)
-            | h.striders.remove(&id)
-            | h.krows.remove(&id)
-            | h.arties.remove(&id)
-            | h.ultis.remove(&id)
-        {
+        if h.loners.remove(&id) | h.striders.remove(&id) | h.krows.remove(&id) | h.arties.remove(&id) {
             self.fighters.remove(&id);
         }
         let h = &mut self.misc_handler;
@@ -313,7 +298,7 @@ impl Ai {
         let gone = |u: Unit| u.health() <= 0.0 || u.team() != team;
         let fighters = &mut self.fighters;
         let h = &mut self.misc_handler;
-        for set in [&mut h.loners, &mut h.striders, &mut h.krows, &mut h.arties, &mut h.ultis] {
+        for set in [&mut h.loners, &mut h.striders, &mut h.krows, &mut h.arties] {
             set.retain(|id| match fighters.get(id) {
                 Some(f) if !gone(f.unit) => true,
                 Some(_) => {
@@ -451,41 +436,6 @@ impl Ai {
         }
     }
 
-    fn misc_assign_ultis(&mut self) {
-        let ids: Vec<i32> = self.misc_handler.ultis.iter().copied().collect();
-        for id in ids {
-            if self.retreat_handler.is_retreating(id) {
-                continue;
-            }
-            let Some(pos) = self.fighters.get(&id).map(|f| f.get_pos()) else { continue };
-            let target =
-                self.war_get_ulti_target(pos).and_then(|e| self.war.targets.get(&e)).map(|e| (e.position, e.unit));
-            match target {
-                Some((epos, eunit)) => {
-                    if distance(pos, epos) > 300.0 {
-                        self.misc_sneak(id, epos);
-                    } else if let Some(f) = self.fighters.get(&id) {
-                        f.unit.attack(eunit, 0);
-                    }
-                }
-                None => {
-                    let Some(spot) = self.graph.get_closest_enemy_spot(pos).map(|ms| ms.get_pos()) else { continue };
-                    let tgt = self.graph_get_closest_haven(spot);
-                    if tgt != NULLPOS && distance(tgt, pos) > 300.0 {
-                        self.misc_sneak(id, tgt);
-                    }
-                }
-            }
-        }
-    }
-
-    fn misc_sneak(&mut self, id: i32, target: Vec3) {
-        let mut nav = nav!(self);
-        if let Some(f) = self.fighters.get_mut(&id) {
-            f.sneak(target, &mut nav);
-        }
-    }
-
     fn misc_fight_to(&mut self, id: i32, target: Vec3) {
         let mut nav = nav!(self);
         if let Some(f) = self.fighters.get_mut(&id) {
@@ -508,7 +458,8 @@ impl Ai {
                 continue;
             }
             let pos = u.pos();
-            let target = if u.rules_param_float("disarmed", 0.0) > 0.0 || self.war.get_effective_threat(pos) > 0.0 {
+            let threatened = self.war.view(u.def()).get_effective_threat(pos) > 0.0;
+            let target = if u.rules_param_float("disarmed", 0.0) > 0.0 || threatened {
                 self.graph_get_closest_haven(pos)
             } else {
                 self.war_get_target(u, false)
@@ -545,9 +496,9 @@ impl Ai {
                 continue;
             }
             let pos = u.pos();
-            if (u.rules_param_float("disarmed", 0.0) > 0.0 || self.war.get_effective_threat(pos) > 0.0)
-                && self.defs.name_of(u) != "spidercrabe"
-            {
+            // (Under water, only what hits under water counts; see `water`.)
+            let threatened = self.war.view(u.def()).get_effective_threat(pos) > 0.0;
+            if (u.rules_param_float("disarmed", 0.0) > 0.0 || threatened) && self.defs.name_of(u) != "spidercrabe" {
                 let haven = self.graph_get_closest_haven(pos);
                 self.misc_move_to(id, haven);
             } else {

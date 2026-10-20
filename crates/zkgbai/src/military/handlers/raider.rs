@@ -8,7 +8,6 @@ use crate::Ai;
 use crate::defs::Defs;
 use crate::graph::MetalSpot;
 use crate::kgbutil::kgb_move_to;
-use crate::military::arsenal::SUBMERGED;
 use crate::military::sweeps::DETONATE_RANGE;
 use crate::military::{Enemy, Fighter, MilitaryManager, ScoutTask, ScoutTaskId, ScoutTasks, SquadId, SquadKind};
 use crate::nav;
@@ -749,9 +748,11 @@ impl Ai {
         };
         let (unit, pos, rtarget) = (r.unit, r.get_pos(), r.target);
         let war = &self.war;
-        let raider_threat = war.get_friendly_raider_threat(pos);
-        let over_threat = war.get_threat(pos) * (1.0 + war.get_riot_threat(pos)) > raider_threat
-            || (rtarget != NULLPOS && war.get_threat(rtarget) > raider_threat);
+        // The threat maps as the raider sees them, under water too (see `water`).
+        let view = war.view(unit.def());
+        let raider_threat = view.get_friendly_raider_threat(pos);
+        let over_threat = view.get_threat(pos) * (1.0 + view.get_riot_threat(pos)) > raider_threat
+            || (rtarget != NULLPOS && view.get_threat(rtarget) > raider_threat);
         if over_threat {
             // Try to keep raiders from suiciding.
             let haven = self.graph_get_closest_raider_haven(pos);
@@ -784,18 +785,19 @@ impl Ai {
         }
 
         let war = &self.war;
+        let view = war.view(unit.def());
         let h = &self.raider_handler;
-        let friendly_threat = war.get_friendly_threat(pos);
+        let friendly_threat = view.get_friendly_threat(pos);
         // Where the terrain lets the raider get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
         let engage = crate::terrain::engage_test(terrain, unit);
-        let hits_sub = unit.def().is_some_and(|d| self.hits_under_water(d));
+        let hits = war.reach(unit.def());
         for &tid in &h.solo_scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
                 continue;
             };
-            if war.get_riot_threat(s.target) > 0.0
-                || war.get_effective_threat(s.target) > friendly_threat
+            if view.get_riot_threat(s.target) > 0.0
+                || view.get_effective_threat(s.target) > friendly_threat
                 || !engage(s.target)
             {
                 continue;
@@ -808,7 +810,7 @@ impl Ai {
         }
 
         for d in &war.sniper_sightings {
-            if war.get_riot_threat(d.position) > 0.0 || !engage(d.position) {
+            if view.get_riot_threat(d.position) > 0.0 || !engage(d.position) {
                 continue;
             }
             let tmpcost = distance(pos, d.position) / 4.0 - 100.0;
@@ -821,15 +823,15 @@ impl Ai {
         if !is_blastwing {
             for e in war.targets.values() {
                 if e.is_riot
-                    || war.get_riot_threat(e.position) > 0.0
-                    || war.get_effective_threat(e.position) > friendly_threat
-                    || (!e.is_porc && war.get_porc_threat(e.position) > 0.0)
+                    || view.get_riot_threat(e.position) > 0.0
+                    || view.get_effective_threat(e.position) > friendly_threat
+                    || (!e.is_porc && view.get_porc_threat(e.position) > 0.0)
                     || !engage(e.position)
-                    || (e.position.y < SUBMERGED && !hits_sub)
+                    || !war.can_hit(hits, e)
                 {
                     continue;
                 }
-                let ethreat = war.get_threat(e.position);
+                let ethreat = view.get_threat(e.position);
                 let tmpcost = raid_cost(war, &self.defs, e, pos, ethreat);
                 if tmpcost < cost {
                     cost = tmpcost;
@@ -1056,16 +1058,19 @@ impl Ai {
             .filter_map(|id| self.fighters.get(id))
             .map(|f| (f.get_pos(), f.unit.is_cloaked()))
             .collect();
+        let def = rs.fighters.iter().find_map(|id| self.fighters.get(id)).and_then(|f| f.unit.def());
         let war = &self.war;
+        // The threat maps as the squad sees them, under water too (see `water`).
+        let view = war.view(def);
 
         if status != 'a' {
             // Assign forming and rallying squads.
             let over_threat = (rs_target != NULLPOS
-                && (war.get_porc_threat(rs_target) > 0.0
-                    || war.get_tactical_threat(rs_target) > war.available_mobile_threat))
+                && (view.get_porc_threat(rs_target) > 0.0
+                    || view.get_tactical_threat(rs_target) > war.available_mobile_threat))
                 || members.iter().any(|&(rpos, _)| {
-                    war.get_threat(rpos) * (1.0 + war.get_riot_threat(rpos)) > war.get_total_friendly_threat(rpos)
-                        || war.get_porc_threat(rpos) > 0.0
+                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) > view.get_total_friendly_threat(rpos)
+                        || view.get_porc_threat(rpos) > 0.0
                 });
             if !over_threat {
                 // Rallying squads may be sent to block an incursion's way.
@@ -1096,11 +1101,11 @@ impl Ai {
         }
 
         // Get targets for actively raiding squads.
-        let threat = war.get_friendly_raider_threat(pos);
-        let over_threat = war.get_threat(rs_target) * (1.0 + war.get_riot_threat(rs_target)) > threat
-            || members
-                .iter()
-                .any(|&(rpos, cloaked)| !cloaked && war.get_threat(rpos) * (1.0 + war.get_riot_threat(rpos)) > threat);
+        let threat = view.get_friendly_raider_threat(pos);
+        let over_threat = view.get_threat(rs_target) * (1.0 + view.get_riot_threat(rs_target)) > threat
+            || members.iter().any(|&(rpos, cloaked)| {
+                !cloaked && view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) > threat
+            });
         if over_threat {
             // Try to keep raider squads from suiciding.
             let haven = self.graph_get_closest_raider_haven(pos);
@@ -1114,6 +1119,7 @@ impl Ai {
             return;
         }
         let war = &self.war;
+        let view = war.view(def);
 
         // For ready squads, assign to a target.
         let Some((leader, leader_unit, leader_pos)) =
@@ -1129,7 +1135,7 @@ impl Ai {
         // Where the terrain lets the squad get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
         let engage = crate::terrain::engage_test(terrain, leader_unit);
-        let hits_sub = leader_unit.def().is_some_and(|d| self.hits_under_water(d));
+        let hits = war.reach(leader_unit.def());
         let h = &self.raider_handler;
         for &tid in &h.scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
@@ -1139,7 +1145,7 @@ impl Ai {
             if tmpcost >= cost || !engage(s.target) {
                 continue;
             }
-            if war.get_threat(s.target) * (1.0 + war.get_riot_threat(s.target)) > threat
+            if view.get_threat(s.target) * (1.0 + view.get_riot_threat(s.target)) > threat
                 || !reach
                     .get_or_insert_with(|| self.pathfinder.raider_reachability(war, leader_unit, threat))
                     .reaches(s.target)
@@ -1151,8 +1157,8 @@ impl Ai {
         }
 
         for d in &war.sniper_sightings {
-            if war.get_riot_threat(d.position) > 0.0
-                || war.get_threat(d.position) > war.available_mobile_threat
+            if view.get_riot_threat(d.position) > 0.0
+                || view.get_threat(d.position) > war.available_mobile_threat
                 || !engage(d.position)
             {
                 continue;
@@ -1171,11 +1177,11 @@ impl Ai {
             if !e.identified {
                 continue;
             }
-            let ethreat = war.get_threat(e.position) * (1.0 + war.get_riot_threat(e.position));
+            let ethreat = view.get_threat(e.position) * (1.0 + view.get_riot_threat(e.position));
             if ethreat > threat
-                || (!e.is_porc && war.get_porc_threat(e.position) > 0.0)
+                || (!e.is_porc && view.get_porc_threat(e.position) > 0.0)
                 || !engage(e.position)
-                || (e.position.y < SUBMERGED && !hits_sub)
+                || !war.can_hit(hits, e)
             {
                 continue;
             }

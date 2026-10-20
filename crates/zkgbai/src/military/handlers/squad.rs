@@ -550,12 +550,15 @@ impl Ai {
         let Some(s) = self.squads.get(sid) else { return };
         let pos = s.get_pos(&self.fighters);
         let (status, target) = (s.status, s.target);
+        // The threat maps as the squad sees them, under water too (see `water`).
+        let view = self.war.view(s.get_leader(&self.fighters).and_then(|l| l.def()));
+        let dive = view.dive();
 
         match status {
             'f' => {
-                if self.war.get_threat(pos) > 2.0 * self.war.get_total_friendly_threat(pos)
-                    || self.war.get_porc_threat(pos) > 0.0
-                    || (target != NULLPOS && self.war.get_porc_threat(target) > 0.0)
+                if view.get_threat(pos) > 2.0 * view.get_total_friendly_threat(pos)
+                    || view.get_porc_threat(pos) > 0.0
+                    || (target != NULLPOS && view.get_porc_threat(target) > 0.0)
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
@@ -574,8 +577,9 @@ impl Ai {
                 }
             }
             'a' => {
-                if self.war.get_effective_threat(pos) > 0.0
-                    && (!self.graph.is_ally_territory(pos) || self.war.get_porc_threat(pos) > 0.0)
+                let view = self.war.view_dive(dive);
+                if view.get_effective_threat(pos) > 0.0
+                    && (!self.graph.is_ally_territory(pos) || view.get_porc_threat(pos) > 0.0)
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);

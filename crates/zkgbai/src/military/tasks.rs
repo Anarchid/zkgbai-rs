@@ -8,11 +8,14 @@ pub struct DefenseTarget {
     pub position: Vec3,
     pub damage: f32,
     pub frame_issued: i32,
+    /// Hit by a water weapon from out of sight in water: what did it may
+    /// be under water, where only water weapons reach (see `water`).
+    pub under_water: bool,
 }
 
 impl DefenseTarget {
     pub fn new(position: Vec3, damage: f32, frame_issued: i32) -> Self {
-        Self { position, damage, frame_issued }
+        Self { position, damage, frame_issued, under_water: false }
     }
 }
 
