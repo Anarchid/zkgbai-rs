@@ -30,6 +30,10 @@ use crate::kgbutil::HeightMap;
 use crate::military::Porc;
 use crate::util::distance;
 
+/// A building within this of a construction job's site is that job's
+/// (build sites snap to the build grid), elmos.
+pub(super) const SITE_SLACK: f32 = 25.0;
+
 pub struct EconomyManager {
     cb: Callback,
     pub sparrow: Option<Unit>,
@@ -731,19 +735,42 @@ impl Ai {
         if let Some(builder) = builder {
             if unit.is_being_built() {
                 if def.speed() == 0.0 {
-                    let own_task = self.eco.workers.get(&builder.id()).and_then(|w| w.task).filter(|&t| {
-                        self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type == def)
+                    // The builder's job, if this stands at its site: a builder
+                    // given a new job may yet start what it was building, and
+                    // that must not become the new job's (it would send all
+                    // who take the job to repair it, and never build there).
+                    let upos = unit.pos();
+                    let job = self.eco.workers.get(&builder.id()).and_then(|w| w.task);
+                    if let Some(t) = job.and_then(|t| self.eco.tasks.get(t)).filter(|t| {
+                        distance(t.get_pos(), upos) >= SITE_SLACK
+                            && t.as_construction().is_some_and(|c| c.build_type == def)
+                    }) {
+                        let p = t.get_pos();
+                        self.log(&format!(
+                            "economy: a {} started at ({:.0}, {:.0}) by a builder whose job is at ({:.0}, {:.0})",
+                            self.defs.name(def),
+                            upos.x,
+                            upos.z,
+                            p.x,
+                            p.z
+                        ));
+                    }
+                    let own_task = job.filter(|&t| {
+                        self.eco.tasks.get(t).is_some_and(|t| {
+                            distance(t.get_pos(), upos) < SITE_SLACK
+                                && t.as_construction().is_some_and(|c| c.build_type == def)
+                        })
                     });
                     if let Some(c) =
                         own_task.and_then(|t| self.eco.tasks.get_mut(t)).and_then(|t| t.as_construction_mut())
                     {
                         c.target = Some(unit);
                     } else {
-                        let upos = unit.pos();
                         for &id in &self.eco.construction_tasks {
                             if let Some(t) = self.eco.tasks.get_mut(id) {
                                 let dist = distance(t.get_pos(), upos);
-                                if let Some(c) = t.as_construction_mut().filter(|c| dist < 25.0 && c.build_type == def)
+                                if let Some(c) =
+                                    t.as_construction_mut().filter(|c| dist < SITE_SLACK && c.build_type == def)
                                 {
                                     c.target = Some(unit);
                                 }
@@ -947,9 +974,28 @@ impl Ai {
             unit.set_move_state(0, 0);
         }
 
-        let finished = self.eco.construction_tasks.iter().copied().find(|&id| {
-            self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.target == Some(unit))
-        });
+        // The job at its site is done; any other that took it for its
+        // building builds its own again.
+        let upos = unit.pos();
+        let targeting: Vec<TaskId> = (self.eco.construction_tasks.iter().copied())
+            .filter(|&id| {
+                self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.target == Some(unit))
+            })
+            .collect();
+        let mut finished = None;
+        for id in targeting {
+            let Some(t) = self.eco.tasks.get_mut(id) else { continue };
+            let p = t.get_pos();
+            if finished.is_none() && distance(p, upos) < SITE_SLACK {
+                finished = Some(id);
+            } else if let Some(c) = t.as_construction_mut() {
+                c.target = None;
+                self.log(&format!(
+                    "economy: the {def_name} job at ({:.0}, {:.0}) had the one finished at ({:.0}, {:.0}) for its own",
+                    p.x, p.z, upos.x, upos.z
+                ));
+            }
+        }
         if let Some(id) = finished {
             if def_name == "staticcon" {
                 let ct_target = self.eco.tasks.get(id).and_then(|t| t.as_construction()).and_then(|c| c.ct_target);

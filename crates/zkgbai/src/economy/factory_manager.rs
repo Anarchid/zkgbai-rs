@@ -468,8 +468,9 @@ impl Ai {
 impl Ai {
     /// Queue the next unit for factory (or strider hub) `fac_id`.
     fn fac_assign_factory_task(&mut self, fac_id: i32) {
-        // A staged strike builds its Widows itself (see `strike_test`).
-        if self.test.is_some() {
+        // A staged strike builds its Widows itself (see `strike_test`); the
+        // `hijack` test plays the economy as usual.
+        if self.test.as_deref().is_some_and(|t| t != "hijack") {
             return;
         }
         let Some(f) = self.fac.factories.get_mut(&fac_id) else { return };

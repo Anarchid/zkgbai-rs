@@ -47,7 +47,14 @@
 //! wind generators, four caretakers and three more caretakers apart by its
 //! base: light things together, for the Infernos of a `test=eos` attacker,
 //! which has nothing there worth an Eos (see `missiles`): the first two
-//! are worth one, the three caretakers are not.
+//! are worth one, the three caretakers are not. With `test=hijack`, from
+//! the first minute to the eighth up to three constructors about to start
+//! a mex are handed a far mex job just then, as the AI does now and then
+//! (its orders reach the engine a frame later, so it starts the mex
+//! anyway);
+//! every few minutes the log tells how many construction jobs hold a
+//! finished building (stuck: whoever takes them repairs it, and builds
+//! nothing).
 
 use springai::Vec3;
 
@@ -58,6 +65,15 @@ use crate::util::{OPTION_SHIFT_KEY, distance, get_directional_point};
 /// When the attacker gets its silo, and its radar for `eos`.
 const SILO_FRAME: i32 = 30 * 300;
 const RADAR_FRAME: i32 = 30 * 100;
+
+/// From when to when constructors are handed another job as they start a
+/// mex, how many at most, and from when the jobs are looked at, each
+/// minute (`hijack`).
+const HIJACK_FRAME: i32 = 30 * 60;
+const HIJACK_CHECK: i32 = 30 * 480;
+const HIJACKS: u32 = 3;
+const HIJACK_REPORT: i32 = 30 * 180;
+static HIJACKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// How often probing Charons come.
 const PROBE_ROUND: i32 = 30 * 40;
@@ -91,6 +107,9 @@ impl Ai {
     pub fn strike_test_update(&mut self, frame: i32) {
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_update(frame);
+        }
+        if self.test.as_deref() == Some("hijack") && frame % 30 == 0 && (HIJACK_FRAME..HIJACK_CHECK).contains(&frame) {
+            self.strike_test_hijack();
         }
         if frame != 60 && frame % 300 != 0 {
             return;
@@ -245,6 +264,9 @@ impl Ai {
         if frame == 60 {
             self.cb.cheats_set_enabled(true);
         }
+        if test == "hijack" && frame >= HIJACK_REPORT && frame % 1800 == 0 {
+            self.strike_test_stuck_jobs();
+        }
         if (test == "eos" || test == "deepscout") && frame == RADAR_FRAME + 1500 {
             let radars = self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "staticradar");
             for r in radars.filter(|r| distance(r.pos(), enemy) < 1500.0) {
@@ -340,5 +362,65 @@ impl Ai {
             self.jaeger_ordered(crate::military::scouts::WIDOW);
             self.log("strike-test: a jaeger Widow ordered");
         }
+    }
+
+    /// Hand a constructor about to start a mex another, far mex job, as
+    /// the AI does when a cheaper job turns up just then: its orders reach
+    /// the engine a frame later, so it starts the first mex all the same
+    /// (see `test=hijack`).
+    fn strike_test_hijack(&mut self) {
+        let Some(mex) = self.defs.get("staticmex") else { return };
+        let is_mex =
+            |t: &crate::economy::WorkerTask| t.as_construction().is_some_and(|c| c.build_type.id() == mex.id());
+        let frame = self.frame;
+        let eco = &self.eco;
+        let pick = eco.workers.values().find_map(|w| {
+            let job = w.task.and_then(|t| eco.tasks.get(t)).filter(|t| is_mex(t))?;
+            let reach = w.unit.def()?.build_distance() * 1.5;
+            if job.as_construction()?.target.is_some() || distance(w.unit.pos(), job.get_pos()) > reach {
+                return None;
+            }
+            let other = (eco.construction_tasks.iter().copied())
+                .filter(|&id| {
+                    eco.tasks.get(id).is_some_and(|t| is_mex(t) && distance(t.get_pos(), job.get_pos()) > 300.0)
+                })
+                .min_by(|&a, &b| {
+                    let d = |id| eco.tasks.get(id).map_or(f32::MAX, |t| distance(t.get_pos(), job.get_pos()));
+                    d(a).total_cmp(&d(b))
+                })?;
+            Some((w.id, job.get_pos(), other))
+        });
+        if HIJACKED.load(std::sync::atomic::Ordering::Relaxed) >= HIJACKS {
+            return;
+        }
+        let Some((wid, near, other)) = pick else { return };
+        HIJACKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let far = self.eco.tasks.get(other).map_or(near, |t| t.get_pos());
+        if let Some(w) = self.eco.workers.get_mut(&wid) {
+            // It builds the near one (the order the engine has), while the
+            // AI has it down for the far one.
+            w.unit.build(mex, near, 0, 0);
+            w.clear_task(&mut self.eco.tasks);
+            w.set_task(&mut self.eco.tasks, other, frame);
+        }
+        self.log(&format!(
+            "strike-test: a constructor about to build the mex at ({:.0}, {:.0}) is given the mex job at ({:.0}, {:.0})",
+            near.x, near.z, far.x, far.z
+        ));
+    }
+
+    /// Log the construction jobs that hold a finished building.
+    fn strike_test_stuck_jobs(&self) {
+        let stuck: Vec<String> = (self.eco.construction_tasks.iter())
+            .filter_map(|&id| self.eco.tasks.get(id))
+            .filter_map(|t| {
+                let target = t.as_construction()?.target?;
+                (target.health() > 0.0 && !target.is_being_built()).then(|| {
+                    let (p, q) = (t.get_pos(), target.pos());
+                    format!("({:.0}, {:.0}) holding one at ({:.0}, {:.0})", p.x, p.z, q.x, q.z)
+                })
+            })
+            .collect();
+        self.log(&format!("strike-test: {} jobs hold a finished building: {}", stuck.len(), stuck.join("; ")));
     }
 }

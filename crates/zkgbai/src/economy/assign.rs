@@ -3,7 +3,7 @@
 
 use springai::{UnitDef, Vec3};
 
-use super::{TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
+use super::{SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
 use crate::military::DefenseTarget;
 use crate::util::{OPTION_SHIFT_KEY, distance};
@@ -193,12 +193,16 @@ impl Ai {
         }
 
         let out_of_range = distance(wpos, task_pos) > build_dist * 1.5;
+        let mut stale = None;
         let Some(task) = self.eco.tasks.get_mut(task_id) else {
             return;
         };
         let order = match &mut task.kind {
             TaskKind::Construction(c) => {
-                if c.target.is_some_and(|t| t.health() <= 0.0) {
+                // (A finished building elsewhere is not this job's: build it.)
+                let elsewhere = |t: springai::Unit| !t.is_being_built() && distance(t.pos(), task_pos) >= SITE_SLACK;
+                stale = c.target.filter(|&t| t.health() > 0.0 && elsewhere(t)).map(|t| t.pos());
+                if c.target.is_some_and(|t| t.health() <= 0.0 || elsewhere(t)) {
                     c.target = None;
                 }
                 match c.target {
@@ -230,6 +234,12 @@ impl Ai {
             }
             TaskKind::Repair(r) => Order::Repair(r.target),
         };
+        if let Some(p) = stale {
+            self.log(&format!(
+                "economy: the job at ({:.0}, {:.0}) had a finished building at ({:.0}, {:.0}) for its own",
+                task_pos.x, task_pos.z, p.x, p.z
+            ));
+        }
 
         let opts = if out_of_range {
             if let Some(w) = self.eco.workers.get(&wid) {
