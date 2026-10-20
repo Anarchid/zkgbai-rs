@@ -7,7 +7,8 @@
 //! their units: what none of them can engage is the gap, and where it is a
 //! good share of what we see, the factory whose units close most of it is
 //! asked for (see the economy's requisitions). Enemies seen under water
-//! also call for sonar to see them by.
+//! also call for an Urchin (torpedo turret: sonar to see them by, and
+//! torpedoes); there is no sonar building.
 
 use springai::{UnitDef, Vec3};
 use zk_terrain::Tier;

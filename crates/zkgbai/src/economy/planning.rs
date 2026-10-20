@@ -18,8 +18,8 @@ const SHELTERED_SPACING: f32 = 2.0;
 /// (about a constructor's build range).
 const FACTORY_REACH: f32 = 150.0;
 
-/// Water at least this deep takes a sonar station, elmos.
-const SONAR_DEPTH: f32 = 12.0;
+/// Water at least this deep takes an Urchin, elmos.
+const URCHIN_DEPTH: f32 = 8.0;
 
 /// An opening factory is ruled out when its units reach less than this
 /// share of what the best one's do.
@@ -846,23 +846,23 @@ impl Ai {
         None
     }
 
-    /// Sonar where enemies were seen under water lately (we cannot see them
-    /// there otherwise), by the nearest of our metal spots, if none covers
-    /// it yet.
-    fn eco_plan_sonar(&mut self) {
+    /// An Urchin where enemies were seen under water lately, by the nearest
+    /// of our metal spots, if none covers it yet. There is no sonar
+    /// building to build: sonar comes with ships and with the Urchin
+    /// (torpedo turret), which also hits what it sees. It stands on water
+    /// (its yardmap is all water): the first water on the way out from our
+    /// metal to the sighting.
+    fn eco_plan_sub_defense(&mut self) {
         let Some(sighting) = self.arsenal_submerged_sighting() else { return };
-        let Some(sonar) = self.defs.get("staticsonar") else { return };
-        let range = sonar.sonar_radius() as f32;
-        let covered = self
-            .cb
-            .team_units()
-            .into_iter()
-            .any(|u| u.def().is_some_and(|d| d.id() == sonar.id()) && distance(u.pos(), sighting) < 2.0 * range);
-        let Some(spot) = self
-            .graph
-            .get_owned_spots()
-            .iter()
-            .map(|m| m.get_pos())
+        let Some(urchin) = self.defs.get("turrettorp") else { return };
+        let range = urchin.sonar_radius() as f32;
+        let near = |p: Vec3| distance(p, sighting) < 2.0 * range;
+        let covered = self.eco.porcs.iter().any(|u| u.def().is_some_and(|d| d.id() == urchin.id()) && near(u.pos()))
+            || self.eco.porc_tasks.iter().any(|&t| {
+                let task = self.eco.tasks.get(t).and_then(|t| t.as_construction());
+                task.is_some_and(|c| c.build_type.id() == urchin.id()) && near(self.eco.task_pos(t))
+            });
+        let Some(spot) = (self.graph.get_owned_spots().iter().map(|m| m.get_pos()))
             .min_by(|a, b| distance(*a, sighting).total_cmp(&distance(*b, sighting)))
         else {
             return;
@@ -870,21 +870,19 @@ impl Ai {
         if covered || distance(spot, sighting) > 3.0 * range {
             return;
         }
-        // It floats, on water this deep (`minWaterDepth` 10): the first such
-        // on the way out from our metal to the sighting.
         let map = self.cb.map();
         let steps = (distance(spot, sighting) / 64.0).ceil().max(1.0) as usize;
         let water = (0..=steps)
             .map(|i| i as f32 / steps as f32)
             .map(|t| Vec3::xz(spot.x + t * (sighting.x - spot.x), spot.z + t * (sighting.z - spot.z)))
-            .find(|p| map.elevation_at(p.x, p.z) < -SONAR_DEPTH);
+            .find(|p| map.elevation_at(p.x, p.z) < -URCHIN_DEPTH);
         let Some(water) = water else { return };
-        let site = self.eco_build_site(sonar, water, 0);
+        let site = self.eco_build_site(urchin, water, 0);
         if site.x < 0.0 {
             return;
         }
-        if self.eco_add_simple(sonar, site, List::Radar, Some(List::Radar)).is_some() {
-            self.log(&format!("economy: sonar at ({:.0}, {:.0}) for enemies under water", site.x, site.z));
+        if self.eco_add_simple(urchin, site, List::Porc, Some(List::Porc)).is_some() {
+            self.log(&format!("economy: urchin at ({:.0}, {:.0}) for enemies under water", site.x, site.z));
         }
     }
 
@@ -896,7 +894,7 @@ impl Ai {
         {
             return;
         }
-        self.eco_plan_sonar();
+        self.eco_plan_sub_defense();
         let r = self.eco_find_requisition();
         if let Some((f, why)) = &r
             && self.eco.requisition_logged.as_ref() != Some(f)
