@@ -9,6 +9,7 @@ use super::tools::Args;
 use super::views::{Out, xz};
 use super::{DefendPoint, FacOrder};
 use crate::Ai;
+use crate::logistics::{Kind, Worth};
 use crate::military::{DefenseTarget, SquadKind};
 
 /// Features the `disable` switch knows (see `Ai::dev_off`).
@@ -157,6 +158,25 @@ pub fn build(ai: &mut Ai, a: &Args) -> Out {
         ai.op.over.priority_tasks.insert(task);
     }
     Ok(json!({"task": task, "site": xz(site), "priority": priority}))
+}
+
+pub fn issue(ai: &mut Ai, a: &Args) -> Out {
+    let task = a.i32("task")?;
+    let task = u32::try_from(task).map_err(|_| "bad task id")?;
+    if a.bool_or("clear", false) {
+        let had = ai.logistics_close(task, "cleared by the operator").is_some();
+        return Ok(json!({"task": task, "closed": had}));
+    }
+    if ai.eco.tasks.get(task).and_then(|t| t.as_construction()).is_none() {
+        return Err(format!("no construction task {task} (see tasks)"));
+    }
+    let value = a.f32_or("value", 1000.0)?.max(0.0);
+    let worth = match a.opt_f32("seconds")? {
+        Some(s) => Worth::Deadline { value, by: ai.frame as f32 / 30.0 + s.max(0.0) },
+        None => Worth::Flat(value),
+    };
+    let id = ai.logistics_open(task, Kind::Operator, worth, "the operator", 0.0).ok_or("could not open the issue")?;
+    Ok(json!({"task": task, "issue": id}))
 }
 
 pub fn defend(ai: &mut Ai, a: &Args) -> Out {

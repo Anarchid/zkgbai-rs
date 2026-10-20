@@ -85,12 +85,29 @@ pub struct BlockOrder {
     pub until: i32,
 }
 
+/// Where an enemy group gets to our value first, for the project tracker
+/// (`logistics`): the asset, where the group is, its power, seconds until
+/// it is there.
+#[derive(Clone, Copy, Debug)]
+pub struct Predicted {
+    pub pos: Vec3,
+    pub from: Vec3,
+    pub power: f32,
+    pub seconds: f32,
+    pub tier: Tier,
+}
+
+/// How far ahead, in seconds of the raid's travel, defenses are planned.
+pub const PLAN_HORIZON: f32 = 90.0;
+
 /// The latest assessment.
 #[derive(Default)]
 pub struct Incursions {
     pub frame: i32,
     /// Incursions that threaten our value within the horizon.
     pub list: Vec<Incursion>,
+    /// Where each group gets to our value first, within [`PLAN_HORIZON`].
+    pub predicted: Vec<Predicted>,
     pub orders: BTreeMap<SquadId, BlockOrder>,
     /// How soon the first enemy group can get anywhere, per movement tier
     /// of the groups.
@@ -206,6 +223,7 @@ impl Ai {
         let mut list = Vec::new();
         let mut orders = Vec::new();
         let mut predicted = Vec::new();
+        let mut planned = Vec::new();
         for &(tier, force, units) in forces.iter().filter(|(_, f, _)| f.power >= MIN_POWER) {
             let (Some(map), Some(porc)) = (terrain.tier(tier), defenses.get(&tier)) else { continue };
             let held = |c: usize| porc[c] >= force.power;
@@ -250,16 +268,18 @@ impl Ai {
                 orders.push((d.squad, order));
             }
             // Where nobody blocks, meet it at the first asset it can reach
-            // (if our army can take it on).
-            if plan.exposed > 0.0 && force.power <= self.war.available_mobile_threat {
-                let reach = arrival_times(map, &force, |c| held(c) || plan.blocks.iter().any(|b| b.choke == c));
-                let first = assets
-                    .iter()
-                    .filter(|a| a.side == Side::Ally)
-                    .filter_map(|a| Some((a.pos, reach[map.region_near(a.pos, SNAP)?])))
-                    .filter(|&(_, t)| t <= HORIZON)
-                    .min_by(|a, b| a.1.total_cmp(&b.1));
-                if let Some((p, _)) = first {
+            // (if our army can take it on); and plan a defense there
+            // (`logistics`), whether or not it can.
+            let reach = arrival_times(map, &force, |c| held(c) || plan.blocks.iter().any(|b| b.choke == c));
+            let first = assets
+                .iter()
+                .filter(|a| a.side == Side::Ally)
+                .filter_map(|a| Some((a.pos, reach[map.region_near(a.pos, SNAP)?])))
+                .filter(|&(_, t)| t <= PLAN_HORIZON)
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            if let Some((p, t)) = first {
+                planned.push(Predicted { pos: at(p), from: at(force.pos), power: force.power, seconds: t, tier });
+                if plan.exposed > 0.0 && t <= HORIZON && force.power <= self.war.available_mobile_threat {
                     predicted.push(DefenseTarget::new(at(p), force.power, frame));
                 }
             }
@@ -296,6 +316,7 @@ impl Ai {
         self.incursions.stats = stats;
         self.incursions.frame = frame;
         self.incursions.list = list;
+        self.incursions.predicted = planned;
         self.incursions.danger = danger;
         self.war.predicted_defense_targets = predicted;
     }

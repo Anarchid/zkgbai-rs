@@ -11,6 +11,7 @@ use crate::defs::Defs;
 use crate::economy::{EconomyManager, FactoryManager};
 use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
+use crate::logistics::Logistics;
 use crate::los::LosManager;
 use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
@@ -67,6 +68,8 @@ pub struct Ai {
     pub strategy: Option<Strategy>,
     /// Enemy forces on the move and the squads sent to block them.
     pub incursions: Incursions,
+    /// The project tracker (see `logistics`).
+    pub logistics: Logistics,
     /// Our teleport bridge and the squads going through it.
     pub teleports: Teleports,
     /// Our air transports and the drop under way.
@@ -170,6 +173,7 @@ impl SkirmishAi for Ai {
             terrain,
             strategy: None,
             incursions: Incursions::default(),
+            logistics: Logistics::default(),
             teleports: Teleports::default(),
             drops: Drops::default(),
             intel: Intel::default(),
@@ -403,6 +407,7 @@ impl Ai {
         });
         self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
         self.guard("war.incursions", |ai| ai.incursions_update(frame));
+        self.guard("logistics.update", |ai| ai.logistics_update(frame));
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }

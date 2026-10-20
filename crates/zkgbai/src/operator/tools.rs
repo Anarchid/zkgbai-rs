@@ -184,6 +184,17 @@ pub static TOOLS: &[Tool] = &[
         run: views::tasks,
     },
     Tool {
+        name: "issues",
+        description: "The project tracker: construction jobs valued in metal by when they finish (defenses against \
+                       forecast raids, operator issues), each with its crew, completion forecast, value and the \
+                       bonus its crew gets; the totals (opened, met, late, abandoned) and whether other \
+                       construction is paused for an urgent one.",
+        params: &[],
+        writes: false,
+        needs_modules: true,
+        run: views::issues,
+    },
+    Tool {
         name: "factories",
         description: "Our factories (what each is building), army composition counts and values, what the enemy \
                        was seen to field (air, drones, amphibious, heavy defenses), operator production orders.",
@@ -465,6 +476,21 @@ pub static TOOLS: &[Tool] = &[
         writes: true,
         needs_modules: true,
         run: actions::build,
+    },
+    Tool {
+        name: "issue",
+        description: "Open (or re-value) a project tracker issue on a construction task: worth `value` metal, all \
+                       of it if done within `seconds` (else whenever). The tracker crews it and the crew prefers \
+                       it in proportion. `clear` closes the issue.",
+        params: &[
+            P("task", Int, true, "the construction task id (see tasks)"),
+            P("value", Num, false, "metal the job is worth (default 1000)"),
+            P("seconds", Num, false, "due within this many seconds from now; omit for no deadline"),
+            P("clear", Bool, false, "close the issue instead"),
+        ],
+        writes: true,
+        needs_modules: true,
+        run: actions::issue,
     },
     Tool {
         name: "defend",

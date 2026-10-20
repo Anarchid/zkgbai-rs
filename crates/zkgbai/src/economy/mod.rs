@@ -432,6 +432,14 @@ impl EconomyManager {
         }
     }
 
+    /// Drop a construction job the project tracker gave up on (see
+    /// `logistics`).
+    pub(crate) fn eco_logistics_drop(&mut self, id: TaskId) {
+        if self.tasks.get(id).is_some_and(|t| t.as_construction().is_some()) {
+            self.drop_construction_task(id);
+        }
+    }
+
     /// Stop a construction task, send its workers to be reassigned and
     /// remove it everywhere.
     fn drop_construction_task(&mut self, id: TaskId) {

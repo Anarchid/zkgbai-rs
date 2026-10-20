@@ -20,6 +20,7 @@ pub mod defs;
 pub mod economy;
 pub mod graph;
 pub mod kgbutil;
+pub mod logistics;
 pub mod los;
 pub mod military;
 pub mod operator;

@@ -147,6 +147,7 @@ fn task_value(ai: &Ai, t: &WorkerTask) -> Value {
         "workers": t.assigned_workers,
         "unit": started,
         "priority": ai.op_priority(t.id),
+        "issue": ai.logistics.issues.get(&t.id).map(|i| i.id),
     })
 }
 
@@ -233,6 +234,7 @@ pub fn economy(ai: &mut Ai, _: &Args) -> Out {
         },
         "buildings": {"mexes": e.mexes.len(), "fusions": e.fusions.len(), "defenses": e.porcs.len(), "caretakers": e.nanos.len()},
         "requisition": e.requisition.as_ref().map(|(f, why)| json!({"factory": f, "why": why})),
+        "issues": ai.logistics.issues.len(),
         "viable": {"bots": e.bots_viable, "spiders": e.spiders_viable, "ships": e.ships_viable},
         "defended_factory": e.defended_fac,
     }))
@@ -266,6 +268,10 @@ pub fn tasks(ai: &mut Ai, a: &Args) -> Out {
     let all: Vec<&WorkerTask> = ai.eco.tasks.iter().filter(|t| kind.is_none_or(|k| task_kind(t) == k)).collect();
     let list: Vec<Value> = all.iter().take(limit).map(|t| task_value(ai, t)).collect();
     Ok(json!({"total": all.len(), "tasks": list}))
+}
+
+pub fn issues(ai: &mut Ai, _: &Args) -> Out {
+    Ok(ai.logistics_json())
 }
 
 pub fn factories(ai: &mut Ai, _: &Args) -> Out {

@@ -1022,8 +1022,8 @@ function renderTimeline() {
 }
 
 // ---------------------------------------------------------------- events
-const KIND_GROUP = { log: 'log', 'unit+': 'units', 'unit-': 'units', given: 'units', idle: 'operator', kill: 'combat', 'enemy+': 'combat', op: 'operator', note: 'operator', say: 'chat', chat: 'chat', error: 'log', end: 'operator' };
-const KIND_LABEL = { 'unit+': 'built', 'unit-': 'lost', given: 'given', idle: 'idle', kill: 'kill', 'enemy+': 'spotted', op: 'operator', note: 'note', say: 'said', chat: 'chat', end: 'end' };
+const KIND_GROUP = { log: 'log', 'unit+': 'units', 'unit-': 'units', given: 'units', idle: 'operator', kill: 'combat', 'enemy+': 'combat', op: 'operator', note: 'operator', say: 'chat', chat: 'chat', error: 'log', end: 'operator', issue: 'operator' };
+const KIND_LABEL = { 'unit+': 'built', 'unit-': 'lost', given: 'given', idle: 'idle', kill: 'kill', 'enemy+': 'spotted', op: 'operator', note: 'note', say: 'said', chat: 'chat', end: 'end', issue: 'issue' };
 function evText(e) {
   switch (e.k) {
     case 'log': return e.msg;
@@ -1037,6 +1037,8 @@ function evText(e) {
       ? `${e.tool} ${JSON.stringify(e.args)} → ${e.ok ? 'ok' : 'error: ' + e.error}`
       : `${e.event} ${e.unit || e.factory || ''}`;
     case 'note': return `${e.tag ? '[' + e.tag + '] ' : ''}${e.text}`;
+    case 'issue': { const i = e.issue || {}; const w = i.worth || {};
+      return `${e.event}${e.outcome ? ' (' + e.outcome + ')' : ''} #${i.id} ${i.what} at ${(i.pos || []).join(', ')}: worth ${fmtNum(w.flat ?? w.value)}${w.by != null ? ' by ' + fmtTime(Math.round(w.by * 30)) : ''}, crew ${(i.crew || []).length}, eta ${i.eta}s${e.event === 'open' && i.why ? ' — ' + i.why : ''}`; }
     case 'say': return e.text;
     case 'chat': return `player ${e.player}: ${e.text}`;
     case 'end': return `run ended at ${e.time} (${e.state})`;

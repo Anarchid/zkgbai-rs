@@ -156,6 +156,29 @@ impl Ai {
         Ok((id, site))
     }
 
+    /// A defense the project tracker asked for (see `logistics`): `def` at
+    /// the legal site closest to `pos`, unless porc is planned within
+    /// `near` of it, which is adopted instead. Returns the task and whether
+    /// it was adopted.
+    pub(crate) fn eco_logistics_porc(&mut self, def: UnitDef, pos: Vec3, near: f32) -> Option<(TaskId, bool)> {
+        let site = self.eco_build_site(def, pos, 0);
+        if site.x < 0.0 {
+            return None;
+        }
+        let planned = (self.eco.porc_tasks.iter().copied())
+            .filter(|&id| self.eco.tasks.get(id).is_some_and(|t| t.as_construction().is_some()))
+            .min_by(|&a, &b| distance(self.eco.task_pos(a), site).total_cmp(&distance(self.eco.task_pos(b), site)))
+            .filter(|&id| distance(self.eco.task_pos(id), site) < near);
+        if let Some(id) = planned {
+            return Some((id, true));
+        }
+        let mut ct = WorkerTask::construction(def, site, 0);
+        if let Some(c) = ct.as_construction_mut() {
+            c.frame_issued = self.frame;
+        }
+        self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc)).map(|id| (id, false))
+    }
+
     /// Construction task for `def` at `pos` with facing 0, deduplicated
     /// against `dedup`.
     pub(super) fn eco_add_simple(
