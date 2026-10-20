@@ -269,8 +269,8 @@ pub static TOOLS: &[Tool] = &[
     Tool {
         name: "threat_map",
         description: "One threat or value map as a grid of numbers (rows north to south). Layers: threat, \
-                       enemy_porc, ally_threat, ally_raider, ally_porc, aa_threat, aa_porc, value, raider_value, \
-                       bp, riot, scythe.",
+                       enemy_porc, ally_threat, ally_raider, ally_porc, aa_threat, aa_porc, sub_threat, sub_porc, \
+                       ally_sub, value, raider_value, bp, riot, scythe.",
         params: &[
             P("layer", Str, false, "map name (default threat)"),
             P("max_size", Int, false, "at most this many cells a side (default 96); cells are merged by max"),

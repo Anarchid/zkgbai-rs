@@ -199,7 +199,7 @@ local focus -- port of the AI shown
 local focusChosen = false -- picked by hand
 
 local show = {squads = true, intents = true, memory = true, spots = true, roles = true, defend = true, feed = true}
-local LAYERS = {"none", "threat", "enemy_porc", "aa_threat", "value", "ally_threat", "riot"}
+local LAYERS = {"none", "threat", "enemy_porc", "aa_threat", "sub_threat", "value", "ally_threat", "riot"}
 local layer = "none"
 
 local flashes = {}  -- feedback marks on the ground: {x, z, t, color}
