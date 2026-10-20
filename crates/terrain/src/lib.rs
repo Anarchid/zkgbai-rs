@@ -15,14 +15,17 @@
 //!
 //! On top of the model, [`strategy`] analyses the game's territory (what
 //! guards what, which chokepoints to hold or wall, where bridges, drops and
-//! teleports pay) and [`threat`] reasons about forces on the move (where a
-//! raid can get to and when, and where defenders can block it first).
+//! teleports pay), [`occupancy`] keeps track of who holds each region (and
+//! the ways a force must fight through), and [`threat`] reasons about forces
+//! on the move (where a raid can get to and when, and where defenders can
+//! block it first).
 //!
 //! Positions are world coordinates in elmos (`x`, `z`); internally the model
 //! works on the engine's slope-map grid, one cell per 16 elmos.
 
 mod build;
 mod graph;
+pub mod occupancy;
 pub mod paths;
 pub mod strategy;
 #[cfg(test)]

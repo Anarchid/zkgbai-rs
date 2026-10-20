@@ -46,6 +46,26 @@ const DROP_SHARE: f32 = 0.25;
 const DROP_DETOUR: f32 = 1.5;
 const DROP_INCOME: f32 = 30.0;
 
+/// Or when this much of the enemy's buildings is only for drops to get to
+/// (see `drops`).
+const DROP_PROSPECT: f32 = 5000.0;
+
+/// Bertha sites are tried in this many headings across the half-circle
+/// facing the map's middle, at these shares of the way there, on the
+/// highest ground within this of each (elmos); an enemy metal spot counts
+/// as this much metal, and shells are aimed this high above the ground.
+const BERTHA_HEADINGS: usize = 9;
+const BERTHA_SHARES: [f32; 4] = [0.4, 0.55, 0.7, 0.85];
+const BERTHA_HIGH_GROUND: f32 = 500.0;
+const BERTHA_SPOT_WORTH: f32 = 300.0;
+const BERTHA_TARGET_HEIGHT: f32 = 20.0;
+
+/// A missile silo's guard turrets stand this far towards the enemy, this
+/// far apart, elmos; caretakers by it.
+const SILO_GUARD: f32 = 220.0;
+const SILO_GUARD_SPREAD: f32 = 110.0;
+const SILO_CARETAKERS: usize = 2;
+
 /// From this income on, a factory asked for is built (the usual second
 /// factory waits for 50 and a few caretakers); and how often the asking is
 /// re-assessed, in frames.
@@ -90,7 +110,12 @@ impl Ai {
 
     /// The common "if buildCheck(ct) && !CONTAINSP(dedup, ct): add to
     /// constructionTasks (and `extra`)" step. Returns the new task id.
-    fn eco_add_construction(&mut self, task: WorkerTask, dedup: Option<List>, extra: Option<List>) -> Option<TaskId> {
+    pub(super) fn eco_add_construction(
+        &mut self,
+        task: WorkerTask,
+        dedup: Option<List>,
+        extra: Option<List>,
+    ) -> Option<TaskId> {
         let c = task.as_construction()?;
         if !self.eco_build_check(c.build_type, task.position, c.facing) {
             return None;
@@ -617,6 +642,10 @@ impl Ai {
         let name = ["staticheavyarty", "staticnuke", "zenith", "raveparty"][self.eco.s_wep.clamp(0, 3) as usize];
         let needs = self.defs.get(name).map_or(0.0, |d| self.eco.grid_defs.needs(d.id()));
         let energy = self.eco_energy_production();
+        // New Fusions say what they make a moment after they are done.
+        if needs > 0.0 && energy <= 0.0 {
+            return;
+        }
         if needs > energy {
             let fallback = if self.war.enemy_has_anti_nuke { 0 } else { 1 };
             self.log(&format!(
@@ -637,57 +666,84 @@ impl Ai {
     }
 
     fn eco_create_bertha_task(&mut self) {
-        if self.fac.factories.is_empty() || self.eco.radars.is_empty() {
+        if self.fac.factories.is_empty() || self.eco.radars.is_empty() || self.eco_awaiting_power() {
             return; // Eh, no.
         }
         let Some(bertha) = self.defs.get("staticheavyarty") else {
             return;
         };
-        let mut position;
+        let Some(position) = self.eco_bertha_site(bertha) else { return };
+        self.eco_add_powered(bertha, position, List::SuperWep);
+    }
 
-        let mut good = false;
-        let mut i = 0;
-        loop {
-            i += 1;
-            if i > 4 {
-                return;
-            }
-            let ally_base = self.graph.get_ally_base();
-            let map_center = self.graph.get_map_center();
-            position = get_angular_point(ally_base, map_center, distance(ally_base, map_center) * 0.65);
-            position = self.eco.height_map.get_highest_point_in_radius(position, 800.0);
-            position = self.eco_build_site(bertha, position, 0);
-            let mut j = 0;
-            while !good {
-                j += 1;
-                if j > 3 {
-                    break;
+    /// Where a Bertha shells the most: of sites on high ground between our
+    /// base and the map's middle (not in enemy land or at the front, clear
+    /// of factories and other superweapons), the one whose plasma, on its
+    /// low arc, clears the terrain to the most enemy value in range: the
+    /// buildings we know of, and the enemy's metal spots at what a spot is
+    /// worth. Shells that would hit a hill on the way do not count.
+    fn eco_bertha_site(&mut self, bertha: UnitDef) -> Option<Vec3> {
+        let wd = bertha.weapon_mounts().into_iter().find_map(|m| m.weapon_def())?;
+        let range = wd.range();
+        // Elmos per frame, as the engine keeps it.
+        let speed = if wd.projectile_speed() < 100.0 { wd.projectile_speed() * 30.0 } else { wd.projectile_speed() };
+        let gravity = self.cb.map().gravity();
+        let muzzle = 0.8 * bertha.height();
+        let mut targets: Vec<(Vec3, f32)> = (self.war.targets.values())
+            .filter(|e| e.identified && e.is_static && !e.is_dead)
+            .map(|e| (e.position, e.value))
+            .collect();
+        targets.extend(self.graph.get_enemy_territory().iter().map(|m| (m.position, BERTHA_SPOT_WORTH)));
+        let ally_base = self.graph.get_ally_base();
+        let map_center = self.graph.get_map_center();
+        let span = distance(ally_base, map_center);
+        let (dx, dz) = (map_center.x - ally_base.x, map_center.z - ally_base.z);
+        let heading = dz.atan2(dx);
+        let mut best: Option<(Vec3, f32, f32)> = None;
+        for k in 0..BERTHA_HEADINGS {
+            let a = heading + std::f32::consts::PI * (k as f32 / (BERTHA_HEADINGS - 1) as f32 - 0.5);
+            for share in BERTHA_SHARES {
+                let p = Vec3::xz(ally_base.x + span * share * a.cos(), ally_base.z + span * share * a.sin());
+                let high = self.eco.height_map.get_highest_point_in_radius(p, BERTHA_HIGH_GROUND);
+                let site = self.eco_build_site(bertha, high, 0);
+                if site.x < 0.0
+                    || self.eco_bad_super_wep_site(site)
+                    || self.eco.super_weps.iter().any(|b| distance(b.pos(), site) < 350.0)
+                {
+                    continue;
                 }
-                good = !self.eco.super_weps.iter().any(|b| distance(b.pos(), position) < 350.0);
-
-                if self.eco_bad_super_wep_site(position) {
-                    good = false;
+                let hm = &self.eco.height_map;
+                let (mut clear, mut in_range) = (0.0, 0.0);
+                for &(t, v) in targets.iter().filter(|t| distance(t.0, site) <= range) {
+                    in_range += v;
+                    if hm.shell_clears(site, muzzle, t, BERTHA_TARGET_HEIGHT, speed, gravity) {
+                        clear += v;
+                    }
                 }
-
-                if !good {
-                    position = get_radial_point(position, 300.0);
-                    position = self.eco_build_site(bertha, position, 0);
+                if best.is_none_or(|b| clear > b.1) {
+                    best = Some((site, clear, in_range));
                 }
-            }
-            if good {
-                break;
             }
         }
-
-        let mut ct = WorkerTask::construction(bertha, position, 0);
-        if let Some(c) = ct.as_construction_mut() {
-            c.frame_issued = self.frame;
-        }
-        self.eco_add_construction(ct, Some(List::SuperWep), Some(List::SuperWep));
+        let Some((site, clear, in_range)) = best else {
+            if self.frame - self.eco.bertha_report >= 30 * 300 {
+                self.eco.bertha_report = self.frame;
+                self.log(
+                    "economy: no Bertha site: high ground towards the middle is all front line, enemy land or taken",
+                );
+            }
+            return None;
+        };
+        self.log(&format!(
+            "economy: Bertha site at ({:.0}, {:.0}): its shells clear the terrain to {clear:.0} of {in_range:.0} \
+             metal of the enemy's in range",
+            site.x, site.z
+        ));
+        Some(site)
     }
 
     fn eco_create_super_wep_task(&mut self) {
-        if self.fac.factories.is_empty() || self.eco.radars.is_empty() {
+        if self.fac.factories.is_empty() || self.eco.radars.is_empty() || self.eco_awaiting_power() {
             return; // Eh, no.
         }
         let name = match self.eco.s_wep {
@@ -722,11 +778,7 @@ impl Ai {
             position = self.eco_build_site(death, position, 0);
         }
 
-        let mut ct = WorkerTask::construction(death, position, 0);
-        if let Some(c) = ct.as_construction_mut() {
-            c.frame_issued = self.frame;
-        }
-        self.eco_add_construction(ct, Some(List::SuperWep), Some(List::SuperWep));
+        self.eco_add_powered(death, position, List::SuperWep);
     }
 
     /// Rule out first factories whose units get to much less of the metal
@@ -831,6 +883,16 @@ impl Ai {
                 format!("{value:.0} metal is behind anti-nukes: Widows to find and stun them"),
             ));
         }
+        if !owned("factoryspider") && self.scouts_deep_wanted() && !self.scouts_have_widow() {
+            return Some((
+                "factoryspider".to_owned(),
+                format!(
+                    "{} Fusions{}: a Widow to scout the enemy's land deep",
+                    self.eco.fusions.len(),
+                    if self.misc_has_nuke() || self.missiles_silo().is_some() { " and a silo" } else { "" }
+                ),
+            ));
+        }
         let s = self.strategy.as_ref()?;
         if !self.dev_off("drops")
             && !owned("factorygunship")
@@ -853,6 +915,16 @@ impl Ai {
                     format!(
                         "{:.0}% of the enemy's value is out of ground reach or far round guarded chokepoints: air drops",
                         100.0 * guarded / total
+                    ),
+                ));
+            }
+            let prospect = self.drops_prospect_value();
+            if prospect >= DROP_PROSPECT {
+                return Some((
+                    "factorygunship".to_owned(),
+                    format!(
+                        "{prospect:.0} metal of enemy buildings is much further on foot, past what holds the way, \
+                         than by air: air drops"
                     ),
                 ));
             }
@@ -935,6 +1007,54 @@ impl Ai {
         }
     }
 
+    /// Make a firebase of a missile silo just up (it stands forward, within
+    /// reach of the enemy's buildings): its missiles first for resources, a
+    /// heavy and a light laser and a flak turret between it and the enemy,
+    /// an area shield over it against artillery, and caretakers that speed
+    /// its missiles and repair it.
+    pub fn eco_fortify_silo(&mut self, silo: Unit) {
+        silo.execute_custom_command(cmd::PRIORITY, &[2.0], 0, NO_TIMEOUT);
+        let at = silo.pos();
+        let enemy = self.graph.get_enemy_center();
+        let toward = if enemy == NULLPOS { self.graph.get_map_center() } else { enemy };
+        let ahead = get_directional_point(at, toward, SILO_GUARD);
+        let (dx, dz) = ((ahead.x - at.x) / SILO_GUARD, (ahead.z - at.z) / SILO_GUARD);
+        let aside = |d: f32| Vec3::xz(ahead.x - dz * d, ahead.z + dx * d);
+        let mut planned = Vec::new();
+        for (name, p, list) in [
+            ("turretheavylaser", aside(0.0), List::Porc),
+            ("turretlaser", aside(SILO_GUARD_SPREAD), List::Porc),
+            ("turretlaser", aside(-SILO_GUARD_SPREAD), List::Porc),
+            ("turretaaflak", get_directional_point(at, toward, SILO_GUARD / 2.0), List::Aa),
+            ("staticshield", get_directional_point(at, toward, 110.0), List::Construction),
+        ] {
+            let Some(def) = self.defs.get(name) else { continue };
+            let site = self.eco_build_site(def, p, 0);
+            let extra = (list != List::Construction).then_some(list);
+            if site.x >= 0.0 && self.eco_add_simple(def, site, list, extra).is_some() {
+                planned.push(name);
+            }
+        }
+        // The caretakers, by the nearest constructor's reach.
+        let wid = (self.eco.workers.values())
+            .min_by(|a, b| distance(a.get_pos(), at).total_cmp(&distance(b.get_pos(), at)))
+            .map(|w| w.id);
+        let mut caretakers = 0;
+        if let Some(wid) = wid {
+            for _ in 0..SILO_CARETAKERS {
+                let before = self.eco.nano_tasks.len();
+                self.eco_create_nano_turret_task(wid, silo);
+                caretakers += self.eco.nano_tasks.len() - before;
+            }
+        }
+        self.log(&format!(
+            "missiles: fortifying the silo at ({:.0}, {:.0}): {}, {caretakers} caretakers",
+            at.x,
+            at.z,
+            if planned.is_empty() { "no room for defenses".to_owned() } else { planned.join(", ") }
+        ));
+    }
+
     /// Re-assess what factory the modules would have, now and then.
     pub(super) fn eco_update_requisition(&mut self, frame: i32) {
         if (frame + self.offset) % REQUISITION_PERIOD != 0
@@ -946,6 +1066,7 @@ impl Ai {
         self.eco_plan_sub_defense();
         self.eco_plan_missile_silo();
         self.eco_plan_watchtower();
+        self.eco_plan_colony();
         let r = self.eco_find_requisition();
         if let Some((f, why)) = &r
             && self.eco.requisition_logged.as_ref() != Some(f)

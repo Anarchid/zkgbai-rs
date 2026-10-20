@@ -1,11 +1,13 @@
 //! Shared utilities: grids, pathfinding, terrain analysis.
 
+pub mod air_field;
 pub mod grid;
 pub mod height_map;
 pub mod move_to;
 pub mod pathfinder;
 pub mod terrain_analyzer;
 
+pub use air_field::AirField;
 pub use grid::{ArrayGraphics, ByteArrayGraphics};
 pub use height_map::HeightMap;
 pub use move_to::kgb_move_to;

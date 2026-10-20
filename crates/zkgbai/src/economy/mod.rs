@@ -3,6 +3,7 @@
 
 mod assign;
 pub mod build_ids;
+mod colonize;
 pub mod factory;
 pub mod factory_manager;
 pub mod grid;
@@ -145,8 +146,17 @@ pub struct EconomyManager {
     /// A watchtower for our strikes going up, and when to plan the next.
     watchtower: Option<watchtower::Watchtower>,
     watchtower_after: i32,
+    /// A colony being taken, and when to look for the next.
+    colony: Option<colonize::Colony>,
+    colony_after: i32,
+    /// When a colony last wanted an air constructor.
+    colony_wants_air: Option<i32>,
     /// Grid ranges and power needs by unit type.
     pub grid_defs: grid::GridDefs,
+    /// A building that needs power, held back until its site has it.
+    pub(super) pending_power: Option<grid::PendingPower>,
+    /// When it was last said that no Bertha site was found.
+    bertha_report: i32,
     last_repaired_unit: i32,
     nuke_wep_id: i32,
     wolv_mine_id: i32,
@@ -312,7 +322,12 @@ impl EconomyManager {
             ditch_tries: Vec::new(),
             watchtower: None,
             watchtower_after: 0,
+            colony: None,
+            colony_after: 0,
+            colony_wants_air: None,
             grid_defs: grid::GridDefs::default(),
+            pending_power: None,
+            bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
             wolv_mine_id: -1,

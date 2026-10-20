@@ -13,6 +13,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use springai::{Callback, Unit, UnitDef, Vec3};
+use zk_terrain::occupancy::{Occupancy, Presence};
 use zk_terrain::paths::{Paths, SNAP};
 use zk_terrain::strategy::{Analysis, Asset, Scenario, Side, ground_distance};
 use zk_terrain::{MoveClass, Pos, SpringMapData, Terrain, Tier, TierMap};
@@ -221,8 +222,8 @@ impl Ai {
 
     /// Draw a tier's chokepoints, gates and regions as map markers
     /// (`kgbterrain <tier>` chat command), with `strategy` the chokepoints
-    /// of the latest strategic analysis, or with `threat` the enemy's
-    /// incursions and our blocks.
+    /// of the latest strategic analysis, with `threat` the enemy's
+    /// incursions and our blocks, or with `occupancy` who holds each region.
     pub fn terrain_draw(&self, tier_name: &str) {
         let Some(terrain) = self.terrain() else {
             self.say("Terrain analysis is not ready.");
@@ -236,8 +237,12 @@ impl Ai {
             self.incursions_draw();
             return;
         }
+        if tier_name == "occupancy" {
+            self.occupancy_draw();
+            return;
+        }
         let Some(tier) = Tier::ALL.into_iter().find(|t| t.name() == tier_name) else {
-            self.say("Usage: kgbterrain spider|bot|vehicle|hover|ship|amphib|strategy|threat");
+            self.say("Usage: kgbterrain spider|bot|vehicle|hover|ship|amphib|strategy|threat|occupancy");
             return;
         };
         let Some(map) = terrain.tier(tier) else { return };
@@ -410,6 +415,9 @@ impl Ai {
 /// Frames between strategic re-analyses.
 const STRATEGY_PERIOD: i32 = 900;
 
+/// Enemy units seen within this many frames hold the region they were in.
+pub const PRESENCE_RECENT: i32 = 30 * 30;
+
 /// How far behind a chokepoint (on our side) its defenses stand, elmos.
 const FORTIFY_SETBACK: f32 = 120.0;
 
@@ -439,6 +447,8 @@ pub struct Strategy {
     /// through our base or past chokepoints our defenses hold, or not at
     /// all: ground defenses there are wasted.
     pub sheltered: Vec<bool>,
+    /// What holds each region (see [`Ai::region_presence`]).
+    pub occupancy: Occupancy,
     /// The enemy's base, and the other movement tiers its ground forces
     /// have shown.
     enemy_base: Pos,
@@ -509,6 +519,77 @@ impl Ai {
             .collect()
     }
 
+    /// What is known to stand on the map, for who holds which region: the
+    /// enemy's buildings, and its ground units seen in the last
+    /// [`PRESENCE_RECENT`] frames, with their danger to ground forces or to
+    /// aircraft and their value; our fighters, and our metal spots' value.
+    pub fn region_presence(&self) -> Vec<Presence> {
+        let frame = self.frame;
+        let mut presence: Vec<Presence> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && !e.can_fly() && (e.is_static || frame - e.last_seen <= PRESENCE_RECENT))
+            .map(|e| {
+                let danger = e.get_danger();
+                let aa = e.is_aa || e.is_flex_aa;
+                Presence {
+                    pos: pos(e.position),
+                    side: Side::Enemy,
+                    power: if e.is_aa && !e.is_flex_aa { 0.0 } else { danger },
+                    aa: if aa { danger } else { 0.0 },
+                    value: e.value,
+                }
+            })
+            .collect();
+        presence.extend(self.fighters.values().map(|f| Presence {
+            pos: pos(f.get_pos()),
+            side: Side::Ally,
+            power: (f.power + f.unit.max_health()) / 10.0,
+            aa: 0.0,
+            value: f.metal_value,
+        }));
+        presence.extend(self.graph.get_owned_spots().iter().map(|m| Presence {
+            pos: pos(m.get_pos()),
+            side: Side::Ally,
+            power: 0.0,
+            aa: 0.0,
+            value: m.value,
+        }));
+        presence
+    }
+
+    /// Label each region of the strategy's tier with who holds it.
+    fn occupancy_draw(&self) {
+        let (Some(strategy), Some(terrain)) = (&self.strategy, self.terrain()) else {
+            self.say("No strategic analysis yet.");
+            return;
+        };
+        let Some(map) = terrain.tier(strategy.tier) else { return };
+        let draw = self.cb.map();
+        let mut held = [0; 3];
+        for (r, h) in strategy.occupancy.regions.iter().enumerate() {
+            let side = h.holder();
+            held[side as usize] += 1;
+            if side == Side::Neutral {
+                continue;
+            }
+            let c = map.regions[r].center;
+            draw.add_point(
+                Vec3::new(c.x, draw.elevation_at(c.x, c.z), c.z),
+                &format!(
+                    "R{r} enemy {:.0} (aa {:.0}, {:.0}m), ours {:.0} ({:.0}m)",
+                    h.enemy_power, h.enemy_aa, h.enemy_value, h.ally_power, h.ally_value
+                ),
+            );
+        }
+        self.say(&format!(
+            "Frame {} ({} tier): {} regions ours, {} the enemy's, {} no one's.",
+            strategy.frame,
+            strategy.tier.name(),
+            held[Side::Ally as usize],
+            held[Side::Enemy as usize],
+            held[Side::Neutral as usize]
+        ));
+    }
+
     /// Re-run the strategic analysis every [`STRATEGY_PERIOD`] frames.
     pub fn strategy_update(&mut self, frame: i32) {
         if (frame + self.offset) % STRATEGY_PERIOD == 0 {
@@ -547,7 +628,9 @@ impl Ai {
         };
         let sheltered = analysis.sheltered(map, pos(enemy), held, held_region);
         let other_tiers = tiers[1..].to_vec();
-        let strategy = Strategy { frame, tier, analysis, fortify, sheltered, enemy_base: pos(enemy), other_tiers };
+        let occupancy = Occupancy::new(map, &self.region_presence());
+        let strategy =
+            Strategy { frame, tier, analysis, fortify, sheltered, occupancy, enemy_base: pos(enemy), other_tiers };
         // The first analysis, and whenever what is sheltered changes much.
         let before = self.strategy.as_ref().map_or(0, |s| s.sheltered.iter().filter(|&&s| s).count());
         let now = strategy.sheltered.iter().filter(|&&s| s).count();

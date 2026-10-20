@@ -96,8 +96,8 @@ impl Ai {
         let Some(w) = self.eco.workers.get(&wid) else {
             return;
         };
-        // Busy terraforming: leave it to it.
-        if !w.is_chicken && super::terraform::is_terraforming(unit) {
+        // Busy terraforming, or flown to a colony: leave it to it.
+        if !w.is_chicken && (super::terraform::is_terraforming(unit) || self.eco_in_transit(wid)) {
             self.eco.assigned.push_back(wid);
             return;
         }
@@ -241,9 +241,11 @@ impl Ai {
             Some(d) if !worker.is_com => self.eco_other_builders(d),
             _ => Vec::new(),
         };
+        // So does metal of a colony it is the colonist of.
         let stranded = |t: &WorkerTask| {
             let mex = t.as_construction().is_some_and(|c| c.build_type.id() == eco.build_ids.mex_id);
-            if mex && self.eco_out_of_reach(&others, t.get_pos()) { STRANDED_BONUS } else { 0.0 }
+            let bonus = if mex && self.eco_out_of_reach(&others, t.get_pos()) { STRANDED_BONUS } else { 0.0 };
+            bonus + self.eco_colony_bonus(wid, t.get_pos(), mex)
         };
 
         let mut task: Option<TaskId> = None;
@@ -467,8 +469,12 @@ impl Ai {
                 }
 
                 if def_id == ids.pylon_id {
-                    // for pylons
+                    // for pylons: first of all while a superweapon waits
+                    // for its site to have power (see `grid`)
                     let (nfus, npyl) = (eco.fusions.len(), eco.pylons.len());
+                    if eco.pending_power.is_some() {
+                        return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));
+                    }
                     if worker.is_greedy {
                         if nfus > npyl {
                             return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));

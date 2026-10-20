@@ -12,6 +12,15 @@
 //! instead, the attacker gets a radar by the enemy's base that sees the
 //! Fusions and then goes, and a missile silo within reach of them: its Eos
 //! should count each Fusion they hit gone, unseen, and strike each once.
+//! With `test=drop` (hovers) or `test=dropbot` (bots), the attacker gets a
+//! radar by the enemy's base and, every few minutes, four Charons and four
+//! assaults and riots at home; any landing counts, walkable or not (see
+//! `drops`), so each round flies a sortie to the enemy's buildings. With
+//! `test=bertha`, the attacker gets five Fusions and a radar at home at
+//! once, so its economy goes for a superweapon (a Bertha, mostly) soon.
+//! With `test=colony`, it gets a ground constructor and a Charon (or with
+//! `test=colonyair` an air constructor) to colonize the free metal far off
+//! (see `economy::colonize`).
 
 use springai::Vec3;
 
@@ -22,6 +31,10 @@ use crate::util::{distance, get_directional_point};
 /// When the attacker gets its silo, and its radar for `eos`.
 const SILO_FRAME: i32 = 30 * 300;
 const RADAR_FRAME: i32 = 30 * 100;
+
+/// When the drop rounds start, and how often they come.
+const DROP_FRAME: i32 = 30 * 60;
+const DROP_ROUND: i32 = 30 * 180;
 
 impl Ai {
     pub fn strike_test_update(&mut self, frame: i32) {
@@ -59,6 +72,25 @@ impl Ai {
             ("bite", SILO_FRAME) => vec![("staticnuke", ahead(-500.0)), ("staticradar", enemy)],
             ("eos", RADAR_FRAME) => vec![("staticradar", enemy)],
             ("eos", SILO_FRAME) => vec![(missiles::SILO, get_directional_point(enemy, base, 2500.0))],
+            ("bertha", 60) => {
+                let mut units = [-600.0, -400.0, -200.0, 200.0, 400.0]
+                    .map(|d| ("energyfusion", Vec3::xz(base.x - dz / n * d, base.z + dx / n * d)))
+                    .to_vec();
+                // Superweapons wait for a radar.
+                units.push(("staticradar", ahead(300.0)));
+                units
+            }
+            ("colony", 60) => vec![("cloakcon", ahead(-150.0)), ("gunshiptrans", ahead(-250.0))],
+            ("colonyair", 60) => vec![("gunshipcon", ahead(-150.0))],
+            ("drop" | "dropbot", f) if f >= DROP_FRAME && (f - DROP_FRAME) % DROP_ROUND == 0 => {
+                let cargo = if test == "drop" { ["hoverassault", "hoverriot"] } else { ["cloakassault", "cloakriot"] };
+                let mut units = vec![("gunshiptrans", ahead(-200.0)); 4];
+                units.extend((0..4).map(|k| (cargo[k % 2], ahead(-100.0))));
+                if f == DROP_FRAME {
+                    units.push(("staticradar", enemy));
+                }
+                units
+            }
             _ => Vec::new(),
         };
         if frame == 60 {
@@ -75,6 +107,12 @@ impl Ai {
             let Some(def) = self.defs.get(name) else { continue };
             let site = self.cb.map().find_closest_build_site(def, at, 1200.0, 4, 0);
             let unit = self.cb.cheat_new_unit(def, if site.x >= 0.0 { site } else { at });
+            // A short walk, so it goes idle and joins its handler as if
+            // built (cheated units get no idle event otherwise).
+            if let Some(u) = unit.filter(|_| def.speed() > 0.0) {
+                let p = u.pos();
+                u.move_to(Vec3::new(p.x + 40.0, p.y, p.z + 40.0), 0);
+            }
             let p = unit.map(|u| u.pos());
             self.log(&format!("strike-test: {name} at {:?}", p.map(|p| (p.x as i32, p.z as i32))));
         }

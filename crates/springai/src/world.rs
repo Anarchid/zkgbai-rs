@@ -332,6 +332,13 @@ impl Map {
         ffi!(self.cb, Map_getElevationAt, x, z)
     }
 
+    /// Gravity, elmos per second squared (the engine keeps it per frame
+    /// squared, negative).
+    pub fn gravity(&self) -> f32 {
+        let g = ffi!(self.cb, Map_getGravity).abs();
+        if g < 1.0 { g * 900.0 } else { g }
+    }
+
     pub fn min_height(&self) -> f32 {
         ffi!(self.cb, Map_getMinHeight)
     }

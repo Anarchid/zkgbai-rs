@@ -11,6 +11,12 @@
 //! with a missile in store or coming and a target that known anti-nukes
 //! alone guard, a Widow waits by each of them, and bites when `nukes` says
 //! the missile is ready; it flies once they are stunned.
+//!
+//! Past that, once the game is one of strategic weapons (two Fusions of
+//! ours, or a silo of either kind), a Widow scouts deep for good: it goes
+//! where the enemy's ground has gone unseen longest, its valuable buildings
+//! first — where anti-nukes, superweapons and Fusions stand that our
+//! strikes want to know of — and a spider factory is asked for to build it.
 
 use std::collections::BTreeMap;
 
@@ -23,8 +29,21 @@ use crate::util::{OPTION_SHIFT_KEY, distance, get_directional_point};
 
 pub const WIDOW: &str = "spiderantiheavy";
 
-/// Widows wanted at most: one to look, the rest to bite.
-const MAX_WIDOWS: usize = 3;
+/// Widows wanted at most: one to look, one to scout deep, the rest to
+/// bite.
+const MAX_WIDOWS: usize = 4;
+
+/// Deep scouting is wanted from this many Fusions of ours on (a Singularity
+/// counts as one), or a silo.
+const DEEP_FUSIONS: usize = 2;
+
+/// A deep look goes to a place unseen at least this long (frames), the
+/// longer the better up to the cap; a building counts this many times more
+/// per 1000 metal of it. It is given up after this long.
+const DEEP_STALE: i32 = 30 * 60;
+const STALE_CAP: i32 = 30 * 300;
+const VALUE_WEIGHT: f32 = 1.0;
+const DEEP_TIMEOUT: i32 = 30 * 120;
 
 /// Frames between updates, and before an unfulfilled order is forgotten.
 const PERIOD: i32 = 30;
@@ -60,6 +79,8 @@ enum Job {
     Wait(i32),
     /// Biting an anti-nuke.
     Bite(i32),
+    /// Scouting the enemy's land deep, at a place unseen long.
+    Deep(Vec3),
 }
 
 struct Widow {
@@ -90,7 +111,40 @@ impl Ai {
     /// How many Widows there is work for.
     fn scouts_needed(&self) -> usize {
         let bites = self.nukes_bite_plan().map_or(0, |c| c.antis.len());
-        (usize::from(!self.scouts_looks().is_empty()) + bites).min(MAX_WIDOWS)
+        let deep = usize::from(self.scouts_deep_wanted());
+        (usize::from(!self.scouts_looks().is_empty()) + deep + bites).min(MAX_WIDOWS)
+    }
+
+    /// Whether the game is one of strategic weapons, where a Widow should
+    /// always be scouting the enemy's land deep.
+    pub fn scouts_deep_wanted(&self) -> bool {
+        !self.dev_off("scouts")
+            && (self.eco.fusions.len() >= DEEP_FUSIONS || self.misc_has_nuke() || self.missiles_silo().is_some())
+    }
+
+    /// Whether we have a Widow.
+    pub fn scouts_have_widow(&self) -> bool {
+        !self.scouts.widows.is_empty()
+    }
+
+    /// Where a Widow at `from` should scout deep, and how long it has gone
+    /// unseen: of the enemy's metal spots and buildings unseen at least
+    /// [`DEEP_STALE`] and not near `taken`, the longest unseen (buildings by
+    /// their value), the nearer the better.
+    fn scouts_deep_target(&self, from: Vec3, taken: &[Vec3]) -> Option<(Vec3, i32)> {
+        let frame = self.frame;
+        let spots = self.graph.get_enemy_territory().into_iter().map(|m| (m.position, m.last_seen, 1.0));
+        let buildings = (self.war.targets.values())
+            .filter(|e| e.is_static && !e.is_dead && e.identified && e.value >= 1000.0)
+            .map(|e| (e.position, e.last_seen, 1.0 + VALUE_WEIGHT * e.value / 1000.0));
+        let score = |&(p, seen, weight): &(Vec3, i32, f32)| {
+            (frame - seen).min(STALE_CAP) as f32 * weight / (1.0 + distance(p, from) / 3000.0)
+        };
+        (spots.chain(buildings))
+            .filter(|&(p, seen, _)| frame - seen >= DEEP_STALE && !self.los.is_in_los(p))
+            .filter(|&(p, ..)| taken.iter().all(|&t| distance(t, p) >= SPREAD))
+            .max_by(|a, b| score(a).total_cmp(&score(b)))
+            .map(|(p, seen, _)| (p, frame - seen))
     }
 
     /// Whether a spider factory should build a Widow now.
@@ -170,6 +224,7 @@ impl Ai {
             let doing = match job {
                 Job::Home => "going home",
                 Job::Look(_) => "looking",
+                Job::Deep(_) => "scouting deep",
                 Job::Wait(_) => "on its way to bite",
                 Job::Bite(_) => "biting",
             };
@@ -207,7 +262,8 @@ impl Ai {
             }
             let free = (self.scouts.widows.iter())
                 .filter(|(_, w)| {
-                    matches!(w.job, Job::Home | Job::Look(_)) && w.unit.health() >= HURT * w.unit.max_health()
+                    matches!(w.job, Job::Home | Job::Look(_) | Job::Deep(_))
+                        && w.unit.health() >= HURT * w.unit.max_health()
                 })
                 .min_by(|a, b| distance(a.1.unit.pos(), at).total_cmp(&distance(b.1.unit.pos(), at)))
                 .map(|(&id, _)| id);
@@ -217,13 +273,22 @@ impl Ai {
             }
         }
         // The rest look: each at the nearest place to look that another
-        // is not already after.
+        // is not already after; with none, they scout deep.
+        let deep = self.scouts_deep_wanted();
         for &id in &ids {
             let Some(w) = self.scouts.widows.get(&id) else { continue };
             let here = w.unit.pos();
             let keep = match w.job {
                 Job::Look(p) => looks.iter().any(|&l| distance(l, p) < 1.0),
                 Job::Home => w.unit.health() < HURT * w.unit.max_health(),
+                // Until it sees the place, or gives up; a look of our
+                // strikes comes first.
+                Job::Deep(p) => {
+                    deep && looks.is_empty()
+                        && !self.los.is_in_los(p)
+                        && distance(here, p) > WAIT_RANGE
+                        && frame - w.since <= DEEP_TIMEOUT
+                }
                 _ => true,
             };
             if keep {
@@ -231,17 +296,29 @@ impl Ai {
             }
             let taken: Vec<Vec3> = (self.scouts.widows.iter())
                 .filter(|&(&o, _)| o != id)
-                .filter_map(|(_, o)| if let Job::Look(p) = o.job { Some(p) } else { None })
+                .filter_map(|(_, o)| if let Job::Look(p) | Job::Deep(p) = o.job { Some(p) } else { None })
                 .collect();
             let next = (looks.iter().copied())
                 .filter(|&l| taken.iter().all(|&t| distance(t, l) >= SPREAD))
                 .min_by(|a, b| distance(*a, here).total_cmp(&distance(*b, here)));
+            let deep_next = if next.is_none() && deep { self.scouts_deep_target(here, &taken) } else { None };
             let Some(w) = self.scouts.widows.get_mut(&id) else { continue };
-            let job = next.map_or(Job::Home, Job::Look);
+            let job = match (next, deep_next) {
+                (Some(p), _) => Job::Look(p),
+                (None, Some((p, _))) => Job::Deep(p),
+                _ => Job::Home,
+            };
             if job != w.job {
                 (w.job, w.since, w.moved) = (job, frame, i32::MIN / 2);
-                if let Job::Look(p) = job {
-                    self.log(&format!("scouts: a Widow goes to look at ({:.0}, {:.0})", p.x, p.z));
+                match (job, deep_next) {
+                    (Job::Look(p), _) => self.log(&format!("scouts: a Widow goes to look at ({:.0}, {:.0})", p.x, p.z)),
+                    (Job::Deep(p), Some((_, unseen))) => self.log(&format!(
+                        "scouts: a Widow goes deep, to ({:.0}, {:.0}), unseen for {} s",
+                        p.x,
+                        p.z,
+                        unseen / 30
+                    )),
+                    _ => {}
                 }
             }
         }
@@ -257,7 +334,7 @@ impl Ai {
         let (unit, here) = (w.unit, w.unit.pos());
         let to = match w.job {
             Job::Bite(_) => return,
-            Job::Look(p) => p,
+            Job::Look(p) | Job::Deep(p) => p,
             Job::Wait(anti) => {
                 let Some(e) = self.war.targets.get(&anti) else { return };
                 get_directional_point(e.position, here, WAIT_RANGE)

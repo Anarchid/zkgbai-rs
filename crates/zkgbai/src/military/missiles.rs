@@ -115,6 +115,7 @@ impl Ai {
         self.missiles.silo = Some(silo);
         let p = silo.pos();
         self.log(&format!("missiles: silo up at ({:.0}, {:.0})", p.x, p.z));
+        self.eco_fortify_silo(silo);
     }
 
     /// A missile on a pad: ours to fire.

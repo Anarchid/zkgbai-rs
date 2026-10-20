@@ -7,9 +7,11 @@
 //! seen standing, not presumed; see `missiles`).
 //!
 //! From some income on, the nearest constructors raise a spike on safe
-//! ground of ours within reach of enough of that (of the places that bring
-//! in nearly the most, the farthest back), and the radar goes on top (or on
-//! the ground, if the spike does not come up).
+//! ground of ours whose radar would see enough of that (of the places that
+//! bring in nearly the most, the farthest back), and the radar goes on top
+//! (or on the ground, if the spike does not come up). Radar sees by sight
+//! lines over the terrain, as the engine's does: what a hill between hides,
+//! a site does not count, unless the spike lifts the radar over it.
 
 use springai::{Unit, Vec3};
 
@@ -27,6 +29,11 @@ const REACH: f32 = 5000.0;
 /// wide, elmos.
 const SPIKE: f32 = 64.0;
 const TOP: f32 = 48.0;
+
+/// The radar's height above its footing (`radarEmitHeight`), and how high
+/// above the ground what it watches stands, elmos.
+const EMIT_HEIGHT: f32 = 32.0;
+const TARGET_HEIGHT: f32 = 10.0;
 
 /// Frames to give the spike (and constructors to send, one after another,
 /// as each is called away), and the radar on it; before trying again after
@@ -145,7 +152,14 @@ impl Ai {
         // Safe ground of ours within reach of the most of it, the nearest.
         let mut sites: Vec<Vec3> = self.graph.get_owned_spots().iter().map(|m| m.get_pos()).collect();
         sites.push(self.graph.get_ally_center());
-        let reached = |p: Vec3| unseen.iter().filter(|u| distance(u.0, p) <= REACH).map(|u| u.1).sum::<usize>();
+        let hm = &self.eco.height_map;
+        let reached_from = |p: Vec3, eye: f32| {
+            (unseen.iter())
+                .filter(|u| distance(u.0, p) <= REACH && hm.sees(p, eye, u.0, TARGET_HEIGHT))
+                .map(|u| u.1)
+                .sum::<usize>()
+        };
+        let reached = |p: Vec3| reached_from(p, SPIKE + EMIT_HEIGHT);
         let near = |p: Vec3| unseen.iter().map(|u| distance(u.0, p)).fold(f32::MAX, f32::min);
         let scored: Vec<(Vec3, usize)> = (sites.into_iter())
             .filter(|&p| p != NULLPOS && self.graph.is_ally_territory(p) && self.war.get_threat(p) <= 0.0)
@@ -173,13 +187,13 @@ impl Ai {
             return;
         }
         let ground = self.cb.map().elevation_at(site.x, site.z);
+        let (worth, flat) = (reached(site), reached_from(site, EMIT_HEIGHT));
         let Some(unit) = self.eco_raise_spike(site) else { return };
         self.eco.watchtower = Some(Watchtower { site, ground, worker: unit, since: frame, tries: 1, planned: false });
         self.log(&format!(
-            "radar: raising a spike at ({:.0}, {:.0}) for a watchtower over enemy ground out of radar (worth {})",
-            site.x,
-            site.z,
-            reached(site)
+            "radar: raising a spike at ({:.0}, {:.0}) for a watchtower over enemy ground out of radar (worth {worth} \
+             in sight from the spike, {flat} from the ground)",
+            site.x, site.z
         ));
     }
 

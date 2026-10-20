@@ -1216,7 +1216,7 @@ impl Ai {
             return "gunshipheavyskirm";
         }
 
-        if self.fac_need_workers(fac) {
+        if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
             return "gunshipcon";
         }
 
@@ -1253,7 +1253,7 @@ impl Ai {
     }
 
     fn fac_get_planes(&self, fac: &mut Factory) -> &'static str {
-        if self.fac_need_workers(fac) {
+        if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
             return "planecon";
         }
         if self.eco.sparrow.is_none() {

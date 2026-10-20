@@ -1,6 +1,8 @@
 use springai::{Callback, Vec3};
 
-/// Cached terrain heights for "find high ground" queries (radar placement).
+/// Cached terrain heights (as at the start of the game) for "find high
+/// ground" queries, sight lines and shell paths (radar and artillery
+/// placement).
 pub struct HeightMap {
     data: Vec<f32>,
     width: i32,
@@ -45,6 +47,53 @@ impl HeightMap {
         }
         Vec3::new(max_x as f32 * 8.0, 0.0, max_y as f32 * 8.0)
     }
+
+    /// Terrain height at `(x, z)` (the nearest square, clamped to the map).
+    pub fn height_at(&self, x: f32, z: f32) -> f32 {
+        let cx = ((x / 8.0) as i32).clamp(0, self.width - 1);
+        let cz = ((z / 8.0) as i32).clamp(0, self.height - 1);
+        self.data.get((cz * self.width + cx) as usize).copied().unwrap_or(0.0)
+    }
+
+    /// Whether a sight line from `eye` elmos above the ground (or sea) at
+    /// `from` reaches `target` elmos above it at `to`, no terrain between
+    /// rising above it: how the engine's line of sight and radar see.
+    pub fn sees(&self, from: Vec3, eye: f32, to: Vec3, target: f32) -> bool {
+        let h0 = self.height_at(from.x, from.z).max(0.0) + eye;
+        let h1 = self.height_at(to.x, to.z).max(0.0) + target;
+        self.clears(from, to, |t, _| h0 + (h1 - h0) * t)
+    }
+
+    /// Whether a cannon shell fired at `speed` (elmos/s) under `gravity`
+    /// (elmos/s²) from `muzzle` elmos above the ground at `from` reaches
+    /// `target` elmos above it at `to` on its low arc without hitting the
+    /// terrain between; false out of its reach.
+    pub fn shell_clears(&self, from: Vec3, muzzle: f32, to: Vec3, target: f32, speed: f32, gravity: f32) -> bool {
+        let h0 = self.height_at(from.x, from.z).max(0.0) + muzzle;
+        let h = self.height_at(to.x, to.z).max(0.0) + target - h0;
+        let d = ((to.x - from.x).powi(2) + (to.z - from.z).powi(2)).sqrt().max(1.0);
+        let (v2, g) = (speed * speed, gravity.max(1.0));
+        let disc = v2 * v2 - g * (g * d * d + 2.0 * h * v2);
+        if disc < 0.0 {
+            return false;
+        }
+        let tan = (v2 - disc.sqrt()) / (g * d);
+        let fall = g * (1.0 + tan * tan) / (2.0 * v2);
+        self.clears(from, to, |_, x| h0 + x * tan - fall * x * x)
+    }
+
+    /// Whether `line` (height at share `t` of the way, `x` elmos along)
+    /// stays above the terrain between `from` and `to`, sampled every 16
+    /// elmos.
+    fn clears(&self, from: Vec3, to: Vec3, line: impl Fn(f32, f32) -> f32) -> bool {
+        let d = ((to.x - from.x).powi(2) + (to.z - from.z).powi(2)).sqrt();
+        let steps = (d / 16.0).ceil() as i32;
+        (1..steps).all(|k| {
+            let t = k as f32 / steps as f32;
+            let (x, z) = (from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t);
+            self.height_at(x, z) <= line(t, t * d) + 1.0
+        })
+    }
 }
 
 #[cfg(test)]
@@ -57,6 +106,32 @@ mod tests {
         data[4 + 2] = -10.0;
         data[2 * 4 + 3] = 30.0;
         HeightMap { data, width: 4, height: 3 }
+    }
+
+    /// A 64-square strip, flat at 0 but for a ridge of `ridge` at squares
+    /// 30-33.
+    fn strip(ridge: f32) -> HeightMap {
+        let mut data = vec![0.0; 64];
+        for h in &mut data[30..34] {
+            *h = ridge;
+        }
+        HeightMap { data, width: 64, height: 1 }
+    }
+
+    #[test]
+    fn ridges_block_sight_and_low_shells() {
+        let (a, b) = (Vec3::new(8.0, 0.0, 0.0), Vec3::new(500.0, 0.0, 0.0));
+        assert!(strip(10.0).sees(a, 32.0, b, 10.0));
+        assert!(!strip(60.0).sees(a, 32.0, b, 10.0));
+        // High enough on a spike, over the ridge.
+        assert!(!strip(60.0).sees(a, 32.0 + 64.0, b, 10.0));
+        assert!(strip(60.0).sees(a, 32.0 + 128.0, b, 10.0));
+        // A Bertha's shell (1050 elmos/s, gravity 130) flies flat over 500
+        // elmos: a low ridge passes, a high one does not; out of reach is
+        // out of reach.
+        assert!(strip(20.0).shell_clears(a, 30.0, b, 20.0, 1050.0, 130.0));
+        assert!(!strip(120.0).shell_clears(a, 30.0, b, 20.0, 1050.0, 130.0));
+        assert!(!strip(0.0).shell_clears(a, 30.0, b, 20.0, 50.0, 130.0));
     }
 
     #[test]

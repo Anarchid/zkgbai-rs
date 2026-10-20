@@ -10,20 +10,28 @@
 //! energy (or needs it) into one along a minimum spanning tree of pylon
 //! chains. Chains are laid a pylon at a time and checked against the grid
 //! as built, so a misplaced pylon is made up for next time.
+//!
+//! A building that needs power (a Bertha, a superweapon) is not started
+//! until its site is on a grid making enough: the pylons go first, so 6000
+//! metal does not stand idle for minutes waiting to be linked (see
+//! [`Ai::eco_add_powered`]).
 
 use std::collections::HashMap;
 
-use springai::{Unit, Vec3};
+use springai::{UnitDef, Vec3};
 
 use super::List;
+use super::tasks::WorkerTask;
 use crate::Ai;
 use crate::util::distance;
 
 /// Frames between plans.
 const GRID_PERIOD: i32 = 30 * 10;
 
-/// Pylons queued at most at a time.
+/// Pylons queued at most at a time; more while a building waits for its
+/// site to have power.
 const MAX_PYLON_TASKS: usize = 3;
+const MAX_PYLON_TASKS_WAITING: usize = 6;
 
 /// Grids making less energy than this (metal spots, a few solars) are left
 /// to the economy's own pylon building.
@@ -35,6 +43,18 @@ const CHAIN_SLACK: f32 = 0.85;
 /// A planned pylon is already there if a pylon (or one queued) is this
 /// close, elmos.
 const PYLON_SAME: f32 = 250.0;
+
+/// Frames a building waits for its site to have power before it is started
+/// anyway.
+const POWER_WAIT: i32 = 30 * 180;
+
+/// A building that needs power, waiting for its site to be linked.
+pub struct PendingPower {
+    def: UnitDef,
+    pos: Vec3,
+    list: List,
+    since: i32,
+}
 
 /// Grid ranges and power needs of the unit types that have them.
 #[derive(Default)]
@@ -67,9 +87,9 @@ impl GridDefs {
     }
 }
 
-/// One of our grid members.
+/// One of our grid members (or a building's site waiting for power).
 struct Member {
-    unit: Unit,
+    what: String,
     pos: Vec3,
     range: f32,
     energy: f32,
@@ -97,12 +117,41 @@ impl Ai {
             .sum()
     }
 
+    /// Queue `def` at `pos` (on task list `list`); one that needs power
+    /// waits until its site has it, while the planner links it up.
+    pub(super) fn eco_add_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
+        let needs = self.eco.grid_defs.needs(def.id());
+        if needs <= 0.0 || self.dev_off("grid") {
+            self.eco_start_powered(def, pos, list);
+            return;
+        }
+        if self.eco.pending_power.is_none() {
+            self.log(&format!(
+                "grid: linking the site of a {} at ({:.0}, {:.0}) to {needs:.0} energy before building it",
+                self.defs.name(def),
+                pos.x,
+                pos.z
+            ));
+            self.eco.pending_power = Some(PendingPower { def, pos, list, since: self.frame });
+        }
+    }
+
+    /// Whether a building waits for its site to have power.
+    pub(super) fn eco_awaiting_power(&self) -> bool {
+        self.eco.pending_power.is_some()
+    }
+
+    fn eco_start_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
+        let mut ct = WorkerTask::construction(def, pos, 0);
+        if let Some(c) = ct.as_construction_mut() {
+            c.frame_issued = self.frame;
+        }
+        self.eco_add_construction(ct, Some(list), Some(list));
+    }
+
     /// Link starved buildings to power, and (late) the grids to each other.
     pub fn eco_plan_grid(&mut self, frame: i32) {
-        if (frame + self.offset + 13) % GRID_PERIOD != 0
-            || self.eco.pylon_tasks.len() >= MAX_PYLON_TASKS
-            || self.dev_off("grid")
-        {
+        if (frame + self.offset + 13) % GRID_PERIOD != 0 || self.dev_off("grid") {
             return;
         }
         let gd = &self.eco.grid_defs;
@@ -110,7 +159,7 @@ impl Ai {
         if pr <= 0.0 {
             return;
         }
-        let members: Vec<Member> = self
+        let mut members: Vec<Member> = self
             .cb
             .team_units()
             .into_iter()
@@ -123,9 +172,21 @@ impl Ai {
                     return None;
                 }
                 let energy = u.rules_param_float("current_energyIncome", 0.0);
-                Some(Member { unit: u, pos: u.pos(), range, energy, needs })
+                Some(Member { what: self.defs.name_of(u).to_owned(), pos: u.pos(), range, energy, needs })
             })
             .collect();
+        // The site of a building waiting for power, as if it stood there.
+        let pending = self.eco.pending_power.as_ref().and_then(|p| {
+            let &(range, needs) = gd.by_def.get(&p.def.id())?;
+            members.push(Member {
+                what: format!("{} site", self.defs.name(p.def)),
+                pos: p.pos,
+                range,
+                energy: 0.0,
+                needs,
+            });
+            Some(members.len() - 1)
+        });
 
         // The grids, and what each makes.
         let n = members.len();
@@ -142,6 +203,32 @@ impl Ai {
         let mut capacity = vec![0.0f32; n];
         for (i, m) in members.iter().enumerate() {
             capacity[grid[i]] += m.energy;
+        }
+        // A waiting building starts once its site has power (or has waited
+        // long enough).
+        if let (Some(i), Some(p)) = (pending, self.eco.pending_power.as_ref()) {
+            let (has, needs) = (capacity[grid[i]], members[i].needs);
+            let (def, pos, list, since) = (p.def, p.pos, p.list, p.since);
+            if has >= needs || frame - since > POWER_WAIT {
+                self.eco.pending_power = None;
+                self.log(&format!(
+                    "grid: the {} at ({:.0}, {:.0}) {}; building it",
+                    members[i].what,
+                    pos.x,
+                    pos.z,
+                    if has >= needs {
+                        format!("has {has:.0} of {needs:.0} energy")
+                    } else {
+                        format!("waited {} s for power", (frame - since) / 30)
+                    }
+                ));
+                self.eco_start_powered(def, pos, list);
+            }
+        } else if self.eco.pending_power.is_some() {
+            self.eco.pending_power = None;
+        }
+        if self.eco.pylon_tasks.len() >= self.eco_max_pylon_tasks() {
+            return;
         }
 
         // Grids worth linking: those making energy, and those needing it.
@@ -171,9 +258,12 @@ impl Ai {
         // First the starved: the building needing the most power, linked to
         // the grid that makes up its shortfall the cheapest (or else the
         // strongest).
-        let starved = (0..n)
-            .filter(|&i| members[i].needs > capacity[grid[i]])
-            .max_by(|&a, &b| members[a].needs.total_cmp(&members[b].needs));
+        // A building waiting for power goes first.
+        let starved = pending.filter(|&i| members[i].needs > capacity[grid[i]]).or_else(|| {
+            (0..n)
+                .filter(|&i| members[i].needs > capacity[grid[i]])
+                .max_by(|&a, &b| members[a].needs.total_cmp(&members[b].needs))
+        });
         let plan = if let Some(s) = starved {
             let (g, needs) = (grid[s], members[s].needs);
             let options: Vec<(usize, f32, (usize, usize))> = nodes
@@ -187,10 +277,9 @@ impl Ai {
             let enough =
                 options.iter().filter(|o| capacity[g] + capacity[o.0] >= needs).min_by(|a, b| a.1.total_cmp(&b.1));
             let strongest = options.iter().max_by(|a, b| capacity[a.0].total_cmp(&capacity[b.0]));
-            enough.or(strongest).map(|o| {
-                let what = self.defs.name_of(members[s].unit).to_owned();
-                (o.2, format!("{what} needing {needs:.0} energy (has {:.0})", capacity[g]))
-            })
+            enough
+                .or(strongest)
+                .map(|o| (o.2, format!("{} needing {needs:.0} energy (has {:.0})", members[s].what, capacity[g])))
         } else if self.eco.fusions.len() >= 2 && nodes.len() > 1 {
             // Late game: the cheapest link of a minimum spanning tree over
             // the grids (Kruskal; the tree's other links come later).
@@ -212,13 +301,17 @@ impl Ai {
         self.eco_lay_pylons(a.pos, a.range, b.pos, b.range, &why);
     }
 
+    fn eco_max_pylon_tasks(&self) -> usize {
+        if self.eco.pending_power.is_some() { MAX_PYLON_TASKS_WAITING } else { MAX_PYLON_TASKS }
+    }
+
     /// Queue the pylons of a chain from `a` (range `ra`) to `b` that are not
     /// there yet.
     fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
         let Some(pylon) = self.defs.get("energypylon") else { return };
         let mut queued = 0;
         for p in chain(a, ra, b, rb, self.eco.grid_defs.pylon_range) {
-            if self.eco.pylon_tasks.len() >= MAX_PYLON_TASKS {
+            if self.eco.pylon_tasks.len() >= self.eco_max_pylon_tasks() {
                 break;
             }
             let there = self.eco.pylons.iter().any(|u| distance(u.pos(), p) < PYLON_SAME)

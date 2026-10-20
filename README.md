@@ -19,8 +19,8 @@ Layout
 |------|------|
 | `crates/springai-sys` | Raw bindings to the engine's Skirmish AI C interface, pre-generated from the Recoil headers (no libclang or engine checkout needed to build). Regenerate with `tools/regen-bindings.sh`. |
 | `crates/springai` | Safe Rust interface: `Copy` handles for units/defs/features, engine queries and orders, decoded events, and `export_ai!`, which contains every panic at the FFI boundary, supports several AI instances per process and queues re-entrant events. |
-| `crates/terrain` | `zk-terrain`: engine-independent terrain model. For each movement tier (spider, bot, vehicle, hover, ship, amphibious) the map is split by [zkta](https://github.com/Anarchid/zkta-rust) into regions joined by chokepoints, with a region lookup per position and static connectivity. `strategy` analyses the region graph against the game state: which chokepoints guard which regions, which to hold or wall, and where bridges, air drops or teleports would hurt the enemy most. `threat` reasons about forces on the move: how soon a raid can reach each region (chokepoints held against it stop it) and where defenders can stand first to keep it from the most value. |
-| `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories, the energy grid and linking power-hungry buildings to it, terraforming: ditches against vehicles), `military` (enemy tracking, threat maps, targeting, unit handlers, enemy incursions and the squads sent to block them, the Djinn evacuating retreating striders, Charon air drops, nukes and tactical missiles, Widows scouting for them, intel: how much enemy metal is unaccounted for, and when that calls for an anti-nuke), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread and re-analysed every minute so terraforming shows up, and the periodic strategic analysis), `los`. |
+| `crates/terrain` | `zk-terrain`: engine-independent terrain model. For each movement tier (spider, bot, vehicle, hover, ship, amphibious) the map is split by [zkta](https://github.com/Anarchid/zkta-rust) into regions joined by chokepoints, with a region lookup per position and static connectivity. `strategy` analyses the region graph against the game state: which chokepoints guard which regions, which to hold or wall, and where bridges, air drops or teleports would hurt the enemy most. `occupancy` keeps track of who holds each region (strength, anti-air and value of either side) and of the ground ways a force has if it must fight through them. `threat` reasons about forces on the move: how soon a raid can reach each region (chokepoints held against it stop it) and where defenders can stand first to keep it from the most value. |
+| `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories, the energy grid and linking power-hungry buildings to it before they are built, terraforming: ditches against vehicles and spikes for advanced radar sited by sight lines, Berthas sited by shell paths, missile silos made firebases, colonies of far-off free metal), `military` (enemy tracking, threat maps, targeting, unit handlers, enemy incursions and the squads sent to block them, the Djinn evacuating retreating striders, Charon air drops where the walk is long or held against us and the sky clear, nukes and tactical missiles, Widows scouting for them and deep into the enemy's land, intel: how much enemy metal is unaccounted for, and when that calls for an anti-nuke), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread and re-analysed every minute so terraforming shows up, and the periodic strategic analysis), `los`. |
 | `tools/arena` | Headless match harness: `match.sh` plays one game, `series.sh` plays a map pool in parallel and summarises win rates. |
 | `tools/terrain-view` | Renders a tier's regions and chokepoints to PNG and, given a scenario dumped by the AI (`ZKGBAI_DUMP_TERRAIN=<dir>`), overlays and prints the strategic analysis. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
@@ -71,12 +71,18 @@ several depths and log how steep they come out and which movement tiers can cros
 against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, comma-separated:
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
-`scouts`, `radar` (watchtowers), `requisition`.
+`scouts`, `radar` (watchtowers), `requisition`, `colonize`.
 `ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
 The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?test=bite` against
 `ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
 spider factory, should be intercepted, find the anti-nuke with Widows, stun it and get a missile through;
 with `test=eos` it gets a missile silo by the Fusions instead, and its Eos should count each one they hit gone.
+With `test=drop` (hovers) or `test=dropbot` (bots) it gets four Charons and four assaults and riots every
+three minutes and drops them by the defender's buildings, walkable or not: a check of the air route,
+landing spots and unload handling (`drops:` lines, with a status line every 30 s in the air).
+`test=bertha` gives it five Fusions and a radar at once (a superweapon soon, sited by shell paths, its
+site linked to power first); `test=colony` a constructor and a Charon, `test=colonyair` an air
+constructor, to colonize the free metal far off.
 `ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
 
 In-game commands
@@ -90,7 +96,8 @@ Type these in chat in a game with the AI:
 - `kgbmap threat|porc|riot` — dump a threat map as ASCII art.
 - `kgbterrain spider|bot|vehicle|hover|ship|amphib` — mark a tier's regions, chokepoints and gates
   on the map; `kgbterrain strategy` marks the chokepoints the AI holds, `kgbterrain threat` the enemy
-  incursions, the regions they reach within 30 s and the squads blocking them.
+  incursions, the regions they reach within 30 s and the squads blocking them, `kgbterrain occupancy`
+  who holds each region of the strategy's tier (enemy and our strength, enemy anti-air and value).
 - `kgbfac veh|hover|tank|cloak|shield|amph|spider` — choose the AI's first factory (1v1 only).
 
 Lineage
