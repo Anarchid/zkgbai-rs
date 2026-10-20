@@ -48,6 +48,16 @@ const MARGIN: f32 = 5.0;
 /// Workers an issue gets at most.
 const MAX_CREW: usize = 6;
 
+/// Forecast completion times are stretched by this: workers path around
+/// things, get shot at and stall for metal (measured: jobs forecast at 14 s
+/// took 40 s when late).
+const PESSIMISM: f32 = 1.5;
+
+/// A defense opens only if the forecast gets this much of what it is worth
+/// (it stands in time, more or less); late turrets came out late or not at
+/// all.
+const IN_TIME: f32 = 0.8;
+
 /// A crew member's bonus in the assignment loop, at most.
 const BONUS_CAP: f32 = 3500.0;
 
@@ -293,7 +303,7 @@ fn best_crew(
 ) -> (usize, f32, f32) {
     let mut plans = Vec::with_capacity(MAX_CREW);
     for k in 1..=hands.len().min(MAX_CREW) {
-        let eta = finish_time(&hands[..k], work, cost, metal, income);
+        let eta = finish_time(&hands[..k], work, cost, metal, income) * PESSIMISM;
         plans.push((k, eta, worth.at(now + eta)));
     }
     let Some(top) = plans.iter().map(|p| p.2).fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v)))) else {
@@ -531,7 +541,7 @@ impl Ai {
                 let worth = Worth::Deadline { value: saved, by };
                 let (_, eta, value) = best_crew(&hands, def.build_time(), cost, metal, income, &worth, now);
                 let net = value - cost;
-                if net >= MIN_NET && best.as_ref().is_none_or(|b| net > b.1) {
+                if value >= IN_TIME * saved && net >= MIN_NET && best.as_ref().is_none_or(|b| net > b.1) {
                     best = Some((def, net, saved, eta, after));
                 }
             }
@@ -677,10 +687,12 @@ mod tests {
     #[test]
     fn smallest_crew_that_meets_the_deadline() {
         let hands = [(1, 0.0, 10.0), (2, 2.0, 10.0), (3, 4.0, 10.0), (4, 30.0, 10.0)];
-        let worth = Worth::Deadline { value: 1000.0, by: 8.0 };
-        // Alone: 10 s, late (value 1000 * (1 - 2/20) = 900); two: 2 + 80/20 = 6 s.
+        let worth = Worth::Deadline { value: 1000.0, by: 9.0 };
+        // Alone: 10 s, 15 with pessimism (value 1000 * (1 - 6/20) = 700);
+        // two: 2 + 80/20 = 6 s, 9 with pessimism: in time.
         let (k, eta, v) = best_crew(&hands, 100.0, 0.0, 0.0, 10.0, &worth, 0.0);
-        assert_eq!((k, eta, v), (2, 6.0, 1000.0));
+        assert_eq!(k, 2);
+        assert!((eta - 9.0).abs() < 1e-4 && (v - 1000.0).abs() < 1e-3, "{eta} {v}");
         // Past saving: the nearest one, no value.
         let worth = Worth::Deadline { value: 1000.0, by: -30.0 };
         let (k, _, v) = best_crew(&hands, 100.0, 0.0, 0.0, 10.0, &worth, 0.0);
