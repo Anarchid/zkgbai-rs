@@ -120,6 +120,13 @@ const ON_LINE: f32 = 400.0;
 const DAMAGE: f32 = 11501.0;
 const EDGE: f32 = 0.3;
 
+/// A target behind anti-nukes that Shockleys can stun for a nuke's flight.
+struct Combo {
+    target: Vec3,
+    value: f32,
+    antis: Vec<(i32, Vec3)>,
+}
+
 /// Flight lines are sampled this often, elmos.
 const SAMPLE: f32 = 250.0;
 
@@ -144,8 +151,11 @@ impl Ai {
                 continue;
             }
             if e.is_static {
-                all += e.value;
-                buildings += e.value;
+                // An anti-nuke's value counts what it guards (see below).
+                let value =
+                    if e.def_name == "staticantinuke" { e.ud.map_or(e.value, |u| u.cost(self.metal)) } else { e.value };
+                all += value;
+                buildings += value;
             } else if !e.is_raider && e.def_speed() < SLOW && frame - e.last_seen < 900 {
                 all += 0.5 * e.value;
             }
@@ -178,14 +188,18 @@ impl Ai {
     fn nukes_guard(&self, at: Vec3) -> Option<&'static str> {
         let from = self.nukes_origin();
         let known = self.nukes_antis().any(|a| segment_distance(a, from, at) <= ANTI_COVERAGE);
+        if known { Some("a known anti-nuke") } else { self.nukes_suspect(at) }
+    }
+
+    /// Whether an anti-nuke not seen may guard `at`: why, if so.
+    fn nukes_suspect(&self, at: Vec3) -> Option<&'static str> {
+        let from = self.nukes_origin();
         // An anti within its coverage of a stretch is within twice that of
         // lines passing near it.
         let near = |stretch: &[Vec3]| stretch.iter().any(|&p| segment_distance(p, from, at) <= 2.0 * ANTI_COVERAGE);
         let suspected = self.nukes.intercepted.iter().any(|i| i.until > self.frame && near(&i.stretch));
         let unverified = self.nukes.unverified.iter().any(|l| near(&self.nukes_stretch(l.from, l.target)));
-        if known {
-            Some("a known anti-nuke")
-        } else if suspected {
+        if suspected {
             Some("an interception")
         } else if unverified {
             Some("a strike not seen yet")
@@ -194,19 +208,56 @@ impl Ai {
         }
     }
 
-    fn nukes_covered(&self, at: Vec3) -> bool {
-        self.nukes_guard(at).is_some()
+    /// The best target worth a missile that only known anti-nukes guard,
+    /// each within reach of a Shockley on our pads: and those anti-nukes.
+    fn nukes_combo(&self) -> Option<Combo> {
+        let from = self.nukes_origin();
+        let antis: Vec<(i32, Vec3)> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
+            .map(|e| (e.unit_id, e.position))
+            .collect();
+        (self.nukes_aim_points())
+            .filter(|&(p, v)| v >= FIRE_VALUE && self.nukes_suspect(p).is_none())
+            .filter_map(|(p, v)| {
+                let blocking: Vec<(i32, Vec3)> =
+                    antis.iter().copied().filter(|a| segment_distance(a.1, from, p) <= ANTI_COVERAGE).collect();
+                let stun = !blocking.is_empty() && blocking.iter().all(|a| self.missiles_can_stun(a.1));
+                stun.then_some(Combo { target: p, value: v, antis: blocking })
+            })
+            .max_by(|a, b| a.value.total_cmp(&b.value))
     }
 
-    /// What an anti-nuke at `anti` denies our nukes: the best blast it
-    /// guards (its coverage meets the line to it).
-    pub fn nukes_shielded_value(&self, anti: Vec3) -> f32 {
+    /// Set each known anti-nuke's value to its cost and, while we have a
+    /// silo, what it alone keeps from our nukes (the buildings to which
+    /// the flight passes it and no other anti): so that every weapon
+    /// counts it so.
+    fn nukes_value_antis(&mut self) {
         let from = self.nukes_origin();
-        (self.war.targets.values())
-            .filter(|e| e.identified && e.is_static && !e.is_dead)
-            .filter(|e| segment_distance(anti, from, e.position) <= ANTI_COVERAGE)
-            .map(|e| self.nukes_blast_value(e.position).0)
-            .fold(0.0, f32::max)
+        let antis: Vec<(i32, Vec3, f32)> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
+            .map(|e| (e.unit_id, e.position, e.ud.map_or(e.value, |u| u.cost(self.metal))))
+            .collect();
+        let mut alone = vec![0.0; antis.len()];
+        if self.misc_has_nuke() {
+            let guarded = (self.war.targets.values())
+                .filter(|e| e.identified && e.is_static && !e.is_dead && e.def_name != "staticantinuke");
+            for e in guarded {
+                let mut by =
+                    antis.iter().enumerate().filter(|(_, a)| segment_distance(a.1, from, e.position) <= ANTI_COVERAGE);
+                if let (Some((i, _)), None) = (by.next(), by.next()) {
+                    alone[i] += e.value;
+                }
+            }
+        }
+        for (&(id, _, cost), extra) in antis.iter().zip(alone) {
+            if let Some(e) = self.war.targets.get_mut(&id) {
+                e.value = cost + extra;
+            }
+        }
+    }
+
+    fn nukes_covered(&self, at: Vec3) -> bool {
+        self.nukes_guard(at).is_some()
     }
 
     /// The best aim point no anti-nuke guards, and the value there.
@@ -253,8 +304,21 @@ impl Ai {
     /// Fire `silo` at the best uncovered target worth a missile; whether it
     /// fired.
     pub fn nukes_fire(&mut self, silo: Unit) -> bool {
-        let target = self.nukes_target().filter(|&(_, v)| v >= FIRE_VALUE);
-        let Some((target, value)) = target.filter(|_| self.nukes.launch.is_none()) else {
+        if self.nukes.launch.is_some() {
+            self.nukes_report_hold(silo);
+            return false;
+        }
+        let mut target = self.nukes_target().filter(|&(_, v)| v >= FIRE_VALUE);
+        // Else stun the anti-nukes in the way with Shockleys, and fire now.
+        if target.is_none()
+            && let Some(c) = self.nukes_combo()
+            && self.missiles_stun(&c.antis)
+        {
+            let (p, n) = (c.target, c.antis.len());
+            self.log(&format!("nukes: Shockleys at {n} anti-nukes in the way to ({:.0}, {:.0})", p.x, p.z));
+            target = Some((p, c.value));
+        }
+        let Some((target, value)) = target else {
             self.nukes_report_hold(silo);
             return false;
         };
@@ -285,6 +349,9 @@ impl Ai {
             antis.iter().any(|&a| i.stretch.iter().any(|&p| distance(a, p) <= ANTI_COVERAGE + SAMPLE))
         };
         self.nukes.intercepted.retain(|i| i.until > frame && !explained(i));
+        if (frame + self.offset) % 300 == 0 {
+            self.nukes_value_antis();
+        }
         if let Some(l) = self.nukes.launch.take_if(|l| frame >= l.due) {
             if l.silo.health() > 0.0 && l.silo.stockpile() < l.stock {
                 self.nukes.unverified.push(l);

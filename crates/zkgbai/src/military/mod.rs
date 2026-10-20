@@ -7,8 +7,10 @@ pub mod enemy;
 pub mod handlers;
 pub mod incursions;
 pub mod intel;
+pub mod missiles;
 pub mod nukes;
 pub mod radar;
+pub mod sweeps;
 pub mod tasks;
 pub mod teleport;
 pub mod unit_classes;
@@ -401,6 +403,7 @@ impl Ai {
         self.guard("drops.update", |ai| ai.drops_update(frame));
         self.guard("intel.update", |ai| ai.intel_update(frame));
         self.guard("nukes.update", |ai| ai.nukes_update(frame));
+        self.guard("missiles.update", |ai| ai.missiles_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -477,6 +480,15 @@ impl Ai {
         if name == "staticnuke" {
             self.war.has_nuke = true;
             self.misc_add_nuke(unit);
+        }
+
+        if name == missiles::SILO {
+            self.missiles_add_silo(unit);
+            return;
+        }
+        if missiles::MISSILES.contains(&name) {
+            self.missiles_add_missile(unit);
+            return;
         }
 
         if name == "zenith" {
@@ -708,7 +720,8 @@ impl Ai {
         }
         let is_nuke = name == "staticnuke";
         let is_sapper = self.unit_classes.sappers.contains(name);
-        let is_heavy_arty = name == "staticheavyarty";
+        // Missiles on their pads paint no threat either (they fly off).
+        let is_heavy_arty = name == "staticheavyarty" || missiles::MISSILES.contains(&name);
         let id = unit.id();
 
         self.war.new_units.remove(&id);
@@ -1816,9 +1829,10 @@ impl Ai {
                     tmpcost *= 2.0;
                 }
             }
-            // An anti-nuke is worth what it keeps from our nukes.
+            // An anti-nuke is worth what it alone keeps from our nukes too
+            // (its value beyond its cost; see `nukes`).
             if name == "staticantinuke" {
-                tmpcost += self.nukes_shielded_value(e.position);
+                tmpcost += (e.value - ud.cost(metal)).max(0.0);
             }
             if tmpcost > cost {
                 cost = tmpcost;

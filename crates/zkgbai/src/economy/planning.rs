@@ -6,6 +6,7 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
 use crate::Ai;
 use crate::defs::cmd;
+use crate::military::missiles;
 use crate::terrain::pos as terrain_pos;
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
 use zk_terrain::Tier;
@@ -857,7 +858,8 @@ impl Ai {
         let Some(urchin) = self.defs.get("turrettorp") else { return };
         let range = urchin.sonar_radius() as f32;
         let near = |p: Vec3| distance(p, sighting) < 2.0 * range;
-        let covered = self.eco.porcs.iter().any(|u| u.def().is_some_and(|d| d.id() == urchin.id()) && near(u.pos()))
+        let ours = self.cb.team_units().into_iter().filter(|u| u.def().is_some_and(|d| d.id() == urchin.id()));
+        let covered = ours.into_iter().any(|u| near(u.pos()))
             || self.eco.porc_tasks.iter().any(|&t| {
                 let task = self.eco.tasks.get(t).and_then(|t| t.as_construction());
                 task.is_some_and(|c| c.build_type.id() == urchin.id()) && near(self.eco.task_pos(t))
@@ -886,6 +888,39 @@ impl Ai {
         }
     }
 
+    /// A missile silo where it reaches enough worth Eos (see `missiles`),
+    /// once we can afford one; its job summons the constructors near it.
+    fn eco_plan_missile_silo(&mut self) {
+        let Some(silo) = self.defs.get(missiles::SILO) else { return };
+        if self.dev_off("missiles")
+            || self.missiles_silo().is_some()
+            || self.eco.adjusted_income < missiles::SILO_INCOME
+            || self.eco.estalled
+        {
+            return;
+        }
+        let planned = self.eco.construction_tasks.iter().any(|&id| {
+            self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == silo.id())
+        });
+        if planned {
+            return;
+        }
+        let Some((site, value, n)) = self.missiles_site() else {
+            self.missiles_report_no_site();
+            return;
+        };
+        let pos = self.eco_build_site(silo, site, 0);
+        if pos.x < 0.0 {
+            return;
+        }
+        if self.eco_add_simple(silo, pos, List::Construction, None).is_some() {
+            self.log(&format!(
+                "missiles: silo at ({:.0}, {:.0}), {value:.0} metal of targets ({n}) in reach; summoning constructors",
+                pos.x, pos.z
+            ));
+        }
+    }
+
     /// Re-assess what factory the modules would have, now and then.
     pub(super) fn eco_update_requisition(&mut self, frame: i32) {
         if (frame + self.offset) % REQUISITION_PERIOD != 0
@@ -895,6 +930,7 @@ impl Ai {
             return;
         }
         self.eco_plan_sub_defense();
+        self.eco_plan_missile_silo();
         let r = self.eco_find_requisition();
         if let Some((f, why)) = &r
             && self.eco.requisition_logged.as_ref() != Some(f)

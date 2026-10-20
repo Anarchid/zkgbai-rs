@@ -9,6 +9,7 @@ use crate::defs::Defs;
 use crate::graph::MetalSpot;
 use crate::kgbutil::kgb_move_to;
 use crate::military::arsenal::SUBMERGED;
+use crate::military::sweeps::DETONATE_RANGE;
 use crate::military::{Enemy, Fighter, MilitaryManager, ScoutTask, ScoutTaskId, ScoutTasks, SquadId, SquadKind};
 use crate::nav;
 use crate::util::{NULLPOS, distance};
@@ -214,6 +215,9 @@ impl Ai {
             self.raider_handler.sparrow = None;
             self.raider_clear_task(id);
             self.raider_drop_fighter(id);
+        }
+        if self.sweeps.detonating == Some(id) {
+            self.sweeps.detonating = None;
         }
     }
 
@@ -877,10 +881,28 @@ impl Ai {
         let Some((unit, pos)) = self.fighters.get(&sparrow).map(|f| (f.unit, f.get_pos())) else {
             return;
         };
-        // With nukes to fire, find the anti-nukes that stopped them.
-        if self.misc_has_nuke()
-            && let Some(p) = self.nukes_scout_target(pos)
-        {
+        if self.sweeps.detonating == Some(sparrow) {
+            return;
+        }
+        // A Sparrow (not an Owl) sweeps where unseen snipers shoot from, and
+        // whether anti-nukes we struck are gone: it flies at them and, near
+        // enough, detonates.
+        let sweeps = self.defs.name_of(unit) == "planelightscout";
+        let sniper = if sweeps { self.sweeps_sniper_target(pos) } else { None };
+        let sweep = sniper.map(|p| (p, true)).or_else(|| self.missiles_scout_target(pos).map(|p| (p, false)));
+        if let Some((p, fight)) = sweep.filter(|_| sweeps) {
+            if distance(pos, p) <= DETONATE_RANGE {
+                self.sweeps_detonate(unit, p, fight);
+            } else {
+                self.raider_clear_task(sparrow);
+                self.raider_raid(sparrow, p);
+            }
+            return;
+        }
+        // With nukes to fire, find the anti-nukes that stopped them; see
+        // whether anti-nukes we struck are gone.
+        let look = if self.misc_has_nuke() { self.nukes_scout_target(pos) } else { None };
+        if let Some(p) = look.or_else(|| self.missiles_scout_target(pos)) {
             self.raider_clear_task(sparrow);
             self.raider_raid(sparrow, p);
             return;

@@ -24,6 +24,11 @@ const STRANDED_PER_CON: usize = 3;
 const STRANDED_CONS: usize = 3;
 const STRANDED_BONUS: f32 = 3000.0;
 
+/// A missile silo is rushed: the constructors near it are summoned, about
+/// this many before more of them cost extra.
+const SQUAD: f32 = 4.0;
+const SQUAD_PULL: f32 = 3000.0;
+
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
     Build(UnitDef, Vec3, i32),
@@ -402,6 +407,10 @@ impl Ai {
                     && ((ctask.fac_def && eco.effective_income < 15.0) || (cost > 300.0 && def_id != ids.airpad_id))
                 {
                     return dist + (10000.0 * cost_mod);
+                }
+
+                if def_id == ids.missile_silo_id {
+                    return (dist / 4.0) - SQUAD_PULL + (400.0 * (cost_mod - SQUAD)).max(0.0);
                 }
 
                 if ids.fac_ids.contains(&def_id) {

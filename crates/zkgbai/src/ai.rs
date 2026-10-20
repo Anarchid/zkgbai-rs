@@ -16,7 +16,9 @@ use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::incursions::Incursions;
 use crate::military::intel::Intel;
+use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
+use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::terrain::{Strategy, TerrainModel};
@@ -70,6 +72,8 @@ pub struct Ai {
     pub intel: Intel,
     /// Our nuclear strikes, and where they were intercepted.
     pub nukes: Nukes,
+    pub missiles: Missiles,
+    pub sweeps: Sweeps,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -155,6 +159,8 @@ impl SkirmishAi for Ai {
             drops: Drops::default(),
             intel: Intel::default(),
             nukes: Nukes::default(),
+            missiles: Missiles::default(),
+            sweeps: Sweeps::default(),
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -518,6 +524,7 @@ impl Ai {
             Event::UnitDamaged { unit, attacker, damage, dir, weapon, paralyzer } => {
                 self.guard("eco.unitDamaged", |ai| ai.eco_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
+                self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
             }
             Event::UnitDestroyed { unit, attacker } => {
                 self.guard("graph.unitDestroyed", |ai| ai.graph_unit_destroyed(unit, attacker));

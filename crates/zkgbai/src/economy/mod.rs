@@ -108,7 +108,7 @@ pub struct EconomyManager {
     last_rc_value_frame: Cell<i32>,
     energy_reclaim: bool,
     hard_estalled: bool,
-    estalled: bool,
+    pub estalled: bool,
     big_map: bool,
     water_damage: bool,
     added_facs: bool,

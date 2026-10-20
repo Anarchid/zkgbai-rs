@@ -15,6 +15,7 @@ pub struct BuildIds {
     pub radar_id: i32,
     pub fac_ids: BTreeSet<i32>,
     pub expensive_ids: BTreeSet<i32>,
+    pub missile_silo_id: i32,
 }
 
 /// Placeholder before `eco_init`: every id is -1 (matches nothing).
@@ -29,6 +30,7 @@ impl Default for BuildIds {
             airpad_id: -1,
             pylon_id: -1,
             radar_id: -1,
+            missile_silo_id: -1,
             fac_ids: BTreeSet::new(),
             expensive_ids: BTreeSet::new(),
         }
@@ -62,6 +64,7 @@ impl BuildIds {
             airpad_id: defs.id("staticrearm"),
             pylon_id: defs.id("energypylon"),
             radar_id: defs.id("staticradar"),
+            missile_silo_id: defs.id(crate::military::missiles::SILO),
             fac_ids,
             expensive_ids,
         }

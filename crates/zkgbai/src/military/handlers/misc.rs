@@ -116,6 +116,7 @@ impl Ai {
             for b in berthas {
                 let target = self.war_get_bertha_target(b.pos());
                 if target != NULLPOS {
+                    self.missiles_note_strike(target);
                     b.attack_area(target, 0.0, 0);
                 } else {
                     b.stop(0);
