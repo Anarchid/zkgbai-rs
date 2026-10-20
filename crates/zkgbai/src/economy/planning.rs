@@ -269,7 +269,7 @@ impl Ai {
         // A nuke, when one strike would pay for it.
         if !self.eco.has_super_wep && self.eco.super_wep_tasks.is_empty() && self.eco.s_wep != 1 && self.nukes_wanted()
         {
-            if let Some((p, v)) = self.nukes_target() {
+            if let Some((p, v)) = self.nukes_build_target() {
                 self.log(&format!(
                     "nukes: {v:.0} metal in one blast at ({:.0}, {:.0}) unguarded; building a silo",
                     p.x, p.z

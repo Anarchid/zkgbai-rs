@@ -1,6 +1,9 @@
-//! Nuclear strikes by counting value: when one missile's blast would take
-//! out enough of the enemy's slow value (buildings, and units too slow to
-//! get away) that no anti-nuke known or suspected covers, a silo pays.
+//! Nuclear strikes by counting value. A silo pays when one missile's blast
+//! would take out enough of the enemy's slow value (buildings, and units
+//! too slow to get away in the minutes it takes to build) that no anti-nuke
+//! known or suspected covers. A missile in store is fired wherever a blast
+//! is worth its cost: at buildings, and as much at armies seen lately (the
+//! front, say), less what of ours the blast takes too.
 //!
 //! An anti-nuke stops any missile whose flight crosses its coverage, not
 //! only those aimed within it (Zero-K's antinuke handler: the remaining
@@ -37,13 +40,31 @@ const BLAST: f32 = 960.0;
 const ANTI_COVERAGE: f32 = 2500.0;
 
 /// Value in one blast that makes a silo worth building (it and a missile
-/// cost about 11k), and that a missile is worth firing at (twice its cost).
+/// cost about 11k), and that a missile in store is worth firing at (its
+/// cost: it is a loss sitting there).
 pub const STRIKE_VALUE: f32 = 10000.0;
-const FIRE_VALUE: f32 = 6480.0;
+const FIRE_VALUE: f32 = 3240.0;
 
-/// Units slower than this (elmos/s) count, at half their value (they may
-/// still move off).
+/// Weighing a silo, units slower than this (elmos/s) count at half their
+/// value (they may still move off in the minutes it takes).
 const SLOW: f32 = 75.0;
+
+/// Weighing a missile, units seen this lately count, at full value but for
+/// fast ones (that may be gone in the flight) at half.
+const SEEN_LATELY: i32 = 30 * 15;
+const FAST: f32 = 100.0;
+
+/// Our own (and allies') value in a blast counts against it this much.
+const FRIENDLY_WEIGHT: f32 = 1.5;
+
+/// What a blast is weighed for: building a silo, which takes minutes
+/// (buildings, and slow units at half), or firing a missile in store (all
+/// that is there now, less what is ours).
+#[derive(Clone, Copy, PartialEq)]
+enum Purpose {
+    Build,
+    Fire,
+}
 
 /// From this income on (with the economy not losing) a silo is affordable.
 const NUKE_INCOME: f32 = 50.0;
@@ -142,8 +163,9 @@ fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
 const SCOUTED: f32 = 400.0;
 
 impl Ai {
-    /// What a blast at `at` takes out: (all of it, buildings only).
-    fn nukes_blast_value(&self, at: Vec3) -> (f32, f32) {
+    /// What a blast at `at` takes out, weighed for `purpose`: (all of it,
+    /// buildings only).
+    fn nukes_blast_value(&self, at: Vec3, purpose: Purpose) -> (f32, f32) {
         let frame = self.frame;
         let (mut all, mut buildings) = (0.0, 0.0);
         for e in self.war.targets.values() {
@@ -156,7 +178,9 @@ impl Ai {
                     if e.def_name == "staticantinuke" { e.ud.map_or(e.value, |u| u.cost(self.metal)) } else { e.value };
                 all += value;
                 buildings += value;
-            } else if !e.is_raider && e.def_speed() < SLOW && frame - e.last_seen < 900 {
+            } else if purpose == Purpose::Fire && frame - e.last_seen < SEEN_LATELY {
+                all += if e.is_raider || e.def_speed() > FAST { 0.5 * e.value } else { e.value };
+            } else if purpose == Purpose::Build && !e.is_raider && e.def_speed() < SLOW && frame - e.last_seen < 900 {
                 all += 0.5 * e.value;
             }
         }
@@ -216,7 +240,7 @@ impl Ai {
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
             .map(|e| (e.unit_id, e.position))
             .collect();
-        (self.nukes_aim_points())
+        (self.nukes_aim_points(Purpose::Fire).into_iter())
             .filter(|&(p, v)| v >= FIRE_VALUE && self.nukes_suspect(p).is_none())
             .filter_map(|(p, v)| {
                 let blocking: Vec<(i32, Vec3)> =
@@ -260,16 +284,43 @@ impl Ai {
         self.nukes_guard(at).is_some()
     }
 
-    /// The best aim point no anti-nuke guards, and the value there.
-    pub fn nukes_target(&self) -> Option<(Vec3, f32)> {
-        self.nukes_aim_points().filter(|&(p, _)| !self.nukes_covered(p)).max_by(|a, b| a.1.total_cmp(&b.1))
+    /// The best aim point no anti-nuke guards, and the value there, for a
+    /// silo to build.
+    pub fn nukes_build_target(&self) -> Option<(Vec3, f32)> {
+        self.nukes_target(Purpose::Build)
     }
 
-    /// Enemy buildings to aim at, and the value in the blast at each.
-    fn nukes_aim_points(&self) -> impl Iterator<Item = (Vec3, f32)> + '_ {
-        (self.war.targets.values())
-            .filter(|e| e.identified && e.is_static && !e.is_dead && !self.graph.is_ally_territory(e.position))
-            .map(|e| (e.position, self.nukes_blast_value(e.position).0))
+    fn nukes_target(&self, purpose: Purpose) -> Option<(Vec3, f32)> {
+        let mut points = self.nukes_aim_points(purpose);
+        points.sort_by(|a, b| b.1.total_cmp(&a.1));
+        points.into_iter().find(|&(p, _)| !self.nukes_covered(p))
+    }
+
+    /// Where to aim, and the value there, for `purpose`: at enemy
+    /// buildings, and to fire also at units seen lately (less what of ours
+    /// the blast takes too, for those worth a missile at all).
+    fn nukes_aim_points(&self, purpose: Purpose) -> Vec<(Vec3, f32)> {
+        let frame = self.frame;
+        let points = (self.war.targets.values())
+            .filter(|e| e.identified && !e.is_dead && !e.can_fly())
+            .filter(|e| match purpose {
+                Purpose::Build => e.is_static && !self.graph.is_ally_territory(e.position),
+                Purpose::Fire => e.is_static || frame - e.last_seen < SEEN_LATELY,
+            })
+            .map(|e| (e.position, self.nukes_blast_value(e.position, purpose).0));
+        match purpose {
+            Purpose::Build => points.collect(),
+            Purpose::Fire => points
+                .filter(|&(_, v)| v >= FIRE_VALUE)
+                .map(|(p, v)| (p, v - FRIENDLY_WEIGHT * self.nukes_friendly_value(p)))
+                .collect(),
+        }
+    }
+
+    /// Our and our allies' value a blast at `at` takes out.
+    fn nukes_friendly_value(&self, at: Vec3) -> f32 {
+        let metal = self.metal;
+        (self.cb.friendly_units_in(at, BLAST).into_iter()).filter_map(|u| u.def()).map(|d| d.cost(metal)).sum()
     }
 
     /// Say now and then why missiles in store stay there.
@@ -278,8 +329,9 @@ impl Ai {
             return;
         }
         self.nukes.last_hold_report = self.frame;
+        let points = self.nukes_aim_points(Purpose::Fire);
         let best = |guarded: bool| {
-            (self.nukes_aim_points())
+            (points.iter().copied())
                 .filter(|&(p, _)| self.nukes_covered(p) == guarded)
                 .max_by(|a, b| a.1.total_cmp(&b.1))
         };
@@ -298,7 +350,7 @@ impl Ai {
         !self.dev_off("nukes")
             && self.eco.adjusted_income >= NUKE_INCOME
             && self.eco.static_income >= 0.8 * self.intel.income
-            && self.nukes_target().is_some_and(|(_, v)| v >= STRIKE_VALUE)
+            && self.nukes_target(Purpose::Build).is_some_and(|(_, v)| v >= STRIKE_VALUE)
     }
 
     /// Fire `silo` at the best uncovered target worth a missile; whether it
@@ -308,7 +360,7 @@ impl Ai {
             self.nukes_report_hold(silo);
             return false;
         }
-        let mut target = self.nukes_target().filter(|&(_, v)| v >= FIRE_VALUE);
+        let mut target = self.nukes_target(Purpose::Fire).filter(|&(_, v)| v >= FIRE_VALUE);
         // Else stun the anti-nukes in the way with Shockleys, and fire now.
         if target.is_none()
             && let Some(c) = self.nukes_combo()
