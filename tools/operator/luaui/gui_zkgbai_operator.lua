@@ -1581,7 +1581,14 @@ function makeChiliPanel()
 				lines[#lines + 1] = "\255\140\140\140" .. timeText(feed[i].f or 0) .. "  \255\235\235\230" .. feed[i].text
 			end
 			p.feed:SetText(table.concat(lines, "\n"))
-			p.scroll:SetScrollPos(0, math.huge)
+			-- To the bottom; Chili clamps only once laid out (an unclamped
+			-- huge value breaks its drawing), so not before.
+			local sc = p.scroll
+			if sc.contentArea and sc.clientArea then
+				sc:SetScrollPos(nil, sc.contentArea[4], false, true)
+			else
+				shownFeed = nil
+			end
 		elseif not show.feed and shownFeed then
 			shownFeed = nil
 			p.feed:SetText("")
