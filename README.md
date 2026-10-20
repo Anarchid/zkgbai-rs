@@ -23,7 +23,7 @@ Layout
 | `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories, the energy grid and linking power-hungry buildings to it before they are built, terraforming: ditches against vehicles and spikes for advanced radar sited by sight lines, Berthas sited by shell paths, missile silos made firebases, colonies of far-off free metal), `military` (enemy tracking, threat maps, anti-air we do not see placed from the bearings of its hits on our aircraft, targeting, unit handlers, enemy incursions and the squads sent to block them, the Djinn evacuating retreating striders, Charon air drops where the walk is long or held against us and the sky clear, nukes and tactical missiles, Widows scouting for them and deep into the enemy's land, intel: how much enemy metal is unaccounted for, and when that calls for an anti-nuke), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread and re-analysed every minute so terraforming shows up, and the periodic strategic analysis), `los`, and `operator` (the operator API and run journal, below). |
 | `tools/arena` | Headless match harness: `match.sh` plays one game, `series.sh` plays a map pool in parallel and summarises win rates. |
 | `tools/terrain-view` | Renders a tier's regions (darker on slopes units crawl up), gates (red, orange where going round them is easy) and borders (magenta where crossing is free, blue with a yellow tick into the side it climbs into) to PNG and, given a scenario dumped by the AI (`ZKGBAI_DUMP_TERRAIN=<dir>`), overlays and prints the strategic analysis. |
-| `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. |
+| `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. `luaui/gui_zkgbai_operator.lua`: the same in the game, as a LuaUI widget. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
 
 Building
@@ -130,6 +130,19 @@ options, seed), the `map`, then `log` lines (each AI log line, `mod` its module)
 `end` record with the CPU profile. `tools/operator/zkop.py journal <file>` summarizes one;
 `zkop.py ls`, `call`, `tools` and `events` talk to the running instances, which announce
 themselves in `<tmp>/zkgbai-operator/`.
+
+In the game itself, the LuaUI widget `tools/operator/luaui/gui_zkgbai_operator.lua` (copy it to
+`<spring data dir>/LuaUI/Widgets/`; it needs local widgets on, Zero-K's default) finds the instances
+on this machine over LuaSocket and draws what the one in focus thinks into the world: its squads and
+where they go, places it defends, where its other units mean to go (a worker's task, a raider's
+target), its memory of the enemy (where it last saw each unit and how long ago, and the reach of
+remembered defenses), its view of the metal spots, a threat or value map on the ground, the units the
+operator holds, and its log in a panel. Select the AI's units (as a spectator, or an AI ally's units)
+and right-click to steer them: move, attack-move with ctrl, attack or guard a unit, queue with shift;
+alt sends their whole squad, ctrl+alt makes a place to defend. `/luaui zkop` takes `focus <team>`,
+`layer <name>`, `release`, `build <unitdef>` and `defend` (at the mouse), `fac <unitdef> [n]`,
+`say`, `note`, `feature <name> on|off`. `tools/arena/match.sh` installs extra widgets for a match
+from `ARENA_WIDGETS`.
 
 In-game commands
 ----------------

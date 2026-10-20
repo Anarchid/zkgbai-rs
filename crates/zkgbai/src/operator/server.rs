@@ -68,6 +68,9 @@ pub struct Shared {
     pub snapshot: Mutex<Option<String>>,
     pub snapshot_wanted: AtomicU64,
     pub frame: AtomicI32,
+    /// Our team and ally team (so clients can tell instances apart).
+    pub team: i32,
+    pub ally_team: i32,
     pub journal: Option<PathBuf>,
     pub shutdown: AtomicBool,
 }
@@ -362,7 +365,8 @@ fn route(stream: &TcpStream, req: &Request, shared: &Shared, keep: bool) -> bool
         ("GET", "/health") => json_response(
             stream,
             200,
-            &json!({"ok": true, "frame": shared.frame.load(Ordering::Relaxed), "name": shared.name, "version": shared.version}),
+            &json!({"ok": true, "frame": shared.frame.load(Ordering::Relaxed), "name": shared.name,
+                    "version": shared.version, "team": shared.team, "ally_team": shared.ally_team}),
             &cors,
             keep,
         ),

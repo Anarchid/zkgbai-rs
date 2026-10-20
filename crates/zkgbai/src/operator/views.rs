@@ -861,6 +861,27 @@ pub fn defs(ai: &mut Ai, a: &Args) -> Out {
     Ok(json!({"total": total, "defs": rows}))
 }
 
+/// Where a unit of ours means to go, and why: a worker's task, or the
+/// target of a fighter outside squads (squads have their own target).
+fn intent(ai: &Ai, id: i32) -> Value {
+    if let Some(t) = ai.eco.workers.get(&id).and_then(|w| w.task).and_then(|t| ai.eco.tasks.get(t)) {
+        let p = t.get_pos();
+        let what = match &t.kind {
+            TaskKind::Construction(c) => ai.defs.name(c.build_type),
+            TaskKind::Reclaim(_) => "reclaim",
+            TaskKind::Repair(_) => "repair",
+            TaskKind::CombatReclaim(_) => "combat_reclaim",
+        };
+        return json!([p.x.round() as i32, p.z.round() as i32, what]);
+    }
+    match ai.fighters.get(&id) {
+        Some(f) if f.squad.is_none() && f.target != NULLPOS => {
+            json!([f.target.x.round() as i32, f.target.z.round() as i32, Value::Null])
+        }
+        _ => Value::Null,
+    }
+}
+
 /// Everything's position, compactly (the dashboard's map).
 pub fn snapshot_value(ai: &Ai) -> Value {
     let units: Vec<Value> = ai
@@ -878,7 +899,8 @@ pub fn snapshot_value(ai: &Ai) -> Value {
                 p.z.round() as i32,
                 hp,
                 role(ai, u),
-                ai.fighters.get(&u.id()).and_then(|f| f.squad)
+                ai.fighters.get(&u.id()).and_then(|f| f.squad),
+                intent(ai, u.id())
             ])
         })
         .collect();
@@ -913,7 +935,8 @@ pub fn snapshot_value(ai: &Ai) -> Value {
                 e.position.z.round() as i32,
                 frame - e.last_seen,
                 flags,
-                e.value.round() as i32
+                e.value.round() as i32,
+                e.threat_radius.round() as i32
             ])
         })
         .collect();
@@ -975,8 +998,8 @@ pub fn snapshot_value(ai: &Ai) -> Value {
         "metal": res(ai.metal),
         "energy": res(ai.energy),
         "legend": {
-            "units": ["id", "def", "x", "z", "health%", "role", "squad"],
-            "enemies": ["id", "def", "x", "z", "frames since seen", "flags", "value"],
+            "units": ["id", "def", "x", "z", "health%", "role", "squad", "intent [x, z, what] or null"],
+            "enemies": ["id", "def", "x", "z", "frames since seen", "flags", "value", "threat radius"],
             "enemy_flags": ["visible", "radar", "static", "porc", "mex", "com", "worker", "aa", "air", "identified"],
             "squads": ["id", "kind", "status", "x", "z", "target x", "target z", "members", "value"],
             "spots": ["free", "ours", "enemy", "enemy territory", "our territory"],

@@ -274,6 +274,8 @@ impl Ai {
                 snapshot: Mutex::new(None),
                 snapshot_wanted: Default::default(),
                 frame: Default::default(),
+                team: self.team_id,
+                ally_team: self.ally_team_id,
                 journal: self.op.journal_path.clone(),
                 shutdown: Default::default(),
             });

@@ -84,6 +84,8 @@ fi
 ln -s "$CACHE" "$WD/cache"
 mkdir -p "$WD/LuaUI/Widgets"
 sed "s/@MAX_FRAMES@/$MAX_FRAMES/" "$(dirname "$0")/arena_widget.lua" > "$WD/LuaUI/Widgets/arena_widget.lua"
+# ARENA_WIDGETS: more LuaUI widget files to install for the match.
+for w in ${ARENA_WIDGETS:-}; do cp "$w" "$WD/LuaUI/Widgets/"; done
 
 # parse "Short[:Ver][@lib][?opts]" -> sets SHORT VER LIB OPTS
 parse_ai() {

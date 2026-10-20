@@ -171,6 +171,7 @@ select, input[type=text], input[type=search], textarea {
       <label><input type="checkbox" id="showEnemies" checked> enemies</label>
       <label><input type="checkbox" id="showSquads" checked> squads</label>
       <label><input type="checkbox" id="showSpots" checked> metal</label>
+      <label><input type="checkbox" id="showIntents" checked> intents</label>
       <label>overlay
         <select id="overlay" autocomplete="off">
           <option value="">none</option>
@@ -501,8 +502,10 @@ function drawMap() {
     ctx.drawImage(terrain, x0, y0, h.width * h.cell * view.k, h.height * h.cell * view.k);
   }
   if (overlayCanvas && S.overlay) {
+    // The AI's map cells are centered on multiples of 64 elmos.
+    const [ox, oy] = toScreen(-32, -32);
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(overlayCanvas, x0, y0, S.overlay.width * S.overlay.cell * view.k, S.overlay.height * S.overlay.cell * view.k);
+    ctx.drawImage(overlayCanvas, ox, oy, S.overlay.width * S.overlay.cell * view.k, S.overlay.height * S.overlay.cell * view.k);
   }
   hits = [];
   const snap = snapNow();
@@ -569,6 +572,22 @@ function drawMap() {
       if (S.selEnemy === e[0]) { ctx.beginPath(); ctx.arc(sx, sy, rad * 2.2, 0, Math.PI * 2); ctx.strokeStyle = colors.ink; ctx.lineWidth = 2; ctx.stroke(); }
       hits.push([sx, sy, 'enemy', e]);
     }
+  }
+
+  // Where units outside squads mean to go: workers to their task, others to their target.
+  if ($('#showIntents').checked) {
+    ctx.lineWidth = 1;
+    for (const u of snap.units || []) {
+      const it = u[7];
+      if (!it) continue;
+      const [sx, sy] = toScreen(u[2], u[3]);
+      const [tx, ty] = toScreen(it[0], it[1]);
+      ctx.strokeStyle = colors.ours;
+      ctx.globalAlpha = it[2] ? 0.35 : 0.6;
+      ctx.setLineDash(it[2] ? [2, 3] : []);
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
   }
 
   if ($('#showOurs').checked) {
@@ -681,7 +700,8 @@ function select(h, add) {
 function tipFor(h) {
   const d = h[3];
   switch (h[2]) {
-    case 'unit': return [[`#${d[0]}`, d[1]], [d[5], 'role'], [d[4] + '%', 'health'], ...(d[6] ? [['S' + d[6], 'squad']] : [])];
+    case 'unit': return [[`#${d[0]}`, d[1]], [d[5], 'role'], [d[4] + '%', 'health'], ...(d[6] ? [['S' + d[6], 'squad']] : []),
+      ...(d[7] ? [[d[7][2] || `${d[7][0]}, ${d[7][1]}`, d[7][2] ? 'task' : 'going to']] : [])];
     case 'enemy': return [[`#${d[0]}`, d[1] || 'unidentified'], [fmtNum(d[6]), 'value'], [d[4] <= 30 ? 'now' : fmtTime(d[4]) + ' ago', 'seen']];
     case 'squad': return [[`S${d[0]}`, `${d[1]} squad`], [d[2], 'status'], [d[7], 'members'], [fmtNum(d[8]), 'value']];
     case 'spot': return [['#' + d.i, 'metal spot'], [d.owner, 'owner'], [fmtNum(d.value, 2), 'value']];
@@ -1222,7 +1242,7 @@ $('#runsBtn').addEventListener('click', async () => {
 });
 $('#runs').addEventListener('click', (ev) => { if (ev.target === $('#runs')) $('#runs').style.display = 'none'; });
 $('#fitBtn').addEventListener('click', fitView);
-for (const id of ['#showOurs', '#showEnemies', '#showSquads', '#showSpots']) $(id).addEventListener('change', () => touch('map'));
+for (const id of ['#showOurs', '#showEnemies', '#showSquads', '#showSpots', '#showIntents']) $(id).addEventListener('change', () => touch('map'));
 
 // ---------------------------------------------------------------- frame loop
 let lastT = performance.now();
