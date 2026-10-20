@@ -16,7 +16,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3, WeaponDef};
 
 use crate::Ai;
 use crate::defs::cmd;
-use crate::kgbutil::kgb_move_to;
+use crate::kgbutil::{kgb_move_to, kgb_move_to_exact};
 use crate::military::precision::Approach;
 use crate::util::{OPTION_SHIFT_KEY, distance};
 
@@ -61,9 +61,10 @@ const DANGER_FRAMES: i32 = 60;
 /// leaves that target alone longer.
 const GIVE_UP_FRAMES: i32 = 30 * 20;
 const TARGET_BAN_FRAMES: i32 = 30 * 60;
-/// The raider counts as there within this distance (no more than the
-/// spot's hidden surroundings, `HIDE_JITTER`).
-const ARRIVED: f32 = 20.0;
+/// The raider is told to stop this near its spot (the shadow behind a
+/// single tower is narrow), and counts as there within `ARRIVED`.
+const PARK: f32 = 4.0;
+const ARRIVED: f32 = 12.0;
 /// Spots given up on stay off the plan this long, and this far around.
 const BAD_SPOT_FRAMES: i32 = 30 * 180;
 const BAD_SPOT_RADIUS: f32 = 48.0;
@@ -228,8 +229,10 @@ impl Ai {
                 }
                 tried.push(s);
                 let Some(a) = self.precision.approach(s, pos, &sh, &revealers, safe) else { continue };
-                // In and out, and the stay.
-                let damage = 2.0 * a.damage + dps * kill_time;
+                // In and out, the stay, and the run once the target (if
+                // it is what hides the spot) is gone.
+                let after = self.precision.after_kill_damage(s, e.position, half, &sh);
+                let damage = 2.0 * a.damage + dps * kill_time + after;
                 if damage > budget {
                     continue;
                 }
@@ -432,7 +435,7 @@ impl Ai {
                     if frame - m.ordered > 30 * 5 || (off && frame - m.ordered > 30) {
                         unit.execute_custom_command(cmd::UNIT_SET_TARGET, &[target as f32], 0, NO_TIMEOUT);
                         if off {
-                            kgb_move_to(unit, spot, 0, frame);
+                            kgb_move_to_exact(unit, spot, PARK, 0, frame);
                         }
                         if let Some(m) = self.precision.missions.get_mut(&id) {
                             m.ordered = frame;
@@ -502,8 +505,14 @@ impl Ai {
             path.reverse();
             path.push(m.approach.entry);
         }
+        let last = path.len().saturating_sub(1);
         for (k, p) in path.iter().enumerate() {
-            kgb_move_to(f.unit, *p, if k == 0 { 0 } else { OPTION_SHIFT_KEY }, frame);
+            let opts = if k == 0 { 0 } else { OPTION_SHIFT_KEY };
+            if k == last && !reverse {
+                kgb_move_to_exact(f.unit, *p, PARK, opts, frame);
+            } else {
+                kgb_move_to(f.unit, *p, opts, frame);
+            }
         }
         m.ordered = frame;
     }

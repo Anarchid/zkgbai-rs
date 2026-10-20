@@ -209,10 +209,13 @@ impl Ai {
             });
         }
 
-        // A shooter at the defense's mex.
-        let mex = (self.cb.enemy_units().into_iter())
-            .filter(|u| self.defs.name_of(*u) == "staticmex" && distance(u.pos(), at) < range + 300.0)
-            .min_by(|a, b| distance(a.pos(), at).total_cmp(&distance(b.pos(), at)));
+        // A shooter at the defense's radar, if it has one, else its mex.
+        let near = |name: &str| {
+            (self.cb.enemy_units().into_iter())
+                .filter(|u| self.defs.name_of(*u) == name && distance(u.pos(), at) < range + 300.0)
+                .min_by(|a, b| distance(a.pos(), at).total_cmp(&distance(b.pos(), at)))
+        };
+        let mex = near("staticradar").or_else(|| near("staticmex"));
         let Some(mex) = mex else { return };
         let Some(mdef) = mex.def() else { return };
         let half = mdef.x_size().min(mdef.z_size()) as f32 * 4.0;
@@ -224,7 +227,8 @@ impl Ai {
             .filter(|s| s.1 == want_free && taken.iter().all(|t| distance(*t, s.0) >= SPACING))
             .min_by(|a, b| distance(a.0, mex.pos()).total_cmp(&distance(b.0, mex.pos())));
         self.log(&format!(
-            "probe: mex at ({:.0}, {:.0}): {free} free and {blocked} blocked hidden spots",
+            "probe: {} at ({:.0}, {:.0}): {free} free and {blocked} blocked hidden spots",
+            self.defs.name_of(mex),
             mex.pos().x,
             mex.pos().z
         ));
@@ -254,7 +258,8 @@ impl Ai {
             let hit = dealt > 1.0;
             let pos = s.unit.pos();
             self.log(&format!(
-                "probe: shot at mex d={:.0} {} fired={} dealt={dealt:.0} hurt={} at ({:.0}, {:.0})",
+                "probe: shot at {} d={:.0} {} fired={} dealt={dealt:.0} hurt={} at ({:.0}, {:.0})",
+                self.defs.name_of(s.target),
                 s.dist,
                 if s.free { "free" } else { "blocked" },
                 fired as u8,

@@ -43,7 +43,12 @@ const FULL_GROW: f32 = 0.5;
 /// below the gun's line of fire, there and this far around (where it may
 /// end up standing, and what the shadow cells blur).
 pub const HIDE_MARGIN: f32 = 6.0;
-const HIDE_JITTER: f32 = 20.0;
+/// ...and this far on along each defense's line of fire, and this far to
+/// either side of it (the shadow behind a single tower is a narrow cone:
+/// slipping along it is safe, across it is not; raiders park within a few
+/// elmos when told to, see `handlers::precision`).
+const HIDE_ALONG: f32 = 20.0;
+const HIDE_ACROSS: f32 = 6.0;
 /// Elmos added to defense ranges.
 pub const RANGE_MARGIN: f32 = 24.0;
 /// Firing spots stay this far inside our raiders' range (they park only
@@ -57,8 +62,11 @@ const UNIT_CLEARANCE: f32 = 16.0;
 const SYNC_FRAMES: i32 = 30;
 const TERRAIN_FRAMES: i32 = 30 * 60;
 const REPORT_FRAMES: i32 = 30 * 60;
-/// Half the side of the window an approach is planned in.
+/// Half the side of the window an approach is planned in, and its cells.
 const APPROACH_WINDOW: f32 = 1200.0;
+const APPROACH_CELL: f32 = 16.0;
+/// Firing spots are looked for this far apart.
+const SPOT_STEP: f32 = 8.0;
 /// How much time under fire counts against an approach: per second losing
 /// all of the raider's health, this many seconds more.
 const EXPOSURE_WEIGHT: f32 = 30.0;
@@ -464,14 +472,35 @@ impl Precision {
         self.exposure_around(x, z, aim) == 0.0
     }
 
-    /// The most damage per second a unit with its aim point `aim` up would
-    /// take at `(x, z)` or around it (where it may end up standing).
+    /// The damage per second a unit with its aim point `aim` up would take
+    /// at `(x, z)` or near it (where it may end up standing): from each
+    /// defense that hits it there, or [`HIDE_ALONG`] on or back along its
+    /// line of fire, or [`HIDE_ACROSS`] to either side.
     pub fn exposure_around(&self, x: f32, z: f32, aim: f32) -> f32 {
-        let (j, d) = (HIDE_JITTER, HIDE_JITTER * std::f32::consts::FRAC_1_SQRT_2);
-        [(0.0, 0.0), (j, 0.0), (-j, 0.0), (0.0, j), (0.0, -j), (d, d), (d, -d), (-d, d), (-d, -d)]
-            .iter()
-            .map(|&(dx, dz)| self.exposure(x + dx, z + dz, aim))
-            .fold(0.0, f32::max)
+        let Some(ground) = self.ground.as_ref() else { return 0.0 };
+        let terrain = ground.ground(x, z);
+        let mut dps = 0.0;
+        for (id, g) in &self.guns {
+            let (dx, dz) = (x - g.pos.x, z - g.pos.z);
+            let d = dx.hypot(dz).max(1.0);
+            let (ax, az) = (dx / d, dz / d);
+            let points = [(0.0, 0.0), (HIDE_ALONG, 0.0), (-HIDE_ALONG, 0.0), (0.0, HIDE_ACROSS), (0.0, -HIDE_ACROSS)];
+            for a in &g.arms {
+                if a.water_only && terrain >= 0.0 {
+                    continue;
+                }
+                let hits = points.iter().any(|&(along, across)| {
+                    let (px, pz) = (x + ax * along - az * across, z + az * along + ax * across);
+                    let stand = ground.stand(px, pz);
+                    a.gun.reaches(px, pz, stand + aim, RANGE_MARGIN)
+                        && (self.distrusted.contains(id) || a.shadow.need_at(px, pz) <= aim + HIDE_MARGIN)
+                });
+                if hits {
+                    dps += a.dps;
+                }
+            }
+        }
+        dps
     }
 
     /// Whether a unit like `sh` can stand at `(x, z)`: not too steep, not
@@ -525,9 +554,9 @@ impl Precision {
         let Some(ground) = self.ground.as_ref() else { return Vec::new() };
         let mut spots = Vec::new();
         let slack = SPOT_SLACK.min(SPOT_SLACK_SHARE * sh.range);
-        let mut r = half + CELL;
+        let mut r = half + SPOT_STEP;
         while r <= sh.range - slack {
-            let n = (std::f32::consts::TAU * r / CELL).ceil() as i32;
+            let n = (std::f32::consts::TAU * r / SPOT_STEP).ceil() as i32;
             for k in 0..n {
                 let a = k as f32 / n as f32 * std::f32::consts::TAU;
                 let (x, z) = (target.x + r * a.cos(), target.z + r * a.sin());
@@ -547,7 +576,7 @@ impl Precision {
                 let free = ground.line_is_free(from, [target.x, target_aim, target.z], sh.aoe, 0.0, half + 8.0);
                 spots.push((Vec3::new(x, stand, z), free, dps));
             }
-            r += CELL;
+            r += SPOT_STEP;
         }
         spots
     }
@@ -570,6 +599,60 @@ impl Precision {
             )
     }
 
+    /// The damage a raider like `sh` would take getting out of reach after
+    /// killing the building at `target` (`half` across) from `spot`, where
+    /// that building itself is what hides it from a defense (the narrow
+    /// cone behind a lone tower: it goes with the tower). Assumes a straight
+    /// run away from each such defense.
+    pub fn after_kill_damage(&self, spot: Vec3, target: Vec3, half: f32, sh: &Shooter) -> f32 {
+        let Some(ground) = self.ground.as_ref() else { return 0.0 };
+        let stand = ground.stand(spot.x, spot.z);
+        let mut damage = 0.0;
+        for g in self.guns.values() {
+            for a in &g.arms {
+                if !a.gun.reaches(spot.x, spot.z, stand + sh.aim, RANGE_MARGIN)
+                    || a.bare.need_at(spot.x, spot.z) > sh.aim + HIDE_MARGIN
+                {
+                    continue;
+                }
+                // Does its line to the spot pass through the target?
+                let (dx, dz) = (spot.x - a.gun.x, spot.z - a.gun.z);
+                let len2 = (dx * dx + dz * dz).max(1.0);
+                let t = (((target.x - a.gun.x) * dx + (target.z - a.gun.z) * dz) / len2).clamp(0.0, 1.0);
+                let (px, pz) = (a.gun.x + dx * t, a.gun.z + dz * t);
+                if (target.x - px).hypot(target.z - pz) > half + 8.0
+                    || self.others_cover([a.gun.x, a.gun.muzzle, a.gun.z], [spot.x, stand + sh.aim, spot.z], target)
+                {
+                    continue;
+                }
+                let out = (a.gun.range + RANGE_MARGIN - len2.sqrt()).max(0.0);
+                damage += a.dps * out / sh.speed.max(1.0);
+            }
+        }
+        damage
+    }
+
+    /// Whether a building other than the one standing at `except` covers
+    /// the line from `from` to `to` (rises over it somewhere).
+    fn others_cover(&self, from: [f32; 3], to: [f32; 3], except: Vec3) -> bool {
+        let d = (to[0] - from[0]).hypot(to[2] - from[2]).max(1.0);
+        let steps = (d / 8.0).ceil() as i32;
+        self.blocks.values().filter_map(|b| b.volume.filter(|_| (b.x - except.x).hypot(b.z - except.z) > 2.0)).any(
+            |v| {
+                // Near the line at all?
+                let t = (((v.x - from[0]) * (to[0] - from[0]) + (v.z - from[2]) * (to[2] - from[2])) / (d * d))
+                    .clamp(0.0, 1.0);
+                let (px, pz) = (from[0] + (to[0] - from[0]) * t, from[2] + (to[2] - from[2]) * t);
+                (v.x - px).hypot(v.z - pz) <= v.hx.max(v.hz)
+                    && (1..steps).any(|k| {
+                        let t = k as f32 / steps as f32;
+                        let (x, z) = (from[0] + (to[0] - from[0]) * t, from[2] + (to[2] - from[2]) * t);
+                        v.top_at(x, z) > from[1] + (to[1] - from[1]) * t
+                    })
+            },
+        )
+    }
+
     /// The cheapest way for a raider like `sh` at `from` to `spot`: from
     /// ground where `safe` holds and no defense we know of reaches (or from
     /// where it stands, if that is in the window), weighing time against
@@ -584,19 +667,19 @@ impl Precision {
         revealers: &[Vec3],
         safe: impl Fn(Vec3) -> bool,
     ) -> Option<Approach> {
-        let reveal = (sh.cloak + CELL).powi(2);
+        let reveal = (sh.cloak + APPROACH_CELL).powi(2);
         let seen = |x: f32, z: f32| {
             sh.cloak <= 0.0 || revealers.iter().any(|r| (r.x - x).powi(2) + (r.z - z).powi(2) < reveal)
         };
         let ground = self.ground.as_ref()?;
-        let n = (2.0 * APPROACH_WINDOW / CELL) as i32 + 1;
+        let n = (2.0 * APPROACH_WINDOW / APPROACH_CELL) as i32 + 1;
         let (x0, z0) = (spot.x - APPROACH_WINDOW, spot.z - APPROACH_WINDOW);
         let center = |i: usize| {
             let (cx, cz) = ((i as i32 % n) as f32, (i as i32 / n) as f32);
-            (x0 + cx * CELL, z0 + cz * CELL)
+            (x0 + cx * APPROACH_CELL, z0 + cz * APPROACH_CELL)
         };
         let index = |x: f32, z: f32| {
-            let (cx, cz) = (((x - x0) / CELL).round() as i32, ((z - z0) / CELL).round() as i32);
+            let (cx, cz) = (((x - x0) / APPROACH_CELL).round() as i32, ((z - z0) / APPROACH_CELL).round() as i32);
             (cx >= 0 && cz >= 0 && cx < n && cz < n).then(|| (cz * n + cx) as usize)
         };
         let len = (n * n) as usize;
@@ -648,7 +731,7 @@ impl Precision {
                 if dps[j].is_infinite() {
                     continue;
                 }
-                let dt = CELL * ((dx * dx + dz * dz) as f32).sqrt() / speed;
+                let dt = APPROACH_CELL * ((dx * dx + dz * dz) as f32).sqrt() / speed;
                 let next = c + dt * (1.0 + EXPOSURE_WEIGHT * dps[j] / sh.health.max(1.0));
                 if next < cost[j] {
                     cost[j] = next;
@@ -975,17 +1058,19 @@ impl Ai {
             st.lost,
             st.hit_at_spot
         );
-        for name in RAIDERS {
+        // The raider types we have (the search is costly at fine cells).
+        let ours: BTreeSet<&str> = self.fighters.values().map(|f| self.defs.name_of(f.unit)).collect();
+        let mut shadow_done = false;
+        for name in RAIDERS.into_iter().filter(|n| ours.contains(n)) {
             let Some(sh) = self.defs.get(name).and_then(|d| self.precision_shooter(d)) else { continue };
-            let (reach, share) = p.shadowed_share(sh.aim);
             let hittable =
                 covered.iter().filter(|(pos, aim, half)| !p.firing_spots(*pos, *aim, *half, &sh).is_empty()).count();
-            line += &format!(
-                " {name}(aim {:.0}, range {:.0}): {hittable} [shadow {:.0}% of {reach}]",
-                sh.aim,
-                sh.range,
-                share * 100.0
-            );
+            line += &format!(" {name}(aim {:.0}, range {:.0}): {hittable}", sh.aim, sh.range);
+            if !shadow_done {
+                let (reach, share) = p.shadowed_share(sh.aim);
+                line += &format!(" [shadow {:.0}% of {reach}]", share * 100.0);
+                shadow_done = true;
+            }
         }
         self.log(&line);
     }
@@ -1084,6 +1169,47 @@ mod tests {
     }
 
     #[test]
+    fn a_lone_lotus_cannot_cover_its_own_radar() {
+        // A radar (ZK's: an upright cylinder 32 wide, 90 tall, 32 sunk)
+        // 150 east of a Lotus: in the narrow cone behind it, a Glaive kills
+        // it unseen.
+        let mut ground = flat(256);
+        let (lx, lz) = (600.0, 1000.0);
+        let radar = Volume { x: lx + 150.0, y: 13.0, z: lz, hx: 16.0, hy: 45.0, hz: 16.0, shape: Shape::CylinderY };
+        ground.set_volumes([radar]);
+        let gun = Gun {
+            x: lx,
+            z: lz,
+            muzzle: 62.0,
+            range: 460.0,
+            height_mod: 0.2,
+            aoe: 4.0,
+            body: 15.0,
+            flight: Flight::Line,
+            avoids_friends: true,
+            through_ground: false,
+        };
+        let shadow = Shadow::compute(&ground, &gun, RANGE_MARGIN + CELL);
+        let bare = Shadow::compute(&ground, &Gun { avoids_friends: false, ..gun }, RANGE_MARGIN + CELL);
+        let arm = Arm { gun, shadow, bare, dps: 100.0, water_only: false };
+        let mut p = Precision { ground: Some(ground), ..Default::default() };
+        p.guns.insert(1, Armed { pos: Vec3::xz(lx, lz), name: "turretlaser".into(), arms: vec![arm], stale: false });
+        p.blocks.insert(2, Footing { x: radar.x, z: lz, hx: 16.0, hz: 16.0, volume: Some(radar) });
+        let spots = p.firing_spots(Vec3::new(radar.x, 30.0, lz), 30.0, 16.0, &glaive());
+        assert!(spots.len() >= 6, "{}", spots.len());
+        // All of them in the cone behind the radar.
+        assert!(spots.iter().all(|s| s.x > radar.x + 16.0 && (s.z - lz).abs() < 40.0), "{spots:?}");
+        // But the cone goes with the radar: a Glaive left standing in it
+        // runs out of the Lotus's reach under fire.
+        let after = p.after_kill_damage(spots[0], Vec3::xz(radar.x, lz), 16.0, &glaive());
+        assert!(after > 100.0, "{after}");
+        // Not so behind a wall that stays.
+        let w = walled_lotus(600.0, 1000.0, 100.0);
+        let s = w.firing_spots(Vec3::new(850.0, 29.0, 1000.0), 29.0, 24.0, &glaive());
+        assert_eq!(w.after_kill_damage(s[0], Vec3::xz(850.0, 1000.0), 24.0, &glaive()), 0.0);
+    }
+
+    #[test]
     fn spots_behind_the_wall_only() {
         let p = walled_lotus(600.0, 1000.0, 100.0);
         // A mex 250 east of the Lotus, behind its wall: Glaives can hit it
@@ -1125,6 +1251,6 @@ mod tests {
         assert_eq!(a.damage, 0.0);
         // Standing in the shadow already: the way in starts where it is.
         let a = p.approach(spot, Vec3::xz(860.0, 1000.0), &sh, &[], safe).unwrap();
-        assert!((a.entry.x - 860.0).abs() <= CELL && a.damage == 0.0, "{:?}", a);
+        assert!((a.entry.x - 860.0).abs() <= APPROACH_CELL && a.damage == 0.0, "{:?}", a);
     }
 }

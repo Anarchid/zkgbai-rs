@@ -12,7 +12,7 @@ pub use air_field::AirField;
 pub use grid::{ArrayGraphics, ByteArrayGraphics};
 pub use height_map::HeightMap;
 pub use line_of_fire::{FireGround, Flight, Gun, Shadow, Shape, Volume};
-pub use move_to::kgb_move_to;
+pub use move_to::{kgb_move_to, kgb_move_to_exact};
 pub use pathfinder::{PathCost, Pathfinder, Reachability};
 pub use terrain_analyzer::TerrainAnalyzer;
 

@@ -11,3 +11,14 @@ pub fn kgb_move_to(unit: Unit, pos: Vec3, opts: i16, frame: i32) {
         frame + 30 * 30,
     );
 }
+
+/// [`kgb_move_to`], stopping within `stop` elmos of `pos` (ZK's raw move
+/// otherwise stops up to 16 off, or farther in a crowd).
+pub fn kgb_move_to_exact(unit: Unit, pos: Vec3, stop: f32, opts: i16, frame: i32) {
+    unit.execute_custom_command(
+        crate::defs::cmd::RAW_MOVE,
+        &[pos.x, pos.y, pos.z, stop],
+        springai::opt::RIGHT_MOUSE_KEY | opts,
+        frame + 30 * 30,
+    );
+}

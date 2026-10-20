@@ -15,8 +15,9 @@
 
 /// Elmos per heightmap square.
 pub const SQUARE: f32 = 8.0;
-/// Elmos per shadow cell.
-pub const CELL: f32 = 16.0;
+/// Elmos per shadow cell (fine enough for the narrow cone behind a single
+/// tower: a cell counts as shadowed only if every ray through it is).
+pub const CELL: f32 = 8.0;
 /// Elmos between samples along a ray.
 const STEP: f32 = 8.0;
 /// A line passes a sample this much below it.

@@ -25,9 +25,12 @@
 //! attacker keeps flying unarmed Charons over the enemy's base, to be shot
 //! at by what it does not see (see `air_intel`; cheats name every attacker,
 //! so the fixes are scored against where the shooters truly are). With
-//! `test=fort` and `test=shadowprobe`, see `shadow_probe`. With
-//! `test=precision` (against `test=fort`), the attacker gets two each of
-//! Scorchers, Scythes and Kodachis every two minutes, and a
+//! `test=fort` (or `test=radarfort`: a Lotus by each mex and a radar
+//! farther out, which only the radar shadows) and `test=shadowprobe`, see
+//! `shadow_probe`. With
+//! `test=precision` (against `test=fort` or `test=radarfort`), the
+//! attacker gets two each of Glaives, Scythes, Scorchers and Kodachis every
+//! two minutes, as solo raiders, and a
 //! radar toward the enemy: their precision missions (see
 //! `handlers::precision`) are all that should hurt the fort.
 
@@ -151,11 +154,22 @@ impl Ai {
             }
             ("precision", f) if f >= PRECISION_FRAME && (f - PRECISION_FRAME) % PRECISION_ROUND == 0 => {
                 let mut units: Vec<(&str, Vec3)> = Vec::new();
-                for name in ["vehraid", "cloakheavyraid", "tankraid"] {
+                for name in ["cloakraid", "cloakheavyraid", "vehraid", "tankraid"] {
                     units.extend([(name, ahead(-100.0)), (name, ahead(-160.0))]);
                 }
                 if f == PRECISION_FRAME {
                     units.push(("staticradar", get_directional_point(enemy, base, 1500.0)));
+                }
+                units
+            }
+            ("radarfort", 60) => {
+                let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
+                spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
+                let mut units = vec![("planescout", ahead(-100.0)), ("planescout", ahead(-200.0))];
+                for &s in spots.iter().take(FORT_SPOTS) {
+                    units.push(("staticmex", s));
+                    units.push(("turretlaser", get_directional_point(s, toward, 120.0)));
+                    units.push(("staticradar", get_directional_point(s, toward, 270.0)));
                 }
                 units
             }
@@ -208,13 +222,13 @@ impl Ai {
         }
         // Owls keep watch over the fort, and the commander holds its fire
         // (it would shoot the probes; losing it ends the game).
-        if test == "fort" && frame == 300 {
+        if (test == "fort" || test == "radarfort") && frame == 300 {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
                 c.set_move_state(0, 0);
             }
         }
-        if test == "fort" && frame == 60 {
+        if (test == "fort" || test == "radarfort") && frame == 60 {
             let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
             spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
             spots.truncate(FORT_SPOTS);
