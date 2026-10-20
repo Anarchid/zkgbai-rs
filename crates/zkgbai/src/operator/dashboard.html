@@ -1,0 +1,1253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZKGBAI Operator</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb; --surface-2: #f1f0ec;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+  --ours: #2a78d6; --enemy: #e34948; --accent: #1baf7a; --series-2: #eb6834;
+  --heat: 235, 104, 52; --terrain-lo: 132, 130, 122; --terrain-hi: 238, 236, 229; --water: 160, 182, 204;
+  --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --ours: #3987e5; --enemy: #e66767; --accent: #199e70; --series-2: #d95926;
+    --heat: 217, 89, 38; --terrain-lo: 26, 26, 24; --terrain-hi: 118, 116, 106; --water: 34, 52, 72;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --surface-2: #232321;
+  --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --ours: #3987e5; --enemy: #e66767; --accent: #199e70; --series-2: #d95926;
+  --heat: 217, 89, 38; --terrain-lo: 26, 26, 24; --terrain-hi: 118, 116, 106; --water: 34, 52, 72;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); font: 13px/1.4 var(--font); }
+button, select, input, textarea { font: inherit; color: inherit; }
+button {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; cursor: pointer;
+}
+button:hover { border-color: var(--axis); }
+button:disabled { opacity: .45; cursor: default; }
+select, input[type=text], input[type=search], textarea {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px;
+}
+.bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 16px;
+  border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.bar h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.bar .meta { color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.bar .meta b { color: var(--ink); font-weight: 600; }
+.bar .spacer { flex: 1; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); }
+.badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.badge.live::before { background: var(--good); }
+.badge.replay::before { background: var(--ours); }
+.badge.down::before { background: var(--critical); }
+.layout {
+  display: grid; gap: 12px; padding: 12px 16px 16px;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  grid-template-areas: "map side" "time time" "log console";
+}
+@media (max-width: 980px) {
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "map" "time" "side" "log" "console"; }
+}
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.mapcard { grid-area: map; position: relative; min-height: max(360px, 64vh); overflow: hidden; }
+#map { position: absolute; inset: 0; }
+#map { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+@media (max-width: 980px) { .mapcard { min-height: 60vh; } }
+#map.dragging { cursor: grabbing; }
+.maptools {
+  position: absolute; left: 8px; top: 8px; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+  background: color-mix(in srgb, var(--surface) 88%, transparent); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px 8px; max-width: calc(100% - 16px);
+}
+.maptools label { display: inline-flex; gap: 4px; align-items: center; color: var(--ink-2); }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 4px; }
+.maplegend {
+  position: absolute; left: 8px; bottom: 8px; background: color-mix(in srgb, var(--surface) 88%, transparent);
+  border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 12px; max-width: calc(100% - 16px);
+}
+.hint { position: absolute; right: 8px; top: 8px; color: var(--muted); font-size: 12px; }
+@media (max-width: 1300px) { .hint { display: none; } }
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none; max-width: 320px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.18); font-size: 12px;
+}
+#tip .v { font-weight: 600; color: var(--ink); }
+#tip .k { color: var(--ink-2); }
+#tip .row { display: flex; gap: 6px; align-items: center; }
+#menu {
+  position: fixed; z-index: 11; display: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px; box-shadow: 0 6px 20px rgba(0,0,0,.22); min-width: 220px;
+}
+#menu button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 5px 8px; border-radius: 5px; }
+#menu button:hover { background: var(--surface-2); }
+#menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
+.side { grid-area: side; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.tile { padding: 8px 10px; }
+.tile .t { color: var(--ink-2); font-size: 12px; }
+.tile .n { font-size: 18px; font-weight: 600; }
+.tile .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.chart { padding: 8px 10px 4px; }
+.chart .head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.chart .title { font-weight: 600; }
+.chart canvas { width: 100%; height: 92px; display: block; cursor: crosshair; }
+.key { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+.inspector { padding: 8px 10px; }
+.inspector h2, .log h2, .console h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; font-size: 12px; }
+.kv .k { color: var(--ink-2); }
+.kv .v { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.inspector .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.empty { color: var(--muted); }
+.timeline { grid-area: time; display: flex; align-items: center; gap: 10px; padding: 6px 10px; flex-wrap: wrap; }
+.timeline input[type=range] { flex: 1; min-width: 160px; accent-color: var(--ours); }
+.timeline .when { font-variant-numeric: tabular-nums; min-width: 120px; color: var(--ink-2); }
+.log { grid-area: log; padding: 8px 10px; display: flex; flex-direction: column; min-width: 0; }
+.log .filters { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-bottom: 6px; color: var(--ink-2); }
+.log .filters label { display: inline-flex; gap: 4px; align-items: center; }
+#events { height: 300px; overflow: auto; font-size: 12px; border-top: 1px solid var(--border); }
+.ev { display: grid; grid-template-columns: 44px 70px minmax(0, 1fr); gap: 6px; padding: 2px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.ev:hover { background: var(--surface-2); }
+.ev .f { color: var(--muted); font-variant-numeric: tabular-nums; }
+.ev .kind { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev .txt { overflow-wrap: anywhere; }
+.ev.op .kind { color: var(--accent); font-weight: 600; }
+.ev.err .txt { color: var(--critical); }
+.console { grid-area: console; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.console .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.console select { flex: 1; min-width: 140px; }
+.console .desc { color: var(--ink-2); font-size: 12px; white-space: pre-line; }
+#args { width: 100%; height: 76px; font: 12px var(--mono); resize: vertical; }
+#out { margin: 0; height: 170px; overflow: auto; font: 12px var(--mono); background: var(--surface-2); border-radius: 6px; padding: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.drop { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 20;
+  background: color-mix(in srgb, var(--page) 80%, transparent); font-size: 18px; border: 3px dashed var(--ours); }
+.modal { position: fixed; inset: 0; display: none; align-items: flex-start; justify-content: center; z-index: 15;
+  background: rgba(0,0,0,.35); padding-top: 10vh; }
+.modal .card { padding: 12px; width: min(640px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; }
+.modal table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.modal td { padding: 4px 6px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+.modal tr:hover td { background: var(--surface-2); cursor: pointer; }
+#toast { position: fixed; right: 16px; bottom: 16px; z-index: 12; display: none; max-width: 420px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 20px rgba(0,0,0,.2); }
+</style>
+</head>
+<body>
+<header class="bar">
+  <h1>ZKGBAI operator</h1>
+  <div class="meta" id="meta"><span class="empty">no run loaded</span></div>
+  <span class="spacer"></span>
+  <span class="badge" id="conn">offline</span>
+  <button id="runsBtn" hidden>Runs…</button>
+  <button id="liveBtn" hidden>Back to live</button>
+  <button id="openBtn">Open journal…</button>
+  <input type="file" id="file" accept=".jsonl,.json,.ndjson,.txt" hidden>
+</header>
+
+<main class="layout">
+  <section class="card mapcard">
+    <canvas id="map" aria-label="Map of the game: our units, enemies, squads and metal spots"></canvas>
+    <div class="maptools">
+      <label><input type="checkbox" id="showOurs" checked> ours</label>
+      <label><input type="checkbox" id="showEnemies" checked> enemies</label>
+      <label><input type="checkbox" id="showSquads" checked> squads</label>
+      <label><input type="checkbox" id="showSpots" checked> metal</label>
+      <label>overlay
+        <select id="overlay" autocomplete="off">
+          <option value="">none</option>
+          <option>threat</option><option>enemy_porc</option><option>aa_threat</option><option>aa_porc</option>
+          <option>ally_threat</option><option>ally_porc</option><option>ally_raider</option>
+          <option>value</option><option>raider_value</option><option>riot</option><option>scythe</option><option>bp</option>
+        </select>
+      </label>
+      <button id="fitBtn" title="Fit the map">Fit</button>
+    </div>
+    <div class="maplegend legend">
+      <span><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="var(--ours)"/></svg>ours</span>
+      <span><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="3.5" fill="none" stroke="var(--enemy)" stroke-width="1.6"/></svg>enemy</span>
+      <span><svg width="10" height="10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" fill="var(--ink-2)"/></svg>building</span>
+      <span><svg width="10" height="10" aria-hidden="true"><path d="M5 1 L9 5 L5 9 L1 5Z" fill="var(--ink-2)"/></svg>worker</span>
+      <span><svg width="12" height="12" aria-hidden="true"><circle cx="6" cy="6" r="5" fill="none" stroke="var(--accent)" stroke-width="1.6"/></svg>squad · operator's</span>
+      <span><svg width="12" height="12" aria-hidden="true"><path d="M6 1V11M1 6H11" stroke="var(--ink)" stroke-width="1.4"/></svg>defend</span>
+    </div>
+    <div class="hint">wheel zoom · drag pan · click select · shift+drag box · right-click act</div>
+  </section>
+
+  <aside class="side">
+    <div class="tiles" id="tiles"></div>
+    <div class="card chart" data-chart="metal">
+      <div class="head"><span class="title">Metal</span><span class="legend"><span><i class="key" style="background:var(--ours)"></i>income</span><span><i class="key" style="background:var(--series-2)"></i>spent</span></span></div>
+      <canvas></canvas>
+    </div>
+    <div class="card chart" data-chart="energy">
+      <div class="head"><span class="title">Energy</span><span class="legend"><span><i class="key" style="background:var(--ours)"></i>income</span><span><i class="key" style="background:var(--series-2)"></i>spent</span></span></div>
+      <canvas></canvas>
+    </div>
+    <div class="card chart" data-chart="army">
+      <div class="head"><span class="title">Army value (metal)</span><span class="legend"><span><i class="key" style="background:var(--ours)"></i>ours</span><span><i class="key" style="background:var(--enemy)"></i>enemy seen</span></span></div>
+      <canvas></canvas>
+    </div>
+    <div class="card inspector" id="inspector"><h2>Inspector</h2><div class="empty">Click a unit, enemy, squad or metal spot.</div></div>
+  </aside>
+
+  <section class="card timeline">
+    <button id="playBtn" title="Play from here">▶</button>
+    <select id="speed" title="Replay speed"><option value="1">1×</option><option value="4" selected>4×</option><option value="16">16×</option><option value="64">64×</option></select>
+    <input type="range" id="slider" min="0" max="0" value="0" step="1" aria-label="Game time">
+    <span class="when" id="when">0:00</span>
+    <label><input type="checkbox" id="follow" checked autocomplete="off"> follow</label>
+  </section>
+
+  <section class="card log">
+    <h2>Events</h2>
+    <div class="filters">
+      <label><input type="checkbox" data-kind="log" checked> log</label>
+      <label><input type="checkbox" data-kind="units"> units</label>
+      <label><input type="checkbox" data-kind="combat" checked> combat</label>
+      <label><input type="checkbox" data-kind="operator" checked> operator</label>
+      <label><input type="checkbox" data-kind="chat" checked> chat</label>
+      <input type="search" id="grep" placeholder="filter text" style="flex:1;min-width:120px">
+    </div>
+    <div id="events" role="log" aria-live="off"></div>
+  </section>
+
+  <section class="card console">
+    <h2>Tool console</h2>
+    <div class="row"><select id="tool" aria-label="Tool"></select><button id="callBtn" disabled>Call</button></div>
+    <div class="desc" id="toolDesc">Connect to a running game to call its tools.</div>
+    <textarea id="args" spellcheck="false" aria-label="Tool arguments (JSON)">{}</textarea>
+    <pre id="out" aria-live="polite"></pre>
+  </section>
+</main>
+
+<div id="tip"></div>
+<div id="menu" role="menu"></div>
+<div id="toast" role="status"></div>
+<div class="drop" id="drop">Drop a journal (.jsonl) to replay it</div>
+<div class="modal" id="runs"><div class="card"><h2 style="margin:0 0 8px;font-size:14px">Journals of this AI</h2><div id="runsBody"></div></div></div>
+
+<script>
+'use strict';
+const $ = (s) => document.querySelector(s);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  return e;
+}
+const fmtTime = (f) => { const s = Math.max(0, Math.floor(f / 30)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const fmtNum = (v, d = 0) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : Number(v).toLocaleString(undefined, { maximumFractionDigits: d });
+const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+// ---------------------------------------------------------------- state
+// One store for both modes: a live game streams its records over SSE, a
+// journal file holds the same records.
+const S = {
+  live: false, run: null, map: null, ticks: [], snaps: [], events: [], lastFrame: 0, lastSeq: -1,
+  liveSnap: null, cursor: 0, follow: true, playing: false,
+  selected: new Set(), selSquad: null, selEnemy: null, selSpot: null,
+  overlay: null, tools: [], status: null,
+};
+const dirty = { map: true, charts: true, log: true, tiles: true, inspector: true };
+const touch = (...k) => { for (const x of k) dirty[x] = true; };
+
+function resetStore() {
+  Object.assign(S, { run: null, map: null, ticks: [], snaps: [], events: [], lastFrame: 0, lastSeq: -1, liveSnap: null,
+    cursor: 0, selected: new Set(), selSquad: null, selEnemy: null, selSpot: null, overlay: null, status: null });
+  terrain = null; overlayCanvas = null; logKey = '';
+  touch('map', 'charts', 'log', 'tiles', 'inspector');
+}
+
+function ingest(r) {
+  if (typeof r !== 'object' || r === null) return;
+  if (typeof r.seq === 'number') {
+    if (S.live && r.seq <= S.lastSeq) return;
+    S.lastSeq = Math.max(S.lastSeq, r.seq);
+  }
+  if (typeof r.f === 'number' && r.f > S.lastFrame) S.lastFrame = r.f;
+  switch (r.k) {
+    case 'run': S.run = r; touch('tiles'); break;
+    case 'map': S.map = r; terrain = null; touch('map'); break;
+    case 'tick': S.ticks.push(r); touch('charts', 'tiles'); break;
+    case 'snap': S.snaps.push(r); touch('map'); break;
+    default: S.events.push(r); touch('log');
+  }
+}
+
+const frameNow = () => (S.follow ? S.lastFrame : S.cursor);
+
+function lastAtOrBefore(arr, frame) {
+  let lo = 0, hi = arr.length - 1, best = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid].f <= frame) { best = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  return best >= 0 ? arr[best] : null;
+}
+
+function snapNow() {
+  if (S.follow && S.liveSnap) return S.liveSnap;
+  return lastAtOrBefore(S.snaps, frameNow()) || null;
+}
+
+// ---------------------------------------------------------------- header
+function renderMeta() {
+  const m = $('#meta');
+  m.replaceChildren();
+  const r = S.run;
+  if (!r) { m.append(el('span', 'empty', S.live ? 'waiting for the run header…' : 'no run loaded')); return; }
+  const add = (k, v) => { const s = el('span'); s.append(k + ' '); s.append(el('b', null, v)); m.append(s); };
+  add('map', r.map);
+  add('team', r.team);
+  add('build', r.build || r.version);
+  if (S.status) add('state', S.status.state);
+  m.title = r.run || '';
+}
+
+function setConn(kind, text) {
+  const c = $('#conn');
+  c.className = 'badge ' + kind;
+  c.textContent = text;
+}
+
+// ---------------------------------------------------------------- tiles
+function renderTiles() {
+  const t = lastAtOrBefore(S.ticks, frameNow());
+  const box = $('#tiles');
+  box.replaceChildren();
+  const tile = (title, big, small) => {
+    const d = el('div', 'card tile');
+    d.append(el('div', 't', title), el('div', 'n', big), el('div', 's', small));
+    box.append(d);
+  };
+  if (!t) { tile('Waiting for data', '–', ''); return; }
+  tile('Metal income', fmtNum(t.m[1], 1), `${fmtNum(t.m[0])} stored · ${fmtNum(t.m[2], 1)} spent`);
+  tile('Energy income', fmtNum(t.e[1], 1), `${fmtNum(t.e[0])} stored · ${fmtNum(t.e[2], 1)} spent`);
+  tile('Army value', fmtNum(t.army), `enemy seen ${fmtNum(t.enemy_army)} · defenses ${fmtNum(t.enemy_porc)}`);
+  tile('Metal spots', `${t.spots[0]} : ${t.spots[1]}`, `ours : enemy · territory ${Math.round((t.territory || 0) * 100)}%`);
+  tile('Forces', fmtNum(t.fighters), `fighters · ${t.squads} squads · ${t.workers} workers`);
+  tile('Game time', fmtTime(t.f), S.live ? (S.follow ? 'live' : 'scrolled back') : 'replay');
+}
+
+// ---------------------------------------------------------------- map
+const canvas = $('#map');
+const ctx = canvas.getContext('2d');
+const view = { k: 0.1, x: 0, y: 0, fitted: false, user: false }; // user: zoomed or panned by hand
+let terrain = null; // offscreen canvas of the height grid
+let overlayCanvas = null;
+let colors = {};
+
+function readColors() {
+  colors = {
+    ours: cssVar('--ours'), enemy: cssVar('--enemy'), accent: cssVar('--accent'), ink: cssVar('--ink'),
+    ink2: cssVar('--ink-2'), muted: cssVar('--muted'), surface: cssVar('--surface'), surface2: cssVar('--surface-2'),
+    heat: cssVar('--heat').split(',').map(Number), series2: cssVar('--series-2'),
+    grid: cssVar('--grid'), axis: cssVar('--axis'),
+    lo: cssVar('--terrain-lo').split(',').map(Number), hi: cssVar('--terrain-hi').split(',').map(Number),
+    water: cssVar('--water').split(',').map(Number),
+  };
+}
+
+function mapSize() { return S.map && S.map.size ? S.map.size : [8192, 8192]; }
+
+function fitView() {
+  const [W, H] = mapSize();
+  const r = canvas.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  view.k = Math.min(r.width / W, r.height / H) * 0.96;
+  view.x = (r.width - W * view.k) / 2;
+  view.y = (r.height - H * view.k) / 2;
+  view.fitted = true;
+  view.user = false;
+  touch('map');
+}
+
+const toScreen = (x, z) => [x * view.k + view.x, z * view.k + view.y];
+const toWorld = (sx, sy) => [(sx - view.x) / view.k, (sy - view.y) / view.k];
+
+// Hill-shaded heights; below 0 is water.
+function buildTerrain() {
+  const h = S.map && S.map.heights;
+  if (!h) return null;
+  const c = document.createElement('canvas');
+  c.width = h.width; c.height = h.height;
+  const g = c.getContext('2d');
+  const img = g.createImageData(h.width, h.height);
+  const at = (x, z) => h.rows[Math.max(0, Math.min(h.height - 1, z))][Math.max(0, Math.min(h.width - 1, x))] / 255;
+  const span = (h.max - h.min) || 1;
+  for (let z = 0; z < h.height; z++) {
+    for (let x = 0; x < h.width; x++) {
+      const v = at(x, z);
+      const real = h.min + v * span;
+      const dx = at(x + 1, z) - at(x - 1, z), dz = at(x, z + 1) - at(x, z - 1);
+      const light = Math.max(0, Math.min(1, 0.55 - (dx + dz) * 6));
+      let rgb;
+      if (real < 0) {
+        const d = Math.min(1, -real / 60);
+        rgb = colors.water.map((w, i) => w * (1 - d * 0.35) + colors.lo[i] * d * 0.35);
+      } else {
+        const t = Math.min(1, v * 0.55 + light * 0.45);
+        rgb = colors.lo.map((l, i) => l + (colors.hi[i] - l) * t);
+      }
+      const o = (z * h.width + x) * 4;
+      img.data[o] = rgb[0]; img.data[o + 1] = rgb[1]; img.data[o + 2] = rgb[2]; img.data[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+// One-hue ramp: opacity grows with the value.
+function buildOverlay(o) {
+  if (!o || !o.rows) return null;
+  const c = document.createElement('canvas');
+  c.width = o.width; c.height = o.height;
+  const g = c.getContext('2d');
+  const img = g.createImageData(o.width, o.height);
+  const max = Math.max(1, o.max);
+  const [r, gr, b] = colors.heat;
+  for (let y = 0; y < o.height; y++) for (let x = 0; x < o.width; x++) {
+    const v = o.rows[y][x] || 0;
+    const a = v <= 0 ? 0 : 40 + 180 * Math.min(1, Math.sqrt(v / max));
+    const i = (y * o.width + x) * 4;
+    img.data[i] = r; img.data[i + 1] = gr; img.data[i + 2] = b; img.data[i + 3] = a;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+function unitRadius() { return Math.max(2.5, Math.min(7, view.k * 45)); }
+
+function shapeFor(role) {
+  switch (role) {
+    case 'commander': return 'com';
+    case 'worker': return 'diamond';
+    case 'factory': return 'fac';
+    case 'building': case 'mex': case 'caretaker': return 'square';
+    case 'defense': return 'porc';
+    case 'retreating': return 'ring';
+    default: return 'circle';
+  }
+}
+
+function glyph(shape, x, y, r, color, filled) {
+  ctx.beginPath();
+  switch (shape) {
+    case 'com': case 'diamond': {
+      const s = shape === 'com' ? r * 1.7 : r * 1.25;
+      ctx.moveTo(x, y - s); ctx.lineTo(x + s, y); ctx.lineTo(x, y + s); ctx.lineTo(x - s, y); ctx.closePath(); break;
+    }
+    case 'fac': ctx.rect(x - r * 1.5, y - r * 1.5, r * 3, r * 3); break;
+    case 'square': case 'porc': ctx.rect(x - r * 0.9, y - r * 0.9, r * 1.8, r * 1.8); break;
+    default: ctx.arc(x, y, shape === 'small' ? r * 0.7 : r, 0, Math.PI * 2);
+  }
+  if (filled && shape !== 'ring') {
+    ctx.fillStyle = color; ctx.fill();
+    ctx.lineWidth = 1; ctx.strokeStyle = colors.surface; ctx.stroke();
+  } else {
+    ctx.lineWidth = 1.6; ctx.strokeStyle = color; ctx.stroke();
+  }
+  if (shape === 'porc') {
+    ctx.beginPath(); ctx.arc(x, y, r * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = filled ? colors.surface : color; ctx.fill();
+  }
+  if (shape === 'com') {
+    ctx.beginPath(); ctx.arc(x, y, r * 2.4, 0, Math.PI * 2);
+    ctx.lineWidth = 1; ctx.strokeStyle = color; ctx.stroke();
+  }
+}
+
+// Enemy flag bits of the snapshot (see its legend).
+const EF = { visible: 1, radar: 2, static: 4, porc: 8, mex: 16, com: 32, worker: 64, aa: 128, air: 256, identified: 512 };
+
+let hits = []; // [sx, sy, kind, data] of what is drawn, for hover and clicks
+
+function drawMap() {
+  const dpr = window.devicePixelRatio || 1;
+  const r = canvas.getBoundingClientRect();
+  if (canvas.width !== Math.round(r.width * dpr) || canvas.height !== Math.round(r.height * dpr)) {
+    canvas.width = Math.round(r.width * dpr); canvas.height = Math.round(r.height * dpr);
+  }
+  if (!view.fitted && S.map) fitView();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, r.width, r.height);
+  const [W, H] = mapSize();
+  const [x0, y0] = toScreen(0, 0);
+  ctx.fillStyle = colors.surface2;
+  ctx.fillRect(x0, y0, W * view.k, H * view.k);
+  if (!terrain && S.map) terrain = buildTerrain();
+  if (terrain) {
+    ctx.imageSmoothingEnabled = true;
+    const h = S.map.heights;
+    ctx.drawImage(terrain, x0, y0, h.width * h.cell * view.k, h.height * h.cell * view.k);
+  }
+  if (overlayCanvas && S.overlay) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(overlayCanvas, x0, y0, S.overlay.width * S.overlay.cell * view.k, S.overlay.height * S.overlay.cell * view.k);
+  }
+  hits = [];
+  const snap = snapNow();
+  const rad = unitRadius();
+
+  if ($('#showSpots').checked && S.map && S.map.spots) {
+    const owners = snap ? snap.spots : null;
+    S.map.spots.forEach((s, i) => {
+      const [sx, sy] = toScreen(s[0], s[1]);
+      const o = owners ? owners[i] : 0;
+      ctx.beginPath(); ctx.arc(sx, sy, Math.max(2.5, rad * 0.8), 0, Math.PI * 2);
+      if (o === 1 || o === 2) { ctx.fillStyle = o === 1 ? colors.ours : colors.enemy; ctx.fill(); }
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = o === 3 ? colors.enemy : o === 4 ? colors.ours : colors.ink2;
+      ctx.setLineDash(o === 3 || o === 4 ? [2, 2] : []);
+      ctx.stroke(); ctx.setLineDash([]);
+      hits.push([sx, sy, 'spot', { i, x: s[0], z: s[1], value: s[2], owner: ['free', 'ours', 'enemy', 'enemy territory', 'our territory'][o] || 'free' }]);
+    });
+  }
+  if (!snap) { drawSelectionBox(); return; }
+
+  for (const d of snap.defend || []) {
+    const [sx, sy] = toScreen(d[0], d[1]);
+    ctx.strokeStyle = colors.ink; ctx.lineWidth = 1.4;
+    ctx.setLineDash(d[3] ? [3, 2] : []);
+    ctx.beginPath(); ctx.moveTo(sx - 8, sy); ctx.lineTo(sx + 8, sy); ctx.moveTo(sx, sy - 8); ctx.lineTo(sx, sy + 8); ctx.stroke();
+    ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    hits.push([sx, sy, 'defend', { x: d[0], z: d[1], weight: d[2], predicted: d[3] }]);
+  }
+
+  if ($('#showSquads').checked) {
+    for (const q of snap.squads || []) {
+      if (q[3] === 0 && q[4] === 0) continue;
+      const [sx, sy] = toScreen(q[3], q[4]);
+      if (q[5] || q[6]) {
+        const [tx, ty] = toScreen(q[5], q[6]);
+        ctx.strokeStyle = colors.accent; ctx.lineWidth = 1.2; ctx.setLineDash([5, 4]);
+        ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke(); ctx.setLineDash([]);
+        ctx.beginPath(); ctx.moveTo(tx - 4, ty - 4); ctx.lineTo(tx + 4, ty + 4); ctx.moveTo(tx + 4, ty - 4); ctx.lineTo(tx - 4, ty + 4); ctx.stroke();
+      }
+      const ring = rad * 3 + 4;
+      ctx.beginPath(); ctx.arc(sx, sy, ring, 0, Math.PI * 2);
+      ctx.lineWidth = S.selSquad === q[0] ? 2.5 : 1.4; ctx.strokeStyle = colors.accent; ctx.stroke();
+      ctx.fillStyle = colors.ink; ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(`S${q[0]}`, sx + ring + 2, sy - ring + 4);
+      hits.push([sx, sy, 'squad', q]);
+    }
+  }
+
+  if ($('#showEnemies').checked) {
+    for (const e of snap.enemies || []) {
+      const age = e[4], fl = e[5];
+      const [sx, sy] = toScreen(e[2], e[3]);
+      // Remembered contacts fade with time since seen.
+      ctx.globalAlpha = (fl & (EF.visible | EF.radar)) ? 1 : Math.max(0.3, 1 - age / 2700);
+      let shape = 'circle';
+      if (fl & EF.com) shape = 'com';
+      else if (fl & EF.porc) shape = 'porc';
+      else if (fl & EF.static) shape = 'square';
+      else if (fl & EF.worker) shape = 'diamond';
+      else if (!(fl & EF.identified)) shape = 'small';
+      glyph(shape, sx, sy, rad, colors.enemy, false);
+      ctx.globalAlpha = 1;
+      if (S.selEnemy === e[0]) { ctx.beginPath(); ctx.arc(sx, sy, rad * 2.2, 0, Math.PI * 2); ctx.strokeStyle = colors.ink; ctx.lineWidth = 2; ctx.stroke(); }
+      hits.push([sx, sy, 'enemy', e]);
+    }
+  }
+
+  if ($('#showOurs').checked) {
+    for (const u of snap.units || []) {
+      const [sx, sy] = toScreen(u[2], u[3]);
+      const role = u[5];
+      glyph(shapeFor(role), sx, sy, rad, colors.ours, true);
+      if (role === 'reserved') { ctx.beginPath(); ctx.arc(sx, sy, rad * 1.9, 0, Math.PI * 2); ctx.strokeStyle = colors.accent; ctx.lineWidth = 2; ctx.stroke(); }
+      if (u[4] < 50) { ctx.fillStyle = colors.enemy; ctx.fillRect(sx - rad, sy + rad + 2, rad * 2 * (1 - u[4] / 100), 2); }
+      if (S.selected.has(u[0])) { ctx.beginPath(); ctx.arc(sx, sy, rad * 2.2, 0, Math.PI * 2); ctx.strokeStyle = colors.ink; ctx.lineWidth = 2; ctx.stroke(); }
+      hits.push([sx, sy, 'unit', u]);
+    }
+  }
+  drawSelectionBox();
+}
+
+let box = null; // [sx0, sy0, sx1, sy1] while shift-dragging
+function drawSelectionBox() {
+  if (!box) return;
+  ctx.strokeStyle = colors.accent; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+  ctx.strokeRect(Math.min(box[0], box[2]), Math.min(box[1], box[3]), Math.abs(box[2] - box[0]), Math.abs(box[3] - box[1]));
+  ctx.setLineDash([]);
+}
+
+function hitAt(sx, sy, maxd = 12) {
+  const prio = { unit: 0, enemy: 0, squad: 1, defend: 2, spot: 3 };
+  let best = null, bd = maxd * maxd;
+  for (const h of hits) {
+    const d = (h[0] - sx) ** 2 + (h[1] - sy) ** 2;
+    if (d < bd || (best && d === bd && prio[h[2]] < prio[best[2]])) { bd = d; best = h; }
+  }
+  return best;
+}
+
+let drag = null;
+canvas.addEventListener('wheel', (ev) => {
+  ev.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const sx = ev.clientX - r.left, sy = ev.clientY - r.top;
+  const [wx, wz] = toWorld(sx, sy);
+  view.k = Math.max(0.01, Math.min(4, view.k * Math.exp(-ev.deltaY * 0.0015)));
+  view.user = true;
+  view.x = sx - wx * view.k; view.y = sy - wz * view.k;
+  touch('map');
+}, { passive: false });
+canvas.addEventListener('pointerdown', (ev) => {
+  if (ev.button !== 0) return;
+  hideMenu();
+  const r = canvas.getBoundingClientRect();
+  const sx = ev.clientX - r.left, sy = ev.clientY - r.top;
+  if (ev.shiftKey) box = [sx, sy, sx, sy];
+  drag = { sx, sy, x: view.x, y: view.y, moved: false };
+  canvas.setPointerCapture(ev.pointerId);
+});
+canvas.addEventListener('pointermove', (ev) => {
+  const r = canvas.getBoundingClientRect();
+  const sx = ev.clientX - r.left, sy = ev.clientY - r.top;
+  if (drag) {
+    if (Math.abs(sx - drag.sx) + Math.abs(sy - drag.sy) > 3) drag.moved = true;
+    if (box) { box[2] = sx; box[3] = sy; }
+    else if (drag.moved) { view.x = drag.x + sx - drag.sx; view.y = drag.y + sy - drag.sy; view.user = true; canvas.classList.add('dragging'); }
+    touch('map');
+    return;
+  }
+  const h = hitAt(sx, sy);
+  if (h) showTip(ev.clientX, ev.clientY, tipFor(h)); else hideTip();
+});
+canvas.addEventListener('pointerleave', hideTip);
+canvas.addEventListener('pointerup', (ev) => {
+  if (!drag) return;
+  const r = canvas.getBoundingClientRect();
+  const sx = ev.clientX - r.left, sy = ev.clientY - r.top;
+  canvas.classList.remove('dragging');
+  if (box) {
+    const [a, b, c, d] = [Math.min(box[0], box[2]), Math.min(box[1], box[3]), Math.max(box[0], box[2]), Math.max(box[1], box[3])];
+    if (!ev.ctrlKey) S.selected.clear();
+    for (const h of hits) if (h[2] === 'unit' && h[0] >= a && h[0] <= c && h[1] >= b && h[1] <= d) S.selected.add(h[3][0]);
+    S.selSquad = null; S.selEnemy = null; S.selSpot = null;
+    box = null;
+    inspected = null;
+    touch('map', 'inspector');
+  } else if (!drag.moved) {
+    select(hitAt(sx, sy), ev.shiftKey || ev.ctrlKey);
+  }
+  drag = null;
+});
+canvas.addEventListener('contextmenu', (ev) => {
+  ev.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  const [wx, wz] = toWorld(ev.clientX - r.left, ev.clientY - r.top);
+  openMenu(ev.clientX, ev.clientY, Math.round(wx), Math.round(wz));
+});
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') { S.selected.clear(); S.selSquad = null; S.selEnemy = null; S.selSpot = null; hideMenu(); touch('map', 'inspector'); }
+});
+
+function select(h, add) {
+  if (!add) { S.selected.clear(); S.selSquad = null; S.selEnemy = null; S.selSpot = null; }
+  if (h) {
+    if (h[2] === 'unit') { const id = h[3][0]; if (add && S.selected.has(id)) S.selected.delete(id); else S.selected.add(id); }
+    else if (h[2] === 'enemy') S.selEnemy = h[3][0];
+    else if (h[2] === 'squad') S.selSquad = h[3][0];
+    else if (h[2] === 'spot') S.selSpot = h[3];
+  }
+  inspected = null;
+  touch('map', 'inspector');
+  refreshInspector();
+}
+
+function tipFor(h) {
+  const d = h[3];
+  switch (h[2]) {
+    case 'unit': return [[`#${d[0]}`, d[1]], [d[5], 'role'], [d[4] + '%', 'health'], ...(d[6] ? [['S' + d[6], 'squad']] : [])];
+    case 'enemy': return [[`#${d[0]}`, d[1] || 'unidentified'], [fmtNum(d[6]), 'value'], [d[4] <= 30 ? 'now' : fmtTime(d[4]) + ' ago', 'seen']];
+    case 'squad': return [[`S${d[0]}`, `${d[1]} squad`], [d[2], 'status'], [d[7], 'members'], [fmtNum(d[8]), 'value']];
+    case 'spot': return [['#' + d.i, 'metal spot'], [d.owner, 'owner'], [fmtNum(d.value, 2), 'value']];
+    case 'defend': return [[fmtNum(d.weight), d.predicted ? 'predicted attack' : 'defend']];
+  }
+  return [];
+}
+
+const tip = $('#tip');
+function showTip(x, y, rows) {
+  tip.replaceChildren();
+  for (const [v, k] of rows) {
+    const r = el('div', 'row');
+    r.append(el('span', 'v', v), el('span', 'k', k));
+    tip.append(r);
+  }
+  tip.style.display = 'block';
+  tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - 8, x + 14) + 'px';
+  tip.style.top = Math.min(window.innerHeight - tip.offsetHeight - 8, y + 14) + 'px';
+}
+function hideTip() { tip.style.display = 'none'; }
+
+// ---------------------------------------------------------------- acting
+async function call(tool, args = {}) {
+  const res = await fetch('/call/' + encodeURIComponent(tool), {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args),
+  });
+  const body = await res.json().catch(() => ({ error: 'bad reply' }));
+  if (!res.ok) throw new Error((body && body.error) || res.statusText);
+  return body;
+}
+
+function toast(text, bad) {
+  const t = $('#toast');
+  t.textContent = text;
+  t.style.borderColor = bad ? 'var(--critical)' : 'var(--border)';
+  t.style.display = 'block';
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { t.style.display = 'none'; }, 3500);
+}
+
+async function act(tool, args, label) {
+  try {
+    const r = await call(tool, args);
+    toast(`${label}: done`);
+    showOut(tool, args, r);
+    return r;
+  } catch (e) {
+    toast(`${label}: ${e.message}`, true);
+    return null;
+  }
+}
+
+const menu = $('#menu');
+function hideMenu() { menu.style.display = 'none'; }
+function openMenu(x, y, wx, wz) {
+  if (!S.live) { toast('Acting needs a live game (this is a replay).', true); return; }
+  menu.replaceChildren();
+  const item = (label, fn) => { const b = el('button', null, label); b.addEventListener('click', () => { hideMenu(); fn(); }); menu.append(b); };
+  const sep = () => menu.append(el('div', 'sep'));
+  const ids = [...S.selected];
+  if (ids.length) {
+    item(`Move ${ids.length} selected here`, () => act('order', { units: ids, cmd: 'move', x: wx, z: wz }, 'move'));
+    item(`Attack-move ${ids.length} selected here`, () => act('order', { units: ids, cmd: 'fight', x: wx, z: wz }, 'fight'));
+    item(`Patrol ${ids.length} selected to here`, () => act('order', { units: ids, cmd: 'patrol', x: wx, z: wz }, 'patrol'));
+    item(`Build here with ${ids.length} selected…`, () => {
+      const def = prompt('Building to place (unit def name, e.g. turretlaser):');
+      if (def) act('order', { units: ids, cmd: 'build', unit: def.trim(), x: wx, z: wz }, 'build');
+    });
+    sep();
+  }
+  if (S.selSquad !== null) {
+    item(`Send squad S${S.selSquad} here (60 s)`, () => act('squad_target', { squad: S.selSquad, x: wx, z: wz, seconds: 60 }, 'squad'));
+    item(`Hand squad S${S.selSquad} back to the AI`, () => act('squad_target', { squad: S.selSquad, clear: true }, 'squad'));
+    sep();
+  }
+  item('Defend here (60 s)', () => act('defend', { x: wx, z: wz, seconds: 60 }, 'defend'));
+  item('Construction task here…', () => {
+    const def = prompt('Building for the economy to build here (prioritized):', 'turretlaser');
+    if (def) act('build', { unit: def.trim(), x: wx, z: wz }, 'build');
+  });
+  item('Marker here…', () => { const t = prompt('Marker label:', ''); if (t !== null) act('mark', { x: wx, z: wz, label: t }, 'mark'); });
+  item(`Copy position (${wx}, ${wz})`, () => navigator.clipboard && navigator.clipboard.writeText(`"x": ${wx}, "z": ${wz}`));
+  menu.style.display = 'block';
+  menu.style.left = Math.min(window.innerWidth - menu.offsetWidth - 8, x) + 'px';
+  menu.style.top = Math.min(window.innerHeight - menu.offsetHeight - 8, y) + 'px';
+}
+document.addEventListener('pointerdown', (ev) => { if (!menu.contains(ev.target)) hideMenu(); });
+
+// ---------------------------------------------------------------- inspector
+let inspected = null; // live details of the selected unit
+async function refreshInspector() {
+  if (!S.live) { touch('inspector'); return; }
+  const ids = [...S.selected];
+  const id = ids.length === 1 ? ids[0] : (ids.length === 0 && S.selEnemy !== null ? S.selEnemy : null);
+  if (id === null) { inspected = null; touch('inspector'); return; }
+  try { inspected = await call('unit', { id }); } catch (e) { inspected = { id, error: e.message }; }
+  touch('inspector');
+}
+setInterval(() => { if (S.live && S.follow && (S.selected.size === 1 || S.selEnemy !== null)) refreshInspector(); }, 2000);
+
+function kvBlock(pairs) {
+  const d = el('div', 'kv');
+  for (const [k, v] of pairs) d.append(el('div', 'k', k), el('div', 'v', v));
+  return d;
+}
+
+function renderInspector() {
+  const box = $('#inspector');
+  box.replaceChildren(el('h2', null, 'Inspector'));
+  const snap = snapNow();
+  const ids = [...S.selected];
+  const actions = el('div', 'actions');
+  const btn = (label, fn) => { const b = el('button', null, label); b.disabled = !S.live; b.addEventListener('click', fn); actions.append(b); };
+  if (ids.length > 1) {
+    const rows = (snap ? snap.units : []).filter((u) => S.selected.has(u[0]));
+    const counts = {};
+    for (const u of rows) counts[u[1]] = (counts[u[1]] || 0) + 1;
+    box.append(el('div', null, `${ids.length} units selected`));
+    box.append(kvBlock(Object.entries(counts).sort((a, b) => b[1] - a[1])));
+    btn('Take', () => act('take', { units: ids }, 'take'));
+    btn('Release', () => act('release', { units: ids }, 'release'));
+    btn('Stop', () => act('order', { units: ids, cmd: 'stop' }, 'stop'));
+    box.append(actions, el('div', 'empty', 'Right-click the map to order them.'));
+    return;
+  }
+  if (ids.length === 1 || S.selEnemy !== null) {
+    const id = ids.length === 1 ? ids[0] : S.selEnemy;
+    const v = inspected && inspected.id === id && !inspected.error ? inspected : null;
+    if (v && S.follow) {
+      const pairs = [['unit', `${v.def} #${v.id}`], ['side', v.side]];
+      if (v.human) pairs.push(['name', v.human]);
+      pairs.push(['position', v.pos.join(', ')]);
+      if (v.side === 'ours') {
+        pairs.push(['role', v.role], ['health', `${fmtNum(v.health)} / ${fmtNum(v.max_health)}`]);
+        if (v.being_built) pairs.push(['built', Math.round(v.build_progress * 100) + '%']);
+        if (v.fighter) pairs.push(['fighter', `${v.fighter.kind}${v.fighter.squad ? ' · squad S' + v.fighter.squad : ''} · power ${fmtNum(v.fighter.power)}`]);
+        if (v.fighter && v.fighter.target) pairs.push(['target', v.fighter.target.join(', ')]);
+        if (v.worker && v.worker.task) pairs.push(['task', `${v.worker.task.kind} ${v.worker.task.what} at ${v.worker.task.pos.join(', ')}`]);
+        pairs.push(['orders', v.commands.length ? v.commands.map((c) => c.build ? 'build ' + c.build : 'cmd ' + c.id).join(', ') : 'none']);
+        pairs.push(['operator', v.reserved ? 'holds it (the AI does not order it)' : 'no']);
+      } else {
+        pairs.push(['value', fmtNum(v.value)], ['power', fmtNum(v.power)], ['seen', v.seen_ago <= 30 ? 'now' : fmtTime(v.seen_ago) + ' ago'], ['flags', v.flags.join(', ')]);
+      }
+      box.append(kvBlock(pairs));
+    } else if (snap) {
+      const u = (S.selEnemy !== null && !ids.length ? snap.enemies : snap.units).find((r) => r[0] === id);
+      if (u) box.append(kvBlock(S.selEnemy !== null && !ids.length
+        ? [['enemy', `${u[1] || 'unidentified'} #${u[0]}`], ['position', `${u[2]}, ${u[3]}`], ['value', fmtNum(u[6])], ['seen', u[4] <= 30 ? 'now' : fmtTime(u[4]) + ' ago']]
+        : [['unit', `${u[1]} #${u[0]}`], ['position', `${u[2]}, ${u[3]}`], ['role', u[5]], ['health', u[4] + '%']]));
+      else box.append(el('div', 'empty', 'Not in this snapshot.'));
+      if (inspected && inspected.error) box.append(el('div', 'empty', inspected.error));
+    }
+    if (ids.length === 1) {
+      btn('Take', () => act('take', { units: ids }, 'take').then(refreshInspector));
+      btn('Release', () => act('release', { units: ids }, 'release').then(refreshInspector));
+      btn('Stop', () => act('order', { units: ids, cmd: 'stop' }, 'stop'));
+      box.append(actions);
+    }
+    return;
+  }
+  if (S.selSquad !== null && snap) {
+    const q = (snap.squads || []).find((r) => r[0] === S.selSquad);
+    if (q) {
+      box.append(kvBlock([['squad', `S${q[0]} (${q[1]})`], ['status', q[2]], ['position', `${q[3]}, ${q[4]}`], ['target', `${q[5]}, ${q[6]}`], ['members', q[7]], ['value', fmtNum(q[8])]]));
+      const members = (snap.units || []).filter((u) => u[6] === q[0]).map((u) => u[0]);
+      const b = el('button', null, `Select its ${members.length} units`);
+      b.addEventListener('click', () => { S.selected = new Set(members); touch('map', 'inspector'); });
+      actions.append(b);
+      btn('Hand back', () => act('squad_target', { squad: q[0], clear: true }, 'squad'));
+      box.append(actions, el('div', 'empty', 'Right-click the map to send it somewhere.'));
+    } else box.append(el('div', 'empty', 'Squad not in this snapshot.'));
+    return;
+  }
+  if (S.selSpot) {
+    const s = S.selSpot;
+    box.append(kvBlock([['metal spot', '#' + s.i], ['position', `${s.x}, ${s.z}`], ['value', fmtNum(s.value, 2)], ['owner', s.owner]]));
+    return;
+  }
+  box.append(el('div', 'empty', 'Click a unit, enemy, squad or metal spot. Shift-drag to select several of ours.'));
+}
+
+// ---------------------------------------------------------------- charts
+const charts = [...document.querySelectorAll('.chart')].map((c) => ({ kind: c.dataset.chart, canvas: c.querySelector('canvas'), hover: null, geom: null }));
+function chartSeries(kind) {
+  if (kind === 'metal') return [{ name: 'income', color: colors.ours, get: (r) => r.m[1] }, { name: 'spent', color: colors.series2, get: (r) => r.m[2] }];
+  if (kind === 'energy') return [{ name: 'income', color: colors.ours, get: (r) => r.e[1] }, { name: 'spent', color: colors.series2, get: (r) => r.e[2] }];
+  return [{ name: 'ours', color: colors.ours, get: (r) => r.army }, { name: 'enemy seen', color: colors.enemy, get: (r) => r.enemy_army }];
+}
+
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+  return 10 * p;
+}
+
+function drawChart(ch) {
+  const c = ch.canvas;
+  const dpr = window.devicePixelRatio || 1;
+  const r = c.getBoundingClientRect();
+  if (!r.width) return;
+  if (c.width !== Math.round(r.width * dpr) || c.height !== Math.round(r.height * dpr)) {
+    c.width = Math.round(r.width * dpr); c.height = Math.round(r.height * dpr);
+  }
+  const g = c.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, r.width, r.height);
+  const pad = { l: 38, r: 6, t: 6, b: 16 };
+  const w = r.width - pad.l - pad.r, h = r.height - pad.t - pad.b;
+  const series = chartSeries(ch.kind);
+  const ticks = S.ticks;
+  const maxF = Math.max(1800, S.lastFrame);
+  let maxV = 0;
+  for (const t of ticks) for (const s of series) maxV = Math.max(maxV, s.get(t) || 0);
+  maxV = niceMax(maxV * 1.05);
+  const X = (f) => pad.l + (f / maxF) * w;
+  const Y = (v) => pad.t + h - (v / maxV) * h;
+  ch.geom = { pad, w, maxF };
+  g.font = '10px system-ui, sans-serif';
+  g.fillStyle = colors.muted;
+  g.lineWidth = 1;
+  for (let i = 0; i <= 2; i++) {
+    const v = (maxV * i) / 2, y = Math.round(Y(v)) + 0.5;
+    g.strokeStyle = i === 0 ? colors.axis : colors.grid;
+    g.beginPath(); g.moveTo(pad.l, y); g.lineTo(pad.l + w, y); g.stroke();
+    g.textAlign = 'right'; g.fillText(fmtNum(v), pad.l - 4, y + 3);
+  }
+  const minutes = maxF / 1800;
+  const stepMin = minutes > 40 ? 10 : minutes > 16 ? 5 : minutes > 6 ? 2 : 1;
+  g.textAlign = 'center';
+  for (let m = 0; m <= minutes; m += stepMin) g.fillText(`${m}m`, X(m * 1800), pad.t + h + 12);
+  if (!ticks.length) return;
+  const stride = Math.max(1, Math.floor(ticks.length / (w * 1.5)));
+  for (const s of series) {
+    g.strokeStyle = s.color; g.lineWidth = 2; g.lineJoin = 'round';
+    g.beginPath();
+    for (let i = 0; i < ticks.length; i += stride) {
+      const t = ticks[i];
+      const x = X(t.f), y = Y(s.get(t) || 0);
+      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+  if (!S.follow) {
+    const x = Math.round(X(S.cursor)) + 0.5;
+    g.strokeStyle = colors.ink2; g.lineWidth = 1; g.setLineDash([3, 3]);
+    g.beginPath(); g.moveTo(x, pad.t); g.lineTo(x, pad.t + h); g.stroke(); g.setLineDash([]);
+  }
+  if (ch.hover !== null) {
+    const t = lastAtOrBefore(ticks, ch.hover) || ticks[0];
+    const x = Math.round(X(t.f)) + 0.5;
+    g.strokeStyle = colors.axis; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(x, pad.t); g.lineTo(x, pad.t + h); g.stroke();
+    for (const s of series) {
+      g.beginPath(); g.arc(x, Y(s.get(t) || 0), 4, 0, Math.PI * 2);
+      g.fillStyle = s.color; g.fill(); g.strokeStyle = colors.surface; g.lineWidth = 2; g.stroke();
+    }
+  }
+}
+
+for (const ch of charts) {
+  const frameAt = (ev) => {
+    const r = ch.canvas.getBoundingClientRect();
+    const gm = ch.geom;
+    if (!gm) return null;
+    return Math.max(0, Math.min(gm.maxF, ((ev.clientX - r.left - gm.pad.l) / gm.w) * gm.maxF));
+  };
+  ch.canvas.addEventListener('pointermove', (ev) => {
+    const f = frameAt(ev);
+    if (f === null || !S.ticks.length) return;
+    for (const o of charts) o.hover = f;
+    const t = lastAtOrBefore(S.ticks, f) || S.ticks[0];
+    tip.replaceChildren(el('div', 'k', fmtTime(t.f)));
+    for (const s of chartSeries(ch.kind)) {
+      const row = el('div', 'row');
+      const key = el('span', 'key'); key.style.background = s.color;
+      row.append(key, el('span', 'v', fmtNum(s.get(t), 1)), el('span', 'k', s.name));
+      tip.append(row);
+    }
+    tip.style.display = 'block';
+    tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - 8, ev.clientX + 14) + 'px';
+    tip.style.top = (ev.clientY + 14) + 'px';
+    touch('charts');
+  });
+  ch.canvas.addEventListener('pointerleave', () => { for (const o of charts) o.hover = null; hideTip(); touch('charts'); });
+  ch.canvas.addEventListener('click', (ev) => { const f = frameAt(ev); if (f !== null) setCursor(Math.round(f)); });
+}
+
+// ---------------------------------------------------------------- timeline
+const slider = $('#slider');
+function setCursor(f) {
+  S.follow = false; $('#follow').checked = false;
+  S.cursor = Math.max(0, Math.min(S.lastFrame, f));
+  touch('map', 'charts', 'log', 'tiles', 'inspector');
+}
+slider.addEventListener('input', () => setCursor(Number(slider.value)));
+$('#follow').addEventListener('change', (ev) => {
+  S.follow = ev.target.checked;
+  if (S.follow) S.playing = false;
+  touch('map', 'charts', 'log', 'tiles', 'inspector');
+});
+$('#playBtn').addEventListener('click', () => {
+  if (S.follow) { S.follow = false; $('#follow').checked = false; S.cursor = 0; }
+  if (S.cursor >= S.lastFrame) S.cursor = 0;
+  S.playing = !S.playing;
+});
+let timelineKey = '';
+function renderTimeline() {
+  const key = `${S.lastFrame}:${Math.floor(frameNow())}:${S.playing}`;
+  if (key === timelineKey) return;
+  timelineKey = key;
+  slider.max = String(S.lastFrame);
+  slider.value = String(Math.floor(frameNow()));
+  $('#when').textContent = `${fmtTime(frameNow())} / ${fmtTime(S.lastFrame)}`;
+  $('#playBtn').textContent = S.playing ? '❚❚' : '▶';
+}
+
+// ---------------------------------------------------------------- events
+const KIND_GROUP = { log: 'log', 'unit+': 'units', 'unit-': 'units', given: 'units', idle: 'operator', kill: 'combat', 'enemy+': 'combat', op: 'operator', note: 'operator', say: 'chat', chat: 'chat', error: 'log', end: 'operator' };
+const KIND_LABEL = { 'unit+': 'built', 'unit-': 'lost', given: 'given', idle: 'idle', kill: 'kill', 'enemy+': 'spotted', op: 'operator', note: 'note', say: 'said', chat: 'chat', end: 'end' };
+function evText(e) {
+  switch (e.k) {
+    case 'log': return e.msg;
+    case 'unit+': return `${e.def} #${e.id}`;
+    case 'unit-': return `${e.def} #${e.id}${e.by ? ' to ' + e.by : ''}${e.reserved ? ' (the operator held it)' : ''}`;
+    case 'kill': return `${e.def || 'unidentified'} #${e.id}${e.by ? ' by ' + e.by : ''}`;
+    case 'enemy+': return `${e.def || 'unidentified'} #${e.id}`;
+    case 'given': return `${e.def} #${e.id}: team ${e.from} → ${e.to}${e.captured ? ' (captured)' : ''}`;
+    case 'idle': return `the operator's ${e.def} #${e.id} is idle`;
+    case 'op': return e.tool
+      ? `${e.tool} ${JSON.stringify(e.args)} → ${e.ok ? 'ok' : 'error: ' + e.error}`
+      : `${e.event} ${e.unit || e.factory || ''}`;
+    case 'note': return `${e.tag ? '[' + e.tag + '] ' : ''}${e.text}`;
+    case 'say': return e.text;
+    case 'chat': return `player ${e.player}: ${e.text}`;
+    case 'end': return `run ended at ${e.time} (${e.state})`;
+    default: return JSON.stringify(e);
+  }
+}
+let logKey = '';
+function renderLog() {
+  const box = $('#events');
+  const groups = new Set([...document.querySelectorAll('.filters input[type=checkbox]')].filter((c) => c.checked).map((c) => c.dataset.kind));
+  const grep = $('#grep').value.trim().toLowerCase();
+  const until = frameNow();
+  const out = [];
+  for (let i = S.events.length - 1; i >= 0 && out.length < 400; i--) {
+    const e = S.events[i];
+    if (e.f > until) continue;
+    if (!groups.has(KIND_GROUP[e.k] || 'log')) continue;
+    const text = evText(e);
+    if (grep && !text.toLowerCase().includes(grep) && !(e.mod || e.k || '').includes(grep)) continue;
+    out.push([e, text]);
+  }
+  const key = `${out.length}:${out.length ? out[0][0].seq : ''}:${[...groups].join()}:${grep}`;
+  if (key === logKey) return;
+  logKey = key;
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+  box.replaceChildren();
+  out.reverse();
+  for (const [e, text] of out) {
+    const isErr = e.k === 'error' || (e.k === 'log' && (e.mod === 'error' || /panicked/.test(e.msg || '')));
+    const opish = e.k === 'op' || e.k === 'note' || e.k === 'idle';
+    const row = el('div', `ev${opish ? ' op' : ''}${isErr ? ' err' : ''}`);
+    row.append(el('span', 'f', fmtTime(e.f)), el('span', 'kind', e.k === 'log' ? (e.mod || 'log') : (KIND_LABEL[e.k] || e.k)), el('span', 'txt', text));
+    row.title = 'Show the map at this moment';
+    row.addEventListener('click', () => {
+      setCursor(e.f);
+      if (Array.isArray(e.pos)) {
+        const r = canvas.getBoundingClientRect();
+        view.x = r.width / 2 - e.pos[0] * view.k; view.y = r.height / 2 - e.pos[1] * view.k;
+        view.user = true;
+        touch('map');
+      }
+    });
+    box.append(row);
+  }
+  if (atBottom || !S.live) box.scrollTop = box.scrollHeight;
+}
+document.querySelectorAll('.filters input').forEach((i) => i.addEventListener('input', () => { logKey = ''; touch('log'); }));
+
+// ---------------------------------------------------------------- tool console
+function showOut(tool, args, result) {
+  $('#out').textContent = `${tool} ${JSON.stringify(args)}\n\n${JSON.stringify(result, null, 2)}`;
+}
+function argsTemplate(t) {
+  const o = {};
+  const props = (t.inputSchema && t.inputSchema.properties) || {};
+  for (const name of (t.inputSchema && t.inputSchema.required) || []) {
+    const ty = props[name] && props[name].type;
+    o[name] = ty === 'number' || ty === 'integer' ? 0 : ty === 'boolean' ? false : ty === 'array' ? [] : '';
+  }
+  if ('units' in props && S.selected.size) o.units = [...S.selected];
+  if ('id' in props && S.selected.size === 1) o.id = [...S.selected][0];
+  if ('squad' in props && S.selSquad !== null) o.squad = S.selSquad;
+  return o;
+}
+function renderToolDesc() {
+  const t = S.tools.find((x) => x.name === $('#tool').value);
+  if (!t) return;
+  const props = (t.inputSchema && t.inputSchema.properties) || {};
+  const req = new Set((t.inputSchema && t.inputSchema.required) || []);
+  const params = Object.entries(props).map(([k, v]) => `${k}${req.has(k) ? '' : '?'}: ${v.description || v.type}`);
+  $('#toolDesc').textContent = t.description + (params.length ? '\n' + params.join('\n') : '');
+  $('#args').value = JSON.stringify(argsTemplate(t));
+}
+$('#tool').addEventListener('change', renderToolDesc);
+$('#callBtn').addEventListener('click', async () => {
+  const tool = $('#tool').value;
+  let args;
+  try { args = JSON.parse($('#args').value || '{}'); } catch (e) { $('#out').textContent = 'Arguments are not valid JSON: ' + e.message; return; }
+  $('#out').textContent = 'calling ' + tool + '…';
+  try { showOut(tool, args, await call(tool, args)); } catch (e) { $('#out').textContent = `${tool}: ${e.message}`; }
+});
+async function loadTools() {
+  try { S.tools = (await (await fetch('/tools')).json()).tools || []; } catch (e) { S.tools = []; }
+  const sel = $('#tool');
+  sel.replaceChildren();
+  for (const t of S.tools) {
+    const o = el('option', null, t.name + (t.annotations && t.annotations.readOnlyHint === false ? '  (acts)' : ''));
+    o.value = t.name;
+    sel.append(o);
+  }
+  $('#callBtn').disabled = !S.tools.length;
+  if (S.tools.length) renderToolDesc();
+}
+
+// ---------------------------------------------------------------- live game
+let source = null;
+let overlayTimer = null;
+let timers = [];
+async function connectLive() {
+  let ok = false;
+  try { ok = (await fetch('/health')).ok; } catch (e) { ok = false; }
+  if (!ok) { setConn('', 'no game: open a journal'); return; }
+  S.live = true;
+  $('#runsBtn').hidden = false;
+  setConn('live', 'live');
+  loadTools();
+  try { S.status = await call('status'); } catch (e) { /* not up yet */ }
+  try { ingest(Object.assign({ k: 'map', f: 0 }, await call('map_info'))); } catch (e) { /* comes with the stream */ }
+  source = new EventSource('/events?since=0');
+  source.onmessage = (m) => { try { ingest(JSON.parse(m.data)); } catch (e) { /* skip */ } };
+  source.onerror = () => setConn('down', 'reconnecting');
+  source.onopen = () => setConn('live', 'live');
+  timers.push(setInterval(pollSnapshot, 1000));
+  timers.push(setInterval(async () => { try { S.status = await call('status'); touch('tiles'); } catch (e) { /* paused */ } }, 5000));
+}
+async function pollSnapshot() {
+  if (!S.live) return;
+  try {
+    const s = await (await fetch('/snapshot')).json();
+    if (s && s.frame !== undefined) {
+      S.liveSnap = s;
+      if (s.frame > S.lastFrame) S.lastFrame = s.frame;
+      touch('map', 'tiles');
+      if (S.selected.size > 1 || S.selSquad !== null) touch('inspector');
+    }
+  } catch (e) { /* game gone */ }
+}
+async function pollOverlay() {
+  const layer = $('#overlay').value;
+  if (!layer || !S.live) { S.overlay = null; overlayCanvas = null; touch('map'); return; }
+  try {
+    S.overlay = await call('threat_map', { layer, max_size: 160 });
+    overlayCanvas = buildOverlay(S.overlay);
+    touch('map');
+  } catch (e) { toast('overlay: ' + e.message, true); }
+}
+$('#overlay').addEventListener('change', () => {
+  if (!S.live && $('#overlay').value) { toast('Overlays need a live game.', true); $('#overlay').value = ''; return; }
+  clearInterval(overlayTimer);
+  pollOverlay();
+  if ($('#overlay').value) overlayTimer = setInterval(pollOverlay, 3000);
+});
+
+// ---------------------------------------------------------------- journals
+function loadJournalText(text, name) {
+  if (source) { source.close(); source = null; }
+  for (const t of timers) clearInterval(t);
+  timers = [];
+  clearInterval(overlayTimer); $('#overlay').value = '';
+  S.live = false;
+  resetStore();
+  let bad = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try { ingest(JSON.parse(line)); } catch (e) { bad++; }
+  }
+  S.follow = false; $('#follow').checked = false;
+  S.cursor = S.lastFrame;
+  view.fitted = false;
+  setConn('replay', 'replay: ' + (name || 'journal'));
+  $('#liveBtn').hidden = !location.protocol.startsWith('http');
+  $('#runsBtn').hidden = true;
+  $('#callBtn').disabled = true;
+  $('#toolDesc').textContent = 'Replaying a journal: tools act only on a live game.';
+  if (bad) toast(`${bad} lines could not be read`, true);
+  touch('map', 'charts', 'log', 'tiles', 'inspector');
+}
+$('#openBtn').addEventListener('click', () => $('#file').click());
+$('#file').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (f) loadJournalText(await f.text(), f.name);
+});
+$('#liveBtn').addEventListener('click', () => location.reload());
+window.addEventListener('dragover', (ev) => { ev.preventDefault(); $('#drop').style.display = 'flex'; });
+window.addEventListener('dragleave', (ev) => { if (ev.target === $('#drop')) $('#drop').style.display = 'none'; });
+window.addEventListener('drop', async (ev) => {
+  ev.preventDefault();
+  $('#drop').style.display = 'none';
+  const f = ev.dataTransfer.files[0];
+  if (f) loadJournalText(await f.text(), f.name);
+});
+$('#runsBtn').addEventListener('click', async () => {
+  const body = $('#runsBody');
+  body.replaceChildren(el('div', 'empty', 'loading…'));
+  $('#runs').style.display = 'flex';
+  try {
+    const r = await (await fetch('/journals')).json();
+    body.replaceChildren();
+    if (!r.journals || !r.journals.length) { body.append(el('div', 'empty', 'No journals: start the AI with the journal option or ZKGBAI_JOURNAL.')); return; }
+    body.append(el('div', 'empty', r.dir));
+    const table = el('table');
+    for (const j of r.journals) {
+      const tr = el('tr');
+      tr.append(el('td', null, j.name), el('td', null, `${(j.size / 1024).toFixed(0)} KB`), el('td', null, new Date(j.modified * 1000).toLocaleString()));
+      tr.addEventListener('click', async () => {
+        $('#runs').style.display = 'none';
+        const text = await (await fetch('/journals/' + encodeURIComponent(j.name))).text();
+        loadJournalText(text, j.name);
+      });
+      table.append(tr);
+    }
+    body.append(table);
+  } catch (e) { body.replaceChildren(el('div', 'empty', 'Could not list journals: ' + e.message)); }
+});
+$('#runs').addEventListener('click', (ev) => { if (ev.target === $('#runs')) $('#runs').style.display = 'none'; });
+$('#fitBtn').addEventListener('click', fitView);
+for (const id of ['#showOurs', '#showEnemies', '#showSquads', '#showSpots']) $(id).addEventListener('change', () => touch('map'));
+
+// ---------------------------------------------------------------- frame loop
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(0.25, (now - lastT) / 1000); lastT = now;
+  if (S.playing && !S.follow) {
+    S.cursor = Math.min(S.lastFrame, S.cursor + dt * 30 * Number($('#speed').value));
+    if (S.cursor >= S.lastFrame) S.playing = false;
+    touch('map', 'charts', 'log', 'tiles');
+  }
+  if (dirty.map) { dirty.map = false; drawMap(); }
+  if (dirty.charts) { dirty.charts = false; for (const ch of charts) drawChart(ch); }
+  if (dirty.log) { dirty.log = false; renderLog(); }
+  if (dirty.tiles) { dirty.tiles = false; renderTiles(); renderMeta(); }
+  if (dirty.inspector) { dirty.inspector = false; renderInspector(); }
+  renderTimeline();
+  requestAnimationFrame(frame);
+}
+new ResizeObserver(() => { if (!view.user) view.fitted = false; touch('map', 'charts'); }).observe(document.querySelector('.layout'));
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  readColors(); terrain = null; overlayCanvas = buildOverlay(S.overlay); touch('map', 'charts');
+});
+readColors();
+requestAnimationFrame(frame);
+if (location.protocol.startsWith('http')) connectLive(); else setConn('', 'open a journal');
+</script>
+</body>
+</html>

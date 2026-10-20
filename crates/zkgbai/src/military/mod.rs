@@ -281,6 +281,60 @@ impl MilitaryManager {
         self.defense_targets.push(d);
     }
 
+    /// Add a defense target, or renew the one at the same place.
+    pub fn refresh_defense_target(&mut self, d: DefenseTarget) {
+        let same = |t: &DefenseTarget| t.position.x == d.position.x && t.position.z == d.position.z;
+        match self.defense_targets.iter_mut().find(|t| same(t)) {
+            Some(t) => *t = d,
+            None => self.defense_targets.push(d),
+        }
+    }
+
+    /// Places to defend: attacked lately (`false`) and predicted (`true`).
+    pub fn defense_targets(&self) -> impl Iterator<Item = (&DefenseTarget, bool)> {
+        self.defense_targets.iter().map(|d| (d, false)).chain(self.predicted_defense_targets.iter().map(|d| (d, true)))
+    }
+
+    /// Names of the threat and value maps, for [`MilitaryManager::grid_value`].
+    pub const GRIDS: [&'static str; 12] = [
+        "threat",
+        "enemy_porc",
+        "ally_threat",
+        "ally_raider",
+        "ally_porc",
+        "aa_threat",
+        "aa_porc",
+        "value",
+        "raider_value",
+        "bp",
+        "riot",
+        "scythe",
+    ];
+
+    /// Size in cells (of 64 elmos) of the threat and value maps.
+    pub fn grid_size(&self) -> (i32, i32) {
+        (self.threat_graphics.width, self.threat_graphics.height)
+    }
+
+    /// Raw cell value of a threat or value map by name (see [`Self::GRIDS`]).
+    pub fn grid_value(&self, name: &str, x: i32, y: i32) -> Option<f32> {
+        Some(match name {
+            "threat" => self.threat_graphics.get_value(x, y),
+            "enemy_porc" => self.enemy_porc_graphics.get_value(x, y),
+            "ally_threat" => self.ally_threat_graphics.get_value(x, y),
+            "ally_raider" => self.ally_raider_graphics.get_value(x, y),
+            "ally_porc" => self.ally_porc_graphics.get_value(x, y),
+            "aa_threat" => self.aa_threat_graphics.get_value(x, y),
+            "aa_porc" => self.aa_porc_graphics.get_value(x, y),
+            "value" => self.value_graphics.get_value(x, y),
+            "raider_value" => self.raider_value_graphics.get_value(x, y),
+            "bp" => self.bp_graphics.get_value(x, y),
+            "riot" => self.riot_graphics.get_value(x, y),
+            "scythe" => self.scythe_graphics.get_value(x, y),
+            _ => return None,
+        })
+    }
+
     /// Places attacked lately and places about to be.
     fn all_defense_targets(&self) -> impl Iterator<Item = &DefenseTarget> {
         self.defense_targets.iter().chain(&self.predicted_defense_targets)

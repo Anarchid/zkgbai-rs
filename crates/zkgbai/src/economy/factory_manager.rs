@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use springai::{Callback, Unit};
+use springai::{Callback, Unit, UnitDef};
 
 use crate::Ai;
 use crate::economy::Factory;
@@ -477,6 +477,11 @@ impl Ai {
             f.creating_scout = false;
             f.scout_allowance -= 1;
         }
+        if let Some(def) = self.op_factory_order(fac_id) {
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
+        let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let mut fac = f.clone();
 
         let mut scouts_needed: i32 = self.fac.factories.values().map(|f| f.max_scout_allowance).sum();
@@ -530,6 +535,26 @@ impl Ai {
             return;
         };
         if kind == FacKind::StriderHub {
+            let site = self.fac.cb.map().find_closest_build_site(def, pos, 250.0, 3, 0);
+            unit.build(def, site, 0, 0);
+        } else {
+            unit.build(def, pos, 0, 0);
+        }
+    }
+
+    /// Build a unit the operator ordered, telling the modules that keep
+    /// count of what they order.
+    fn fac_build_ordered(&mut self, fac_id: i32, def: UnitDef) {
+        let Some(f) = self.fac.factories.get(&fac_id) else { return };
+        let (unit, pos, kind) = (f.unit, f.get_pos(), f.kind());
+        match self.defs.name(def) {
+            "amphtele" => self.teleport_ordered(),
+            "gunshiptrans" => self.drops_ordered(),
+            scouts::WIDOW => self.scouts_ordered(),
+            _ => {}
+        }
+        if kind == FacKind::StriderHub {
+            unit.stop(0);
             let site = self.fac.cb.map().find_closest_build_site(def, pos, 250.0, 3, 0);
             unit.build(def, site, 0, 0);
         } else {

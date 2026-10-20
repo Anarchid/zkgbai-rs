@@ -20,9 +20,10 @@ Layout
 | `crates/springai-sys` | Raw bindings to the engine's Skirmish AI C interface, pre-generated from the Recoil headers (no libclang or engine checkout needed to build). Regenerate with `tools/regen-bindings.sh`. |
 | `crates/springai` | Safe Rust interface: `Copy` handles for units/defs/features, engine queries and orders, decoded events, and `export_ai!`, which contains every panic at the FFI boundary, supports several AI instances per process and queues re-entrant events. |
 | `crates/terrain` | `zk-terrain`: engine-independent terrain model. For each movement tier (spider, bot, vehicle, hover, ship, amphibious) the map is split by [zkta](https://github.com/Anarchid/zkta-rust) into regions joined by chokepoints: zkta's gates, and borders where regions touch over slopes units crawl up (or open ground) without one. Each chokepoint is measured on the ground: how much longer than flat ground crossing it takes either way (units slow down only climbing), how much longer going round a gate over its sides takes, and how much wall would close it. Routes over the region graph count the climb; holding a chokepoint costs more the wider the front its defenders must cover and less the longer attackers climb into it. With a region lookup per position and static connectivity. `strategy` analyses the region graph against the game state: which chokepoints guard which regions, which to hold or wall, and where bridges, air drops or teleports would hurt the enemy most. `occupancy` keeps track of who holds each region (strength, anti-air and value of either side) and of the ground ways a force has if it must fight through them. `threat` reasons about forces on the move: how soon a raid can reach each region (chokepoints held against it stop it) and where defenders can stand first to keep it from the most value. |
-| `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories, the energy grid and linking power-hungry buildings to it before they are built, terraforming: ditches against vehicles and spikes for advanced radar sited by sight lines, Berthas sited by shell paths, missile silos made firebases, colonies of far-off free metal), `military` (enemy tracking, threat maps, anti-air we do not see placed from the bearings of its hits on our aircraft, targeting, unit handlers, enemy incursions and the squads sent to block them, the Djinn evacuating retreating striders, Charon air drops where the walk is long or held against us and the sky clear, nukes and tactical missiles, Widows scouting for them and deep into the enemy's land, intel: how much enemy metal is unaccounted for, and when that calls for an anti-nuke), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread and re-analysed every minute so terraforming shows up, and the periodic strategic analysis), `los`. |
+| `crates/zkgbai` | The AI. `src/ai.rs` owns all state and dispatches events to the modules: `graph` (metal-spot graph, territory, overdrive grid), `economy` (workers, tasks, factories, the energy grid and linking power-hungry buildings to it before they are built, terraforming: ditches against vehicles and spikes for advanced radar sited by sight lines, Berthas sited by shell paths, missile silos made firebases, colonies of far-off free metal), `military` (enemy tracking, threat maps, anti-air we do not see placed from the bearings of its hits on our aircraft, targeting, unit handlers, enemy incursions and the squads sent to block them, the Djinn evacuating retreating striders, Charon air drops where the walk is long or held against us and the sky clear, nukes and tactical missiles, Widows scouting for them and deep into the enemy's land, intel: how much enemy metal is unaccounted for, and when that calls for an anti-nuke), `kgbutil` (pathfinder, terrain checks), `terrain` (the terrain model, built on a background thread and re-analysed every minute so terraforming shows up, and the periodic strategic analysis), `los`, and `operator` (the operator API and run journal, below). |
 | `tools/arena` | Headless match harness: `match.sh` plays one game, `series.sh` plays a map pool in parallel and summarises win rates. |
 | `tools/terrain-view` | Renders a tier's regions (darker on slopes units crawl up), gates (red, orange where going round them is easy) and borders (magenta where crossing is free, blue with a yellow tick into the side it climbs into) to PNG and, given a scenario dumped by the AI (`ZKGBAI_DUMP_TERRAIN=<dir>`), overlays and prints the strategic analysis. |
+| `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
 
 Building
@@ -86,6 +87,49 @@ constructor, to colonize the free metal far off. `ZKGBAI?test=aaprobe` against `
 flies unarmed Charons over static and mobile anti-air the attacker never sees (`air-intel:` lines:
 the raw hits, and every minute the contacts it has placed, to compare with the fort's).
 `ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
+
+Operator API and run journal
+----------------------------
+
+Another process (an LLM agent, the dashboard, a script) can read what the AI knows and steer what it
+does while it plays, and every run can be recorded for afterwards. Both are off unless asked for, per
+instance by AI option or for all instances by environment variable:
+
+- `operator` / `ZKGBAI_OPERATOR`: `on` serves on `127.0.0.1:7460` (or the next free port: a second
+  instance takes 7461), or give a port or `host:port`.
+- `journal` / `ZKGBAI_JOURNAL`: `on` writes `journal/<run>.jsonl` in the AI's data dir, or give a
+  directory. With `tools/arena/match.sh`, `ZKGBAI_JOURNAL=out` puts each match's journals next to its
+  infolog.
+
+The server answers on one port:
+
+| Endpoint | What |
+|----------|------|
+| `/` | The dashboard: the map (terrain, metal spots and owners, our units by role, enemies fading with time since seen, squads and their targets, places to defend, threat and value overlays), economy and army charts, the event log, an inspector, and a console for every tool. Select units (click, shift-drag) and right-click the map to order them, send a squad, set a defense point or a construction task. Scrub the timeline back over the game, or open a journal (from disk or the AI's journal list) to replay it. |
+| `/mcp` | MCP over Streamable HTTP: `claude mcp add --transport http zkgbai http://127.0.0.1:7460/mcp` gives an agent the tools. |
+| `/rpc` | Plain JSON-RPC 2.0: the method is a tool's name, the params its arguments. |
+| `/call/<tool>` | `curl 'localhost:7460/call/enemies?kind=porc&limit=5'`, or POST the arguments as JSON. |
+| `/tools` | Every tool with its description and input schema. |
+| `/events` | The event stream as server-sent events (`?kinds=log,kill&since=<seq>`). |
+| `/snapshot`, `/journal`, `/journals`, `/health` | The latest positions (served even while the game is paused), this run's journal, the journal directory. |
+
+Tools that read: `status`, `economy`, `workers`, `tasks`, `factories`, `military`, `squads`,
+`units`, `unit`, `enemies`, `threat_at`, `threat_map`, `spots`, `map_info`, `terrain`, `events`,
+`defs`, `snapshot`, `overrides`, `profile`. Tools that act: `say`, `mark`, `note` (into the
+journal), `feature` (switch a dev feature off or on mid-game), `fac_queue` (production orders the
+factories serve before their own choice), `requisition` (the next factory), `build` (a prioritized
+construction task), `defend` (a place the army defends as if attacked there), `squad_target`
+(override a squad's target for a while), `take` / `release` / `order` (hold units: the engine
+wrapper drops the AI's own orders to them, `springai::reserved`, until they are released). Calls run
+on the AI's thread at its next frame, so they are answered while the game runs.
+
+A journal is JSON lines, `{"seq":..,"f":frame,"k":kind,...}`: a `run` header (build, map, teams,
+options, seed), the `map`, then `log` lines (each AI log line, `mod` its module), `unit+`/`unit-`,
+`kill`, `enemy+`, `given`, `say`/`chat`, `op` (each operator action with its result) and `note`,
+`tick` every second (resources, army values, spots) and `snap` every five seconds (positions), and an
+`end` record with the CPU profile. `tools/operator/zkop.py journal <file>` summarizes one;
+`zkop.py ls`, `call`, `tools` and `events` talk to the running instances, which announce
+themselves in `<tmp>/zkgbai-operator/`.
 
 In-game commands
 ----------------

@@ -369,6 +369,12 @@ impl Ai {
                     return if worker.id != ctask.assigned_plop { NEVER } else { -1000.0 };
                 }
 
+                // Asked for by the operator: before anything else, spread
+                // over workers like other jobs.
+                if self.op_priority(task.id) {
+                    return (dist / 4.0) - 3000.0 + (400.0 * (cost_mod - 1.0)).max(0.0);
+                }
+
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {

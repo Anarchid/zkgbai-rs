@@ -22,6 +22,7 @@ use crate::military::scouts::Scouts;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
+use crate::operator::Operator;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
@@ -90,6 +91,9 @@ pub struct Ai {
     pub misc_handler: MiscHandler,
     pub bomber_handler: BomberHandler,
 
+    /// The operator API and the run's journal.
+    pub op: Operator,
+
     enemy_teams: BTreeSet<i32>,
     enemy_ally_teams: BTreeSet<i32>,
     pub debug_activated: bool,
@@ -105,21 +109,21 @@ pub struct Ai {
     slave: bool,
     merge_target: i32,
     /// Per-module panic counts, for log rate limiting.
-    panics: BTreeMap<&'static str, u32>,
+    pub(crate) panics: BTreeMap<&'static str, u32>,
     /// Per-handler CPU time, reported on release and by `kgbprofile`.
-    profile: BTreeMap<&'static str, Timing>,
+    pub(crate) profile: BTreeMap<&'static str, Timing>,
     /// Nesting depth of `guard` calls (handlers may guard their sub-steps).
     guard_depth: u32,
 }
 
 /// Accumulated wall time of one module handler.
 #[derive(Default)]
-struct Timing {
-    calls: u64,
-    total: Duration,
-    max: Duration,
+pub(crate) struct Timing {
+    pub calls: u64,
+    pub total: Duration,
+    pub max: Duration,
     /// Runs inside another guarded handler (excluded from the grand total).
-    nested: bool,
+    pub nested: bool,
 }
 
 impl SkirmishAi for Ai {
@@ -180,6 +184,7 @@ impl SkirmishAi for Ai {
             squad_handler: SquadHandler::new(),
             misc_handler: MiscHandler::new(),
             bomber_handler: BomberHandler::new(),
+            op: Operator::new(cb, seed),
             enemy_teams: BTreeSet::new(),
             enemy_ally_teams: BTreeSet::new(),
             debug_activated: false,
@@ -201,10 +206,14 @@ impl SkirmishAi for Ai {
     }
 
     fn handle_event(&mut self, event: Event) -> i32 {
+        if !self.op_observe(&event) {
+            return 0;
+        }
         match event {
             Event::Init { .. } => return self.init(),
-            Event::Release { .. } => {
+            Event::Release { reason } => {
                 self.log_profile();
+                self.op_finish(reason);
                 self.initialized = false;
             }
             Event::Update { frame } => self.update(frame),
@@ -227,8 +236,22 @@ impl SkirmishAi for Ai {
 impl Ai {
     /// Modules receive events only after a successful init, and never in
     /// merge (slave) mode.
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.initialized && !self.slave && !self.resigned
+    }
+
+    /// Where the AI is in its life: starting, playing, merged (handing its
+    /// units to another instance) or resigned.
+    pub fn state(&self) -> &'static str {
+        if self.slave {
+            "merged"
+        } else if self.resigned {
+            "resigned"
+        } else if self.initialized {
+            "playing"
+        } else {
+            "starting"
+        }
     }
 
     /// Run one module's handler, isolating panics so one faulty module does
@@ -345,6 +368,7 @@ impl Ai {
             self.log(&format!("dev: features off: {}", off.join(", ")));
         }
         self.initialized = true;
+        self.op_start();
         0
     }
 
@@ -353,6 +377,7 @@ impl Ai {
             return;
         }
         self.frame = frame;
+        self.guard("operator.update", |ai| ai.op_update(frame));
         if frame == 0 {
             self.say("glhf!");
         }
@@ -529,7 +554,7 @@ impl Ai {
 
     /// Route an event to the modules that handle it, in module order
     /// (los, graph, eco, war, fac).
-    fn dispatch(&mut self, event: Event) {
+    pub(crate) fn dispatch(&mut self, event: Event) {
         match event {
             Event::UnitFinished { unit } => {
                 self.guard("graph.unitFinished", |ai| ai.graph_unit_finished(unit));
@@ -718,8 +743,26 @@ impl Ai {
         self.disabled.contains(feature)
     }
 
+    pub fn features_off(&self) -> Vec<String> {
+        self.disabled.iter().cloned().collect()
+    }
+
+    /// Switch a feature off (or back on) while playing.
+    pub fn set_feature_off(&mut self, feature: &str, off: bool) {
+        if off {
+            self.disabled.insert(feature.to_owned());
+        } else {
+            self.disabled.remove(feature);
+        }
+    }
+
     pub fn log(&self, s: &str) {
         self.cb.log(s);
+        if self.op.is_on() {
+            // Lines are mostly "module: what happened".
+            let module = s.split_once(':').map(|(m, _)| m).filter(|m| m.len() <= 24 && !m.contains(' '));
+            self.op_emit("log", serde_json::json!({"mod": module, "msg": s}));
+        }
     }
 
     /// Report an internal error: always logged, also said in chat when
@@ -734,6 +777,7 @@ impl Ai {
 
     pub fn say(&self, s: &str) {
         self.cb.game().send_text_message(&format!("/say <{AI_SHORT_NAME}> {s}"), 0);
+        self.op_emit("say", serde_json::json!({"text": s}));
     }
 
     pub fn emote(&self, s: &str) {

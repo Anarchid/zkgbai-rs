@@ -516,7 +516,7 @@ impl Ai {
         }
     }
 
-    fn squad_set_target(&mut self, sid: SquadId, target: Vec3) {
+    pub(crate) fn squad_set_target(&mut self, sid: SquadId, target: Vec3) {
         let mut nav = nav!(self);
         if let Some(s) = self.squads.get_mut(sid) {
             s.set_target(target, &mut self.fighters, &mut nav);
@@ -542,6 +542,11 @@ impl Ai {
     }
 
     fn squad_assign_squad(&mut self, sid: SquadId) {
+        // Sent somewhere by the operator.
+        if let Some(target) = self.op_squad_target(sid) {
+            self.squad_set_target(sid, target);
+            return;
+        }
         let Some(s) = self.squads.get(sid) else { return };
         let pos = s.get_pos(&self.fighters);
         let (status, target) = (s.status, s.target);
@@ -589,6 +594,10 @@ impl Ai {
     }
 
     fn squad_assign_air_squad(&mut self, sid: SquadId) {
+        if let Some(target) = self.op_squad_target(sid) {
+            self.squad_set_target(sid, target);
+            return;
+        }
         let Some(s) = self.squads.get(sid) else { return };
         let pos = s.get_pos(&self.fighters);
 

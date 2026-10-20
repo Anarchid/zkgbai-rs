@@ -131,6 +131,31 @@ impl Ai {
         Some(id)
     }
 
+    /// A construction task the operator asked for: `def` at the legal site
+    /// closest to `pos`. Returns the task and its site.
+    pub(crate) fn eco_operator_build(
+        &mut self,
+        def: UnitDef,
+        pos: Vec3,
+        facing: i32,
+    ) -> Result<(TaskId, Vec3), String> {
+        let site = self.cb.map().find_closest_build_site(def, pos, 600.0, 3, facing);
+        if site.x < 0.0 {
+            return Err("no build site within 600 elmos".into());
+        }
+        let task = WorkerTask::construction(def, site, facing);
+        if let Some(&id) =
+            self.eco.construction_tasks.iter().find(|&&id| self.eco.tasks.get(id).is_some_and(|t| t.same_as(&task)))
+        {
+            return Ok((id, site));
+        }
+        let armed = !def.weapon_mounts().is_empty();
+        let id = self
+            .eco_add_construction(task, Some(List::Construction), armed.then_some(List::Porc))
+            .ok_or("the economy refused the site (too close to a factory's yard or a planned building)")?;
+        Ok((id, site))
+    }
+
     /// Construction task for `def` at `pos` with facing 0, deduplicated
     /// against `dedup`.
     pub(super) fn eco_add_simple(
@@ -1061,6 +1086,10 @@ impl Ai {
             || self.fac.factories.is_empty()
             || self.dev_off("requisition")
         {
+            return;
+        }
+        if let Some(r) = self.op_requisition() {
+            self.eco.requisition = Some(r);
             return;
         }
         self.eco_plan_sub_defense();

@@ -13,6 +13,7 @@ pub mod export;
 mod feature;
 mod macros;
 mod math;
+pub mod reserved;
 mod unit;
 mod unitdef;
 mod weapondef;

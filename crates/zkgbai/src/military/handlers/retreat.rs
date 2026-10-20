@@ -33,6 +33,10 @@ impl RetreatHandler {
         Self::default()
     }
 
+    pub fn num_retreating(&self) -> usize {
+        self.retreating_units.len()
+    }
+
     /// Whether the unit is retreating. Unlike [`Ai::retreat_is_retreating`]
     /// this skips the original's special case for uncloaked scythes, which
     /// needs the threat map; only the raider handler controls scythes.

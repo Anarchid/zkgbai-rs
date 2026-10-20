@@ -172,6 +172,9 @@ impl Weapon {
 /// `unitId, groupId, options, timeOut` header.
 macro_rules! unit_cmd {
     ($self:ident, $topic:ident, $S:ident, $opts:expr, $timeout:expr $(, $f:ident : $v:expr)* $(,)?) => {{
+        if !crate::reserved::may_command(&$self.cb, $self.unit_id) {
+            return false;
+        }
         let mut data = sys::$S {
             unitId: $self.unit_id,
             groupId: -1,
@@ -184,7 +187,8 @@ macro_rules! unit_cmd {
 }
 
 /// Unit orders. Every order returns `true` if the engine accepted it; orders
-/// use the default timeout (never) unless the name says otherwise.
+/// use the default timeout (never) unless the name says otherwise. Orders to
+/// [reserved](crate::reserved) units are dropped.
 impl Unit {
     pub fn build(&self, def: UnitDef, pos: Vec3, facing: i32, opts: i16) -> bool {
         let mut p = pos.to_array();

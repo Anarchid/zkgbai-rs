@@ -69,6 +69,8 @@ ENGINE="${ENGINE_DIR%/}/spring-headless"
 
 OUT=${OUT:-$(mktemp -d "${TMPDIR:-/tmp}/zk-match.XXXXXX")}
 mkdir -p "$OUT"
+# ZKGBAI_JOURNAL=out: ZKGBAI's run journals go with this match's infolog.
+if [ "${ZKGBAI_JOURNAL:-}" = out ]; then export ZKGBAI_JOURNAL="$OUT/journal"; fi
 WD="$OUT/wd"
 mkdir -p "$WD"
 

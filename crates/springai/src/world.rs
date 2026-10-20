@@ -86,6 +86,13 @@ impl Callback {
         ffi!(self, File_getContent, p.as_ptr(), buf.as_mut_ptr().cast(), size).then_some(buf)
     }
 
+    /// This AI's own writable data directory (under the engine's write dir,
+    /// `AI/Skirmish/<name>/<version>/`), if the engine names one.
+    pub fn writeable_dir(&self) -> Option<String> {
+        let d = owned_str(ffi!(self, DataDirs_getWriteableDir));
+        (!d.is_empty()).then_some(d)
+    }
+
     /// Write a line to the engine's infolog.
     pub fn log(&self, msg: &str) {
         let m = c_string(msg);

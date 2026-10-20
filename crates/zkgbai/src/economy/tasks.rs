@@ -187,6 +187,11 @@ impl Default for TaskStore {
 }
 
 impl TaskStore {
+    /// All tasks, by id.
+    pub fn iter(&self) -> impl Iterator<Item = &WorkerTask> {
+        self.tasks.values()
+    }
+
     pub fn get(&self, id: TaskId) -> Option<&WorkerTask> {
         self.tasks.get(&id)
     }

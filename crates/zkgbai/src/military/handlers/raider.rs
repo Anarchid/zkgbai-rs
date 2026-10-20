@@ -454,7 +454,7 @@ impl Ai {
         }
     }
 
-    fn raider_squad_raid(&mut self, sid: SquadId, pos: Vec3) {
+    pub(crate) fn raider_squad_raid(&mut self, sid: SquadId, pos: Vec3) {
         let mut nav = nav!(self);
         if let Some(sq) = self.squads.get_mut(sid) {
             sq.raid(pos, &mut self.fighters, &mut nav);
@@ -1040,6 +1040,11 @@ impl Ai {
     }
 
     fn raider_assign_raider_squad(&mut self, sid: SquadId) {
+        // Sent somewhere by the operator.
+        if let Some(target) = self.op_squad_target(sid) {
+            self.raider_squad_raid(sid, target);
+            return;
+        }
         let Some(rs) = self.squads.get(sid) else {
             return;
         };
