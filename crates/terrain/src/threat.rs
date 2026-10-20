@@ -108,11 +108,20 @@ pub fn intercept(
     let mean_asset = value.iter().sum::<f32>() / count as f32;
     let valued: Vec<usize> = (0..value.len()).filter(|&r| value[r] > 0.0).collect();
 
+    // The front a block must cover: on the side away from the force.
+    let front = |c: usize| {
+        let choke = &map.chokes[c];
+        let behind = choke.regions.iter().copied().max_by(|&a, &b| enemy.to_region(a).total_cmp(&enemy.to_region(b)));
+        behind.map_or(choke.width, |r| choke.hold_width(r))
+    };
+    let fronts: Vec<f32> = (0..map.chokes.len()).map(front).collect();
+    let front = |c: usize| fronts[c];
+
     // Who gets to each chokepoint ahead of the force: (defender, slack).
     let mut first: Vec<Vec<(usize, f32)>> = vec![Vec::new(); map.chokes.len()];
     for (i, d) in defenders.iter().enumerate().filter(|(_, d)| d.power >= force.power) {
         let ours = Paths::new(map, d.pos, |_| false);
-        for (c, arrivals) in first.iter_mut().enumerate().filter(|&(c, _)| map.chokes[c].width <= MAX_HOLD_WIDTH) {
+        for (c, arrivals) in first.iter_mut().enumerate().filter(|&(c, _)| front(c) <= MAX_HOLD_WIDTH) {
             let (theirs, mine) = (enemy.to_choke(c), ours.to_choke(c));
             if !theirs.is_finite() || !mine.is_finite() || force.seconds(theirs) > horizon {
                 continue;
@@ -137,7 +146,7 @@ pub fn intercept(
             let closed = |x: usize| held(x) || x == c || blocks.iter().any(|b| b.choke == x);
             let after = Paths::new(map, force.pos, closed);
             let left = at_stake(&after);
-            let cost = mean_asset * BLOCK_COST * (1.0 + map.chokes[c].width / MAX_HOLD_WIDTH);
+            let cost = mean_asset * BLOCK_COST * (1.0 + front(c) / MAX_HOLD_WIDTH);
             let net = exposed - left - cost;
             if net > 0.0 && best.as_ref().is_none_or(|b| net > b.0) {
                 best = Some((net, c, after, left));
@@ -167,8 +176,11 @@ pub fn intercept(
 struct Reach {
     force: Force,
     region: Option<usize>,
-    /// Seconds to each chokepoint.
-    to_choke: Vec<f32>,
+    /// Number of each chokepoint's first side (see [`Paths`]).
+    first: Vec<usize>,
+    /// Seconds to each side of each chokepoint: to stand beside it in its
+    /// region `regions[k]` at `first[c] + k`.
+    to_side: Vec<f32>,
 }
 
 impl Reach {
@@ -177,7 +189,10 @@ impl Reach {
         if Some(r) == self.region {
             return self.force.seconds(self.force.pos.distance(p));
         }
-        let via = |c: usize| self.to_choke[c] + self.force.seconds(map.chokes[c].pos.distance(p));
+        let via = |c: usize| {
+            let side = map.chokes[c].side(r).map_or(f32::INFINITY, |k| self.to_side[self.first[c] + k]);
+            side + self.force.seconds(map.chokes[c].pos.distance(p))
+        };
         map.regions[r].chokes.iter().map(|&c| via(c)).fold(f32::INFINITY, f32::min)
     }
 }
@@ -220,7 +235,9 @@ impl Danger {
                 self.first[r] = force.power;
             }
         }
-        self.reaches.push(Reach { force, region: paths.origin_region(), to_choke });
+        let (first, sides) = paths.sides();
+        let to_side = sides.iter().map(|&d| force.seconds(d)).collect();
+        self.reaches.push(Reach { force, region: paths.origin_region(), first: first.to_vec(), to_side });
     }
 
     /// How soon the first force can get to `p`, and how strong it is;

@@ -44,9 +44,15 @@ impl FlowNet {
 
     /// Undirected edge with capacity `cap` both ways.
     pub fn add_edge(&mut self, a: usize, b: usize, cap: f64, choke: Option<usize>) {
+        self.add_arcs(a, b, cap, cap, choke);
+    }
+
+    /// An arc `a` to `b` with capacity `ab` and one back with capacity `ba`
+    /// (each the other's residual).
+    pub fn add_arcs(&mut self, a: usize, b: usize, ab: f64, ba: f64, choke: Option<usize>) {
         let (ia, ib) = (self.edges[a].len(), self.edges[b].len());
-        self.edges[a].push(FlowEdge { to: b, cap, rev: ib, choke });
-        self.edges[b].push(FlowEdge { to: a, cap, rev: ia, choke });
+        self.edges[a].push(FlowEdge { to: b, cap: ab, rev: ib, choke });
+        self.edges[b].push(FlowEdge { to: a, cap: ba, rev: ia, choke });
     }
 
     /// The chokepoints of a minimum cut between `s` and `t`; `None` if it
@@ -127,5 +133,15 @@ mod tests {
         let mut h = FlowNet::new(2);
         h.add_edge(0, 1, f64::INFINITY, None);
         assert!(h.min_cut(0, 1).is_none());
+
+        // Directed: only the capacity from the source's side counts.
+        let mut d = FlowNet::new(3);
+        d.add_arcs(0, 1, 2.0, 50.0, Some(5));
+        d.add_arcs(1, 2, 9.0, 1.0, Some(6));
+        assert_eq!(d.min_cut(0, 2).unwrap(), vec![5]);
+        let mut e = FlowNet::new(3);
+        e.add_arcs(2, 1, 1.0, 9.0, Some(6));
+        e.add_arcs(1, 0, 50.0, 2.0, Some(5));
+        assert_eq!(e.min_cut(0, 2).unwrap(), vec![5]);
     }
 }

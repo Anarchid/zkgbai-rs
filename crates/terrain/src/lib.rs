@@ -1,8 +1,11 @@
 //! Engine-independent terrain model for Zero-K maps.
 //!
 //! For each movement [`Tier`] the map is decomposed by [zkta] into regions
-//! joined by chokepoints. On top of that this crate provides what an AI
-//! needs at query time:
+//! joined by chokepoints: zkta's narrow *gates*, and *borders* where regions
+//! touch without one, mostly over slopes that slow units without stopping
+//! them. Every chokepoint knows how hard it is to cross either way (units
+//! slow down only climbing) and how much wall would close it. On top of
+//! that this crate provides what an AI needs at query time:
 //!
 //! - a dense *region map* (which region contains a position), derived by
 //!   flood-filling the passable area with every chokepoint's gate line drawn
@@ -11,7 +14,8 @@
 //! - static *connectivity* (connected components of passable cells), so
 //!   "can units of this tier get from A to B at all" is a lookup;
 //! - the region graph (regions as nodes, chokepoints as edges), with
-//!   shortest ground routes over it ([`paths`]).
+//!   shortest ground routes over it ([`paths`]), uphill crossings counting
+//!   the time they take.
 //!
 //! On top of the model, [`strategy`] analyses the game's territory (what
 //! guards what, which chokepoints to hold or wall, where bridges, drops and
@@ -23,6 +27,7 @@
 //! Positions are world coordinates in elmos (`x`, `z`); internally the model
 //! works on the engine's slope-map grid, one cell per 16 elmos.
 
+mod borders;
 mod build;
 mod graph;
 pub mod occupancy;
@@ -33,7 +38,8 @@ mod testmaps;
 pub mod threat;
 mod tier;
 
-pub use tier::{MoveClass, Tier, engine_max_slope};
+pub use borders::{FLANK_REACH, GATE_MARGIN};
+pub use tier::{MoveClass, SOFT_SPEED, Tier, default_slope_mod, engine_max_slope};
 pub use zkta::spring_map::SpringMapData;
 
 /// Elmos per model cell (the engine's slope-map resolution).
@@ -71,17 +77,78 @@ pub struct Region {
     pub chokes: Vec<usize>,
 }
 
-/// A narrow passage between regions.
+/// What kind of passage a chokepoint is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChokeKind {
+    /// A narrow opening between obstacles (zkta's chokepoint), with a gate
+    /// line across it.
+    Gate,
+    /// A stretch where two regions touch without a gate: mostly a slope
+    /// units cross slowly (see [`Choke::climb`]), sometimes open ground the
+    /// decomposition split without one.
+    Border,
+}
+
+/// A passage between regions: an edge of the region graph.
 #[derive(Clone, Debug)]
 pub struct Choke {
     pub id: usize,
+    pub kind: ChokeKind,
+    /// Where to cross: the gate's middle, or a border's easiest crossing.
     pub pos: Pos,
-    /// Clearance (passage width) in elmos.
+    /// Clearance (passage width) in elmos; a border's length.
     pub width: f32,
-    /// End points of the gate line across the passage, if known.
+    /// End points of the gate line across the passage, if known; a
+    /// border's ends.
     pub gate: Option<[Pos; 2]>,
     /// Ids of the regions this chokepoint joins (normally two).
     pub regions: Vec<usize>,
+    /// How much longer than on flat ground it takes to cross into
+    /// `regions[i]` here, in elmos of flat ground: zero downhill or level,
+    /// more the steeper and longer the climb.
+    pub climb: Vec<f32>,
+    /// How much longer than through the gate it takes to cross into
+    /// `regions[i]` over the ground beside it (from [`GATE_MARGIN`] to
+    /// [`FLANK_REACH`] off its line), elmos; `INFINITY` where the gate's
+    /// sides are cliffs, and for borders.
+    pub bypass: Vec<f32>,
+    /// Length of wall (or ditch) that closes the passage, elmos: a gate's
+    /// width plus the passable slopes beside it, a border's length.
+    pub wall: f32,
+}
+
+/// How much longer (elmos of flat ground) going round a gate over its
+/// sides must take before its sides count as no way round at all: then
+/// defenses need to cover only the gate itself, not its whole wall.
+pub const HARD_BYPASS: f32 = 300.0;
+
+impl Choke {
+    /// Index of `region` in [`Choke::regions`].
+    pub fn side(&self, region: usize) -> Option<usize> {
+        self.regions.iter().position(|&r| r == region)
+    }
+
+    /// See [`Choke::climb`]; zero for a region it does not join.
+    pub fn climb_into(&self, region: usize) -> f32 {
+        self.side(region).map_or(0.0, |i| self.climb[i])
+    }
+
+    /// See [`Choke::bypass`]; `INFINITY` for a region it does not join.
+    pub fn bypass_into(&self, region: usize) -> f32 {
+        self.side(region).map_or(f32::INFINITY, |i| self.bypass[i])
+    }
+
+    /// How wide a front defenses keeping enemies out of `region` here must
+    /// cover: a gate's width if going round it is no option, more of its
+    /// wall the easier going round is; a border's length.
+    pub fn hold_width(&self, region: usize) -> f32 {
+        let bypass = self.bypass_into(region);
+        if !bypass.is_finite() {
+            return self.width;
+        }
+        let soft = 1.0 / (1.0 + bypass / HARD_BYPASS);
+        self.width + (self.wall - self.width).max(0.0) * soft
+    }
 }
 
 /// The terrain model for one movement tier.
@@ -264,7 +331,28 @@ impl Terrain {
 #[cfg(test)]
 mod tests {
     use crate::testmaps::grid_map;
-    use crate::{CELL, Pos};
+    use crate::{CELL, Choke, ChokeKind, HARD_BYPASS, Pos};
+
+    #[test]
+    fn the_easier_going_round_a_gate_the_wider_the_front_to_hold() {
+        let gate = Choke {
+            id: 0,
+            kind: ChokeKind::Gate,
+            pos: Pos::default(),
+            width: 100.0,
+            gate: None,
+            regions: vec![0, 1],
+            climb: vec![0.0; 2],
+            // Cliffs one way round, open ground the other.
+            bypass: vec![f32::INFINITY, 0.0],
+            wall: 300.0,
+        };
+        assert_eq!(gate.hold_width(0), 100.0);
+        assert_eq!(gate.hold_width(1), 300.0);
+        let harder = Choke { bypass: vec![f32::INFINITY, HARD_BYPASS], ..gate };
+        assert_eq!(harder.hold_width(1), 200.0);
+        assert_eq!(harder.hold_width(7), 100.0);
+    }
 
     #[test]
     fn reaching_across_a_gap_takes_range() {

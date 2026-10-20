@@ -48,7 +48,7 @@ pub struct RegionValue {
 #[derive(Clone, Debug)]
 pub struct WallOption {
     pub choke: usize,
-    /// Wall length needed (the passage width), elmos.
+    /// Wall length needed (the passage and its passable sides), elmos.
     pub width: f32,
     /// Allied value no longer reachable by enemy ground forces.
     pub protects: f32,
@@ -115,9 +115,9 @@ pub struct Analysis {
     /// allied value cut off from the enemy base; empty if no wall is worth
     /// building.
     pub seal: Vec<usize>,
-    /// The chokepoints (on our side, at most [`MAX_HOLD_WIDTH`] wide) that
-    /// best trade the number held for allied value cut off from the enemy
-    /// base: where static defense pays.
+    /// The chokepoints (on our side, with a front at most
+    /// [`MAX_HOLD_WIDTH`] wide to cover) that best trade the number held for
+    /// allied value cut off from the enemy base: where static defense pays.
     pub hold: Vec<usize>,
     pub bridges: Vec<BridgeOption>,
     pub drops: Vec<DropOption>,
@@ -140,6 +140,10 @@ pub const MAX_HOLD_WIDTH: f32 = 600.0;
 /// Cost of holding a chokepoint, in average asset values (plus up to half
 /// an asset for width).
 pub const HOLD_COST: f32 = 1.0;
+
+/// A climb this long (elmos of flat ground) into the region held halves
+/// the cost of holding a chokepoint: attackers crawl up under fire.
+pub const HOLD_CLIMB: f32 = 300.0;
 
 impl Analysis {
     pub fn run(s: &Scenario) -> Analysis {
@@ -243,7 +247,7 @@ impl Analysis {
             .into_iter()
             .map(|(c, regions)| WallOption {
                 choke: c,
-                width: map.chokes[c].width,
+                width: map.chokes[c].wall,
                 protects: regions.iter().map(|&r| self.values[r].ally + 0.5 * self.values[r].neutral).sum(),
                 regions,
             })
@@ -262,21 +266,26 @@ impl Analysis {
     /// enemy's doorstep would not survive, so the cut must not simply box
     /// them in.
     fn seal_walls(&self, map: &TierMap) -> Vec<usize> {
-        self.value_cut(map, |choke, typical| Some(choke.width * typical / WALL_ELMOS_PER_ASSET))
+        self.value_cut(map, |choke, _, typical| Some(choke.wall * typical / WALL_ELMOS_PER_ASSET))
     }
 
+    /// Holding a chokepoint against crossings into `region` costs more the
+    /// wider the front to cover (see [`Choke::hold_width`]) and less the
+    /// longer the climb into `region` keeps attackers under fire.
     fn hold_chokes(&self, map: &TierMap, mean_asset: f32) -> Vec<usize> {
-        self.value_cut(map, |choke, _| {
-            (choke.width <= MAX_HOLD_WIDTH).then(|| mean_asset * (HOLD_COST + 0.5 * choke.width / MAX_HOLD_WIDTH))
+        self.value_cut(map, |choke, region, _| {
+            let width = choke.hold_width(region);
+            let cost = mean_asset * (HOLD_COST + 0.5 * width / MAX_HOLD_WIDTH);
+            (width <= MAX_HOLD_WIDTH).then(|| cost / (1.0 + choke.climb_into(region) / HOLD_CLIMB))
         })
     }
 
     /// The chokepoints on our side of the map whose closing best trades
     /// cost for allied value cut off from the enemy base (a min-cut in
-    /// project-selection form). `cost` is the price of closing a chokepoint
-    /// given the value of a typical valued region, `None` if it cannot be
-    /// closed.
-    fn value_cut(&self, map: &TierMap, cost: impl Fn(&Choke, f32) -> Option<f32>) -> Vec<usize> {
+    /// project-selection form). `cost(choke, region, typical)` is the price
+    /// of closing a chokepoint against crossings into `region`, given the
+    /// value of a typical valued region; `None` if it cannot be closed.
+    fn value_cut(&self, map: &TierMap, cost: impl Fn(&Choke, usize, f32) -> Option<f32>) -> Vec<usize> {
         let Some(source) = self.enemy_base else { return Vec::new() };
         let value = |r: usize| self.values[r].ally + 0.5 * self.values[r].neutral;
         let targets: Vec<usize> = (0..map.regions.len())
@@ -289,11 +298,14 @@ impl Analysis {
         let sink = map.regions.len();
         let mut flow = FlowNet::new(sink + 1);
         for (c, choke) in map.chokes.iter().enumerate() {
-            let cap = if self.choke_on_our_side(map, c) { cost(choke, typical) } else { None };
-            let cap = cap.map_or(f64::INFINITY, f64::from);
+            let ours = self.choke_on_our_side(map, c);
+            let cap = |into: usize| {
+                let cap = if ours { cost(choke, into, typical) } else { None };
+                cap.map_or(f64::INFINITY, f64::from)
+            };
             for (i, &a) in choke.regions.iter().enumerate() {
                 for &b in &choke.regions[i + 1..] {
-                    flow.add_edge(a, b, cap, Some(c));
+                    flow.add_arcs(a, b, cap(b), cap(a), Some(c));
                 }
             }
         }
@@ -427,7 +439,8 @@ pub fn ground_distance(map: &TierMap, a: Pos, b: Pos) -> Option<f32> {
     Paths::new(map, a, |_| false).distance_to(b)
 }
 
-/// Regions as nodes, chokepoints as weighted edges.
+/// Regions as nodes, chokepoints as weighted edges (each way its own
+/// weight: crossing uphill takes longer).
 struct RegionGraph {
     /// Per region: (neighbour, choke, travel distance through the choke).
     adj: Vec<Vec<(usize, usize, f32)>>,
@@ -440,8 +453,8 @@ impl RegionGraph {
             for (i, &a) in c.regions.iter().enumerate() {
                 for &b in &c.regions[i + 1..] {
                     let w = map.regions[a].center.distance(c.pos) + c.pos.distance(map.regions[b].center);
-                    adj[a].push((b, c.id, w));
-                    adj[b].push((a, c.id, w));
+                    adj[a].push((b, c.id, w + c.climb_into(b)));
+                    adj[b].push((a, c.id, w + c.climb_into(a)));
                 }
             }
         }

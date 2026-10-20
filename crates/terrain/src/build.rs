@@ -5,15 +5,15 @@ use std::collections::{HashMap, VecDeque};
 use zkta::analyzer::{NoopRenderer, analyze_bitmap};
 use zkta::geometry::Point;
 
-use crate::{CELL, Choke, MoveClass, NONE, Pos, Region, SpringMapData, Tier, TierMap};
-
-/// Slope limits for the region decomposition, relative to the engine's hard
-/// limit (see [`MoveClass::softened`]). Connectivity uses the hard limit.
-const SOFT_SLOPE_FACTOR: f32 = 0.5;
+use crate::{CELL, Choke, ChokeKind, MoveClass, NONE, Pos, Region, SpringMapData, Tier, TierMap, borders};
 
 /// Passable components smaller than this (cells) get no region of their own:
 /// specks between steep slopes that no unit meaningfully occupies.
 const MIN_POCKET_CELLS: usize = 32;
+
+/// Open ground fenced off by slopes, without a region from zkta, becomes a
+/// region of its own from this size (cells, about 180 x 180 elmos).
+const MIN_TERRACE_CELLS: usize = 128;
 
 /// How far (cells) a gate line is extended past its crossing points to reach
 /// real obstacle cells: zkta's crossing points lie on simplified contours,
@@ -22,11 +22,13 @@ const GATE_EXTENSION: i32 = 12;
 
 pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass) -> TierMap {
     // Hard obstacles: where the engine stops units (connectivity). Soft
-    // obstacles additionally include slopes units only crawl over; the
-    // region decomposition works on those.
-    let (obstacles, w, h) = obstacle_map(data, class);
-    let (soft, _, _) = obstacle_map(data, class.softened(SOFT_SLOPE_FACTOR));
-    let (width, height) = (w as usize, h as usize);
+    // obstacles additionally include slopes units only crawl up (see
+    // `MoveClass::soft`); the region decomposition works on those.
+    let ground = Ground::new(data, class);
+    let obstacles = ground.obstacles(class);
+    let soft = ground.obstacles(class.soft());
+    let (width, height) = (ground.width, ground.height);
+    let (w, h) = (width as u32, height as u32);
     let component = label_components(&obstacles, width, height);
     let passable = component.iter().filter(|&&c| c != NONE).count();
 
@@ -61,12 +63,18 @@ pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass) -> Ti
         .map(|(i, c)| {
             let mut regions: Vec<usize> = c.region_ids.iter().filter_map(|id| region_index.get(id).copied()).collect();
             regions.sort_unstable();
+            let width = (2.0 * c.radius as f32 * CELL).max(CELL);
+            let sides = regions.len();
             Choke {
                 id: i,
+                kind: ChokeKind::Gate,
                 pos: cell_point(c.position),
-                width: (2.0 * c.radius as f32 * CELL).max(CELL),
+                width,
                 gate: c.crossing_points.map(|[a, b]| [cell_point(a), cell_point(b)]),
                 regions,
+                climb: vec![0.0; sides],
+                bypass: vec![f32::INFINITY; sides],
+                wall: width,
             }
         })
         .collect();
@@ -80,6 +88,7 @@ pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass) -> Ti
     let seeds: Vec<Option<usize>> =
         analysis.regions.iter().map(|r| seed_cell(r.center, r.radius, &soft, &walls, width, height)).collect();
     assign_regions(&mut map, &soft, &obstacles, &walls, &seeds);
+    borders::link(&mut map, &ground, &soft, &walls);
     map
 }
 
@@ -92,24 +101,75 @@ fn cell_point(p: Point) -> Pos {
     Pos::new((p.x as f32 + 0.5) * CELL, (p.y as f32 + 0.5) * CELL)
 }
 
-/// Obstacle bitmap at slope-map resolution for a movement class. Water
-/// depth per cell is the mean over its 2x2 heightmap squares.
-fn obstacle_map(data: &SpringMapData, class: MoveClass) -> (Vec<bool>, u32, u32) {
-    let (w, h) = (data.slope_width, data.slope_height);
-    let hm_w = data.map_width as usize;
-    let depth_at = |x: usize, z: usize| data.height_map.get(z * hm_w + x).map_or(0.0, |&v| (-v).max(0.0));
-    let mut obstacles = vec![true; (w * h) as usize];
-    for sz in 0..h as usize {
-        for sx in 0..w as usize {
-            let i = sz * w as usize + sx;
-            let Some(&slope) = data.slope_map.get(i) else { continue };
-            let (hx, hz) = (sx * 2, sz * 2);
-            let depth =
-                (depth_at(hx, hz) + depth_at(hx + 1, hz) + depth_at(hx, hz + 1) + depth_at(hx + 1, hz + 1)) * 0.25;
-            obstacles[i] = class.blocks(slope, depth);
+/// The ground at slope-map resolution, for one movement class: what
+/// stops it, and how long it takes to cross.
+pub(crate) struct Ground {
+    pub width: usize,
+    pub height: usize,
+    class: MoveClass,
+    /// Slope-map value per cell; `NAN` off the slope map's data.
+    slope: Vec<f32>,
+    /// Mean height of the cell's 2x2 heightmap squares.
+    elevation: Vec<f32>,
+    /// Water depth, likewise.
+    depth: Vec<f32>,
+}
+
+impl Ground {
+    fn new(data: &SpringMapData, class: MoveClass) -> Self {
+        let (width, height) = (data.slope_width as usize, data.slope_height as usize);
+        let hm_w = data.map_width as usize;
+        let hm = |x: usize, z: usize| data.height_map.get(z * hm_w + x).copied().unwrap_or(0.0);
+        let mut g = Ground {
+            width,
+            height,
+            class,
+            slope: vec![f32::NAN; width * height],
+            elevation: vec![0.0; width * height],
+            depth: vec![0.0; width * height],
+        };
+        for sz in 0..height {
+            for sx in 0..width {
+                let i = sz * width + sx;
+                let (hx, hz) = (sx * 2, sz * 2);
+                let corners = [hm(hx, hz), hm(hx + 1, hz), hm(hx, hz + 1), hm(hx + 1, hz + 1)];
+                g.elevation[i] = corners.iter().sum::<f32>() * 0.25;
+                g.depth[i] = corners.iter().map(|&y| (-y).max(0.0)).sum::<f32>() * 0.25;
+                if let Some(&slope) = data.slope_map.get(i) {
+                    g.slope[i] = slope;
+                }
+            }
         }
+        g
     }
-    (obstacles, w, h)
+
+    /// Obstacle bitmap for a movement class (cells without slope data
+    /// block).
+    fn obstacles(&self, class: MoveClass) -> Vec<bool> {
+        (0..self.slope.len()).map(|i| self.slope[i].is_nan() || class.blocks(self.slope[i], self.depth[i])).collect()
+    }
+
+    /// Time to step from cell `a` to its neighbour `b`, in cells of flat
+    /// ground. Climbing slows units by `1 + slope * slope_mod` (see
+    /// [`MoveClass::uphill_speed`]), scaled by how directly the step climbs
+    /// (the engine's `dirSlopeMod`): its rise against the rise straight up
+    /// the slope. Downhill, across slopes and on water for hovercraft, a
+    /// step takes as long as on flat ground.
+    pub fn step_time(&self, a: usize, b: usize) -> f32 {
+        let rise = self.elevation[b] - self.elevation[a];
+        let on_water = self.depth[a] > 0.0 || self.depth[b] > 0.0;
+        if rise <= 0.0 || self.class.min_water_depth > 0.0 || (self.class.hover && on_water) {
+            return 1.0;
+        }
+        let slope = 0.5 * (self.slope[a] + self.slope[b]);
+        let cos = (1.0 - slope).max(0.05);
+        let tan = (1.0 - cos * cos).max(0.0).sqrt() / cos;
+        if tan.is_nan() || tan <= 1e-4 {
+            return 1.0;
+        }
+        let directly = (rise / (CELL * tan)).min(1.0);
+        1.0 + slope * self.class.slope_mod * directly
+    }
 }
 
 /// 4-connected components of passable cells; `NONE` for obstacles.
@@ -149,13 +209,24 @@ fn neighbours4(c: usize, width: usize, height: usize) -> impl Iterator<Item = us
 }
 
 /// Rasterize every chokepoint's gate line (extended to the obstacles on
-/// both sides) as walls. Lines are 8-connected, which seals them against the
-/// 4-connected region flood.
-fn gate_walls(chokes: &[zkta::region::Chokepoint], obstacles: &[bool], width: usize, height: usize) -> Vec<bool> {
-    let mut walls = vec![false; obstacles.len()];
+/// both sides) as walls: per cell, the index of the chokepoint whose wall
+/// it is, `NONE` elsewhere. Lines are 8-connected, which seals them against
+/// the 4-connected region flood.
+fn gate_walls(chokes: &[zkta::region::Chokepoint], obstacles: &[bool], width: usize, height: usize) -> Vec<u32> {
+    let mut walls = vec![NONE; obstacles.len()];
     let in_grid = |x: i32, z: i32| x >= 0 && z >= 0 && (x as usize) < width && (z as usize) < height;
-    let blocked = |x: i32, z: i32| !in_grid(x, z) || obstacles[z as usize * width + x as usize];
-    for c in chokes {
+    let blocked = |(x, z): (i32, i32)| !in_grid(x, z) || obstacles[z as usize * width + x as usize];
+    // The obstacle cell nearest `p` within the extension, if any.
+    let nearest_obstacle = |(px, pz): (i32, i32)| -> Option<(i32, i32)> {
+        (1..=GATE_EXTENSION).find_map(|ring| {
+            let mut ring_cells = Vec::new();
+            for d in -ring..=ring {
+                ring_cells.extend([(px + d, pz - ring), (px + d, pz + ring), (px - ring, pz + d), (px + ring, pz + d)]);
+            }
+            ring_cells.into_iter().filter(|&q| blocked(q)).min_by_key(|&(x, z)| (x - px).pow(2) + (z - pz).pow(2))
+        })
+    };
+    for (i, c) in chokes.iter().enumerate() {
         let Some([a, b]) = c.crossing_points else { continue };
         let (dx, dz) = ((b.x - a.x) as f32, (b.y - a.y) as f32);
         let len = (dx * dx + dz * dz).sqrt();
@@ -163,23 +234,35 @@ fn gate_walls(chokes: &[zkta::region::Chokepoint], obstacles: &[bool], width: us
             continue;
         }
         let (ux, uz) = (dx / len, dz / len);
-        // March outward from each end until the line meets an obstacle.
-        let extend = |p: Point, sx: f32, sz: f32| -> (i32, i32) {
-            let mut end = (p.x, p.y);
-            for i in 1..=GATE_EXTENSION {
-                let q = ((p.x as f32 + sx * i as f32).round() as i32, (p.y as f32 + sz * i as f32).round() as i32);
-                end = q;
-                if blocked(q.0, q.1) {
-                    break;
-                }
+        // March outward from each end until the line meets an obstacle;
+        // not at all from an end on one already, or past a thin obstacle
+        // the line would cut into the open ground beyond it. An end the
+        // line does not seal that way is joined to the nearest obstacle.
+        let extend = |p: Point, sx: f32, sz: f32| -> ((i32, i32), Option<(i32, i32)>) {
+            let p = (p.x, p.y);
+            if blocked(p) {
+                return (p, None);
             }
-            end
+            let at =
+                |i: i32| ((p.0 as f32 + sx * i as f32).round() as i32, (p.1 as f32 + sz * i as f32).round() as i32);
+            if let Some(q) = (1..=GATE_EXTENSION).map(at).find(|&q| blocked(q)) {
+                return (q, None);
+            }
+            match nearest_obstacle(p) {
+                Some(q) => (p, Some(q)),
+                None => (at(GATE_EXTENSION), None),
+            }
         };
-        let start = extend(a, -ux, -uz);
-        let end = extend(b, ux, uz);
-        for (x, z) in line_cells(start, end) {
-            if in_grid(x, z) {
-                walls[z as usize * width + x as usize] = true;
+        let (start, start_spur) = extend(a, -ux, -uz);
+        let (end, end_spur) = extend(b, ux, uz);
+        let mut lines = vec![(start, end)];
+        lines.extend(start_spur.map(|q| (start, q)));
+        lines.extend(end_spur.map(|q| (end, q)));
+        for (from, to) in lines {
+            for (x, z) in line_cells(from, to) {
+                if in_grid(x, z) && walls[z as usize * width + x as usize] == NONE {
+                    walls[z as usize * width + x as usize] = i as u32;
+                }
             }
         }
     }
@@ -215,7 +298,7 @@ fn seed_cell(
     center: Point,
     radius: f64,
     obstacles: &[bool],
-    walls: &[bool],
+    walls: &[u32],
     width: usize,
     height: usize,
 ) -> Option<usize> {
@@ -224,7 +307,7 @@ fn seed_cell(
             return None;
         }
         let c = z as usize * width + x as usize;
-        (!obstacles[c] && !walls[c]).then_some(c)
+        (!obstacles[c] && walls[c] == NONE).then_some(c)
     };
     if let Some(c) = open(center.x, center.y) {
         return Some(c);
@@ -247,15 +330,14 @@ fn seed_cell(
 /// Flood regions from their seeds over soft-passable ground within the gate
 /// walls, then give the leftovers (wall cells, steep but passable slopes,
 /// pockets without a seed) to the nearest region over hard-passable ground.
-fn assign_regions(map: &mut TierMap, soft: &[bool], obstacles: &[bool], walls: &[bool], seeds: &[Option<usize>]) {
+fn assign_regions(map: &mut TierMap, soft: &[bool], obstacles: &[bool], walls: &[u32], seeds: &[Option<usize>]) {
     let (width, height) = (map.width, map.height);
-    let region = &mut map.region;
     let mut queue = VecDeque::new();
     for (r, seed) in seeds.iter().enumerate() {
         if let Some(c) = *seed
-            && region[c] == NONE
+            && map.region[c] == NONE
         {
-            region[c] = r as u32;
+            map.region[c] = r as u32;
             queue.push_back(c);
         }
     }
@@ -263,49 +345,70 @@ fn assign_regions(map: &mut TierMap, soft: &[bool], obstacles: &[bool], walls: &
     while let Some(c) = queue.pop_front() {
         frontier.push(c);
         for n in neighbours4(c, width, height) {
-            if !soft[n] && !walls[n] && region[n] == NONE {
-                region[n] = region[c];
+            if !soft[n] && walls[n] == NONE && map.region[n] == NONE {
+                map.region[n] = map.region[c];
                 queue.push_back(n);
             }
         }
     }
+    // Open ground fenced off by slopes that zkta found no region in (a
+    // terrace, a hilltop) is a region of its own: the slopes around it are
+    // borders, not part of a neighbour.
+    frontier.extend(new_regions(map, |c| !soft[c] && walls[c] == NONE, MIN_TERRACE_CELLS));
     // Second pass: through walls, steep slopes and into unseeded pockets.
     queue.extend(frontier);
     while let Some(c) = queue.pop_front() {
         for n in neighbours4(c, width, height) {
-            if !obstacles[n] && region[n] == NONE {
-                region[n] = region[c];
+            if !obstacles[n] && map.region[n] == NONE {
+                map.region[n] = map.region[c];
                 queue.push_back(n);
             }
         }
     }
-
     // Passable components zkta found no region in (islands, sealed
     // plateaus) become regions of their own, without chokepoints; tiny
     // specks stay region-less.
+    new_regions(map, |c| !obstacles[c], MIN_POCKET_CELLS);
+
+    for (cell, &r) in map.region.iter().enumerate() {
+        if r != NONE {
+            let reg = &mut map.regions[r as usize];
+            reg.cells += 1;
+            reg.component = map.component[cell];
+        }
+    }
+}
+
+/// Turn every connected stretch of `open` cells without a region into a
+/// region of its own, if it has at least `min_cells` cells. Returns the
+/// cells of the new regions.
+fn new_regions(map: &mut TierMap, open: impl Fn(usize) -> bool, min_cells: usize) -> Vec<usize> {
     const POCKET: u32 = NONE - 1;
-    for start in 0..region.len() {
-        if obstacles[start] || region[start] != NONE {
+    let (width, height) = (map.width, map.height);
+    let (mut claimed, mut small) = (Vec::new(), Vec::new());
+    for start in 0..map.region.len() {
+        if !open(start) || map.region[start] != NONE {
             continue;
         }
-        region[start] = POCKET;
+        map.region[start] = POCKET;
         let mut cells = vec![start];
         let mut i = 0;
         while i < cells.len() {
             for n in neighbours4(cells[i], width, height) {
-                if !obstacles[n] && region[n] == NONE {
-                    region[n] = POCKET;
+                if open(n) && map.region[n] == NONE {
+                    map.region[n] = POCKET;
                     cells.push(n);
                 }
             }
             i += 1;
         }
-        if cells.len() < MIN_POCKET_CELLS {
+        if cells.len() < min_cells {
+            small.extend(cells);
             continue;
         }
         let id = map.regions.len() as u32;
         for &c in &cells {
-            region[c] = id;
+            map.region[c] = id;
         }
         let (sx, sz) = cells.iter().fold((0.0, 0.0), |(x, z), &c| (x + (c % width) as f32, z + (c / width) as f32));
         let centroid = Pos::new((sx / cells.len() as f32 + 0.5) * CELL, (sz / cells.len() as f32 + 0.5) * CELL);
@@ -317,18 +420,12 @@ fn assign_regions(map: &mut TierMap, soft: &[bool], obstacles: &[bool], walls: &
             .min_by(|a, b| a.distance(centroid).total_cmp(&b.distance(centroid)))
             .unwrap_or(centroid);
         map.regions.push(Region { id: id as usize, center, cells: 0, component: NONE, chokes: Vec::new() });
+        claimed.extend(cells);
     }
-
-    for r in region.iter_mut().filter(|r| **r == POCKET) {
-        *r = NONE;
+    for c in small {
+        map.region[c] = NONE;
     }
-    for (cell, &r) in region.iter().enumerate() {
-        if r != NONE {
-            let reg = &mut map.regions[r as usize];
-            reg.cells += 1;
-            reg.component = map.component[cell];
-        }
-    }
+    claimed
 }
 
 #[cfg(test)]

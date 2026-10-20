@@ -16,7 +16,7 @@ use springai::{Callback, Unit, UnitDef, Vec3};
 use zk_terrain::occupancy::{Occupancy, Presence};
 use zk_terrain::paths::{Paths, SNAP};
 use zk_terrain::strategy::{Analysis, Asset, Scenario, Side, ground_distance};
-use zk_terrain::{MoveClass, Pos, SpringMapData, Terrain, Tier, TierMap};
+use zk_terrain::{ChokeKind, MoveClass, Pos, SpringMapData, Terrain, Tier, TierMap};
 
 use crate::Ai;
 use crate::defs::Defs;
@@ -53,6 +53,19 @@ const TIER_UNITS: [(Tier, &str); 6] = [
 impl TerrainModel {
     /// Fetch the map data and start the analysis thread.
     pub fn start(cb: Callback, defs: &Defs) -> Self {
+        let classes: Vec<String> = tier_classes(defs)
+            .iter()
+            .map(|(t, c)| {
+                format!(
+                    "{} {:.3} (crawl {:.3}, slopeMod {:.1})",
+                    t.name(),
+                    c.max_slope,
+                    c.soft().max_slope,
+                    c.slope_mod
+                )
+            })
+            .collect();
+        cb.log(&format!("terrain: slope limits {}", classes.join(", ")));
         match analyse(cb, defs) {
             Ok(rx) => TerrainModel::Pending { rx },
             Err(e) => {
@@ -92,13 +105,18 @@ fn map_data(cb: Callback) -> Result<SpringMapData, String> {
     Ok(data)
 }
 
+/// Each tier's movement class, from the game's constructor of that tier.
+fn tier_classes(defs: &Defs) -> Vec<(Tier, MoveClass)> {
+    TIER_UNITS
+        .iter()
+        .map(|&(tier, unit)| (tier, defs.get(unit).and_then(move_class).unwrap_or_else(|| tier.zero_k_class())))
+        .collect()
+}
+
 /// Analyse the map as it is now on a background thread.
 fn analyse(cb: Callback, defs: &Defs) -> Result<Analysed, String> {
     let data = map_data(cb)?;
-    let classes: Vec<(Tier, MoveClass)> = TIER_UNITS
-        .iter()
-        .map(|&(tier, unit)| (tier, defs.get(unit).and_then(move_class).unwrap_or_else(|| tier.zero_k_class())))
-        .collect();
+    let classes = tier_classes(defs);
     let (tx, rx) = mpsc::channel();
     // Pure computation: the thread must never call into the engine.
     std::thread::Builder::new()
@@ -116,8 +134,10 @@ fn analyse(cb: Callback, defs: &Defs) -> Result<Analysed, String> {
 /// buildings.
 pub fn move_class(def: UnitDef) -> Option<MoveClass> {
     let md = def.move_data()?;
+    let slope_mod = md.slope_mod();
     Some(MoveClass {
         max_slope: md.max_slope(),
+        slope_mod: if slope_mod > 0.0 { slope_mod } else { zk_terrain::default_slope_mod(md.max_slope()) },
         max_water_depth: if md.speed_mod_class() == 2 { f32::INFINITY } else { md.depth() },
         min_water_depth: def.min_water_depth().max(0.0),
         hover: md.speed_mod_class() == 2,
@@ -203,12 +223,13 @@ impl Ai {
                 self.terrain = TerrainModel::Ready { terrain, rebuild: None };
                 self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
                 for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
+                    let gates = t.chokes.iter().filter(|c| c.kind == ChokeKind::Gate).count();
                     self.log(&format!(
-                        "terrain: {:<8} {:>5.1}% passable, {} regions, {} chokepoints",
+                        "terrain: {:<8} {:>5.1}% passable, {} regions, {gates} gates, {} borders",
                         t.tier.name(),
                         t.passable_fraction * 100.0,
                         t.regions.len(),
-                        t.chokes.len()
+                        t.chokes.len() - gates
                     ));
                 }
             }
@@ -255,7 +276,20 @@ impl Ai {
             if let Some([a, b]) = c.gate {
                 map_draw.add_line(at(a), at(b));
             }
-            map_draw.add_point(at(c.pos), &format!("C{} {:.0}", c.id, c.width));
+            // Climbs into each side, where crossing is slower than flat ground.
+            let climbs: Vec<String> = (c.regions.iter().zip(&c.climb))
+                .filter(|&(_, &x)| x >= 16.0)
+                .map(|(r, x)| format!(" up into R{r} +{x:.0}"))
+                .collect();
+            let label = match c.kind {
+                ChokeKind::Gate => {
+                    let round = c.bypass.iter().copied().fold(f32::INFINITY, f32::min);
+                    let sides = if round.is_finite() { format!(", round it +{round:.0}") } else { String::new() };
+                    format!("C{} gate {:.0} (wall {:.0}{sides})", c.id, c.width, c.wall)
+                }
+                ChokeKind::Border => format!("C{} border {:.0}", c.id, c.width),
+            };
+            map_draw.add_point(at(c.pos), &format!("{label}{}", climbs.concat()));
         }
         for r in &map.regions {
             map_draw.add_point(at(r.center), &format!("R{}", r.id));
@@ -460,7 +494,8 @@ pub struct Fortification {
     pub choke: usize,
     /// Where its defenses go: just behind the gate on our side.
     pub pos: Vec3,
-    /// Passage width, elmos.
+    /// Width of the front its defenses cover, elmos (see
+    /// `Choke::hold_width`).
     pub width: f32,
     /// No build site near `pos` (until the next analysis).
     pub blocked: bool,
@@ -710,8 +745,8 @@ impl Ai {
 }
 
 /// The chokepoints worth holding (see [`Analysis::hold`]) that lie between
-/// our base and theirs: (choke, defense position, width), nearest the enemy
-/// first.
+/// our base and theirs: (choke, defense position, front width), nearest the
+/// enemy first.
 fn fortifications(map: &TierMap, a: &Analysis) -> Vec<(usize, Pos, f32)> {
     let Some(base) = a.ally_base else { return Vec::new() };
     let mut sites: Vec<_> = a
@@ -723,8 +758,9 @@ fn fortifications(map: &TierMap, a: &Analysis) -> Vec<(usize, Pos, f32)> {
             if a.choke_distance(map, c, false) >= a.dist_from_enemy[base] {
                 return None;
             }
-            let p = map.setback(c, a.home_side(map, c)?, FORTIFY_SETBACK);
-            Some((a.choke_distance(map, c, false), (c, p, map.chokes[c].width)))
+            let home = a.home_side(map, c)?;
+            let p = map.setback(c, home, FORTIFY_SETBACK);
+            Some((a.choke_distance(map, c, false), (c, p, map.chokes[c].hold_width(home))))
         })
         .collect();
     sites.sort_by(|x, y| x.0.total_cmp(&y.0));

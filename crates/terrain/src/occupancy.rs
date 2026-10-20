@@ -121,8 +121,12 @@ impl Occupancy {
             let here = map.regions[r].center;
             for (c, next) in map.neighbours(r) {
                 let Some(t) = toll(next) else { continue };
-                let gate = map.chokes[c].pos;
-                let nd = d + here.distance(gate) + gate.distance(map.regions[next].center) + t;
+                let gate = &map.chokes[c];
+                let nd = d
+                    + here.distance(gate.pos)
+                    + gate.pos.distance(map.regions[next].center)
+                    + gate.climb_into(next)
+                    + t;
                 if nd < dist[next] {
                     dist[next] = nd;
                     heap.push(HeapItem(nd, next));

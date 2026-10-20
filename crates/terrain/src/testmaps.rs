@@ -1,6 +1,6 @@
 //! Hand-built maps for tests.
 
-use crate::{CELL, Choke, NONE, Pos, Region, Tier, TierMap};
+use crate::{CELL, Choke, ChokeKind, NONE, Pos, Region, Tier, TierMap};
 
 /// A hand-built map: `#` obstacle, letters regions; chokes are given as
 /// (region, region, cell x, cell z, width in cells).
@@ -63,10 +63,14 @@ pub fn grid_map(rows: &[&str], chokes: &[(char, char, f32, f32, f32)]) -> TierMa
             regions[rb].chokes.push(i);
             Choke {
                 id: i,
+                kind: ChokeKind::Gate,
                 pos: Pos::new((x + 0.5) * CELL, (z + 0.5) * CELL),
                 width: width * CELL,
                 gate: None,
                 regions: vec![ra.min(rb), ra.max(rb)],
+                climb: vec![0.0; 2],
+                bypass: vec![f32::INFINITY; 2],
+                wall: width * CELL,
             }
         })
         .collect();

@@ -11,7 +11,7 @@
 //! re-analysis sees the chokepoint closed to the enemy.
 
 use springai::{NO_TIMEOUT, Unit, Vec3};
-use zk_terrain::{Pos, Tier};
+use zk_terrain::{ChokeKind, Pos, Tier};
 
 use crate::Ai;
 use crate::economy::factory::FacKind;
@@ -57,8 +57,9 @@ const DITCH_MIN_INCOME: f32 = 8.0;
 /// Workers this far from a ditch are not sent to dig it, elmos.
 const DITCH_WORKER_RANGE: f32 = 2500.0;
 
-/// How far a ditch reaches past its chokepoint's gate at either end, elmos.
-const DITCH_OVERHANG: f32 = 48.0;
+/// How far a ditch reaches past its chokepoint's gate at either end, elmos:
+/// as far as the ground counting as the gate itself.
+const DITCH_OVERHANG: f32 = zk_terrain::GATE_MARGIN;
 
 /// A ditch being dug, or tried.
 pub struct Ditch {
@@ -108,6 +109,12 @@ impl Ai {
             self.eco.ditch_tries.iter().filter(|&&(_, f)| frame - f < DITCH_RETRY).map(|&(p, _)| p).collect();
         let site = s.fortify.iter().find_map(|f| {
             let choke = &tier_map.chokes[f.choke];
+            // Only across a gate with no way round it: units would walk round
+            // a ditch over the slopes beside it.
+            let home = s.analysis.home_side(tier_map, f.choke)?;
+            if choke.kind != ChokeKind::Gate || choke.bypass_into(home).is_finite() {
+                return None;
+            }
             let [a, b] = choke.gate?;
             // Measured where it is dug: the middle of the gate.
             let (mx, mz) = ((a.x + b.x) / 2.0, (a.z + b.z) / 2.0);

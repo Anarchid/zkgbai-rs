@@ -2,9 +2,13 @@
 //!
 //! usage: terrain-view <map.zktamap> <out-dir> [tier,tier,...] [--scenario <file.json>]
 //!
-//! Colours: regions get distinct hues, obstacles are dark grey; gate lines
-//! are white, chokepoints red squares (size ~ passage width), region
-//! centers black dots.
+//! Colours: regions get distinct hues (darker on slopes units crawl up,
+//! see `MoveClass::soft`), obstacles are dark grey; gate lines
+//! are white, gates red squares (size ~ passage width; orange where going
+//! round over their sides is easy), region centers black dots. Borders
+//! (regions touching without a gate) are magenta lines where crossing is
+//! free, blue where it climbs, with a yellow tick into the region it
+//! climbs into.
 //!
 //! With a scenario (dumped by the AI with `ZKGBAI_DUMP_TERRAIN`), regions are
 //! muted and the strategic analysis is overlaid: assets as dots (blue ally,
@@ -17,7 +21,7 @@ use std::time::Instant;
 
 use image::{Rgb, RgbImage};
 use zk_terrain::strategy::{Analysis, Asset, Scenario, Side};
-use zk_terrain::{CELL, Pos, SpringMapData, Terrain, Tier, TierMap};
+use zk_terrain::{CELL, ChokeKind, HARD_BYPASS, Pos, SpringMapData, Terrain, Tier, TierMap};
 
 const SCALE: u32 = 2;
 
@@ -48,7 +52,8 @@ fn main() {
     eprintln!("analysed {} tiers in {:.2}s", tiers.len(), start.elapsed().as_secs_f32());
     for map in terrain.tiers() {
         let path = out.join(format!("{}.png", map.tier.name()));
-        let mut img = render(map, scenario.is_some());
+        let slopes = soft_slopes(&data, map.tier);
+        let mut img = render(map, &slopes, scenario.is_some());
         if let Some(sc) = &scenario {
             let s = Scenario { map, ally_base: sc.ally_base, enemy_base: sc.enemy_base, assets: &sc.assets };
             let t0 = Instant::now();
@@ -58,14 +63,17 @@ fn main() {
             report(map, &analysis);
         }
         img.save(&path).expect("cannot write image");
-        let linked = map.chokes.iter().filter(|c| c.regions.len() >= 2).count();
+        let gates = map.chokes.iter().filter(|c| c.kind == ChokeKind::Gate);
+        let soft = gates.clone().filter(|c| c.bypass.iter().any(|&b| b < HARD_BYPASS)).count();
+        let borders = map.chokes.iter().filter(|c| c.kind == ChokeKind::Border);
+        let climbing = borders.clone().filter(|c| c.climb.iter().any(|&x| x >= 32.0)).count();
         println!(
-            "{:<8} passable {:>5.1}%  regions {:>3}  chokepoints {:>3} ({} linking)  -> {}",
+            "{:<8} passable {:>5.1}%  regions {:>3}  gates {:>3} ({soft} soft)  borders {:>3} ({climbing} climbing)  -> {}",
             map.tier.name(),
             map.passable_fraction * 100.0,
             map.regions.len(),
-            map.chokes.len(),
-            linked,
+            gates.count(),
+            borders.count(),
             path.display()
         );
     }
@@ -113,14 +121,19 @@ fn report(map: &TierMap, a: &Analysis) {
             w.regions.len()
         );
     }
-    println!("  seal    {:?} (total width {:.0})", a.seal, a.seal.iter().map(|&c| map.chokes[c].width).sum::<f32>());
+    println!("  seal    {:?} (total wall {:.0})", a.seal, a.seal.iter().map(|&c| map.chokes[c].wall).sum::<f32>());
     println!("  hold    {:?}", a.hold);
     let base_threat = a.ally_base.map_or(f32::INFINITY, |b| a.dist_from_enemy[b]);
     for &c in &a.hold {
+        let choke = &map.chokes[c];
+        let home = a.home_side(map, c).unwrap_or(choke.regions[0]);
         println!(
-            "    C{:<3} width {:>4.0}  enemy distance {:>5.0} (our base {:>5.0})",
+            "    C{:<3} {:?} width {:>4.0} front {:>4.0} climb in {:>4.0}  enemy distance {:>5.0} (our base {:>5.0})",
             c,
-            map.chokes[c].width,
+            choke.kind,
+            choke.width,
+            choke.hold_width(home),
+            choke.climb_into(home),
             a.choke_distance(map, c, false),
             base_threat
         );
@@ -223,27 +236,62 @@ fn mute(c: Rgb<u8>) -> Rgb<u8> {
     Rgb(c.0.map(|v| (v as u16 * 2 / 5 + 120) as u8))
 }
 
-fn render(map: &TierMap, muted: bool) -> RgbImage {
+/// Cells the tier passes but only crawls up: steeper than its soft limit.
+fn soft_slopes(data: &SpringMapData, tier: Tier) -> Vec<bool> {
+    let (class, soft) = (tier.zero_k_class(), tier.zero_k_class().soft());
+    let (w, hm_w) = (data.slope_width as usize, data.map_width as usize);
+    let depth = |x: usize, z: usize| data.height_map.get(z * hm_w + x).map_or(0.0, |&v| (-v).max(0.0));
+    (0..data.slope_map.len())
+        .map(|i| {
+            let (x, z) = (i % w * 2, i / w * 2);
+            let d = (depth(x, z) + depth(x + 1, z) + depth(x, z + 1) + depth(x + 1, z + 1)) * 0.25;
+            let slope = data.slope_map[i];
+            soft.blocks(slope, d) && !class.blocks(slope, d)
+        })
+        .collect()
+}
+
+fn render(map: &TierMap, slopes: &[bool], muted: bool) -> RgbImage {
     let (w, h) = (map.width as u32 * SCALE, map.height as u32 * SCALE);
     let mut img = RgbImage::from_pixel(w, h, Rgb([40, 40, 40]));
     for cell in 0..map.width * map.height {
         if let Some(r) = map.region_of_cell(cell) {
             let (cx, cz) = ((cell % map.width) as u32 * SCALE, (cell / map.width) as u32 * SCALE);
+            let mut colour = if muted { mute(region_colour(r)) } else { region_colour(r) };
+            if slopes.get(cell).copied().unwrap_or(false) {
+                colour = Rgb(colour.0.map(|v| (v as u16 * 11 / 20) as u8));
+            }
             for dz in 0..SCALE {
                 for dx in 0..SCALE {
-                    let colour = if muted { mute(region_colour(r)) } else { region_colour(r) };
                     img.put_pixel(cx + dx, cz + dz, colour);
                 }
             }
         }
     }
     let px = |p: Pos| ((p.x / CELL * SCALE as f32) as i32, (p.z / CELL * SCALE as f32) as i32);
-    for c in &map.chokes {
+    for c in map.chokes.iter().filter(|c| c.kind == ChokeKind::Border) {
+        let climb = c.climb.iter().copied().fold(0.0, f32::max);
+        if let Some([a, b]) = c.gate {
+            let colour = if climb < 32.0 { Rgb([255, 0, 255]) } else { Rgb([40, 90, 255]) };
+            thick_line(&mut img, px(a), px(b), 2, colour);
+        }
+        square(&mut img, px(c.pos), 2, Rgb([0, 0, 0]));
+        if climb >= 32.0 {
+            let k = (0..c.climb.len()).max_by(|&i, &j| c.climb[i].total_cmp(&c.climb[j])).unwrap_or(0);
+            let towards = map.regions[c.regions[k]].center;
+            let d = c.pos.distance(towards).max(1.0);
+            let len = (climb / 4.0).clamp(24.0, 160.0);
+            let tip = Pos::new(c.pos.x + (towards.x - c.pos.x) / d * len, c.pos.z + (towards.z - c.pos.z) / d * len);
+            thick_line(&mut img, px(c.pos), px(tip), 2, Rgb([255, 230, 0]));
+        }
+    }
+    for c in map.chokes.iter().filter(|c| c.kind == ChokeKind::Gate) {
         if let Some([a, b]) = c.gate {
             line(&mut img, px(a), px(b), Rgb([255, 255, 255]));
         }
         let half = ((c.width / CELL * SCALE as f32) / 4.0).clamp(2.0, 10.0) as i32;
-        square(&mut img, px(c.pos), half, if c.regions.len() >= 2 { Rgb([220, 0, 0]) } else { Rgb([255, 160, 0]) });
+        let soft = c.bypass.iter().any(|&b| b < HARD_BYPASS);
+        square(&mut img, px(c.pos), half, if soft { Rgb([255, 160, 0]) } else { Rgb([220, 0, 0]) });
     }
     for r in &map.regions {
         square(&mut img, px(r.center), 2, Rgb([0, 0, 0]));
