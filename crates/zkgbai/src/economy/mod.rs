@@ -138,6 +138,10 @@ pub struct EconomyManager {
     /// A factory a module asked for, and why; and the last one logged.
     pub requisition: Option<(String, String)>,
     pub requisition_logged: Option<String>,
+    /// When a factory of a new type is next due, and whether one is due now
+    /// (see `planning::NEW_FAC_INCOME`).
+    pub new_fac_at: Option<i32>,
+    pub new_fac_due: bool,
     /// Terraform commands issued (for their tags).
     pub terraform_tags: i32,
     /// Development aid: the terraform test, when on.
@@ -319,6 +323,8 @@ impl EconomyManager {
             dev_pick: None,
             requisition: None,
             requisition_logged: None,
+            new_fac_at: None,
+            new_fac_due: false,
             terraform_tags: 0,
             terraform_test: None,
             ditch: None,
@@ -571,6 +577,7 @@ impl Ai {
         self.eco_dig_ditches(frame);
         self.eco_plan_grid(frame);
         self.eco_update_requisition(frame);
+        self.eco_update_new_factory(frame);
 
         if frame % 30 == self.offset % 30 {
             self.eco_capture_mexes();

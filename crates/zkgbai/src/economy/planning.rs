@@ -38,6 +38,15 @@ const REACH_GAP: f32 = 0.25;
 /// when its units get to this share of the metal out of reach.
 const AIR_FALLBACK: f32 = 0.7;
 
+/// Past this income a factory of a type we do not have yet is started
+/// every five minutes or so (a minute either way), unless something
+/// presses (out of energy, or attacked lately); one factory for every
+/// `NEW_FAC_PER` of income at most.
+pub(super) const NEW_FAC_INCOME: f32 = 50.0;
+const NEW_FAC_EVERY: i32 = 30 * 300;
+const NEW_FAC_JITTER: i32 = 30 * 60;
+const NEW_FAC_PER: f32 = 25.0;
+
 /// A gunship factory is asked for, from income `DROP_INCOME` on, when this
 /// share of the enemy's value is out of ground reach or behind guarded
 /// chokepoints the long way round (ground route this many times the
@@ -196,13 +205,16 @@ impl Ai {
             let nnanos = eco.nanos.len();
             if (has_plop && !assigned_plop)
                 || (frame > 900 && !has_plop && nfac < 1 + merged && no_fac_tasks)
-                // a factory a module asked for
-                || (eco.requisition.is_some()
+                // a factory a module asked for (that we have none of: it may be
+                // stale, asked for before one went up another way)
+                || (eco.requisition.as_ref().is_some_and(|(f, _)| !self.eco_has_factory(f))
                     && eco.static_income > REQUISITION_INCOME
                     && nfac >= 1
                     && nfac < 3 + merged
                     && no_fac_tasks)
                 || (eco.static_income > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
+                // a factory of a new type, now and then
+                || (eco.new_fac_due && nfac >= 1 && no_fac_tasks)
                 || (eco.static_income > 90.0 && nfac == 2 && nnanos > 6 && eminent && no_fac_tasks)
                 || (merged > 0 && eco.static_income > 65.0 && !eco.has_striders && eminent && no_fac_tasks)
                 || (merged > 0
@@ -415,9 +427,11 @@ impl Ai {
         if let Some(from) = from.filter(|_| nfac == 0) {
             self.eco_weigh_factories_by_reach(from);
         }
-        let reach_fac = if nfac > 0 { self.eco.requisition.take().map(|(f, _)| f) } else { None };
+        let asked = if nfac > 0 { self.eco.requisition.take().map(|(f, _)| f) } else { None };
+        let reach_fac = asked.filter(|f| !self.eco_has_factory(f));
+        let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
 
-        if self.eco.potential_fac_list.is_empty() {
+        if self.eco.potential_fac_list.is_empty() && reach_fac.is_none() && new_type.is_none() {
             self.eco.added_facs = false;
             return;
         }
@@ -449,6 +463,12 @@ impl Ai {
             factory = self.defs.get(&reach_fac);
             self.eco.potential_fac_list.remove(&reach_fac);
             fac_name = reach_fac;
+        } else if let Some(new_type) = new_type {
+            self.log(&format!("economy: a factory of a new type: {new_type}"));
+            factory = self.defs.get(&new_type);
+            self.eco.potential_fac_list.remove(&new_type);
+            self.eco.new_fac_due = false;
+            fac_name = new_type;
         } else if self.eco.potential_fac_list.contains("factoryship") && kgb_rand() < 0.5 {
             fac_name = "factoryship".to_owned();
             factory = self.defs.get(&fac_name);
@@ -839,6 +859,59 @@ impl Ai {
     /// factory, the share out of reach and the share it gets to. A gunship
     /// factory (its constructors fly anywhere) only when no ground or sea
     /// factory gets to most of it.
+    /// Whether we have a factory named `name`, standing or going up.
+    pub(super) fn eco_has_factory(&self, name: &str) -> bool {
+        self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name)
+            || (self.eco.factory_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)))
+                .filter_map(|t| t.as_construction())
+                .any(|c| self.defs.name(c.build_type) == name)
+    }
+
+    /// Now and then past some income, have a factory of a new type built
+    /// (see [`NEW_FAC_INCOME`]).
+    pub(super) fn eco_update_new_factory(&mut self, frame: i32) {
+        if (frame + self.offset) % 30 != 0 || self.fac.factories.is_empty() || self.eco.new_fac_due {
+            return;
+        }
+        let income = self.eco.static_income;
+        let next = || frame + NEW_FAC_EVERY + ((kgb_rand() * 2.0 - 1.0) * f64::from(NEW_FAC_JITTER)) as i32;
+        let Some(at) = self.eco.new_fac_at else {
+            if income > NEW_FAC_INCOME {
+                self.eco.new_fac_at = Some(next());
+            }
+            return;
+        };
+        let room = (self.fac.factories.len() as f32) < 1.0 + income / NEW_FAC_PER;
+        let attacked = self.war.defense_targets().any(|(_, predicted)| !predicted);
+        if frame < at || income <= NEW_FAC_INCOME || !room || self.eco.estalled || attacked {
+            return;
+        }
+        if self.eco_new_factory_type().is_some() {
+            self.eco.new_fac_due = true;
+        }
+        self.eco.new_fac_at = Some(next());
+    }
+
+    /// A type of factory we have none of yet, at random: of those whose
+    /// units get about this map, the aircraft factories, and a strider hub
+    /// once we have pylons (not the jump factory: nothing here tells it
+    /// what to build).
+    fn eco_new_factory_type(&self) -> Option<String> {
+        let mut types: Vec<String> = self.eco.initial_fac_list.iter().cloned().collect();
+        types.extend(["factorygunship", "factoryplane"].map(String::from));
+        if !self.eco.pylons.is_empty() {
+            types.push("striderhub".to_owned());
+        }
+        types.sort();
+        types.dedup();
+        types.retain(|f| f != "factoryjump" && self.defs.get(f).is_some() && !self.eco_has_factory(f));
+        if types.is_empty() {
+            return None;
+        }
+        let n = ((kgb_rand() * types.len() as f64) as usize).min(types.len() - 1);
+        Some(types.swap_remove(n))
+    }
+
     fn eco_reach_gap(&self) -> Option<(&'static str, f32, f32)> {
         let terrain = self.reach_terrain()?;
         let from = self.graph.get_ally_center();
