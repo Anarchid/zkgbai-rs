@@ -6,7 +6,7 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
 use crate::Ai;
 use crate::defs::cmd;
-use crate::military::missiles;
+use crate::military::{missiles, nukes};
 use crate::terrain::pos as terrain_pos;
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
 use zk_terrain::Tier;
@@ -799,8 +799,9 @@ impl Ai {
     }
 
     /// The factory the modules would have built next, and why: one whose
-    /// units get to metal ours cannot, or a gunship factory to drop our
-    /// assaults past the chokepoints guarding much of the enemy's value.
+    /// units get to metal ours cannot, a spider factory for Widows to open
+    /// the way for our nukes, or a gunship factory to drop our assaults
+    /// past the chokepoints guarding much of the enemy's value.
     fn eco_find_requisition(&self) -> Option<(String, String)> {
         if let Some((f, gap, fills)) = self.eco_reach_gap() {
             return Some((
@@ -822,6 +823,14 @@ impl Ai {
             ));
         }
         let owned = |name: &str| self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
+        if !owned("factoryspider")
+            && let Some(value) = self.scouts_want_factory().filter(|&v| v >= nukes::STRIKE_VALUE)
+        {
+            return Some((
+                "factoryspider".to_owned(),
+                format!("{value:.0} metal is behind anti-nukes: Widows to find and stun them"),
+            ));
+        }
         let s = self.strategy.as_ref()?;
         if !self.dev_off("drops")
             && !owned("factorygunship")
@@ -936,6 +945,7 @@ impl Ai {
         }
         self.eco_plan_sub_defense();
         self.eco_plan_missile_silo();
+        self.eco_plan_watchtower();
         let r = self.eco_find_requisition();
         if let Some((f, why)) = &r
             && self.eco.requisition_logged.as_ref() != Some(f)

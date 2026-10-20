@@ -42,6 +42,17 @@ impl LosManager {
         self.is_in_los_level(position, 0)
     }
 
+    /// Whether each of `positions` is in our radar now (the radar map is
+    /// read for the call).
+    pub fn in_radar(&self, positions: &[Vec3]) -> Vec<bool> {
+        let radar = self.cb.map().radar_map();
+        let cell = 1i32 << self.cb.mod_info().radar_mip_level().clamp(0, 30);
+        let (gw, gh) = (self.map_width / cell, self.map_height / cell);
+        (positions.iter())
+            .map(|&p| los_index(p, self.map_width, self.map_height, gw, gh, radar.len()).is_some_and(|i| radar[i] > 0))
+            .collect()
+    }
+
     /// LOS check requiring at least `level` overlapping LOS sources.
     pub fn is_in_los_level(&self, position: Vec3, level: i32) -> bool {
         los_index(position, self.map_width, self.map_height, self.grid_width, self.grid_height, self.los_map.len())

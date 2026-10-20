@@ -9,6 +9,7 @@ pub mod grid;
 mod planning;
 pub mod tasks;
 pub mod terraform;
+mod watchtower;
 pub mod worker;
 
 pub use build_ids::BuildIds;
@@ -141,6 +142,9 @@ pub struct EconomyManager {
     pub ditch: Option<terraform::Ditch>,
     pub ditched: Vec<Vec3>,
     pub ditch_tries: Vec<(Vec3, i32)>,
+    /// A watchtower for our strikes going up, and when to plan the next.
+    watchtower: Option<watchtower::Watchtower>,
+    watchtower_after: i32,
     /// Grid ranges and power needs by unit type.
     pub grid_defs: grid::GridDefs,
     last_repaired_unit: i32,
@@ -306,6 +310,8 @@ impl EconomyManager {
             ditch: None,
             ditched: Vec::new(),
             ditch_tries: Vec::new(),
+            watchtower: None,
+            watchtower_after: 0,
             grid_defs: grid::GridDefs::default(),
             last_repaired_unit: 0,
             nuke_wep_id: -1,
@@ -556,11 +562,16 @@ impl Ai {
                 }
             }
 
-            if !self.war.enemy_has_anti_nuke {
-                for &u in &self.eco.super_weps {
-                    if self.defs.name_of(u) == "staticnuke" && !u.is_being_built() && u.stockpile_queued() < 2 {
-                        u.queue_stockpile(0);
-                    }
+            // Two missiles in store; against an anti-nuke one: for what it
+            // does not cover, or to fire past it stunned (see `nukes`).
+            for &u in &self.eco.super_weps {
+                let wanted = if self.war.enemy_has_anti_nuke {
+                    u.stockpile() + u.stockpile_queued() < 1
+                } else {
+                    u.stockpile() + u.stockpile_queued() < 2
+                };
+                if self.defs.name_of(u) == "staticnuke" && !u.is_being_built() && wanted {
+                    u.queue_stockpile(0);
                 }
             }
 

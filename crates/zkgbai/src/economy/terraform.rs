@@ -21,16 +21,24 @@ use crate::util::{OPTION_SHIFT_KEY, distance};
 /// The gadget's custom commands.
 const CMD_TERRAFORM_INTERNAL: i32 = 39801;
 const CMD_RAISE: i32 = 39737;
+const CMD_REPAIR: i32 = 40;
 
-/// Terraform kinds (the internal command's first parameter).
+/// Terraform kinds (the internal command's first parameter): level to a
+/// height, or raise by one.
+const LEVEL: f32 = 1.0;
 const RAISE: f32 = 2.0;
 
 /// Terraform tags are the AI's own; widgets count from 1.
 const FIRST_TAG: i32 = 1 << 20;
 
-/// Whether `unit` is working on a terraform order.
+/// Whether `unit` is working on a terraform order: the gadget's own, or
+/// the repair of a terraunit it laid out, which the gadget orders first.
 pub fn is_terraforming(unit: Unit) -> bool {
-    unit.current_commands().iter().any(|c| c.id() == CMD_RAISE)
+    let terraunit = |id: f32| {
+        Unit::from_id(unit.callback(), id as i32).and_then(|t| t.def()).is_some_and(|d| d.name() == "terraunit")
+    };
+    (unit.current_commands().iter())
+        .any(|c| c.id() == CMD_RAISE || (c.id() == CMD_REPAIR && c.params().first().is_some_and(|&id| terraunit(id))))
 }
 
 /// How deep ditches are dug, and how deep one must be in the middle to
@@ -148,6 +156,22 @@ impl Ai {
     /// wall), or lower it with a negative height (a ditch). `queue` adds
     /// the work after the builders' other orders.
     pub fn terraform_line(&mut self, builders: &[Unit], line: &[Vec3], height: f32, queue: bool) {
+        self.terraform(builders, line, false, RAISE, height, queue);
+    }
+
+    /// Have `builders` raise the ground inside the polygon `area` by
+    /// `height` elmos (the gadget slopes its edges like a pyramid).
+    pub fn terraform_area(&mut self, builders: &[Unit], area: &[Vec3], height: f32, queue: bool) {
+        self.terraform(builders, area, true, RAISE, height, queue);
+    }
+
+    /// Have `builders` level the ground inside the polygon `area` to
+    /// `height` (a flat top, if raised).
+    pub fn terraform_level(&mut self, builders: &[Unit], area: &[Vec3], height: f32, queue: bool) {
+        self.terraform(builders, area, true, LEVEL, height, queue);
+    }
+
+    fn terraform(&mut self, builders: &[Unit], line: &[Vec3], area: bool, kind: f32, height: f32, queue: bool) {
         let Some(&first) = builders.first() else { return };
         if line.len() < 2 {
             return;
@@ -157,12 +181,12 @@ impl Ai {
         self.eco.terraform_tags += 1;
         let tag = (FIRST_TAG + self.eco.terraform_tags) as f32;
         let mut params = vec![
-            RAISE,
+            kind,
             self.team_id as f32,
             cx,
             cz,
             tag,
-            0.0, // a line, not a closed area
+            if area { 1.0 } else { 0.0 }, // a closed area, or a line
             height,
             n,
             builders.len() as f32,
@@ -194,6 +218,8 @@ const TEST_SPACING: f32 = 160.0;
 pub struct TerraformTest {
     /// Each ditch's ends and depth.
     ditches: Vec<([Vec3; 2], f32)>,
+    /// A spike raised: its middle, and the ground there before.
+    spike: Option<(Vec3, f32)>,
 }
 
 impl Ai {
@@ -233,13 +259,33 @@ impl Ai {
             self.terraform_line(&[builder], &line, -depth, i > 0);
             ditches.push((ends, depth));
         }
-        self.log(&format!("terraform-test: digging {} ditches from ({:.0}, {:.0})", ditches.len(), start.x, start.z));
-        self.eco.terraform_test = Some(TerraformTest { ditches });
+        // And a spike (see the watchtowers), beside the ditches.
+        let mid = Vec3::xz(start.x - dx * 300.0, start.z + dz * 200.0);
+        let square =
+            [(-24.0, -24.0), (24.0, -24.0), (24.0, 24.0), (-24.0, 24.0)].map(|(x, z)| Vec3::xz(mid.x + x, mid.z + z));
+        let ground = map.elevation_at(mid.x, mid.z);
+        let top = square.iter().map(|p| map.elevation_at(p.x, p.z)).fold(ground, f32::max);
+        self.terraform_level(&[builder], &square, top + 64.0, true);
+        let orders: Vec<i32> = builder.current_commands().iter().map(|c| c.id()).collect();
+        self.log(&format!(
+            "terraform-test: digging {} ditches from ({:.0}, {:.0}), raising a spike at ({:.0}, {:.0}); orders {orders:?}",
+            ditches.len(),
+            start.x,
+            start.z,
+            mid.x,
+            mid.z
+        ));
+        self.eco.terraform_test = Some(TerraformTest { ditches, spike: Some((mid, ground)) });
     }
 
     fn terraform_test_report(&self) {
         let Some(test) = &self.eco.terraform_test else { return };
         let map = self.cb.map();
+        if let Some((mid, ground)) = test.spike {
+            let up: Vec<String> =
+                (-5..=5).map(|k| format!("{:.0}", map.elevation_at(mid.x + 8.0 * k as f32, mid.z) - ground)).collect();
+            self.log(&format!("terraform-test: spike across {up:?}"));
+        }
         let slopes = map.slope_map();
         let sw = (map.width() / 2).max(1) as usize;
         let slope_at = |x: f32, z: f32| {

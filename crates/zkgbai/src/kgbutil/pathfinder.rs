@@ -492,7 +492,9 @@ impl Terrain {
                 if slope > max_slope || bad_depth {
                     return IMPASSABLE;
                 }
-                1.0 + (1.0 - slope) + (20.0 * war.get_scythe_threat(pos))
+                // Cloaked, but found by what bumps into it and hurt by
+                // what is fired nearby: wide of enemies and fighting.
+                1.0 + (1.0 - slope) + (20.0 * war.get_scythe_threat(pos)) + (20.0 * war.get_threat(pos))
             }
             PathCost::SpiderPath => {
                 if slope > max_slope || bad_depth {

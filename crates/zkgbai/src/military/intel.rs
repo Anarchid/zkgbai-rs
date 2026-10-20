@@ -2,19 +2,25 @@
 //! nothing of — a hidden nuke, say.
 //!
 //! The enemy's production is estimated symmetrically: what we make, scaled
-//! by the metal-spot value it holds (seen and inferred, see the territory
-//! shadows) against ours. Against that stand the enemy units we have seen
-//! and not seen die, and what we have destroyed. What is left is
-//! unaccounted for — mostly economy buildings we never get to see, and the
-//! enemy should have as much of those, for what it makes, as we do. What it
-//! cannot account for beyond that is suspicious; when that is as much as a
-//! nuke silo costs and we can spare an anti-nuke, it is anti time.
+//! by the metal-spot value it holds against ours. Spots seen to be its
+//! count in full; spots only inferred to be (see the territory shadows,
+//! which take in much neutral ground) at a tenth; both sides count a base
+//! as well, so that early the estimate is near our own income. Against
+//! that stand the enemy units we have seen and not seen die, and what we
+//! have destroyed. What is left is unaccounted for — mostly economy
+//! buildings we never get to see, and the enemy should have as much of
+//! those, for what it makes, as we do. What it cannot account for beyond
+//! that is suspicious; when that is as much as a nuke silo costs, and more
+//! than the estimate could be off by late on, and we can spare an
+//! anti-nuke, it is anti time.
 //!
-//! The symmetric estimate runs high (the inferred enemy territory takes in
-//! much of the neutral ground): about 2.16 times what the enemy really made,
-//! against the arena's numbers over 40 games, in self-play and against
-//! CircuitAI alike. Scaled down by that, games without nukes peaked at 4.5k
-//! suspicious metal.
+//! Fitted to the arena's numbers (310 estimates over 8 self-play games on
+//! 7 maps), the income estimate is within 0.76-1.32 of the truth (10th to
+//! 90th percentile) at every stage of the game. The earlier one, counting
+//! inferred spots in full and scaling by 1/2.16, ran 1.46 times high early
+//! and 0.72 late, and built anti-nukes at ten minutes against no nuke.
+//! Replayed with the fit, games without nukes peaked at 3.8k suspicious
+//! metal; a silo planned at 10 minutes showed as 9.5k by 17.
 
 use std::collections::BTreeMap;
 
@@ -26,16 +32,18 @@ const PERIOD: i32 = 30;
 /// Metal a team starts with besides its free commander and factory.
 const START_METAL: f32 = 1000.0;
 
-/// Base income (and the commander's) as spot value, so the estimate is
-/// symmetric before anyone holds spots.
-const BASE_VALUE: f32 = 4.0;
+/// Spot value each side counts besides its spots, the weight of spots only
+/// inferred to be the enemy's, and what the enemy really makes for what
+/// the estimate says (all fitted, see above).
+const BASE_VALUE: f32 = 24.0;
+const INFERRED_WEIGHT: f32 = 0.1;
+const CALIBRATION: f32 = 1.03;
 
-/// What the enemy really makes, for what the symmetric estimate says.
-const CALIBRATION: f32 = 1.0 / 2.16;
-
-/// Suspicious metal that makes a hidden nuke a worry (a silo's cost), and
-/// the income from which we can spare an anti-nuke.
+/// Suspicious metal that makes a hidden nuke a worry (a silo's cost, or
+/// more than the estimate's error: a share of all the enemy made), and the
+/// income from which we can spare an anti-nuke.
 pub const ANTI_SUSPICION: f32 = 8000.0;
+const ANTI_SHARE: f32 = 0.15;
 const ANTI_INCOME: f32 = 35.0;
 
 /// Frames between summaries in the log.
@@ -55,6 +63,8 @@ pub struct Intel {
     ours: f32,
     infrastructure: f32,
     last_frame: i32,
+    /// Spot values for the log: ours, the enemy's seen, inferred.
+    spots: (f32, f32, f32),
 }
 
 impl Intel {
@@ -87,7 +97,9 @@ impl Ai {
         let spots = &self.graph.metal_spots;
         let ours: f32 = spots.iter().filter(|s| s.owned).map(|s| s.value).sum();
         let theirs: f32 = spots.iter().filter(|s| !s.owned && (s.hostile || s.enemy_shadowed)).map(|s| s.value).sum();
-        let income = CALIBRATION * self.eco.static_income * (theirs + BASE_VALUE) / (ours + BASE_VALUE);
+        let seen: f32 = spots.iter().filter(|s| !s.owned && s.hostile).map(|s| s.value).sum();
+        let held = seen + INFERRED_WEIGHT * (theirs - seen);
+        let income = CALIBRATION * self.eco.static_income * (held + BASE_VALUE) / (ours + BASE_VALUE);
         let infrastructure = self.eco_infrastructure_value();
         let intel = &mut self.intel;
         if intel.last_frame == 0 {
@@ -100,19 +112,25 @@ impl Ai {
         intel.infrastructure = (infrastructure / intel.ours).clamp(0.0, 0.9);
         intel.income = income;
         intel.last_frame = frame;
+        intel.spots = (ours, seen, theirs - seen);
 
         if frame / LOG_PERIOD != (frame - PERIOD) / LOG_PERIOD {
             let i = &self.intel;
             self.log(&format!(
                 "intel: enemy made ~{:.0} metal (~{:.1}/s); seen alive {:.0}, destroyed {:.0}, unaccounted {:.0}, \
-                 of which suspicious {:.0} (we keep {:.0}% in buildings)",
+                 of which suspicious {:.0} (we keep {:.0}% in buildings); spots ours {:.1}, theirs seen {:.1}, \
+                 inferred {:.1}; our income {:.1}",
                 i.produced,
                 i.income,
                 i.known.values().sum::<f32>(),
                 i.killed,
                 i.unaccounted(),
                 i.suspicious(),
-                100.0 * i.infrastructure
+                100.0 * i.infrastructure,
+                i.spots.0,
+                i.spots.1,
+                i.spots.2,
+                self.eco.static_income
             ));
         }
     }
@@ -129,7 +147,7 @@ impl Ai {
     /// against it.
     pub fn intel_wants_anti(&self) -> bool {
         !self.dev_off("intel")
-            && self.intel.suspicious() >= ANTI_SUSPICION
+            && self.intel.suspicious() >= ANTI_SUSPICION.max(ANTI_SHARE * self.intel.produced)
             && self.eco.adjusted_income >= ANTI_INCOME
             && self.eco.static_income >= 0.8 * self.intel.income
     }

@@ -18,6 +18,7 @@ use crate::military::incursions::Incursions;
 use crate::military::intel::Intel;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
+use crate::military::scouts::Scouts;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
@@ -74,6 +75,8 @@ pub struct Ai {
     pub nukes: Nukes,
     pub missiles: Missiles,
     pub sweeps: Sweeps,
+    /// Widows scouting for our strikes.
+    pub scouts: Scouts,
 
     /// All mobile combat units under handler control, by unit id.
     pub fighters: FighterStore,
@@ -90,6 +93,8 @@ pub struct Ai {
     /// Development aid: features switched off, for A/B tests (the AI
     /// option `disable`, else `ZKGBAI_DISABLE`; comma separated).
     disabled: BTreeSet<String>,
+    /// A staged test to play (AI option `test`, see `strike_test`).
+    pub test: Option<String>,
     rsgn: bool,
     resigned: bool,
     initialized: bool,
@@ -161,6 +166,7 @@ impl SkirmishAi for Ai {
             nukes: Nukes::default(),
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
+            scouts: Scouts::default(),
             defs,
             fighters: FighterStore::new(),
             squads: Squads::new(),
@@ -172,6 +178,7 @@ impl SkirmishAi for Ai {
             enemy_teams: BTreeSet::new(),
             enemy_ally_teams: BTreeSet::new(),
             debug_activated: false,
+            test: cb.option("test"),
             disabled: cb
                 .option("disable")
                 .or_else(|| std::env::var("ZKGBAI_DISABLE").ok())
@@ -374,6 +381,11 @@ impl Ai {
 
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
+        // A staged anti-nuke stands by (see `strike_test`).
+        if self.test.as_deref() == Some("anti") {
+            self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
+            return;
+        }
         if self.terraform_testing() {
             self.guard("eco.terraformTest", |ai| ai.terraform_test_update(frame));
         } else {
@@ -384,6 +396,10 @@ impl Ai {
     }
 
     fn check_resign(&mut self) {
+        // A staged test plays on (see `strike_test`).
+        if self.test.is_some() {
+            return;
+        }
         let espots = self.graph.get_enemy_spots().len() as f32;
         let ospots = self.graph.get_owned_spots().len() as f32;
         if !self.is_ffa

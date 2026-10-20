@@ -8,7 +8,7 @@ use crate::Ai;
 use crate::economy::Factory;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
-use crate::military::Fighter;
+use crate::military::{Fighter, scouts};
 use crate::util::kgb_rand;
 
 pub struct FactoryManager {
@@ -468,6 +468,10 @@ impl Ai {
 impl Ai {
     /// Queue the next unit for factory (or strider hub) `fac_id`.
     fn fac_assign_factory_task(&mut self, fac_id: i32) {
+        // A staged strike builds its Widows itself (see `strike_test`).
+        if self.test.is_some() {
+            return;
+        }
         let Some(f) = self.fac.factories.get_mut(&fac_id) else { return };
         if f.creating_scout {
             f.creating_scout = false;
@@ -507,6 +511,7 @@ impl Ai {
         match choice {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
+            scouts::WIDOW => self.scouts_ordered(),
             _ => {}
         }
 
@@ -1151,6 +1156,10 @@ impl Ai {
 
         if war.slasher_spam as f32 * 140.0 > fm.assault_value {
             return if kgb_rand() > 0.5 { "spiderassault" } else { "spiderskirm" };
+        }
+
+        if self.scouts_want_widow() {
+            return scouts::WIDOW;
         }
 
         if fm.scout_budget > 0 {

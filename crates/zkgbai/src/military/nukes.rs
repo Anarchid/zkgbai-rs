@@ -19,14 +19,18 @@
 //! nukes.
 //!
 //! Without those messages (older versions; the engine has no explosion
-//! events for AIs), the AI can only see what is left: if the buildings in the blast are seen
-//! standing once the missile is due, an anti-nuke must be within its
-//! coverage of the flight line, short of our own ground, and lines passing
-//! near that stretch are suspect until the anti is found or a while has
-//! passed. Only what is seen counts: the engine reports enemy deaths in our
-//! sight or radar only, so unseen buildings stay on the books whether the
-//! missile landed or not. Until a look tells (scouts are sent), lines near
-//! that stretch wait.
+//! events for AIs), the AI can only see what is left: if the buildings in
+//! the blast are seen standing once the missile is due, an anti-nuke must
+//! be within its coverage of the flight line, short of our own ground. Only
+//! what is seen counts: the engine reports enemy deaths in our sight or
+//! radar only, so unseen buildings stay on the books whether the missile
+//! landed or not; lines near a flight not seen to land wait for a look.
+//!
+//! An anti-nuke does not walk off: an interception holds until the anti is
+//! found (then it counts as known) or every place it could stand has been
+//! in our sight since with no anti there. A line is suspect while it passes
+//! within coverage of such a place. Scouts look (see `scouts`); a Widow
+//! that finds the anti can stun it for a missile's flight.
 
 use springai::{NO_TIMEOUT, Unit, Vec3};
 
@@ -83,8 +87,8 @@ const FLIGHT_EXTRA: f32 = 30.0;
 /// A hit must have removed this share of the buildings' value.
 const HIT_SHARE: f32 = 0.3;
 
-/// Frames an interception keeps an area suspect.
-const SUSPICION_FRAMES: i32 = 30 * 600;
+/// Where an anti-nuke may stand is sampled this finely, elmos.
+const CANDIDATE_STEP: f32 = 300.0;
 
 /// Frames to wait for a look at what a missile did, after it is due.
 const VERIFY_FRAMES: i32 = 30 * 180;
@@ -117,17 +121,32 @@ pub struct Nukes {
     last_hold_report: i32,
     /// Whether a nuke not ours went off on our ground.
     pub enemy_detonation: bool,
+    /// Widows biting the anti-nukes in the way to a target, to fire at it
+    /// once they are stunned.
+    bite: Option<Bite>,
 }
 
 /// An intercepted flight: an anti-nuke is within its coverage of some of
-/// `stretch` (the burst, or the flight beyond our ground, sampled),
-/// suspected until when; where a scout should look, and whether one has.
+/// `near` (the burst, or the flight beyond our ground, sampled); the places
+/// it may stand that have not been in our sight since.
 struct Interception {
-    stretch: Vec<Vec3>,
-    until: i32,
-    look: Vec3,
-    scouted: bool,
+    near: Vec<Vec3>,
+    candidates: Vec<Vec3>,
 }
+
+/// Anti-nukes being bitten for a missile at `target`, since when.
+struct Bite {
+    target: Vec3,
+    value: f32,
+    antis: Vec<Unit>,
+    since: i32,
+}
+
+/// Frames for the bites to stun all their anti-nukes.
+const BITE_TIMEOUT: i32 = 30 * 10;
+
+/// Anti-nukes in the way of one missile that Widows may bite, at most.
+const MAX_BITES: usize = 2;
 
 /// A burst this high above the ground (or sea) is an airburst, elmos (as
 /// Zero-K's nuke explosion chooser has it).
@@ -141,15 +160,41 @@ const ON_LINE: f32 = 400.0;
 const DAMAGE: f32 = 11501.0;
 const EDGE: f32 = 0.3;
 
-/// A target behind anti-nukes that Shockleys can stun for a nuke's flight.
-struct Combo {
-    target: Vec3,
-    value: f32,
-    antis: Vec<(i32, Vec3)>,
+/// A target that known anti-nukes alone guard, to stun for a nuke's
+/// flight (with Shockleys or Widows).
+pub struct Combo {
+    pub target: Vec3,
+    pub value: f32,
+    pub antis: Vec<(i32, Vec3)>,
 }
 
 /// Flight lines are sampled this often, elmos.
 const SAMPLE: f32 = 250.0;
+
+/// Where an anti-nuke within its coverage of some of `near` may stand, on
+/// a map of `size` (elmos), but where `seen`.
+fn anti_candidates(near: &[Vec3], size: (f32, f32), seen: impl Fn(Vec3) -> bool) -> Vec<Vec3> {
+    let (w, h) = size;
+    let (mut x0, mut z0, mut x1, mut z1) = (w, h, 0.0f32, 0.0f32);
+    for p in near {
+        (x0, z0) = (x0.min(p.x - ANTI_COVERAGE), z0.min(p.z - ANTI_COVERAGE));
+        (x1, z1) = (x1.max(p.x + ANTI_COVERAGE), z1.max(p.z + ANTI_COVERAGE));
+    }
+    let mut candidates = Vec::new();
+    let mut z = z0.max(CANDIDATE_STEP / 2.0);
+    while z <= z1.min(h) {
+        let mut x = x0.max(CANDIDATE_STEP / 2.0);
+        while x <= x1.min(w) {
+            let c = Vec3::xz(x, z);
+            if near.iter().any(|&p| distance(c, p) <= ANTI_COVERAGE) && !seen(c) {
+                candidates.push(c);
+            }
+            x += CANDIDATE_STEP;
+        }
+        z += CANDIDATE_STEP;
+    }
+    candidates
+}
 
 /// Distance from `p` to the segment from `a` to `b`, on the ground plane.
 fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
@@ -158,9 +203,6 @@ fn segment_distance(p: Vec3, a: Vec3, b: Vec3) -> f32 {
     let t = if len2 > 0.0 { (((p.x - a.x) * dx + (p.z - a.z) * dz) / len2).clamp(0.0, 1.0) } else { 0.0 };
     distance(p, Vec3::xz(a.x + t * dx, a.z + t * dz))
 }
-
-/// A scout has looked at an aim point when it came this close, elmos.
-const SCOUTED: f32 = 400.0;
 
 impl Ai {
     /// What a blast at `at` takes out, weighed for `purpose`: (all of it,
@@ -218,10 +260,11 @@ impl Ai {
     /// Whether an anti-nuke not seen may guard `at`: why, if so.
     fn nukes_suspect(&self, at: Vec3) -> Option<&'static str> {
         let from = self.nukes_origin();
+        let guards = |p: Vec3| segment_distance(p, from, at) <= ANTI_COVERAGE;
+        let suspected = self.nukes.intercepted.iter().any(|i| i.candidates.iter().any(|&c| guards(c)));
         // An anti within its coverage of a stretch is within twice that of
         // lines passing near it.
         let near = |stretch: &[Vec3]| stretch.iter().any(|&p| segment_distance(p, from, at) <= 2.0 * ANTI_COVERAGE);
-        let suspected = self.nukes.intercepted.iter().any(|i| i.until > self.frame && near(&i.stretch));
         let unverified = self.nukes.unverified.iter().any(|l| near(&self.nukes_stretch(l.from, l.target)));
         if suspected {
             Some("an interception")
@@ -232,9 +275,9 @@ impl Ai {
         }
     }
 
-    /// The best target worth a missile that only known anti-nukes guard,
-    /// each within reach of a Shockley on our pads: and those anti-nukes.
-    fn nukes_combo(&self) -> Option<Combo> {
+    /// The best target worth a missile that only known anti-nukes (and
+    /// those that `stun` takes) guard: and those anti-nukes.
+    fn nukes_combo(&self, stun: impl Fn(&[(i32, Vec3)]) -> bool) -> Option<Combo> {
         let from = self.nukes_origin();
         let antis: Vec<(i32, Vec3)> = (self.war.targets.values())
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
@@ -245,10 +288,24 @@ impl Ai {
             .filter_map(|(p, v)| {
                 let blocking: Vec<(i32, Vec3)> =
                     antis.iter().copied().filter(|a| segment_distance(a.1, from, p) <= ANTI_COVERAGE).collect();
-                let stun = !blocking.is_empty() && blocking.iter().all(|a| self.missiles_can_stun(a.1));
-                stun.then_some(Combo { target: p, value: v, antis: blocking })
+                (!blocking.is_empty() && stun(&blocking)).then_some(Combo { target: p, value: v, antis: blocking })
             })
             .max_by(|a, b| a.value.total_cmp(&b.value))
+    }
+
+    /// With a missile in store or coming, the best target that Widows by
+    /// the anti-nukes guarding it could open (see `scouts`).
+    pub fn nukes_bite_plan(&self) -> Option<Combo> {
+        self.misc_nuke().filter(|s| s.health() > 0.0 && s.stockpile() + s.stockpile_queued() > 0)?;
+        self.nukes_combo(|antis| antis.len() <= MAX_BITES)
+    }
+
+    /// The most value behind anti-nukes, known or not, for a missile.
+    pub fn nukes_blocked_value(&self) -> f32 {
+        (self.nukes_aim_points(Purpose::Fire).into_iter())
+            .filter(|&(p, _)| self.nukes_covered(p))
+            .map(|(_, v)| v)
+            .fold(0.0, f32::max)
     }
 
     /// Set each known anti-nuke's value to its cost and, while we have a
@@ -310,8 +367,9 @@ impl Ai {
             .map(|e| (e.position, self.nukes_blast_value(e.position, purpose).0));
         match purpose {
             Purpose::Build => points.collect(),
+            // Never where our Widows are about their work.
             Purpose::Fire => points
-                .filter(|&(_, v)| v >= FIRE_VALUE)
+                .filter(|&(p, v)| v >= FIRE_VALUE && !self.scouts_near(p, BLAST + 200.0))
                 .map(|(p, v)| (p, v - FRIENDLY_WEIGHT * self.nukes_friendly_value(p)))
                 .collect(),
         }
@@ -360,20 +418,41 @@ impl Ai {
             self.nukes_report_hold(silo);
             return false;
         }
+        if self.nukes.bite.is_some() {
+            return false;
+        }
+        // The best open target, or one behind anti-nukes worth more: stun
+        // those with Shockleys and fire now, or have the Widows waiting by
+        // them bite and fire once they are stunned.
         let mut target = self.nukes_target(Purpose::Fire).filter(|&(_, v)| v >= FIRE_VALUE);
-        // Else stun the anti-nukes in the way with Shockleys, and fire now.
-        if target.is_none()
-            && let Some(c) = self.nukes_combo()
+        let open = target.map_or(0.0, |t| t.1);
+        if let Some(c) = self.nukes_combo(|antis| antis.iter().all(|a| self.missiles_can_stun(a.1)))
+            && c.value > open
             && self.missiles_stun(&c.antis)
         {
             let (p, n) = (c.target, c.antis.len());
             self.log(&format!("nukes: Shockleys at {n} anti-nukes in the way to ({:.0}, {:.0})", p.x, p.z));
             target = Some((p, c.value));
+        } else if let Some(c) = self.nukes_combo(|antis| antis.iter().all(|a| self.scouts_bite_ready(a.0)))
+            && c.value > open
+        {
+            let antis: Vec<Unit> = c.antis.iter().filter_map(|a| self.war.targets.get(&a.0)).map(|e| e.unit).collect();
+            self.scouts_bite(&c.antis);
+            let (p, n) = (c.target, antis.len());
+            self.log(&format!("nukes: Widows biting {n} anti-nukes in the way to ({:.0}, {:.0})", p.x, p.z));
+            self.nukes.bite = Some(Bite { target: p, value: c.value, antis, since: self.frame });
+            return false;
         }
         let Some((target, value)) = target else {
             self.nukes_report_hold(silo);
             return false;
         };
+        self.nukes_launch(silo, target, value);
+        true
+    }
+
+    /// Fire a missile from `silo` at `target`, with `value` in the blast.
+    fn nukes_launch(&mut self, silo: Unit, target: Vec3, value: f32) {
         let (stock, from) = (silo.stockpile(), silo.pos());
         silo.execute_custom_command(CMD_ATTACK, &[target.x, target.y, target.z], 0, NO_TIMEOUT);
         let due = self.frame + (30.0 * (distance(silo.pos(), target) / MISSILE_SPEED + FLIGHT_EXTRA)) as i32;
@@ -383,7 +462,30 @@ impl Ai {
             .collect();
         self.nukes.launch = Some(Launch { silo, stock, fired: self.frame, from, target, buildings, due });
         self.log(&format!("nukes: missile away at ({:.0}, {:.0}), {value:.0} metal in the blast", target.x, target.z));
-        true
+    }
+
+    /// Fire at the target of the bites once every anti-nuke in the way is
+    /// stunned (or gone); give up if they are not soon.
+    fn nukes_bite_update(&mut self) {
+        let Some(b) = &self.nukes.bite else { return };
+        let silo = self.misc_nuke().filter(|s| s.health() > 0.0 && s.stockpile() > 0);
+        let stunned = b.antis.iter().all(|a| a.health() <= 0.0 || a.is_paralyzed());
+        let (target, value, late) = (b.target, b.value, self.frame - b.since > BITE_TIMEOUT);
+        match silo {
+            Some(silo) if stunned && self.nukes.launch.is_none() => {
+                self.nukes.bite = None;
+                self.log("nukes: the anti-nukes in the way are stunned");
+                self.nukes_launch(silo, target, value);
+            }
+            _ if late || silo.is_none() => {
+                self.nukes.bite = None;
+                self.log(&format!(
+                    "nukes: the bites did not stun the anti-nukes to ({:.0}, {:.0})",
+                    target.x, target.z
+                ));
+            }
+            _ => {}
+        }
     }
 
     /// See how the missile in the air did once it is due.
@@ -394,13 +496,10 @@ impl Ai {
         if self.nukes.test.is_some() {
             self.nukes_test_update(frame);
         }
-        // An interception is explained once an anti is seen within reach of
-        // the line.
-        let antis: Vec<Vec3> = self.nukes_antis().collect();
-        let explained = |i: &Interception| {
-            antis.iter().any(|&a| i.stretch.iter().any(|&p| distance(a, p) <= ANTI_COVERAGE + SAMPLE))
-        };
-        self.nukes.intercepted.retain(|i| i.until > frame && !explained(i));
+        self.nukes_bite_update();
+        if (frame + self.offset) % 30 == 0 {
+            self.nukes_update_interceptions();
+        }
         if (frame + self.offset) % 300 == 0 {
             self.nukes_value_antis();
         }
@@ -415,6 +514,54 @@ impl Ai {
             let unverified = std::mem::take(&mut self.nukes.unverified);
             self.nukes.unverified = unverified.into_iter().filter(|l| !self.nukes_verify(l)).collect();
         }
+    }
+
+    /// An interception is explained once an anti-nuke is seen where it
+    /// could be, and refuted once all the places it could be have been in
+    /// our sight since.
+    fn nukes_update_interceptions(&mut self) {
+        let antis: Vec<Vec3> = self.nukes_antis().collect();
+        let mut done = Vec::new();
+        for i in &mut self.nukes.intercepted {
+            let at = i.near[i.near.len() / 2];
+            if let Some(a) = antis.iter().find(|&&a| i.near.iter().any(|&p| distance(a, p) <= ANTI_COVERAGE + SAMPLE)) {
+                done.push(format!(
+                    "the interception by ({:.0}, {:.0}) is the anti-nuke's at ({:.0}, {:.0})",
+                    at.x, at.z, a.x, a.z
+                ));
+                i.candidates.clear();
+                continue;
+            }
+            i.candidates.retain(|&c| !self.los.is_in_los(c));
+            if i.candidates.is_empty() {
+                done.push(format!(
+                    "no anti-nuke stands where the one that stopped us by ({:.0}, {:.0}) could",
+                    at.x, at.z
+                ));
+            }
+        }
+        self.nukes.intercepted.retain(|i| !i.candidates.is_empty());
+        for d in done {
+            self.log(&format!("nukes: {d}"));
+        }
+    }
+
+    /// An interception by an anti-nuke within its coverage of `near`: the
+    /// places it may stand are those not in our sight now.
+    fn nukes_intercepted(&mut self, near: Vec<Vec3>) {
+        let map = self.cb.map();
+        let size = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+        let candidates = anti_candidates(&near, size, |c| self.los.is_in_los(c));
+        if !candidates.is_empty() {
+            self.nukes.intercepted.push(Interception { near, candidates });
+        }
+    }
+
+    /// Where scouts should look: at what missiles did that no word came
+    /// of, and where anti-nukes that stopped them may stand.
+    pub fn nukes_looks(&self) -> Vec<Vec3> {
+        let todo = self.nukes.unverified.iter().map(|l| l.target);
+        todo.chain(self.nukes.intercepted.iter().flat_map(|i| i.candidates.iter().copied())).collect()
     }
 
     /// See what missile `l` did, by the buildings in its blast seen gone or
@@ -437,8 +584,7 @@ impl Ai {
             self.log(&format!("nukes: missile at {at} landed, {gone:.0} of {standing:.0} metal of buildings gone"));
         } else if seen > (1.0 - HIT_SHARE) * standing {
             let stretch = self.nukes_stretch(l.from, target);
-            let until = frame + SUSPICION_FRAMES;
-            self.nukes.intercepted.push(Interception { stretch, until, look: target, scouted: false });
+            self.nukes_intercepted(stretch);
             self.log(&format!(
                 "nukes: missile at {at} did not land ({seen:.0} of {standing:.0} seen standing): \
                  an anti-nuke must be within {ANTI_COVERAGE:.0} of its flight"
@@ -476,8 +622,7 @@ impl Ai {
             return;
         };
         if airburst {
-            let until = frame + SUSPICION_FRAMES;
-            self.nukes.intercepted.push(Interception { stretch: vec![at], until, look: at, scouted: false });
+            self.nukes_intercepted(vec![at]);
             self.log(&format!(
                 "nukes: missile at ({:.0}, {:.0}) burst in the air at {place}: an anti-nuke must be within \
                  {ANTI_COVERAGE:.0} of there",
@@ -505,16 +650,22 @@ impl Ai {
         ));
     }
 
-    /// Where a scout at `from` should look: at what a missile did, or for
-    /// the anti-nuke that stopped one, flying out along its line to the
-    /// aim point (one within reach now counts as looked at).
-    pub fn nukes_scout_target(&mut self, from: Vec3) -> Option<Vec3> {
-        for i in self.nukes.intercepted.iter_mut().filter(|i| distance(i.look, from) < SCOUTED) {
-            i.scouted = true;
+    /// What our nukes would strike, or must get past: worth watching by
+    /// radar.
+    pub fn nukes_watch_points(&self) -> Vec<Vec3> {
+        if !self.misc_has_nuke() {
+            return Vec::new();
         }
-        let todo = self.nukes.unverified.iter().map(|l| l.target);
-        let todo = todo.chain(self.nukes.intercepted.iter().filter(|i| !i.scouted).map(|i| i.look));
-        todo.min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
+        let mut points: Vec<Vec3> = self.nukes_antis().collect();
+        let mut aims = self.nukes_aim_points(Purpose::Build);
+        aims.sort_by(|a, b| b.1.total_cmp(&a.1));
+        points.extend(aims.into_iter().take(3).filter(|a| a.1 >= FIRE_VALUE).map(|a| a.0));
+        points
+    }
+
+    /// The nearest of [`nukes_looks`](Self::nukes_looks) to `from`.
+    pub fn nukes_scout_target(&self, from: Vec3) -> Option<Vec3> {
+        self.nukes_looks().into_iter().min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
     }
 }
 
@@ -613,5 +764,22 @@ mod tests {
         assert_eq!(segment_distance(Vec3::xz(-400.0, 300.0), a, b), 500.0);
         assert_eq!(segment_distance(Vec3::xz(1300.0, -400.0), a, b), 500.0);
         assert_eq!(segment_distance(Vec3::xz(3.0, 4.0), a, a), 5.0);
+    }
+
+    #[test]
+    fn where_an_anti_may_stand() {
+        // A burst mid-map; our sight covers everything west of x = 5000.
+        let burst = Vec3::xz(6000.0, 6000.0);
+        let c = anti_candidates(&[burst], (12000.0, 12000.0), |p| p.x < 5000.0);
+        assert!(!c.is_empty());
+        assert!(c.iter().all(|&p| distance(p, burst) <= ANTI_COVERAGE && p.x >= 5000.0));
+        // On the map only: a burst by the edge.
+        let edge = anti_candidates(&[Vec3::xz(100.0, 100.0)], (12000.0, 12000.0), |_| false);
+        assert!(edge.iter().all(|p| p.x > 0.0 && p.z > 0.0));
+        // A line that passes far from every place it may stand is open; one
+        // through them is not.
+        let guarded = |from: Vec3, to: Vec3| c.iter().any(|&p| segment_distance(p, from, to) <= ANTI_COVERAGE);
+        assert!(!guarded(Vec3::xz(0.0, 0.0), Vec3::xz(1000.0, 11000.0)));
+        assert!(guarded(Vec3::xz(0.0, 6000.0), Vec3::xz(11000.0, 6000.0)));
     }
 }

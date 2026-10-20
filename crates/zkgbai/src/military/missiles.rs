@@ -8,8 +8,12 @@
 //! for up to 45 s, longer than a nuke's flight) go at the anti-nukes in the
 //! way of a loaded nuke, fired together with it (see `nukes`).
 //!
-//! An anti-nuke we struck (with an Eos, or shelled with Berthas) and have
-//! not seen since stays on the books whether dead or not: scouts look.
+//! The AI hears of no death it does not see, and an Eos is gone from the
+//! game once launched: a building an Eos hit (all it took, its shield
+//! drained first) is counted gone once the missile is due, unless it is
+//! seen standing. An anti-nuke we struck (with Eos, or shelled with
+//! Berthas) is not: a nuke flown at it on a guess costs too much. It stays
+//! on the books until a look tells (see `scouts`).
 
 use std::collections::BTreeMap;
 
@@ -60,11 +64,14 @@ const FUNNELWEB_RADIUS: f32 = 550.0;
 const STAGGER: i32 = 60;
 
 /// A struck target is left alone until seen standing this long after the
-/// strike (the AI hears of no death it does not see: a target struck and
-/// not seen since is most likely gone); a struck anti-nuke not seen for
-/// this long gets a scout. Strikes are forgotten after a while.
+/// strike; a struck anti-nuke not seen for this long wants a look. Strikes
+/// are forgotten after a while.
 const LOOK_AFTER: i32 = 30 * 20;
 const STRUCK_MEMORY: i32 = 30 * 600;
+
+/// An Eos's flight: three seconds up, then 1200 elmos/s (and a margin).
+const EOS_RISE: f32 = 5.0;
+const EOS_SPEED: f32 = 1000.0;
 
 const CMD_ATTACK: i32 = 20;
 
@@ -80,8 +87,12 @@ pub struct Missiles {
     struck: BTreeMap<i32, i32>,
     /// When a silo was last planned (a plan dropped is not remade at once).
     pub planned: Option<i32>,
-    /// Eos to follow those that drained shields: at, how many, from when.
-    followups: Vec<(Vec3, usize, i32)>,
+    /// Eos to follow those that drained shields: at whom, where, how many,
+    /// from when.
+    followups: Vec<(i32, Vec3, usize, i32)>,
+    /// Buildings all the Eos they take are flying at: which, and when the
+    /// last is due.
+    strikes: Vec<(i32, i32)>,
     last_report: i32,
 }
 
@@ -235,6 +246,7 @@ impl Ai {
         }
         self.missiles.ready.retain(|m| m.health() > 0.0);
         self.missiles.struck.retain(|_, t| frame - *t < STRUCK_MEMORY);
+        self.missiles_settle_strikes();
         let Some(silo) = self.missiles_silo() else { return };
         self.missiles_fire_eos();
         self.missiles_restock(silo);
@@ -255,18 +267,19 @@ impl Ai {
         // Those following Eos that drained shields first, then the rest
         // (keeping enough for the follow-ups to come).
         let followups = std::mem::take(&mut self.missiles.followups);
-        for (p, n, after) in followups {
+        for (id, p, n, after) in followups {
             let near: Vec<usize> = (0..free.len()).filter(|&i| distance(free[i].pos(), p) <= REACH).collect();
             if after > frame || near.len() < n {
-                self.missiles.followups.push((p, n, after));
+                self.missiles.followups.push((id, p, n, after));
                 continue;
             }
             for &i in near.iter().take(n).rev() {
                 let m = free.remove(i);
                 self.missiles_launch(m, p);
             }
+            self.missiles_strike_due(id, p);
         }
-        let reserved: usize = self.missiles.followups.iter().map(|f| f.1).sum();
+        let reserved: usize = self.missiles.followups.iter().map(|f| f.2).sum();
         let mut targets = self.missiles_eos_targets();
         targets.retain(|t| free.iter().any(|m| distance(m.pos(), t.pos) <= REACH));
         targets.sort_by(|a, b| (b.value / b.needed as f32).total_cmp(&(a.value / a.needed as f32)));
@@ -279,7 +292,9 @@ impl Ai {
                 self.missiles_launch(m, t.pos);
             }
             if t.shielded {
-                self.missiles.followups.push((t.pos, t.needed - 1, frame + STAGGER));
+                self.missiles.followups.push((t.id, t.pos, t.needed - 1, frame + STAGGER));
+            } else {
+                self.missiles_strike_due(t.id, t.pos);
             }
             self.missiles.struck.insert(t.id, frame);
             let name = self.war.targets.get(&t.id).map_or("?", |e| e.def_name.as_str());
@@ -288,6 +303,32 @@ impl Ai {
                 "missiles: {} Eos at a {name} worth {:.0} at ({:.0}, {:.0}){shield}",
                 t.needed, t.value, t.pos.x, t.pos.z
             ));
+        }
+    }
+
+    /// All the Eos building `id` takes are flying at it from the pads.
+    fn missiles_strike_due(&mut self, id: i32, at: Vec3) {
+        let from = self.missiles_silo().map_or(at, |s| s.pos());
+        let due = self.frame + (30.0 * (EOS_RISE + distance(from, at) / EOS_SPEED)) as i32;
+        self.missiles.strikes.push((id, due));
+    }
+
+    /// Count buildings our Eos are due at gone, unless seen standing since
+    /// (anti-nukes wait for a look).
+    fn missiles_settle_strikes(&mut self) {
+        let frame = self.frame;
+        let (due, flying): (Vec<_>, Vec<_>) = self.missiles.strikes.iter().partition(|s| s.1 <= frame);
+        self.missiles.strikes = flying;
+        for (id, at) in due {
+            let Some(e) = self.war.targets.get(&id).filter(|e| !e.is_dead) else { continue };
+            let (unit, name, pos) = (e.unit, e.def_name.clone(), e.position);
+            let place = format!("({:.0}, {:.0})", pos.x, pos.z);
+            if e.last_seen >= at {
+                self.log(&format!("missiles: the {name} at {place} stands after its Eos"));
+            } else if name != "staticantinuke" {
+                self.war_enemy_destroyed(unit, None);
+                self.log(&format!("missiles: the {name} at {place} counts as gone, its Eos due"));
+            }
         }
     }
 
@@ -310,7 +351,7 @@ impl Ai {
         let stun = self.missiles_stun_targets().iter().filter(|a| distance(a.1, here) <= REACH).count();
         let needed: usize =
             self.missiles_eos_targets().iter().filter(|t| distance(t.pos, here) <= REACH).map(|t| t.needed).sum();
-        let needed = needed + self.missiles.followups.iter().map(|f| f.1).sum::<usize>();
+        let needed = needed + self.missiles.followups.iter().map(|f| f.2).sum::<usize>();
         let def = if n_shock < stun.min(2) {
             shockley
         } else if n_eos < needed.min(PADS) {
@@ -357,15 +398,30 @@ impl Ai {
         }
     }
 
-    /// A struck anti-nuke still on the books and not seen for a while: where
-    /// a scout should look whether it is gone.
-    pub fn missiles_scout_target(&self, from: Vec3) -> Option<Vec3> {
+    /// Struck anti-nukes still on the books and not seen for a while: where
+    /// to look whether they are gone.
+    pub fn missiles_looks(&self) -> Vec<Vec3> {
         let frame = self.frame;
         (self.missiles.struck.iter())
             .filter(|&(_, &t)| frame - t > LOOK_AFTER)
             .filter_map(|(id, _)| self.war.targets.get(id))
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke" && frame - e.last_seen > LOOK_AFTER)
             .map(|e| e.position)
-            .min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
+            .collect()
+    }
+
+    /// What our Eos strike or would: worth watching by radar, to hear
+    /// whether it falls.
+    pub fn missiles_watch_points(&self) -> Vec<Vec3> {
+        let Some(silo) = self.missiles_silo() else { return Vec::new() };
+        let here = silo.pos();
+        let struck = (self.missiles.struck.keys()).filter_map(|id| self.war.targets.get(id)).map(|e| e.position);
+        let targets = self.missiles_eos_targets().into_iter().map(|t| t.pos).filter(|&p| distance(p, here) <= REACH);
+        struck.chain(targets).collect()
+    }
+
+    /// The nearest of [`missiles_looks`](Self::missiles_looks) to `from`.
+    pub fn missiles_scout_target(&self, from: Vec3) -> Option<Vec3> {
+        self.missiles_looks().into_iter().min_by(|a, b| distance(*a, from).total_cmp(&distance(*b, from)))
     }
 }

@@ -1,37 +1,35 @@
 //! Assault squads, shield balls and air squads.
+//!
+//! A squad goes where its leader can, so its members move alike: squads
+//! form by kind of unit and by the ground they can cross (a vehicle does
+//! not follow bots up a slope), but for amphibious bots, which go wherever
+//! bots do and may join them.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use springai::{Unit, Vec3};
+use zk_terrain::Tier;
 
 use crate::Ai;
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
+use crate::terrain::tier_of;
 use crate::util::{NULLPOS, distance};
 
 #[derive(Default)]
 pub struct SquadHandler {
     /// Fighter-store ids of all assault-type fighters.
     pub fighters: BTreeSet<i32>,
-    pub next_cloaky_squad: Option<SquadId>,
-    pub next_shield_squad: Option<SquadId>,
-    pub next_amph_squad: Option<SquadId>,
-    pub next_recluse_squad: Option<SquadId>,
-    pub next_spider_squad: Option<SquadId>,
-    pub next_veh_squad: Option<SquadId>,
-    pub next_halberd_squad: Option<SquadId>,
-    pub next_hover_squad: Option<SquadId>,
-    pub next_tank_squad: Option<SquadId>,
-    pub next_boat_squad: Option<SquadId>,
-    pub next_air_squad: Option<SquadId>,
-    pub next_brawler_squad: Option<SquadId>,
+    /// The squads forming, by kind of unit and movement tier (none for
+    /// aircraft).
+    next_squads: BTreeMap<(Slot, Option<Tier>), SquadId>,
     pub shield_squads: VecDeque<SquadId>,
     pub squads: VecDeque<SquadId>,
     pub air_squads: VecDeque<SquadId>,
 }
 
 /// Which forming squad an assault unit joins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Slot {
     Cloaky,
     Shield,
@@ -95,23 +93,12 @@ impl SquadHandler {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    fn next_squad(&mut self, slot: Slot) -> &mut Option<SquadId> {
-        match slot {
-            Slot::Cloaky => &mut self.next_cloaky_squad,
-            Slot::Shield => &mut self.next_shield_squad,
-            Slot::Amph => &mut self.next_amph_squad,
-            Slot::Recluse => &mut self.next_recluse_squad,
-            Slot::Spider => &mut self.next_spider_squad,
-            Slot::Veh => &mut self.next_veh_squad,
-            Slot::Halberd => &mut self.next_halberd_squad,
-            Slot::Hover => &mut self.next_hover_squad,
-            Slot::Tank => &mut self.next_tank_squad,
-            Slot::Boat => &mut self.next_boat_squad,
-            Slot::Brawler => &mut self.next_brawler_squad,
-            Slot::Air => &mut self.next_air_squad,
-        }
-    }
+/// Whether units of movement tiers `a` and `b` go the same ways (as far as
+/// following a leader of either goes: amphibious bots with bots).
+fn same_ways(a: Option<Tier>, b: Option<Tier>) -> bool {
+    a == b || matches!((a, b), (Some(Tier::Bot), Some(Tier::Amphib)) | (Some(Tier::Amphib), Some(Tier::Bot)))
 }
 
 /// Low-shield hysteresis for shield balls: retreat below half shields and
@@ -139,6 +126,24 @@ impl Ai {
         }
         if frame % 14 == (self.offset + 9) % 14 {
             self.squad_assign_air_squads();
+        }
+        if frame % 1800 == (self.offset + 11) % 1800 {
+            self.squad_check_tiers();
+        }
+    }
+
+    /// Report squads whose members do not go the same ways (none should).
+    fn squad_check_tiers(&mut self) {
+        let mut mixed = Vec::new();
+        for sid in self.squads.ids() {
+            let Some(s) = self.squads.get(sid) else { continue };
+            let tiers: BTreeSet<Option<Tier>> = s.fighters.iter().map(|&m| self.squad_tier(m)).collect();
+            if tiers.iter().any(|&a| tiers.iter().any(|&b| !same_ways(a, b))) {
+                mixed.push(format!("squad {sid}: {tiers:?}"));
+            }
+        }
+        if !mixed.is_empty() {
+            self.debug(&format!("squads mixing movement tiers: {}", mixed.join("; ")));
         }
     }
 
@@ -211,15 +216,28 @@ impl Ai {
         self.squads.remove(sid);
     }
 
+    /// The movement tier of fighter `id` (none for aircraft).
+    fn squad_tier(&self, id: i32) -> Option<Tier> {
+        self.fighters.get(&id).and_then(|f| f.unit.def()).and_then(tier_of)
+    }
+
+    /// Whether fighter `id` goes the same ways as every member of squad
+    /// `sid`.
+    fn squad_fits(&self, sid: SquadId, id: i32) -> bool {
+        let tier = self.squad_tier(id);
+        self.squads.get(sid).is_some_and(|s| s.fighters.iter().all(|&m| same_ways(self.squad_tier(m), tier)))
+    }
+
     fn squad_assign_assault(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let slot = Slot::for_name(self.defs.name_of(unit));
+        let key = (slot, unit.def().and_then(tier_of));
         let tf = self.graph.territory_fraction;
         let inc = self.eco.effective_income;
         let allies = self.merged_allies;
 
         // Create a new squad if there isn't one.
-        let sid = match *self.squad_handler.next_squad(slot) {
+        let sid = match self.squad_handler.next_squads.get(&key).copied() {
             Some(sid) if self.squads.contains(sid) => sid,
             _ => {
                 let kind = if slot == Slot::Halberd { SquadKind::Hover } else { SquadKind::Assault };
@@ -238,7 +256,7 @@ impl Ai {
                 } else {
                     self.squad_handler.squads.push_back(sid);
                 }
-                *self.squad_handler.next_squad(slot) = Some(sid);
+                self.squad_handler.next_squads.insert(key, sid);
                 sid
             }
         };
@@ -248,7 +266,7 @@ impl Ai {
         s.add_unit_nav(id, &mut self.fighters, &mut nav);
         if slot.is_complete(s.metal_value, s.income, s.get_size(), self.eco.adjusted_income) {
             s.status = 'r';
-            *self.squad_handler.next_squad(slot) = None;
+            self.squad_handler.next_squads.remove(&key);
         }
     }
 
@@ -264,41 +282,51 @@ impl Ai {
         self.squad_assign_assault(id);
     }
 
-    /// Make `units` (no longer any handler's) an attacking squad where they
-    /// stand: a force landed by air, say.
-    pub fn squad_adopt(&mut self, units: &[Unit]) -> Option<SquadId> {
+    /// Make `units` (no longer any handler's) attacking squads where they
+    /// stand, one for each kind of ground they cross: a force landed by
+    /// air, say.
+    pub fn squad_adopt(&mut self, units: &[Unit]) -> Vec<SquadId> {
         let team = self.team_id;
         let fresh: Vec<Fighter> = units
             .iter()
             .filter(|u| u.health() > 0.0 && u.team() == team && !self.fighters.contains_key(&u.id()))
             .filter_map(|&u| Some(Fighter::new(u, u.def()?.cost(self.metal), team)))
             .collect();
-        if fresh.is_empty() {
-            return None;
-        }
-        let sid = self.squads.create(SquadKind::Assault, team, &self.defs);
+        let mut squads: Vec<SquadId> = Vec::new();
         for f in fresh {
             let id = f.id;
             self.fighters.insert(id, f);
             self.squad_handler.fighters.insert(id);
+            let sid = match squads.iter().copied().find(|&sid| self.squad_fits(sid, id)) {
+                Some(sid) => sid,
+                None => {
+                    let sid = self.squads.create(SquadKind::Assault, team, &self.defs);
+                    squads.push(sid);
+                    sid
+                }
+            };
             let mut nav = nav!(self);
             if let Some(s) = self.squads.get_mut(sid) {
                 s.add_unit_nav(id, &mut self.fighters, &mut nav);
             }
         }
-        if let Some(s) = self.squads.get_mut(sid) {
-            s.status = 'a';
+        for &sid in &squads {
+            if let Some(s) = self.squads.get_mut(sid) {
+                s.status = 'a';
+            }
+            self.squad_handler.squads.push_back(sid);
         }
-        self.squad_handler.squads.push_back(sid);
-        Some(sid)
+        squads
     }
 
     fn squad_assign_shield_mob(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit);
         let (is_felon, is_aspis) = (name == "shieldfelon", name == "shieldshield");
-        let shield_squads: Vec<SquadId> =
-            self.squad_handler.shield_squads.iter().copied().filter(|&s| self.squads.contains(s)).collect();
+        // Shield balls only for those that go where their felon goes.
+        let shield_squads: Vec<SquadId> = (self.squad_handler.shield_squads.iter().copied())
+            .filter(|&s| self.squads.contains(s) && (is_felon || self.squad_fits(s, id)))
+            .collect();
 
         let needed = if is_felon && (self.merged_allies == 0 || shield_squads.is_empty()) {
             // Create a new shieldball for each felon, unless on teams where you want just one giant death ball.
@@ -384,7 +412,9 @@ impl Ai {
             if !f.shield_mob {
                 continue;
             }
-            if f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_shield_squad()) {
+            if f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_shield_squad())
+                || !self.squad_fits(sid, id)
+            {
                 continue;
             }
             let unit = f.unit;
@@ -518,10 +548,6 @@ impl Ai {
 
         match status {
             'f' => {
-                // On its way through the teleporter.
-                if self.teleport_busy(sid) {
-                    return;
-                }
                 if self.war.get_threat(pos) > 2.0 * self.war.get_total_friendly_threat(pos)
                     || self.war.get_porc_threat(pos) > 0.0
                     || (target != NULLPOS && self.war.get_porc_threat(target) > 0.0)
@@ -530,33 +556,19 @@ impl Ai {
                     self.squad_retreat_to(sid, haven);
                 } else {
                     let rally = self.war_get_rally_point(pos);
-                    // By the gate to the front, if that beats walking.
-                    if self.teleport_gate(sid, pos, rally) {
-                        return;
-                    }
                     self.squad_set_target(sid, rally);
                 }
             }
             'r' => {
-                if self.teleport_busy(sid) {
-                    return;
-                }
                 // Set rallying for squads that are finished forming and gathering to attack
                 // (where an incursion needs blocking, if one does).
                 let rally = self.incursion_block(sid).unwrap_or_else(|| self.war_get_rally_point(pos));
-                if self.teleport_gate(sid, pos, rally) {
-                    return;
-                }
                 self.squad_set_target(sid, rally);
                 if self.squad_is_rallied(sid) {
                     self.squad_set_status(sid, 'a');
                 }
             }
             'a' => {
-                // On its way through the teleporter.
-                if self.teleport_busy(sid) {
-                    return;
-                }
                 if self.war.get_effective_threat(pos) > 0.0
                     && (!self.graph.is_ally_territory(pos) || self.war.get_porc_threat(pos) > 0.0)
                 {
@@ -569,12 +581,7 @@ impl Ai {
                     return;
                 }
                 let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return };
-                let (target, cost) = self.war_best_target(leader, leader.pos(), true);
-                // By teleporter, if a better target waits at its exit.
-                if self.teleport_shortcut(sid, pos, cost) {
-                    return;
-                }
-                let target = if target != NULLPOS { self.war_mark_target(target) } else { NULLPOS };
+                let target = self.war_get_target(leader, true);
                 self.squad_set_target(sid, target);
             }
             _ => {}
@@ -729,5 +736,13 @@ mod tests {
         assert!(update_low_shields(false, 0.4));
         assert!(update_low_shields(true, 0.7));
         assert!(!update_low_shields(true, 0.85));
+    }
+
+    #[test]
+    fn squads_keep_to_one_kind_of_ground() {
+        let (bot, amph, veh) = (Some(Tier::Bot), Some(Tier::Amphib), Some(Tier::Vehicle));
+        assert!(same_ways(bot, bot) && same_ways(bot, amph) && same_ways(amph, bot));
+        assert!(!same_ways(bot, veh) && !same_ways(veh, amph) && !same_ways(None, bot));
+        assert!(same_ways(None, None));
     }
 }

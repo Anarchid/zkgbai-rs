@@ -12,10 +12,6 @@
 //! through), and fewer defenders on the ground, turrets and units together,
 //! than the drop force takes on. Landed, the force is an attacking squad on
 //! its own; the Charons fly home for the next sortie.
-//!
-//! Between sorties, a Charon also ferries single units where they are
-//! wanted and could not walk: a Djinn to a teleport exit behind the enemy's
-//! lines (see `teleport`).
 
 use std::collections::BTreeMap;
 
@@ -92,24 +88,6 @@ enum Stage {
     Flying,
 }
 
-/// A Charon ferrying one unit (a Djinn to its exit, say).
-#[derive(Clone, Copy)]
-struct Ferry {
-    charon: Unit,
-    cargo: Unit,
-    to: Vec3,
-    stage: Stage,
-    since: i32,
-}
-
-/// How a ferry is going.
-#[derive(Clone, Copy, PartialEq)]
-pub enum Ferried {
-    Underway,
-    Landed(Vec3),
-    Failed,
-}
-
 /// What tells whether cargo is aboard.
 #[derive(Clone, Copy)]
 struct Aboard {
@@ -138,9 +116,6 @@ impl Aboard {
     }
 }
 
-/// A ferry (carrying medium cargo, slowly) gives up after this long.
-const FERRY_TIMEOUT: i32 = 30 * 240;
-
 struct Sortie {
     loads: Vec<Load>,
     drop: Vec3,
@@ -156,9 +131,6 @@ pub struct Drops {
     /// When a Charon was queued at a factory.
     ordered: Option<i32>,
     last_sortie: i32,
-    ferry: Option<Ferry>,
-    /// The cargo of the last ferry, and how it went.
-    ferried: Option<(i32, Ferried)>,
 }
 
 /// A unit that fits a seat, and what it brings (on the scale of enemy
@@ -209,9 +181,7 @@ impl Ai {
         }
         let team = self.team_id;
         self.drops.charons.retain(|_, u| u.health() > 0.0 && u.team() == team);
-        if self.drops.ferry.is_some() {
-            self.drops_ferry_fly(frame);
-        } else if self.drops.sortie.is_some() {
+        if self.drops.sortie.is_some() {
             self.drops_fly(frame);
         } else if self.drops.charons.len() >= FLIGHT && frame - self.drops.last_sortie >= SORTIE_DELAY {
             self.drops_launch(frame);
@@ -230,73 +200,6 @@ impl Ai {
             let t = k as f32 / steps as f32;
             self.war.get_aa_threat(Vec3::xz(from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t)) <= 0.0
         })
-    }
-
-    /// A Charon free to ferry a unit (none is out on a sortie or ferry).
-    pub fn drops_free_charon(&self) -> Option<Unit> {
-        if self.dev_off("drops") || self.drops.sortie.is_some() || self.drops.ferry.is_some() {
-            return None;
-        }
-        let home = self.graph.get_ally_center();
-        (self.drops.charons.values().copied())
-            .filter(|c| c.health() > 0.0)
-            .min_by(|a, b| distance(a.pos(), home).total_cmp(&distance(b.pos(), home)))
-    }
-
-    /// Have a free Charon carry `cargo` to `to`; whether one is on it.
-    pub fn drops_ferry(&mut self, cargo: Unit, to: Vec3) -> bool {
-        let Some(charon) = self.drops_free_charon() else { return false };
-        cargo.stop(0);
-        charon.execute_custom_command(CMD_LOAD_UNITS, &[cargo.id() as f32], 0, NO_TIMEOUT);
-        let since = self.frame;
-        self.drops.ferry = Some(Ferry { charon, cargo, to, stage: Stage::Loading, since });
-        self.drops.ferried = Some((cargo.id(), Ferried::Underway));
-        let what = self.defs.name_of(cargo).to_owned();
-        self.log(&format!("drops: Charon ferrying a {what} to ({:.0}, {:.0})", to.x, to.z));
-        true
-    }
-
-    /// How the ferry of `cargo` went, if it had one.
-    pub fn drops_ferried(&self, cargo: Unit) -> Option<Ferried> {
-        self.drops.ferried.filter(|f| f.0 == cargo.id()).map(|f| f.1)
-    }
-
-    fn drops_ferry_fly(&mut self, frame: i32) {
-        let Some(f) = self.drops.ferry else { return };
-        let aboard = self.drops_aboard();
-        let alive = |u: Unit| aboard.alive(u);
-        let carried = aboard.carried(f.charon, f.cargo);
-        let outcome = match f.stage {
-            Stage::Loading if carried => {
-                self.drops_route(f.charon, f.to);
-                self.drops.ferry = Some(Ferry { stage: Stage::Flying, since: frame, ..f });
-                None
-            }
-            Stage::Loading if frame - f.since > LOAD_TIMEOUT || !alive(f.charon) || !alive(f.cargo) => {
-                Some(Ferried::Failed)
-            }
-            Stage::Loading => None,
-            Stage::Flying if !alive(f.cargo) => Some(Ferried::Failed),
-            Stage::Flying if !carried && !aboard.lifted(f.cargo) => Some(Ferried::Landed(f.cargo.pos())),
-            Stage::Flying => {
-                if carried && (frame - f.since > FERRY_TIMEOUT || distance(f.charon.pos(), f.to) < DROP_RADIUS) {
-                    let p = f.charon.pos();
-                    f.charon.execute_custom_command(CMD_UNLOAD_UNITS, &[p.x, p.y, p.z, DROP_RADIUS], 0, NO_TIMEOUT);
-                }
-                None
-            }
-        };
-        let Some(outcome) = outcome else { return };
-        self.drops.ferry = None;
-        self.drops.ferried = Some((f.cargo.id(), outcome));
-        if alive(f.charon) {
-            self.drops_go_home(f.charon);
-        }
-        let how = match outcome {
-            Ferried::Landed(p) => format!("landed {:.0} from its goal", distance(p, f.to)),
-            _ => "failed".to_owned(),
-        };
-        self.log(&format!("drops: ferry {how}"));
     }
 
     /// How many units near `at` would fit a Charon's seat.
@@ -499,11 +402,11 @@ impl Ai {
             .filter(|l| l.cargo.health() > 0.0 && distance(l.cargo.pos(), drop) < 2.0 * DAMAGE_RADIUS)
             .map(|l| l.cargo)
             .collect();
-        let squad = self.squad_adopt(&landed);
+        let squads = self.squad_adopt(&landed);
         for &u in &landed {
             self.retreat_add_coward(u);
         }
-        self.log(&format!("drops: {} landed (squad {squad:?})", landed.len()));
+        self.log(&format!("drops: {} landed (squads {squads:?})", landed.len()));
         self.drops.last_sortie = frame;
     }
 

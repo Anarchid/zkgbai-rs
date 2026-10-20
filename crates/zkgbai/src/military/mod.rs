@@ -10,6 +10,8 @@ pub mod intel;
 pub mod missiles;
 pub mod nukes;
 pub mod radar;
+pub mod scouts;
+pub mod strike_test;
 pub mod sweeps;
 pub mod tasks;
 pub mod teleport;
@@ -404,6 +406,8 @@ impl Ai {
         self.guard("intel.update", |ai| ai.intel_update(frame));
         self.guard("nukes.update", |ai| ai.nukes_update(frame));
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
+        self.guard("scouts.update", |ai| ai.scouts_update(frame));
+        self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -509,6 +513,10 @@ impl Ai {
         }
         if name == "gunshiptrans" {
             self.drops_add_charon(unit);
+            return;
+        }
+        if name == scouts::WIDOW {
+            self.scouts_add_widow(unit);
             return;
         }
 

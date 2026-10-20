@@ -197,6 +197,10 @@ impl Ai {
                 h.retreating_units.remove(&id);
                 continue;
             }
+            // On its way home through the Djinn's lamp.
+            if self.teleports.evacuating(id) {
+                continue;
+            }
 
             let (unit, pos, is_scythe, is_plane, is_flyer, cloaked) =
                 (c.unit, c.get_pos(), c.is_scythe, c.is_plane, c.is_flyer, c.is_cloaked());
