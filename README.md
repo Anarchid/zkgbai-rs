@@ -138,14 +138,16 @@ on this machine over LuaSocket and draws what the one in focus thinks into the w
 where they go, places it defends, where its other units mean to go (a worker's task, a raider's
 target), its memory of the enemy (where it last saw each unit and how long ago, and the reach of
 remembered defenses), its view of the metal spots, the units the operator holds, and the chokepoints
-of the terrain analysis. A GL4 shader draped over the terrain (Zero-K's `LuaShader`) shows one of
-its threat or value maps, smooth with contour lines, and the segmentation of a movement tier:
+of the terrain analysis. GL4 shaders (Zero-K's `LuaShader`) tint the ground: in screen space over
+the map's deferred depth buffer when `AllowDeferredMapRendering` is on (exact on the terrain), else
+on a mesh draped over it (`/luaui zkop render mesh` forces that). They show one of its threat or
+value maps, smooth with contour lines, and the segmentation of a movement tier:
 regions by id, or by who holds them (ours blue, the enemy's red, sheltered ones hatched). Its panel
 is a Chili window: toggles, the map and terrain pickers, the AI in focus, and its log. Select the
 AI's units (as a spectator, or an AI ally's units) and right-click to steer them: move, attack-move
 with ctrl, attack or guard a unit, queue with shift; alt sends their whole squad, ctrl+alt makes a
 place to defend. `/luaui zkop` takes `focus <team>`, `layer <name>`, `terrain <off|regions|holders>
-[tier]`, `release`, `build <unitdef>` and `defend` (at the mouse), `fac <unitdef> [n]`, `say`,
+[tier]`, `render <auto|screen|mesh>`, `release`, `build <unitdef>` and `defend` (at the mouse), `fac <unitdef> [n]`, `say`,
 `note`, `feature <name> on|off`. Without GL4 the value map is drawn as quads, without Chili the
 panel by hand. `tools/arena/match.sh` installs extra widgets for a match
 from `ARENA_WIDGETS`.

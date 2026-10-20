@@ -10,10 +10,12 @@
 -- focus <team>): its squads and where they go, places it defends, where its
 -- other units mean to go and why, its memory of the enemy (where it last saw
 -- them, how long ago, and the reach of remembered defenses), its view of the
--- metal spots, and its log. On the ground, through a shader draped over the
--- terrain: one of its threat or value maps, smooth with contour lines, and the
--- terrain's segmentation for a movement tier (regions by id or by who holds
--- them, sheltered ones hatched) with the chokepoints between them.
+-- metal spots, and its log. On the ground, by shaders (screen-space over the
+-- map's deferred depth when AllowDeferredMapRendering is on, else a mesh
+-- draped on the terrain): one of its threat or value maps, smooth with
+-- contour lines, and the terrain's segmentation for a movement tier (regions
+-- by id or by who holds them, sheltered ones hatched) with the chokepoints
+-- between them.
 --
 -- Steering (as a spectator, or for an AI ally): select the AI's units and
 -- right-click: move; ctrl: attack-move; on a unit: attack or guard; shift
@@ -22,9 +24,9 @@
 -- released (panel button, or /luaui zkop release).
 --
 -- Text commands (/luaui zkop ...): focus <team>, layer <name|none>,
--- terrain <off|regions|holders> [tier], release, build <unitdef> (at the
--- mouse), fac <unitdef> [count], defend (at the mouse), say <text>,
--- note <text>, feature <name> on|off, toggle <what>.
+-- terrain <off|regions|holders> [tier], render <auto|screen|mesh>, release,
+-- build <unitdef> (at the mouse), fac <unitdef> [count], defend (at the
+-- mouse), say <text>, note <text>, feature <name> on|off, toggle <what>.
 --
 -- The panel is a Chili window in Zero-K; without Chili it is drawn by hand,
 -- and without GL4 shaders the value map falls back to plain quads.
@@ -277,49 +279,27 @@ local function act(inst, tool, args, label, onDone)
 end
 
 --------------------------------------------------------------------------------
--- Maps on the ground: a GL4 shader over a mesh draped on the terrain
+-- Maps on the ground, by GL4 shaders. With the map's deferred depth buffer
+-- (AllowDeferredMapRendering = 1, Zero-K's own lights and distortions need
+-- it too): a screen-space pass that finds each pixel's place on the map from
+-- its depth and tints it, exact on the terrain. Without it: a mesh draped on
+-- the terrain from the heightmap.
 --------------------------------------------------------------------------------
 
-local overlay = {} -- shader, vao, ok
-
-local VS_SRC = [[
-#version 420
-#line 10000
-layout (location = 0) in vec2 meshXZ; // world x, z
-uniform sampler2D heightmapTex;
-out DataVS {
-	vec2 worldXZ;
-};
-//__ENGINEUNIFORMBUFFERDEFS__
-#line 10100
-void main() {
-	vec2 w = meshXZ;
-	vec2 uvhm = clamp(w, vec2(8.0), mapSize.xy - 8.0) / mapSize.xy;
-	float y = max(0.0, textureLod(heightmapTex, uvhm, 0.0).x) + 4.0;
-	worldXZ = w;
-	gl_Position = cameraViewProj * vec4(w.x, y, w.y, 1.0);
-}
-]]
+local overlay = {} -- ok; mesh = {shader, tiles}; screen = {shader, quad}
+local renderMode = "auto" -- auto, screen, mesh
 
 -- Mode 0: a value map (red channel, 0-1; linear filtering), tinted with
 -- contour lines at quarters. Mode 1: regions (id + 1 in red and green,
 -- texel-exact) coloured by id or by who holds them (attrTex, a texel per
 -- region: red the enemy's strength, blue ours, alpha flags), with borders.
-local FS_SRC = [[
-#version 420
-#line 20000
+local TINT_SRC = [[
 uniform sampler2D dataTex;
 uniform sampler2D attrTex;
 uniform vec4 dataRect;   // origin x, z; world width, height
 uniform vec4 dataInfo;   // texels wide, high; mode; alpha
 uniform vec4 valueColor; // rgb; contour strength
 uniform vec4 regionInfo; // colour by holders?; regions; border alpha; fill alpha
-in DataVS {
-	vec2 worldXZ;
-};
-out vec4 fragColor;
-//__ENGINEUNIFORMBUFFERDEFS__
-#line 20100
 
 vec3 hsv2rgb(vec3 c) {
 	vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0);
@@ -332,25 +312,25 @@ float regionAt(ivec2 t) {
 	return floor(c.r * 255.0 + 0.5) + 256.0 * floor(c.g * 255.0 + 0.5) - 1.0;
 }
 
-void main() {
+// The colour a map point gets; alpha 0 for none.
+vec4 tint(vec2 worldXZ) {
 	vec2 uv = (worldXZ - dataRect.xy) / dataRect.zw;
-	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) discard;
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return vec4(0.0);
 	if (dataInfo.z < 0.5) {
 		float v = texture(dataTex, uv).r;
-		if (v < 0.02) discard;
+		if (v < 0.02) return vec4(0.0);
 		float levels = v * 4.0;
 		float f = fract(levels);
 		float line = 1.0 - smoothstep(0.0, 1.5 * fwidth(levels), min(f, 1.0 - f));
 		vec3 c = valueColor.rgb * (0.65 + 0.35 * v);
 		float a = dataInfo.w * (0.2 + 0.6 * sqrt(v));
-		fragColor = vec4(mix(c, vec3(1.0, 0.95, 0.85), line * valueColor.a), clamp(a + line * valueColor.a * 0.6, 0.0, 0.95));
-		return;
+		return vec4(mix(c, vec3(1.0, 0.95, 0.85), line * valueColor.a), clamp(a + line * valueColor.a * 0.6, 0.0, 0.95));
 	}
 	vec2 p = uv * dataInfo.xy;
 	ivec2 ip = ivec2(floor(p));
 	vec2 f = fract(p);
 	float id = regionAt(ip);
-	if (id < 0.0) discard;
+	if (id < 0.0) return vec4(0.0);
 	vec2 fw = max(fwidth(p) * 1.5, vec2(0.1));
 	float border = 0.0;
 	if (regionAt(ip + ivec2(1, 0)) != id) border = max(border, 1.0 - smoothstep(0.0, fw.x, 1.0 - f.x));
@@ -372,7 +352,79 @@ void main() {
 		// Sheltered from the enemy's ground forces: hatched.
 		fill *= 0.4 + 1.6 * step(0.5, fract((worldXZ.x + worldXZ.y) / 64.0));
 	}
-	fragColor = vec4(mix(c, vec3(1.0), border * 0.3), clamp(fill + border * regionInfo.z, 0.0, 0.95));
+	return vec4(mix(c, vec3(1.0), border * 0.3), clamp(fill + border * regionInfo.z, 0.0, 0.95));
+}
+]]
+
+local MESH_VS = [[
+#version 420
+#line 10000
+layout (location = 0) in vec2 meshXZ; // world x, z
+uniform sampler2D heightmapTex;
+out DataVS {
+	vec2 worldXZ;
+};
+//__ENGINEUNIFORMBUFFERDEFS__
+#line 10100
+void main() {
+	vec2 w = meshXZ;
+	vec2 uvhm = clamp(w, vec2(8.0), mapSize.xy - 8.0) / mapSize.xy;
+	float y = max(0.0, textureLod(heightmapTex, uvhm, 0.0).x) + 4.0;
+	worldXZ = w;
+	gl_Position = cameraViewProj * vec4(w.x, y, w.y, 1.0);
+}
+]]
+
+local MESH_FS = [[
+#version 420
+#line 20000
+in DataVS {
+	vec2 worldXZ;
+};
+out vec4 fragColor;
+//__ENGINEUNIFORMBUFFERDEFS__
+]] .. TINT_SRC .. [[
+#line 20500
+void main() {
+	fragColor = tint(worldXZ);
+	if (fragColor.a <= 0.0) discard;
+}
+]]
+
+local SCREEN_VS = [[
+#version 420
+#line 30000
+layout (location = 0) in vec4 posUV; // clip x, y; screen u, v
+out DataVS {
+	vec2 screenUV;
+};
+//__ENGINEUNIFORMBUFFERDEFS__
+#line 30100
+void main() {
+	screenUV = posUV.zw;
+	gl_Position = vec4(posUV.xy, 0.0, 1.0);
+}
+]]
+
+-- Depth runs 0-1 in Recoil's clip space, as in Zero-K's deferred lights.
+local SCREEN_FS = [[
+#version 420
+#line 40000
+uniform sampler2D mapDepthTex;
+in DataVS {
+	vec2 screenUV;
+};
+out vec4 fragColor;
+//__ENGINEUNIFORMBUFFERDEFS__
+]] .. TINT_SRC .. [[
+#line 40500
+void main() {
+	float depth = texture(mapDepthTex, screenUV).x;
+	if (depth >= 1.0) discard;
+	vec4 world = cameraViewProjInv * vec4(screenUV * 2.0 - 1.0, depth, 1.0);
+	world.xyz /= world.w;
+	fragColor = tint(world.xz);
+	if (fragColor.a <= 0.0) discard;
 }
 ]]
 
@@ -424,6 +476,37 @@ local function buildMeshTiles()
 	return tiles
 end
 
+-- Two triangles over the whole screen.
+local function buildScreenQuad()
+	local vbo = gl.GetVBO(GL.ARRAY_BUFFER, false)
+	if not vbo then
+		return nil
+	end
+	vbo:Define(6, {{id = 0, name = "posUV", size = 4}})
+	vbo:Upload({
+		-1, -1, 0, 0,   -1, 1, 0, 1,   1, 1, 1, 1,
+		1, 1, 1, 1,     1, -1, 1, 0,   -1, -1, 0, 0,
+	})
+	local vao = gl.GetVAO()
+	vao:AttachVertexBuffer(vbo)
+	return vao
+end
+
+local UNIFORMS = {dataRect = {0, 0, 1, 1}, dataInfo = {1, 1, 0, 0.5}, valueColor = {1, 0.5, 0.2, 0.6}, regionInfo = {0, 1, 0.8, 0.15}}
+
+local function compile(LuaShader, name, vs, fs, ints)
+	return LuaShader.CheckShaderUpdates({
+		vsSrc = vs, fsSrc = fs, shaderName = name,
+		uniformInt = ints, uniformFloat = UNIFORMS, shaderConfig = {},
+		-- Inline sources look unchanged to the loader; compile anyway.
+		forceupdate = true,
+	})
+end
+
+local function deferredMap()
+	return Spring.GetConfigInt("AllowDeferredMapRendering", 0) == 1
+end
+
 local function initOverlay()
 	if not gl.CreateShader or not gl.GetVAO or not gl.GetVBO then
 		return "no GL4 (headless?)"
@@ -435,25 +518,23 @@ local function initOverlay()
 	if not okInclude or not LuaShader then
 		return "no LuaShader.lua"
 	end
-	overlay.source = {
-		vsSrc = VS_SRC,
-		fsSrc = FS_SRC,
-		shaderName = "ZKGBAI Operator overlay",
-		uniformInt = {heightmapTex = 0, dataTex = 1, attrTex = 2},
-		uniformFloat = {dataRect = {0, 0, 1, 1}, dataInfo = {1, 1, 0, 0.5}, valueColor = {1, 0.5, 0.2, 0.6}, regionInfo = {0, 1, 0.8, 0.15}},
-		shaderConfig = {},
-		-- Inline sources look unchanged to the loader; compile anyway.
-		forceupdate = true,
-	}
-	overlay.shader = LuaShader.CheckShaderUpdates(overlay.source)
-	if not overlay.shader then
-		return "the overlay shader did not compile"
+	local shader = compile(LuaShader, "ZKGBAI Operator overlay (mesh)", MESH_VS, MESH_FS, {heightmapTex = 0, dataTex = 1, attrTex = 2})
+	local tiles = shader and buildMeshTiles()
+	if shader and tiles then
+		overlay.mesh = {shader = shader, tiles = tiles}
 	end
-	overlay.tiles = buildMeshTiles()
-	if not overlay.tiles then
-		return "no VBOs"
+	if deferredMap() then
+		shader = compile(LuaShader, "ZKGBAI Operator overlay (screen)", SCREEN_VS, SCREEN_FS, {dataTex = 1, attrTex = 2, mapDepthTex = 3})
+		local quad = shader and buildScreenQuad()
+		if shader and quad then
+			overlay.screen = {shader = shader, quad = quad}
+		end
+	end
+	if not overlay.mesh and not overlay.screen then
+		return "the overlay shaders did not compile"
 	end
 	overlay.ok = true
+	spEcho(format("ZKGBAI Operator: ground maps by %s", overlay.screen and "screen-space shader (deferred map depth)" or "mesh"))
 end
 
 local function newDataTexture(w, h, linear)
@@ -585,8 +666,8 @@ local function uploadRegionAttributes(t, m)
 	end)
 end
 
-local function drawOverlayPass(tex, rect, w, h, mode, attr, regionInfo)
-	local s = overlay.shader
+local function drawOverlayPass(pass, tex, rect, w, h, mode, attr, regionInfo)
+	local s = pass.shader
 	gl.Texture(1, tex)
 	if attr then
 		gl.Texture(2, attr)
@@ -597,8 +678,12 @@ local function drawOverlayPass(tex, rect, w, h, mode, attr, regionInfo)
 	if regionInfo then
 		s:SetUniform("regionInfo", regionInfo[1], regionInfo[2], regionInfo[3], regionInfo[4])
 	end
-	for i = 1, #overlay.tiles do
-		overlay.tiles[i]:DrawElements(GL.TRIANGLES)
+	if pass.quad then
+		pass.quad:DrawArrays(GL.TRIANGLES)
+	else
+		for i = 1, #pass.tiles do
+			pass.tiles[i]:DrawElements(GL.TRIANGLES)
+		end
 	end
 end
 
@@ -612,22 +697,35 @@ local function drawOverlays(inst)
 	if not values and not regions then
 		return true
 	end
-	glDepthTest(GL.LEQUAL)
+	local pass = overlay.screen
+	if renderMode == "mesh" or not pass then
+		pass = overlay.mesh
+	end
+	if not pass then
+		return true
+	end
 	gl.DepthMask(false)
 	gl.Culling(false)
 	gl.Blending(GL.SRC_ALPHA, GL.ONE_MINUS_SRC_ALPHA)
-	gl.Texture(0, "$heightmap")
-	overlay.shader:Activate()
+	if pass.quad then
+		-- Every pixel finds its own depth; nothing to test against.
+		glDepthTest(false)
+		gl.Texture(3, "$map_gbuffer_zvaltex")
+	else
+		glDepthTest(GL.LEQUAL)
+		gl.Texture(0, "$heightmap")
+	end
+	pass.shader:Activate()
 	if regions then
-		drawOverlayPass(t.tex, t.rect, t.w, t.h, 1, t.attr, {segmentation == "holders" and 1 or 0, t.attrN, 0.8, 0.14})
+		drawOverlayPass(pass, t.tex, t.rect, t.w, t.h, 1, t.attr, {segmentation == "holders" and 1 or 0, t.attrN, 0.8, 0.14})
 	end
 	if values then
-		drawOverlayPass(ov.tex, ov.rect, ov.w, ov.h, 0)
+		drawOverlayPass(pass, ov.tex, ov.rect, ov.w, ov.h, 0)
 	end
-	overlay.shader:Deactivate()
-	gl.Texture(0, false)
-	gl.Texture(1, false)
-	gl.Texture(2, false)
+	pass.shader:Deactivate()
+	for unit = 0, 3 do
+		gl.Texture(unit, false)
+	end
 	gl.DepthMask(false)
 	glDepthTest(false)
 	return true
@@ -1012,6 +1110,9 @@ function widget:TextCommand(command)
 		setLayer(words[3])
 	elseif cmd == "terrain" then
 		setSegmentation(words[3], words[4])
+	elseif cmd == "render" then
+		renderMode = words[3] or "auto"
+		say("ground maps by " .. ((renderMode ~= "mesh" and overlay.screen) and "screen-space shader" or "mesh"))
 	elseif cmd == "toggle" and words[3] and show[words[3]] ~= nil then
 		show[words[3]] = not show[words[3]]
 	elseif cmd == "release" then
@@ -1039,7 +1140,7 @@ function widget:TextCommand(command)
 	elseif cmd == "feature" and words[3] then
 		act(inst, "feature", {name = words[3], off = words[4] ~= "on"}, "feature " .. words[3])
 	else
-		say("zkop: focus <team> | layer <name> | terrain <off|regions|holders> [tier] | toggle <what> | release | build <def> | defend | fac <def> [n] | say | note | feature <name> on|off", true)
+		say("zkop: focus <team> | layer <name> | terrain <off|regions|holders> [tier] | render <auto|screen|mesh> | toggle <what> | release | build <def> | defend | fac <def> [n] | say | note | feature <name> on|off", true)
 	end
 	if panel then
 		panel.sync()
@@ -1683,8 +1784,8 @@ function widget:Shutdown()
 		panel.dispose()
 		panel = nil
 	end
-	if overlay.shader then
-		overlay.shader:Delete()
+	for _, pass in pairs({overlay.mesh, overlay.screen}) do
+		pass.shader:Delete()
 	end
 end
 
