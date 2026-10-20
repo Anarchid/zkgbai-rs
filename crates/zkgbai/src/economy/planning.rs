@@ -19,6 +19,10 @@ const SHELTERED_SPACING: f32 = 2.0;
 /// (about a constructor's build range).
 const FACTORY_REACH: f32 = 150.0;
 
+/// Frames before a missile silo planned is planned again (if the job was
+/// dropped, or the silo lost).
+const SILO_REPLAN: i32 = 30 * 120;
+
 /// Water at least this deep takes an Urchin, elmos.
 const URCHIN_DEPTH: f32 = 8.0;
 
@@ -902,7 +906,7 @@ impl Ai {
         let planned = self.eco.construction_tasks.iter().any(|&id| {
             self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == silo.id())
         });
-        if planned {
+        if planned || self.missiles.planned.is_some_and(|f| self.frame - f < SILO_REPLAN) {
             return;
         }
         let Some((site, value, n)) = self.missiles_site() else {
@@ -914,6 +918,7 @@ impl Ai {
             return;
         }
         if self.eco_add_simple(silo, pos, List::Construction, None).is_some() {
+            self.missiles.planned = Some(self.frame);
             self.log(&format!(
                 "missiles: silo at ({:.0}, {:.0}), {value:.0} metal of targets ({n}) in reach; summoning constructors",
                 pos.x, pos.z

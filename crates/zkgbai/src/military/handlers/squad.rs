@@ -518,6 +518,10 @@ impl Ai {
 
         match status {
             'f' => {
+                // On its way through the teleporter.
+                if self.teleport_busy(sid) {
+                    return;
+                }
                 if self.war.get_threat(pos) > 2.0 * self.war.get_total_friendly_threat(pos)
                     || self.war.get_porc_threat(pos) > 0.0
                     || (target != NULLPOS && self.war.get_porc_threat(target) > 0.0)
@@ -526,13 +530,23 @@ impl Ai {
                     self.squad_retreat_to(sid, haven);
                 } else {
                     let rally = self.war_get_rally_point(pos);
+                    // By the gate to the front, if that beats walking.
+                    if self.teleport_gate(sid, pos, rally) {
+                        return;
+                    }
                     self.squad_set_target(sid, rally);
                 }
             }
             'r' => {
+                if self.teleport_busy(sid) {
+                    return;
+                }
                 // Set rallying for squads that are finished forming and gathering to attack
                 // (where an incursion needs blocking, if one does).
                 let rally = self.incursion_block(sid).unwrap_or_else(|| self.war_get_rally_point(pos));
+                if self.teleport_gate(sid, pos, rally) {
+                    return;
+                }
                 self.squad_set_target(sid, rally);
                 if self.squad_is_rallied(sid) {
                     self.squad_set_status(sid, 'a');

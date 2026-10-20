@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use springai::{NO_TIMEOUT, Unit, Vec3};
 
 use crate::Ai;
+use crate::terrain::HELD_POWER;
 use crate::util::{distance, get_directional_point};
 
 pub const SILO: &str = "staticmissilesilo";
@@ -38,12 +39,25 @@ const EOS_DAMAGE: f32 = 3502.0;
 /// Fusion's.
 const WORTH: f32 = 1000.0;
 
+/// What a silo and a missile cost: a silo is worth it where what is in
+/// reach pays for both.
+const SILO_COST: f32 = 1200.0;
+const MISSILE_COST: f32 = 600.0;
+
 /// Income from which a silo and its missiles are affordable.
 pub const SILO_INCOME: f32 = 30.0;
 
-/// Enemy shields stop an Eos (3600 shield power against 3502 damage).
+/// Enemy shields stop an Eos: an Aegis or Aspis network (3600 power each,
+/// radius 350) takes one more, fired first, to drain it below what the
+/// rest needs to get through; a Funnelweb's (19400, radius 550) takes too
+/// many, and it alone stops Shockleys too.
 const SHIELDS: [&str; 2] = ["staticshield", "shieldshield"];
 const SHIELD_RADIUS: f32 = 350.0;
+const FUNNELWEB: &str = "striderfunnelweb";
+const FUNNELWEB_RADIUS: f32 = 550.0;
+
+/// Frames between the Eos that drains a shield and those that follow.
+const STAGGER: i32 = 60;
 
 /// A struck target is left alone until seen standing this long after the
 /// strike (the AI hears of no death it does not see: a target struck and
@@ -64,6 +78,10 @@ pub struct Missiles {
     ready: Vec<Unit>,
     /// Enemy buildings struck, since when.
     struck: BTreeMap<i32, i32>,
+    /// When a silo was last planned (a plan dropped is not remade at once).
+    pub planned: Option<i32>,
+    /// Eos to follow those that drained shields: at, how many, from when.
+    followups: Vec<(Vec3, usize, i32)>,
     last_report: i32,
 }
 
@@ -73,6 +91,8 @@ struct Target {
     pos: Vec3,
     value: f32,
     needed: usize,
+    /// Under an Aegis or Aspis: the first Eos drains it, the rest follow.
+    shielded: bool,
 }
 
 impl Ai {
@@ -92,9 +112,19 @@ impl Ai {
         self.missiles.ready.push(missile);
     }
 
-    fn missiles_shielded(&self, p: Vec3) -> bool {
-        (self.war.targets.values())
-            .any(|e| !e.is_dead && SHIELDS.contains(&e.def_name.as_str()) && distance(e.position, p) <= SHIELD_RADIUS)
+    /// Whether a known shield covers `p`: an Aegis or Aspis (`Some(false)`)
+    /// or a Funnelweb (`Some(true)`).
+    fn missiles_shield(&self, p: Vec3) -> Option<bool> {
+        let live = self.war.targets.values().filter(|e| !e.is_dead);
+        let mut light = false;
+        for e in live {
+            let d = distance(e.position, p);
+            if e.def_name == FUNNELWEB && d <= FUNNELWEB_RADIUS {
+                return Some(true);
+            }
+            light |= SHIELDS.contains(&e.def_name.as_str()) && d <= SHIELD_RADIUS;
+        }
+        light.then_some(false)
     }
 
     /// Enemy buildings worth Eos: unshielded, not struck lately (unless
@@ -105,10 +135,15 @@ impl Ai {
             .filter(|e| e.identified && e.is_static && !e.is_dead && !struck(e.unit_id, e.last_seen))
             .filter_map(|e| {
                 let needed = (e.ud?.health() / EOS_DAMAGE).ceil().max(1.0) as usize;
-                let t = Target { id: e.unit_id, pos: e.position, value: e.value, needed };
+                let shielded = match self.missiles_shield(e.position) {
+                    Some(true) => return None,
+                    Some(false) => true,
+                    None => false,
+                };
+                let needed = needed + usize::from(shielded);
+                let t = Target { id: e.unit_id, pos: e.position, value: e.value, needed, shielded };
                 (e.value / needed as f32 >= WORTH && needed <= PADS).then_some(t)
             })
-            .filter(|t| !self.missiles_shielded(t.pos))
             .collect()
     }
 
@@ -121,13 +156,16 @@ impl Ai {
         (self.war.targets.values())
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
             .filter(|e| e.ud.is_some_and(|ud| e.value > ud.cost(self.metal)))
+            .filter(|e| self.missiles_shield(e.position) != Some(true))
             .map(|e| (e.unit_id, e.position, e.value))
             .collect()
     }
 
     /// Where a silo would do most: a safe place on our ground within reach
-    /// of more than one target, or of an anti-nuke in the way of our nukes;
-    /// with the value and the number of targets in reach.
+    /// of enough to pay for it and its missiles (three Fusions, one
+    /// Singularity or anti-nuke; an anti-nuke a Shockley would stun counts
+    /// for what it keeps from our nukes); with the payoff and the number of
+    /// targets in reach.
     pub fn missiles_site(&self) -> Option<(Vec3, f32, usize)> {
         let eos = self.missiles_eos_targets();
         let stun = self.missiles_stun_targets();
@@ -143,17 +181,24 @@ impl Ai {
         sites.extend(ahead);
         let scored: Vec<(Vec3, f32, usize)> = sites
             .into_iter()
-            // Safe enough: ours, and our forces there outweigh the enemy's.
-            .filter(|&p| self.graph.is_ally_territory(p) && self.war.get_effective_threat(p) <= 0.0)
+            // Safe enough: ours, and no enemy known there, or our defenses
+            // holding it (a silo is a target where it reaches).
+            .filter(|&p| {
+                self.graph.is_ally_territory(p)
+                    && (self.war.get_threat(p) <= 0.0
+                        || (self.war.get_effective_threat(p) <= 0.0
+                            && self.war.get_friendly_porc_threat(p) >= HELD_POWER))
+            })
             .filter_map(|p| {
                 let near = eos.iter().filter(|t| distance(t.pos, p) <= REACH);
-                let (mut value, mut n) = near.fold((0.0, 0), |(v, n), t| (v + t.value, n + 1));
+                let (mut payoff, mut n) =
+                    near.fold((0.0, 0), |(v, n), t| (v + t.value - MISSILE_COST * t.needed as f32, n + 1));
                 let antis = stun.iter().filter(|a| distance(a.1, p) <= REACH && !eos.iter().any(|t| t.id == a.0));
                 for a in antis {
-                    value += a.2;
-                    n += 2;
+                    payoff += a.2 - MISSILE_COST;
+                    n += 1;
                 }
-                (n >= 2).then_some((p, value, n))
+                (payoff >= SILO_COST).then_some((p, payoff, n))
             })
             .collect();
         let best = scored.iter().map(|s| s.1).fold(0.0, f32::max);
@@ -206,24 +251,49 @@ impl Ai {
         if free.is_empty() {
             return;
         }
+        let frame = self.frame;
+        // Those following Eos that drained shields first, then the rest
+        // (keeping enough for the follow-ups to come).
+        let followups = std::mem::take(&mut self.missiles.followups);
+        for (p, n, after) in followups {
+            let near: Vec<usize> = (0..free.len()).filter(|&i| distance(free[i].pos(), p) <= REACH).collect();
+            if after > frame || near.len() < n {
+                self.missiles.followups.push((p, n, after));
+                continue;
+            }
+            for &i in near.iter().take(n).rev() {
+                let m = free.remove(i);
+                self.missiles_launch(m, p);
+            }
+        }
+        let reserved: usize = self.missiles.followups.iter().map(|f| f.1).sum();
         let mut targets = self.missiles_eos_targets();
         targets.retain(|t| free.iter().any(|m| distance(m.pos(), t.pos) <= REACH));
         targets.sort_by(|a, b| (b.value / b.needed as f32).total_cmp(&(a.value / a.needed as f32)));
         for t in targets {
-            if free.len() < t.needed {
+            if free.len() < t.needed + reserved {
                 continue;
             }
-            for m in free.drain(..t.needed) {
-                m.execute_custom_command(CMD_ATTACK, &[t.pos.x, t.pos.y, t.pos.z], 0, NO_TIMEOUT);
-                self.missiles.ready.retain(|r| r.id() != m.id());
+            let now = if t.shielded { 1 } else { t.needed };
+            for m in free.drain(..now).collect::<Vec<_>>() {
+                self.missiles_launch(m, t.pos);
             }
-            self.missiles.struck.insert(t.id, self.frame);
+            if t.shielded {
+                self.missiles.followups.push((t.pos, t.needed - 1, frame + STAGGER));
+            }
+            self.missiles.struck.insert(t.id, frame);
             let name = self.war.targets.get(&t.id).map_or("?", |e| e.def_name.as_str());
+            let shield = if t.shielded { ", the first to drain its shield" } else { "" };
             self.log(&format!(
-                "missiles: {} Eos at a {name} worth {:.0} at ({:.0}, {:.0})",
+                "missiles: {} Eos at a {name} worth {:.0} at ({:.0}, {:.0}){shield}",
                 t.needed, t.value, t.pos.x, t.pos.z
             ));
         }
+    }
+
+    fn missiles_launch(&mut self, missile: Unit, at: Vec3) {
+        missile.execute_custom_command(CMD_ATTACK, &[at.x, at.y, at.z], 0, NO_TIMEOUT);
+        self.missiles.ready.retain(|r| r.id() != missile.id());
     }
 
     /// Keep the pads stocked: Shockleys for the anti-nukes in the way of
@@ -240,6 +310,7 @@ impl Ai {
         let stun = self.missiles_stun_targets().iter().filter(|a| distance(a.1, here) <= REACH).count();
         let needed: usize =
             self.missiles_eos_targets().iter().filter(|t| distance(t.pos, here) <= REACH).map(|t| t.needed).sum();
+        let needed = needed + self.missiles.followups.iter().map(|f| f.1).sum::<usize>();
         let def = if n_shock < stun.min(2) {
             shockley
         } else if n_eos < needed.min(PADS) {

@@ -416,7 +416,7 @@ const FORTIFY_SETBACK: f32 = 120.0;
 /// A chokepoint is held when our defenses covering it are this strong
 /// (about two light laser turrets, on the scale of enemy danger), and a
 /// region when they cover its middle this strongly (four).
-const HELD_POWER: f32 = 150.0;
+pub const HELD_POWER: f32 = 150.0;
 const HELD_REGION_POWER: f32 = 400.0;
 
 /// Enemy ground forces threaten what is within this many elmos of ground
