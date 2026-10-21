@@ -22,13 +22,24 @@
 //! strikes want to know of — and a spider factory is asked for to build a
 //! Widow for it, unless a cloak factory can build a Scythe.
 //!
-//! Scouts are few and dear, so they are steered closely: every second a
-//! fresh path, of which only a short leg is given, round every enemy
-//! building we know of (seen or remembered) and every enemy seen lately on
-//! the ground, by its size, the scout's decloak distance and a margin. A
-//! leg that what we see comes to lie on is replaced at once; one that
-//! cannot get on without coming that close stops short, and the scout
-//! waits there (it sees farther than that).
+//! Scouts are few and dear, so they are steered closely: six times a
+//! second a look at the leg they are on, and every half second a fresh
+//! path, of which only a short leg is given, round every enemy building we
+//! know of (seen or remembered) and every enemy seen lately on the ground,
+//! by its size, the scout's decloak distance and a margin: a small one on a
+//! look (it is there to see them; it heads for the nearest place in sight
+//! of what it is to look at, clear of them all), a wide one going home.
+//! Enemies in sight are kept clear of along where they are going, the
+//! next few seconds; those seen lately, by how far they may have walked
+//! since. A leg that what we see comes to lie on is replaced at once; one
+//! that cannot get on without coming that close stops short, and the scout
+//! waits there for the way to clear (it sees farther than that).
+//!
+//! Cloaked enemies cannot be seen: where a scout lost its cloak with
+//! nothing we know of near it, one stands, and the place is kept clear of
+//! for a while; area cloakers seen (Iris, Cornea) are kept clear of by
+//! their cloak's reach; and the more of the enemy's army seen lately cloaks,
+//! the wider every berth.
 
 use std::collections::BTreeMap;
 
@@ -69,21 +80,67 @@ const REPORT: i32 = 30 * 60;
 
 /// Frames between looks at the scouts' legs, and between new paths for
 /// the same scout.
-const STEER: i32 = 15;
-const REPATH: i32 = 30;
+const STEER: i32 = 5;
+const REPATH: i32 = 15;
 
 /// Elmos of a path given at a time, and within which of a leg's end a new
 /// one is due.
-const LEG: f32 = 400.0;
-const LEG_END: f32 = 100.0;
+const LEG: f32 = 300.0;
+const LEG_END: f32 = 80.0;
 
 /// Room kept from enemies beyond their size and the scout's decloak
-/// distance, elmos; more from mobiles (they move), counted while seen this
-/// lately (frames). The decloak distance where a def gives none.
+/// distance, elmos: on a look little, going home more; more from mobiles
+/// (they move), counted while seen this lately (frames). The decloak
+/// distance where a def gives none.
+const LOOK_MARGIN: f32 = 16.0;
 const KEEP_MARGIN: f32 = 40.0;
+const MOBILE_LOOK_MARGIN: f32 = 32.0;
 const MOBILE_MARGIN: f32 = 100.0;
 const MOBILE_SEEN: i32 = 30 * 10;
 const DECLOAK: f32 = 75.0;
+
+/// Mobiles in sight are kept clear of where they will be each second this
+/// many seconds ahead; one out of sight, by how far it may have walked
+/// since, up to this far.
+const AHEAD: i32 = 3;
+const WANDER: f32 = 300.0;
+
+/// A look heads for the nearest place within this share of the scout's
+/// sight of what it is to look at, clear of every berth. Hills block sight:
+/// where it does not see it from there, the next place is this much
+/// nearer; within this of it, a deep look is given up for a while
+/// (frames), another look goes straight there.
+const VANTAGE: f32 = 0.8;
+const NEARER: f32 = 0.6;
+const CLOSEST: f32 = 100.0;
+const TRIED_FRAMES: i32 = 30 * 180;
+
+/// Where a scout lost its cloak with nothing we know of within this of it,
+/// on the enemy's ground and with energy to cloak by (below this much
+/// stored, cloaks flicker), a cloaked enemy is taken to stand: a circle of
+/// this radius is kept clear of for this long. A scout's lost cloak is
+/// logged once in this long (frames). Area cloakers (cloaking what is within their reach).
+/// Every berth widens by up to this much with the share of the enemy's
+/// army seen lately (frames) that cloaks (commanders aside; of this much
+/// metal at least, so that a few units do not make it all).
+const UNEXPLAINED: f32 = 200.0;
+const CLOAK_ENERGY: f32 = 50.0;
+const SHOWN_LOG: i32 = 30 * 10;
+const HIDDEN_RADIUS: f32 = 250.0;
+const HIDDEN_FRAMES: i32 = 30 * 120;
+const AREA_CLOAKERS: [(&str, f32); 2] = [("cloakjammer", 350.0), ("staticjammer", 400.0)];
+
+/// When each cell of a grid this coarse (elmos) was last in our sight is
+/// kept (refreshed this often, frames): deep looks go also to cells on the
+/// enemy's side of the map unseen long, the gaps between what we know of,
+/// counting this much of a metal spot (a cell where the enemy is likelier,
+/// nearer its base, up to twice that).
+const SEEN_CELL: f32 = 256.0;
+const SEEN_PERIOD: i32 = 60;
+const CELL_WEIGHT: f32 = 0.5;
+const CLOAK_MARGIN: f32 = 60.0;
+const CLOAK_SEEN: i32 = 30 * 180;
+const CLOAK_ARMY: f32 = 2000.0;
 
 /// Scouts on separate looks keep this far apart, elmos.
 const SPREAD: f32 = 1000.0;
@@ -128,6 +185,12 @@ struct Scout {
     /// Where it was last seen alive, and whether it was cloaked then.
     at: Vec3,
     cloaked: bool,
+    /// How far from what it is to look at its vantage may be (0: as far as
+    /// [`VANTAGE`] has it): where it did not see it from one, the next is
+    /// nearer.
+    reach: f32,
+    /// When it last lost its cloak.
+    shown: i32,
 }
 
 impl Scout {
@@ -136,9 +199,38 @@ impl Scout {
     }
 }
 
+/// Something a scout keeps clear of: where, its size (half a footprint's
+/// diagonal, or its own reach), and what it is.
+#[derive(Clone, Copy)]
+struct Keepout {
+    at: Vec3,
+    size: f32,
+    kind: Keep,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Keep {
+    Building,
+    Unit,
+    /// A cloaked enemy guessed at, or an area cloaker's reach.
+    Hidden,
+    /// Where a nuke of ours is on its way to.
+    Blast,
+}
+
 #[derive(Default)]
 pub struct Scouts {
     scouts: BTreeMap<i32, Scout>,
+    /// Where scouts lost their cloak with nothing we know of near, and when.
+    hidden: Vec<(Vec3, i32)>,
+    /// Deep looks given up (the place could not be seen), and when.
+    tried: Vec<(Vec3, i32)>,
+    /// The share of the enemy's army seen lately that cloaks.
+    cloak_share: f32,
+    /// When each cell (see [`SEEN_CELL`]) was last in our sight, in rows of
+    /// `seen_width`.
+    seen: Vec<i32>,
+    seen_width: i32,
     /// When a Widow, and a Scythe, was queued at a factory.
     ordered: Option<i32>,
     ordered_scythe: Option<i32>,
@@ -188,17 +280,64 @@ impl Ai {
     fn scouts_deep_target(&self, from: Vec3, taken: &[Vec3]) -> Option<(Vec3, i32)> {
         let frame = self.frame;
         let spots = self.graph.get_enemy_territory().into_iter().map(|m| (m.position, m.last_seen, 1.0));
+        let cells = self.scouts_unseen_cells();
         let buildings = (self.war.targets.values())
             .filter(|e| e.is_static && !e.is_dead && e.identified && e.value >= 1000.0)
             .map(|e| (e.position, e.last_seen, 1.0 + VALUE_WEIGHT * e.value / 1000.0));
         let score = |&(p, seen, weight): &(Vec3, i32, f32)| {
             (frame - seen).min(STALE_CAP) as f32 * weight / (1.0 + distance(p, from) / 3000.0)
         };
-        (spots.chain(buildings))
+        (spots.chain(buildings).chain(cells))
             .filter(|&(p, seen, _)| frame - seen >= DEEP_STALE && !self.los.is_in_los(p))
             .filter(|&(p, ..)| taken.iter().all(|&t| distance(t, p) >= SPREAD))
+            .filter(|&(p, ..)| self.scouts.tried.iter().all(|t| distance(t.0, p) >= SEEN_CELL))
             .max_by(|a, b| score(a).total_cmp(&score(b)))
             .map(|(p, seen, _)| (p, frame - seen))
+    }
+
+    /// Cells on the enemy's side of the map (nearer its metal than ours,
+    /// not under water), when each was last seen, and what looking there is
+    /// worth (see [`CELL_WEIGHT`]).
+    fn scouts_unseen_cells(&self) -> Vec<(Vec3, i32, f32)> {
+        let (ours, theirs) = (self.graph.get_ally_center(), self.graph.get_enemy_center());
+        if self.scouts.seen_width == 0 || ours == NULLPOS || theirs == NULLPOS {
+            return Vec::new();
+        }
+        let map = self.cb.map();
+        let apart = distance(ours, theirs).max(1.0);
+        let w = self.scouts.seen_width;
+        (self.scouts.seen.iter().enumerate())
+            .filter_map(|(i, &seen)| {
+                let (x, y) = (i as i32 % w, i as i32 / w);
+                let c = Vec3::xz((x as f32 + 0.5) * SEEN_CELL, (y as f32 + 0.5) * SEEN_CELL);
+                let near = distance(c, theirs);
+                if near >= distance(c, ours) || map.elevation_at(c.x, c.z) < -20.0 {
+                    return None;
+                }
+                Some((c, seen, CELL_WEIGHT * (2.0 - (near / apart).min(1.0))))
+            })
+            .collect()
+    }
+
+    /// Note which cells (see [`SEEN_CELL`]) are in our sight now.
+    fn scouts_update_seen(&mut self, frame: i32) {
+        if (frame + self.offset + 11) % SEEN_PERIOD != 0 {
+            return;
+        }
+        let map = self.cb.map();
+        let w = ((map.width() * 8) as f32 / SEEN_CELL).ceil() as i32;
+        let h = ((map.height() * 8) as f32 / SEEN_CELL).ceil() as i32;
+        if self.scouts.seen_width != w {
+            // Never seen: as stale as can be.
+            self.scouts.seen = vec![-STALE_CAP; (w * h).max(0) as usize];
+            self.scouts.seen_width = w;
+        }
+        for (i, seen) in self.scouts.seen.iter_mut().enumerate() {
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            if self.los.is_in_los(Vec3::xz((x as f32 + 0.5) * SEEN_CELL, (y as f32 + 0.5) * SEEN_CELL)) {
+                *seen = frame;
+            }
+        }
     }
 
     /// Whether a spider factory should build a Widow now: there is work
@@ -265,6 +404,8 @@ impl Ai {
             job: Job::Home,
             moved: i32::MIN / 2,
             leg: Vec::new(),
+            reach: 0.0,
+            shown: i32::MIN / 2,
             since: self.frame,
             at: unit.pos(),
             cloaked: false,
@@ -302,6 +443,7 @@ impl Ai {
     }
 
     pub fn scouts_update(&mut self, frame: i32) {
+        self.scouts_update_seen(frame);
         if self.scouts.scouts.is_empty() {
             return;
         }
@@ -311,8 +453,13 @@ impl Ai {
         if (frame + self.offset + 7) % REPORT == 0 {
             let s = self.scouts.scouts.values();
             let count = |f: &dyn Fn(&Scout) -> bool| s.clone().filter(|w| f(w)).count();
+            // How much of the enemy's side we saw in the last few minutes.
+            let cells = self.scouts_unseen_cells();
+            let fresh = cells.iter().filter(|c| frame - c.1 < CLOAK_SEEN).count();
+            let coverage = 100.0 * fresh as f32 / cells.len().max(1) as f32;
             self.log(&format!(
-                "scouts: {} Widows, {} Scythes; {} cloaked; looking {}, deep {}, by anti-nukes {}, home {}",
+                "scouts: {} Widows, {} Scythes; {} cloaked; looking {}, deep {}, by anti-nukes {}, home {}; \
+                 enemy side seen in 3 min {coverage:.0}%; {:.0}% of the enemy army cloaks; {} cloaked enemies guessed",
                 count(&|w| w.widow),
                 count(&|w| !w.widow),
                 count(&|w| w.unit.is_cloaked()),
@@ -320,6 +467,8 @@ impl Ai {
                 count(&|w| matches!(w.job, Job::Deep(_))),
                 count(&|w| matches!(w.job, Job::Wait(_) | Job::Bite(_))),
                 count(&|w| w.job == Job::Home),
+                100.0 * self.scouts.cloak_share,
+                self.scouts.hidden.len(),
             ));
         }
         if (frame + self.offset + 7) % STEER == 0 {
@@ -335,23 +484,23 @@ impl Ai {
             .map(|w| (w.kind(), w.at, w.job))
             .collect();
         self.scouts.scouts.retain(|_, w| w.unit.health() > 0.0 && w.unit.team() == team);
-        // Those out of cloak, unless biting, and what is nearest them.
-        let mut shown = Vec::new();
         for w in self.scouts.scouts.values_mut() {
             w.at = w.unit.pos();
-            let cloaked = w.unit.is_cloaked();
-            if w.cloaked && !cloaked && !matches!(w.job, Job::Bite(_)) {
-                shown.push((w.kind(), w.at));
+        }
+        // How much of the enemy's army seen lately cloaks.
+        let (mut cloaky, mut all) = (0.0, 0.0);
+        for e in (self.war.targets.values())
+            .filter(|e| !e.is_dead && !e.is_static && !e.is_com && !e.can_fly() && frame - e.last_seen < CLOAK_SEEN)
+        {
+            let Some(ud) = e.ud else { continue };
+            all += e.value;
+            if ud.is_able_to_cloak() || AREA_CLOAKERS.iter().any(|a| a.0 == e.def_name) {
+                cloaky += e.value;
             }
-            w.cloaked = cloaked;
         }
-        for (kind, at) in shown {
-            let near = (self.war.targets.values())
-                .filter(|e| !e.is_dead && e.position != NULLPOS)
-                .min_by(|a, b| distance(a.position, at).total_cmp(&distance(b.position, at)))
-                .map_or(String::new(), |e| format!(", {} {:.0} away", e.def_name, distance(e.position, at)));
-            self.log(&format!("scouts: a {kind} decloaked at ({:.0}, {:.0}){near}", at.x, at.z));
-        }
+        self.scouts.cloak_share = cloaky / all.max(CLOAK_ARMY);
+        self.scouts.hidden.retain(|h| frame - h.1 < HIDDEN_FRAMES);
+        self.scouts.tried.retain(|t| frame - t.1 < TRIED_FRAMES);
         for (kind, at, job) in lost {
             let doing = match job {
                 Job::Home => "going home",
@@ -417,6 +566,10 @@ impl Ai {
                 // Until it sees the place, or gives up; a look of our
                 // strikes comes first.
                 Job::Deep(p) => {
+                    // (Given up for a while if it cannot get to see it.)
+                    if frame - w.since > DEEP_TIMEOUT && !self.los.is_in_los(p) {
+                        self.scouts.tried.push((p, frame));
+                    }
                     deep && looks.is_empty()
                         && !self.los.is_in_los(p)
                         && distance(here, p) > WAIT_RANGE
@@ -442,7 +595,7 @@ impl Ai {
                 _ => Job::Home,
             };
             if job != w.job {
-                (w.job, w.since, w.moved) = (job, frame, i32::MIN / 2);
+                (w.job, w.since, w.moved, w.reach) = (job, frame, i32::MIN / 2, 0.0);
                 let kind = w.kind();
                 match (job, deep_next) {
                     (Job::Look(p), _) => {
@@ -460,27 +613,86 @@ impl Ai {
         }
     }
 
-    /// Where scouts must not go, lest they be seen: round each enemy
-    /// building we know of and each enemy seen lately on the ground, by its
-    /// size and a margin (a scout adds its decloak distance); and where a
-    /// nuke of ours is on its way to.
-    fn scouts_keepouts(&self) -> Vec<(Vec3, f32)> {
+    /// What scouts keep clear of, lest they be seen: each enemy building we
+    /// know of; each enemy in sight on the ground where it will be the next
+    /// few seconds, and each seen lately where it may have walked since;
+    /// cloaked enemies guessed at and area cloakers' reach; and where a
+    /// nuke of ours is on its way to. (Each scout adds its decloak distance
+    /// and a margin; see [`Ai::scouts_move`].)
+    fn scouts_keepouts(&self) -> Vec<Keepout> {
         let frame = self.frame;
-        let blast = self.nukes_in_flight().map(|(p, r)| (p, r + KEEP_MARGIN));
-        (self.war.targets.values())
-            .filter(|e| !e.is_dead && e.position != NULLPOS && !e.can_fly())
-            .filter(|e| e.is_static || frame - e.last_seen <= MOBILE_SEEN)
-            .map(|e| {
-                // Half the footprint's diagonal (footprint squares are 8 elmos).
-                let size = e.ud.map_or(16.0, |d| 4.0 * (d.x_size() as f32).hypot(d.z_size() as f32));
-                (e.position, size + if e.is_static { KEEP_MARGIN } else { KEEP_MARGIN + MOBILE_MARGIN })
-            })
-            .chain(blast)
-            .collect()
+        let mut keep = Vec::new();
+        for e in (self.war.targets.values()).filter(|e| !e.is_dead && e.position != NULLPOS && !e.can_fly()) {
+            let since = frame - e.last_seen;
+            if !e.is_static && since > MOBILE_SEEN {
+                continue;
+            }
+            // Half the footprint's diagonal (footprint squares are 8 elmos).
+            let size = e.ud.map_or(16.0, |d| 4.0 * (d.x_size() as f32).hypot(d.z_size() as f32));
+            if let Some(&(_, reach)) = AREA_CLOAKERS.iter().find(|a| a.0 == e.def_name) {
+                keep.push(Keepout { at: e.position, size: reach, kind: Keep::Hidden });
+            }
+            if e.is_static {
+                keep.push(Keepout { at: e.position, size, kind: Keep::Building });
+            } else if since == 0 {
+                let v = e.unit.vel();
+                for t in 0..=AHEAD {
+                    let ahead = (30 * t) as f32;
+                    let at = Vec3::new(e.position.x + v.x * ahead, e.position.y, e.position.z + v.z * ahead);
+                    keep.push(Keepout { at, size, kind: Keep::Unit });
+                }
+            } else {
+                let wander = (e.speed() * since as f32).min(WANDER);
+                keep.push(Keepout { at: e.position, size: size + wander, kind: Keep::Unit });
+            }
+        }
+        keep.extend(self.scouts.hidden.iter().map(|&(at, _)| Keepout { at, size: HIDDEN_RADIUS, kind: Keep::Hidden }));
+        if let Some((at, r)) = self.nukes_in_flight() {
+            keep.push(Keepout { at, size: r + KEEP_MARGIN, kind: Keep::Blast });
+        }
+        keep
+    }
+
+    /// Note scouts that lost their cloak (not biting), and what is nearest
+    /// them: with nothing we know of near, a cloaked enemy is taken to
+    /// stand there.
+    fn scouts_watch_cloak(&mut self) {
+        let frame = self.frame;
+        let mut shown = Vec::new();
+        for w in self.scouts.scouts.values_mut() {
+            let cloaked = w.unit.is_cloaked();
+            if w.cloaked && !cloaked && !matches!(w.job, Job::Bite(_)) && w.unit.health() > 0.0 {
+                shown.push((w.kind(), w.unit.pos(), frame - w.shown >= SHOWN_LOG));
+                w.shown = frame;
+            }
+            w.cloaked = cloaked;
+        }
+        let starved = self.eco.energy < CLOAK_ENERGY;
+        for (kind, at, log) in shown {
+            let nearest = (self.war.targets.values())
+                .filter(|e| !e.is_dead && e.position != NULLPOS)
+                .min_by(|a, b| distance(a.position, at).total_cmp(&distance(b.position, at)));
+            let near =
+                nearest.map_or(String::new(), |e| format!(", {} {:.0} away", e.def_name, distance(e.position, at)));
+            let unexplained = nearest.is_none_or(|e| distance(e.position, at) > UNEXPLAINED);
+            let hidden = unexplained && !starved && !self.graph.is_ally_territory(at);
+            if hidden {
+                self.scouts.hidden.push((at, frame));
+            }
+            let why = match (hidden, starved) {
+                (true, _) => "; a cloaked enemy, likely",
+                (false, true) => "; out of energy",
+                _ => "",
+            };
+            if log {
+                self.log(&format!("scouts: a {kind} decloaked at ({:.0}, {:.0}){near}{why}", at.x, at.z));
+            }
+        }
     }
 
     /// Steer every scout (see the module notes).
     fn scouts_steer(&mut self) {
+        self.scouts_watch_cloak();
         let keepouts = self.scouts_keepouts();
         let ids: Vec<i32> = self.scouts.scouts.keys().copied().collect();
         for id in ids {
@@ -490,13 +702,48 @@ impl Ai {
 
     /// Send scout `id` on its way: a short leg of a fresh path when one is
     /// due, or when the leg it has crosses what would see it.
-    fn scouts_move(&mut self, id: i32, keepouts: &[(Vec3, f32)]) {
+    fn scouts_move(&mut self, id: i32, keepouts: &[Keepout]) {
         let frame = self.frame;
         let Some(w) = self.scouts.scouts.get(&id) else { return };
         let (unit, here, widow, job) = (w.unit, w.unit.pos(), w.widow, w.job);
+        let def = unit.def();
+        let decloak = def.map(|d| d.decloak_distance()).filter(|&d| d > 0.0).unwrap_or(DECLOAK);
+        // Out to see them, little room; staking out an anti-nuke or going
+        // home, more.
+        let looking = matches!(job, Job::Look(_) | Job::Deep(_));
+        let cloak = CLOAK_MARGIN * self.scouts.cloak_share;
+        let circles: Vec<(Vec3, f32)> = (keepouts.iter())
+            .map(|k| {
+                let margin = match (k.kind, looking) {
+                    (Keep::Building, true) => decloak + LOOK_MARGIN + cloak,
+                    (Keep::Building, false) => decloak + KEEP_MARGIN + cloak,
+                    (Keep::Unit, true) => decloak + MOBILE_LOOK_MARGIN + cloak,
+                    (Keep::Unit, false) => decloak + KEEP_MARGIN + MOBILE_MARGIN + cloak,
+                    (Keep::Hidden, _) => decloak,
+                    (Keep::Blast, _) => 0.0,
+                };
+                (k.at, k.size + margin)
+            })
+            .collect();
+        let clear = |p: Vec3| circles.iter().all(|&(c, r)| distance(p, c) >= r);
+        // A look goes to the nearest place in sight of what it is to look
+        // at, clear of every berth.
+        let reach = if w.reach > 0.0 { w.reach } else { VANTAGE * def.map_or(0.0, |d| d.los_radius()) };
+        let vantage = |p: Vec3| {
+            if clear(p) {
+                return p;
+            }
+            let sight = reach;
+            let rings = (1..).map(|k| 100.0 * k as f32).take_while(|&r| r <= sight);
+            (rings.flat_map(|r| (0..16).map(move |k| (r, k as f32 * std::f32::consts::TAU / 16.0))))
+                .map(|(r, a)| Vec3::xz(p.x + r * a.cos(), p.z + r * a.sin()))
+                .filter(|&q| clear(q))
+                .min_by(|a, b| distance(*a, here).total_cmp(&distance(*b, here)))
+                .unwrap_or(p)
+        };
         let to = match job {
             Job::Bite(_) => return,
-            Job::Look(p) | Job::Deep(p) => p,
+            Job::Look(p) | Job::Deep(p) => vantage(p),
             Job::Wait(anti) => {
                 let Some(e) = self.war.targets.get(&anti) else { return };
                 get_directional_point(e.position, here, WAIT_RANGE)
@@ -504,10 +751,24 @@ impl Ai {
             Job::Home => self.graph_get_closest_haven(here),
         };
         if distance(here, to) < LEG_END {
+            // There, and what it is to look at still unseen (a hill in the
+            // way): nearer, or another place.
+            if let Job::Look(p) | Job::Deep(p) = job
+                && !self.los.is_in_los(p)
+                && let Some(w) = self.scouts.scouts.get_mut(&id)
+            {
+                w.reach = reach * NEARER;
+                if w.reach < CLOSEST {
+                    if matches!(job, Job::Deep(_)) {
+                        self.scouts.tried.push((p, frame));
+                        w.since = i32::MIN / 2;
+                    } else {
+                        w.reach = 1.0;
+                    }
+                }
+            }
             return;
         }
-        let decloak = unit.def().map(|d| d.decloak_distance()).filter(|&d| d > 0.0).unwrap_or(DECLOAK);
-        let circles: Vec<(Vec3, f32)> = keepouts.iter().map(|&(p, r)| (p, r + decloak)).collect();
         // What it is in already it leaves by the shortest way (see the
         // pathfinder); the rest its way must not cross.
         let crosses =
