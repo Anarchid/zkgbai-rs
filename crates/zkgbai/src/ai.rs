@@ -33,8 +33,10 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// Experimental features that are off unless named in the `enable` option
 /// (or ZKGBAI_ENABLE): `pairs` (Constables pair up on builds) lost its
 /// mirror 3-5, expanding slower (12.5 mexes to 16.5 at minute 10) though
-/// losing fewer.
-const OFF_BY_DEFAULT: [&str; 1] = ["pairs"];
+/// losing fewer; `currency` (the danger of a job on an issue's crew priced
+/// as the worker's expected loss, and the crew holding where it pays) lost
+/// its mirrors 17-23 twice where the issue clients alone won 25-15.
+const OFF_BY_DEFAULT: [&str; 2] = ["pairs", "currency"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.

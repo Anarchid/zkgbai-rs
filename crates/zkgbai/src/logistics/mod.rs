@@ -19,10 +19,11 @@
 //! what it unlocks or saves, less a share of it for every second it is
 //! late. The operator can open issues of its own (tool `issue`).
 //!
-//! The crew's bonus is in metal, so the danger of the job is too (feature
-//! `currency`): what sending the worker risks is its cost times the chance
-//! of losing it there, and a worker whose share is more than that stays on
-//! the job where it would otherwise run.
+//! The crew's bonus is in metal, so the danger of the job can be too
+//! (feature `currency`, off by default: it lost its mirrors): what sending
+//! the worker risks is its cost times the chance of losing it there, and a
+//! worker whose share is more than that stays on the job where it would
+//! otherwise run.
 
 use std::collections::{BTreeMap, BTreeSet};
 
