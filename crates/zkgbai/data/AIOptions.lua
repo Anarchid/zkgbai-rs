@@ -13,7 +13,15 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision.',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, jumps, puppies, earlycons, raidmem, odreserve.',
+		type   = 'string',
+		def    = '',
+		maxlen = 200,
+	},
+	{
+		key    = 'enable',
+		name   = 'Experimental features',
+		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,

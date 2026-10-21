@@ -18,6 +18,13 @@ const FIREWALKER_SKIRMS: f32 = 1200.0;
 const JUGGLENAUT_COST: f32 = 1700.0;
 const JUGGLENAUT_BRAWLERS: f32 = 3000.0;
 
+/// Early Constables (see `fac_wants_early_constable`): for this long, at
+/// least this many, one per this much metal income, at most this many.
+const EARLY_CONS_FRAMES: i32 = 30 * 60 * 12;
+const EARLY_CONS_MIN: usize = 2;
+const EARLY_CONS_INCOME: f32 = 5.5;
+const EARLY_CONS_MAX: usize = 14;
+
 pub struct FactoryManager {
     cb: Callback,
     pub factories: BTreeMap<i32, Factory>,
@@ -1294,7 +1301,7 @@ impl Ai {
         let tf = self.graph.territory_fraction;
         let income = self.eco.adjusted_income;
 
-        if self.fac_need_workers(fac) {
+        if self.fac_need_workers(fac) || self.fac_wants_early_constable() {
             return "jumpcon";
         }
 
@@ -1367,6 +1374,19 @@ impl Ai {
         }
     }
 
+    /// Constables early, in step with income, as CircuitAI does with jumpjets
+    /// (its second by 1.5 minutes, then about one per 5.5 metal of income:
+    /// 9 at minute 8 against our 3.5, when it had 18 mexes to our 10; we
+    /// built Pyros first). For the first EARLY_CONS_FRAMES; off with
+    /// `disable=earlycons`.
+    fn fac_wants_early_constable(&self) -> bool {
+        if self.frame >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
+            return false;
+        }
+        let cons = self.eco.workers.values().filter(|w| !w.is_com).count();
+        cons < EARLY_CONS_MIN.max((self.eco.adjusted_income / EARLY_CONS_INCOME) as usize).min(EARLY_CONS_MAX)
+    }
+
     /// Firewalkers while the enemy's light skirmishers (Ronins, Rogues,
     /// Recluses...) outweigh what we have of them; a jump factory taken
     /// for that (see `eco_find_requisition`) builds little else.
@@ -1393,7 +1413,8 @@ impl Ai {
         if herd >= HERD_CAP || self.dev_off("puppies") {
             return false;
         }
-        let mut want = 4 + (self.puppies_wreck_metal() / 150.0) as usize;
+        // (No herd of its own in the first minutes: Constables then.)
+        let mut want = if self.frame < 30 * 60 * 4 { 0 } else { 2 } + (self.puppies_wreck_metal() / 150.0) as usize;
         if self.war.enemy_cloaky_value > 600.0 {
             want += 6;
         }

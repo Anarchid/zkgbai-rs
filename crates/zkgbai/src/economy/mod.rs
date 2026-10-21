@@ -467,6 +467,13 @@ impl EconomyManager {
     }
 }
 
+/// Energy for overdrive (see `eco_update_income`): energy is wanted up to
+/// this many times the mexes' base income, and (from this frame on) while
+/// energy storage is less than this full.
+const OD_ENERGY_RATIO: f32 = 2.6;
+const OD_STORAGE_FROM: i32 = 30 * 60 * 5;
+const OD_STORAGE_FILL: f32 = 0.5;
+
 /// Cross-module economy logic and module events.
 impl Ai {
     pub fn eco_init(&mut self) {
@@ -635,6 +642,7 @@ impl Ai {
     /// The 15-frame income/stall bookkeeping block of `update`.
     fn eco_update_income(&mut self, frame: i32) {
         let merged = self.merged_allies as f32;
+        let odreserve = !self.dev_off("odreserve");
         let (m, e) = (self.metal, self.energy);
         let eco = &mut self.eco;
         eco.raw_mex_income = 0.0;
@@ -705,13 +713,23 @@ impl Ai {
                 }
             }
         }
-        let eratio = 2.0 + eco.fusions.len() as f32;
+        // Energy for overdrive (`odreserve`): ZK spends on overdrive the
+        // spare energy times how full energy storage is, so energy only
+        // when stalled leaves almost none (CircuitAI: 37 E/s on overdrive at
+        // minute 10 against our 13; energy 1.9x mex income at minute 5 to
+        // our 1.3, 2.9x to 2.1 at minute 15).
+        let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + eco.fusions.len() as f32;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
         let tf = self.graph.territory_fraction;
         eco.hard_estalled = (eco.max_storage > 1.0
             && eco.energy < (eco.effective_income_energy * (1.0 + tf)).min(eco.max_storage / 2.0))
             || eco.static_income > eco.effective_income_energy;
-        eco.estalled = eco.hard_estalled || eco.raw_mex_income * eratio > eco.effective_income_energy;
+        eco.estalled = eco.hard_estalled
+            || eco.raw_mex_income * eratio > eco.effective_income_energy
+            || (odreserve
+                && frame > OD_STORAGE_FROM
+                && eco.max_storage > 1.0
+                && eco.energy < OD_STORAGE_FILL * eco.max_storage);
         if eco.max_storage > 1.0 && eco.hard_estalled && eco.metal / eco.max_storage > 0.5 {
             eco.energy_reclaim = true;
         }

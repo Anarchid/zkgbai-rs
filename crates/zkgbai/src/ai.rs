@@ -29,6 +29,27 @@ use crate::operator::Operator;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
+/// Experimental features that are off unless named in the `enable` option
+/// (or ZKGBAI_ENABLE): `pairs` (Constables pair up on builds) lost its
+/// mirror 3-5, expanding slower (12.5 mexes to 16.5 at minute 10) though
+/// losing fewer.
+const OFF_BY_DEFAULT: [&str; 1] = ["pairs"];
+
+/// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
+/// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
+fn dev_features(cb: Callback) -> BTreeSet<String> {
+    let list = |key: &str, var: &str| -> BTreeSet<String> {
+        cb.option(key)
+            .or_else(|| std::env::var(var).ok())
+            .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
+            .unwrap_or_default()
+    };
+    let mut off = list("disable", "ZKGBAI_DISABLE");
+    let on = list("enable", "ZKGBAI_ENABLE");
+    off.extend(OFF_BY_DEFAULT.iter().filter(|f| !on.contains(**f)).map(|f| f.to_string()));
+    off
+}
+
 /// The `shortName` this AI is registered under (see `data/AIInfo.lua`).
 pub const AI_SHORT_NAME: &str = "ZKGBAI";
 
@@ -199,11 +220,7 @@ impl SkirmishAi for Ai {
             enemy_ally_teams: BTreeSet::new(),
             debug_activated: false,
             test: cb.option("test"),
-            disabled: cb
-                .option("disable")
-                .or_else(|| std::env::var("ZKGBAI_DISABLE").ok())
-                .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
-                .unwrap_or_default(),
+            disabled: dev_features(cb),
             rsgn: false,
             resigned: false,
             initialized: false,
