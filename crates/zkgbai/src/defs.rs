@@ -20,9 +20,17 @@ pub mod cmd {
     pub const UNIT_SET_TARGET: i32 = 34923;
     pub const UNIT_CANCEL_TARGET: i32 = 34924;
     pub const ONECLICK_WEAPON: i32 = 35000;
+    /// Puppies' wreck eating (ZK's unit_grey_goo): 0 off, 1 on, 2 also
+    /// while cloaked.
+    pub const GOO_GATHER: i32 = 35646;
+    /// Jugglenaut's gravity guns (cmd_onoff): 0 pulls, 1 pushes.
+    pub const PUSH_PULL: i32 = 35666;
     pub const WANT_ONOFF: i32 = 35667;
     pub const UNIT_AI: i32 = 36214;
     pub const DONT_FIRE_AT_RADAR: i32 = 38372;
+    /// Jump to a point (ZK's unit_jumpjets; params x, y, z): walks into
+    /// range first, waits for the reload.
+    pub const JUMP: i32 = 38521;
     pub const WANTED_SPEED: i32 = 38825;
     pub const AIR_STRAFE: i32 = 39381;
 }

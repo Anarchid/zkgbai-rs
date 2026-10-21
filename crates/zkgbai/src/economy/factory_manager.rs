@@ -11,6 +11,20 @@ use crate::kgbutil::kgb_move_to;
 use crate::military::{Fighter, scouts};
 use crate::util::kgb_rand;
 
+/// Firewalker and Jugglenaut metal, and from how much enemy light
+/// skirmisher / close-range army metal seen they are wanted.
+const FIREWALKER_COST: f32 = 900.0;
+const FIREWALKER_SKIRMS: f32 = 1200.0;
+const JUGGLENAUT_COST: f32 = 1700.0;
+const JUGGLENAUT_BRAWLERS: f32 = 3000.0;
+
+/// Early Constables (see `fac_wants_early_constable`): for this long, at
+/// least this many, one per this much metal income, at most this many.
+const EARLY_CONS_FRAMES: i32 = 30 * 60 * 12;
+const EARLY_CONS_MIN: usize = 2;
+const EARLY_CONS_INCOME: f32 = 5.5;
+const EARLY_CONS_MAX: usize = 14;
+
 pub struct FactoryManager {
     cb: Callback,
     pub factories: BTreeMap<i32, Factory>,
@@ -74,6 +88,14 @@ pub struct FactoryManager {
     pub num_laws: i32,
     pub num_rackets: i32,
     pub num_bandits: i32,
+    pub num_pyros: i32,
+    pub num_mods: i32,
+    pub num_placeholders: i32,
+    pub num_jacks: i32,
+    pub num_jugglenauts: i32,
+    pub num_firewalkers: i32,
+    /// Puppies the factories made (the herd's own splits are not counted).
+    pub num_puppies: i32,
 
     /// Mobile combat units still under construction.
     new_units: BTreeSet<i32>,
@@ -146,6 +168,13 @@ impl FactoryManager {
             num_laws: 0,
             num_rackets: 0,
             num_bandits: 0,
+            num_pyros: 0,
+            num_mods: 0,
+            num_placeholders: 0,
+            num_jacks: 0,
+            num_jugglenauts: 0,
+            num_firewalkers: 0,
+            num_puppies: 0,
             new_units: BTreeSet::new(),
             big_map,
             has_fusion: false,
@@ -172,6 +201,12 @@ impl FactoryManager {
             "shieldriot" => &mut self.num_laws,
             "shieldarty" => &mut self.num_rackets,
             "shieldshield" => &mut self.num_aspis,
+            "jumpraid" => &mut self.num_pyros,
+            "jumpskirm" => &mut self.num_mods,
+            "jumpblackhole" => &mut self.num_placeholders,
+            "jumpassault" => &mut self.num_jacks,
+            "jumpsumo" => &mut self.num_jugglenauts,
+            "jumparty" => &mut self.num_firewalkers,
             "vehcapture" => &mut self.num_domis,
             "vehassault" => &mut self.num_ravagers,
             "vehriot" => &mut self.num_levelers,
@@ -220,7 +255,14 @@ impl FactoryManager {
         }
         if matches!(
             name,
-            "hoverassault" | "cloakassault" | "vehassault" | "amphfloater" | "shieldassault" | "tankassault"
+            "hoverassault"
+                | "cloakassault"
+                | "vehassault"
+                | "amphfloater"
+                | "shieldassault"
+                | "tankassault"
+                | "jumpassault"
+                | "jumpsumo"
         ) {
             self.assault_value += sign * cost;
         }
@@ -296,6 +338,13 @@ impl Ai {
         }
 
         let is_scout = builder.and_then(|b| fm.factories.get(&b.id())).is_some_and(|f| f.creating_scout);
+        if name == crate::military::puppies::PUPPY {
+            if builder.is_some() {
+                fm.num_puppies += 1;
+            } else {
+                self.puppies.born += 1;
+            }
+        }
 
         fm.count_value(name, cost, 1.0);
         fm.count_unit(name, 1);
@@ -400,6 +449,9 @@ impl Ai {
 
             fm.count_value(name, cost, -1.0);
             fm.count_unit(name, -1);
+            if name == crate::military::puppies::PUPPY && fm.num_puppies > 0 {
+                fm.num_puppies -= 1;
+            }
         }
 
         if self.fac.strider_hub == Some(id) {
@@ -509,6 +561,7 @@ impl Ai {
             FacKind::Hover => self.fac_get_hovers(&mut fac),
             FacKind::Tank => self.fac_get_tanks(&mut fac),
             FacKind::Spider => self.fac_get_spiders(&mut fac),
+            FacKind::Jump => self.fac_get_jumps(&mut fac),
             FacKind::StriderHub => self.fac_get_strider(),
             FacKind::Other => return,
         };
@@ -1233,6 +1286,139 @@ impl Ai {
         } else {
             "spiderassault"
         }
+    }
+
+    /// Jumpjets. Pyro pressure first (the opening's solo raiders run
+    /// fire-shadow raids, see `precision`), then Moderator squads with a
+    /// Placeholder per four Moderators to hold what they shoot, a Jack per
+    /// two of those up front, and Pyros guarding them from swarms (see
+    /// `war_unit_idle`); Firewalkers against masses of light skirmishers,
+    /// Jugglenauts against crowds of close-range units, Puppies to eat the
+    /// wrecks between the armies (see `puppies`), Skuttles for the jaegers.
+    fn fac_get_jumps(&self, fac: &mut Factory) -> &'static str {
+        let fm = &self.fac;
+        let war = &self.war;
+        let tf = self.graph.territory_fraction;
+        let income = self.eco.adjusted_income;
+
+        if self.fac_need_workers(fac) || self.fac_wants_early_constable() {
+            return "jumpcon";
+        }
+
+        if self.fac_wants_firewalker() {
+            return "jumparty";
+        }
+
+        // Jacks walk through Fencer fire (6000 health).
+        if war.slasher_spam as f32 * 280.0 > fm.assault_value {
+            return "jumpassault";
+        }
+
+        if self.jaeger_wants("jumpbomb") {
+            return "jumpbomb";
+        }
+
+        if self.fac_wants_puppy() {
+            return crate::military::puppies::PUPPY;
+        }
+
+        if fm.scout_budget > 0 {
+            fac.creating_scout = true;
+            return "jumpraid";
+        }
+
+        if fac.raider_spam < 0.0 {
+            fac.raider_spam += 1.0;
+            return "jumpraid";
+        }
+
+        // Moderators shoot aircraft too.
+        if self.fac_aa_roll() {
+            return if kgb_rand() > 0.5 { "jumpaa" } else { "jumpskirm" };
+        }
+
+        // An early Jack: a commander killer that jumps out again.
+        if fm.num_jacks == 0 && fm.num_pyros >= 2 {
+            return "jumpassault";
+        }
+
+        if self.fac_wants_jugglenaut() {
+            fac.add_scout_allowance(1);
+            return "jumpsumo";
+        }
+
+        // Pyro waves now and then.
+        let raid_threshold =
+            if war.sniper_sightings.is_empty() { 0.9 + f64::from(0.05f32.min(tf / 10.0)) } else { 0.8 };
+        if !fm.highprio && kgb_rand() > raid_threshold {
+            fac.raider_spam -= ((income / 8.0).floor() as i32).clamp(2, 5) as f32;
+        }
+        if kgb_rand() > 0.5 {
+            fac.add_scout_allowance(1);
+        }
+
+        // Firewalkers in the army as we grow: the cheapest killers per metal
+        // of the jump factory in self-play.
+        if income > 25.0 && (fm.num_firewalkers as f32) < (income / 25.0).floor() && kgb_rand() > 0.6 {
+            fac.add_scout_allowance(1);
+            return "jumparty";
+        }
+
+        let support = fm.num_mods + fm.num_placeholders;
+        if fm.num_mods >= 4 * (fm.num_placeholders + 1) {
+            "jumpblackhole"
+        } else if fm.num_jacks * 2 < support {
+            "jumpassault"
+        } else {
+            "jumpskirm"
+        }
+    }
+
+    /// Constables early, in step with income, as CircuitAI does with jumpjets
+    /// (its second by 1.5 minutes, then about one per 5.5 metal of income:
+    /// 9 at minute 8 against our 3.5, when it had 18 mexes to our 10; we
+    /// built Pyros first). For the first EARLY_CONS_FRAMES; off with
+    /// `disable=earlycons`.
+    fn fac_wants_early_constable(&self) -> bool {
+        if self.frame >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
+            return false;
+        }
+        let cons = self.eco.workers.values().filter(|w| !w.is_com).count();
+        cons < EARLY_CONS_MIN.max((self.eco.adjusted_income / EARLY_CONS_INCOME) as usize).min(EARLY_CONS_MAX)
+    }
+
+    /// Firewalkers while the enemy's light skirmishers (Ronins, Rogues,
+    /// Recluses...) outweigh what we have of them; a jump factory taken
+    /// for that (see `eco_find_requisition`) builds little else.
+    pub(crate) fn fac_wants_firewalker(&self) -> bool {
+        let skirms = self.war.enemy_light_skirm_value;
+        let have = self.fac.num_firewalkers as f32 * FIREWALKER_COST;
+        self.eco.adjusted_income > 20.0 && skirms >= FIREWALKER_SKIRMS && have < 0.5 * skirms
+    }
+
+    /// Jugglenauts while the enemy's close-range army (raiders, riots,
+    /// assaults) is big and we are rich enough.
+    fn fac_wants_jugglenaut(&self) -> bool {
+        let brawlers = self.war.enemy_brawler_value;
+        let have = self.fac.num_jugglenauts as f32 * JUGGLENAUT_COST;
+        self.eco.adjusted_income > 35.0 && brawlers >= JUGGLENAUT_BRAWLERS && have < 0.4 * brawlers && kgb_rand() > 0.5
+    }
+
+    /// Puppies for a herd that grows with the wreckage away from our base
+    /// (they eat it and split, see `puppies`), a few early between the
+    /// Pyros, more against cloakbots (mass Puppies are said to beat them).
+    fn fac_wants_puppy(&self) -> bool {
+        use crate::military::puppies::HERD_CAP;
+        let herd = self.puppies_count();
+        if herd >= HERD_CAP || self.dev_off("puppies") {
+            return false;
+        }
+        // (No herd of its own in the first minutes: Constables then.)
+        let mut want = if self.frame < 30 * 60 * 4 { 0 } else { 2 } + (self.puppies_wreck_metal() / 150.0) as usize;
+        if self.war.enemy_cloaky_value > 600.0 {
+            want += 6;
+        }
+        herd < want.min(HERD_CAP) && kgb_rand() > 0.5
     }
 
     fn fac_get_gunship(&self, fac: &mut Factory) -> &'static str {

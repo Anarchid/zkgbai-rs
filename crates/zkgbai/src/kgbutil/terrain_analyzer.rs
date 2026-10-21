@@ -96,7 +96,7 @@ impl TerrainAnalyzer {
             self.add("factorycloak");
             self.add("factoryshield");
             self.add("factoryamph");
-            //self.add("factoryjump");
+            self.add("factoryjump");
         } else if veh.result && bot.avg_cost_ratio >= veh.avg_cost_ratio - 0.05 {
             ai.log(&format!("{TA_MSG}Bots not cost competitive, skipping!"));
         }
@@ -153,7 +153,7 @@ impl TerrainAnalyzer {
             }
             if too_few(&self.initial_fac_list) {
                 self.add("factoryspider");
-                //self.add("factoryjump");
+                self.add("factoryjump");
             }
         }
     }

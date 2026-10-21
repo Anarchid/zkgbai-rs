@@ -52,7 +52,14 @@ impl UnitClasses {
                 "shipscout",
                 "shiptorpraider",
             ]),
-            medium_raiders: set(&["vehraid", "gunshipraid", "cloakheavyraid", "tankheavyraid", "subraider"]),
+            medium_raiders: set(&[
+                "vehraid",
+                "gunshipraid",
+                "cloakheavyraid",
+                "tankheavyraid",
+                "subraider",
+                "jumpraid",
+            ]),
             solo_raiders: set(&["spiderscout", "vehscout", "shieldscout", "gunshipbomb"]),
             assaults: set(&[
                 "cloakassault",
@@ -80,6 +87,10 @@ impl UnitClasses {
                 "shipriot",
                 "shipskirm",
                 "shipassault",
+                "jumpskirm",
+                "jumpblackhole",
+                "jumpassault",
+                "jumpsumo",
             ]),
             shield_mobs: set(&[
                 "shieldassault",
@@ -103,6 +114,7 @@ impl UnitClasses {
                 "striderarty",
                 "shiparty",
                 "shipheavyarty",
+                "jumparty",
             ]),
             aas: set(&[
                 "cloakaa",
@@ -136,7 +148,15 @@ impl UnitClasses {
                 "gunshipbomb",
                 "planefighter",
             ]),
-            heavies: set(&["tankassault", "tankheavyassault", "spidercrabe", "amphassault", "shipassault"]),
+            heavies: set(&[
+                "tankassault",
+                "tankheavyassault",
+                "spidercrabe",
+                "amphassault",
+                "shipassault",
+                "jumpassault",
+                "jumpsumo",
+            ]),
             air_mobs: BTreeSet::new(),
             porc_weps: BTreeSet::new(),
         }

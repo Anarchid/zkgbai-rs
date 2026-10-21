@@ -13,7 +13,15 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause.',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, jumps, puppies, earlycons, raidmem, odreserve.',
+		type   = 'string',
+		def    = '',
+		maxlen = 200,
+	},
+	{
+		key    = 'enable',
+		name   = 'Experimental features',
+		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -43,6 +51,14 @@ local options = {
 		min    = -1,
 		max    = 1000,
 		step   = 1,
+	},
+	{
+		key    = 'factory',
+		name   = 'Factories',
+		desc   = 'The factories to build, first to last, comma-separated (e.g. factoryjump,factorycloak); empty to choose freely.',
+		type   = 'string',
+		def    = '',
+		maxlen = 200,
 	},
 }
 

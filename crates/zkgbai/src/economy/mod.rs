@@ -138,6 +138,8 @@ pub struct EconomyManager {
     dev_facs: Vec<String>,
     /// Development aid: open with the n-th viable factory.
     dev_pick: Option<usize>,
+    /// The first factory, rolled at the start (see `eco_roll_opening`).
+    opening: Option<String>,
     /// A factory a module asked for, and why; and the last one logged.
     pub requisition: Option<(String, String)>,
     pub requisition_logged: Option<String>,
@@ -325,6 +327,7 @@ impl EconomyManager {
             user_fac: String::new(),
             dev_facs: Vec::new(),
             dev_pick: None,
+            opening: None,
             requisition: None,
             requisition_logged: None,
             new_fac_at: None,
@@ -482,6 +485,13 @@ impl EconomyManager {
     }
 }
 
+/// Energy for overdrive (see `eco_update_income`): energy is wanted up to
+/// this many times the mexes' base income, and (from this frame on) while
+/// energy storage is less than this full.
+const OD_ENERGY_RATIO: f32 = 2.6;
+const OD_STORAGE_FROM: i32 = 30 * 60 * 5;
+const OD_STORAGE_FILL: f32 = 0.5;
+
 /// Cross-module economy logic and module events.
 impl Ai {
     pub fn eco_init(&mut self) {
@@ -499,7 +509,10 @@ impl Ai {
 
         // Development aid: the factories to build, first (as `kgbfac` sets
         // it) to last, comma-separated.
-        if let Ok(facs) = std::env::var("ZKGBAI_FACTORY") {
+        // (The AI option `factory` for one AI only.)
+        if let Some(facs) =
+            self.cb.option("factory").filter(|f| !f.trim().is_empty()).or_else(|| std::env::var("ZKGBAI_FACTORY").ok())
+        {
             let mut facs = facs.split(',').map(str::trim).filter(|f| self.defs.get(f).is_some()).map(str::to_owned);
             self.eco.user_fac = facs.next().unwrap_or_default();
             self.eco.dev_facs = facs.collect();
@@ -530,7 +543,7 @@ impl Ai {
         if self.merged_allies == 0 && message.starts_with("kgbfac") {
             // port: the C++ tested `find("veh") == 6` (only "kgbfacveh");
             // the Java original accepted any suffix ("kgbfac veh").
-            const CHOICES: [(&str, &str); 7] = [
+            const CHOICES: [(&str, &str); 8] = [
                 ("veh", "factoryveh"),
                 ("hover", "factoryhover"),
                 ("tank", "factorytank"),
@@ -538,12 +551,13 @@ impl Ai {
                 ("shield", "factoryshield"),
                 ("amph", "factoryamph"),
                 ("spider", "factoryspider"),
+                ("jump", "factoryjump"),
             ];
             match CHOICES.iter().find(|(suffix, _)| message.ends_with(suffix)) {
                 Some((_, fac)) => self.eco.user_fac = (*fac).to_owned(),
                 None => {
                     self.say("Invalid factory name!");
-                    self.say("Valid choices: veh, hover, tank, cloak, shield, amph, spider");
+                    self.say("Valid choices: veh, hover, tank, cloak, shield, amph, spider, jump");
                 }
             }
 
@@ -647,6 +661,7 @@ impl Ai {
     /// The 15-frame income/stall bookkeeping block of `update`.
     fn eco_update_income(&mut self, frame: i32) {
         let merged = self.merged_allies as f32;
+        let odreserve = !self.dev_off("odreserve");
         let (m, e) = (self.metal, self.energy);
         let team = self.team_id;
         let eco = &mut self.eco;
@@ -720,13 +735,23 @@ impl Ai {
                 }
             }
         }
-        let eratio = 2.0 + eco.fusions.len() as f32;
+        // Energy for overdrive (`odreserve`): ZK spends on overdrive the
+        // spare energy times how full energy storage is, so energy only
+        // when stalled leaves almost none (CircuitAI: 37 E/s on overdrive at
+        // minute 10 against our 13; energy 1.9x mex income at minute 5 to
+        // our 1.3, 2.9x to 2.1 at minute 15).
+        let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + eco.fusions.len() as f32;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
         let tf = self.graph.territory_fraction;
         eco.hard_estalled = (eco.max_storage > 1.0
             && eco.energy < (eco.effective_income_energy * (1.0 + tf)).min(eco.max_storage / 2.0))
             || eco.static_income > eco.effective_income_energy;
-        eco.estalled = eco.hard_estalled || eco.raw_mex_income * eratio > eco.effective_income_energy;
+        eco.estalled = eco.hard_estalled
+            || eco.raw_mex_income * eratio > eco.effective_income_energy
+            || (odreserve
+                && frame > OD_STORAGE_FROM
+                && eco.max_storage > 1.0
+                && eco.energy + eco.energy_reserve < OD_STORAGE_FILL * eco.max_storage);
         if eco.max_storage > 1.0 && eco.hard_estalled && eco.metal / eco.max_storage > 0.5 {
             eco.energy_reclaim = true;
         }

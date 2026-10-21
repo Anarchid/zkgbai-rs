@@ -6,7 +6,7 @@ use springai::{UnitDef, Vec3};
 use super::{SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
 use crate::military::DefenseTarget;
-use crate::util::{OPTION_SHIFT_KEY, distance};
+use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 
 /// Cost of a job a worker must never take.
 // port: the C++ used 65535/65536 here together with "first task always
@@ -14,6 +14,22 @@ use crate::util::{OPTION_SHIFT_KEY, distance};
 // another commander's factory plop; the Java's Float.MAX_VALUE with strict
 // comparisons is restored.
 const NEVER: f32 = f32::MAX;
+
+/// Constables pair up on builds: a Constable within PAIR_RANGE already on a
+/// job makes it PAIR_BONUS cheaper to join (and is no crowd).
+const PAIRED_CON: &str = "jumpcon";
+const PAIR_RANGE: f32 = 500.0;
+const PAIR_BONUS: f32 = 150.0;
+
+/// Raid memory: enemy armed ground units seen within RAID_MEMORY frames and
+/// RAID_RADIUS of a job make it cost RAID_COST more (plus their danger),
+/// unless our power there is more than theirs / RAID_HOLD. Against
+/// jumpjets most of our constructors lost before minute 15 died building
+/// turrets where raiders had just been. Off with `disable=raidmem`.
+const RAID_MEMORY: i32 = 30 * 20;
+const RAID_RADIUS: f32 = 800.0;
+const RAID_HOLD: f32 = 0.8;
+const RAID_COST: f32 = 1500.0;
 
 /// Metal spots only one type of our constructors gets to (out at sea, say,
 /// for aircraft): one of those for every so many spots, up to a few, and a
@@ -140,6 +156,8 @@ impl Ai {
                             w.chicken_frame = frame;
                         }
                     }
+                    // Constables and recon commanders jump away.
+                    self.jump_escape(unit, haven);
                 } else {
                     self.eco_stop_chickening(wid);
                 }
@@ -263,7 +281,18 @@ impl Ai {
         let worker = eco.workers.get(&wid)?;
         let wpos = worker.get_pos();
         let view = self.war.view(worker.unit.def());
-        let threat_cost = |t: &WorkerTask| 500.0 * view.get_effective_threat(t.get_pos()).max(0.0);
+        // Raiders seen lately near a job count as well as those seen there
+        // now: jumpjets come out of the fog in seconds (see RAID_MEMORY).
+        let raiders = self.eco_recent_raiders();
+        let threat_cost = |t: &WorkerTask| {
+            let p = t.get_pos();
+            let mut cost = 500.0 * view.get_effective_threat(p).max(0.0);
+            let near: f32 = raiders.iter().filter(|r| distance(r.0, p) <= RAID_RADIUS).map(|r| r.1).sum();
+            if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) {
+                cost += RAID_COST + near;
+            }
+            cost
+        };
         // Only jobs the worker can get to (bots cannot build out at sea).
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
@@ -381,12 +410,45 @@ impl Ai {
         cluster_bonus(p, free)
     }
 
+    /// What worker `worker` at `wpos` doing `task` costs (lower is better),
+    /// less PAIR_BONUS for a Constable joining its partner (see below).
+    /// Enemy armed ground units seen within RAID_MEMORY frames: where last
+    /// seen and their danger (empty with `disable=raidmem`).
+    fn eco_recent_raiders(&self) -> Vec<(Vec3, f32)> {
+        if self.dev_off("raidmem") {
+            return Vec::new();
+        }
+        let frame = self.frame;
+        (self.war.targets.values())
+            .filter(|e| !e.is_dead && !e.is_static && !e.can_fly() && e.can_attack() && !e.is_worker)
+            .filter(|e| frame - e.last_seen <= RAID_MEMORY && e.position != NULLPOS)
+            .map(|e| (e.position, e.get_danger()))
+            .collect()
+    }
+
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+        let cost = self.eco_cost_of_job_alone(worker, wpos, task);
+        if cost >= NEVER || self.dev_off("pairs") || self.defs.name_of(worker.unit) != PAIRED_CON {
+            return cost;
+        }
+        let partner = (task.assigned_workers.iter())
+            .filter(|&&id| id != worker.id)
+            .filter_map(|id| self.eco.workers.get(id))
+            .any(|w| !w.is_com && distance(w.get_pos(), wpos) <= PAIR_RANGE && self.defs.name_of(w.unit) == PAIRED_CON);
+        if partner { cost - PAIR_BONUS } else { cost }
+    }
+
+    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
         let task_pos = task.get_pos();
         let dist = distance(wpos, task_pos);
 
+        // Constables (5 build power for 135 metal, 550 health) go in pairs
+        // on one build, as good players pair them: the first other Constable
+        // on the job, if near, is a partner, not a crowd.
+        let pairs = !self.dev_off("pairs") && self.defs.name_of(worker.unit) == PAIRED_CON;
+        let mut partner = false;
         for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)) {
             // increment cost mod for every other worker unassigned to the given task that isn't the worker we're assigning
             // as long as they're closer or equaldist to the target.
@@ -394,7 +456,14 @@ impl Ai {
             let rdist = idist.max(200.0);
             let deltadist = (idist - dist).abs();
             if w.id != worker.id {
-                if w.is_com {
+                if pairs
+                    && !partner
+                    && !w.is_com
+                    && distance(w.get_pos(), wpos) <= PAIR_RANGE
+                    && self.defs.name_of(w.unit) == PAIRED_CON
+                {
+                    partner = true;
+                } else if w.is_com {
                     cost_mod += 2.0;
                 } else if rdist < dist || deltadist < 100.0 {
                     cost_mod += 1.0;

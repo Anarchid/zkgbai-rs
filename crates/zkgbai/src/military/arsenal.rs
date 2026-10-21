@@ -31,7 +31,7 @@ const GAP_CLOSED: f32 = 0.5;
 const MAX_RANGE: f32 = 600.0;
 
 /// Factories that can be asked for to close a gap (not the jump factory:
-/// nothing here tells it what to build).
+/// its units reach what the other bots' do).
 const CANDIDATES: [&str; 10] = [
     "factorycloak",
     "factoryshield",

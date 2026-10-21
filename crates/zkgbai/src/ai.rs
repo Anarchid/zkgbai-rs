@@ -18,8 +18,10 @@ use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, Retre
 use crate::military::incursions::Incursions;
 use crate::military::intel::Intel;
 use crate::military::jaeger::Jaegers;
+use crate::military::jumps::Jumps;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
+use crate::military::puppies::Puppies;
 use crate::military::scouts::Scouts;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
@@ -27,6 +29,27 @@ use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::operator::Operator;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
+
+/// Experimental features that are off unless named in the `enable` option
+/// (or ZKGBAI_ENABLE): `pairs` (Constables pair up on builds) lost its
+/// mirror 3-5, expanding slower (12.5 mexes to 16.5 at minute 10) though
+/// losing fewer.
+const OFF_BY_DEFAULT: [&str; 1] = ["pairs"];
+
+/// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
+/// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
+fn dev_features(cb: Callback) -> BTreeSet<String> {
+    let list = |key: &str, var: &str| -> BTreeSet<String> {
+        cb.option(key)
+            .or_else(|| std::env::var(var).ok())
+            .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
+            .unwrap_or_default()
+    };
+    let mut off = list("disable", "ZKGBAI_DISABLE");
+    let on = list("enable", "ZKGBAI_ENABLE");
+    off.extend(OFF_BY_DEFAULT.iter().filter(|f| !on.contains(**f)).map(|f| f.to_string()));
+    off
+}
 
 /// The `shortName` this AI is registered under (see `data/AIInfo.lua`).
 pub const AI_SHORT_NAME: &str = "ZKGBAI";
@@ -84,6 +107,8 @@ pub struct Ai {
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
+    pub jumps: Jumps,
+    pub puppies: Puppies,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -182,6 +207,8 @@ impl SkirmishAi for Ai {
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
+            jumps: Jumps::default(),
+            puppies: Puppies::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,
@@ -197,11 +224,7 @@ impl SkirmishAi for Ai {
             enemy_ally_teams: BTreeSet::new(),
             debug_activated: false,
             test: cb.option("test"),
-            disabled: cb
-                .option("disable")
-                .or_else(|| std::env::var("ZKGBAI_DISABLE").ok())
-                .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
-                .unwrap_or_default(),
+            disabled: dev_features(cb),
             rsgn: false,
             resigned: false,
             initialized: false,
@@ -369,7 +392,8 @@ impl Ai {
             return 1;
         }
 
-        self.select_random_commander();
+        let opening = self.eco_roll_opening();
+        self.select_commander(opening.as_deref());
         self.choose_start_pos();
         if !self.disabled.is_empty() {
             let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
@@ -615,10 +639,29 @@ impl Ai {
     }
 
     fn select_random_commander(&mut self) {
-        let name = "dyntrainer_support_base";
+        self.select_commander(None);
+    }
+
+    /// The commander for opening with factory `opening`: a recon commander
+    /// for jumpjets and spiders (it jumps too, and goes where they go), a
+    /// support commander otherwise. ZKGBAI_COMMANDER=<def> overrides.
+    fn select_commander(&mut self, opening: Option<&str>) {
+        let name = match std::env::var("ZKGBAI_COMMANDER").ok().filter(|c| self.defs.get(c).is_some()) {
+            Some(c) => c,
+            None => match opening {
+                Some("factoryjump" | "factoryspider") if self.defs.get("dyntrainer_recon_base").is_some() => {
+                    "dyntrainer_recon_base".to_owned()
+                }
+                _ => "dyntrainer_support_base".to_owned(),
+            },
+        };
+        let name = name.as_str();
         self.cb.call_lua_rules(&format!("ai_commander:{name}"));
         let human = self.defs.get(name).map(|d| d.human_name()).unwrap_or_else(|| name.to_owned());
-        self.log(&format!("Selected Commander: {human}."));
+        match opening {
+            Some(f) => self.log(&format!("Selected Commander: {human} (opening with {f}).")),
+            None => self.log(&format!("Selected Commander: {human}.")),
+        }
     }
 
     fn identify_enemy_teams(&mut self) {

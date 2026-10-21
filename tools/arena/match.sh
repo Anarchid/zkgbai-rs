@@ -24,6 +24,12 @@
 #                e.g. 2v2, 1v1v1 for a 3-way FFA)
 #   -k           keep the write dir after the match
 #
+# environment:
+#   ARENA_MAX_ENGINES (6), ARENA_MIN_FREE_MB (5000): the engine waits to
+#                start while that many spring-headless run on the machine (any
+#                session's) or less memory is available
+#   ARENA_WIDGETS  more LuaUI widget files to install for the match
+#
 # Prints a final line: RESULT winner=<A|B|allyN|draw|frames|timeout|crash> ...
 #   (A/B = allyteam 0/1)
 set -uo pipefail
@@ -50,14 +56,14 @@ while getopts "m:e:g:t:f:s:o:p:L:k" opt; do
         p) PORT=$OPTARG ;;
         L) LAYOUT=$OPTARG ;;
         k) KEEP=1 ;;
-        *) sed -n '2,29p' "$0"; exit 2 ;;
+        *) sed -n '2,34p' "$0"; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
 IFS=v read -r -a ALLY_SIZES <<< "$LAYOUT"
 NUM_TEAMS=0
 for n in "${ALLY_SIZES[@]}"; do NUM_TEAMS=$((NUM_TEAMS + n)); done
-[ $# -eq "$NUM_TEAMS" ] || { echo "layout $LAYOUT needs $NUM_TEAMS AI specs, got $#" >&2; sed -n '2,29p' "$0"; exit 2; }
+[ $# -eq "$NUM_TEAMS" ] || { echo "layout $LAYOUT needs $NUM_TEAMS AI specs, got $#" >&2; sed -n '2,34p' "$0"; exit 2; }
 
 if [ -z "$ENGINE_DIR" ]; then
     ENGINE_DIR=$(ls -d "$HOME"/.spring/engine/linux64/20*/ 2>/dev/null | sort | tail -1)
@@ -197,8 +203,27 @@ EOF
 } > "$SCRIPT"
 
 LOG="$WD/infolog.txt"
+# Engine budget shared by everyone on this machine (other sessions' series
+# too): wait while ARENA_MAX_ENGINES headless engines run, or less than
+# ARENA_MIN_FREE_MB of memory is available (an engine takes ~3.3 GB). The
+# lock makes the check and the launch one step across all match.sh runs.
+ARENA_MAX_ENGINES=${ARENA_MAX_ENGINES:-6}
+ARENA_MIN_FREE_MB=${ARENA_MIN_FREE_MB:-5000}
+exec 9> "${TMPDIR:-/tmp}/zkgbai-arena.lock"
+while :; do
+    flock 9
+    engines=$(pgrep -c -f '[s]pring-headless --write-dir')
+    free_mb=$(awk '/MemAvailable/ { print int($2 / 1024) }' /proc/meminfo)
+    if [ "$engines" -lt "$ARENA_MAX_ENGINES" ] && [ "$free_mb" -ge "$ARENA_MIN_FREE_MB" ]; then break; fi
+    flock -u 9
+    sleep 10
+done
 "$ENGINE" --write-dir "$WD" "$SCRIPT" > "$OUT/stdout.txt" 2>&1 &
 PID=$!
+# Hold the lock until the engine has taken its memory.
+sleep 15
+flock -u 9
+exec 9>&-
 
 start=$(date +%s)
 # The arena widget ends the match (quitforce) on game over or at the frame

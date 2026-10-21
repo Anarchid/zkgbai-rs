@@ -9,9 +9,11 @@ pub mod handlers;
 pub mod incursions;
 pub mod intel;
 pub mod jaeger;
+pub mod jumps;
 pub mod missiles;
 pub mod nukes;
 pub mod precision;
+pub mod puppies;
 pub mod radar;
 pub mod scouts;
 pub mod shadow_probe;
@@ -87,6 +89,14 @@ pub struct MilitaryManager {
     pub enemy_heavy_value: f32,
     pub enemy_has_troll_com: bool,
     pub enemy_fighter_value: f32,
+    /// Metal of the enemy's light skirmishers (Ronins, Rogues, Recluses,
+    /// Scalpels, Moderators, Fencers, Buoys), Firewalker food.
+    pub enemy_light_skirm_value: f32,
+    /// Metal of the enemy's close-range army (raiders, riots, assaults),
+    /// Jugglenaut food.
+    pub enemy_brawler_value: f32,
+    /// Metal of the enemy's mobile cloakbots.
+    pub enemy_cloaky_value: f32,
     pub enemy_has_anti_nuke: bool,
     pub enemy_has_nuke: bool,
 
@@ -157,6 +167,9 @@ impl MilitaryManager {
             enemy_heavy_value: 0.0,
             enemy_has_troll_com: false,
             enemy_fighter_value: 0.0,
+            enemy_light_skirm_value: 0.0,
+            enemy_brawler_value: 0.0,
+            enemy_cloaky_value: 0.0,
             enemy_has_anti_nuke: false,
             enemy_has_nuke: false,
             defense_targets: Vec::new(),
@@ -483,6 +496,8 @@ impl Ai {
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
         self.guard("jaeger.update", |ai| ai.jaeger_update(frame));
+        self.guard("jumps.update", |ai| ai.jumps_update(frame));
+        self.guard("puppies.update", |ai| ai.puppies_update(frame));
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
         self.guard("precision.update", |ai| ai.precision_update(frame));
         self.guard("water.update", |ai| ai.water_update(frame));
@@ -603,6 +618,16 @@ impl Ai {
             self.scouts_add(unit);
             return;
         }
+        // Puppies herd to wrecks (see `puppies`); those split off a Puppy
+        // guard it and never idle, so they are taken in here.
+        if name == puppies::PUPPY {
+            self.puppies_add(unit);
+            return;
+        }
+        // Jugglenauts pull (see `jumps`).
+        if name == "jumpsumo" {
+            unit.execute_custom_command(cmd::PUSH_PULL, &[0.0], 0, NO_TIMEOUT);
+        }
 
         let mobile_combat = ud.speed() > 0.0 && ud.build_options().is_empty();
         if self.unit_classes.striders.contains(name) {
@@ -669,6 +694,29 @@ impl Ai {
             self.misc_add_krow(Fighter::new_krow(unit, cost, team));
         }
 
+        // Pyros give themselves away firing at radar dots.
+        if name == "jumpraid" {
+            unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[1.0], 0, NO_TIMEOUT);
+        }
+        // A Pyro per three Moderators and Placeholders guards their squads
+        // from swarms; a few raid alone (fire-shadow raids: their flames go
+        // through hills, see `precision`), the rest in squads.
+        if name == "jumpraid" {
+            if self.war_wants_pyro_guard() {
+                unit.set_move_state(1, 0);
+                self.squad_add_assault(Fighter::new(unit, cost, team));
+                return;
+            }
+            let solo = (self.raider_handler.solo_raiders.iter())
+                .filter(|id| self.fighters.get(id).is_some_and(|f| self.defs.name_of(f.unit) == "jumpraid"))
+                .count();
+            if solo < (3 + (self.eco.adjusted_income / 30.0) as usize).min(6) {
+                unit.set_move_state(1, 0);
+                self.raider_add_solo_raider(Fighter::new_raider(unit, cost, team));
+                return;
+            }
+        }
+
         let classes = &self.unit_classes;
         if classes.small_raiders.contains(name) {
             if name == "amphbomb" {
@@ -722,6 +770,20 @@ impl Ai {
             unit.fight(get_radial_point(self.graph.get_ally_center(), 800.0), 0);
             self.misc_add_sapper(unit);
         }
+    }
+
+    /// Whether the squads' Moderators and Placeholders want another Pyro
+    /// with them.
+    fn war_wants_pyro_guard(&self) -> bool {
+        let (mut guards, mut held) = (0, 0);
+        for id in &self.squad_handler.fighters {
+            match self.fighters.get(id).map(|f| self.defs.name_of(f.unit)) {
+                Some("jumpraid") => guards += 1,
+                Some("jumpskirm" | "jumpblackhole") => held += 1,
+                _ => {}
+            }
+        }
+        held >= 2 && guards * 3 < held
     }
 
     pub fn war_unit_damaged(
@@ -827,6 +889,8 @@ impl Ai {
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);
         self.jaeger_remove_unit(unit);
+        self.jumps_remove_unit(unit);
+        self.puppies_remove_unit(unit);
 
         if is_nuke {
             self.war.has_nuke = false;
@@ -1410,6 +1474,9 @@ impl Ai {
         let mut enemy_air_value = 0.0f32;
         war.enemy_heavy_value = 0.0;
         war.enemy_fighter_value = 0.0;
+        war.enemy_light_skirm_value = 0.0;
+        war.enemy_brawler_value = 0.0;
+        war.enemy_cloaky_value = 0.0;
         for t in war.targets.values() {
             if !t.identified {
                 continue;
@@ -1465,6 +1532,40 @@ impl Ai {
 
             if t.def_speed() > 0.0 && t.def_max_weapon_range() > 0.0 && t.def_builds_nothing() {
                 war.enemy_fighter_value += cost;
+                if !t.can_fly() {
+                    if matches!(
+                        name,
+                        "cloakskirm"
+                            | "shieldskirm"
+                            | "spiderskirm"
+                            | "hoverskirm"
+                            | "jumpskirm"
+                            | "vehsupport"
+                            | "amphfloater"
+                            | "shipskirm"
+                    ) {
+                        war.enemy_light_skirm_value += cost;
+                    } else if t.is_raider
+                        || t.is_riot
+                        || matches!(
+                            name,
+                            "cloakassault"
+                                | "shieldassault"
+                                | "vehassault"
+                                | "tankassault"
+                                | "hoverassault"
+                                | "spiderassault"
+                                | "amphimpulse"
+                                | "jumpassault"
+                                | "jumpsumo"
+                        )
+                    {
+                        war.enemy_brawler_value += cost;
+                    }
+                    if name.starts_with("cloak") {
+                        war.enemy_cloaky_value += cost;
+                    }
+                }
             }
         }
 

@@ -230,6 +230,10 @@ impl Ai {
                         }
                     };
                     self.retreat_coward_to(id, haven);
+                    // Jumpers jump the first stretch, over the chasers.
+                    if !is_flyer {
+                        self.jump_escape(unit, haven);
+                    }
                 } else if !self.graph.is_enemy_territory(pos) {
                     if let Some(c) = self.retreat_handler.cowards.get(&id) {
                         c.find_pad();
