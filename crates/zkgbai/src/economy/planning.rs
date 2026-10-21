@@ -1012,12 +1012,13 @@ impl Ai {
         }
         // (A cloak factory builds Scythes for it instead.)
         if !owned("factoryspider") && !owned("factorycloak") && self.scouts_deep_wanted() && !self.scouts_have_scout() {
+            let (income, spare) = self.scouts_energy();
             return Some((
                 "factoryspider".to_owned(),
                 format!(
-                    "{} Fusions{}: a Widow to scout the enemy's land deep",
-                    self.eco.fusions.len(),
-                    if self.misc_has_nuke() || self.missiles_silo().is_some() { " and a silo" } else { "" }
+                    "{income:.0} energy income, {spare:.0} past spending all metal{}: a Widow to scout the enemy's \
+                     land deep",
+                    if self.misc_has_nuke() || self.missiles_silo().is_some() { ", a silo" } else { "" }
                 ),
             ));
         }

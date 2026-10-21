@@ -44,7 +44,10 @@ pub struct EconomyManager {
     pub base_income: f32,
     pub effective_income: f32,
     pub metal: f32,
+    /// Energy stored, less the reserve the game holds back for cloaks
+    /// (`energy_reserve`; see the scouts).
     pub energy: f32,
+    pub energy_reserve: f32,
     pub adjusted_income: f32,
     pub greed: f32,
     pub defended_fac: bool,
@@ -106,7 +109,7 @@ pub struct EconomyManager {
     new_energy: Vec<Unit>,
     reclaim_record: VecDeque<f32>,
 
-    effective_income_energy: f32,
+    pub effective_income_energy: f32,
     raw_mex_income: f32,
     /// min(metal, energy) usage, refreshed every 15 frames.
     pub effective_expenditure: f32,
@@ -246,6 +249,7 @@ impl EconomyManager {
             effective_income: 0.0,
             metal: 0.0,
             energy: 0.0,
+            energy_reserve: 0.0,
             adjusted_income: 0.0,
             greed: 0.0,
             defended_fac: false,
@@ -644,6 +648,7 @@ impl Ai {
     fn eco_update_income(&mut self, frame: i32) {
         let merged = self.merged_allies as f32;
         let (m, e) = (self.metal, self.energy);
+        let team = self.team_id;
         let eco = &mut self.eco;
         eco.raw_mex_income = 0.0;
         eco.effective_income_metal = 2.0 * (1.0 + merged);
@@ -668,7 +673,9 @@ impl Ai {
 
         let economy = eco.cb.economy();
         eco.metal = economy.current(m);
-        eco.energy = economy.current(e);
+        // (A game that takes no reserve from AIs leaves it at 0.)
+        eco.energy_reserve = eco.cb.game().team_rules_param_float(team, "energyReserve", 0.0).min(eco.max_storage);
+        eco.energy = (economy.current(e) - eco.energy_reserve).max(0.0);
 
         let expend_metal = economy.usage(m);
         let expend_energy = economy.usage(e);
@@ -885,6 +892,12 @@ impl Ai {
 
         if def_name == "staticantinuke" {
             unit.execute_custom_command(cmd::PRIORITY, &[2.0], 0, NO_TIMEOUT);
+        }
+
+        // Area cloakers pay for their field at misc priority: a field that
+        // fails shows all it hides.
+        if matches!(def_name, "cloakjammer" | "staticjammer") {
+            unit.execute_custom_command(cmd::MISC_PRIORITY, &[2.0], 0, NO_TIMEOUT);
         }
 
         if matches!(def_name, "staticheavyarty" | "staticnuke" | "zenith" | "raveparty") {

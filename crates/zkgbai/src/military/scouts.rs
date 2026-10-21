@@ -15,8 +15,8 @@
 //! alone guard, a Widow waits by each of them, and bites when `nukes` says
 //! the missile is ready; it flies once they are stunned.
 //!
-//! Past that, once the game is one of strategic weapons (two Fusions of
-//! ours, or a silo of either kind), a scout scouts deep for good: it goes
+//! Past that, once we have energy to spare for a cloak (an overdrive
+//! economy), or a silo of either kind, a scout scouts deep for good: it goes
 //! where the enemy's ground has gone unseen longest, its valuable buildings
 //! first — where anti-nukes, superweapons and Fusions stand that our
 //! strikes want to know of — and a spider factory is asked for to build a
@@ -40,6 +40,14 @@
 //! for a while; area cloakers seen (Iris, Cornea) are kept clear of by
 //! their cloak's reach; and the more of the enemy's army seen lately cloaks,
 //! the wider every berth.
+//!
+//! A cloak goes out when our energy store runs dry (it draws on the store
+//! directly, twice a second, ahead of all else; a Widow 5 energy a second
+//! standing, 15 walking). So the game is asked to hold a few seconds of
+//! our scouts' upkeep back from all but high-priority spending (ZK's
+//! energy reserve, where the game takes it from AIs), and should the store
+//! run low all the same, scouts on the enemy's ground hold still, unless
+//! something comes at them.
 
 use std::collections::BTreeMap;
 
@@ -58,9 +66,22 @@ pub const SCYTHE: &str = "cloakheavyraid";
 /// (Widows) to bite.
 const MAX_SCOUTS: usize = 4;
 
-/// Deep scouting is wanted from this many Fusions of ours on (a Singularity
-/// counts as one), or a silo.
-const DEEP_FUSIONS: usize = 2;
+/// Deep scouting is wanted with energy to spare for a cloak: an income this
+/// much beyond what spending all our metal takes (building takes as much
+/// energy as metal), or this much in all; or with a silo.
+const SPARE_ENERGY: f32 = 30.0;
+const RICH_ENERGY: f32 = 100.0;
+
+/// The game is asked to hold back this many seconds of our scouts' cloak
+/// upkeep on the move (those on order counted), and this much at least.
+/// Should the store run below this many seconds of it all the same (high
+/// priority spends the reserve too), scouts on the enemy's ground hold
+/// still till it is back to this many (short of the reserve, where the
+/// store stays while it is held).
+const RESERVE_SECONDS: f32 = 4.0;
+const RESERVE_MIN: f32 = 50.0;
+const STILL_SECONDS: f32 = 2.0;
+const MOVE_SECONDS: f32 = 3.0;
 
 /// A deep look goes to a place unseen at least this long (frames), the
 /// longer the better up to the cap; a building counts this many times more
@@ -118,17 +139,23 @@ const TRIED_FRAMES: i32 = 30 * 180;
 /// Where a scout lost its cloak with nothing we know of within this of it,
 /// on the enemy's ground and with energy to cloak by (below this much
 /// stored, cloaks flicker), a cloaked enemy is taken to stand: a circle of
-/// this radius is kept clear of for this long. A scout's lost cloak is
-/// logged once in this long (frames). Area cloakers (cloaking what is within their reach).
+/// this radius is kept clear of for this long. A scout's lost cloak, and
+/// its holding still, is logged once in this long (frames).
+const UNEXPLAINED: f32 = 200.0;
+const CLOAK_ENERGY: f32 = 50.0;
+const HIDDEN_RADIUS: f32 = 250.0;
+const HIDDEN_FRAMES: i32 = 30 * 120;
+const SHOWN_LOG: i32 = 30 * 10;
+
+/// Area cloakers (cloaking what is within their reach).
+const AREA_CLOAKERS: [(&str, f32); 2] = [("cloakjammer", 350.0), ("staticjammer", 400.0)];
+
 /// Every berth widens by up to this much with the share of the enemy's
 /// army seen lately (frames) that cloaks (commanders aside; of this much
 /// metal at least, so that a few units do not make it all).
-const UNEXPLAINED: f32 = 200.0;
-const CLOAK_ENERGY: f32 = 50.0;
-const SHOWN_LOG: i32 = 30 * 10;
-const HIDDEN_RADIUS: f32 = 250.0;
-const HIDDEN_FRAMES: i32 = 30 * 120;
-const AREA_CLOAKERS: [(&str, f32); 2] = [("cloakjammer", 350.0), ("staticjammer", 400.0)];
+const CLOAK_MARGIN: f32 = 60.0;
+const CLOAK_SEEN: i32 = 30 * 180;
+const CLOAK_ARMY: f32 = 2000.0;
 
 /// When each cell of a grid this coarse (elmos) was last in our sight is
 /// kept (refreshed this often, frames): deep looks go also to cells on the
@@ -138,9 +165,6 @@ const AREA_CLOAKERS: [(&str, f32); 2] = [("cloakjammer", 350.0), ("staticjammer"
 const SEEN_CELL: f32 = 256.0;
 const SEEN_PERIOD: i32 = 60;
 const CELL_WEIGHT: f32 = 0.5;
-const CLOAK_MARGIN: f32 = 60.0;
-const CLOAK_SEEN: i32 = 30 * 180;
-const CLOAK_ARMY: f32 = 2000.0;
 
 /// Scouts on separate looks keep this far apart, elmos.
 const SPREAD: f32 = 1000.0;
@@ -191,6 +215,8 @@ struct Scout {
     reach: f32,
     /// When it last lost its cloak.
     shown: i32,
+    /// Holding still for want of energy.
+    held: bool,
 }
 
 impl Scout {
@@ -234,6 +260,15 @@ pub struct Scouts {
     /// When a Widow, and a Scythe, was queued at a factory.
     ordered: Option<i32>,
     ordered_scythe: Option<i32>,
+    /// The energy reserve last asked of the game, and whether the game
+    /// took it (once asked).
+    reserve: f32,
+    reserve_taken: Option<bool>,
+    /// Whether scouts on the enemy's ground hold still for want of energy,
+    /// when one last began to (logged), and for how long they have in all.
+    still: bool,
+    still_log: i32,
+    still_frames: i32,
 }
 
 impl Ai {
@@ -256,11 +291,66 @@ impl Ai {
         (self.scouts_eyes_needed() + bites).min(MAX_SCOUTS)
     }
 
-    /// Whether the game is one of strategic weapons, where a scout should
-    /// always be scouting the enemy's land deep.
+    /// Our energy income, and what is left of it once all our metal is
+    /// spent (building takes as much energy as metal).
+    pub fn scouts_energy(&self) -> (f32, f32) {
+        let e = self.eco.effective_income_energy;
+        (e, e - self.eco.effective_income_metal - self.eco.reclaim_income)
+    }
+
+    /// Whether a scout should always be scouting the enemy's land deep: we
+    /// have energy to spare for its cloak (see [`SPARE_ENERGY`]), or a silo.
     pub fn scouts_deep_wanted(&self) -> bool {
+        let (income, spare) = self.scouts_energy();
         !self.dev_off("scouts")
-            && (self.eco.fusions.len() >= DEEP_FUSIONS || self.misc_has_nuke() || self.missiles_silo().is_some())
+            && (spare >= SPARE_ENERGY
+                || income >= RICH_ENERGY
+                || self.misc_has_nuke()
+                || self.missiles_silo().is_some())
+    }
+
+    /// Our scouts' cloak upkeep on the move, energy a second.
+    fn scouts_upkeep(&self) -> f32 {
+        (self.scouts.scouts.values())
+            .filter(|w| w.unit.health() > 0.0)
+            .filter_map(|w| w.unit.def())
+            .map(|d| d.cloak_cost_moving())
+            .sum()
+    }
+
+    /// Energy in our store, reserve and all.
+    fn scouts_stored(&self) -> f32 {
+        self.cb.economy().current(self.energy)
+    }
+
+    /// Ask the game to hold energy back for our scouts' cloaks (see
+    /// [`RESERVE_SECONDS`]), and note whether it does: a game that takes no
+    /// reserve from AIs ignores the ask.
+    fn scouts_reserve(&mut self) {
+        // (Those on order count, so that the store is full when they are
+        // out.)
+        let ordered = |at: Option<i32>, name: &str| {
+            (at.filter(|&f| self.frame - f <= ORDER_TIMEOUT))
+                .and_then(|_| self.defs.get(name))
+                .map_or(0.0, |d| d.cloak_cost_moving())
+        };
+        let upkeep =
+            self.scouts_upkeep() + ordered(self.scouts.ordered, WIDOW) + ordered(self.scouts.ordered_scythe, SCYTHE);
+        let want = if upkeep > 0.0 { (RESERVE_SECONDS * upkeep).max(RESERVE_MIN).round() } else { 0.0 };
+        if self.scouts.reserve > 0.0 && self.scouts.reserve_taken.is_none() {
+            let held = self.cb.game().team_rules_param_float(self.team_id, "energyReserve", -1.0);
+            let taken = held == self.scouts.reserve;
+            self.scouts.reserve_taken = Some(taken);
+            self.log(if taken {
+                "scouts: the game holds energy back for our cloaks"
+            } else {
+                "scouts: the game takes no energy reserve from AIs; scouts hold still when energy runs low"
+            });
+        }
+        if want != self.scouts.reserve {
+            self.cb.call_lua_rules(&format!("ereserve:{want}"));
+            self.scouts.reserve = want;
+        }
     }
 
     /// Whether we have a scout.
@@ -406,6 +496,7 @@ impl Ai {
             leg: Vec::new(),
             reach: 0.0,
             shown: i32::MIN / 2,
+            held: false,
             since: self.frame,
             at: unit.pos(),
             cloaked: false,
@@ -444,6 +535,9 @@ impl Ai {
 
     pub fn scouts_update(&mut self, frame: i32) {
         self.scouts_update_seen(frame);
+        if (frame + self.offset + 7) % PERIOD == 0 {
+            self.scouts_reserve();
+        }
         if self.scouts.scouts.is_empty() {
             return;
         }
@@ -457,9 +551,15 @@ impl Ai {
             let cells = self.scouts_unseen_cells();
             let fresh = cells.iter().filter(|c| frame - c.1 < CLOAK_SEEN).count();
             let coverage = 100.0 * fresh as f32 / cells.len().max(1) as f32;
+            let held = match self.scouts.reserve_taken {
+                Some(true) => "held",
+                Some(false) => "not taken",
+                None => "asked",
+            };
             self.log(&format!(
                 "scouts: {} Widows, {} Scythes; {} cloaked; looking {}, deep {}, by anti-nukes {}, home {}; \
-                 enemy side seen in 3 min {coverage:.0}%; {:.0}% of the enemy army cloaks; {} cloaked enemies guessed",
+                 enemy side seen in 3 min {coverage:.0}%; {:.0}% of the enemy army cloaks; {} cloaked enemies guessed; \
+                 energy reserve {:.0} ({held}); scouts held still for energy {} s in all",
                 count(&|w| w.widow),
                 count(&|w| !w.widow),
                 count(&|w| w.unit.is_cloaked()),
@@ -469,6 +569,8 @@ impl Ai {
                 count(&|w| w.job == Job::Home),
                 100.0 * self.scouts.cloak_share,
                 self.scouts.hidden.len(),
+                self.scouts.reserve,
+                self.scouts.still_frames / 30,
             ));
         }
         if (frame + self.offset + 7) % STEER == 0 {
@@ -667,7 +769,7 @@ impl Ai {
             }
             w.cloaked = cloaked;
         }
-        let starved = self.eco.energy < CLOAK_ENERGY;
+        let starved = self.scouts_stored() < CLOAK_ENERGY;
         for (kind, at, log) in shown {
             let nearest = (self.war.targets.values())
                 .filter(|e| !e.is_dead && e.position != NULLPOS)
@@ -693,6 +795,11 @@ impl Ai {
     /// Steer every scout (see the module notes).
     fn scouts_steer(&mut self) {
         self.scouts_watch_cloak();
+        // Short of energy for the cloaks, those on the enemy's ground hold
+        // still (see [`STILL_SECONDS`]).
+        let upkeep = self.scouts_upkeep();
+        let enough = if self.scouts.still { MOVE_SECONDS } else { STILL_SECONDS };
+        self.scouts.still = self.scouts_stored() < enough * upkeep;
         let keepouts = self.scouts_keepouts();
         let ids: Vec<i32> = self.scouts.scouts.keys().copied().collect();
         for id in ids {
@@ -769,6 +876,33 @@ impl Ai {
             }
             return;
         }
+        // Short of energy, on the enemy's ground and with nothing coming at
+        // it, it holds still (a cloak costs less standing); the time held
+        // does not count against a deep look.
+        if self.scouts.still && clear(here) && !self.graph.is_ally_territory(here) {
+            if !w.leg.is_empty() {
+                unit.stop(0);
+            }
+            let began = !w.held;
+            if let Some(w) = self.scouts.scouts.get_mut(&id) {
+                (w.leg, w.moved, w.held) = (Vec::new(), i32::MIN / 2, true);
+                if matches!(job, Job::Deep(_)) {
+                    w.since += STEER;
+                }
+            }
+            self.scouts.still_frames += STEER;
+            if began && frame - self.scouts.still_log >= SHOWN_LOG {
+                self.scouts.still_log = frame;
+                let kind = if widow { "Widow" } else { "Scythe" };
+                self.log(&format!(
+                    "scouts: a {kind} holds still at ({:.0}, {:.0}), {:.0} energy stored",
+                    here.x,
+                    here.z,
+                    self.scouts_stored()
+                ));
+            }
+            return;
+        }
         // What it is in already it leaves by the shortest way (see the
         // pathfinder); the rest its way must not cross.
         let crosses =
@@ -807,6 +941,7 @@ impl Ai {
         if let Some(w) = self.scouts.scouts.get_mut(&id) {
             w.moved = frame;
             w.leg = leg.clone();
+            w.held = false;
         }
         let Some((&first, rest)) = leg.split_first() else {
             if was_moving {
