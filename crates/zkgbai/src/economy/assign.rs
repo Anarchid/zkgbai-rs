@@ -115,7 +115,10 @@ impl Ai {
         let pos = unit.pos();
         // The threat maps as the worker sees them, under water too (see `water`).
         let view = self.war.view(unit.def());
+        // (A worker on the crew of an issue worth more to it than its
+        // risk stays: see `logistics`.)
         if !w.is_chicken
+            && !self.logistics_holds(wid)
             && (view.get_effective_threat(pos) > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() || w.get_shields() < 0.5)
                     && view.get_threat(pos) > 0.0
@@ -284,10 +287,16 @@ impl Ai {
         // Raiders seen lately near a job count as well as those seen there
         // now: jumpjets come out of the fog in seconds (see RAID_MEMORY).
         let raiders = self.eco_recent_raiders();
+        let currency = !self.dev_off("currency");
         let threat_cost = |t: &WorkerTask| {
             let p = t.get_pos();
-            let mut cost = 500.0 * view.get_effective_threat(p).max(0.0);
             let near: f32 = raiders.iter().filter(|r| distance(r.0, p) <= RAID_RADIUS).map(|r| r.1).sum();
+            // On the crew of an issue, the danger is in the bonus's
+            // currency: the expected loss of the worker (see `logistics`).
+            if currency && self.logistics_bonus(wid, t.id).is_some() {
+                return self.logistics_risk(worker, p, near);
+            }
+            let mut cost = 500.0 * view.get_effective_threat(p).max(0.0);
             if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) {
                 cost += RAID_COST + near;
             }
@@ -412,6 +421,12 @@ impl Ai {
 
     /// What worker `worker` at `wpos` doing `task` costs (lower is better),
     /// less PAIR_BONUS for a Constable joining its partner (see below).
+    /// The danger of the enemy armed ground units seen lately within
+    /// RAID_RADIUS of `p` (see below).
+    pub(crate) fn eco_raiders_near(&self, p: Vec3) -> f32 {
+        self.eco_recent_raiders().iter().filter(|r| distance(r.0, p) <= RAID_RADIUS).map(|r| r.1).sum()
+    }
+
     /// Enemy armed ground units seen within RAID_MEMORY frames: where last
     /// seen and their danger (empty with `disable=raidmem`).
     fn eco_recent_raiders(&self) -> Vec<(Vec3, f32)> {

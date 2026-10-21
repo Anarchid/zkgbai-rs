@@ -1038,7 +1038,7 @@ function evText(e) {
       : `${e.event} ${e.unit || e.factory || ''}`;
     case 'note': return `${e.tag ? '[' + e.tag + '] ' : ''}${e.text}`;
     case 'issue': { const i = e.issue || {}; const w = i.worth || {};
-      return `${e.event}${e.outcome ? ' (' + e.outcome + ')' : ''} #${i.id} ${i.what} at ${(i.pos || []).join(', ')}: worth ${fmtNum(w.flat ?? w.value)}${w.by != null ? ' by ' + fmtTime(Math.round(w.by * 30)) : ''}, crew ${(i.crew || []).length}, eta ${i.eta}s${e.event === 'open' && i.why ? ' — ' + i.why : ''}`; }
+      return `${e.event}${e.outcome ? ' (' + e.outcome + ')' : ''} #${i.id} ${i.what} at ${(i.pos || []).join(', ')}: worth ${fmtNum(w.flat ?? w.value)}${w.by != null ? ' by ' + fmtTime(Math.round(w.by * 30)) : ''}${w.rate != null ? ' less ' + fmtNum(w.rate) + '/s late' : ''}, crew ${(i.crew || []).length}, eta ${i.eta}s${e.event === 'open' && i.why ? ' — ' + i.why : ''}`; }
     case 'say': return e.text;
     case 'chat': return `player ${e.player}: ${e.text}`;
     case 'end': return `run ended at ${e.time} (${e.state})`;

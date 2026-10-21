@@ -13,8 +13,16 @@
 //! The first client is defense against incursions the terrain model
 //! forecasts (`incursions`): at the first of our assets an enemy group can
 //! reach, a turret sized to the group, if one can stand in time and the
-//! value at risk pays for it. The operator can open issues of its own
-//! (tool `issue`).
+//! value at risk pays for it. The others (feature `clients`) are capital
+//! that waits: pylons while a building waits for its site to have power
+//! (`grid`), a factory a module requisitioned, an anti-nuke; each worth
+//! what it unlocks or saves, less a share of it for every second it is
+//! late. The operator can open issues of its own (tool `issue`).
+//!
+//! The crew's bonus is in metal, so the danger of the job is too (feature
+//! `currency`): what sending the worker risks is its cost times the chance
+//! of losing it there, and a worker whose share is more than that stays on
+//! the job where it would otherwise run.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -23,7 +31,7 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
 use crate::Ai;
 use crate::defs::cmd;
-use crate::economy::TaskId;
+use crate::economy::{TaskId, Worker};
 use crate::military::wrappers::weapon_power;
 use crate::util::{distance, get_directional_point};
 
@@ -83,6 +91,14 @@ const PAUSE_MIN_COST: f32 = 150.0;
 /// Frames between summaries in the log.
 const STATS_PERIOD: i32 = 1800;
 
+/// Capital pays back over this long (seconds): what a building that
+/// unlocks another (a pylon for a Bertha), or a factory that answers a
+/// threat, loses for every second it is late.
+pub const PAYBACK: f32 = 600.0;
+
+/// Odds a nuke is coming when the intel only suspects one.
+const SUSPICION_ODDS: f32 = 0.3;
+
 /// Candidate turrets for an emergency defense.
 const TURRETS: [&str; 6] =
     ["turretlaser", "turretmissile", "turretriot", "turretheavylaser", "turretemp", "turretgauss"];
@@ -95,6 +111,8 @@ pub enum Worth {
     Flat(f32),
     /// All of it by `by`, falling to nothing over [`DECAY`] seconds after.
     Deadline { value: f32, by: f32 },
+    /// All of it at `from`, less `rate` for every second after.
+    Stream { value: f32, from: f32, rate: f32 },
 }
 
 impl Worth {
@@ -108,18 +126,19 @@ impl Worth {
                     value * (1.0 - (done - by) / DECAY).max(0.0)
                 }
             }
+            Worth::Stream { value, from, rate } => (value - rate * (done - from).max(0.0)).max(0.0),
         }
     }
 
     pub fn most(&self) -> f32 {
         match *self {
-            Worth::Flat(v) | Worth::Deadline { value: v, .. } => v,
+            Worth::Flat(v) | Worth::Deadline { value: v, .. } | Worth::Stream { value: v, .. } => v,
         }
     }
 
     pub fn deadline(&self) -> Option<f32> {
         match *self {
-            Worth::Flat(_) => None,
+            Worth::Flat(_) | Worth::Stream { .. } => None,
             Worth::Deadline { by, .. } => Some(by),
         }
     }
@@ -128,6 +147,7 @@ impl Worth {
         match *self {
             Worth::Flat(v) => json!({"flat": v}),
             Worth::Deadline { value, by } => json!({"value": value, "by": by}),
+            Worth::Stream { value, from, rate } => json!({"value": value, "from": from, "rate": rate}),
         }
     }
 }
@@ -135,6 +155,9 @@ impl Worth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Defense,
+    Grid,
+    Factory,
+    Antinuke,
     Operator,
 }
 
@@ -142,6 +165,9 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Defense => "defense",
+            Kind::Grid => "grid",
+            Kind::Factory => "factory",
+            Kind::Antinuke => "antinuke",
             Kind::Operator => "operator",
         }
     }
@@ -248,7 +274,7 @@ fn porc_power(def: UnitDef) -> f32 {
 }
 
 /// The chance that an enemy force of `enemy` power overruns `ours`.
-fn loss_chance(enemy: f32, ours: f32) -> f32 {
+pub(crate) fn loss_chance(enemy: f32, ours: f32) -> f32 {
     if enemy <= 0.0 {
         return 0.0;
     }
@@ -328,6 +354,7 @@ impl Ai {
         let now = frame as f32 / 30.0;
         self.logistics_close_gone(now);
         self.logistics_defenses(now);
+        self.logistics_grid(now);
         self.logistics_forecast(now);
         if !self.dev_off("pause") {
             self.logistics_pause(now);
@@ -371,6 +398,32 @@ impl Ai {
         self.logistics.issues.contains_key(&task)
     }
 
+    /// What sending worker `w` to `p` risks, in metal: its cost times the
+    /// chance of losing it to the enemy power there (or seen near there
+    /// lately, `raiders_near`: the raid memory) against ours.
+    pub fn logistics_risk(&self, w: &Worker, p: Vec3, raiders_near: f32) -> f32 {
+        let Some(cost) = w.unit.def().map(|d| d.cost(self.metal)) else { return 0.0 };
+        let enemy = self.war.get_enemy_power(p).max(raiders_near);
+        cost * loss_chance(enemy, self.war.get_total_friendly_power(p))
+    }
+
+    /// Whether worker `wid` stays on its job in danger: it is on the crew
+    /// of the issue its job is, and its share of the value is more than
+    /// what it risks. (Commanders never: they are worth more than they
+    /// cost.)
+    pub fn logistics_holds(&self, wid: i32) -> bool {
+        if self.dev_off("currency") {
+            return false;
+        }
+        let Some(w) = self.eco.workers.get(&wid) else { return false };
+        if w.is_com {
+            return false;
+        }
+        let Some(share) = w.task.and_then(|t| self.logistics_bonus(wid, t)) else { return false };
+        let p = w.get_pos();
+        share > self.logistics_risk(w, p, self.eco_raiders_near(p))
+    }
+
     /// Open an issue on construction task `task` (or re-value one).
     pub fn logistics_open(&mut self, task: TaskId, kind: Kind, worth: Worth, why: &str, against: f32) -> Option<u32> {
         let t = self.eco.tasks.get(task)?;
@@ -406,12 +459,14 @@ impl Ai {
             started: c.target.is_some(),
         };
         self.log(&format!(
-            "logistics: issue #{id}: {what} at ({:.0}, {:.0}) worth {} ({why})",
+            "logistics: issue #{id} ({}): {what} at ({:.0}, {:.0}) worth {} ({why})",
+            kind.name(),
             pos.x,
             pos.z,
             match worth {
                 Worth::Flat(v) => format!("{v:.0}"),
                 Worth::Deadline { value, by } => format!("{value:.0} by {:.0}s", by - self.frame as f32 / 30.0),
+                Worth::Stream { value, rate, .. } => format!("{value:.0} less {rate:.1}/s late"),
             }
         ));
         self.op_emit("issue", json!({"event": "open", "issue": issue.json()}));
@@ -577,6 +632,62 @@ impl Ai {
         }
     }
 
+    /// Pylons while a building waits for its site to have power (`grid`):
+    /// what waits is capital idle, worth its cost less a [`PAYBACK`] share
+    /// of it for every second late.
+    fn logistics_grid(&mut self, now: f32) {
+        if self.dev_off("clients") {
+            return;
+        }
+        let Some((def, pos)) = self.eco_awaiting() else {
+            let powered: Vec<TaskId> =
+                self.logistics.issues.values().filter(|i| i.kind == Kind::Grid).map(|i| i.task).collect();
+            for task in powered {
+                self.logistics_close(task, "powered");
+            }
+            return;
+        };
+        let value = def.cost(self.metal);
+        let why = format!("a {} at ({:.0}, {:.0}) waits for power", self.defs.name(def), pos.x, pos.z);
+        let worth = Worth::Stream { value, from: now, rate: value / PAYBACK };
+        for task in self.eco.pylon_tasks().to_vec() {
+            if !self.logistics.issues.contains_key(&task) {
+                self.logistics_open(task, Kind::Grid, worth, &why, 0.0);
+            }
+        }
+    }
+
+    /// A factory a module requisitioned (task `task`): worth the usual
+    /// share of the `value` it answers, less a [`PAYBACK`] share of that
+    /// for every second it is not there.
+    pub fn logistics_factory(&mut self, task: TaskId, value: f32, why: &str) {
+        if self.dev_off("logistics") || self.dev_off("clients") || value <= 0.0 {
+            return;
+        }
+        let value = value * VAR_UTILITY;
+        let now = self.frame as f32 / 30.0;
+        self.logistics_open(task, Kind::Factory, Worth::Stream { value, from: now, rate: value / PAYBACK }, why, 0.0);
+    }
+
+    /// An anti-nuke (task `task`): worth what the worst blast on us would
+    /// take, by the odds a nuke is coming (`sure`, or the intel's
+    /// suspicion), less that again for every missile's worth of the
+    /// enemy's income late.
+    pub fn logistics_antinuke(&mut self, task: TaskId, sure: bool) {
+        if self.dev_off("logistics") || self.dev_off("clients") {
+            return;
+        }
+        let blast = self.nukes_worst_blast();
+        let odds = if sure { 1.0 } else { SUSPICION_ODDS };
+        let value = blast * odds;
+        let missile =
+            (self.defs.get("staticnuke").and_then(|d| d.stockpile_def())).map_or(2000.0, |w| w.cost(self.metal));
+        let cycle = (missile / self.intel.income.max(1.0)).max(30.0);
+        let now = self.frame as f32 / 30.0;
+        let why = format!("{blast:.0} metal in the worst blast, odds {odds:.1}, a missile every {cycle:.0}s");
+        self.logistics_open(task, Kind::Antinuke, Worth::Stream { value, from: now, rate: value / cycle }, &why, 0.0);
+    }
+
     /// Forecast every open issue: its crew, when it is done, what it is
     /// worth then; drop jobs past saving.
     fn logistics_forecast(&mut self, now: f32) {
@@ -706,6 +817,16 @@ mod tests {
         assert_eq!(w.at(20.0), 50.0);
         assert_eq!(w.at(40.0), 0.0);
         assert_eq!(Worth::Flat(7.0).at(1e9), 7.0);
+    }
+
+    #[test]
+    fn a_stream_is_worth_less_the_longer_it_waits() {
+        let w = Worth::Stream { value: 3000.0, from: 100.0, rate: 5.0 };
+        assert_eq!(w.at(100.0), 3000.0);
+        assert_eq!(w.at(50.0), 3000.0);
+        assert_eq!(w.at(160.0), 2700.0);
+        assert_eq!(w.at(1000.0), 0.0);
+        assert_eq!(w.deadline(), None);
     }
 
     #[test]

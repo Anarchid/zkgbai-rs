@@ -13,7 +13,7 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, jumps, puppies, earlycons, raidmem, odreserve.',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, currency, clients, jumps, puppies, earlycons, raidmem, odreserve.',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,

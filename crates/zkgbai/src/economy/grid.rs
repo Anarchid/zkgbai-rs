@@ -141,6 +141,11 @@ impl Ai {
         self.eco.pending_power.is_some()
     }
 
+    /// The building that waits for its site to have power, and where.
+    pub(crate) fn eco_awaiting(&self) -> Option<(UnitDef, Vec3)> {
+        self.eco.pending_power.as_ref().map(|p| (p.def, p.pos))
+    }
+
     fn eco_start_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
         let mut ct = WorkerTask::construction(def, pos, 0);
         if let Some(c) = ct.as_construction_mut() {

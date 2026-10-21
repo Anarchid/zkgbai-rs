@@ -100,7 +100,7 @@ pub struct EconomyManager {
     pylons: Vec<Unit>,
     aas: Vec<Unit>,
     screamers: Vec<Unit>,
-    super_weps: Vec<Unit>,
+    pub(crate) super_weps: Vec<Unit>,
     storages: Vec<Unit>,
     initial_fac_list: BTreeSet<String>,
     potential_fac_list: BTreeSet<String>,
@@ -142,6 +142,8 @@ pub struct EconomyManager {
     opening: Option<String>,
     /// A factory a module asked for, and why; and the last one logged.
     pub requisition: Option<(String, String)>,
+    /// What the requisition answers, in metal (0 when the operator asked).
+    pub requisition_value: f32,
     pub requisition_logged: Option<String>,
     /// When a factory of a new type is next due, and whether one is due now
     /// (see `planning::NEW_FAC_INCOME`).
@@ -329,6 +331,7 @@ impl EconomyManager {
             dev_pick: None,
             opening: None,
             requisition: None,
+            requisition_value: 0.0,
             requisition_logged: None,
             new_fac_at: None,
             new_fac_due: false,
@@ -351,6 +354,11 @@ impl EconomyManager {
             build_ids: BuildIds::default(),
             height_map: HeightMap::new(cb),
         }
+    }
+
+    /// The pylon jobs (for `logistics`).
+    pub(crate) fn pylon_tasks(&self) -> &[TaskId] {
+        &self.pylon_tasks
     }
 
     fn list(&self, l: List) -> &Vec<TaskId> {

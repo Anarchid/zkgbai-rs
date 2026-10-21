@@ -381,6 +381,16 @@ impl Ai {
         (self.cb.friendly_units_in(at, BLAST).into_iter()).filter_map(|u| u.def()).map(|d| d.cost(metal)).sum()
     }
 
+    /// The most a blast could take of ours: at our center, a factory, a
+    /// fusion, a superweapon.
+    pub(crate) fn nukes_worst_blast(&self) -> f32 {
+        let at = std::iter::once(self.graph.get_ally_center())
+            .chain(self.fac.factories.values().map(|f| f.unit.pos()))
+            .chain(self.eco.fusions.iter().map(|u| u.pos()))
+            .chain(self.eco.super_weps.iter().map(|u| u.pos()));
+        at.map(|p| self.nukes_friendly_value(p)).fold(0.0, f32::max)
+    }
+
     /// Say now and then why missiles in store stay there.
     fn nukes_report_hold(&mut self, silo: Unit) {
         if self.frame - self.nukes.last_hold_report < HOLD_REPORT {

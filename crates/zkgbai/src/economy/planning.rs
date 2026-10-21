@@ -410,7 +410,9 @@ impl Ai {
             self.eco.anti_nuke = true;
             if let Some(protector) = self.defs.get("staticantinuke") {
                 let pos = self.eco_build_site(protector, self.graph.get_ally_center(), 0);
-                self.eco_add_simple(protector, pos, List::Construction, None);
+                if let Some(id) = self.eco_add_simple(protector, pos, List::Construction, None) {
+                    self.logistics_antinuke(id, self.war.enemy_has_nuke || nuked);
+                }
             }
         }
     }
@@ -475,8 +477,9 @@ impl Ai {
         if let Some(from) = from.filter(|_| nfac == 0) {
             self.eco_weigh_factories_by_reach(from);
         }
-        let asked = if nfac > 0 { self.eco.requisition.take().map(|(f, _)| f) } else { None };
-        let reach_fac = asked.filter(|f| !self.eco_has_factory(f));
+        let asked = if nfac > 0 { self.eco.requisition.take() } else { None };
+        let asked_value = self.eco.requisition_value;
+        let reach_fac = asked.as_ref().filter(|(f, _)| !self.eco_has_factory(f)).map(|(f, _)| f.clone());
         let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
 
         if self.eco.potential_fac_list.is_empty() && reach_fac.is_none() && new_type.is_none() {
@@ -692,6 +695,12 @@ impl Ai {
             let id = self.eco.tasks.insert(ct);
             self.eco.construction_tasks.push(id);
             self.eco.factory_tasks.push(id);
+            // A requisition is an issue worth what it answers.
+            if let Some((f, why)) = &asked
+                && *f == fac_name
+            {
+                self.logistics_factory(id, asked_value, why);
+            }
         } else {
             restore(self, &fac_name);
         }
@@ -1028,8 +1037,12 @@ impl Ai {
         roll
     }
 
-    fn eco_find_requisition(&self) -> Option<(String, String)> {
+    /// The factory a module wants, why, and what that answers in metal
+    /// (for `logistics`).
+    fn eco_find_requisition(&self) -> Option<(String, String, f32)> {
         if let Some((f, gap, fills)) = self.eco_reach_gap() {
+            // The metal out of reach, as income over a payback period.
+            let value = gap * self.eco.static_income * crate::logistics::PAYBACK;
             return Some((
                 f.to_owned(),
                 format!(
@@ -1037,6 +1050,7 @@ impl Ai {
                     100.0 * gap,
                     100.0 * fills
                 ),
+                value,
             ));
         }
         if let Some((f, gap, seen, closes)) = self.arsenal_gap() {
@@ -1046,6 +1060,7 @@ impl Ai {
                     "{gap:.0} of {seen:.0} metal of the enemy seen lately is out of our units' reach or under water; \
                      its units get to {closes:.0}"
                 ),
+                gap,
             ));
         }
         let owned = |name: &str| self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
@@ -1055,6 +1070,7 @@ impl Ai {
             return Some((
                 "factoryspider".to_owned(),
                 format!("{value:.0} metal is behind anti-nukes: Widows to find and stun them"),
+                value,
             ));
         }
         // (A cloak factory builds Scythes for it instead.)
@@ -1067,6 +1083,7 @@ impl Ai {
                      land deep",
                     if self.misc_has_nuke() || self.missiles_silo().is_some() { ", a silo" } else { "" }
                 ),
+                self.intel.unaccounted().max(0.0),
             ));
         }
         // Firewalkers burn masses of light skirmishers.
@@ -1083,6 +1100,7 @@ impl Ai {
                     "{skirms:.0} of the enemy's {:.0} metal of army seen is light skirmishers: Firewalkers",
                     self.war.enemy_fighter_value
                 ),
+                skirms,
             ));
         }
         let s = self.strategy.as_ref()?;
@@ -1108,6 +1126,7 @@ impl Ai {
                         "{:.0}% of the enemy's value is out of ground reach or far round guarded chokepoints: air drops",
                         100.0 * guarded / total
                     ),
+                    guarded,
                 ));
             }
             let prospect = self.drops_prospect_value();
@@ -1118,6 +1137,7 @@ impl Ai {
                         "{prospect:.0} metal of enemy buildings is much further on foot, past what holds the way, \
                          than by air: air drops"
                     ),
+                    prospect,
                 ));
             }
         }
@@ -1257,6 +1277,7 @@ impl Ai {
         }
         if let Some(r) = self.op_requisition() {
             self.eco.requisition = Some(r);
+            self.eco.requisition_value = 0.0;
             return;
         }
         self.eco_plan_sub_defense();
@@ -1264,13 +1285,14 @@ impl Ai {
         self.eco_plan_watchtower();
         self.eco_plan_colony();
         let r = self.eco_find_requisition();
-        if let Some((f, why)) = &r
+        if let Some((f, why, value)) = &r
             && self.eco.requisition_logged.as_ref() != Some(f)
         {
-            self.log(&format!("economy: requisitioning a {f}: {why}"));
+            self.log(&format!("economy: requisitioning a {f}: {why} ({value:.0} metal)"));
             self.eco.requisition_logged = Some(f.clone());
         }
-        self.eco.requisition = r;
+        self.eco.requisition_value = r.as_ref().map_or(0.0, |r| r.2);
+        self.eco.requisition = r.map(|(f, why, _)| (f, why));
     }
 
     /// Try up to ~100 random spots around `position` for one `def`.
