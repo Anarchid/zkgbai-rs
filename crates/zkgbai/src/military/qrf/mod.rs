@@ -14,6 +14,7 @@
 //! On only in the staged raid-defense game (`test=qrf`, see `raid_test`),
 //! unless `disable=qrf`, when the usual handlers take the force instead.
 
+pub mod cover;
 pub mod field;
 pub mod station;
 
@@ -147,6 +148,7 @@ pub struct Qrf {
     /// Seconds between trace lines (0: none).
     pub trace: i32,
     pub station: station::Station,
+    pub cover: cover::Cover,
     stats: Stats,
 }
 
@@ -232,6 +234,7 @@ impl Ai {
         self.qrf_assets();
         match self.qrf.algo.as_str() {
             "station" => self.qrf_station_update(frame),
+            "cover" => self.qrf_cover_update(frame),
             other => {
                 if frame % LOG_PERIOD < PERIOD {
                     self.log(&format!("qrf: no algorithm {other}, using station"));
