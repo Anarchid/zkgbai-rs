@@ -318,6 +318,7 @@ impl Ai {
         //do we need storages?
         if frame > 600
             && !self.fac.factories.is_empty()
+            && (!self.eco_energy_starved() || self.dev_off("storagegate"))
             && (self.eco.metal / self.eco.max_storage > 0.8
                 || ((self.eco.commanders.len() + self.eco.storages.len()) as i32) < 1 + self.merged_allies)
             && self.eco.storage_tasks.is_empty()
@@ -367,8 +368,9 @@ impl Ai {
             self.eco.chose_sup_wep = false;
         }
 
-        // do we need superweapons?
+        // do we need superweapons? (not while energy is what we lack)
         if !self.eco.chose_sup_wep
+            && !self.eco_energy_starved()
             && ((!self.allies.is_empty() && self.eco.has_striders && self.fac.num_striders > 1)
                 || self.allies.is_empty())
             && self.eco.fusions.len() > 4
@@ -680,9 +682,11 @@ impl Ai {
         }
 
         let mut ct = WorkerTask::construction_plop(factory, position, facing, is_plop);
+        // The free first factory always; another not while energy is what we lack.
         if self.eco_build_check(factory, position, facing)
             && !self.eco.tasks.contains(&self.eco.factory_tasks, &ct)
             && self.eco_can_reach(wid, position)
+            && (is_plop || !self.eco_energy_starved())
         {
             if is_plop {
                 if let Some(c) = ct.as_construction_mut() {
@@ -1343,6 +1347,9 @@ impl Ai {
     }
 
     pub(super) fn eco_defend_mex(&mut self, position: Vec3) {
+        if !self.op_porc_allowed(position) {
+            return;
+        }
         let turret = self.eco_light_turret();
         // Where enemy ground forces cannot get, about half as many.
         let spacing = if self.strategy_sheltered(position) { SHELTERED_SPACING } else { 1.0 };
@@ -1366,6 +1373,9 @@ impl Ai {
     }
 
     pub(super) fn eco_fortify_mex(&mut self, position: Vec3, wd: Option<WeaponDef>) {
+        if !self.op_porc_allowed(position) {
+            return;
+        }
         let porc;
 
         if self.eco.adjusted_income > 30.0 {
@@ -1495,6 +1505,9 @@ impl Ai {
     }
 
     fn eco_defend_link(&mut self, position: Vec3) {
+        if !self.op_porc_allowed(position) {
+            return;
+        }
         let Some(llt) = self.defs.get("turretlaser") else {
             return;
         };

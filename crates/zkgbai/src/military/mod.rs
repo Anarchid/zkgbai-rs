@@ -64,6 +64,10 @@ fn aa_porc_circle(e: &mut Enemy) -> (i32, i32, i32, i32) {
     (x, y, r + 1, effective_power)
 }
 
+/// Weapon range at which an enemy fighter outranges light raiders (Glaive
+/// 185, Dagger 212, Kodachi 210; Scalpel 330, Rocko 275).
+pub const OUTRANGES_RAIDERS: f32 = 260.0;
+
 pub struct MilitaryManager {
     cb: Callback,
 
@@ -89,6 +93,10 @@ pub struct MilitaryManager {
     pub enemy_heavy_value: f32,
     pub enemy_has_troll_com: bool,
     pub enemy_fighter_value: f32,
+    /// Share (by cost) of the enemy's seen mobile fighters whose weapons
+    /// outrange light raiders (skirmishers and the like): the raider-layer
+    /// matchup, for the operator's `military` view.
+    pub outranging_share: f32,
     /// Metal of the enemy's light skirmishers (Ronins, Rogues, Recluses,
     /// Scalpels, Moderators, Fencers, Buoys), Firewalker food.
     pub enemy_light_skirm_value: f32,
@@ -167,6 +175,7 @@ impl MilitaryManager {
             enemy_heavy_value: 0.0,
             enemy_has_troll_com: false,
             enemy_fighter_value: 0.0,
+            outranging_share: 0.0,
             enemy_light_skirm_value: 0.0,
             enemy_brawler_value: 0.0,
             enemy_cloaky_value: 0.0,
@@ -1477,6 +1486,7 @@ impl Ai {
         war.enemy_light_skirm_value = 0.0;
         war.enemy_brawler_value = 0.0;
         war.enemy_cloaky_value = 0.0;
+        let (mut mobile_value, mut outranging_value) = (0.0f32, 0.0f32);
         for t in war.targets.values() {
             if !t.identified {
                 continue;
@@ -1484,6 +1494,12 @@ impl Ai {
             let Some(ud) = t.ud else { continue };
             let name = t.def_name.as_str();
             let cost = ud.cost(metal);
+            if !t.is_static && !t.is_worker && t.power > 0.0 && ud.speed() > 0.0 && frame - t.last_seen < 1800 {
+                mobile_value += cost;
+                if t.threat_radius >= OUTRANGES_RAIDERS {
+                    outranging_value += cost;
+                }
+            }
             match name {
                 "turretheavylaser" | "turretgauss" | "turretriot" | "turretemp" | "turretimpulse" | "spidercrabe" => {
                     war.enemy_porc_value += cost;
@@ -1568,6 +1584,7 @@ impl Ai {
                 }
             }
         }
+        war.outranging_share = if mobile_value > 0.0 { outranging_value / mobile_value } else { 0.0 };
 
         war.max_enemy_air_value = enemy_air_value.max(war.max_enemy_air_value);
 
@@ -2187,6 +2204,11 @@ impl Ai {
             return target;
         }
 
+        // The operator's line, if one is set: the army stands there when
+        // nothing calls it (instead of escorting workers or the front spots).
+        if let Some(line) = self.op_line_point() {
+            return line;
+        }
         //if there aren't any, then rally near the front line.
         let position = self.war_get_worker_escort(pos);
         if position != NULLPOS {

@@ -738,6 +738,7 @@ name = "zkgbai"
 version = "0.2.0"
 dependencies = [
  "delaunator",
+ "png",
  "serde_json",
  "springai",
  "zk-terrain",

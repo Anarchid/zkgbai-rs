@@ -14,6 +14,10 @@
 //! - `GET /journal`, `GET /journals`, `GET /journals/<name>`: this run's
 //!   journal, and the list and files of the journal directory.
 //! - `GET /health`: liveness and the current frame.
+//! - `GET /mcpl` (WebSocket upgrade): MCPL, the live extension of MCP, for
+//!   agent hosts (see [`super::mcpl`]).
+//! - `GET /board`: the board picture (see [`super::board`]), redrawn every
+//!   5 s.
 //!
 //! Tool calls run on the AI's thread at its next frame: the connection
 //! thread hands them over and waits for the answer.
@@ -30,6 +34,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 use super::bus::Bus;
+use super::hud::{FeedConfig, HudConfig};
+use super::{mcpl, ws};
 
 /// How long a caller waits for the AI to take a call (it only does while
 /// the game runs).
@@ -73,6 +79,12 @@ pub struct Shared {
     pub ally_team: i32,
     pub journal: Option<PathBuf>,
     pub shutdown: AtomicBool,
+    /// The run's id (for event ids).
+    pub run_id: String,
+    /// What the HUD shows and the feed pushes (set by tools on the AI's
+    /// thread, read by MCPL sessions).
+    pub hud: Arc<Mutex<HudConfig>>,
+    pub feed: Arc<Mutex<FeedConfig>>,
 }
 
 pub fn unix_ms() -> u64 {
@@ -177,7 +189,7 @@ impl Request {
 }
 
 /// Serve one connection's requests until it closes, idles out, or we stop.
-fn serve(stream: TcpStream, shared: &Shared) {
+fn serve(stream: TcpStream, shared: &Arc<Shared>) {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_nodelay(true);
@@ -339,7 +351,7 @@ fn json_response(stream: &TcpStream, status: u16, v: &Value, cors: &[(&str, Stri
 }
 
 /// Handle one request; `false` to close the connection.
-fn route(stream: &TcpStream, req: &Request, shared: &Shared, keep: bool) -> bool {
+fn route(stream: &TcpStream, req: &Request, shared: &Arc<Shared>, keep: bool) -> bool {
     let Some(origin) = allowed_origin(req) else {
         let _ = respond(stream, 403, "text/plain", b"origin not allowed", &[], false);
         return false;
@@ -371,6 +383,34 @@ fn route(stream: &TcpStream, req: &Request, shared: &Shared, keep: bool) -> bool
             keep,
         ),
         ("GET", "/tools") => json_response(stream, 200, &json!({"tools": shared.tools}), &cors, keep),
+        ("GET", "/mcpl") if ws::wants_upgrade(&req.headers) => {
+            if ws::upgrade(stream, &req.headers).is_ok() {
+                // The connection is the session's now.
+                if let Ok(s) = stream.try_clone() {
+                    mcpl::serve(s, shared);
+                }
+            }
+            false
+        }
+        ("GET", "/mcpl") => {
+            respond(stream, 400, "text/plain", b"MCPL is served over a WebSocket: upgrade this request", &cors, keep).is_ok()
+        }
+        ("GET", "/board") => {
+            // The board as a page that redraws itself (the PNG travels as a
+            // data URI, so the AI thread only renders when someone looks).
+            let image = call_internal(shared, "board_png", json!({}), Duration::from_secs(5))
+                .ok()
+                .and_then(|v| v.get("image").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_default();
+            let body = if image.is_empty() {
+                "<!doctype html><meta http-equiv=refresh content=5><body style=background:#111;color:#ccc>no board yet (the AI's modules are not running)".to_owned()
+            } else {
+                format!(
+                    "<!doctype html><meta http-equiv=refresh content=5><title>ZKGBAI board</title><body style=\"margin:0;background:#111\"><img style=\"image-rendering:pixelated;width:100%\" src=\"data:image/png;base64,{image}\">"
+                )
+            };
+            respond(stream, 200, "text/html; charset=utf-8", body.as_bytes(), &cors, keep).is_ok()
+        }
         ("GET", "/snapshot") => {
             shared.snapshot_wanted.store(unix_ms(), Ordering::Relaxed);
             let snap = shared.snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -474,15 +514,20 @@ fn call(shared: &Shared, tool: &str, args: Value) -> Result<Value, String> {
     if !shared.tools.iter().any(|t| t["name"] == tool) {
         return Err(format!("unknown tool '{tool}' (GET /tools lists them)"));
     }
+    call_internal(shared, tool, args, CALL_TIMEOUT)
+}
+
+/// Run any tool the AI's thread knows, listed or internal, with a timeout.
+pub(super) fn call_internal(shared: &Shared, tool: &str, args: Value, timeout: Duration) -> Result<Value, String> {
     let (tx, rx) = sync_channel(1);
     shared.calls.send(Call { tool: tool.to_owned(), args, reply: tx }).map_err(|_| "the AI is gone".to_owned())?;
-    rx.recv_timeout(CALL_TIMEOUT).unwrap_or_else(|_| {
-        Err(format!("no answer within {}s: the AI only answers while the game runs (paused?)", CALL_TIMEOUT.as_secs()))
+    rx.recv_timeout(timeout).unwrap_or_else(|_| {
+        Err(format!("no answer within {:.1}s: the AI only answers while the game runs (paused?)", timeout.as_secs_f64()))
     })
 }
 
 /// One JSON-RPC message; `None` for notifications and responses.
-fn rpc(shared: &Shared, msg: &Value) -> Option<Value> {
+pub(super) fn rpc(shared: &Shared, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str);
     let (Some(id), Some(method)) = (id, method) else { return None };
@@ -510,11 +555,22 @@ fn rpc(shared: &Shared, msg: &Value) -> Option<Value> {
                 return err(-32602, format!("unknown tool '{name}'"));
             }
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let (text, structured, is_error) = match call(shared, name, args) {
-                Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_default(), Some(v), false),
+            let (mut text, mut structured, is_error) = match call(shared, name, args) {
+                Ok(v) => (String::new(), Some(v), false),
                 Err(e) => (e, None, true),
             };
-            let mut result = json!({"content": [{"type": "text", "text": text}], "isError": is_error});
+            // A tool's picture goes as an image block, not as a wall of base64.
+            let image = structured.as_mut().and_then(|v| {
+                v.as_object_mut().and_then(|m| m.remove("image_png_base64")).and_then(|i| i.as_str().map(str::to_owned))
+            });
+            if let Some(v) = &structured {
+                text = serde_json::to_string_pretty(v).unwrap_or_default();
+            }
+            let mut content = vec![json!({"type": "text", "text": text})];
+            if let Some(data) = image {
+                content.push(json!({"type": "image", "data": data, "mimeType": "image/png"}));
+            }
+            let mut result = json!({"content": content, "isError": is_error});
             if let Some(v @ Value::Object(_)) = structured {
                 result["structuredContent"] = v;
             }

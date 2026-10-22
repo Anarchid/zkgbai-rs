@@ -393,11 +393,34 @@ pub static TOOLS: &[Tool] = &[
         needs_modules: false,
         run: views::profile,
     },
+    Tool {
+        name: "board",
+        description: "The map as a picture: terrain, a grid labelled in thousands of elmos, metal spots (ours \
+                       blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, \
+                       buildings blue), enemies (red; orange when only remembered), enemy defenses with their \
+                       reach, squad lines to their targets, defended places in magenta. Read it for shape (where \
+                       the front is, which flank is empty); use the text tools for exact coordinates.",
+        params: &[],
+        writes: false,
+        needs_modules: true,
+        run: views::board,
+    },
+    Tool {
+        name: "modules",
+        description: "The AI's modules (what each decides) with the orders each has issued and had dropped, and \
+                       which are muted. Mute a module with `mute` to take its job over: it keeps thinking, its \
+                       orders stop.",
+        params: &[],
+        writes: false,
+        needs_modules: false,
+        run: views::modules,
+    },
     // ---- acting ----
     Tool {
         name: "say",
-        description: "Say something in the game chat (everyone sees it).",
-        params: &[P("text", Str, true, "what to say")],
+        description: "Say something in the game chat: to everyone (the opponent included), or with spec=true to \
+                       the spectators only.",
+        params: &[P("text", Str, true, "what to say"), P("spec", Bool, false, "spectators only (default false)")],
         writes: true,
         needs_modules: false,
         run: actions::say,
@@ -425,10 +448,85 @@ pub static TOOLS: &[Tool] = &[
         run: actions::note,
     },
     Tool {
+        name: "mute",
+        description: "Mute a module (or unmute it): its orders to units are dropped while it keeps its \
+                       bookkeeping, so the operator can do its job instead. Name a module (eco, fac, raider, \
+                       squad, retreat, scouts, drops, nukes, missiles, precision, bomber, misc, jaeger, jumps, \
+                       puppies, teleport, water, war) or one handler (eco.unitIdle). See `modules`.",
+        params: &[
+            P("module", Str, true, "module name or prefix"),
+            P("off", Bool, false, "true (default) to mute, false to unmute"),
+        ],
+        writes: true,
+        needs_modules: false,
+        run: actions::mute,
+    },
+    Tool {
+        name: "hud",
+        description: "Set what the HUD shows (MCPL hosts get it injected before every inference): a comma list \
+                       of sections among status, workers, factories, squads, threats, overrides, board (the map as \
+                       a picture); `all` or `none`. Pin a read tool to run on every render (pin=enemies \
+                       args={\"kind\":\"fighter\",\"visible\":true}), or unpin it. Without arguments, shows the \
+                       HUD now (text only).",
+        params: &[
+            P("sections", Str, false, "comma list of sections, all, or none"),
+            P("pin", Str, false, "a read tool to run on every render"),
+            P("args", Str, false, "pin: the tool's arguments as a JSON object"),
+            P("unpin", Str, false, "a pinned tool to drop (or all)"),
+        ],
+        writes: true,
+        needs_modules: false,
+        run: actions::hud,
+    },
+    Tool {
+        name: "feed",
+        description: "Set what the feed pushes to an MCPL host: the record kinds pushed as they happen (chat, \
+                       kill, unit-, unit+, enemy+, idle, given, log, op, note, alert, end...), how long records \
+                       are batched, and how often a situation report (the HUD plus a tally of everything since \
+                       the last) is pushed. Without arguments, shows the settings.",
+        params: &[
+            P("kinds", Str, false, "comma list of record kinds to push live (default: run,end,chat,kill,unit-,enemy+,idle,given,alert)"),
+            P("batch_ms", Int, false, "records this close together go in one push (default 3000)"),
+            P("sitrep_s", Int, false, "seconds between situation reports, 0 for none (default 30)"),
+        ],
+        writes: true,
+        needs_modules: false,
+        run: actions::feed,
+    },
+    Tool {
+        name: "porc_zone",
+        description: "With feature mexporc off, the AI builds no turrets by mexes and links except inside the \
+                       circles you permit here: add one at x,z with a radius (for a while), or clear them all. \
+                       Without arguments, lists them.",
+        params: &[
+            P("x", Num, false, "map x"),
+            P("z", Num, false, "map z"),
+            P("radius", Num, false, "elmos (default 600)"),
+            P("seconds", Num, false, "how long the permission stands (default 1800)"),
+            P("clear", Bool, false, "drop all zones"),
+        ],
+        writes: true,
+        needs_modules: false,
+        run: actions::porc_zone,
+    },
+    Tool {
+        name: "dial",
+        description: "Set one of the AI's dials. greed (0.25-4, default 1): the threat the economy perceives \
+                       is divided by it, so far or contested metal spots are priced cheaper for workers and \
+                       workers flee later (the expansion horizon). line (0-0.9, default 0 = the AI's own \
+                       choice): where the army stands when nothing calls it, as a fraction of the way from our \
+                       base to the enemy's center (0.2 home, 0.5 the middle). Without a value, shows the dials.",
+        params: &[P("name", Str, true, "greed or line"), P("value", Num, false, "the new value")],
+        writes: true,
+        needs_modules: false,
+        run: actions::dial,
+    },
+    Tool {
         name: "feature",
-        description: "Switch an AI feature off or back on (the dev switches): porc, reach, refuge, teleport, \
-                       drops, ditch, reanalysis, intel, grid, precision, nukes, missiles, scouts, radar, \
-                       requisition, colonize, aaintel.",
+        description: "Switch an AI feature off or back on (the dev switches): porc, mexporc (turrets by mexes \
+                       and links), reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, precision, \
+                       nukes, missiles, scouts, radar, requisition, colonize, aaintel, logistics, clients, jumps, \
+                       puppies, earlycons, raidmem, odreserve, pairs, currency.",
         params: &[
             P("name", Str, true, "feature name"),
             P("off", Bool, true, "true to switch it off, false to switch it back on"),
@@ -440,7 +538,9 @@ pub static TOOLS: &[Tool] = &[
     Tool {
         name: "fac_queue",
         description: "Order units from our factories: the next time a factory that can build the unit picks what \
-                       to make, it makes this instead, until the count is done. Orders are served in sequence.",
+                       to make, it makes this instead, until the count is done. Orders are served in sequence, \
+                       except that a factory wanting a constructor by the AI's own rule builds that first: \
+                       production orders never starve the economy of builders.",
         params: &[
             P("unit", Str, false, "unit def name (see defs)"),
             P("count", Int, false, "how many (default 1)"),
@@ -524,6 +624,50 @@ pub static TOOLS: &[Tool] = &[
         run: actions::squad_target,
     },
     Tool {
+        name: "squad_intent",
+        description: "Give a squad a standing intention (and a courage), kept until cleared or timed out: hold (stand at x,z \
+                       and fight what comes), raid (hunt the enemy's mexes, workers and buildings within radius \
+                       of x,z, nearest first, never turrets), escort (go where our unit goes), attack (go to x,z; \
+                       once within radius the AI has the squad back), or clear.",
+        params: &[
+            P("squad", Int, true, "squad id (see squads, or squad_form)"),
+            P("intent", Str, false, "hold, raid, escort, attack or clear (omit to only set courage)"),
+            P("courage", Num, false, "0.25-4 (default 1): the threat the squad perceives is divided by it and its units retreat at a health level divided by it; 3 is suicidal, 0.5 cowardly. Sticks to the squad."),
+            P("x", Num, false, "map x"),
+            P("z", Num, false, "map z"),
+            P("radius", Num, false, "raid: how far around x,z to hunt (default 1500); attack: arrival distance (default 300)"),
+            P("unit", Int, false, "escort: the unit to follow"),
+            P("seconds", Num, false, "how long the intent stands (default 600)"),
+        ],
+        writes: true,
+        needs_modules: true,
+        run: actions::squad_intent,
+    },
+    Tool {
+        name: "squad_form",
+        description: "Make a squad of our armed mobile units (taken from whatever handler had them, e.g. solo \
+                       raiders or another squad; reserved units are handed back). kind raider (raid micro: hit \
+                       and run, retreat when hurt) or assault (stand and fight); auto picks by the units. The new \
+                       squad attacks where it stands until given an intent.",
+        params: &[
+            P("units", Ids, true, "unit ids"),
+            P("kind", Str, false, "raider, assault or auto (default)"),
+            P("courage", Num, false, "0.25-4 (default 1), see squad_intent"),
+        ],
+        writes: true,
+        needs_modules: true,
+        run: actions::squad_form,
+    },
+    Tool {
+        name: "squad_disband",
+        description: "Dissolve a squad: its units go back to the AI, which picks them up as if idle (solo \
+                       raiders, new squads, and so on).",
+        params: &[P("squad", Int, true, "squad id")],
+        writes: true,
+        needs_modules: true,
+        run: actions::squad_disband,
+    },
+    Tool {
         name: "take",
         description: "Reserve units for the operator: the AI keeps tracking them but its orders to them are \
                        dropped, so only `order` moves them. They stay put until ordered.",
@@ -544,16 +688,17 @@ pub static TOOLS: &[Tool] = &[
         name: "order",
         description: "Order our units directly. Commands: move, fight (attack-move), patrol, attack (target unit, \
                        or ground at x,z), area_attack, guard, repair, reclaim (target unit), area_reclaim, \
-                       build (unit def at x,z), stop, wait, fire_state, move_state, cloak, on_off, self_destruct. \
-                       Units are reserved first (take) unless take is false, in which case the AI may override \
-                       the order at once.",
+                       build (unit def at x,z), field_fac (a commander with a field factory copies factory \
+                       `target`'s build list and wants `unit`; afterwards build it like a structure), stop, \
+                       wait, fire_state, move_state, cloak, on_off, self_destruct. Units are reserved first \
+                       (take) unless take is false, in which case the AI may override the order at once.",
         params: &[
             P("units", Ids, true, "unit ids"),
             P("cmd", Str, true, "the command"),
             P("x", Num, false, "map x"),
             P("z", Num, false, "map z"),
-            P("target", Int, false, "target unit id"),
-            P("unit", Str, false, "build: building def name"),
+            P("target", Int, false, "target unit id (field_fac: the factory)"),
+            P("unit", Str, false, "build: building def name; field_fac: the unit to build in the field"),
             P("facing", Int, false, "build: 0-3"),
             P("radius", Num, false, "area commands (default 300)"),
             P("value", Int, false, "fire_state 0-2, move_state 0-2, cloak/on_off 0-1"),

@@ -599,6 +599,14 @@ impl Ai {
             + self.fac.factories.values().map(|f| cost(&f.unit)).sum::<f32>()
     }
 
+    /// Energy-stalled with metal to spare: a storage, a factory or a
+    /// superweapon now would feed the stall that starves them (metal above
+    /// 80% of storage is what a stall produces, and it used to call for a
+    /// storage). Energy comes first.
+    pub fn eco_energy_starved(&self) -> bool {
+        !self.dev_off("stallgate") && self.eco.estalled && self.eco.metal > 200.0
+    }
+
     pub fn eco_update(&mut self, frame: i32) {
         if frame % 300 == self.offset % 300 {
             self.eco_check_nanos();

@@ -72,7 +72,12 @@ several depths and log how steep they come out and which movement tiers can cros
 against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, comma-separated:
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
-`scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft).
+`scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
+`mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
+`ZKGBAI_MUTE` (or the AI option `mute`) silences modules: `eco`, `fac`, `raider`, `squad`, `scouts`, ... (the
+list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
+that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are
+worth.
 `ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
 The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?test=bite` against
 `ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
@@ -107,6 +112,7 @@ The server answers on one port:
 |----------|------|
 | `/` | The dashboard: the map (terrain, metal spots and owners, our units by role, enemies fading with time since seen, squads and their targets, places to defend, threat and value overlays), economy and army charts, the event log, an inspector, and a console for every tool. Select units (click, shift-drag) and right-click the map to order them, send a squad, set a defense point or a construction task. Scrub the timeline back over the game, or open a journal (from disk or the AI's journal list) to replay it. |
 | `/mcp` | MCP over Streamable HTTP: `claude mcp add --transport http zkgbai http://127.0.0.1:7460/mcp` gives an agent the tools. |
+| `/mcpl` | MCPL (MCP Live) over a WebSocket, for agent hosts that speak it (connectome-host): the same tools, plus the feed pushed to the host as it happens (`push/event`), the HUD injected into the agent's context before each of its inferences (`context/beforeInference`), and the agent's turns recorded in the journal (`inference/lifecycle` → `inference` records). Feature sets `zkgbai.read`, `zkgbai.act`, `zkgbai.hud`, `zkgbai.events`. `tools/operator/mcpl-smoke.mjs` exercises it. |
 | `/rpc` | Plain JSON-RPC 2.0: the method is a tool's name, the params its arguments. |
 | `/call/<tool>` | `curl 'localhost:7460/call/enemies?kind=porc&limit=5'`, or POST the arguments as JSON. |
 | `/tools` | Every tool with its description and input schema. |
@@ -116,17 +122,39 @@ The server answers on one port:
 Tools that read: `status`, `economy`, `workers`, `tasks`, `factories`, `military`, `squads`,
 `units`, `unit`, `enemies`, `threat_at`, `threat_map`, `spots`, `map_info`, `terrain`, `terrain_map`
 (the segmentation of a movement tier: regions per cell, who holds them, chokepoints), `events`,
-`defs`, `snapshot`, `overrides`, `profile`. Tools that act: `say`, `mark`, `note` (into the
-journal), `feature` (switch a dev feature off or on mid-game), `fac_queue` (production orders the
-factories serve before their own choice), `requisition` (the next factory), `build` (a prioritized
-construction task), `defend` (a place the army defends as if attacked there), `squad_target`
-(override a squad's target for a while), `take` / `release` / `order` (hold units: the engine
-wrapper drops the AI's own orders to them, `springai::reserved`, until they are released). Calls run
-on the AI's thread at its next frame, so they are answered while the game runs.
+`defs`, `snapshot`, `overrides`, `profile`, `modules` (each module, what it decides, the orders it
+issued and had dropped). Tools that act: `say`, `mark`, `note` (into the journal), `feature` (switch
+a dev feature off or on mid-game), `mute` (silence a module: it keeps its bookkeeping, its orders to
+units are dropped, so the operator can do its job; `eco`, `fac`, `raider`, `squad`, ... or one handler
+like `eco.unitIdle`), `hud` (which sections the HUD shows), `feed` (which record kinds are pushed to
+an MCPL host, how they are batched, how often a situation report goes), `fac_queue` (production
+orders the factories serve before their own choice), `requisition` (the next factory), `build` (a
+prioritized construction task), `issue` (value a construction job so its crew holds), `defend` (a
+place the army defends as if attacked there), `squad_target` (override a squad's target for a
+while), `take` / `release` / `order` (hold units: the engine wrapper drops the AI's own orders to
+them, `springai::reserved`, until they are released; `order cmd=field_fac` has a commander copy a
+factory's build list, Zero-K's field factory, after which `order cmd=build unit=tankcon x z` builds
+the constructor beside it). Policies rather than orders: `squad_form` (a squad of any armed units,
+raider or assault), `squad_intent` (hold a place, raid the enemy's economy around one, escort a unit,
+attack a place and hand the squad back; with a `courage` that divides the threat the squad
+perceives and the health level its units retreat at), `squad_disband`, `dial name=greed` (the
+economy's expansion horizon: perceived threat at jobs and workers divided by it), `porc_zone`
+(with `mexporc` off, circles where turrets by mexes and links are still allowed). The HUD can carry
+pinned reads (`hud pin=enemies args={...}`) and the `board`, the map as a PNG (`GET /board` shows it;
+MCPL hosts get it as an image block). Calls run on the AI's thread at its next frame, so they are
+answered while the game runs.
+
+**Piloting.** `tools/arena/pilot.sh -m "Agalta v1.0" -f factorytank -D mexporc` starts a real-time
+match of the operator-served build against an unsteered copy of itself and prints the pilot's
+endpoints (`PILOT url=... mcpl=ws://127.0.0.1:7460/mcpl out=...`); the replay stays in `out/wd/demos/`
+for `tools/replay/capture.sh`. The `zkchar` recipe `zaku` puts a connectome-host agent on that
+endpoint.
 
 A journal is JSON lines, `{"seq":..,"f":frame,"k":kind,...}`: a `run` header (build, map, teams,
 options, seed), the `map`, then `log` lines (each AI log line, `mod` its module), `unit+`/`unit-`,
-`kill`, `enemy+`, `given`, `say`/`chat`, `op` (each operator action with its result) and `note`,
+`kill`, `enemy+`, `given`, `say`/`chat`, `op` (each operator action with its result), `note`,
+`inference` (an MCPL host's agent turns: phase, id, usage), `alert` (an energy stall, metal floating, a reserved
+unit under fire), `incursions` (the interception statistics per minute), `terrain` (the strategic analysis, once),
 `tick` every second (resources, army values, spots) and `snap` every five seconds (positions), and an
 `end` record with the CPU profile. `tools/operator/zkop.py journal <file>` summarizes one;
 `zkop.py ls`, `call`, `tools` and `events` talk to the running instances, which announce

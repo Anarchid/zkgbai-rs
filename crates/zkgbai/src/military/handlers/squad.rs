@@ -166,7 +166,10 @@ impl Ai {
             }
             let retreating = self.retreat_handler.is_retreating(id);
             let flies = unit.def().is_some_and(|d| d.is_able_to_fly());
-            if !retreating && !flies && self.fighters.get_mut(&id).is_some_and(|f| f.is_stuck(frame)) {
+            // A squad the operator holds somewhere stands still on purpose:
+            // not stuck, not for the reclaimers.
+            let held = f.squad.is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some());
+            if !retreating && !flies && !held && self.fighters.get_mut(&id).is_some_and(|f| f.is_stuck(frame)) {
                 self.squad_leave_squad(id);
                 self.eco_add_combat_reclaim_task(unit);
                 self.retreat_remove_unit(unit);
@@ -552,16 +555,20 @@ impl Ai {
         }
         let Some(s) = self.squads.get(sid) else { return };
         let pos = s.get_pos(&self.fighters);
-        let (status, target) = (s.status, s.target);
+        let (status, target, courage) = (s.status, s.target, s.courage);
         // The threat maps as the squad sees them, under water too (see `water`).
         let view = self.war.view(s.get_leader(&self.fighters).and_then(|l| l.def()));
         let dive = view.dive();
+        // The operator's courage: perceived threat is divided by it, and a
+        // bold squad (courage > 1) tolerates danger up to that share of its
+        // own strength where a plain one tolerates none.
+        let tolerance = |friendly: f32| (courage - 1.0).max(0.0) * friendly;
 
         match status {
             'f' => {
-                if view.get_threat(pos) > 2.0 * view.get_total_friendly_threat(pos)
-                    || view.get_porc_threat(pos) > 0.0
-                    || (target != NULLPOS && view.get_porc_threat(target) > 0.0)
+                if view.get_threat(pos) / courage > 2.0 * view.get_total_friendly_threat(pos)
+                    || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
+                    || (target != NULLPOS && view.get_porc_threat(target) / courage > tolerance(view.get_total_friendly_threat(pos)))
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
@@ -581,8 +588,8 @@ impl Ai {
             }
             'a' => {
                 let view = self.war.view_dive(dive);
-                if view.get_effective_threat(pos) > 0.0
-                    && (!self.graph.is_ally_territory(pos) || view.get_porc_threat(pos) > 0.0)
+                if view.get_effective_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
+                    && (!self.graph.is_ally_territory(pos) || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos)))
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);

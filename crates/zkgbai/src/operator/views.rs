@@ -41,7 +41,7 @@ fn resource(ai: &Ai, r: Resource) -> Value {
     json!({"current": r1(e.current(r)), "income": r1(e.income(r)), "usage": r1(e.usage(r)), "storage": r1(e.storage(r))})
 }
 
-fn def_by_id(ai: &Ai, id: i32) -> Option<UnitDef> {
+pub(super) fn def_by_id(ai: &Ai, id: i32) -> Option<UnitDef> {
     ai.defs.all().find(|d| d.id() == id)
 }
 
@@ -403,6 +403,7 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
             "slasher_spam": w.slasher_spam,
             "known": w.targets.len(),
             "defenses": w.enemy_porcs.len(),
+            "outranging_share": r2(w.outranging_share),
         },
         "ours": {
             "army_value": r1(ai.fac.army_value),
@@ -464,7 +465,9 @@ pub fn squads(ai: &mut Ai, _: &Args) -> Out {
                 "leader": s.leader,
                 "value": r1(s.metal_value),
                 "members": members,
+                "courage": r2(s.courage),
                 "operator_target": ai.op_squad_target(s.id).map(xz),
+                "intent": ai.op.over.squad_intents.get(&s.id).map(|i| json!({"kind": i.kind.name(), "pos": xz(i.pos), "radius": r1(i.radius), "unit": i.unit, "seconds_left": (i.until - ai.frame) / 30})),
                 "block": ai.incursions.orders.get(&s.id).map(|b| xz(b.pos)),
             })
         })
@@ -896,7 +899,9 @@ pub fn events(ai: &mut Ai, a: &Args) -> Out {
     let limit = a.opt_i32("limit")?.unwrap_or(100).clamp(1, 5000) as usize;
     // Without kinds, the narrative: no ticks and snapshots.
     let keep = |r: &super::bus::Record| {
-        let kind_ok = if kinds.is_empty() { r.kind != "tick" && r.kind != "snap" } else { kinds.contains(&r.kind) };
+        // Spectator chat is never shown (see `op_observe`).
+        let kind_ok = r.kind != "specchat"
+            && if kinds.is_empty() { r.kind != "tick" && r.kind != "snap" } else { kinds.contains(&r.kind) };
         kind_ok && grep.as_ref().is_none_or(|g| r.line.contains(g.as_str()))
     };
     let records = match a.opt_i32("since")? {
@@ -1146,12 +1151,82 @@ pub fn overrides_value(ai: &Ai) -> Value {
         "priority_tasks": o.priority_tasks,
         "defend": o.defend.iter().map(|d| json!({"pos": xz(d.pos), "weight": r1(d.weight), "seconds_left": (d.until - frame) / 30})).collect::<Vec<_>>(),
         "squad_targets": o.squad_targets.iter().map(|(s, (p, until))| json!({"squad": s, "pos": xz(*p), "seconds_left": (until - frame) / 30})).collect::<Vec<_>>(),
+        "squad_intents": o.squad_intents.iter().map(|(s, i)| json!({"squad": s, "intent": i.kind.name(), "pos": xz(i.pos), "seconds_left": (i.until - frame) / 30})).collect::<Vec<_>>(),
         "features_off": ai.features_off(),
+        "dials": {"greed": ai.op_greed(), "line": ai.op.over.line},
+        "porc_zones": o.porc_zones.iter().map(|z| json!({"pos": xz(z.pos), "radius": r1(z.radius), "seconds_left": (z.until - frame) / 30})).collect::<Vec<_>>(),
     })
 }
 
 pub fn overrides(ai: &mut Ai, _: &Args) -> Out {
     Ok(overrides_value(ai))
+}
+
+/// The board as a PNG: `image_png_base64` becomes an image content block
+/// on the MCP side (see `server::rpc`).
+pub fn board(ai: &mut Ai, _: &Args) -> Out {
+    let png = ai.board_png_base64();
+    if png.is_empty() {
+        return Err("could not draw the board".into());
+    }
+    Ok(json!({"time": game_time(ai.frame), "image_png_base64": png,
+              "legend": "grid in thousands of elmos; metal spots: ours blue, enemy red, free white; commander yellow, workers green, fighters cyan, buildings blue; enemies red (orange when remembered), enemy defenses with their reach; squad lines cyan; defended places magenta"}))
+}
+
+/// The AI's modules, as the `mute` tool names them, with what each decides.
+pub const MODULES: &[(&str, &str)] = &[
+    ("eco", "the economy: workers and their construction, reclaim and repair jobs, mexes, energy, turrets by mexes and links, terraforming"),
+    ("fac", "the factories: what each builds next, and which factory the economy wants"),
+    ("logistics", "the project tracker: crews for valued construction jobs (no orders of its own)"),
+    ("war", "military bookkeeping: enemy tracking, threat maps, targets, mobile anti-air"),
+    ("raider", "raiders: solo and squad raids on the enemy's economy, their retreats"),
+    ("squad", "assault, shield, hover and air squads: forming, rallying, attacking"),
+    ("retreat", "hurt units going home to repair"),
+    ("misc", "support units, loners, striders, artillery, nukes' targets"),
+    ("bomber", "bombers"),
+    ("scouts", "scouting runs"),
+    ("drops", "Charon air drops"),
+    ("teleport", "Djinn teleports"),
+    ("nukes", "nuke firing"),
+    ("missiles", "tactical missile silos"),
+    ("precision", "precision raids behind lone towers"),
+    ("jaeger", "jaeger squads (hunting raiders)"),
+    ("jumps", "jumpbots' jumps"),
+    ("puppies", "Puppies"),
+    ("water", "under-water units"),
+    ("airIntel", "anti-air placed from hits on our aircraft (no orders)"),
+    ("intel", "the estimate of enemy production (no orders)"),
+    ("terrain", "the terrain model and strategic analysis (no orders)"),
+    ("graph", "the metal-spot graph and territory (no orders)"),
+];
+
+/// The modules with the orders each issued and had dropped, and the mutes.
+pub fn modules(ai: &mut Ai, _: &Args) -> Out {
+    let stats = reserved::order_stats(ai.cb);
+    let muted = reserved::muted(ai.cb);
+    let list: Vec<Value> = MODULES
+        .iter()
+        .map(|(name, what)| {
+            let (issued, dropped) = stats
+                .iter()
+                .filter(|(h, _)| *h == *name || h.starts_with(&format!("{name}.")))
+                .fold((0, 0), |(i, d), (_, s)| (i + s.issued, d + s.dropped));
+            let handlers: Vec<Value> = stats
+                .iter()
+                .filter(|(h, _)| *h == *name || h.starts_with(&format!("{name}.")))
+                .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped}))
+                .collect();
+            json!({"module": name, "does": what, "muted": reserved::is_muted(ai.cb, name),
+                   "orders_issued": issued, "orders_dropped": dropped, "handlers": handlers})
+        })
+        .collect();
+    let other: Vec<Value> = stats
+        .iter()
+        .filter(|(h, _)| !MODULES.iter().any(|(m, _)| h == m || h.starts_with(&format!("{m}."))))
+        .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped}))
+        .collect();
+    Ok(json!({"modules": list, "other_handlers": other, "muted": muted,
+              "note": "muted modules keep their bookkeeping; only their orders to units are dropped (orders_dropped counts them, and orders to reserved units)"}))
 }
 
 /// The `n` most expensive handlers, and panics.

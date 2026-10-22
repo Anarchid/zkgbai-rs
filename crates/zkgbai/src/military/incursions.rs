@@ -28,13 +28,18 @@ use zk_terrain::{Pos, Tier};
 use crate::Ai;
 use crate::military::{DefenseTarget, SquadId};
 use crate::terrain::{pos, tier_of};
-use crate::util::distance;
+use crate::util::{distance, get_directional_point};
 
 /// Frames between re-assessments.
 const PERIOD: i32 = 30;
 
 /// Enemy units seen within this many frames count.
 const RECENT: i32 = 60;
+/// How long a group stays in the planner after it was last seen, dead
+/// reckoned toward the nearest of our assets at its speed (object
+/// permanence: a raid does not stop existing when it leaves our sight).
+/// `disable=permanence` restores the sight-only planner.
+const MEMORY: i32 = 1350;
 
 /// Groups weaker than this (a couple of raiders) are left to our defenses
 /// and the squads nearby.
@@ -48,6 +53,7 @@ const ORDER_FRAMES: i32 = 90;
 
 /// How far behind its chokepoint a blocking squad stands, elmos.
 const BLOCK_SETBACK: f32 = 150.0;
+
 
 /// Squads this close to a raid fight it rather than block its way.
 const ENGAGE_RANGE: f32 = 800.0;
@@ -83,6 +89,8 @@ pub struct BlockOrder {
     /// Seconds it gets there ahead of the incursion.
     pub slack: f32,
     pub until: i32,
+    /// The frame the order was first given.
+    pub issued: i32,
 }
 
 /// Where an enemy group gets to our value first, for the project tracker
@@ -156,19 +164,40 @@ impl Ai {
         self.incursions.orders.retain(|_, o| o.until > frame);
         let Some(terrain) = self.terrain.get() else { return };
 
-        // Enemy fighters by tier and region.
+        // Enemy fighters by tier and region. A fighter out of sight for a
+        // while is placed where it would be by now if it kept coming for
+        // our nearest asset, and counts for less the longer it is unseen.
+        let permanence = !self.dev_off("permanence");
+        let horizon = if permanence { MEMORY } else { RECENT };
+        let ally_assets: Vec<Vec3> = if permanence {
+            self.strategy_assets().iter().filter(|a| a.side == Side::Ally).map(|a| Vec3::xz(a.pos.x, a.pos.z)).collect()
+        } else {
+            Vec::new()
+        };
         let mut groups: BTreeMap<(Tier, usize), Vec<Member>> = BTreeMap::new();
         for e in self.war.targets.values() {
-            if !e.identified || e.is_static || e.can_fly() || (e.is_worker && !e.is_com) || frame - e.last_seen > RECENT
-            {
+            let unseen = frame - e.last_seen;
+            if !e.identified || e.is_dead || e.is_static || e.can_fly() || (e.is_worker && !e.is_com) || unseen > horizon {
                 continue;
             }
             // What it can do to what is above water from where it is (a
             // submerged Duck: nothing; see `water`).
-            let danger = e.surface_danger(e.is_submerged());
+            let mut danger = e.surface_danger(e.is_submerged());
+            let mut position = e.position;
+            if unseen > RECENT {
+                let age = unseen as f32 / 30.0;
+                if let Some(target) = ally_assets.iter().copied().min_by(|a, b| {
+                    distance(*a, e.position).total_cmp(&distance(*b, e.position))
+                }) {
+                    let reach = distance(e.position, target);
+                    let step = (e.def_speed() * age).min((reach - 100.0).max(0.0));
+                    position = get_directional_point(e.position, target, step);
+                }
+                danger *= (1.0 - age / (MEMORY as f32 / 30.0)).max(0.3);
+            }
             let Some(tier) = e.ud.and_then(tier_of).filter(|_| danger > 0.0) else { continue };
-            let Some(r) = terrain.tier(tier).and_then(|m| m.region_near(pos(e.position), SNAP)) else { continue };
-            groups.entry((tier, r)).or_default().push((e.position, e.def_speed(), danger));
+            let Some(r) = terrain.tier(tier).and_then(|m| m.region_near(pos(position), SNAP)) else { continue };
+            groups.entry((tier, r)).or_default().push((position, e.def_speed(), danger));
         }
         let mut forces: Vec<(Tier, Force, usize)> = groups
             .into_iter()
@@ -250,6 +279,7 @@ impl Ai {
                     power: d.power,
                     slack: b.slack,
                     until: frame + ORDER_FRAMES,
+                    issued: frame,
                 };
                 if self.incursions.orders.get(&d.squad).is_none_or(|o| o.tier != tier || o.choke != b.choke) {
                     self.log(&format!(
@@ -287,19 +317,29 @@ impl Ai {
         }
         self.incursions.orders.extend(orders);
 
-        // Every group, stopped by our defenses and by squads screening a
+        // Every group, stopped by our defenses and by squads blocking a
         // chokepoint against it.
         let mut danger: BTreeMap<Tier, Danger> = BTreeMap::new();
         for &(tier, force, _) in &forces {
             let (Some(map), Some(porc)) = (terrain.tier(tier), defenses.get(&tier)) else { continue };
-            let screened = |c: usize| {
+            let blocked = |c: usize| {
                 self.incursions.orders.values().any(|o| o.tier == tier && o.choke == c && o.power >= force.power)
             };
-            let held = |c: usize| porc[c] >= force.power || screened(c);
+            let held = |c: usize| porc[c] >= force.power || blocked(c);
             danger.entry(tier).or_insert_with(|| Danger::new(map)).add(map, force, held);
         }
 
         if frame / STATS_PERIOD != self.incursions.frame / STATS_PERIOD {
+            // The same totals as a journal record, for fitting policies.
+            self.op_emit(
+                "incursions",
+                serde_json::json!({
+                    "groups": stats.groups, "threatening": stats.threats, "matched": stats.matched,
+                    "blocked": stats.blocked,
+                    "squads": stats.squads as f32 / (STATS_PERIOD / PERIOD) as f32,
+                    "home": stats.home as f32 / (STATS_PERIOD / PERIOD) as f32, "fled": stats.fled,
+                }),
+            );
             self.log(&format!(
                 "incursions: {} groups, {} threatening, {} with a strong enough squad free, {} blocked; \
                  squads per assessment: {:.1}, {:.1} at home; {} refuge orders",

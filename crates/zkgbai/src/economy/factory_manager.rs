@@ -530,10 +530,6 @@ impl Ai {
             f.creating_scout = false;
             f.scout_allowance -= 1;
         }
-        if let Some(def) = self.op_factory_order(fac_id) {
-            self.fac_build_ordered(fac_id, def);
-            return;
-        }
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let mut fac = f.clone();
 
@@ -565,6 +561,17 @@ impl Ai {
             FacKind::StriderHub => self.fac_get_strider(),
             FacKind::Other => return,
         };
+        // The operator's production orders replace the AI's own pick, but
+        // never a constructor it picked: an operator steering production
+        // must not move the economy off its builder curve.
+        let ai_wants_builder = self.defs.get(choice).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
+        if !ai_wants_builder
+            && let Some(def) = self.op_factory_order(fac_id, false)
+        {
+            self.fac.factories.insert(fac_id, fac);
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
         let (unit, pos) = (fac.unit, fac.get_pos());
         self.fac.factories.insert(fac_id, fac);
         match choice {
