@@ -83,9 +83,12 @@ const DRAFT_HOLD: i32 = PERIOD * 2;
 const SHORT_FOR: i32 = 30 * 20;
 const ORDER_PENDING: i32 = 30 * 60;
 
-/// Units the dedicated teams take: raiders that run on the ground.
+/// Units the dedicated teams take: raiders that run on the ground. A
+/// factory short of the budget builds the first it can: the Blitz before
+/// the Kodachi (1300 hp, range 245 over the light raiders' 185-210, and a
+/// lightning gun that stuns: it holds a mex against raids).
 pub const RECRUITS: [&str; 8] =
-    ["cloakraid", "shieldraid", "hoverraid", "vehraid", "tankraid", "tankheavyraid", "jumpraid", "amphraid"];
+    ["cloakraid", "shieldraid", "hoverraid", "vehraid", "tankheavyraid", "tankraid", "jumpraid", "amphraid"];
 
 /// The budget's mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
