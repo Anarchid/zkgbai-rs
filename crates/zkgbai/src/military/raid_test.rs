@@ -8,7 +8,9 @@
 //! other one, radars cover our half and the approaches to it, and a fixed
 //! force (AI option `qrf_force`, default `tankraid:6`, as `name:count`
 //! joined by `,`) stands at the start. No one builds anything, so nothing
-//! lost comes back. The force is the QRF's (see `qrf`), or with
+//! lost comes back (but with `qrf_air=gunship`, `plane` or `both`, air
+//! factories by the start build the firefighters wanted, see
+//! `firefighters`). The force is the QRF's (see `qrf`), or with
 //! `disable=qrf` the usual handlers'. `qrf_radar`: `on` (default), `off`
 //! (sight only) or `full` (radars over the whole map). Every 30 s the log
 //! has a `qrfscore:` line: mexes standing, buildings and metal lost, the
@@ -39,7 +41,7 @@ use springai::Vec3;
 use crate::Ai;
 use crate::military::Fighter;
 use crate::military::qrf::field::{Grid, Mobility};
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, distance, get_directional_point};
 
 /// When the commander goes, and when the stage is set.
 const CLEAR_FRAME: i32 = 30;
@@ -152,6 +154,16 @@ impl Ai {
             }
             if frame > STAGE_FRAME && frame % SCORE_PERIOD == 0 {
                 self.raid_test_score(frame);
+            }
+            // Idle factories build what the firefighters want, if anything.
+            if frame > STAGE_FRAME && frame % 60 == 0 {
+                let idle: Vec<i32> = (self.fac.factories.values())
+                    .filter(|f| f.unit.current_commands().is_empty())
+                    .map(|f| f.id)
+                    .collect();
+                for id in idle {
+                    self.fac_build_firefighter(id);
+                }
             }
         } else {
             if frame == STAGE_FRAME {
@@ -277,6 +289,14 @@ impl Ai {
         }
         for &r in &radars {
             built.extend(self.raid_test_spawn("staticradar", r, true));
+        }
+        // Air factories for firefighters (see `firefighters`).
+        let air = self.cb.option("qrf_air").unwrap_or_default();
+        for (key, fac, d) in [("gunship", "factorygunship", 350.0), ("plane", "factoryplane", -350.0)] {
+            if air == key || air == "both" {
+                let at = get_directional_point(base, self.raid_test.enemy, d);
+                built.extend(self.raid_test_spawn(fac, at, true));
+            }
         }
         let mut units = Vec::new();
         let mut k = 0;

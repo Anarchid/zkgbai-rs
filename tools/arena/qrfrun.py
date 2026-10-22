@@ -154,7 +154,7 @@ def summary(outs):
                 continue
             rows[(r["map"], r["seed"], r["arm"])] = r  # last wins
     arms = sorted({k[2] for k in rows})
-    keys = ["mexes", "lost_metal", "income_sum", "force", "force_lost_metal", "kills", "atk_spawned", "atk_expired"]
+    keys = ["mexes", "lost_mexes", "lost_metal", "income_sum", "force", "force_lost_metal", "kills", "atk_spawned", "atk_expired"]
     print(f"{'arm':24s} {'n':>3s} " + " ".join(f"{k:>16s}" for k in keys))
     for a in arms:
         rs = [r for k, r in rows.items() if k[2] == a]

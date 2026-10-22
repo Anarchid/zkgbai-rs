@@ -5,6 +5,7 @@ pub mod air_intel;
 pub mod arsenal;
 pub mod drops;
 pub mod enemy;
+pub mod firefighters;
 pub mod handlers;
 pub mod incursions;
 pub mod intel;
@@ -498,6 +499,7 @@ impl Ai {
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
         self.guard("jaeger.update", |ai| ai.jaeger_update(frame));
+        self.guard("firefighters.update", |ai| ai.firefighters_update(frame));
         self.guard("jumps.update", |ai| ai.jumps_update(frame));
         self.guard("puppies.update", |ai| ai.puppies_update(frame));
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
@@ -564,6 +566,11 @@ impl Ai {
         let name = def_name.as_str();
         let cost = ud.cost(self.metal);
         let team = self.team_id;
+        // Raids on our economy call for air (see `firefighters`).
+        if self.firefighters_claims(name) {
+            self.firefighters_add(unit);
+            return;
+        }
 
         if name == "planelightscout" || name == "planescout" {
             unit.set_idle_mode(0, 0);
@@ -881,7 +888,6 @@ impl Ai {
     }
 
     pub fn war_unit_destroyed(&mut self, unit: Unit, attacker: Option<Unit>) {
-        let _ = attacker;
         let ud = unit.def();
         let name = ud.map_or("", |d| self.defs.name(d));
         if name == "wolverine_mine" {
@@ -895,6 +901,7 @@ impl Ai {
 
         self.war.new_units.remove(&id);
         self.raid_test_unit_destroyed(unit);
+        self.firefighters_unit_destroyed(unit, attacker);
 
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
@@ -1076,13 +1083,13 @@ impl Ai {
     }
 
     pub fn war_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {
-        let _ = attacker;
         let id = enemy.id();
         // Commanders come free, so they do not count as metal destroyed.
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.raid_test_enemy_destroyed(enemy);
+        self.firefighters_enemy_destroyed(enemy, attacker);
         let war = &mut self.war;
         let Some(e) = war.targets.get_mut(&id) else { return };
         e.is_dead = true;

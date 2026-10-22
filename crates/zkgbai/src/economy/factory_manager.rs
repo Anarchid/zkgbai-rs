@@ -522,6 +522,11 @@ impl Ai {
     fn fac_assign_factory_task(&mut self, fac_id: i32) {
         // A staged strike builds its Widows itself (see `strike_test`); the
         // `hijack` test plays the economy as usual.
+        // The staged raid game builds only firefighters (see `raid_test`).
+        if self.test.as_deref() == Some("qrf") {
+            self.fac_build_firefighter(fac_id);
+            return;
+        }
         if self.test.as_deref().is_some_and(|t| t != "hijack") {
             return;
         }
@@ -575,6 +580,7 @@ impl Ai {
             // (Then asked for by the scouts: the factory builds no other
             // Scythes while they want one.)
             scouts::SCYTHE if self.scouts_want_scythe() => self.scouts_ordered_scythe(),
+            n if self.firefighters_order(kind) == Some(n) => self.firefighters_ordered(n),
             _ => {}
         }
 
@@ -598,6 +604,16 @@ impl Ai {
         } else {
             unit.build(def, pos, 0, 0);
         }
+    }
+
+    /// Build the firefighter wanted from this factory, if any.
+    pub(crate) fn fac_build_firefighter(&mut self, fac_id: i32) {
+        let Some(f) = self.fac.factories.get(&fac_id) else { return };
+        let (unit, pos, kind) = (f.unit, f.get_pos(), f.kind());
+        let Some(name) = self.firefighters_order(kind) else { return };
+        let Some(def) = self.defs.get(name) else { return };
+        self.firefighters_ordered(name);
+        unit.build(def, pos, 0, 0);
     }
 
     /// Build a unit the operator ordered, telling the modules that keep
@@ -1439,6 +1455,9 @@ impl Ai {
         if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
             return "gunshipcon";
         }
+        if let Some(name) = self.firefighters_order(FacKind::Gunship) {
+            return name;
+        }
 
         if self.drops_want_charon() {
             return "gunshiptrans";
@@ -1475,6 +1494,9 @@ impl Ai {
     fn fac_get_planes(&self, fac: &mut Factory) -> &'static str {
         if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
             return "planecon";
+        }
+        if let Some(name) = self.firefighters_order(FacKind::Plane) {
+            return name;
         }
         if self.eco.sparrow.is_none() {
             return "planescout";
