@@ -1,17 +1,20 @@
 //! The QRF in normal play.
 //!
 //! The force has two parts:
-//! - *dedicated* teams: raiders taken as they leave the factory while the
-//!   defense budget wants more (and given back to the raider handler when
-//!   it wants less). Short of the budget for a while, factories build
-//!   raiders for it in place of plain fighters (`qrf_production`). Hurt members go home to be repaired like any unit
-//!   (the retreat handler) and rejoin when healed.
-//! - *moonlighting* squads: raider squads still forming (waiting at their
-//!   rally point for the rest of their members) answer raids near home in
-//!   the meantime. A squad sent at a raid (*drafted*) is the QRF's to move
-//!   until the raid is dealt with; it keeps taking new members, and leaves
-//!   on its own raid only once it is let go. The incursion planner uses
-//!   squads past forming, so the two never contend for a squad.
+//! - *dedicated* teams: anti-raiders (light raiders where no factory of
+//!   ours makes those, see [`ANTI_RAIDERS`]) taken as they leave the
+//!   factory while the defense budget wants more, and given back to the
+//!   usual handlers when it wants less. Short of the budget for a while,
+//!   factories build them in place of plain fighters (`qrf_production`).
+//!   Hurt members go home to be repaired like any unit (the retreat
+//!   handler) and rejoin when healed.
+//! - *moonlighting* squads: raider squads, and assault squads fast enough,
+//!   still forming (waiting at their rally point for the rest of their
+//!   members) answer raids near home in the meantime. A squad sent at a
+//!   raid (*drafted*) is the QRF's to move until the raid is dealt with; it
+//!   keeps taking new members, and leaves on its own errand only once it
+//!   is let go. The incursion planner uses squads past forming, so the two
+//!   never contend for a squad.
 //!
 //! The budget (AI options `qrf_defense`, `qrf_cap`, `qrf_gain`; the
 //! operator's `qrf_set`): on autopilot, nothing until raids come into our
@@ -83,12 +86,30 @@ const DRAFT_HOLD: i32 = PERIOD * 2;
 const SHORT_FOR: i32 = 30 * 20;
 const ORDER_PENDING: i32 = 30 * 60;
 
-/// Units the dedicated teams take: raiders that run on the ground. A
-/// factory short of the budget builds the first it can: the Blitz before
-/// the Kodachi (1300 hp, range 245 over the light raiders' 185-210, and a
-/// lightning gun that stuns: it holds a mex against raids).
-pub const RECRUITS: [&str; 8] =
-    ["cloakraid", "shieldraid", "hoverraid", "vehraid", "tankheavyraid", "tankraid", "jumpraid", "amphraid"];
+/// What the dedicated teams are made of. Early on, light raiders (cheap,
+/// and as good for offense when let go: the flexible pick); later (see
+/// [`LATE_INCOME`]), anti-raider raiders and light riots (Blitz, Bolas,
+/// Pyro, Venom, Archer: 180-300 metal, 700-1300 hp, ranges of 225-255 over
+/// the light raiders' 185-210, fast enough to get there: they hold a mex
+/// against raids), with light raiders then only where no factory of ours
+/// makes the former. A factory short of the budget builds the first of
+/// the phase's picks it can.
+pub const ANTI_RAIDERS: [&str; 5] = ["tankheavyraid", "hoverheavyraid", "jumpraid", "spideremp", "amphimpulse"];
+pub const RAIDERS: [&str; 6] = ["shieldraid", "vehraid", "cloakraid", "tankraid", "hoverraid", "amphraid"];
+
+/// The dedicated picks are made from this income (metal per second), or
+/// this late (frames), on.
+pub const LATE_INCOME: f32 = 20.0;
+pub const LATE_FRAME: i32 = 30 * 60 * 6;
+
+/// Whether the dedicated teams take this kind of unit at all.
+pub fn is_recruit(name: &str) -> bool {
+    ANTI_RAIDERS.contains(&name) || RAIDERS.contains(&name)
+}
+
+/// Assault squads moonlight only if their slowest goes this fast (Archers
+/// 70, Venoms 84; not Reavers, Outlaws, Maces at 52-61).
+const MOON_SPEED: f32 = 65.0;
 
 /// The budget's mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,6 +142,9 @@ pub struct Budget {
     pub pending: Vec<(i32, f32)>,
     /// Factories may build raiders for the force (`qrf_production`).
     pub production: bool,
+    /// Some factory of ours makes anti-raiders (light raiders are then
+    /// left to raid).
+    pub anti_raiders: bool,
 }
 
 impl Default for Budget {
@@ -139,6 +163,7 @@ impl Default for Budget {
             short_since: None,
             pending: Vec::new(),
             production: true,
+            anti_raiders: false,
         }
     }
 }
@@ -300,6 +325,11 @@ impl Ai {
         self.log(&line);
     }
 
+    /// Whether the dedicated picks are made now (past the early game).
+    pub fn qrf_late(&self) -> bool {
+        self.eco.adjusted_income >= LATE_INCOME || self.frame >= LATE_FRAME
+    }
+
     /// Whether `sid` is a moonlighting squad the QRF sent at a raid (its
     /// handler then leaves it be).
     pub fn qrf_drafted(&self, sid: SquadId) -> bool {
@@ -313,10 +343,18 @@ impl Ai {
         let moonlight = !self.qrf.no_moonlight && self.qrf.algo == "mark";
         let mut eligible: BTreeMap<SquadId, Vec<i32>> = BTreeMap::new();
         if moonlight {
-            for &sid in &self.raider_handler.raider_squads {
+            // Raider squads, and assault squads fast enough (light riots,
+            // skirmishers); not shield balls, which move with their leader.
+            let squads = self.raider_handler.raider_squads.iter().chain(&self.squad_handler.squads);
+            for &sid in squads {
                 let Some(sq) = self.squads.get(sid) else { continue };
                 let drafted = self.qrf.drafted.contains_key(&sid);
-                if sq.kind != SquadKind::Raider
+                let slowest = (sq.fighters.iter())
+                    .filter_map(|id| self.fighters.get(id)?.unit.def())
+                    .map(|d| d.speed())
+                    .fold(f32::INFINITY, f32::min);
+                if !matches!(sq.kind, SquadKind::Raider | SquadKind::Assault | SquadKind::Hover)
+                    || sq.kind != SquadKind::Raider && slowest < MOON_SPEED
                     || sq.is_air_squad
                     || sq.is_dead(&self.fighters)
                     || !(sq.status == 'f' || drafted && sq.status == 'r')
@@ -411,6 +449,10 @@ impl Ai {
             }
         }
         let losses = self.firefighters_pressure().0.max(0.0);
+        let anti_raiders = (self.fac.factories.values())
+            .filter_map(|f| f.unit.def())
+            .any(|d| d.build_options().iter().any(|o| ANTI_RAIDERS.contains(&self.defs.name(*o))));
+        self.qrf.budget.anti_raiders = anti_raiders;
         let b = &mut self.qrf.budget;
         b.army = army;
         b.have = have;
@@ -461,7 +503,11 @@ impl Ai {
             return false;
         }
         let Some(def) = unit.def() else { return false };
-        if !RECRUITS.contains(&self.defs.name(def)) {
+        let name = self.defs.name(def);
+        // Late, light raiders only where no factory makes anti-raiders.
+        let wanted =
+            ANTI_RAIDERS.contains(&name) || RAIDERS.contains(&name) && (!self.qrf_late() || !q.budget.anti_raiders);
+        if !wanted {
             return false;
         }
         let cost = def.cost(self.metal);
@@ -506,7 +552,7 @@ impl Ai {
             return None;
         }
         let frame = self.frame;
-        if b.short_since.is_none_or(|s| frame - s < SHORT_FOR) || RECRUITS.contains(&choice) {
+        if b.short_since.is_none_or(|s| frame - s < SHORT_FOR) || is_recruit(choice) {
             return None;
         }
         let def = self.defs.get(choice)?;
@@ -514,7 +560,12 @@ impl Ai {
             return None;
         }
         let options = factory.def()?.build_options();
-        let name = RECRUITS.iter().copied().find(|n| options.iter().any(|d| self.defs.name(*d) == *n))?;
+        let picks: Vec<&'static str> = if self.qrf_late() {
+            ANTI_RAIDERS.iter().chain(&RAIDERS).copied().collect()
+        } else {
+            RAIDERS.iter().chain(&ANTI_RAIDERS).copied().collect()
+        };
+        let name = picks.into_iter().find(|n| options.iter().any(|d| self.defs.name(*d) == *n))?;
         let cost = self.defs.get(name)?.cost(self.metal);
         let pending: f32 = b.pending.iter().map(|p| p.1).sum();
         if b.wanted - b.have - pending < 0.5 * cost {

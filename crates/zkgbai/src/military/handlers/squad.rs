@@ -548,6 +548,10 @@ impl Ai {
     }
 
     fn squad_assign_squad(&mut self, sid: SquadId) {
+        // Moonlighting at home against a raid (see `qrf::live`).
+        if self.qrf_drafted(sid) {
+            return;
+        }
         // Sent somewhere by the operator.
         if let Some(target) = self.op_squad_target(sid) {
             self.squad_set_target(sid, target);
