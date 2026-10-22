@@ -41,7 +41,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
 /// frozen hover baseline, 20 games each, Oct 22: the memory frightens
 /// workers more than it positions squads.
-const OFF_BY_DEFAULT: [&str; 3] = ["pairs", "currency", "permanence"];
+/// `caretakers` (one per 10 income from the second constructor, factories
+/// not counted): under certification, Oct 23.
+const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "permanence", "caretakers"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.

@@ -94,6 +94,9 @@ pub struct Overrides {
     /// fraction of the way from our base to the enemy's center (0 = the
     /// AI's own choice, 0.2 home, 0.5 the middle).
     pub line: f32,
+    /// Mobile build power the factories keep, as a multiple of metal
+    /// income (0 = the AI's own rule, one to one).
+    pub buildpower: f32,
 }
 
 pub struct PorcZone {
@@ -324,6 +327,10 @@ impl Ai {
         if let Some(l) = setting(self.cb, "line", "ZKGBAI_LINE").and_then(|v| v.parse::<f32>().ok()) {
             self.op.over.line = l.clamp(0.0, 0.9);
             self.log(&format!("operator: line {:.2}", self.op.over.line));
+        }
+        if let Some(b) = setting(self.cb, "buildpower", "ZKGBAI_BUILDPOWER").and_then(|v| v.parse::<f32>().ok()) {
+            self.op.over.buildpower = b.clamp(0.5, 3.0);
+            self.log(&format!("operator: buildpower {:.2}", self.op.over.buildpower));
         }
         let listen = self.op.listen.clone();
         let journal_dir = self.op.journal_dir.clone();
@@ -861,6 +868,12 @@ impl Ai {
     pub(crate) fn op_greed(&self) -> f32 {
         let g = if self.op.over.greed > 0.0 { self.op.over.greed } else { 1.0 };
         if self.eco.estalled && !self.dev_off("greedcap") { g.min(1.0) } else { g }
+    }
+
+    /// The constructor rule's target: mobile build power as a multiple of
+    /// metal income.
+    pub(crate) fn op_buildpower(&self) -> f32 {
+        if self.op.over.buildpower > 0.0 { self.op.over.buildpower } else { 1.0 }
     }
 
     /// Whether the operator prioritized construction task `id`.

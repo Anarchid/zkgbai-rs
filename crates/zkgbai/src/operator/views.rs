@@ -1161,7 +1161,7 @@ pub fn overrides_value(ai: &Ai) -> Value {
         "squad_targets": o.squad_targets.iter().map(|(s, (p, until))| json!({"squad": s, "pos": xz(*p), "seconds_left": (until - frame) / 30})).collect::<Vec<_>>(),
         "squad_intents": o.squad_intents.iter().map(|(s, i)| json!({"squad": s, "intent": i.kind.name(), "pos": xz(i.pos), "seconds_left": (i.until - frame) / 30})).collect::<Vec<_>>(),
         "features_off": ai.features_off(),
-        "dials": {"greed": ai.op_greed(), "line": ai.op.over.line},
+        "dials": {"greed": ai.op_greed(), "line": ai.op.over.line, "buildpower": ai.op_buildpower()},
         "porc_zones": o.porc_zones.iter().map(|z| json!({"pos": xz(z.pos), "radius": r1(z.radius), "seconds_left": (z.until - frame) / 30})).collect::<Vec<_>>(),
     })
 }

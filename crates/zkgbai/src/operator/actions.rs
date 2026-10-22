@@ -242,9 +242,14 @@ pub fn dial(ai: &mut Ai, a: &Args) -> Out {
                 ai.op.over.line = v.clamp(0.0, 0.9);
             }
         }
-        other => return Err(format!("unknown dial '{other}': greed, line")),
+        "buildpower" => {
+            if let Some(v) = a.opt_f32("value")? {
+                ai.op.over.buildpower = v.clamp(0.5, 3.0);
+            }
+        }
+        other => return Err(format!("unknown dial '{other}': greed, line, buildpower")),
     }
-    Ok(json!({"dials": {"greed": ai.op_greed(), "line": ai.op.over.line,
+    Ok(json!({"dials": {"greed": ai.op_greed(), "line": ai.op.over.line, "buildpower": ai.op_buildpower(),
                         "line_point": ai.op_line_point().map(xz)}}))
 }
 

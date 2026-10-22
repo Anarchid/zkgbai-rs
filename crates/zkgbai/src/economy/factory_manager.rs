@@ -696,7 +696,9 @@ impl Ai {
         let income = eco.effective_income_metal + reclaim_income;
         // port: Java's Math.round (half up) rather than std::round; `as`
         // saturates like Java for infinities and maps NaN to 0.
-        let worker_deficit = ((income - fm.mobile_bp) / fac.worker_bp + 0.5).floor() as i32;
+        // The AI's own rule keeps mobile build power at income, one to one;
+        // the `buildpower` dial lets it lead (a strong human runs 1.3-1.7).
+        let worker_deficit = ((self.op_buildpower() * income - fm.mobile_bp) / fac.worker_bp + 0.5).floor() as i32;
 
         if ((worker_deficit > 0 && fm.fighter_value > fm.worker_value) || fm.num_workers == 0)
             || (eco.adjusted_income > 15.0

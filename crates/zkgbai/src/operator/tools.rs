@@ -516,8 +516,10 @@ pub static TOOLS: &[Tool] = &[
                        is divided by it, so far or contested metal spots are priced cheaper for workers and \
                        workers flee later (the expansion horizon). line (0-0.9, default 0 = the AI's own \
                        choice): where the army stands when nothing calls it, as a fraction of the way from our \
-                       base to the enemy's center (0.2 home, 0.5 the middle). Without a value, shows the dials.",
-        params: &[P("name", Str, true, "greed or line"), P("value", Num, false, "the new value")],
+                       base to the enemy's center (0.2 home, 0.5 the middle). buildpower (0.5-3, default 1): \
+                       mobile build power the factories keep, as a multiple of metal income (the AI's own rule \
+                       follows income one to one; a strong human runs 1.3-1.7). Without a value, shows the dials.",
+        params: &[P("name", Str, true, "greed, line or buildpower"), P("value", Num, false, "the new value")],
         writes: true,
         needs_modules: false,
         run: actions::dial,
@@ -665,7 +667,7 @@ pub static TOOLS: &[Tool] = &[
             P("defense", Str, false, "auto, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)"),
             P("cap", Num, false, "auto: at most this share of the mobile army (default 0.3)"),
             P("gain", Num, false, "auto: power per team, times the strongest recent raid's (default 1.5)"),
-            P("size", Str, false, "auto: the raid a team is sized against: typical (default), largest, or lossy (the raids that cost us)"),
+            P("size", Str, false, "auto: the raid a team is sized against: lossy (default: the raids that cost us, and nothing until something was lost to one), typical, or largest"),
             P("moonlight", Bool, false, "forming raider squads answer raids at home while they fill (default true)"),
             P("production", Bool, false, "factories build raiders for the force while it is short of the budget (default true)"),
             P("team_size", Int, false, "raiders per dedicated team (default 3)"),

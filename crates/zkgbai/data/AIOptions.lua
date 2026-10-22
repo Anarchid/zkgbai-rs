@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'enable',
 		name   = 'Experimental features',
-		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
+		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets), caretakers (one caretaker per 10 metal income from the second constructor on, factories not counted, so the constructors leave the factory).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -53,7 +53,7 @@ local options = {
 	{
 		key    = 'qrf_size',
 		name   = 'Home defense sizing',
-		desc   = 'On auto, the raid a team is sized against: typical (a typical recent raid), largest (the largest recent raid-like group), or lossy (the raids that cost us, weighted by the metal lost). Empty: typical.',
+		desc   = 'On auto, the raid a team is sized against: lossy (the raids that cost us, weighted by the metal lost; nothing until something was lost to a raid), typical (a typical recent raid), or largest (the largest recent raid-like group). Empty: lossy.',
 		type   = 'string',
 		def    = '',
 		maxlen = 8,
@@ -73,6 +73,14 @@ local options = {
 		type   = 'string',
 		def    = '',
 		maxlen = 4,
+	},
+	{
+		key    = 'buildpower',
+		name   = 'Build power',
+		desc   = 'Mobile build power the factories keep, as a multiple of metal income, 0.5-3. Empty: 1 (the AI\'s own rule: constructors follow income one to one; a strong human runs 1.3-1.7 plus caretakers).',
+		type   = 'string',
+		def    = '',
+		maxlen = 8,
 	},
 	{
 		key    = 'line',

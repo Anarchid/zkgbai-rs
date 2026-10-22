@@ -67,6 +67,12 @@ const RAID_SHARE: f32 = 0.5;
 /// Raids are remembered this long for the budget (frames).
 const RECALL: i32 = 30 * 180;
 
+/// The dedicated teams never take more than this share of the recruit-class
+/// units the factories built in the last [`RECALL`]: a factory whose riots
+/// all vanish at the door refills them and never builds its assaults (Hide
+/// and Seek, Venoms taken 8 to 1 against Hermits 1 to 9).
+const RECRUIT_SHARE: f32 = 0.5;
+
 /// Losses to raids are remembered this long for the budget (frames).
 const LOSS_RECALL: i32 = 30 * 300;
 
@@ -79,7 +85,11 @@ pub enum Sizing {
     /// The largest raid-like group seen over [`RECALL`].
     Largest,
     /// The raids that cost us: the 75th percentile of raid power weighted
-    /// by the metal lost to each over [`LOSS_RECALL`], never under typical.
+    /// by the metal lost to each over [`LOSS_RECALL`], never under typical;
+    /// and the budget wants nothing until something was lost to a raid
+    /// (the default: ZKGBAI's own raiders leave when a fighter shows and a
+    /// dedicated force buys nothing in mirrors, the baselines' Daggers stay
+    /// and kill).
     Lossy,
 }
 
@@ -178,6 +188,8 @@ pub struct Budget {
     short_since: Option<i32>,
     /// Raiders ordered from factories for the force: frame, metal.
     pub pending: Vec<(i32, f32)>,
+    /// Recruit-class units that left a factory lately: frame, taken.
+    door: VecDeque<(i32, bool)>,
     /// Factories may build raiders for the force (`qrf_production`).
     pub production: bool,
     /// Some factory of ours makes anti-raiders (light raiders are then
@@ -196,12 +208,13 @@ impl Default for Budget {
             army: 0.0,
             moonlight: 0.0,
             reason: "quiet".into(),
-            size: Sizing::Typical,
+            size: Sizing::Lossy,
             sightings: VecDeque::new(),
             loss_raids: VecDeque::new(),
             over_since: None,
             short_since: None,
             pending: Vec::new(),
+            door: VecDeque::new(),
             production: true,
             anti_raiders: false,
         }
@@ -257,6 +270,28 @@ impl Budget {
                 weighted_p75(self.loss_raids.iter().map(|l| (l.1, l.2)).collect()).max(typical)
             }
         }
+    }
+
+    /// Whether the budget is armed: raids seen, or (lossy) something lost
+    /// to one lately.
+    pub fn armed(&self) -> bool {
+        match self.size {
+            Sizing::Lossy => !self.loss_raids.is_empty(),
+            _ => !self.sightings.is_empty(),
+        }
+    }
+
+    /// A recruit-class unit left a factory; whether the cap lets the teams
+    /// take it (counting it).
+    pub fn may_recruit(&mut self, frame: i32, take: bool) -> bool {
+        while self.door.front().is_some_and(|d| frame - d.0 > RECALL) {
+            self.door.pop_front();
+        }
+        let built = self.door.len() as f32 + 1.0;
+        let taken = self.door.iter().filter(|d| d.1).count() as f32;
+        let ok = take && taken + 1.0 <= RECRUIT_SHARE * built;
+        self.door.push_back((frame, ok));
+        ok
     }
 
     /// An asset of ours lost to a raid of this power.
@@ -396,7 +431,7 @@ impl Ai {
         };
         q.budget.cap = num("qrf_cap").unwrap_or(CAP).clamp(0.0, 1.0);
         q.budget.gain = num("qrf_gain").unwrap_or(GAIN).max(0.0);
-        q.budget.size = opt("qrf_size").and_then(|v| Sizing::parse(&v)).unwrap_or(Sizing::Typical);
+        q.budget.size = opt("qrf_size").and_then(|v| Sizing::parse(&v)).unwrap_or(Sizing::Lossy);
         q.budget.production = !opt("qrf_production").is_some_and(|v| matches!(v.as_str(), "off" | "0" | "false"));
         q.grid = Some(Grid::new(self.cb));
         q.candidates = super::candidates(self.cb);
@@ -548,6 +583,7 @@ impl Ai {
         let raids = b.recent().0;
         let strongest = b.strongest();
         let (wanted, reason) = match b.mode {
+            Mode::Auto if !b.armed() => (0.0, format!("quiet [{}: nothing lost to a raid lately]", b.size.name())),
             Mode::Auto => {
                 let (w, r) = auto_wanted(raids, strongest, losses, moon, army, b.gain, b.cap);
                 (w, format!("{r} [{} raid {strongest:.0}]", b.size.name()))
@@ -603,7 +639,9 @@ impl Ai {
             return false;
         }
         let cost = def.cost(self.metal);
-        if q.budget.have + 0.5 * cost > q.budget.wanted {
+        let short = q.budget.have + 0.5 * cost <= q.budget.wanted;
+        let frame = self.frame;
+        if !self.qrf.budget.may_recruit(frame, short) {
             return false;
         }
         let Some(mobility) = Mobility::of(def) else { return false };
@@ -908,7 +946,7 @@ mod tests {
 
     #[test]
     fn sizing_picks_the_raids_that_matter() {
-        let mut b = Budget::default();
+        let mut b = Budget { size: Sizing::Typical, ..Budget::default() };
         // Nine single Daggers and one group of 600 seen; one mex lost to
         // the group.
         b.sightings.push_back((0, vec![80.0; 9]));
@@ -932,6 +970,32 @@ mod tests {
         assert_eq!(b.loss_raids.len(), 1);
         assert_eq!(weighted_p75(vec![(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)]), 3.0);
         assert_eq!(weighted_p75(Vec::new()), 0.0);
+    }
+
+    #[test]
+    fn recruit_cap_leaves_the_factory_half() {
+        let mut b = Budget::default();
+        // Of four units at the door, every second one may be taken (the
+        // first is always the factory's); after the window the count is
+        // fresh.
+        let takes: Vec<bool> = (0..4).map(|i| b.may_recruit(i * 30, true)).collect();
+        assert_eq!(takes, vec![false, true, false, true]);
+        assert!(!b.may_recruit(120, false));
+        assert!(!b.may_recruit(RECALL + 200, true));
+        assert_eq!(b.door.len(), 1);
+        assert!(b.may_recruit(RECALL + 230, true));
+    }
+
+    #[test]
+    fn lossy_arms_on_losses_only() {
+        let mut b = Budget::default();
+        b.sightings.push_back((0, vec![80.0]));
+        assert!(!b.armed());
+        b.lost_to(10, 80.0, 75.0);
+        assert!(b.armed());
+        b.size = Sizing::Typical;
+        b.loss_raids.clear();
+        assert!(b.armed());
     }
 
     #[test]
