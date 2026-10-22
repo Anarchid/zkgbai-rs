@@ -73,6 +73,14 @@ pub fn role(ai: &Ai, u: Unit) -> &'static str {
     if ai.retreat_handler.is_retreating(id) {
         return "retreating";
     }
+    // Home defense (see `qrf`): its own teams, and squads moonlighting.
+    if let Some(m) = ai.qrf.members.get(&id) {
+        match m.squad {
+            None => return "qrf",
+            Some(s) if ai.qrf.drafted.contains_key(&s) => return "qrf_moonlight",
+            _ => {}
+        }
+    }
     if let Some(w) = ai.eco.workers.get(&id) {
         return if w.is_com { "commander" } else { "worker" };
     }
@@ -1191,6 +1199,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("missiles", "tactical missile silos"),
     ("precision", "precision raids behind lone towers"),
     ("jaeger", "jaeger squads (hunting raiders)"),
+    ("qrf", "the quick-reaction force: home defense against raids (dedicated teams, moonlighting squads)"),
     ("jumps", "jumpbots' jumps"),
     ("puppies", "Puppies"),
     ("water", "under-water units"),

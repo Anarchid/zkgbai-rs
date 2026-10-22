@@ -25,6 +25,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("factories", "each factory, what it builds, operator production orders"),
     ("squads", "each squad: kind, status, position, target, size"),
     ("threats", "enemy incursions and the squads blocking them, places defended"),
+    ("qrf", "the quick-reaction force: budget, teams and what each does, raids near our value"),
     ("overrides", "what the operator has set: reserved units, requisition, defense points, muted modules, features off"),
     ("board", "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta"),
 ];
@@ -286,6 +287,31 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                     .collect();
                 if !defend.is_empty() {
                     let _ = write!(s, " | defending: {}", defend.join(", "));
+                }
+                line(&mut out, s);
+            }
+            "qrf" if active && ai.qrf.live => {
+                let q = &ai.qrf;
+                let b = &q.budget;
+                let mut s = format!("qrf {}/{} ({})", n0(b.have), n0(b.wanted), b.reason);
+                let mut teams: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+                for m in q.members.values() {
+                    *teams.entry(m.team).or_default() += 1;
+                }
+                for (t, n) in &teams {
+                    let name = if *t >= crate::military::qrf::live::MOON {
+                        format!("m{}", t - crate::military::qrf::live::MOON)
+                    } else {
+                        t.to_string()
+                    };
+                    let doing = q.doing.get(t).map_or("-", |d| d.what);
+                    let role = q.roles.get(t).map_or(String::new(), |r| format!(" [{} {}]", r.kind.name(), r.tactic.name()));
+                    let _ = write!(s, " | {name} x{n} {doing}{role}");
+                }
+                if !q.groups.is_empty() {
+                    let raids: Vec<String> =
+                        q.groups.iter().map(|g| format!("{}x{} at {}", g.members.len(), n0(g.power), xz(ai, g.center))).collect();
+                    let _ = write!(s, " | raids: {}", raids.join(", "));
                 }
                 line(&mut out, s);
             }

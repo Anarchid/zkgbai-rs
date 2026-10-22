@@ -11,20 +11,29 @@
 //! How the force is used is up to an *algorithm* (AI option `qrf_algo`):
 //! each keeps its state in [`Qrf`] and its code in a file of its own.
 //!
-//! On only in the staged raid-defense game (`test=qrf`, see `raid_test`),
-//! unless `disable=qrf`, when the usual handlers take the force instead.
+//! Two modes:
+//! - *staged*, in the raid-defense game (`test=qrf`, see `raid_test`): the
+//!   force is given and never replenished (`disable=qrf`: the usual
+//!   handlers take it instead);
+//! - *live*, in normal play (see [`live`]): the force is raiders drawn from
+//!   production by a defense budget, and raider squads still forming,
+//!   which answer raids while they wait to fill (moonlighting). Off with
+//!   `disable=qrf`; steered by the operator ([`ops`]).
 
 pub mod cover;
 pub mod field;
 pub mod intent;
+pub mod live;
 pub mod mark;
+pub mod ops;
 pub mod station;
 
 use std::collections::BTreeMap;
 
-use springai::{Unit, UnitDef, Vec3};
+use springai::{Unit, UnitDef, Vec3, reserved};
 
 use crate::Ai;
+use crate::military::SquadId;
 use crate::util::distance;
 use field::{Field, Grid, Mobility};
 
@@ -55,6 +64,10 @@ pub struct Member {
     pub speed: f32,
     pub mobility: Mobility,
     pub range: f32,
+    /// The raider squad it is in, if it moonlights (live mode).
+    pub squad: Option<SquadId>,
+    /// Weapon power, as the threat maps count it (see `Fighter::new`).
+    pub threat: f32,
     order: Option<(Vec3, bool, i32)>,
 }
 
@@ -153,7 +166,32 @@ pub struct Qrf {
     pub cover: cover::Cover,
     pub mark: mark::Mark,
     pub intent: intent::Intent,
+    /// Normal play (else the staged game).
+    pub live: bool,
+    pub budget: live::Budget,
+    /// The operator's roles for teams.
+    pub roles: BTreeMap<usize, live::Role>,
+    /// Moonlighting squads sent at a raid, with the frame last sent.
+    pub drafted: BTreeMap<SquadId, i32>,
+    /// What each team did last (for the operator and the log).
+    pub doing: BTreeMap<usize, live::Doing>,
+    pub next_team: usize,
+    /// Moonlighting is off (operator).
+    pub no_moonlight: bool,
+    pub live_stats: live::Stats,
+    /// Teams are being given back (none are taken meanwhile).
+    releasing: bool,
     stats: Stats,
+}
+
+/// Types a contact may be, slowest first: armed mobile ground units.
+fn candidates(cb: springai::Callback) -> Vec<(f32, UnitDef)> {
+    let mut c: Vec<(f32, UnitDef)> = (cb.unit_defs().into_iter())
+        .filter(|d| d.speed() > 0.0 && !d.is_able_to_fly() && d.build_options().is_empty() && d.num_weapon_mounts() > 0)
+        .map(|d| (d.speed(), d))
+        .collect();
+    c.sort_by(|a, b| a.0.total_cmp(&b.0));
+    c
 }
 
 #[derive(Default)]
@@ -178,14 +216,7 @@ impl Ai {
         q.team_size = self.cb.option("qrf_team").and_then(|v| v.parse().ok()).unwrap_or(3).max(1);
         q.grid = Some(Grid::new(self.cb));
         q.trace = self.cb.option("qrf_trace").and_then(|v| v.parse().ok()).unwrap_or(0);
-        let mut c: Vec<(f32, UnitDef)> = (self.cb.unit_defs().into_iter())
-            .filter(|d| {
-                d.speed() > 0.0 && !d.is_able_to_fly() && d.build_options().is_empty() && d.num_weapon_mounts() > 0
-            })
-            .map(|d| (d.speed(), d))
-            .collect();
-        c.sort_by(|a, b| a.0.total_cmp(&b.0));
-        q.candidates = c;
+        q.candidates = candidates(self.cb);
         let algo = q.algo.clone();
         self.log(&format!("qrf: on={} algo={algo} team={}", self.qrf.on, self.qrf.team_size));
     }
@@ -206,6 +237,8 @@ impl Ai {
                 speed: def.speed(),
                 mobility,
                 range: def.max_weapon_range(),
+                squad: None,
+                threat: 0.0,
                 order: None,
             },
         );
@@ -216,8 +249,9 @@ impl Ai {
         unit.set_fire_state(2, 0);
     }
 
+    /// Whether the unit is the QRF's own (moonlighters are their squads').
     pub fn qrf_claims(&self, id: i32) -> bool {
-        self.qrf.on && self.qrf.members.contains_key(&id)
+        self.qrf.on && self.qrf.members.get(&id).is_some_and(|m| m.squad.is_none())
     }
 
     pub fn qrf_remove_unit(&mut self, id: i32) {
@@ -229,13 +263,34 @@ impl Ai {
     }
 
     pub fn qrf_update(&mut self, frame: i32) {
-        if !self.qrf.on || self.qrf.grid.is_none() || frame % PERIOD != self.offset % PERIOD {
+        if frame % PERIOD != self.offset % PERIOD {
             return;
         }
-        self.qrf.members.retain(|_, m| m.unit.health() > 0.0);
+        if !self.qrf.on {
+            if !self.qrf_live_wanted(frame) {
+                return;
+            }
+            self.qrf_live_start();
+        }
+        if self.qrf.grid.is_none() {
+            return;
+        }
+        if self.qrf.live && self.dev_off("qrf") {
+            self.qrf_live_stop();
+            return;
+        }
+        let team = self.team_id;
+        self.qrf.members.retain(|_, m| m.unit.health() > 0.0 && m.unit.team() == team);
+        if self.qrf.live {
+            self.qrf_live_roster(frame);
+        }
         self.qrf_track(frame);
         self.qrf_group();
         self.qrf_assets();
+        if self.qrf.live {
+            self.qrf_live_filter(frame);
+            self.qrf_live_budget(frame);
+        }
         match self.qrf.algo.as_str() {
             "station" => self.qrf_station_update(frame),
             "cover" => self.qrf_cover_update(frame),
@@ -247,6 +302,9 @@ impl Ai {
                 }
                 self.qrf_station_update(frame)
             }
+        }
+        if self.qrf.live {
+            self.qrf_live_after(frame);
         }
         if frame % LOG_PERIOD < PERIOD {
             self.qrf_log(frame);
@@ -388,13 +446,15 @@ impl Ai {
             .collect();
     }
 
-    /// Our buildings.
+    /// Our buildings (and, in normal play, our constructors).
     fn qrf_assets(&mut self) {
         let metal = self.metal;
+        let live = self.qrf.live;
         self.qrf.assets = (self.cb.team_units().into_iter())
             .filter_map(|u| {
                 let d = u.def()?;
-                (d.speed() <= 0.0 && !u.is_being_built()).then(|| Asset {
+                let worker = live && d.speed() > 0.0 && !d.build_options().is_empty() && !d.is_able_to_fly();
+                ((d.speed() <= 0.0 || worker) && !u.is_being_built()).then(|| Asset {
                     unit: u,
                     pos: u.pos(),
                     cost: d.cost(metal),
@@ -404,10 +464,14 @@ impl Ai {
             .collect();
     }
 
-    /// Members by team.
+    /// Members by team: those at hand (not gone home to be repaired, not
+    /// taken by the operator).
     pub fn qrf_teams(&self) -> BTreeMap<usize, Vec<i32>> {
         let mut teams: BTreeMap<usize, Vec<i32>> = BTreeMap::new();
         for (&id, m) in &self.qrf.members {
+            if self.qrf.live && (self.retreat_handler.is_retreating(id) || reserved::is_reserved(self.cb, id)) {
+                continue;
+            }
             teams.entry(m.team).or_default().push(id);
         }
         teams
@@ -482,7 +546,7 @@ impl Ai {
             "qrf: t={} algo={} members={}/{} power={:.0} tracks={} raids=[{}] orders={} guesses={}/{}",
             frame / 30,
             q.algo,
-            q.members.len(),
+            q.members.values().filter(|m| m.squad.is_none()).count(),
             q.initial_members,
             power,
             q.tracks.len(),

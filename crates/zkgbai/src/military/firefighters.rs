@@ -399,7 +399,7 @@ impl Ai {
     }
 
     /// Loss weight remembered, and the raids' typical health.
-    fn firefighters_pressure(&self) -> (f32, f32, usize) {
+    pub(crate) fn firefighters_pressure(&self) -> (f32, f32, usize) {
         let ls = &self.firefighters.losses;
         let weight = ls.iter().map(|l| l.weight).sum();
         let mut hp: Vec<f32> = ls.iter().map(|l| l.raid_hp).collect();

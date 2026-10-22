@@ -7,6 +7,7 @@
 use serde_json::{Value, json};
 
 use super::{actions, views};
+use crate::military::qrf::ops as qrf_ops;
 use crate::Ai;
 
 #[derive(Clone, Copy)]
@@ -642,6 +643,55 @@ pub static TOOLS: &[Tool] = &[
         writes: true,
         needs_modules: true,
         run: actions::squad_intent,
+    },
+    Tool {
+        name: "qrf",
+        description: "The quick-reaction force (home defense against raids): its budget (power wanted and had, why), \
+                       its teams (dedicated teams of raiders, numbered; moonlighting raider squads still forming, mN), \
+                       what each does (mark: stands between a raid and our value; goal: on the asset the raid heads \
+                       for; strike; screen: waits where raids came in; post; hold; free), and the raids it sees \
+                       near our value (types guessed from speed are marked '?').",
+        params: &[],
+        writes: false,
+        needs_modules: true,
+        run: qrf_ops::view,
+    },
+    Tool {
+        name: "qrf_set",
+        description: "Set the QRF's budget: defense auto (the autopilot: none until raids come or kill our economy, \
+                       then gain x the strongest recent raid per raid at once, at most cap of our mobile army), a \
+                       metal value, or a share like '30%'; moonlighting of forming raider squads on or off.",
+        params: &[
+            P("defense", Str, false, "auto, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)"),
+            P("cap", Num, false, "auto: at most this share of the mobile army (default 0.3)"),
+            P("gain", Num, false, "auto: power per team, times the strongest recent raid's (default 1.5)"),
+            P("moonlight", Bool, false, "forming raider squads answer raids at home while they fill (default true)"),
+            P("team_size", Int, false, "raiders per dedicated team (default 3)"),
+            P("algo", Str, false, "mark (default), cover, station or intent"),
+        ],
+        writes: true,
+        needs_modules: true,
+        run: qrf_ops::set,
+    },
+    Tool {
+        name: "qrf_team",
+        description: "Give a dedicated QRF team a role and a tactic, kept until cleared: auto (the algorithm's), \
+                       zone (only raids on our value within radius of x,z; waits there), post (waits at x,z, answers \
+                       raids anywhere), hold (stands at x,z always), clear, or release (back to the raider handler). \
+                       Tactics: mark (strike when 1.5x stronger), shadow (never strike: keep the force), hunt (strike \
+                       when as strong, meet raids on their way). With units, makes a new team of them first.",
+        params: &[
+            P("team", Str, false, "team id (see qrf)"),
+            P("units", Ids, false, "our ground units to make a new team of (taken from their handlers)"),
+            P("role", Str, false, "auto, zone, post, hold, clear or release"),
+            P("x", Num, false, "map x"),
+            P("z", Num, false, "map z"),
+            P("radius", Num, false, "zone radius (default 1200)"),
+            P("tactic", Str, false, "mark, shadow or hunt"),
+        ],
+        writes: true,
+        needs_modules: true,
+        run: qrf_ops::team,
     },
     Tool {
         name: "squad_form",

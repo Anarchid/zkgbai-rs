@@ -727,6 +727,10 @@ impl Ai {
         if name == "jumpraid" {
             unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[1.0], 0, NO_TIMEOUT);
         }
+        // Raiders for home defense, while its budget wants more (see `qrf`).
+        if self.qrf_recruit(unit) {
+            return;
+        }
         // A Pyro per three Moderators and Placeholders guards their squads
         // from swarms; a few raid alone (fire-shadow raids: their flames go
         // through hills, see `precision`), the rest in squads.
@@ -912,6 +916,8 @@ impl Ai {
         self.war.new_units.remove(&id);
         self.raid_test_unit_destroyed(unit);
         self.firefighters_unit_destroyed(unit, attacker);
+        self.qrf_asset_lost(unit);
+        self.qrf_remove_unit(id);
 
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
@@ -1212,6 +1218,19 @@ impl Ai {
                 let (x, y) = cell(r.get_pos());
                 let rad = 7;
                 war.ally_threat_graphics.paint_circle(x, y, rad, power);
+            }
+
+            // The QRF's own teams (moonlighters are painted as squads).
+            for m in self.qrf.members.values().filter(|m| m.squad.is_none()) {
+                if !alive(m.unit) {
+                    continue;
+                }
+                let power = ((m.threat + m.unit.max_health()) / 10.0) as i32;
+                if !self.retreat_handler.is_retreating(m.unit.id()) {
+                    mobile_threat += power as f32;
+                }
+                let (x, y) = cell(m.pos());
+                war.ally_threat_graphics.paint_circle(x, y, 8, power);
             }
 
             for rs in self.raider_handler.raider_squads.iter().filter_map(|&id| squads.get(id)) {

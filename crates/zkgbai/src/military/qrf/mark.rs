@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use springai::Vec3;
 
 use super::field::{Field, NEVER};
+use super::live::{Doing, MOON, RoleKind, Tactic};
 use crate::Ai;
 use crate::military::qrf::station::k_means;
 use crate::util::distance;
@@ -210,14 +211,45 @@ impl Ai {
         t
     }
 
+    /// A team's tuning: the operator's tactic over the algorithm's own.
+    fn qrf_mark_team_tune(&self, team: usize, tune: Tune) -> Tune {
+        match self.qrf.roles.get(&team).map(|r| r.tactic) {
+            Some(Tactic::Shadow) => Tune { strike: 0.0, breach: false, ..tune },
+            Some(Tactic::Hunt) => Tune { strike: 1.0, intercept: true, ..tune },
+            _ => tune,
+        }
+    }
+
+    /// Whether a team may take a target: a zone team only raids on our
+    /// value within its zone; a holding team none.
+    fn qrf_mark_allows(&self, team: usize, t: &Target) -> bool {
+        match self.qrf.roles.get(&team) {
+            Some(r) if r.kind == RoleKind::Hold => false,
+            Some(r) if r.kind == RoleKind::Zone => {
+                t.threatened.iter().any(|&(i, _)| distance(self.qrf.assets[i].pos, r.pos) <= r.radius)
+            }
+            _ => true,
+        }
+    }
+
+    fn qrf_mark_doing(&mut self, team: usize, what: &'static str, at: Vec3, raid: f32) {
+        let frame = self.frame;
+        self.qrf.doing.insert(team, Doing { what, at, raid, frame });
+    }
+
     pub(super) fn qrf_mark_update(&mut self, frame: i32) {
         let tune = self.qrf_mark_tune();
         self.qrf_mark_merge_teams();
-        let teams = self.qrf_teams();
-        if teams.is_empty() {
+        let all_teams = self.qrf_teams();
+        if all_teams.is_empty() {
             return;
         }
         self.qrf_mark_entries();
+        // Teams holding a place are not matched to raids.
+        let teams: BTreeMap<usize, Vec<i32>> = (all_teams.iter())
+            .filter(|(t, _)| self.qrf.roles.get(t).is_none_or(|r| r.kind != RoleKind::Hold))
+            .map(|(&t, ids)| (t, ids.clone()))
+            .collect();
 
         // The raids that threaten anything, with their travel times.
         let mut targets: Vec<Target> = Vec::new();
@@ -270,7 +302,17 @@ impl Ai {
         let tracks_of = |t: &Target, ai: &Ai| -> BTreeSet<i32> {
             t.groups.iter().flat_map(|&g| ai.qrf.groups[g].members.iter().copied()).collect()
         };
-        let team_ids: Vec<usize> = teams.keys().copied().collect();
+        // The exhaustive matching takes seven teams at most: those nearest
+        // a target.
+        let mut team_ids: Vec<usize> = teams.keys().copied().collect();
+        if team_ids.len() > 7 && !targets.is_empty() {
+            let gap = |t: &usize| {
+                let p = self.qrf_team_pos(&teams[t]).0;
+                targets.iter().map(|x| distance(x.center, p)).fold(f32::INFINITY, f32::min)
+            };
+            team_ids.sort_by(|a, b| gap(a).total_cmp(&gap(b)));
+            team_ids.truncate(7);
+        }
         let fields: Vec<Option<Field>> = team_ids.iter().map(|t| self.qrf_team_field(&teams[t])).collect();
         let mut cost = vec![vec![0.0f32; targets.len()]; team_ids.len()];
         // Of that, what is late among the assets the raid reaches soon: a
@@ -294,10 +336,16 @@ impl Ai {
                 let kept = self.qrf.mark.marks.get(&team).is_some_and(|m| !m.is_disjoint(&ids));
                 cost[a][b] =
                     late + 0.01 * value * distance(pos, t.center) / 100.0 - if kept { 3.0 * value } else { 0.0 };
+                if !self.qrf_mark_allows(team, t) {
+                    cost[a][b] += 1e9;
+                }
             }
         }
-        let mut plan: Vec<(usize, usize)> = best_match(&cost).into_iter().map(|(a, b)| (team_ids[a], b)).collect();
-        let mut free: BTreeSet<usize> = teams.keys().copied().collect();
+        let mut plan: Vec<(usize, usize)> = (best_match(&cost).into_iter())
+            .filter(|&(a, b)| self.qrf_mark_allows(team_ids[a], &targets[b]))
+            .map(|(a, b)| (team_ids[a], b))
+            .collect();
+        let mut free: BTreeSet<usize> = all_teams.keys().copied().collect();
         for (team, _) in &plan {
             free.remove(team);
         }
@@ -306,11 +354,15 @@ impl Ai {
             if free.is_empty() || t.power < DOUBLE_RATIO * mine {
                 continue;
             }
-            let Some(team) = free.iter().copied().min_by(|&a, &b| {
-                let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
-                let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);
-                da.total_cmp(&db)
-            }) else {
+            let Some(team) =
+                free.iter().copied().filter(|&f| teams.contains_key(&f) && self.qrf_mark_allows(f, t)).min_by(
+                    |&a, &b| {
+                        let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
+                        let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);
+                        da.total_cmp(&db)
+                    },
+                )
+            else {
                 break;
             };
             free.remove(&team);
@@ -319,6 +371,7 @@ impl Ai {
 
         let mut marks = BTreeMap::new();
         for &(team, ti) in &plan {
+            let tune = self.qrf_mark_team_tune(team, tune);
             let t = &targets[ti];
             marks.insert(team, tracks_of(t, self));
             let ids = &teams[&team];
@@ -328,8 +381,9 @@ impl Ai {
             // Goalkeeping: stand on the asset the raid heads for, a little
             // toward it, if we get there first (our guns outrange raiders'
             // on a mex).
+            let mut goal_kept = false;
             if tune.goal
-                && let Some(tf) = fields[team_ids.iter().position(|&x| x == team).unwrap_or(0)].as_ref()
+                && let Some(tf) = team_ids.iter().position(|&x| x == team).and_then(|i| fields[i].as_ref())
                 && let Some(g) = (t.groups.iter().map(|&g| &self.qrf.groups[g]))
                     .min_by(|a, b| distance(a.center, pos).total_cmp(&distance(b.center, pos)))
                 && let Some((tr, goal)) = self.qrf_mark_goal(g, &t.threatened)
@@ -337,6 +391,7 @@ impl Ai {
             {
                 let d = distance(goal, g.center).max(1.0);
                 spot = goal + (g.center - goal) * (80.0f32.min(d) / d);
+                goal_kept = true;
             }
             // Strike what comes close, if clearly stronger, and while it is
             // still near the mark (and near our value, if so tuned).
@@ -346,8 +401,8 @@ impl Ai {
                 .filter(|g| tune.commit <= 0.0 || assets.iter().any(|a| distance(a.pos, g.center) < tune.commit))
                 .min_by(|a, b| distance(a.center, pos).total_cmp(&distance(b.center, pos)))
                 .map(|g| g.center + g.vel * 1.0);
-            let ti_team = team_ids.iter().position(|&x| x == team).unwrap_or(0);
-            let breached = breach[ti_team][ti] > 0.0 && tune.breach;
+            let ti_team = team_ids.iter().position(|&x| x == team);
+            let breached = ti_team.is_some_and(|i| breach[i][ti] > 0.0) && tune.breach;
             let near = near.or_else(|| {
                 // A breach: go at the raid that is closest to our value.
                 (t.groups.iter().map(|&g| &self.qrf.groups[g]))
@@ -361,7 +416,7 @@ impl Ai {
                 if !tune.intercept || !strong {
                     return None;
                 }
-                let tf = fields[ti_team].as_ref()?;
+                let tf = fields[ti_team?].as_ref()?;
                 let g = (t.groups.iter().copied()).min_by(|&a, &b| {
                     let (a, b) = (&self.qrf.groups[a], &self.qrf.groups[b]);
                     distance(a.center, pos).total_cmp(&distance(b.center, pos))
@@ -369,18 +424,46 @@ impl Ai {
                 let gf = group_fields[g].as_ref()?;
                 self.qrf_mark_intercept(&self.qrf.groups[g], gf, tf, &t.threatened)
             });
+            let raid_power = t.power;
             match near {
                 Some(aim) if strong => {
                     self.qrf.mark.stats.strikes += 1;
                     self.qrf_order_team(ids, aim, true);
+                    self.qrf_mark_doing(team, "strike", aim, raid_power);
                 }
                 _ => {
                     self.qrf.mark.stats.marks += 1;
                     self.qrf_order_team(ids, spot, tune.fight);
+                    self.qrf_mark_doing(team, if goal_kept { "goal" } else { "mark" }, spot, raid_power);
                 }
             }
         }
         self.qrf.mark.marks = marks;
+
+        // Teams with a place of the operator's go there; moonlighters not
+        // sent are their squads' again.
+        let mut screens = BTreeSet::new();
+        for team in free {
+            let ids = &all_teams[&team];
+            let (pos, _) = self.qrf_team_pos(ids);
+            match self.qrf.roles.get(&team).copied() {
+                Some(r) if r.kind != RoleKind::Auto => {
+                    let what = match r.kind {
+                        RoleKind::Hold => "hold",
+                        _ => "post",
+                    };
+                    if distance(pos, r.pos) > 120.0 {
+                        self.qrf_order_team(ids, r.pos, true);
+                    }
+                    self.qrf_mark_doing(team, what, r.pos, 0.0);
+                }
+                _ if team >= MOON => self.qrf_mark_doing(team, "free", pos, 0.0),
+                _ => {
+                    screens.insert(team);
+                }
+            }
+        }
+        let free = screens;
 
         // The rest screen.
         if frame - self.qrf.mark.sited > RESITE || self.qrf.mark.posts.len() != free.len() {
@@ -389,7 +472,7 @@ impl Ai {
         }
         let mut posts = self.qrf.mark.posts.clone();
         for team in free {
-            let ids = &teams[&team];
+            let ids = &all_teams[&team];
             let (pos, _) = self.qrf_team_pos(ids);
             let Some(k) = (0..posts.len()).min_by(|&a, &b| distance(posts[a], pos).total_cmp(&distance(posts[b], pos)))
             else {
@@ -400,6 +483,7 @@ impl Ai {
             if distance(pos, p) > 150.0 {
                 self.qrf_order_team(ids, p, true);
             }
+            self.qrf_mark_doing(team, "screen", p, 0.0);
         }
         if frame % (30 * 30) < super::PERIOD {
             let s = &self.qrf.mark.stats;
@@ -419,6 +503,7 @@ impl Ai {
     /// Where a team marks a target from: see the module doc.
     fn qrf_mark_spot(&self, ids: &[i32], t: &Target, tune: Tune) -> Vec3 {
         let (standoff, latew) = (tune.standoff, tune.latew);
+        let live = self.qrf.live;
         let (pos, speed) = self.qrf_team_pos(ids);
         let field: Option<Field> = self.qrf_team_field(ids);
         let Some(grid) = self.qrf.grid.as_ref() else { return pos };
@@ -434,6 +519,10 @@ impl Ai {
             for dx in -n..=n {
                 let x = Vec3::xz(t.center.x + dx as f32 * STEP, t.center.z + dz as f32 * STEP);
                 if distance(x, t.center) > REACH || x.x < 0.0 || x.z < 0.0 || !grid.passable(x, mobility) {
+                    continue;
+                }
+                // In normal play, out of reach of enemy defenses.
+                if live && self.war.get_porc_threat(x) > 0.0 {
                     continue;
                 }
                 let transit = field.as_ref().map_or(distance(pos, x) / speed, |f| f.at(x));
@@ -501,6 +590,13 @@ impl Ai {
             .collect();
         for (id, p) in fresh {
             self.qrf.mark.seen.insert(id);
+            // In normal play, only where raids come into our value (not
+            // where scouts saw the enemy at home).
+            if self.qrf.live
+                && (self.graph.is_enemy_territory(p) || self.qrf.assets.iter().all(|a| distance(a.pos, p) > 2500.0))
+            {
+                continue;
+            }
             // One entry per raid: not next to one just recorded.
             if self.qrf.mark.entries.iter().rev().take(4).any(|&e| distance(e, p) < 500.0) {
                 continue;
@@ -546,6 +642,7 @@ impl Ai {
                 let d = distance(gate.pos, e).max(1.0);
                 Some((gate.pos + (e - gate.pos) * (ahead.min(d * 0.5) / d), w))
             })
+            .filter(|(p, _)| !self.qrf.live || self.war.get_porc_threat(*p) <= 0.0)
             .collect();
         k_means(&gates, k)
     }
@@ -556,13 +653,17 @@ impl Ai {
         if teams.len() < 2 {
             return;
         }
+        // In normal play only into a team with room: recruits come one by
+        // one to make up new teams.
+        let own = |t: usize| t < MOON && !self.qrf.roles.contains_key(&t);
+        let room = |n: usize| !self.qrf.live || n < self.qrf.team_size;
         for (&t, ids) in &teams {
-            if ids.len() != 1 {
+            if ids.len() != 1 || !own(t) {
                 continue;
             }
             let (p, _) = self.qrf_team_pos(ids);
             let other = (teams.iter())
-                .filter(|(o, v)| **o != t && v.len() > 1)
+                .filter(|(o, v)| **o != t && v.len() > 1 && own(**o) && room(v.len()))
                 .min_by(|a, b| distance(self.qrf_team_pos(a.1).0, p).total_cmp(&distance(self.qrf_team_pos(b.1).0, p)))
                 .map(|(&o, _)| o);
             if let Some(o) = other

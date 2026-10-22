@@ -232,7 +232,9 @@ impl Ai {
         stats.groups += forces.iter().filter(|(_, f, _)| f.power >= MIN_POWER).count() as u32;
         let mut defenders = Vec::new();
         for &sid in self.squad_handler.squads.iter().chain(&self.raider_handler.raider_squads) {
-            let Some(s) = self.squads.get(sid).filter(|s| s.status != 'f' && !s.is_dead(&self.fighters)) else {
+            let Some(s) = (self.squads.get(sid))
+                .filter(|s| s.status != 'f' && !s.is_dead(&self.fighters) && !self.qrf_drafted(sid))
+            else {
                 continue;
             };
             stats.squads += 1;
