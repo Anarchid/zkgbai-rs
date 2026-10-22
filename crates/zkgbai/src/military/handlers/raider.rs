@@ -191,6 +191,32 @@ impl Ai {
         self.fighters.insert(id, r);
     }
 
+    /// Take raiders in as one squad of their own, ready to raid (the
+    /// staged raid game's raids, see `raid_test`).
+    pub(crate) fn raider_add_squad(&mut self, raiders: Vec<Fighter>, raider_type: char) {
+        let sid = self.squads.create(SquadKind::Raider, self.team_id, &self.defs);
+        if let Some(sq) = self.squads.get_mut(sid) {
+            sq.raider_type = raider_type;
+        }
+        self.raider_handler.raider_squads.push_back(sid);
+        let frame = self.frame;
+        for r in raiders {
+            let id = r.id;
+            if raider_type == 's' {
+                self.raider_handler.small_raiders.insert(id);
+            } else {
+                self.raider_handler.medium_raiders.insert(id);
+            }
+            self.fighters.insert(id, r);
+            if let Some(sq) = self.squads.get_mut(sid) {
+                sq.add_unit(id, &mut self.fighters, frame);
+            }
+        }
+        if let Some(sq) = self.squads.get_mut(sid) {
+            sq.status = 'r';
+        }
+    }
+
     pub fn raider_remove_unit(&mut self, u: Unit) {
         let id = u.id();
         let h = &mut self.raider_handler;

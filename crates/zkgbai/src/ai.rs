@@ -109,6 +109,8 @@ pub struct Ai {
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
+    pub qrf: crate::military::qrf::Qrf,
+    pub raid_test: crate::military::raid_test::RaidTest,
     pub jumps: Jumps,
     pub puppies: Puppies,
     pub air_intel: crate::military::air_intel::AirIntel,
@@ -209,6 +211,8 @@ impl SkirmishAi for Ai {
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
+            qrf: Default::default(),
+            raid_test: Default::default(),
             jumps: Jumps::default(),
             puppies: Puppies::default(),
             air_intel: Default::default(),

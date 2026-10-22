@@ -14,7 +14,9 @@ pub mod missiles;
 pub mod nukes;
 pub mod precision;
 pub mod puppies;
+pub mod qrf;
 pub mod radar;
+pub mod raid_test;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod strike_test;
@@ -502,6 +504,8 @@ impl Ai {
         self.guard("precision.update", |ai| ai.precision_update(frame));
         self.guard("water.update", |ai| ai.water_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
+        self.guard("raid_test.update", |ai| ai.raid_test_update(frame));
+        self.guard("qrf.update", |ai| ai.qrf_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -551,6 +555,10 @@ impl Ai {
     }
 
     pub fn war_unit_finished(&mut self, unit: Unit) {
+        // The staged raid game's force is the QRF's alone (see `qrf`).
+        if self.qrf_claims(unit.id()) {
+            return;
+        }
         let Some(ud) = unit.def() else { return };
         let def_name = self.defs.name(ud).to_owned();
         let name = def_name.as_str();
@@ -644,6 +652,10 @@ impl Ai {
 
     pub fn war_unit_idle(&mut self, unit: Unit) {
         if !self.war.new_units.remove(&unit.id()) {
+            return;
+        }
+        // Staged raids are squads already (see `raid_test`).
+        if self.raid_test_claims(unit.id()) || self.qrf_claims(unit.id()) {
             return;
         }
 
@@ -882,6 +894,7 @@ impl Ai {
         let id = unit.id();
 
         self.war.new_units.remove(&id);
+        self.raid_test_unit_destroyed(unit);
 
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
@@ -1069,6 +1082,7 @@ impl Ai {
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
+        self.raid_test_enemy_destroyed(enemy);
         let war = &mut self.war;
         let Some(e) = war.targets.get_mut(&id) else { return };
         e.is_dead = true;
