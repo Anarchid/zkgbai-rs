@@ -98,8 +98,7 @@ pub struct MilitaryManager {
     pub enemy_fighter_value: f32,
     /// Share (by cost) of the enemy's seen mobile fighters whose weapons
     /// outrange light raiders (skirmishers and the like): the raider-layer
-    /// matchup. Above a third, light raiders are not built (see
-    /// `fac_matchup_substitute`).
+    /// matchup, for the operator's `military` view.
     pub outranging_share: f32,
     /// Metal of the enemy's light skirmishers (Ronins, Rogues, Recluses,
     /// Scalpels, Moderators, Fencers, Buoys), Firewalker food.

@@ -19,10 +19,9 @@ use crate::military::{DefenseTarget, Fighter, SquadKind};
 use crate::util::NULLPOS;
 
 /// Features the `disable` switch knows (see `Ai::dev_off`).
-const FEATURES: [&str; 31] = [
+const FEATURES: [&str; 30] = [
     "porc",
     "mexporc",
-    "screen",
     "logistics",
     "pause",
     "clients",

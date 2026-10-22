@@ -54,16 +54,6 @@ const ORDER_FRAMES: i32 = 90;
 /// How far behind its chokepoint a blocking squad stands, elmos.
 const BLOCK_SETBACK: f32 = 150.0;
 
-/// Seconds a screening squad must arrive ahead of the force it meets on
-/// open ground (the chokepoint planner has its own `MIN_SLACK`).
-const SCREEN_SLACK: f32 = 10.0;
-/// Forces weaker than this are not worth a screen (singles and scouts).
-const SCREEN_MIN_POWER: f32 = 200.0;
-/// A screening squad keeps its screen this long before it is sent elsewhere.
-const SCREEN_HYSTERESIS: i32 = 600;
-/// A screen is never set closer to the asset than this share of the way
-/// from the asset to the force.
-const SCREEN_MIN_SHARE: f32 = 0.2;
 
 /// Squads this close to a raid fight it rather than block its way.
 const ENGAGE_RANGE: f32 = 800.0;
@@ -99,7 +89,7 @@ pub struct BlockOrder {
     /// Seconds it gets there ahead of the incursion.
     pub slack: f32,
     pub until: i32,
-    /// The frame the order was first given (screens keep for a while).
+    /// The frame the order was first given.
     pub issued: i32,
 }
 
@@ -144,8 +134,6 @@ struct Stats {
     matched: u32,
     /// Of those, blocked somewhere.
     blocked: u32,
-    /// Of those, screened on open ground (no chokepoint reachable first).
-    screened: u32,
     /// Squads past forming, and those in our territory.
     squads: u32,
     home: u32,
@@ -326,92 +314,20 @@ impl Ai {
                 if plan.exposed > 0.0 && t <= HORIZON && force.power <= self.war.available_mobile_threat {
                     predicted.push(DefenseTarget::new(at(p), force.power, frame));
                 }
-                // Open ground: no chokepoint a squad reaches first, so meet
-                // the force on its way instead. A free squad at least as
-                // strong stands on the straight line from the asset toward
-                // the force, as far out as it gets there ahead of it.
-                if plan.blocks.is_empty()
-                    && plan.exposed > 0.0
-                    && t <= PLAN_HORIZON
-                    && force.power >= SCREEN_MIN_POWER
-                    && !self.dev_off("screen")
-                {
-                    let (asset, from) = (at(p), at(force.pos));
-                    let mut best: Option<(usize, Vec3, f32, f32)> = None;
-                    for &i in &idx {
-                        let d = &defenders[i];
-                        if !free[i] || d.power < force.power {
-                            continue;
-                        }
-                        // A squad already screening keeps its screen.
-                        if let Some(o) = self.incursions.orders.get(&d.squad)
-                            && o.choke == usize::MAX
-                            && frame - o.issued < SCREEN_HYSTERESIS
-                        {
-                            let mut kept = *o;
-                            kept.until = frame + ORDER_FRAMES;
-                            orders.push((d.squad, kept));
-                            free[i] = false;
-                            continue;
-                        }
-                        for k in (2..=9).rev() {
-                            let share = k as f32 / 10.0;
-                            if share < SCREEN_MIN_SHARE {
-                                break;
-                            }
-                            let q = Vec3::new(
-                                asset.x + (from.x - asset.x) * share,
-                                0.0,
-                                asset.z + (from.z - asset.z) * share,
-                            );
-                            let theirs = distance(from, q) / force.speed.max(1.0);
-                            let mine = distance(d.pos, q) / d.speed.max(1.0);
-                            let slack = theirs - mine;
-                            if slack >= SCREEN_SLACK {
-                                if best.is_none_or(|(_, _, s, _)| share > s || (share == s && d.power > best.unwrap().3)) {
-                                    best = Some((i, q, share, d.power));
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    if let Some((i, q, share, _)) = best {
-                        let d = &defenders[i];
-                        free[i] = false;
-                        stats.screened += 1;
-                        let q = at(pos(q));
-                        let order = BlockOrder {
-                            tier,
-                            choke: usize::MAX,
-                            pos: q,
-                            power: d.power,
-                            slack: share,
-                            until: frame + ORDER_FRAMES,
-                            issued: frame,
-                        };
-                        if self.incursions.orders.get(&d.squad).is_none_or(|o| distance(o.pos, q) > 200.0) {
-                            self.log(&format!(
-                                "screen: squad {} (power {:.0}) meets {units} {} units (power {:.0}) at ({:.0}, {:.0}), {:.0}% of the way out from {:?}, {:.0}s before they reach it",
-                                d.squad, d.power, tier.name(), force.power, q.x, q.z, share * 100.0, (p.x.round() as i32, p.z.round() as i32), t
-                            ));
-                        }
-                        orders.push((d.squad, order));
-                    }
-                }
             }
             list.push(Incursion { tier, force, units, protected: plan.protected, exposed: plan.exposed });
         }
         self.incursions.orders.extend(orders);
 
-        // Every group, stopped by our defenses and by squads screening a
+        // Every group, stopped by our defenses and by squads blocking a
         // chokepoint against it.
         let mut danger: BTreeMap<Tier, Danger> = BTreeMap::new();
         for &(tier, force, _) in &forces {
             let (Some(map), Some(porc)) = (terrain.tier(tier), defenses.get(&tier)) else { continue };
-            let screened = |c: usize| {
+            let blocked = |c: usize| {
                 self.incursions.orders.values().any(|o| o.tier == tier && o.choke == c && o.power >= force.power)
             };
-            let held = |c: usize| porc[c] >= force.power || screened(c);
+            let held = |c: usize| porc[c] >= force.power || blocked(c);
             danger.entry(tier).or_insert_with(|| Danger::new(map)).add(map, force, held);
         }
 
@@ -421,19 +337,18 @@ impl Ai {
                 "incursions",
                 serde_json::json!({
                     "groups": stats.groups, "threatening": stats.threats, "matched": stats.matched,
-                    "blocked": stats.blocked, "screened": stats.screened,
+                    "blocked": stats.blocked,
                     "squads": stats.squads as f32 / (STATS_PERIOD / PERIOD) as f32,
                     "home": stats.home as f32 / (STATS_PERIOD / PERIOD) as f32, "fled": stats.fled,
                 }),
             );
             self.log(&format!(
-                "incursions: {} groups, {} threatening, {} with a strong enough squad free, {} blocked, {} screened; \
+                "incursions: {} groups, {} threatening, {} with a strong enough squad free, {} blocked; \
                  squads per assessment: {:.1}, {:.1} at home; {} refuge orders",
                 stats.groups,
                 stats.threats,
                 stats.matched,
                 stats.blocked,
-                stats.screened,
                 stats.squads as f32 / (STATS_PERIOD / PERIOD) as f32,
                 stats.home as f32 / (STATS_PERIOD / PERIOD) as f32,
                 stats.fled,
@@ -532,11 +447,7 @@ impl Ai {
             }
         }
         for (sid, o) in &self.incursions.orders {
-            if o.choke == usize::MAX {
-                draw.add_point(o.pos, &format!("squad {sid} screens ({:.0}% out)", o.slack * 100.0));
-            } else {
-                draw.add_point(o.pos, &format!("squad {sid} blocks C{} ({:.0}s ahead)", o.choke, o.slack));
-            }
+            draw.add_point(o.pos, &format!("squad {sid} blocks C{} ({:.0}s ahead)", o.choke, o.slack));
         }
         self.say(&format!(
             "Frame {}: {} incursions, {} block orders.",

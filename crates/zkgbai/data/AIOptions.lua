@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'enable',
 		name   = 'Experimental features',
-		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), matchup (no light raiders against an army that outranges them; riots instead), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
+		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,

@@ -36,16 +36,12 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// losing fewer; `currency` (the danger of a job on an issue's crew priced
 /// as the worker's expected loss, and the crew holding where it pays) lost
 /// its mirrors 17-23 twice where the issue clients alone won 25-15.
-/// `matchup` (no light raiders against an army that outranges them: riots
-/// instead) lost income (39 vs 50 at 10:00) and games (5-3-2 vs 6-1-3)
-/// against the frozen hover baseline on Agalta, Oct 22: fewer Kodachis died
-/// but the raider stream's tempo was worth more than the riots.
 /// `permanence` (the interception planner keeps unseen enemy groups 45 s,
 /// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
 /// frozen hover baseline, 20 games each, Oct 22: the memory frightens
 /// workers more than it positions squads.
-const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "matchup", "permanence"];
+const OFF_BY_DEFAULT: [&str; 3] = ["pairs", "currency", "permanence"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
