@@ -27,7 +27,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("threats", "enemy incursions and the squads blocking them, places defended"),
     ("qrf", "the quick-reaction force: budget, teams and what each does, raids near our value"),
     ("overrides", "what the operator has set: reserved units, requisition, defense points, muted modules, features off"),
-    ("board", "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta"),
+    ("board", "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta, home-defense (QRF) teams as gold lines to where they stand (ring: marking a raid, square: striking)"),
 ];
 
 /// A read tool the HUD runs on every render, with its arguments.

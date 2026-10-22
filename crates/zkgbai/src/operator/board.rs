@@ -6,7 +6,9 @@
 //! fighters cyan, buildings blue, the commander yellow), enemies as red dots
 //! (orange once out of sight, dimmer the longer ago), enemy static defenses
 //! as red squares with a faint ring of their reach, squads as cyan lines to
-//! their targets, places defended as magenta rings. The terrain is sampled
+//! their targets, places defended as magenta rings, home-defense (QRF)
+//! teams as yellow lines to where they stand (a ring on a raid they mark,
+//! a square where they strike). The terrain is sampled
 //! once and kept; everything else is drawn fresh each time.
 
 use std::io::Cursor;
@@ -251,6 +253,20 @@ pub fn render(ai: &Ai, terrain: &Terrain) -> Vec<u8> {
                 if s.target != crate::util::NULLPOS && p != crate::util::NULLPOS {
                     c.line(c.at(p), c.at(s.target), [0, 220, 220]);
                 }
+            }
+        }
+        // Home defense: each team to where it is sent.
+        let teams = ai.qrf_teams();
+        for (t, ids) in &teams {
+            let Some(d) = ai.qrf.doing.get(t).filter(|d| d.what != "free" && ai.frame - d.frame < 90) else { continue };
+            let p = ai.qrf_team_pos(ids).0;
+            let col = [250, 210, 40];
+            c.line(c.at(p), c.at(d.at), col);
+            let (x, y) = c.at(d.at);
+            match d.what {
+                "strike" => c.square(x, y, 2, col),
+                "mark" | "goal" => c.ring(x, y, 3, col),
+                _ => {}
             }
         }
         // Enemies.
