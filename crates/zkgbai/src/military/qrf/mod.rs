@@ -16,6 +16,7 @@
 
 pub mod cover;
 pub mod field;
+pub mod intent;
 pub mod mark;
 pub mod station;
 
@@ -151,6 +152,7 @@ pub struct Qrf {
     pub station: station::Station,
     pub cover: cover::Cover,
     pub mark: mark::Mark,
+    pub intent: intent::Intent,
     stats: Stats,
 }
 
@@ -238,6 +240,7 @@ impl Ai {
             "station" => self.qrf_station_update(frame),
             "cover" => self.qrf_cover_update(frame),
             "mark" => self.qrf_mark_update(frame),
+            "intent" => self.qrf_intent_update(frame),
             other => {
                 if frame % LOG_PERIOD < PERIOD {
                     self.log(&format!("qrf: no algorithm {other}, using station"));
