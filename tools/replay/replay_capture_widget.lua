@@ -29,9 +29,12 @@ local CELL = 512
 local HEIGHT_CELL = 128
 local SIGHT_CELL = 256
 local MIN_WRECK_METAL = 20
--- Frames to write a Lua save at (Saves/replay_f<frame>.slsf), substituted
+-- Frames to write a full (creg) save at, as ZK's save menu does
+-- (Saves/replay_f<frame, 6 digits>.ssf), substituted
 -- by capture.sh -S.
 local SAVE_FRAMES = {@SAVE_FRAMES@}
+-- ... and at every multiple of this many frames (0: never), capture.sh -I.
+local SAVE_EVERY = @SAVE_EVERY@
 
 local out
 local gaia = Spring.GetGaiaTeamID()
@@ -251,8 +254,13 @@ end
 
 function widget:Initialize()
 	out = io.open("replaycap.jsonl", "w")
+	-- CMD also holds option and state constants that share ids with commands
+	-- (OPT_RIGHT = 16 = FIGHT, WAITCODE_TIME = 1 = INSERT, ...).
 	for name, id in pairs(CMD) do
-		if type(id) == "number" and type(name) == "string" and name:upper() == name then cmdNames[id] = name end
+		if type(id) == "number" and type(name) == "string" and name:upper() == name
+			and not (name:find("^OPT_") or name:find("^WAITCODE_") or name:find("STATE_")) then
+			cmdNames[id] = name
+		end
 	end
 	local ok, custom = pcall(VFS.Include, "LuaRules/Configs/customcmds.lua")
 	if ok and type(custom) == "table" then
@@ -287,10 +295,12 @@ function widget:GameFrame(n)
 	flushCmds(n)
 	if n % DMG_FRAMES == 0 then flushDmg(n) end
 	if n % SNAP_FRAMES == 0 then snapshot(n) end
-	for _, sf in ipairs(SAVE_FRAMES) do
-		if n == sf then Spring.SendCommands("luasave replay_f" .. n .. " -y") end
-	end
+	local save = SAVE_EVERY > 0 and n > 0 and n % SAVE_EVERY == 0
+	for _, sf in ipairs(SAVE_FRAMES) do save = save or n == sf end
+	if save then Spring.SendCommands(string.format("save replay_f%06d -y", n)) end
 	if overAt and n >= overAt + 90 and out then finish() end
+	-- The engine may exit at the demo's end without Shutdown.
+	if out then out:flush() end
 end
 
 local function pos(u)

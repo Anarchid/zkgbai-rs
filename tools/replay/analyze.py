@@ -15,6 +15,12 @@ import re
 from collections import Counter, defaultdict
 
 FPS = 30
+# Captures made before the widget skipped CMD's option and state constants
+# named some commands after them.
+CMD_ALIASES = {"OPT_RIGHT": "FIGHT", "OPT_INTERNAL": "SQUADWAIT",
+               "WAITCODE_TIME": "INSERT", "FIRESTATE_RETURNFIRE": "INSERT", "MOVESTATE_MANEUVER": "INSERT",
+               "WAITCODE_DEATH": "REMOVE", "FIRESTATE_FIREATWILL": "REMOVE", "MOVESTATE_ROAM": "REMOVE",
+               "FIRESTATE_HOLDFIRE": "STOP", "MOVESTATE_HOLDPOS": "STOP"}
 
 
 def mmss(f):
@@ -24,7 +30,18 @@ def mmss(f):
 
 class Game:
     def __init__(self, path):
-        self.recs = [json.loads(line) for line in open(path)]
+        self.recs = []
+        for line in open(path):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                break  # a capture cut off mid-line (engine exit)
+            if r["k"] == "cmd":
+                r["c"] = CMD_ALIASES.get(r["c"], r["c"])
+            elif r["k"] == "snap":
+                for u in r["units"]:
+                    u[8] = CMD_ALIASES.get(u[8], u[8])
+            self.recs.append(r)
         self.meta = next(r for r in self.recs if r["k"] == "meta")
         self.defs = self.meta.get("defs", {})
         self.teams = {t["team"]: t for t in self.meta["teams"]}
@@ -40,6 +57,8 @@ class Game:
 
     # --- unit classes -------------------------------------------------
     def cost(self, name):
+        if name == "terraunit":
+            return 0  # terraform placeholder with a huge nominal cost
         d = self.defs.get(name)
         return d[1] if d else 0
 
