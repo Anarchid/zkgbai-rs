@@ -23,8 +23,10 @@
 //! the team is there first (an interception). Places tried: the likeliest
 //! destinations, the points between them (a hedge when the belief is
 //! split), and where the team can first cut each likely way. A team fights a
-//! raid that comes near it, near the place it holds, if it is not much
-//! weaker: it does not chase.
+//! raid that comes near it, near our things and the place it holds, and not
+//! running off, if it is clearly stronger: nothing mends the force, so it
+//! never chases, regroups before it fights, and a lone survivor joins
+//! another team.
 //!
 //! Teams with no raid wait where they answer raids soonest: stations chosen
 //! so that from where raids show up (at first a ring at radar's edge, then
@@ -92,7 +94,20 @@ const DETOUR: f32 = 1.15;
 /// `ODDS` of the raid's power.
 const ENGAGE: f32 = 500.0;
 const LEASH: f32 = 900.0;
-const ODDS: f32 = 0.8;
+const ODDS: f32 = 1.5;
+
+/// The raid must be this close to our things to be fought, and moving away
+/// from the team no faster than this (elmos per second).
+const IN_REACH: f32 = 600.0;
+const FLEEING: f32 = 30.0;
+
+/// A team whose farthest member is this far from its centre regroups
+/// before it fights.
+const SPREAD: f32 = 250.0;
+
+/// A team holds a place for a raid only if it covers this much expected
+/// metal there.
+const MIN_COVER: f32 = 5.0;
 
 /// A place this close to a raid's way to a destination is on it.
 const ON_WAY: f32 = 160.0;
@@ -188,6 +203,14 @@ pub struct Intent {
     weights: Option<[f32; FEATURES]>,
     /// Free teams join others' raids (AI option `qrf_concentrate`, on).
     concentrate: bool,
+    /// No chasing, regrouping, lone members merged (`qrf_chase=on` off).
+    no_chase: bool,
+    /// Power a team needs over a raid to take it on (`qrf_odds`).
+    odds: f32,
+    /// Deterrence only (`qrf_deter=on`): teams never go at raids and hold
+    /// position where they stand, firing at what comes in range.
+    deter: bool,
+    held: BTreeSet<i32>,
     score: Score,
 }
 
@@ -234,6 +257,12 @@ impl Ai {
             });
             self.qrf.intent.weights = Some(w.unwrap_or(PRIOR_WEIGHTS));
             self.qrf.intent.concentrate = self.cb.option("qrf_concentrate").is_none_or(|v| v != "off");
+            self.qrf.intent.no_chase = self.cb.option("qrf_chase").is_none_or(|v| v != "on");
+            self.qrf.intent.odds = self.cb.option("qrf_odds").and_then(|v| v.parse().ok()).unwrap_or(ODDS);
+            self.qrf.intent.deter = self.cb.option("qrf_deter").is_some_and(|v| v == "on");
+            if self.qrf.intent.deter {
+                self.qrf.intent.odds = f32::INFINITY;
+            }
         }
         let weights = self.qrf.intent.weights.unwrap_or(PRIOR_WEIGHTS);
         let dests = self.qrf_intent_dests();
@@ -512,7 +541,11 @@ impl Ai {
                     }
                 }
             }
-            if let Some((_, _, t, x)) = best {
+            // A raid that puts nothing of ours at stake is not worth a team
+            // off its station.
+            if let Some((covered, _, t, x)) = best
+                && covered >= MIN_COVER
+            {
                 free.remove(&t);
                 holds.insert(t, (*bid, x));
             }
@@ -537,19 +570,57 @@ impl Ai {
         }
 
         // Orders: hold the place, take on a raid that comes near.
+        let ours: Vec<Vec3> = dests.iter().filter(|d| d.value > 0.0).map(|d| d.pos).collect();
         for ti in &team_info {
             let (t, ids, tpos, tpower) = (ti.team, &ti.ids, ti.pos, ti.power);
-            // Any raid near the team and its place is fought.
             let place = holds.get(&t).map(|h| h.1);
+            // A raid near the team, near our things and its place, and not
+            // running off: nothing mends the force, so it does not chase.
             let near = (self.qrf.groups.iter())
-                .filter(|g| distance(g.center, tpos) < ENGAGE && tpower >= ODDS * g.power)
+                .filter(|g| distance(g.center, tpos) < ENGAGE && tpower >= self.qrf.intent.odds * g.power)
                 .filter(|g| place.is_none_or(|x| distance(g.center, x) < LEASH))
+                .filter(|g| !self.qrf.intent.no_chase || ours.iter().any(|&a| distance(a, g.center) < IN_REACH))
+                .filter(|g| {
+                    let away = Vec3::xz(g.center.x - tpos.x, g.center.z - tpos.z);
+                    let n = away.length_2d().max(1.0);
+                    !self.qrf.intent.no_chase || (g.vel.x * away.x + g.vel.z * away.z) / n < FLEEING
+                })
                 .min_by(|a, b| distance(a.center, tpos).total_cmp(&distance(b.center, tpos)))
                 .map(|g| g.center + g.vel * 1.0);
+            // Strung out: together first.
+            let spread = (ids.iter())
+                .filter_map(|id| self.qrf.members.get(id))
+                .map(|m| distance(m.pos(), tpos))
+                .fold(0.0f32, f32::max);
             if let Some(aim) = near {
-                self.qrf_order_team(ids, aim, true);
+                if spread > SPREAD && self.qrf.intent.no_chase {
+                    self.qrf_order_team(ids, tpos, true);
+                } else {
+                    self.qrf_order_team(ids, aim, true);
+                }
             } else if let Some(x) = place {
                 self.qrf_order_team(ids, x, true);
+            }
+        }
+        // Deterring teams hold position: no chasing what they shoot at.
+        if self.qrf.intent.deter {
+            for (&id, m) in &self.qrf.members {
+                if self.qrf.intent.held.insert(id) {
+                    m.unit.set_move_state(0, 0);
+                }
+            }
+        }
+        // A team down to one joins the nearest other.
+        if self.qrf.intent.no_chase && team_info.len() > 1 {
+            for ti in team_info.iter().filter(|t| t.ids.len() == 1) {
+                let other = (team_info.iter())
+                    .filter(|o| o.team != ti.team && o.ids.len() > 1)
+                    .min_by(|a, b| distance(a.pos, ti.pos).total_cmp(&distance(b.pos, ti.pos)));
+                if let Some(o) = other
+                    && let Some(m) = self.qrf.members.get_mut(&ti.ids[0])
+                {
+                    m.team = o.team;
+                }
             }
         }
         self.qrf.intent.holds = holds;
