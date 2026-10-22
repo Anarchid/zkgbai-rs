@@ -108,8 +108,8 @@ pub struct Params {
     /// `cover_margin`: seconds a station's team must beat the fastest
     /// raider to an asset by.
     pub margin: f32,
-    /// `cover_fight` (0/1): fight raids whenever close (1), or only once
-    /// they commit (0, default).
+    /// `cover_fight` (0/1): fight raids whenever close (1, default), or
+    /// only once they commit (0).
     pub fight: bool,
     /// `cover_keep`: how much a team prefers the raid it is on.
     pub keep: f32,
@@ -136,17 +136,18 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
+        // The best found in the staged raid game (Agalta, Otago).
         Params {
             q: 0.0,
-            margin: 3.0,
-            fight: false,
+            margin: 8.0,
+            fight: true,
             keep: 1.5,
             multi: false,
             stations: true,
-            heal: 0.0,
-            tau: 0.0,
-            deficit: 0.0,
-            pursue: 0.0,
+            heal: 0.35,
+            tau: 20.0,
+            deficit: 0.3,
+            pursue: 15.0,
         }
     }
 }
@@ -253,9 +254,9 @@ impl Ai {
         Params {
             q: f("cover_q", d.q),
             margin: f("cover_margin", d.margin),
-            fight: f("cover_fight", 0.0) > 0.5,
+            fight: f("cover_fight", if d.fight { 1.0 } else { 0.0 }) > 0.5,
             keep: f("cover_keep", d.keep),
-            multi: f("cover_multi", 0.0) > 0.5,
+            multi: f("cover_multi", if d.multi { 1.0 } else { 0.0 }) > 0.5,
             stations: f("cover_stations", 1.0) > 0.5,
             heal: f("cover_heal", d.heal),
             tau: f("cover_tau", d.tau),
