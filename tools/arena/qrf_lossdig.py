@@ -18,7 +18,7 @@ import os, re, sys, math, glob, collections
 TRACE = re.compile(r"qrftrace: t=(\d+) teams=\[(.*?)\] raids=\[(.*?)\]")
 LOSS = re.compile(r"qrfloss: t=(\d+) (\S+) at (-?\d+),(-?\d+)")
 ON = re.compile(r"qrf cover: team (\d+)@(-?\d+),(-?\d+) on raid@(-?\d+),(-?\d+)")
-FIGHT = re.compile(r"qrf cover: team (\d+) fights raid@(-?\d+),(-?\d+)")
+FIGHT = re.compile(r"qrf cover: team (\d+) (?:fights|pursues) raid@(-?\d+),(-?\d+)")
 TEAM = re.compile(r"(\d+):(\d+)@(-?\d+),(-?\d+)")
 RAID = re.compile(r"(\d+)@(-?\d+),(-?\d+)v(-?\d+),(-?\d+)")
 

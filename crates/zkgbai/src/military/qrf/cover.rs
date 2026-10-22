@@ -88,6 +88,11 @@ const MAX_COMBOS: usize = 4096;
 /// A team close to its station stays put, elmos.
 const AT_STATION: f32 = 120.0;
 
+/// A raid this many seconds from an asset, or going at under this share
+/// of its speed, is busy (killing something).
+const BUSY: f32 = 3.0;
+const BUSY_SPEED: f32 = 0.4;
+
 /// A healing member rejoins at this share of its health.
 const HEALED: f32 = 0.8;
 
@@ -123,6 +128,10 @@ pub struct Params {
     pub tau: f32,
     /// `cover_deficit`: weight of coming too late (see [`covered`]).
     pub deficit: f32,
+    /// `cover_pursue`: a raid busy at our assets (one within [`BUSY`]
+    /// seconds, or going slow) is gone at directly by a team that gets to
+    /// it within this many seconds; 0: never (only intercepts).
+    pub pursue: f32,
 }
 
 impl Default for Params {
@@ -137,6 +146,7 @@ impl Default for Params {
             heal: 0.0,
             tau: 0.0,
             deficit: 0.0,
+            pursue: 0.0,
         }
     }
 }
@@ -180,6 +190,7 @@ struct Stats {
     restations: u32,
     merges: u32,
     heals: u32,
+    pursuits: u32,
 }
 
 /// A raid seen: its group's index, its field, and the assets it reaches
@@ -249,6 +260,7 @@ impl Ai {
             heal: f("cover_heal", d.heal),
             tau: f("cover_tau", d.tau),
             deficit: f("cover_deficit", d.deficit),
+            pursue: f("cover_pursue", d.pursue),
         }
     }
 
@@ -257,8 +269,8 @@ impl Ai {
             let p = self.qrf_cover_params();
             self.qrf.cover.params = Some(p);
             let line = format!(
-                "qrf cover: q={} margin={} fight={} keep={} multi={} stations={} heal={} tau={} deficit={}",
-                p.q, p.margin, p.fight, p.keep, p.multi, p.stations, p.heal, p.tau, p.deficit
+                "qrf cover: q={} margin={} fight={} keep={} multi={} stations={} heal={} tau={} deficit={} pursue={}",
+                p.q, p.margin, p.fight, p.keep, p.multi, p.stations, p.heal, p.tau, p.deficit, p.pursue
             );
             self.log(&line);
         }
@@ -430,6 +442,15 @@ impl Ai {
                 continue;
             }
             let Some(tf) = fields.get(&t) else { continue };
+            let busy = first < BUSY || vel.length_2d() < BUSY_SPEED * g.speed;
+            if p.pursue > 0.0 && busy && tf.at(center) < p.pursue && sent_power >= POWER_RATIO * g.power {
+                self.qrf.cover.stats.pursuits += 1;
+                if tracing {
+                    self.log(&format!("qrf cover: team {t} pursues raid@{:.0},{:.0}", center.x, center.z));
+                }
+                self.qrf_order_team(ids, center + vel * 1.0, true);
+                continue;
+            }
             let mut aim = None;
             for &(ai, s) in threatened {
                 let tp = self.qrf.cover.targets[ai].pos;
@@ -506,7 +527,7 @@ impl Ai {
             let c = &self.qrf.cover;
             let st: Vec<String> = c.stations.iter().map(|(t, p)| format!("{t}@{:.0},{:.0}", p.x, p.z)).collect();
             let line = format!(
-                "qrf cover: coverage={:.2} entries={} raider_speed={:.0} stations=[{}] intercepts={} chases={} engages={} restations={} merges={} heals={} healing={}",
+                "qrf cover: coverage={:.2} entries={} raider_speed={:.0} stations=[{}] intercepts={} chases={} engages={} restations={} merges={} heals={} healing={} pursuits={}",
                 c.coverage,
                 c.entries,
                 c.raider_speed,
@@ -517,7 +538,8 @@ impl Ai {
                 c.stats.restations,
                 c.stats.merges,
                 c.stats.heals,
-                c.healing.len()
+                c.healing.len(),
+                c.stats.pursuits
             );
             self.log(&line);
         }
