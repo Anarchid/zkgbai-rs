@@ -15,6 +15,7 @@
 //! unless `disable=qrf`, when the usual handlers take the force instead.
 
 pub mod field;
+pub mod mark;
 pub mod station;
 
 use std::collections::BTreeMap;
@@ -147,6 +148,7 @@ pub struct Qrf {
     /// Seconds between trace lines (0: none).
     pub trace: i32,
     pub station: station::Station,
+    pub mark: mark::Mark,
     stats: Stats,
 }
 
@@ -232,6 +234,7 @@ impl Ai {
         self.qrf_assets();
         match self.qrf.algo.as_str() {
             "station" => self.qrf_station_update(frame),
+            "mark" => self.qrf_mark_update(frame),
             other => {
                 if frame % LOG_PERIOD < PERIOD {
                     self.log(&format!("qrf: no algorithm {other}, using station"));
