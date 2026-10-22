@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
-use springai::{Callback, Event, Resource, SkirmishAi, Unit, Vec3};
+use springai::{Callback, Event, Resource, SkirmishAi, Unit, Vec3, reserved};
 
 use crate::defs::Defs;
 use crate::economy::{EconomyManager, FactoryManager};
@@ -36,7 +36,16 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// losing fewer; `currency` (the danger of a job on an issue's crew priced
 /// as the worker's expected loss, and the crew holding where it pays) lost
 /// its mirrors 17-23 twice where the issue clients alone won 25-15.
-const OFF_BY_DEFAULT: [&str; 2] = ["pairs", "currency"];
+/// `matchup` (no light raiders against an army that outranges them: riots
+/// instead) lost income (39 vs 50 at 10:00) and games (5-3-2 vs 6-1-3)
+/// against the frozen hover baseline on Agalta, Oct 22: fewer Kodachis died
+/// but the raider stream's tempo was worth more than the riots.
+/// `permanence` (the interception planner keeps unseen enemy groups 45 s,
+/// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
+/// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
+/// frozen hover baseline, 20 games each, Oct 22: the memory frightens
+/// workers more than it positions squads.
+const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "matchup", "permanence"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
@@ -51,6 +60,16 @@ fn dev_features(cb: Callback) -> BTreeSet<String> {
     let on = list("enable", "ZKGBAI_ENABLE");
     off.extend(OFF_BY_DEFAULT.iter().filter(|f| !on.contains(**f)).map(|f| f.to_string()));
     off
+}
+
+/// Modules muted from the start: the `mute` option (or ZKGBAI_MUTE), a
+/// comma list of module prefixes (see `springai::reserved::mute` and the
+/// operator's `modules` tool).
+fn muted_modules(cb: Callback) -> Vec<String> {
+    cb.option("mute")
+        .or_else(|| std::env::var("ZKGBAI_MUTE").ok())
+        .map(|v| v.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
+        .unwrap_or_default()
 }
 
 /// The `shortName` this AI is registered under (see `data/AIInfo.lua`).
@@ -298,7 +317,7 @@ impl Ai {
     pub fn guard(&mut self, what: &'static str, f: impl FnOnce(&mut Ai)) {
         let start = Instant::now();
         self.guard_depth += 1;
-        let result = catch_unwind(AssertUnwindSafe(|| f(self)));
+        let result = catch_unwind(AssertUnwindSafe(|| reserved::as_module(what, || f(self))));
         self.guard_depth -= 1;
         let elapsed = start.elapsed();
         let nested = self.guard_depth > 0;
@@ -406,6 +425,13 @@ impl Ai {
         if !self.disabled.is_empty() {
             let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
             self.log(&format!("dev: features off: {}", off.join(", ")));
+        }
+        for m in muted_modules(self.cb) {
+            reserved::mute(self.cb, &m);
+        }
+        let muted = reserved::muted(self.cb);
+        if !muted.is_empty() {
+            self.log(&format!("dev: modules muted: {}", muted.join(", ")));
         }
         self.initialized = true;
         self.op_start();
@@ -841,6 +867,12 @@ impl Ai {
     pub fn say(&self, s: &str) {
         self.cb.game().send_text_message(&format!("/say <{AI_SHORT_NAME}> {s}"), 0);
         self.op_emit("say", serde_json::json!({"text": s}));
+    }
+
+    /// Say something to the spectators only (the engine's `s:` chat).
+    pub fn say_spec(&self, s: &str) {
+        self.cb.game().send_text_message(&format!("/say s:<{AI_SHORT_NAME}> {s}"), 0);
+        self.op_emit("say", serde_json::json!({"text": s, "spec": true}));
     }
 
     pub fn emote(&self, s: &str) {

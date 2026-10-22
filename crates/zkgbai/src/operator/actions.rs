@@ -2,19 +2,37 @@
 //!
 //! Each call is journaled as an `op` record with its arguments and result.
 
-use serde_json::json;
-use springai::{Event, Unit, Vec3, opt, reserved};
+use serde_json::{Value, json};
+use springai::{Event, NO_TIMEOUT, Unit, Vec3, opt, reserved};
 
+/// Zero-K `LuaRules/Gadgets/unit_field_factory.lua`: copy a factory's
+/// build list and pick the unit to build.
+const CMD_FIELD_FAC_QUEUELESS: i32 = 38695;
+
+use super::hud::{self, SECTIONS};
 use super::tools::Args;
-use super::views::{Out, xz};
-use super::{DefendPoint, FacOrder};
+use super::views::{self, Out, r1, xz};
+use super::{DefendPoint, FacOrder, Intent, IntentKind, PorcZone};
 use crate::Ai;
 use crate::logistics::{Kind, Worth};
-use crate::military::{DefenseTarget, SquadKind};
+use crate::military::{DefenseTarget, Fighter, SquadKind};
+use crate::util::NULLPOS;
 
 /// Features the `disable` switch knows (see `Ai::dev_off`).
-const FEATURES: [&str; 17] = [
+const FEATURES: [&str; 29] = [
     "porc",
+    "mexporc",
+    "screen",
+    "logistics",
+    "pause",
+    "clients",
+    "jumps",
+    "puppies",
+    "earlycons",
+    "raidmem",
+    "odreserve",
+    "pairs",
+    "currency",
     "reach",
     "refuge",
     "teleport",
@@ -53,8 +71,13 @@ fn ours(ai: &Ai, id: i32) -> Option<Unit> {
 
 pub fn say(ai: &mut Ai, a: &Args) -> Out {
     let text: String = a.str("text")?.chars().filter(|c| !c.is_control()).take(240).collect();
-    ai.say(&text);
-    Ok(json!({"said": text}))
+    let spec = a.bool_or("spec", false);
+    if spec {
+        ai.say_spec(&text);
+    } else {
+        ai.say(&text);
+    }
+    Ok(json!({"said": text, "spectators_only": spec}))
 }
 
 pub fn mark(ai: &mut Ai, a: &Args) -> Out {
@@ -95,6 +118,135 @@ pub fn feature(ai: &mut Ai, a: &Args) -> Out {
     Ok(v)
 }
 
+pub fn mute(ai: &mut Ai, a: &Args) -> Out {
+    let name = a.str("module")?.trim().to_owned();
+    if name.is_empty() {
+        return Err("'module' is required".into());
+    }
+    let off = a.bool_or("off", true);
+    let changed = if off { reserved::mute(ai.cb, &name) } else { reserved::unmute(ai.cb, &name) };
+    let mut v = json!({"module": name, "muted": off, "changed": changed, "all_muted": reserved::muted(ai.cb)});
+    if !views::MODULES.iter().any(|(m, _)| *m == name) && !name.contains('.') {
+        v["warning"] = json!(format!(
+            "'{name}' is not a module name; see `modules` (it mutes any handler starting with '{name}.')"
+        ));
+    }
+    Ok(v)
+}
+
+pub fn hud(ai: &mut Ai, a: &Args) -> Out {
+    if let Some(list) = a.opt_str("sections")? {
+        let list = list.trim();
+        let sections: Vec<String> = match list.to_ascii_lowercase().as_str() {
+            "all" => SECTIONS.iter().map(|(s, _)| (*s).to_owned()).collect(),
+            "none" | "" => Vec::new(),
+            _ => list.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect(),
+        };
+        let unknown: Vec<&String> = sections.iter().filter(|s| !SECTIONS.iter().any(|(n, _)| n == s)).collect();
+        if !unknown.is_empty() {
+            return Err(format!(
+                "unknown sections {:?}; sections: {}",
+                unknown,
+                SECTIONS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        ai.op.hud.lock().unwrap_or_else(|e| e.into_inner()).sections = sections;
+    }
+    if let Some(name) = a.opt_str("unpin")? {
+        let name = name.trim();
+        let mut h = ai.op.hud.lock().unwrap_or_else(|e| e.into_inner());
+        if name == "all" {
+            h.pins.clear();
+        } else {
+            h.pins.retain(|p| p.tool != name);
+        }
+    }
+    if let Some(name) = a.opt_str("pin")? {
+        let name = name.trim().to_owned();
+        let tool = super::tools::find(&name).ok_or_else(|| format!("no tool '{name}'"))?;
+        if tool.writes || name == "hud" {
+            return Err(format!("'{name}' cannot be pinned: only read tools"));
+        }
+        let args: Value = match a.opt_str("args")? {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| format!("'args' is not JSON: {e}"))?,
+            _ => json!({}),
+        };
+        if !args.is_object() {
+            return Err("'args' must be a JSON object".into());
+        }
+        let mut h = ai.op.hud.lock().unwrap_or_else(|e| e.into_inner());
+        h.pins.retain(|p| p.tool != name);
+        if h.pins.len() >= 6 {
+            return Err("at most 6 pins".into());
+        }
+        h.pins.push(hud::Pin { tool: name, args });
+    }
+    let cfg = ai.op.hud.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let text = hud::render(ai, &cfg);
+    Ok(json!({"sections": cfg.sections, "text": text,
+              "pins": cfg.pins.iter().map(|p| json!({"tool": p.tool, "args": p.args})).collect::<Vec<_>>(),
+              "available": SECTIONS.iter().map(|(n, d)| json!({"name": n, "shows": d})).collect::<Vec<_>>()}))
+}
+
+pub fn feed(ai: &mut Ai, a: &Args) -> Out {
+    let kinds = a.opt_str("kinds")?.map(|k| {
+        k.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect::<std::collections::BTreeSet<_>>()
+    });
+    let batch_ms = a.opt_i32("batch_ms")?.map(|v| v.clamp(0, 60_000) as u64);
+    let sitrep_s = a.opt_i32("sitrep_s")?.map(|v| v.clamp(0, 3600) as u64);
+    let mut f = ai.op.feed.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(k) = kinds {
+        f.kinds = k;
+    }
+    if let Some(b) = batch_ms {
+        f.batch_ms = b;
+    }
+    if let Some(s) = sitrep_s {
+        f.sitrep_s = s;
+    }
+    Ok(json!({"kinds": f.kinds, "batch_ms": f.batch_ms, "sitrep_s": f.sitrep_s,
+              "mcpl": ai.op.url.as_ref().map(|u| format!("{}/mcpl", u.replacen("http://", "ws://", 1)))}))
+}
+
+pub fn porc_zone(ai: &mut Ai, a: &Args) -> Out {
+    if a.bool_or("clear", false) {
+        let n = ai.op.over.porc_zones.len();
+        ai.op.over.porc_zones.clear();
+        return Ok(json!({"cleared": n}));
+    }
+    if let Some(pos) = point(ai, a)? {
+        let radius = a.f32_or("radius", 600.0)?.clamp(50.0, 5000.0);
+        let seconds = a.f32_or("seconds", 1800.0)?.clamp(1.0, 7200.0);
+        let until = ai.frame + (seconds * 30.0) as i32;
+        ai.op.over.porc_zones.push(PorcZone { pos, radius, until });
+    }
+    let frame = ai.frame;
+    Ok(json!({
+        "mexporc_off": ai.dev_off("mexporc"),
+        "zones": ai.op.over.porc_zones.iter().map(|z| json!({"pos": xz(z.pos), "radius": r1(z.radius), "seconds_left": (z.until - frame) / 30})).collect::<Vec<_>>(),
+        "note": if ai.dev_off("mexporc") { "turrets by mexes and links only inside these zones" } else { "feature mexporc is on: zones do nothing until you switch it off" },
+    }))
+}
+
+pub fn dial(ai: &mut Ai, a: &Args) -> Out {
+    let name = a.str("name")?.trim().to_ascii_lowercase();
+    match name.as_str() {
+        "greed" => {
+            if let Some(v) = a.opt_f32("value")? {
+                ai.op.over.greed = v.clamp(0.25, 4.0);
+            }
+        }
+        "line" => {
+            if let Some(v) = a.opt_f32("value")? {
+                ai.op.over.line = v.clamp(0.0, 0.9);
+            }
+        }
+        other => return Err(format!("unknown dial '{other}': greed, line")),
+    }
+    Ok(json!({"dials": {"greed": ai.op_greed(), "line": ai.op.over.line,
+                        "line_point": ai.op_line_point().map(xz)}}))
+}
+
 pub fn fac_queue(ai: &mut Ai, a: &Args) -> Out {
     if a.bool_or("clear", false) {
         let n = ai.op.over.fac_orders.len();
@@ -104,6 +256,15 @@ pub fn fac_queue(ai: &mut Ai, a: &Args) -> Out {
     let name = a.str("unit")?.to_owned();
     let def = ai.defs.get(&name).ok_or_else(|| format!("no unit def '{name}'"))?;
     let count = a.opt_i32("count")?.unwrap_or(1).clamp(1, 200) as u32;
+    if ai.op_posture() {
+        if ai.frame < 3600 {
+            return Err("posture profile: no production orders before 2:00 (the factory's own opening builds the constructors)".into());
+        }
+        let queued: u32 = ai.op.over.fac_orders.iter().map(|o| o.left).sum();
+        if queued + count > 2 {
+            return Err(format!("posture profile: at most 2 units queued ahead ({queued} already)"));
+        }
+    }
     let factory = a.opt_i32("factory")?;
     if let Some(f) = factory
         && !ai.fac.factories.contains_key(&f)
@@ -135,6 +296,9 @@ pub fn requisition(ai: &mut Ai, a: &Args) -> Out {
     let def = ai.defs.get(&name).ok_or_else(|| format!("no unit def '{name}'"))?;
     if def.speed() > 0.0 || def.build_options().is_empty() {
         return Err(format!("'{name}' is not a factory"));
+    }
+    if ai.op_posture() && ai.eco.effective_income < 30.0 {
+        return Err(format!("posture profile: a second factory only once income is past 30 (now {:.1})", ai.eco.effective_income));
     }
     ai.op.over.requisition = Some(name.clone());
     let now = ai.op_requisition();
@@ -215,6 +379,169 @@ pub fn squad_target(ai: &mut Ai, a: &Args) -> Out {
     Ok(json!({"squad": sid, "target": xz(pos), "seconds": seconds}))
 }
 
+pub fn squad_intent(ai: &mut Ai, a: &Args) -> Out {
+    let sid = a.i32("squad")?;
+    let sid = u32::try_from(sid).map_err(|_| "bad squad id")?;
+    if !ai.squads.contains(sid) {
+        return Err(format!("no squad {sid} (see squads)"));
+    }
+    if let (Some(c), Some(sq)) = (a.opt_f32("courage")?, ai.squads.get_mut(sid)) {
+        sq.courage = c.clamp(0.25, 4.0);
+    }
+    let intent = a.opt_str("intent")?.unwrap_or("").trim().to_ascii_lowercase();
+    if intent.is_empty() {
+        let courage = ai.squads.get(sid).map_or(1.0, |s| s.courage);
+        return Ok(json!({"squad": sid, "courage": courage,
+                         "intent": ai.op.over.squad_intents.get(&sid).map(|i| i.kind.name())}));
+    }
+    if intent == "clear" {
+        let had = ai.op.over.squad_intents.remove(&sid).is_some();
+        return Ok(json!({"squad": sid, "cleared": had}));
+    }
+    let kind = match intent.as_str() {
+        "hold" | "form" | "guard" => IntentKind::Hold,
+        "raid" => IntentKind::Raid,
+        "escort" => IntentKind::Escort,
+        "attack" => IntentKind::Attack,
+        other => return Err(format!("unknown intent '{other}': hold, raid, escort, attack or clear")),
+    };
+    let seconds = a.f32_or("seconds", 600.0)?.clamp(1.0, 3600.0);
+    let radius = a.f32_or("radius", if kind == IntentKind::Raid { 1500.0 } else { 300.0 })?.max(50.0);
+    let unit = a.opt_i32("unit")?;
+    let pos = match kind {
+        IntentKind::Escort => {
+            let id = unit.ok_or("'escort' needs the unit to escort (unit)")?;
+            ours(ai, id).ok_or_else(|| format!("{id} is not one of our units"))?.pos()
+        }
+        _ => point(ai, a)?.ok_or("give x and z")?,
+    };
+    let frame = ai.frame;
+    let mut i = Intent { kind, pos, radius, unit, until: frame + (seconds * 30.0) as i32, resolved: NULLPOS };
+    i.resolved = pos;
+    ai.op.over.squad_intents.insert(sid, i);
+    // Drop an explicit target so the intent takes over at once.
+    ai.op.over.squad_targets.remove(&sid);
+    if ai.squads.get(sid).is_some_and(|s| s.kind == SquadKind::Raider) {
+        ai.raider_squad_raid(sid, pos);
+    } else {
+        ai.squad_set_target(sid, pos);
+    }
+    let courage = ai.squads.get(sid).map_or(1.0, |s| s.courage);
+    Ok(json!({"squad": sid, "intent": kind.name(), "pos": xz(pos), "radius": radius, "seconds": seconds, "courage": courage}))
+}
+
+pub fn squad_form(ai: &mut Ai, a: &Args) -> Out {
+    let ids = a.ids("units")?;
+    let kind = match a.opt_str("kind")?.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "assault" => Some(SquadKind::Assault),
+        "raider" => Some(SquadKind::Raider),
+        "auto" => None,
+        other => return Err(format!("unknown kind '{other}': assault, raider or auto")),
+    };
+    let mut units = Vec::new();
+    let mut refused = Vec::new();
+    for id in ids {
+        match ours(ai, id) {
+            Some(u) if u.def().is_some_and(|d| d.speed() > 0.0 && !d.weapon_mounts().is_empty()) => units.push(u),
+            _ => refused.push(id),
+        }
+    }
+    if units.is_empty() {
+        return Err("no armed mobile units of ours among those".into());
+    }
+    // Whatever handler had them lets go (as on death); reserved units are
+    // handed back so the squad handler can move them.
+    for &u in &units {
+        reserved::release(ai.cb, u.id());
+        ai.retreat_remove_unit(u);
+        ai.raider_remove_unit(u);
+        ai.squad_remove_unit(u);
+        ai.misc_remove_unit(u);
+        ai.fighters.remove(&u.id());
+    }
+    let kind = kind.unwrap_or_else(|| {
+        let uc = &ai.unit_classes;
+        let raiders = units
+            .iter()
+            .filter(|u| {
+                let n = ai.defs.name_of(**u);
+                uc.small_raiders.contains(n) || uc.medium_raiders.contains(n) || uc.solo_raiders.contains(n)
+            })
+            .count();
+        if raiders * 2 >= units.len() { SquadKind::Raider } else { SquadKind::Assault }
+    });
+    let team = ai.team_id;
+    let sid = match kind {
+        SquadKind::Assault => {
+            let made = ai.squad_adopt(&units);
+            made.first().copied().ok_or("could not form the squad")?
+        }
+        _ => {
+            let sid = ai.squads.create(SquadKind::Raider, team, &ai.defs);
+            if let Some(sq) = ai.squads.get_mut(sid) {
+                sq.raider_type = 'm';
+                sq.status = 'a';
+            }
+            ai.raider_handler.raider_squads.push_back(sid);
+            let frame = ai.frame;
+            for u in &units {
+                let cost = u.def().map_or(0.0, |d| d.cost(ai.metal));
+                let f = Fighter::new_raider(*u, cost, team);
+                let id = f.id;
+                ai.fighters.insert(id, f);
+                // Known to the raider handler as a squad raider, so its death
+                // or departure leaves the squad the usual way.
+                ai.raider_handler.medium_raiders.insert(id);
+                if let Some(sq) = ai.squads.get_mut(sid) {
+                    sq.add_unit(id, &mut ai.fighters, frame);
+                }
+            }
+            // A leader, so the squad has a position from the start.
+            if let Some(sq) = ai.squads.get_mut(sid) {
+                sq.select_leader(&ai.fighters);
+            }
+            sid
+        }
+    };
+    if let (Some(c), Some(sq)) = (a.opt_f32("courage")?, ai.squads.get_mut(sid)) {
+        sq.courage = c.clamp(0.25, 4.0);
+    }
+    Ok(json!({"squad": sid, "kind": match kind { SquadKind::Raider => "raider", _ => "assault" },
+              "members": units.iter().map(|u| u.id()).collect::<Vec<_>>(), "refused": refused,
+              "hint": "give it an intent with squad_intent, or a place with squad_target"}))
+}
+
+pub fn squad_disband(ai: &mut Ai, a: &Args) -> Out {
+    let sid = a.i32("squad")?;
+    let sid = u32::try_from(sid).map_err(|_| "bad squad id")?;
+    let Some(mut squad) = ai.squads.remove(sid) else {
+        return Err(format!("no squad {sid} (see squads)"));
+    };
+    let members = squad.disband(&mut ai.fighters);
+    ai.raider_handler.raider_squads.retain(|&s| s != sid);
+    ai.squad_handler.squads.retain(|&s| s != sid);
+    ai.squad_handler.shield_squads.retain(|&s| s != sid);
+    ai.squad_handler.air_squads.retain(|&s| s != sid);
+    for slot in ai.raider_handler.next_squads.iter_mut() {
+        if *slot == Some(sid) {
+            *slot = None;
+        }
+    }
+    ai.op.over.squad_intents.remove(&sid);
+    ai.op.over.squad_targets.remove(&sid);
+    // The members are nobody's now; the AI picks them up as if idle.
+    let mut released = Vec::new();
+    for id in members {
+        ai.squad_handler.fighters.remove(&id);
+        ai.fighters.remove(&id);
+        if let Some(u) = ours(ai, id) {
+            ai.dispatch(Event::UnitIdle { unit: u });
+            released.push(id);
+        }
+    }
+    Ok(json!({"squad": sid, "disbanded": released}))
+}
+
 pub fn take(ai: &mut Ai, a: &Args) -> Out {
     let (mut taken, mut refused) = (Vec::new(), Vec::new());
     for id in a.ids("units")? {
@@ -279,6 +606,10 @@ pub fn order(ai: &mut Ai, a: &Args) -> Out {
             need_pos()?;
             build.ok_or("'build' needs a unit def")?;
         }
+        "field_fac" => {
+            need_target()?;
+            build.ok_or("'field_fac' needs the unit to build (unit)")?;
+        }
         "fire_state" | "move_state" | "cloak" | "on_off" => {
             need_value()?;
         }
@@ -313,6 +644,14 @@ pub fn order(ai: &mut Ai, a: &Args) -> Out {
                 let site = map.find_closest_build_site(d, pos.unwrap_or_default(), 300.0, 3, facing);
                 u.build(d, site, facing, opts)
             }),
+            // Zero-K's field factory gadget: CMD_FIELD_FAC_QUEUELESS copies
+            // the factory's blueprint and sets the wanted unit in one go.
+            "field_fac" => match (target, build) {
+                (Some(t), Some(d)) => {
+                    u.execute_custom_command(CMD_FIELD_FAC_QUEUELESS, &[t.id() as f32, d.id() as f32], opts, NO_TIMEOUT)
+                }
+                _ => false,
+            },
             "stop" => u.stop(opts),
             "wait" => u.wait(opts),
             "fire_state" => u.set_fire_state(value.unwrap_or(2).clamp(0, 2), opts),

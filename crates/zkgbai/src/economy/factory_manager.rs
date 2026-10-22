@@ -33,6 +33,8 @@ pub struct FactoryManager {
     pub num_workers: i32,
     pub mobile_bp: f32,
     pub worker_value: f32,
+    /// When the matchup rule last logged (see `fac_matchup_substitute`).
+    pub matchup_logged: i32,
     pub fighter_value: f32,
     pub army_value: f32,
     pub light_arty_value: f32,
@@ -123,6 +125,7 @@ impl FactoryManager {
             num_workers: 0,
             mobile_bp: 0.0,
             worker_value: 0.0,
+            matchup_logged: -1800,
             fighter_value: 0.0,
             army_value: 0.0,
             light_arty_value: 0.0,
@@ -535,10 +538,6 @@ impl Ai {
             f.creating_scout = false;
             f.scout_allowance -= 1;
         }
-        if let Some(def) = self.op_factory_order(fac_id) {
-            self.fac_build_ordered(fac_id, def);
-            return;
-        }
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let mut fac = f.clone();
 
@@ -570,6 +569,20 @@ impl Ai {
             FacKind::StriderHub => self.fac_get_strider(),
             FacKind::Other => return,
         };
+        // The raider layer's matchup: light raiders are not fed to an army
+        // of skirmishers that outrange them.
+        let choice = self.fac_matchup_substitute(choice);
+        // The operator's production orders replace the AI's own pick, but
+        // never a constructor it picked: an operator steering production
+        // must not move the economy off its builder curve.
+        let ai_wants_builder = self.defs.get(choice).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
+        if !ai_wants_builder
+            && let Some(def) = self.op_factory_order(fac_id, false)
+        {
+            self.fac.factories.insert(fac_id, fac);
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
         let (unit, pos) = (fac.unit, fac.get_pos());
         self.fac.factories.insert(fac_id, fac);
         match choice {
@@ -618,6 +631,34 @@ impl Ai {
 
     /// Build a unit the operator ordered, telling the modules that keep
     /// count of what they order.
+    /// `choice`, unless it is a light raider while more than a third of the
+    /// enemy's seen mobile army outranges light raiders: then the factory's
+    /// riot (or an assault) instead. Logged when the rule starts to bite.
+    fn fac_matchup_substitute(&mut self, choice: &'static str) -> &'static str {
+        const SHARE: f32 = 0.34;
+        const RIOTS: [&str; 9] = [
+            "tankriot", "cloakriot", "hoverriot", "vehriot", "shieldriot", "spiderriot", "amphriot", "jumpriot", "gunshipheavyskirm",
+        ];
+        // Kodachis are no raider class of the handlers (they run solo) but
+        // are the tank factory's light raider all the same.
+        let light = self.unit_classes.small_raiders.contains(choice) || choice == "tankraid";
+        if self.dev_off("matchup") || self.war.outranging_share <= SHARE || !light {
+            return choice;
+        }
+        let prefix = choice.trim_end_matches("raid");
+        let riot = RIOTS.iter().copied().find(|r| r.starts_with(prefix) && self.defs.get(r).is_some());
+        let assault = self.unit_classes.assaults.iter().copied().find(|a| a.starts_with(prefix) && self.defs.get(a).is_some());
+        let Some(instead) = riot.or(assault) else { return choice };
+        if self.frame - self.fac.matchup_logged > 1800 {
+            self.fac.matchup_logged = self.frame;
+            self.log(&format!(
+                "matchup: {:.0}% of the enemy's mobile army outranges light raiders; {instead} instead of {choice}",
+                self.war.outranging_share * 100.0
+            ));
+        }
+        instead
+    }
+
     fn fac_build_ordered(&mut self, fac_id: i32, def: UnitDef) {
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let (unit, pos, kind) = (f.unit, f.get_pos(), f.kind());

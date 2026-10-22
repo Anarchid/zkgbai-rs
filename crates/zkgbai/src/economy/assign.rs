@@ -117,11 +117,13 @@ impl Ai {
         let view = self.war.view(unit.def());
         // (A worker on the crew of an issue worth more to it than its
         // risk stays: see `logistics`.)
+        // The operator's greed dial scales the threat a worker perceives.
+        let greed = self.op_greed();
         if !w.is_chicken
             && !self.logistics_holds(wid)
-            && (view.get_effective_threat(pos) > view.get_total_friendly_threat(pos)
+            && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() || w.get_shields() < 0.5)
-                    && view.get_threat(pos) > 0.0
+                    && view.get_threat(pos) / greed > 0.0
                     && !w.is_working_on_porc(&self.eco.tasks)))
         {
             if let Some(w) = self.eco.workers.get_mut(&wid) {
@@ -288,6 +290,7 @@ impl Ai {
         // now: jumpjets come out of the fog in seconds (see RAID_MEMORY).
         let raiders = self.eco_recent_raiders();
         let currency = !self.dev_off("currency");
+        let greed = self.op_greed();
         let threat_cost = |t: &WorkerTask| {
             let p = t.get_pos();
             let near: f32 = raiders.iter().filter(|r| distance(r.0, p) <= RAID_RADIUS).map(|r| r.1).sum();
@@ -300,7 +303,8 @@ impl Ai {
             if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) {
                 cost += RAID_COST + near;
             }
-            cost
+            // The operator's greed dial: far, dangerous jobs priced cheaper.
+            cost / greed
         };
         // Only jobs the worker can get to (bots cannot build out at sea).
         let def = worker.unit.def();

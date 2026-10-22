@@ -48,6 +48,9 @@ pub struct Squad {
     pub last_assignment_frame: i32,
     /// Raider squads: raider class tag.
     pub raider_type: char,
+    /// The operator's courage dial: the threat the squad perceives is
+    /// divided by it, and its members retreat at `retreat_level / courage`.
+    pub courage: f32,
     /// Shield squads.
     pub num_felons: i32,
     /// Shield squads.
@@ -98,6 +101,7 @@ impl Squad {
             target: NULLPOS,
             last_assignment_frame: 0,
             raider_type: '\0',
+            courage: 1.0,
             num_felons: 0,
             num_aspis: 0,
             low_shields: false,

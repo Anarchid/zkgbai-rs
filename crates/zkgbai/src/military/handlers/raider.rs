@@ -42,7 +42,7 @@ pub struct RaiderHandler {
     pub scout_tasks: ScoutTasks,
     /// Fighter-store id of the scout plane.
     sparrow: Option<i32>,
-    next_squads: [Option<SquadId>; NUM_SQUAD_SLOTS],
+    pub(crate) next_squads: [Option<SquadId>; NUM_SQUAD_SLOTS],
     /// The original's `scoutTasks`: used by raider squads and the sparrow.
     scout_task_ids: Vec<ScoutTaskId>,
     /// The original's `soloScoutTasks`: the subset reachable by solo raiders.
@@ -1079,7 +1079,9 @@ impl Ai {
             return;
         };
         let pos = rs.get_pos(&self.fighters);
-        let (status, rs_target, raider_type, leader) = (rs.status, rs.target, rs.raider_type, rs.leader);
+        let (status, rs_target, raider_type, leader, courage) = (rs.status, rs.target, rs.raider_type, rs.leader, rs.courage);
+        // The operator's courage (see `Squad::courage`).
+        let tolerance = |friendly: f32| (courage - 1.0).max(0.0) * friendly;
         let members: Vec<(Vec3, bool)> = rs
             .fighters
             .iter()
@@ -1094,11 +1096,11 @@ impl Ai {
         if status != 'a' {
             // Assign forming and rallying squads.
             let over_threat = (rs_target != NULLPOS
-                && (view.get_porc_threat(rs_target) > 0.0
-                    || view.get_tactical_threat(rs_target) > war.available_mobile_threat))
+                && (view.get_porc_threat(rs_target) / courage > tolerance(war.available_mobile_threat)
+                    || view.get_tactical_threat(rs_target) / courage > war.available_mobile_threat))
                 || members.iter().any(|&(rpos, _)| {
-                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) > view.get_total_friendly_threat(rpos)
-                        || view.get_porc_threat(rpos) > 0.0
+                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) / courage > view.get_total_friendly_threat(rpos)
+                        || view.get_porc_threat(rpos) / courage > tolerance(view.get_total_friendly_threat(rpos))
                 });
             if !over_threat {
                 // Rallying squads may be sent to block an incursion's way.

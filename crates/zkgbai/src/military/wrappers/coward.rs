@@ -24,6 +24,8 @@ pub struct Coward {
 
     /// Health fraction below which the unit retreats.
     retreat_level: f32,
+    /// The squad's courage (see `Squad::courage`); 1 outside a squad.
+    pub courage: f32,
     team: i32,
 }
 
@@ -59,6 +61,7 @@ impl Coward {
                 || def_name == "tankassault"
                 || def_name == "tankheavyassault",
             retreat_level,
+            courage: 1.0,
             team,
         }
     }
@@ -103,9 +106,10 @@ impl Coward {
     /// retreat; updates `is_retreating`.
     pub fn should_retreat(&mut self) -> bool {
         let u = self.unit;
-        let retreat = u.health() / u.max_health() < self.retreat_level
-            || 1.0 - u.capture_progress() < self.retreat_level
-            || (self.is_strider && 1.0 - (u.paralyze_damage() / u.health()) < self.retreat_level);
+        let level = (self.retreat_level / self.courage.max(0.01)).min(0.95);
+        let retreat = u.health() / u.max_health() < level
+            || 1.0 - u.capture_progress() < level
+            || (self.is_strider && 1.0 - (u.paralyze_damage() / u.health()) < level);
         if retreat && self.hold_fire {
             u.set_fire_state(0, 0);
         }

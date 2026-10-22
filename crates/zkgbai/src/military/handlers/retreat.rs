@@ -94,7 +94,16 @@ impl Ai {
             }
             self.retreat_clean_units();
             self.retreat_check_shields();
+            self.retreat_sync_courage();
             self.retreat_cowards();
+        }
+    }
+
+    /// Each coward takes its squad's courage (the operator's dial).
+    fn retreat_sync_courage(&mut self) {
+        let (fighters, squads) = (&self.fighters, &self.squads);
+        for (id, c) in self.retreat_handler.cowards.iter_mut() {
+            c.courage = fighters.get(id).and_then(|f| f.squad).and_then(|sid| squads.get(sid)).map_or(1.0, |s| s.courage);
         }
     }
 
