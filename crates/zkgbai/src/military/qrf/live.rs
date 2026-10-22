@@ -3,7 +3,8 @@
 //! The force has two parts:
 //! - *dedicated* teams: raiders taken as they leave the factory while the
 //!   defense budget wants more (and given back to the raider handler when
-//!   it wants less). Hurt members go home to be repaired like any unit
+//!   it wants less). Short of the budget for a while, factories build
+//!   raiders for it in place of plain fighters (`qrf_production`). Hurt members go home to be repaired like any unit
 //!   (the retreat handler) and rejoin when healed.
 //! - *moonlighting* squads: raider squads still forming (waiting at their
 //!   rally point for the rest of their members) answer raids near home in
@@ -76,6 +77,12 @@ const OVER_FOR: i32 = 30 * 30;
 /// A drafted squad is let go this long after it was last sent (frames).
 const DRAFT_HOLD: i32 = PERIOD * 2;
 
+/// Factories build raiders for the force once it has been short of the
+/// budget (by more than a raider) this long; an order is counted as on
+/// its way for this long (frames).
+const SHORT_FOR: i32 = 30 * 20;
+const ORDER_PENDING: i32 = 30 * 60;
+
 /// Units the dedicated teams take: raiders that run on the ground.
 pub const RECRUITS: [&str; 8] =
     ["cloakraid", "shieldraid", "hoverraid", "vehraid", "tankraid", "tankheavyraid", "jumpraid", "amphraid"];
@@ -106,6 +113,11 @@ pub struct Budget {
     /// Raids near our value: frame, each raid's power.
     sightings: VecDeque<(i32, Vec<f32>)>,
     over_since: Option<i32>,
+    short_since: Option<i32>,
+    /// Raiders ordered from factories for the force: frame, metal.
+    pub pending: Vec<(i32, f32)>,
+    /// Factories may build raiders for the force (`qrf_production`).
+    pub production: bool,
 }
 
 impl Default for Budget {
@@ -121,6 +133,9 @@ impl Default for Budget {
             reason: "quiet".into(),
             sightings: VecDeque::new(),
             over_since: None,
+            short_since: None,
+            pending: Vec::new(),
+            production: true,
         }
     }
 }
@@ -236,6 +251,8 @@ pub struct Doing {
 
 #[derive(Default)]
 pub struct Stats {
+    /// Raiders ordered from factories for the force.
+    pub ordered: u32,
     pub recruited: u32,
     pub released: u32,
     pub drafts: u32,
@@ -270,6 +287,7 @@ impl Ai {
         };
         q.budget.cap = num("qrf_cap").unwrap_or(CAP).clamp(0.0, 1.0);
         q.budget.gain = num("qrf_gain").unwrap_or(GAIN).max(0.0);
+        q.budget.production = !opt("qrf_production").is_some_and(|v| matches!(v.as_str(), "off" | "0" | "false"));
         q.grid = Some(Grid::new(self.cb));
         q.candidates = super::candidates(self.cb);
         let line = format!(
@@ -402,6 +420,12 @@ impl Ai {
         };
         b.wanted = wanted;
         b.reason = reason;
+        b.pending.retain(|p| frame - p.0 < ORDER_PENDING);
+        if wanted - have > 150.0 {
+            b.short_since.get_or_insert(frame);
+        } else {
+            b.short_since = None;
+        }
         // Over budget for a while: let the weakest free team go.
         let over = have > wanted * (1.0 + SLACK) + 150.0;
         if !over {
@@ -460,10 +484,42 @@ impl Ai {
             },
         );
         self.qrf.budget.have += cost;
+        if !self.qrf.budget.pending.is_empty() {
+            self.qrf.budget.pending.remove(0);
+        }
         self.qrf.live_stats.recruited += 1;
         unit.set_move_state(1, 0);
         unit.set_fire_state(2, 0);
         true
+    }
+
+    /// A raider for the force from a factory about to build `choice`, if
+    /// the force has been short of its budget a while (and the orders on
+    /// their way do not make it up). Never in place of anti-air or a
+    /// special unit (`choice` is a plain fighter).
+    pub fn qrf_production(&mut self, factory: Unit, choice: &str) -> Option<&'static str> {
+        let b = &self.qrf.budget;
+        if !self.qrf.on || !self.qrf.live || !b.production {
+            return None;
+        }
+        let frame = self.frame;
+        if b.short_since.is_none_or(|s| frame - s < SHORT_FOR) || RECRUITS.contains(&choice) {
+            return None;
+        }
+        let def = self.defs.get(choice)?;
+        if self.unit_classes.aas.contains(choice) || def.is_able_to_fly() || def.speed() <= 0.0 {
+            return None;
+        }
+        let options = factory.def()?.build_options();
+        let name = RECRUITS.iter().copied().find(|n| options.iter().any(|d| self.defs.name(*d) == *n))?;
+        let cost = self.defs.get(name)?.cost(self.metal);
+        let pending: f32 = b.pending.iter().map(|p| p.1).sum();
+        if b.wanted - b.have - pending < 0.5 * cost {
+            return None;
+        }
+        self.qrf.budget.pending.push((frame, cost));
+        self.qrf.live_stats.ordered += 1;
+        Some(name)
     }
 
     /// Take units into a new team of the operator's (whatever handler had
@@ -594,7 +650,7 @@ impl Ai {
         let moon = teams.keys().filter(|t| **t >= MOON).count();
         let line = format!(
             "qrflive: t={} wanted={:.0} have={:.0} army={:.0} moonlight={:.0} teams={dedicated} moonlighters={moon} \
-             drafted={} raids={} recruited={} released={} drafts={} losses={} marked={} lost_metal={:.0} reason={}",
+             drafted={} raids={} ordered={} recruited={} released={} drafts={} losses={} marked={} lost_metal={:.0} reason={}",
             frame / 30,
             b.wanted,
             b.have,
@@ -602,6 +658,7 @@ impl Ai {
             b.moonlight,
             self.qrf.drafted.len(),
             self.qrf.groups.len(),
+            s.ordered,
             s.recruited,
             s.released,
             s.drafts,
@@ -615,7 +672,7 @@ impl Ai {
             "wanted": b.wanted.round(), "have": b.have.round(), "army": b.army.round(), "moonlight": b.moonlight.round(),
             "mode": format!("{:?}", b.mode), "reason": b.reason, "teams": dedicated, "moonlighters": moon,
             "drafted": self.qrf.drafted.len(), "raids": self.qrf.groups.len(),
-            "recruited": s.recruited, "released": s.released, "drafts": s.drafts,
+            "ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts,
             "losses": s.losses, "losses_marked": s.losses_marked, "losses_metal": s.losses_metal.round(),
         });
         self.op_emit("qrf", v);

@@ -103,10 +103,11 @@ pub fn view(ai: &mut Ai, _: &Args) -> Out {
         "on": q.on, "mode": if q.live { "live" } else if q.on { "staged" } else { "off" },
         "algo": q.algo, "team_size": q.team_size, "moonlight": !q.no_moonlight,
         "budget": {"mode": mode_name(b.mode), "wanted": b.wanted.round(), "have": b.have.round(),
+                   "production": b.production, "on_order": b.pending.len(),
                    "army": b.army.round(), "moonlight": b.moonlight.round(), "cap": b.cap, "gain": b.gain,
                    "reason": b.reason, "recent": {"raids_at_once": raids_at_once, "typical_raid": typical.round()}},
         "teams": teams, "raids": raids,
-        "stats": {"recruited": s.recruited, "released": s.released, "drafts": s.drafts,
+        "stats": {"ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts,
                   "losses": s.losses, "losses_while_marked": s.losses_marked, "losses_metal": s.losses_metal.round()},
         "hint": "team ids: numbers are dedicated teams, mN the moonlighting raider squad N; qrf_team sets roles",
     }))
@@ -143,6 +144,9 @@ pub fn set(ai: &mut Ai, a: &Args) -> Out {
     }
     if a.has("moonlight") {
         ai.qrf.no_moonlight = !a.bool_or("moonlight", true);
+    }
+    if a.has("production") {
+        ai.qrf.budget.production = a.bool_or("production", true);
     }
     if let Some(n) = a.opt_i32("team_size")? {
         ai.qrf.team_size = n.clamp(1, 12) as usize;

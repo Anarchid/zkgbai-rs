@@ -51,6 +51,14 @@ local options = {
 		maxlen = 8,
 	},
 	{
+		key    = 'qrf_production',
+		name   = 'Home defense production',
+		desc   = 'Factories build raiders for the home defense while it is short of its budget: on or off. Empty: on.',
+		type   = 'string',
+		def    = '',
+		maxlen = 4,
+	},
+	{
 		key    = 'qrf_moonlight',
 		name   = 'Moonlighting squads',
 		desc   = 'Raider squads still forming answer raids at home while they fill: on or off. Empty: on.',

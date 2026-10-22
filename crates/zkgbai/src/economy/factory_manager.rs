@@ -576,6 +576,16 @@ impl Ai {
         // never a constructor it picked: an operator steering production
         // must not move the economy off its builder curve.
         let ai_wants_builder = self.defs.get(choice).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
+        // Raiders for home defense while its budget is short (see `qrf`),
+        // in place of a plain fighter.
+        let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy")
+            || choice == scouts::WIDOW
+            || choice == scouts::SCYTHE
+            || self.firefighters_order(kind) == Some(choice);
+        let choice = match (ai_wants_builder || special, fac.unit) {
+            (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
+            _ => choice,
+        };
         if !ai_wants_builder
             && let Some(def) = self.op_factory_order(fac_id, false)
         {
