@@ -17,6 +17,7 @@
 //! options `mark_<field of Tune>`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use springai::Vec3;
 
@@ -255,7 +256,15 @@ impl Ai {
         let mut targets: Vec<Target> = Vec::new();
         // In normal play the travel times go only as far as they are used
         // (the staged game keeps the whole map, as it was tuned on).
-        let (raid_max, team_max) = if self.qrf.live { (HORIZON + 15.0, HORIZON * 2.0 + 30.0) } else { (NEVER, NEVER) };
+        let (raid_max, team_max) = if self.qrf.live { (HORIZON + 15.0, HORIZON * 2.0) } else { (NEVER, NEVER) };
+        // A team's travel times: kept while it stands, in normal play.
+        let team_field = |ai: &Ai, team: usize, ids: &[i32]| -> Option<Arc<Field>> {
+            if ai.qrf.live {
+                ai.qrf_team_field_kept(team, ids, team_max)
+            } else {
+                ai.qrf_team_field_within(ids, team_max).map(Arc::new)
+            }
+        };
         let group_fields: Vec<Option<Field>> =
             self.qrf.groups.iter().map(|g| self.qrf_group_field_within(g, raid_max)).collect();
         for (gi, f) in group_fields.iter().enumerate() {
@@ -318,8 +327,8 @@ impl Ai {
             team_ids.truncate(7);
         }
         // (No raid, no travel times: they are the costliest part.)
-        let fields: Vec<Option<Field>> = (team_ids.iter())
-            .map(|t| if targets.is_empty() { None } else { self.qrf_team_field_within(&teams[t], team_max) })
+        let fields: Vec<Option<Arc<Field>>> = (team_ids.iter())
+            .map(|&t| if targets.is_empty() { None } else { team_field(self, t, &teams[&t]) })
             .collect();
         let mut cost = vec![vec![0.0f32; targets.len()]; team_ids.len()];
         // Of that, what is late among the assets the raid reaches soon: a
@@ -384,7 +393,11 @@ impl Ai {
             let ids = &teams[&team];
             let (pos, _) = self.qrf_team_pos(ids);
             let power: f32 = plan.iter().filter(|p| p.1 == ti).map(|p| self.qrf_team_power(&teams[&p.0])).sum();
-            let mut spot = self.qrf_mark_spot(ids, t, tune);
+            let tf = match team_ids.iter().position(|&x| x == team) {
+                Some(i) => fields[i].clone(),
+                None => team_field(self, team, ids),
+            };
+            let mut spot = self.qrf_mark_spot(ids, t, tune, tf.as_deref());
             // Goalkeeping: stand on the asset the raid heads for, a little
             // toward it, if we get there first (our guns outrange raiders'
             // on a mex).
@@ -508,12 +521,10 @@ impl Ai {
     }
 
     /// Where a team marks a target from: see the module doc.
-    fn qrf_mark_spot(&self, ids: &[i32], t: &Target, tune: Tune) -> Vec3 {
+    fn qrf_mark_spot(&self, ids: &[i32], t: &Target, tune: Tune, field: Option<&Field>) -> Vec3 {
         let (standoff, latew) = (tune.standoff, tune.latew);
         let live = self.qrf.live;
         let (pos, speed) = self.qrf_team_pos(ids);
-        let field: Option<Field> =
-            self.qrf_team_field_within(ids, if self.qrf.live { HORIZON * 2.0 + 30.0 } else { NEVER });
         let Some(grid) = self.qrf.grid.as_ref() else { return pos };
         let Some(mobility) = ids.iter().find_map(|id| self.qrf.members.get(id)).map(|m| m.mobility) else {
             return pos;
@@ -533,7 +544,7 @@ impl Ai {
                 if live && self.war.get_porc_threat(x) > 0.0 {
                     continue;
                 }
-                let transit = field.as_ref().map_or(distance(pos, x) / speed, |f| f.at(x));
+                let transit = field.map_or(distance(pos, x) / speed, |f| f.at(x));
                 if transit == NEVER {
                     continue;
                 }

@@ -28,7 +28,9 @@ pub mod mark;
 pub mod ops;
 pub mod station;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use springai::{Unit, UnitDef, Vec3, reserved};
 
@@ -181,8 +183,13 @@ pub struct Qrf {
     pub live_stats: live::Stats,
     /// Teams are being given back (none are taken meanwhile).
     releasing: bool,
+    /// Travel times of teams standing still, kept a while (normal play):
+    /// by team, the frame, members' places, the horizon.
+    team_fields: RefCell<TeamFields>,
     stats: Stats,
 }
+
+type TeamFields = BTreeMap<usize, (i32, Vec<(i32, Vec3)>, f32, Arc<Field>)>;
 
 /// Types a contact may be, slowest first: armed mobile ground units.
 fn candidates(cb: springai::Callback) -> Vec<(f32, UnitDef)> {
@@ -506,6 +513,25 @@ impl Ai {
         let speed = ms.iter().map(|m| m.speed).fold(f32::INFINITY, f32::min);
         let sources: Vec<(Vec3, f32)> = ms.iter().map(|m| (m.pos(), 0.0)).collect();
         Some(grid.field_within(m.mobility, speed, &sources, max))
+    }
+
+    /// [`Ai::qrf_team_field_within`], kept while every member stays within
+    /// a cell of where it was, for up to three updates: teams screening or
+    /// marking mostly stand.
+    pub fn qrf_team_field_kept(&self, team: usize, ids: &[i32], max: f32) -> Option<Arc<Field>> {
+        let now: Vec<(i32, Vec3)> =
+            ids.iter().filter_map(|id| self.qrf.members.get(id).map(|m| (*id, m.pos()))).collect();
+        if let Some((at, then, m, f)) = self.qrf.team_fields.borrow().get(&team)
+            && *m == max
+            && self.frame - at <= 3 * PERIOD
+            && then.len() == now.len()
+            && then.iter().zip(&now).all(|(a, b)| a.0 == b.0 && distance(a.1, b.1) < field::CELL * 0.75)
+        {
+            return Some(f.clone());
+        }
+        let f = Arc::new(self.qrf_team_field_within(ids, max)?);
+        self.qrf.team_fields.borrow_mut().insert(team, (self.frame, now, max, f.clone()));
+        Some(f)
     }
 
     /// Seconds for a raid to get anywhere.
