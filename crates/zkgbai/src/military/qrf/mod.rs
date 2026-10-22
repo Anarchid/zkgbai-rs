@@ -281,28 +281,31 @@ impl Ai {
         }
         let team = self.team_id;
         self.qrf.members.retain(|_, m| m.unit.health() > 0.0 && m.unit.team() == team);
+        // Each step on its own in the profile (and its faults its own).
         if self.qrf.live {
-            self.qrf_live_roster(frame);
+            self.guard("qrf.roster", |ai| ai.qrf_live_roster(frame));
         }
-        self.qrf_track(frame);
-        self.qrf_group();
-        self.qrf_assets();
+        self.guard("qrf.track", |ai| ai.qrf_track(frame));
+        self.guard("qrf.group", |ai| ai.qrf_group());
+        self.guard("qrf.assets", |ai| ai.qrf_assets());
         if self.qrf.live {
-            self.qrf_live_filter(frame);
-            self.qrf_live_budget(frame);
+            self.guard("qrf.budget", |ai| {
+                ai.qrf_live_filter(frame);
+                ai.qrf_live_budget(frame);
+            });
         }
-        match self.qrf.algo.as_str() {
-            "station" => self.qrf_station_update(frame),
-            "cover" => self.qrf_cover_update(frame),
-            "mark" => self.qrf_mark_update(frame),
-            "intent" => self.qrf_intent_update(frame),
+        self.guard("qrf.algo", |ai| match ai.qrf.algo.as_str() {
+            "station" => ai.qrf_station_update(frame),
+            "cover" => ai.qrf_cover_update(frame),
+            "mark" => ai.qrf_mark_update(frame),
+            "intent" => ai.qrf_intent_update(frame),
             other => {
                 if frame % LOG_PERIOD < PERIOD {
-                    self.log(&format!("qrf: no algorithm {other}, using station"));
+                    ai.log(&format!("qrf: no algorithm {other}, using station"));
                 }
-                self.qrf_station_update(frame)
+                ai.qrf_station_update(frame)
             }
-        }
+        });
         if self.qrf.live {
             self.qrf_live_after(frame);
         }
