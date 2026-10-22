@@ -16,6 +16,7 @@
 
 pub mod cover;
 pub mod field;
+pub mod mark;
 pub mod station;
 
 use std::collections::BTreeMap;
@@ -149,6 +150,7 @@ pub struct Qrf {
     pub trace: i32,
     pub station: station::Station,
     pub cover: cover::Cover,
+    pub mark: mark::Mark,
     stats: Stats,
 }
 
@@ -235,6 +237,7 @@ impl Ai {
         match self.qrf.algo.as_str() {
             "station" => self.qrf_station_update(frame),
             "cover" => self.qrf_cover_update(frame),
+            "mark" => self.qrf_mark_update(frame),
             other => {
                 if frame % LOG_PERIOD < PERIOD {
                     self.log(&format!("qrf: no algorithm {other}, using station"));
