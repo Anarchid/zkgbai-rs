@@ -665,6 +665,7 @@ pub static TOOLS: &[Tool] = &[
             P("defense", Str, false, "auto, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)"),
             P("cap", Num, false, "auto: at most this share of the mobile army (default 0.3)"),
             P("gain", Num, false, "auto: power per team, times the strongest recent raid's (default 1.5)"),
+            P("size", Str, false, "auto: the raid a team is sized against: typical (default), largest, or lossy (the raids that cost us)"),
             P("moonlight", Bool, false, "forming raider squads answer raids at home while they fill (default true)"),
             P("production", Bool, false, "factories build raiders for the force while it is short of the budget (default true)"),
             P("team_size", Int, false, "raiders per dedicated team (default 3)"),

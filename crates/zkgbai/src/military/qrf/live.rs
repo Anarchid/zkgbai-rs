@@ -67,6 +67,41 @@ const RAID_SHARE: f32 = 0.5;
 /// Raids are remembered this long for the budget (frames).
 const RECALL: i32 = 30 * 180;
 
+/// Losses to raids are remembered this long for the budget (frames).
+const LOSS_RECALL: i32 = 30 * 300;
+
+/// How the budget sizes a team against the raids seen (AI option
+/// `qrf_size`, the operator's `qrf_set size`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sizing {
+    /// A typical raid: the 75th percentile of raid power over [`RECALL`].
+    Typical,
+    /// The largest raid-like group seen over [`RECALL`].
+    Largest,
+    /// The raids that cost us: the 75th percentile of raid power weighted
+    /// by the metal lost to each over [`LOSS_RECALL`], never under typical.
+    Lossy,
+}
+
+impl Sizing {
+    pub fn name(self) -> &'static str {
+        match self {
+            Sizing::Typical => "typical",
+            Sizing::Largest => "largest",
+            Sizing::Lossy => "lossy",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Sizing> {
+        match s.trim() {
+            "typical" => Some(Sizing::Typical),
+            "largest" => Some(Sizing::Largest),
+            "lossy" => Some(Sizing::Lossy),
+            _ => None,
+        }
+    }
+}
+
 /// Defaults: dedicated power per unit of a typical raid's; the
 /// ceiling, as a share of our mobile army.
 const GAIN: f32 = 1.5;
@@ -134,8 +169,11 @@ pub struct Budget {
     /// Moonlighting squads' power.
     pub moonlight: f32,
     pub reason: String,
+    pub size: Sizing,
     /// Raids near our value: frame, each raid's power.
     sightings: VecDeque<(i32, Vec<f32>)>,
+    /// Our assets lost to raids: frame, the raid's power, the metal lost.
+    loss_raids: VecDeque<(i32, f32, f32)>,
     over_since: Option<i32>,
     short_since: Option<i32>,
     /// Raiders ordered from factories for the force: frame, metal.
@@ -158,7 +196,9 @@ impl Default for Budget {
             army: 0.0,
             moonlight: 0.0,
             reason: "quiet".into(),
+            size: Sizing::Typical,
             sightings: VecDeque::new(),
+            loss_raids: VecDeque::new(),
             over_since: None,
             short_since: None,
             pending: Vec::new(),
@@ -177,6 +217,25 @@ fn p75(mut xs: Vec<f32>) -> f32 {
     xs[((xs.len() - 1) as f32 * 0.75).round() as usize]
 }
 
+/// The 75th percentile of `xs` by weight: the least value at or above
+/// which three quarters of the weight lies.
+fn weighted_p75(mut xs: Vec<(f32, f32)>) -> f32 {
+    xs.retain(|x| x.1 > 0.0);
+    if xs.is_empty() {
+        return 0.0;
+    }
+    xs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f32 = xs.iter().map(|x| x.1).sum();
+    let mut acc = 0.0;
+    for &(v, w) in &xs {
+        acc += w;
+        if acc >= 0.75 * total {
+            return v;
+        }
+    }
+    xs.last().map_or(0.0, |x| x.0)
+}
+
 impl Budget {
     /// Raids at once, and a raid's power, lately (75th percentiles over the
     /// times raids were near).
@@ -184,6 +243,28 @@ impl Budget {
         let n = p75(self.sightings.iter().map(|s| s.1.len() as f32).collect()).round() as usize;
         let typical = p75(self.sightings.iter().flat_map(|s| s.1.iter().copied()).collect());
         (n, typical)
+    }
+
+    /// The raid power a team is sized against, by [`Sizing`].
+    pub fn strongest(&self) -> f32 {
+        let typical = self.recent().1;
+        match self.size {
+            Sizing::Typical => typical,
+            Sizing::Largest => {
+                (self.sightings.iter().flat_map(|s| s.1.iter().copied())).fold(typical, f32::max)
+            }
+            Sizing::Lossy => {
+                weighted_p75(self.loss_raids.iter().map(|l| (l.1, l.2)).collect()).max(typical)
+            }
+        }
+    }
+
+    /// An asset of ours lost to a raid of this power.
+    pub fn lost_to(&mut self, frame: i32, raid_power: f32, cost: f32) {
+        self.loss_raids.push_back((frame, raid_power, cost));
+        while self.loss_raids.front().is_some_and(|l| frame - l.0 > LOSS_RECALL) {
+            self.loss_raids.pop_front();
+        }
     }
 }
 
@@ -315,12 +396,19 @@ impl Ai {
         };
         q.budget.cap = num("qrf_cap").unwrap_or(CAP).clamp(0.0, 1.0);
         q.budget.gain = num("qrf_gain").unwrap_or(GAIN).max(0.0);
+        q.budget.size = opt("qrf_size").and_then(|v| Sizing::parse(&v)).unwrap_or(Sizing::Typical);
         q.budget.production = !opt("qrf_production").is_some_and(|v| matches!(v.as_str(), "off" | "0" | "false"));
         q.grid = Some(Grid::new(self.cb));
         q.candidates = super::candidates(self.cb);
         let line = format!(
-            "qrf: live algo={} team={} moonlight={} defense={:?} cap={} gain={}",
-            q.algo, q.team_size, !q.no_moonlight, q.budget.mode, q.budget.cap, q.budget.gain
+            "qrf: live algo={} team={} moonlight={} defense={:?} cap={} gain={} size={}",
+            q.algo,
+            q.team_size,
+            !q.no_moonlight,
+            q.budget.mode,
+            q.budget.cap,
+            q.budget.gain,
+            q.budget.size.name()
         );
         self.log(&line);
     }
@@ -457,9 +545,13 @@ impl Ai {
         b.army = army;
         b.have = have;
         b.moonlight = moon;
-        let (raids, strongest) = b.recent();
+        let raids = b.recent().0;
+        let strongest = b.strongest();
         let (wanted, reason) = match b.mode {
-            Mode::Auto => auto_wanted(raids, strongest, losses, moon, army, b.gain, b.cap),
+            Mode::Auto => {
+                let (w, r) = auto_wanted(raids, strongest, losses, moon, army, b.gain, b.cap);
+                (w, format!("{r} [{} raid {strongest:.0}]", b.size.name()))
+            }
             Mode::Metal(v) => (v, "set by the operator".into()),
             Mode::Share(s) => (s * army, format!("{:.0}% of the army, set by the operator", s * 100.0)),
         };
@@ -761,6 +853,10 @@ impl Ai {
         s.losses += 1;
         s.losses_marked += marked as u32;
         s.losses_metal += cost;
+        if let Some((i, _)) = raid {
+            let power = self.qrf.groups[i].power;
+            self.qrf.budget.lost_to(frame, power, cost);
+        }
         let name = self.defs.name(def).to_owned();
         let raid_s = raid.map_or("none".to_owned(), |(i, _)| {
             let g = &self.qrf.groups[i];
@@ -809,6 +905,34 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizing_picks_the_raids_that_matter() {
+        let mut b = Budget::default();
+        // Nine single Daggers and one group of 600 seen; one mex lost to
+        // the group.
+        b.sightings.push_back((0, vec![80.0; 9]));
+        b.sightings.push_back((30, vec![600.0]));
+        b.lost_to(60, 600.0, 75.0);
+        assert!((b.strongest() - 80.0).abs() < 1.0);
+        b.size = Sizing::Largest;
+        assert!((b.strongest() - 600.0).abs() < 1.0);
+        b.size = Sizing::Lossy;
+        assert!((b.strongest() - 600.0).abs() < 1.0);
+        // Losses mostly to light raids: the weighted p75 is light, never
+        // under typical.
+        b.loss_raids.clear();
+        for _ in 0..4 {
+            b.lost_to(60, 80.0, 75.0);
+        }
+        b.lost_to(60, 600.0, 75.0);
+        assert!((b.strongest() - 80.0).abs() < 1.0);
+        // Old losses are forgotten.
+        b.lost_to(60 + LOSS_RECALL + 1, 300.0, 75.0);
+        assert_eq!(b.loss_raids.len(), 1);
+        assert_eq!(weighted_p75(vec![(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)]), 3.0);
+        assert_eq!(weighted_p75(Vec::new()), 0.0);
+    }
 
     #[test]
     fn quiet_wants_nothing() {

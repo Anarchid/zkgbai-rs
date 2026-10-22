@@ -51,6 +51,14 @@ local options = {
 		maxlen = 8,
 	},
 	{
+		key    = 'qrf_size',
+		name   = 'Home defense sizing',
+		desc   = 'On auto, the raid a team is sized against: typical (a typical recent raid), largest (the largest recent raid-like group), or lossy (the raids that cost us, weighted by the metal lost). Empty: typical.',
+		type   = 'string',
+		def    = '',
+		maxlen = 8,
+	},
+	{
 		key    = 'qrf_production',
 		name   = 'Home defense production',
 		desc   = 'Factories build raiders for the home defense while it is short of its budget: on or off. Empty: on.',

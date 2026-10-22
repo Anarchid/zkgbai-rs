@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use springai::{Unit, Vec3};
 
-use super::live::{MOON, Mode, Role, RoleKind, Tactic};
+use super::live::{MOON, Mode, Role, RoleKind, Sizing, Tactic};
 use crate::Ai;
 use crate::operator::tools::Args;
 use crate::operator::views::{Out, r1, xz};
@@ -104,7 +104,7 @@ pub fn view(ai: &mut Ai, _: &Args) -> Out {
         "algo": q.algo, "team_size": q.team_size, "moonlight": !q.no_moonlight,
         "budget": {"mode": mode_name(b.mode), "wanted": b.wanted.round(), "have": b.have.round(),
                    "production": b.production, "on_order": b.pending.len(),
-                   "army": b.army.round(), "moonlight": b.moonlight.round(), "cap": b.cap, "gain": b.gain,
+                   "army": b.army.round(), "moonlight": b.moonlight.round(), "cap": b.cap, "gain": b.gain, "size": b.size.name(),
                    "reason": b.reason, "recent": {"raids_at_once": raids_at_once, "typical_raid": typical.round()}},
         "teams": teams, "raids": raids,
         "stats": {"ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts,
@@ -141,6 +141,9 @@ pub fn set(ai: &mut Ai, a: &Args) -> Out {
     }
     if let Some(g) = a.opt_f32("gain")? {
         ai.qrf.budget.gain = g.clamp(0.0, 10.0);
+    }
+    if let Some(sz) = a.opt_str("size")? {
+        ai.qrf.budget.size = Sizing::parse(sz).ok_or("size: typical, largest or lossy")?;
     }
     if a.has("moonlight") {
         ai.qrf.no_moonlight = !a.bool_or("moonlight", true);

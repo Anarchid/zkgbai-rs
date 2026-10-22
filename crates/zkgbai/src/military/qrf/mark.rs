@@ -94,6 +94,9 @@ struct Tune {
     intercept: bool,
     /// Stand on the asset a raid heads for when there first.
     goal: bool,
+    /// Screen posts over our value where raids reach it (clusters of our
+    /// assets by cost and exposure), not only at the gates raids used.
+    value: bool,
 }
 
 impl Default for Tune {
@@ -109,6 +112,7 @@ impl Default for Tune {
             standw: STANDOFF_COST,
             intercept: false,
             goal: true,
+            value: false,
         }
     }
 }
@@ -203,10 +207,11 @@ impl Ai {
             standw: f("mark_standw", d.standw),
             intercept: f("mark_intercept", 0.0) > 0.0,
             goal: f("mark_goal", 1.0) > 0.0,
+            value: f("mark_value", 0.0) > 0.0,
         };
         self.log(&format!(
-            "qrfmark: strike={} commit={} fight={} standoff={} ahead={} latew={} breach={} standw={} intercept={} goal={}",
-            t.strike, t.commit, t.fight, t.standoff, t.ahead, t.latew, t.breach, t.standw, t.intercept, t.goal
+            "qrfmark: strike={} commit={} fight={} standoff={} ahead={} latew={} breach={} standw={} intercept={} goal={} value={}",
+            t.strike, t.commit, t.fight, t.standoff, t.ahead, t.latew, t.breach, t.standw, t.intercept, t.goal, t.value
         ));
         self.qrf.mark.tune = Some(t);
         t
@@ -487,7 +492,11 @@ impl Ai {
 
         // The rest screen.
         if frame - self.qrf.mark.sited > RESITE || self.qrf.mark.posts.len() != free.len() {
-            self.qrf.mark.posts = self.qrf_mark_posts(free.len(), tune.ahead);
+            self.qrf.mark.posts = if tune.value {
+                self.qrf_mark_value_posts(free.len(), tune.ahead)
+            } else {
+                self.qrf_mark_posts(free.len(), tune.ahead)
+            };
             self.qrf.mark.sited = frame;
         }
         let mut posts = self.qrf.mark.posts.clone();
@@ -664,6 +673,53 @@ impl Ai {
             .filter(|(p, _)| !self.qrf.live || self.war.get_porc_threat(*p) <= 0.0)
             .collect();
         k_means(&gates, k)
+    }
+
+    /// Where raids come from: the entries seen, else the enemy's side.
+    fn qrf_mark_sources(&self) -> Vec<Vec3> {
+        if self.qrf.mark.entries.len() >= 4 {
+            return self.qrf.mark.entries.clone();
+        }
+        let map = self.cb.map();
+        let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+        let n = self.qrf.assets.len().max(1) as f32;
+        let c = self.qrf.assets.iter().fold(Vec3::ZERO, |s, a| s + a.pos * (1.0 / n));
+        let enemy = match self.graph.get_enemy_center() {
+            e if e != crate::util::NULLPOS && distance(e, c) > 1500.0 => e,
+            _ => Vec3::xz(w - c.x, h - c.z),
+        };
+        let mut v = self.qrf.mark.entries.clone();
+        v.push(enemy);
+        v
+    }
+
+    /// Screen posts for `k` teams over our value: our assets clustered by
+    /// cost and exposure (how near the raids' entries, or the enemy's side,
+    /// they are), each cluster's post a little ahead toward the nearest
+    /// entry. Covers the mexes where they are, off the road raids take,
+    /// instead of the gates alone.
+    fn qrf_mark_value_posts(&self, k: usize, ahead: f32) -> Vec<Vec3> {
+        if k == 0 || self.qrf.assets.is_empty() {
+            return Vec::new();
+        }
+        let sources = self.qrf_mark_sources();
+        let nearest_source = |p: Vec3| {
+            (sources.iter().copied()).min_by(|a, b| distance(*a, p).total_cmp(&distance(*b, p))).unwrap_or(p)
+        };
+        let points: Vec<(Vec3, f32)> = (self.qrf.assets.iter())
+            .filter(|a| !self.qrf.live || self.war.get_porc_threat(a.pos) <= 0.0)
+            .map(|a| {
+                let d = distance(nearest_source(a.pos), a.pos);
+                (a.pos, a.cost / (1.0 + d / 1500.0))
+            })
+            .collect();
+        (k_means(&points, k).into_iter())
+            .map(|c| {
+                let e = nearest_source(c);
+                let d = distance(e, c).max(1.0);
+                c + (e - c) * (ahead.min(d * 0.5) / d)
+            })
+            .collect()
     }
 
     /// A team down to one member joins the nearest other team.
