@@ -492,18 +492,28 @@ impl Ai {
     /// Seconds for a team to get anywhere (its slowest member from each
     /// member's place).
     pub fn qrf_team_field(&self, ids: &[i32]) -> Option<Field> {
+        self.qrf_team_field_within(ids, field::NEVER)
+    }
+
+    /// [`Ai::qrf_team_field`] out to `max` seconds.
+    pub fn qrf_team_field_within(&self, ids: &[i32], max: f32) -> Option<Field> {
         let grid = self.qrf.grid.as_ref()?;
         let ms: Vec<&Member> = ids.iter().filter_map(|id| self.qrf.members.get(id)).collect();
         let m = ms.first()?;
         let speed = ms.iter().map(|m| m.speed).fold(f32::INFINITY, f32::min);
         let sources: Vec<(Vec3, f32)> = ms.iter().map(|m| (m.pos(), 0.0)).collect();
-        Some(grid.field(m.mobility, speed, &sources))
+        Some(grid.field_within(m.mobility, speed, &sources, max))
     }
 
     /// Seconds for a raid to get anywhere.
     pub fn qrf_group_field(&self, g: &RaidGroup) -> Option<Field> {
+        self.qrf_group_field_within(g, field::NEVER)
+    }
+
+    /// [`Ai::qrf_group_field`] out to `max` seconds.
+    pub fn qrf_group_field_within(&self, g: &RaidGroup, max: f32) -> Option<Field> {
         let grid = self.qrf.grid.as_ref()?;
-        Some(grid.field(g.mobility, g.speed, &[(g.center, 0.0)]))
+        Some(grid.field_within(g.mobility, g.speed, &[(g.center, 0.0)], max))
     }
 
     /// Order a member to `to`; fighting what it meets on the way if

@@ -19,7 +19,7 @@ use crate::military::{DefenseTarget, Fighter, SquadKind};
 use crate::util::NULLPOS;
 
 /// Features the `disable` switch knows (see `Ai::dev_off`).
-const FEATURES: [&str; 29] = [
+const FEATURES: [&str; 31] = [
     "porc",
     "mexporc",
     "screen",
@@ -49,6 +49,8 @@ const FEATURES: [&str; 29] = [
     "requisition",
     "colonize",
     "aaintel",
+    "qrf",
+    "firefighters",
 ];
 
 /// A ground point at (x, z).

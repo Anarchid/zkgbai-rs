@@ -665,6 +665,16 @@ impl Ai {
             pos.z
         );
         self.log(&line);
+        // A pilot hears of the economy raided unanswered (once a minute).
+        if raid.is_some() && !marked && (name == "staticmex" || name.starts_with("energy")) {
+            let b = &self.qrf.budget;
+            let text = format!(
+                "RAIDED: {name} lost at ({:.0}, {:.0}) to a raid of {raid_s} (units x metal) no QRF team was on; \
+                 home defense {:.0} of {:.0} wanted ({}). qrf shows the teams; qrf_set defense raises the budget.",
+                pos.x, pos.z, b.have, b.wanted, b.reason
+            );
+            self.op_alert("qrf-unanswered", 1800, text);
+        }
         self.op_emit(
             "qrf-loss",
             json!({"unit": name, "pos": [pos.x.round(), pos.z.round()], "raid": raid_s, "marked": marked, "nearest": near_s}),

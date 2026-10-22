@@ -133,6 +133,12 @@ impl Grid {
     /// Seconds to every cell for a unit of `m` at `speed` (elmos/s) from
     /// the nearest of `sources` (a place and a head start in seconds).
     pub fn field(&self, m: Mobility, speed: f32, sources: &[(Vec3, f32)]) -> Field {
+        self.field_within(m, speed, sources, NEVER)
+    }
+
+    /// [`Grid::field`] out to `max` seconds only (cells beyond are
+    /// [`NEVER`]): much cheaper on a big map.
+    pub fn field_within(&self, m: Mobility, speed: f32, sources: &[(Vec3, f32)], max: f32) -> Field {
         let n = self.w * self.h;
         let mut t = vec![NEVER; n];
         let mut heap = BinaryHeap::new();
@@ -162,7 +168,7 @@ impl Grid {
                 let Some(toll) = self.toll(nc, m) else { continue };
                 let step = if dx != 0 && dz != 0 { std::f32::consts::SQRT_2 } else { 1.0 };
                 let nd = d + step * CELL * toll / speed;
-                if nd < t[nc] {
+                if nd < t[nc] && nd <= max {
                     t[nc] = nd;
                     heap.push(Item(nd, nc as u32));
                 }

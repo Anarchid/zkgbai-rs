@@ -253,7 +253,11 @@ impl Ai {
 
         // The raids that threaten anything, with their travel times.
         let mut targets: Vec<Target> = Vec::new();
-        let group_fields: Vec<Option<Field>> = self.qrf.groups.iter().map(|g| self.qrf_group_field(g)).collect();
+        // In normal play the travel times go only as far as they are used
+        // (the staged game keeps the whole map, as it was tuned on).
+        let (raid_max, team_max) = if self.qrf.live { (HORIZON + 15.0, HORIZON * 2.0 + 30.0) } else { (NEVER, NEVER) };
+        let group_fields: Vec<Option<Field>> =
+            self.qrf.groups.iter().map(|g| self.qrf_group_field_within(g, raid_max)).collect();
         for (gi, f) in group_fields.iter().enumerate() {
             let Some(f) = f.as_ref() else { continue };
             let g = &self.qrf.groups[gi];
@@ -313,7 +317,10 @@ impl Ai {
             team_ids.sort_by(|a, b| gap(a).total_cmp(&gap(b)));
             team_ids.truncate(7);
         }
-        let fields: Vec<Option<Field>> = team_ids.iter().map(|t| self.qrf_team_field(&teams[t])).collect();
+        // (No raid, no travel times: they are the costliest part.)
+        let fields: Vec<Option<Field>> = (team_ids.iter())
+            .map(|t| if targets.is_empty() { None } else { self.qrf_team_field_within(&teams[t], team_max) })
+            .collect();
         let mut cost = vec![vec![0.0f32; targets.len()]; team_ids.len()];
         // Of that, what is late among the assets the raid reaches soon: a
         // breach (the raid is inside our value), where guarding has failed.
@@ -505,7 +512,8 @@ impl Ai {
         let (standoff, latew) = (tune.standoff, tune.latew);
         let live = self.qrf.live;
         let (pos, speed) = self.qrf_team_pos(ids);
-        let field: Option<Field> = self.qrf_team_field(ids);
+        let field: Option<Field> =
+            self.qrf_team_field_within(ids, if self.qrf.live { HORIZON * 2.0 + 30.0 } else { NEVER });
         let Some(grid) = self.qrf.grid.as_ref() else { return pos };
         let Some(mobility) = ids.iter().find_map(|id| self.qrf.members.get(id)).map(|m| m.mobility) else {
             return pos;

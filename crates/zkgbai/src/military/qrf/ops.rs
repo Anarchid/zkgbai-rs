@@ -167,6 +167,9 @@ pub fn team(ai: &mut Ai, a: &Args) -> Out {
         return Err("the QRF is not running in this game".into());
     }
     let mut team = parse_team(a)?;
+    if a.has("units") && ai.op_posture() {
+        return Err("posture profile: no hands on units (give roles to the QRF's own teams instead)".into());
+    }
     if a.has("units") {
         let units: Vec<Unit> = (a.ids("units")?.into_iter())
             .filter_map(|id| Unit::from_id(ai.cb, id))
