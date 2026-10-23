@@ -628,6 +628,14 @@ impl Squad {
         if self.shape.role(def).is_some_and(|r| r.switch_on) {
             unit.execute_custom_command(cmd::WANT_ONOFF, &[1.0], 0, NO_TIMEOUT);
         }
+        // Fire orders by its doctrine (Lances holding fire at radar dots).
+        let (fire_state, radar) = self.shape.fire_orders(def);
+        if let Some(state) = fire_state {
+            unit.set_fire_state(state, 0);
+        }
+        if let Some(radar) = radar {
+            unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[if radar { 0.0 } else { 1.0 }], 0, NO_TIMEOUT);
+        }
         self.gauge(id, unit);
 
         let old_leader = self.leader.and_then(|l| fighters.get(&l)).map(|l| (l.id, l.unit));
