@@ -41,7 +41,12 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
 /// frozen hover baseline, 20 games each, Oct 22: the memory frightens
 /// workers more than it positions squads.
-const OFF_BY_DEFAULT: [&str; 3] = ["pairs", "currency", "permanence"];
+/// `mexporc` (a turret by every mex and link) is off by default since
+/// Oct 24: with the home-defense force standing in for the turret it won
+/// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
+/// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
+/// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
+const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "permanence", "mexporc"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
