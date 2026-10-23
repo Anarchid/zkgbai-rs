@@ -129,6 +129,8 @@ pub struct Ai {
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
+    /// Impaler batteries.
+    pub impalers: crate::military::impalers::Impalers,
     pub qrf: crate::military::qrf::Qrf,
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
@@ -234,6 +236,7 @@ impl SkirmishAi for Ai {
             sweeps: Sweeps::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
+            impalers: Default::default(),
             qrf: Default::default(),
             firefighters: Default::default(),
             raid_test: Default::default(),
@@ -679,6 +682,9 @@ impl Ai {
             Event::EnemyLeaveLos { enemy } => self.guard("war.enemyLeaveLOS", |ai| ai.war_enemy_leave_los(enemy)),
             Event::EnemyEnterRadar { enemy } => self.guard("war.enemyEnterRadar", |ai| ai.war_enemy_enter_radar(enemy)),
             Event::EnemyLeaveRadar { enemy } => self.guard("war.enemyLeaveRadar", |ai| ai.war_enemy_leave_radar(enemy)),
+            Event::EnemyDamaged { enemy, attacker, damage, .. } => {
+                self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage))
+            }
             Event::EnemyDestroyed { enemy, attacker } => {
                 self.guard("war.enemyDestroyed", |ai| ai.war_enemy_destroyed(enemy, attacker))
             }

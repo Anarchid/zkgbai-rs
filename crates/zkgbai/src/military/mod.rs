@@ -7,6 +7,7 @@ pub mod drops;
 pub mod enemy;
 pub mod firefighters;
 pub mod handlers;
+pub mod impalers;
 pub mod incursions;
 pub mod intel;
 pub mod jaeger;
@@ -508,6 +509,7 @@ impl Ai {
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
         self.guard("jaeger.update", |ai| ai.jaeger_update(frame));
+        self.guard("impalers.update", |ai| ai.impalers_update(frame));
         self.guard("firefighters.update", |ai| ai.firefighters_update(frame));
         self.guard("jumps.update", |ai| ai.jumps_update(frame));
         self.guard("puppies.update", |ai| ai.puppies_update(frame));
@@ -631,6 +633,11 @@ impl Ai {
         }
         if name == "gunshiptrans" {
             self.drops_add_charon(unit);
+            return;
+        }
+        // Impalers form batteries (see `impalers`).
+        if name == impalers::IMPALER && !self.dev_off("impalers") {
+            self.impalers_add(unit, cost);
             return;
         }
         // Anti-heavies hunt heavies (see `jaeger`); other Widows scout.
@@ -925,6 +932,7 @@ impl Ai {
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);
         self.jaeger_remove_unit(unit);
+        self.impalers_remove_unit(unit);
         self.jumps_remove_unit(unit);
         self.puppies_remove_unit(unit);
 
@@ -1104,6 +1112,7 @@ impl Ai {
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
+        self.impalers_enemy_destroyed(enemy, attacker);
         self.raid_test_enemy_destroyed(enemy);
         self.firefighters_enemy_destroyed(enemy, attacker);
         let war = &mut self.war;

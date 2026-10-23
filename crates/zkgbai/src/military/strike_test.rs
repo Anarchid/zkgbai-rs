@@ -47,7 +47,11 @@
 //! wind generators, four caretakers and three more caretakers apart by its
 //! base: light things together, for the Infernos of a `test=eos` attacker,
 //! which has nothing there worth an Eos (see `missiles`): the first two
-//! are worth one, the three caretakers are not. With `test=hijack`, from
+//! are worth one, the three caretakers are not. With `test=impaler`
+//! (against `test=fort`), the attacker gets four Impalers, two Sparrows to
+//! show it the fort, and a radar covering it, every few minutes: its
+//! batteries (see `impalers`) are what should dismantle the fort. With
+//! `test=hijack`, from
 //! the first minute to the eighth up to three constructors about to start
 //! a mex are handed a far mex job just then, as the AI does now and then
 //! (its orders reach the engine a frame later, so it starts the mex
@@ -100,6 +104,10 @@ const PRECISION_ROUND: i32 = 30 * 120;
 /// When the attacker's assaults come in a jaeger test, and how often.
 const JAEGER_ARMY_FRAME: i32 = 30 * 90;
 const JAEGER_ARMY_ROUND: i32 = 30 * 180;
+
+/// When the attacker's Impalers come, and how often.
+const IMPALER_FRAME: i32 = 30 * 60;
+const IMPALER_ROUND: i32 = 30 * 300;
 
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
@@ -202,6 +210,15 @@ impl Ai {
                 }
                 if f == PRECISION_FRAME {
                     units.push(("staticradar", get_directional_point(enemy, base, 1500.0)));
+                }
+                units
+            }
+            ("impaler", f) if f >= IMPALER_FRAME && (f - IMPALER_FRAME) % IMPALER_ROUND == 0 => {
+                let mut units = vec![("vehheavyarty", ahead(-100.0)); 4];
+                units.extend([("planelightscout", ahead(-200.0)); 2]);
+                if f == IMPALER_FRAME {
+                    // Covering the fort: our hits on it are heard of.
+                    units.push(("staticradar", get_directional_point(enemy, base, 1800.0)));
                 }
                 units
             }
