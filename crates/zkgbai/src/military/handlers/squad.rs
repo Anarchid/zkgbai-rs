@@ -129,6 +129,11 @@ fn core_room(forces: &[Opening], pooled: bool, cores_per_force: usize) -> Option
         .map(|f| f.id)
 }
 
+/// "; engaged N s, its leader averaging V" for a force's log line.
+fn engaged_for(ran: Option<(f32, f32)>) -> String {
+    ran.map_or(String::new(), |(secs, speed)| format!("; engaged {secs:.0} s, its leader averaging {speed:.0}"))
+}
+
 impl Ai {
     pub fn squad_update(&mut self, frame: i32) {
         if frame % 30 == (self.offset + 7) % 30 {
@@ -777,8 +782,13 @@ impl Ai {
                 // Disband coreless forces: their members join other forces
                 // if there are, else fight as assaults.
                 let doctrine = s.shape.doctrine.clone();
+                let ran = if s.engaging { s.engaged_speed(self.frame) } else { None };
                 let fit = s.disband(&mut self.fighters);
-                self.log(&format!("taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere", fit.len()));
+                self.log(&format!(
+                    "taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere{}",
+                    fit.len(),
+                    engaged_for(ran)
+                ));
                 for fi in fit {
                     self.squad_assign_taskforce_member(fi);
                 }
@@ -858,6 +868,8 @@ impl Ai {
         s.keep_pace(&self.fighters);
         let was = s.engaging;
         s.engaging = engage_at.is_some();
+        let ran = if was { s.engaged_speed(frame) } else { None };
+        s.track_engaged(&self.fighters, frame);
         if was == s.engaging {
             return;
         }
@@ -880,12 +892,13 @@ impl Ai {
         );
         let line = match engage_at {
             Some(t) => format!(
-                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; target ({:.0}, {:.0})",
+                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {}; target ({:.0}, {:.0})",
                 if first { " first" } else { " again" },
+                if s.paced() > 0.0 { format!("{:.0}", s.paced()) } else { "free".to_owned() },
                 t.x,
                 t.z
             ),
-            None => format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}"),
+            None => format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}{}", engaged_for(ran)),
         };
         self.log(&line);
     }

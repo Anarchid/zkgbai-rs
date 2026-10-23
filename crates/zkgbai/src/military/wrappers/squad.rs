@@ -66,6 +66,11 @@ pub struct Squad {
     /// they first were (0: never).
     pub engaging: bool,
     pub engaged: i32,
+    /// Taskforces: the path the leader made while engaged, since when, and
+    /// who led where at the last conduct (its measured speed).
+    engaged_path: f32,
+    engaged_since: i32,
+    engaged_last: Option<(i32, Vec3)>,
     team: i32,
     /// Taskforces: the speed limit last given the leader by its slowest
     /// member (0: none).
@@ -114,6 +119,9 @@ impl Squad {
             low_shields: false,
             engaging: false,
             engaged: 0,
+            engaged_path: 0.0,
+            engaged_since: 0,
+            engaged_last: None,
             team,
             paced: 0.0,
             index: 0,
@@ -747,6 +755,38 @@ impl Squad {
             leader.execute_custom_command(cmd::WANTED_SPEED, &[limit], 0, NO_TIMEOUT);
             self.paced = limit;
         }
+    }
+
+    /// Taskforces: the speed limit last given the leader by its slowest
+    /// member (0: none).
+    pub fn paced(&self) -> f32 {
+        self.paced
+    }
+
+    /// Taskforces: follow the leader's path while engaged (once a
+    /// conduct, after `engaging` is set); a new leader's jump is not path.
+    pub fn track_engaged(&mut self, fighters: &FighterStore, frame: i32) {
+        if !self.engaging {
+            self.engaged_last = None;
+            return;
+        }
+        let now = self.leader_fighter(fighters).map(|l| (l.id, l.get_pos()));
+        match (self.engaged_last, now) {
+            (None, _) => {
+                self.engaged_path = 0.0;
+                self.engaged_since = frame;
+            }
+            (Some((was, last)), Some((id, pos))) if was == id => self.engaged_path += distance(last, pos),
+            _ => {}
+        }
+        self.engaged_last = now.or(self.engaged_last);
+    }
+
+    /// Taskforces: seconds engaged so far and the leader's mean speed over
+    /// them, elmos/s (none under a second, or not engaged).
+    pub fn engaged_speed(&self, frame: i32) -> Option<(f32, f32)> {
+        let secs = (frame - self.engaged_since) as f32 / 30.0;
+        (self.engaged_last.is_some() && secs >= 1.0).then(|| (secs, self.engaged_path / secs))
     }
 
     fn taskforce_remove_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, nav: Option<&mut Nav>) {
