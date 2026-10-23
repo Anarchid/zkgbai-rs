@@ -24,7 +24,7 @@ pub use worker::Worker;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use springai::{Callback, NO_TIMEOUT, Unit, Vec3, WeaponDef};
+use springai::{Callback, NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
 use crate::Ai;
 use crate::defs::cmd;
@@ -152,6 +152,9 @@ pub struct EconomyManager {
     dev_pick: Option<usize>,
     /// The first factory, rolled at the start (see `eco_roll_opening`).
     opening: Option<String>,
+    /// Where the opening factory goes and its facing, as announced to
+    /// allies in the pregame (see `crate::iq`).
+    pub(crate) opening_site: Option<(UnitDef, Vec3, i32)>,
     /// A factory a module asked for, and why; and the last one logged.
     pub requisition: Option<(String, String)>,
     /// What the requisition answers, in metal (0 when the operator asked).
@@ -353,6 +356,7 @@ impl EconomyManager {
             dev_facs: Vec::new(),
             dev_pick: None,
             opening: None,
+            opening_site: None,
             requisition: None,
             requisition_value: 0.0,
             requisition_logged: None,

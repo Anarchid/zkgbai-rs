@@ -553,6 +553,65 @@ impl Ai {
         }
     }
 
+    /// The facing towards the map's middle, along the axis `pos` is farther
+    /// off it.
+    fn eco_factory_facing(&self, pos: Vec3) -> i32 {
+        let map_width = self.cb.map().width() * 8;
+        let map_height = self.cb.map().height() * 8;
+        if (map_width as f32 - 2.0 * pos.x).abs() > (map_height as f32 - 2.0 * pos.z).abs() {
+            if 2.0 * pos.x > map_width as f32 {
+                3 // facing="west"
+            } else {
+                1 // facing="east"
+            }
+        } else if 2.0 * pos.z > map_height as f32 {
+            2 // facing="north"
+        } else {
+            0 // facing="south"
+        }
+    }
+
+    /// Where the first factory goes for a commander at `from`, and its
+    /// facing: towards the map's middle, clear of units, features and metal
+    /// spots. `None` when nothing fits. Also run from `init` for the pregame
+    /// announcement, before any unit exists.
+    pub(crate) fn eco_first_factory_site(&self, factory: UnitDef, from: Vec3) -> Option<(Vec3, i32)> {
+        let facing = self.eco_factory_facing(from);
+        let map_center = self.graph.get_map_center();
+        let closest_spot = |p: Vec3| self.graph.get_closest_spot(p).map(|s| s.get_pos());
+        let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
+        for i in 1..=11 {
+            let mut position = get_directional_point(from, map_center, clearance + 20.0);
+            position = self.eco_build_site(factory, position, facing);
+
+            // don't let factories get blocked by random crap, nor build them on top of mexes
+            let mut j = 0;
+            let mut closest = closest_spot(position);
+            while !self.cb.friendly_units_in(position, clearance).is_empty()
+                || !self.cb.features_in(position, clearance).is_empty()
+                || closest.is_some_and(|c| distance(c, position) < 100.0)
+                || !self.eco_build_check(factory, position, 0)
+            {
+                if j > 5 {
+                    break;
+                }
+                j += 1;
+                position = if i < 8 {
+                    get_angular_point(from, map_center, clearance + 20.0)
+                } else {
+                    get_radial_point(from, 125.0)
+                };
+                position = self.eco_build_site(factory, position, facing);
+                closest = closest_spot(position);
+            }
+            // only for preventing stupid placement
+            if self.eco_build_check(factory, position, facing) {
+                return Some((position, facing));
+            }
+        }
+        None
+    }
+
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
         let nfac = self.fac.factories.len();
         let merged = self.merged_allies;
@@ -625,6 +684,10 @@ impl Ai {
 
         let mut fac_name = String::new();
         let factory: Option<UnitDef>;
+        // The opening rolled at the start (with the odds below) is binding, as
+        // allies were told of it, unless the reach check above ruled it out.
+        let opening_due =
+            nfac == 0 && self.eco.opening.as_ref().is_some_and(|f| self.eco.potential_fac_list.contains(f));
 
         // Uncomment this to set the intial fac for debugging purposes.
         /*if nfac == 0 {
@@ -655,11 +718,11 @@ impl Ai {
             self.eco.potential_fac_list.remove(&new_type);
             self.eco.new_fac_due = false;
             fac_name = new_type;
-        } else if self.eco.potential_fac_list.contains("factoryship") && kgb_rand() < 0.5 {
+        } else if !opening_due && self.eco.potential_fac_list.contains("factoryship") && kgb_rand() < 0.5 {
             fac_name = "factoryship".to_owned();
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
-        } else if is_plop && self.eco.potential_fac_list.contains("factorygunship") {
+        } else if !opening_due && is_plop && self.eco.potential_fac_list.contains("factorygunship") {
             fac_name = "factorygunship".to_owned();
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
@@ -710,62 +773,21 @@ impl Ai {
         let Some(wpos) = self.eco.workers.get(&wid).map(|w| w.get_pos()) else {
             return;
         };
-        let mut position = wpos;
+        let mut position: Vec3;
+        let mut facing = self.eco_factory_facing(wpos);
 
-        let map_width = self.cb.map().width() * 8;
-        let map_height = self.cb.map().height() * 8;
-
-        let facing = if (map_width as f32 - 2.0 * position.x).abs() > (map_height as f32 - 2.0 * position.z).abs() {
-            if 2.0 * position.x > map_width as f32 {
-                3 // facing="west"
-            } else {
-                1 // facing="east"
-            }
-        } else if 2.0 * position.z > map_height as f32 {
-            2 // facing="north"
-        } else {
-            0 // facing="south"
-        };
-
-        let map_center = self.graph.get_map_center();
         let closest_spot = |ai: &Ai, p: Vec3| ai.graph.get_closest_spot(p).map(|s| s.get_pos());
         let mut i = 0;
-        let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
         if self.fac.factories.is_empty() || is_plop {
-            loop {
-                if i > 10 {
-                    restore(self, &fac_name);
-                    return;
-                }
-                i += 1;
-                position = get_directional_point(wpos, map_center, clearance + 20.0);
-                position = self.eco_build_site(factory, position, facing);
-
-                // don't let factories get blocked by random crap, nor build them on top of mexes
-                let mut j = 0;
-                let mut closest = closest_spot(self, position);
-                while !self.cb.friendly_units_in(position, clearance).is_empty()
-                    || !self.cb.features_in(position, clearance).is_empty()
-                    || closest.is_some_and(|c| distance(c, position) < 100.0)
-                    || !self.eco_build_check(factory, position, 0)
-                {
-                    if j > 5 {
-                        break;
-                    }
-                    j += 1;
-                    position = if i < 8 {
-                        get_angular_point(wpos, map_center, clearance + 20.0)
-                    } else {
-                        get_radial_point(wpos, 125.0)
-                    };
-                    position = self.eco_build_site(factory, position, facing);
-                    closest = closest_spot(self, position);
-                }
-                // only for preventing stupid placement
-                if self.eco_build_check(factory, position, facing) {
-                    break;
-                }
-            }
+            // Where the pregame announced it to allies, if it still fits.
+            let announced = (self.eco.opening_site.take())
+                .filter(|&(def, pos, face)| def.id() == factory.id() && self.eco_build_check(factory, pos, face))
+                .map(|(_, pos, face)| (pos, face));
+            let Some(site) = announced.or_else(|| self.eco_first_factory_site(factory, wpos)) else {
+                restore(self, &fac_name);
+                return;
+            };
+            (position, facing) = site;
         } else {
             loop {
                 if i > 5 {
@@ -1167,9 +1189,10 @@ impl Ai {
     /// units get to metal ours cannot, a spider factory for Widows to open
     /// the way for our nukes, or a gunship factory to drop our assaults
     /// past the chokepoints guarding much of the enemy's value.
-    /// The factory we will most likely open with, decided at the start so
-    /// the commander suits it: the one set, the one picked, else a roll
-    /// kept for the first factory (the same odds as rolling then).
+    /// The factory we open with, decided at the start so the commander suits
+    /// it and allies can be told: the one set, the one picked, else a roll
+    /// with the first factory's odds (see `eco_create_factory_task`), kept
+    /// for it. Only the reach check can still rule it out.
     pub(crate) fn eco_roll_opening(&mut self) -> Option<String> {
         if !self.eco.user_fac.is_empty() {
             return Some(self.eco.user_fac.clone());
@@ -1184,8 +1207,15 @@ impl Ai {
         if self.merged_allies > 0 {
             return None;
         }
-        let n = ((kgb_rand() * list.len() as f64) as usize).min(list.len() - 1);
-        let roll = list.iter().nth(n).cloned();
+        // A shipyard half the time, a gunship plop in big teams, else any.
+        let roll = if list.contains("factoryship") && kgb_rand() < 0.5 {
+            Some("factoryship".to_owned())
+        } else if list.contains("factorygunship") {
+            Some("factorygunship".to_owned())
+        } else {
+            let n = ((kgb_rand() * list.len() as f64) as usize).min(list.len() - 1);
+            list.iter().nth(n).cloned()
+        };
         self.eco.opening.clone_from(&roll);
         roll
     }

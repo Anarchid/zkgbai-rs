@@ -480,6 +480,7 @@ impl Ai {
             let opening = self.eco_roll_opening();
             self.select_commander(opening.as_deref());
             self.choose_start_pos();
+            self.guard("iq.init", |ai| ai.iq_init(opening.as_deref()));
         }
         if !self.disabled.is_empty() {
             let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
@@ -502,6 +503,7 @@ impl Ai {
             return;
         }
         self.frame = frame;
+        self.iq.started = true;
         self.guard("operator.update", |ai| ai.op_update(frame));
         if frame == 0 {
             self.say("glhf!");
