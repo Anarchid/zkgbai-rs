@@ -13,7 +13,7 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches).',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), airfire (an air factory for the firefighters once raids cost us mexes no home defense team was near), airtempo (an air factory weighed up as the game runs long, sooner on large maps).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
