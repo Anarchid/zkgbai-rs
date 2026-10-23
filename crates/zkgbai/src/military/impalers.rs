@@ -44,7 +44,7 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
 use crate::Ai;
 use crate::defs::cmd;
-use crate::military::taskforce::{Doctrine, seeds};
+use crate::military::taskforce::Doctrine;
 use crate::military::{Enemy, Fighter};
 use crate::nav;
 use crate::terrain::reaches;
@@ -301,8 +301,7 @@ pub struct Impalers {
     shield_radius: BTreeMap<i32, f32>,
     /// Worth given up for safety (see [`EPS`]).
     eps: Option<f32>,
-    /// What escorts a battery takes, and those it has.
-    doctrine: Option<Doctrine>,
+    /// The escorts batteries have (see [`Ai::impalers_doctrine`]).
     escorts: BTreeMap<i32, Escort>,
     stats: Stats,
     last_report: i32,
@@ -353,9 +352,7 @@ impl Ai {
             let eps = self.cb.option("impaler_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(EPS);
             self.impalers.eps = Some(eps.clamp(0.0, 1.0));
         }
-        if self.impalers.doctrine.is_none() && !self.dev_off("escorts") {
-            self.impalers.doctrine = seeds().into_iter().find(|d| d.name == "impaler");
-        }
+        self.taskforce_load();
         self.impalers_add(unit, cost);
         true
     }
@@ -555,14 +552,23 @@ impl Ai {
         self.impalers_report(frame, &targets);
     }
 
-    /// How many escorts of role `role` battery `bid` lacks.
+    /// The doctrine batteries take escorts by: `impaler`, unless switched
+    /// off (or `disable=escorts`).
+    fn impalers_doctrine(&self) -> Option<&Doctrine> {
+        if self.dev_off("escorts") { None } else { self.taskforces.doctrine("impaler") }
+    }
+
+    /// How many escorts of role `role` battery `bid` lacks, by the role's
+    /// want of what the battery has.
     fn impalers_short(&self, bid: u32, role: usize) -> usize {
         let h = &self.impalers;
-        let Some((b, r)) = h.batteries.get(&bid).zip(h.doctrine.as_ref().and_then(|d| d.roles.get(role))) else {
-            return 0;
-        };
-        let have = h.escorts.values().filter(|e| e.battery == bid && e.role == role).count();
-        r.want(b.guns.len()).map_or(1, |w| w.saturating_sub(have))
+        let Some(d) = self.impalers_doctrine() else { return 0 };
+        let Some((b, r)) = h.batteries.get(&bid).zip(d.roles.get(role)) else { return 0 };
+        let mine = h.escorts.iter().filter(|(_, e)| e.battery == bid).map(|(id, _)| id);
+        let units = b.guns.iter().chain(mine).filter_map(|id| self.fighters.get(id));
+        let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &self.taskforces.classes);
+        let have = force.roles.get(role).map_or(0, |x| x.1);
+        r.want(&force).map_or(1, |w| w.saturating_sub(have))
     }
 
     /// The battery most short of role `role`, the nearest to `p` of those.
@@ -577,14 +583,25 @@ impl Ai {
     /// A new unit: an escort of the battery most short of its role, if any
     /// is. It retreats when hurt, as the army does.
     pub fn impalers_claims_escort(&mut self, unit: Unit, name: &str, cost: f32) -> bool {
-        let Some(role) = self.impalers.doctrine.as_ref().and_then(|d| d.role_of(name)) else { return false };
+        let classes = &self.taskforces.classes;
+        let Some((role, r)) = self.impalers_doctrine().and_then(|d| d.role_of(name, classes).map(|i| (i, &d.roles[i])))
+        else {
+            return false;
+        };
+        let (fire_state, radar) = (r.fire_state, r.fire_at_radar);
         let Some(bid) = self.impalers_short_battery(role, unit.pos()) else { return false };
         unit.set_move_state(1, 0);
+        if let Some(s) = fire_state {
+            unit.set_fire_state(s, 0);
+        }
+        if let Some(r) = radar {
+            unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[if r { 0.0 } else { 1.0 }], 0, NO_TIMEOUT);
+        }
         let f = Fighter::new(unit, cost, self.team_id);
         self.fighters.insert(f.id, f);
         self.impalers.escorts.insert(unit.id(), Escort { battery: bid, role, orbits: None });
         let n = self.impalers.batteries.get(&bid).map_or(0, |b| b.guns.len());
-        let r = self.impalers.doctrine.as_ref().and_then(|d| d.roles.get(role)).map_or("?", |r| r.name.as_str());
+        let r = self.impalers_doctrine().and_then(|d| d.roles.get(role)).map_or("?", |r| r.name.as_str());
         let short = self.impalers_short(bid, role);
         self.log(&format!("impalers: a {name} joins a battery of {n} as its {r} ({short} short now)"));
         true
@@ -593,8 +610,8 @@ impl Ai {
     /// The chance a factory pick that could build `name` builds it: a
     /// role's `produce` while some battery is short of it.
     pub fn impalers_escort_produce(&self, name: &str) -> f32 {
-        let Some(d) = self.impalers.doctrine.as_ref() else { return 0.0 };
-        let Some(role) = d.role_of(name) else { return 0.0 };
+        let Some(d) = self.impalers_doctrine() else { return 0.0 };
+        let Some(role) = d.role_of(name, &self.taskforces.classes) else { return 0.0 };
         let short = self.impalers.batteries.keys().any(|&bid| self.impalers_short(bid, role) > 0);
         if short { d.roles[role].produce } else { 0.0 }
     }
@@ -643,7 +660,7 @@ impl Ai {
             if orbits == Some(leader) {
                 continue;
             }
-            let radius = self.impalers.doctrine.as_ref().and_then(|d| d.roles.get(role)).map_or(120.0, |r| r.orbit);
+            let radius = self.impalers_doctrine().and_then(|d| d.roles.get(role)).map_or(120.0, |r| r.orbit);
             unit.execute_custom_command(cmd::ORBIT, &[leader as f32, radius], 0, NO_TIMEOUT);
             unit.execute_custom_command(cmd::ORBIT_DRAW, &[leader as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
             if let Some(e) = self.impalers.escorts.get_mut(&id) {

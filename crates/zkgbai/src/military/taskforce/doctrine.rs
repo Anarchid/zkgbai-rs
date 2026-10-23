@@ -2,21 +2,26 @@
 //! as data.
 //!
 //! A doctrine names its core (the lynchpin a force forms around: a Felon,
-//! a Lance), the roles that join the core (each a list of unit types, how
-//! many per core or as many as come, how far from the leader they orbit)
-//! and the force's conduct: its pace, where it aims once engaged, what it
-//! musters before engaging, and when it falls back. A force missing some
-//! of its roles still fights as it is.
+//! a Lance), the roles that join the core (each a list of unit types or
+//! classes such as `@direct`, how many it wants as an expression over what
+//! the force has (see `expr`), how far from the leader they orbit, their
+//! fire orders) and the force's conduct: its pace, where it aims once
+//! engaged, what it musters before engaging, and when it falls back. A
+//! force missing some of its roles still fights as it is.
 //!
-//! The seeds are the shield ball as it always was (`felon`) and siege
-//! forces around fragile long-range units (`lance`, `phantom`, `tremor`,
-//! `impaler`). The operator edits them in flight (see `ops`), as does a
-//! file named by the `doctrines` option.
+//! The seeds are the shield ball as it always was (`felon`), Impaler
+//! batteries' escorts (`impaler`), and, off until switched on, shooter
+//! teams with spotters (`lance`, `phantom`), siege detachments (`tremor`,
+//! `emissary`), Ravager squads (`ravager`) and cloaked bombs
+//! (`ghostbombs`). A file named by the `doctrines` option patches them and
+//! adds more (see `taskforce::load`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
+use super::Classes;
+use super::expr::{Expr, Force};
 use crate::defs::Defs;
 
 /// Where an engaged force goes.
@@ -30,7 +35,18 @@ pub enum Aim {
     /// Near our haven closest to what artillery should hit, out of the
     /// fight (long-range rockets).
     Standoff,
+    /// At a station from which the core reaches the most, standing there
+    /// and firing at will (Tremors, Emissaries).
+    Siege,
+    /// At a station, holding fire for volleys at what stands still (see
+    /// `military::impalers`).
+    Battery,
+    /// Unseen to a valuable target, the core leading, then the roles that
+    /// `release` charge in (bombs under an area cloak).
+    Strike,
 }
+
+const AIMS: [Aim; 6] = [Aim::Assault, Aim::Artillery, Aim::Standoff, Aim::Siege, Aim::Battery, Aim::Strike];
 
 impl Aim {
     pub fn name(self) -> &'static str {
@@ -38,16 +54,17 @@ impl Aim {
             Aim::Assault => "assault",
             Aim::Artillery => "artillery",
             Aim::Standoff => "standoff",
+            Aim::Siege => "siege",
+            Aim::Battery => "battery",
+            Aim::Strike => "strike",
         }
     }
 
     fn parse(s: &str) -> Result<Aim, String> {
-        match s {
-            "assault" => Ok(Aim::Assault),
-            "artillery" => Ok(Aim::Artillery),
-            "standoff" => Ok(Aim::Standoff),
-            _ => Err(format!("aim '{s}': assault, artillery or standoff")),
-        }
+        AIMS.into_iter().find(|a| a.name() == s).ok_or_else(|| {
+            let names: Vec<&str> = AIMS.iter().map(|a| a.name()).collect();
+            format!("aim '{s}': one of {}", names.join(", "))
+        })
     }
 }
 
@@ -55,10 +72,12 @@ impl Aim {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Role {
     pub name: String,
-    /// Unit types (internal names).
+    /// Unit types (internal names) and classes (`@direct`, see
+    /// [`Classes`]); a unit type a role names goes to it before one whose
+    /// class takes it.
     pub units: Vec<String>,
-    /// How many a force wants per core; `None`: all that come.
-    pub per_core: Option<f32>,
+    /// How many a force wants (see `expr`); `None`: all that come.
+    pub want: Option<Expr>,
     /// How far from the leader they orbit.
     pub orbit: f32,
     /// A new one goes to the force with the fewest of the role, the most
@@ -73,6 +92,12 @@ pub struct Role {
     /// The chance a factory pick that could build one builds it instead,
     /// while a force is short of the role (0: only recruited).
     pub produce: f32,
+    /// Their fire state (0 hold, 1 return fire, 2 at will) and whether they
+    /// fire at radar dots, when they join; `None`: as they are.
+    pub fire_state: Option<i32>,
+    pub fire_at_radar: Option<bool>,
+    /// Striking forces: they charge in once the force is there.
+    pub release: bool,
 }
 
 impl Role {
@@ -80,22 +105,25 @@ impl Role {
         Role {
             name: name.to_owned(),
             units: Vec::new(),
-            per_core: Some(1.0),
+            want: Some(Expr::per_core(1.0)),
             orbit: 120.0,
             to_strongest: false,
             gauge: true,
             switch_on: false,
             produce: 0.0,
+            fire_state: None,
+            fire_at_radar: None,
+            release: false,
         }
     }
 
     fn fill(name: &str, units: &[&str], orbit: f32) -> Role {
-        Role { per_core: None, orbit, units: units.iter().map(|u| (*u).to_owned()).collect(), ..Role::new(name) }
+        Role { want: None, orbit, units: units.iter().map(|u| (*u).to_owned()).collect(), ..Role::new(name) }
     }
 
-    fn escort(name: &str, units: &[&str], per_core: f32, orbit: f32, produce: f32) -> Role {
+    fn escort(name: &str, units: &[&str], want: &str, orbit: f32, produce: f32) -> Role {
         Role {
-            per_core: Some(per_core),
+            want: Some(Expr::parse(want).expect("seed want")),
             orbit,
             produce,
             units: units.iter().map(|u| (*u).to_owned()).collect(),
@@ -103,21 +131,24 @@ impl Role {
         }
     }
 
-    /// How many a force with `cores` cores wants; `None`: all that come.
-    pub fn want(&self, cores: usize) -> Option<usize> {
-        self.per_core.map(|p| (p * cores as f32).ceil() as usize)
+    /// How many `force` wants; `None`: all that come.
+    pub fn want(&self, force: &Force) -> Option<usize> {
+        self.want.as_ref().map(|w| w.want(force))
     }
 
     pub fn to_json(&self) -> Value {
         json!({
             "name": self.name,
             "units": self.units,
-            "per_core": self.per_core,
+            "want": self.want.as_ref().map(Expr::source),
             "orbit": self.orbit,
             "to_strongest": self.to_strongest,
             "gauge": self.gauge,
             "switch_on": self.switch_on,
             "produce": self.produce,
+            "fire_state": self.fire_state,
+            "fire_at_radar": self.fire_at_radar,
+            "release": self.release,
         })
     }
 
@@ -127,13 +158,26 @@ impl Role {
             match k.as_str() {
                 "name" => self.name = string(k, v)?,
                 "units" => self.units = names(k, v)?,
-                "per_core" => {
-                    self.per_core = match v {
+                "want" => {
+                    self.want = match v {
                         Value::Null => None,
                         Value::String(s) if s == "all" || s == "fill" => None,
-                        _ => Some(num(k, v, 0.0, 20.0)?),
+                        Value::String(s) => Some(Expr::parse(s)?),
+                        Value::Number(n) => Some(Expr::parse(&n.to_string())?),
+                        _ => return Err("'want' must be an expression, a number, or \"all\"".into()),
                     }
                 }
+                // What `want` was: so many per core, rounded up.
+                "per_core" => {
+                    self.want = match v {
+                        Value::Null => None,
+                        Value::String(s) if s == "all" || s == "fill" => None,
+                        _ => Some(Expr::per_core(num(k, v, 0.0, 20.0)?)),
+                    }
+                }
+                "fire_state" => self.fire_state = optional(v, |v| Ok(num(k, v, 0.0, 2.0)? as i32))?,
+                "fire_at_radar" => self.fire_at_radar = optional(v, |v| flag(k, v))?,
+                "release" => self.release = flag(k, v)?,
                 "orbit" => self.orbit = num(k, v, 20.0, 600.0)?,
                 "to_strongest" => self.to_strongest = flag(k, v)?,
                 "gauge" => self.gauge = flag(k, v)?,
@@ -152,8 +196,12 @@ pub struct Doctrine {
     /// What it is for, for whoever edits it.
     pub note: String,
     pub enabled: bool,
-    /// The unit types a force forms around.
+    /// The unit types (or classes) a force forms around.
     pub core: Vec<String>,
+    /// The core's fire state and whether it fires at radar dots (see
+    /// [`Role::fire_state`]).
+    pub fire_state: Option<i32>,
+    pub fire_at_radar: Option<bool>,
     pub roles: Vec<Role>,
     /// Cores a force takes before a new core starts its own.
     pub cores_per_force: u32,
@@ -189,6 +237,8 @@ impl Doctrine {
             note: String::new(),
             enabled: true,
             core: Vec::new(),
+            fire_state: None,
+            fire_at_radar: None,
             roles: Vec::new(),
             cores_per_force: 1,
             pool_with_allies: false,
@@ -208,13 +258,34 @@ impl Doctrine {
         self.roles.iter().find(|r| r.name == name)
     }
 
-    /// The index of the first role taking unit type `unit`.
-    pub fn role_of(&self, unit: &str) -> Option<usize> {
-        self.roles.iter().position(|r| r.units.iter().any(|u| u == unit))
+    /// The role taking unit type `unit`: the first naming it, else the
+    /// first with a class taking it; never one the core takes.
+    pub fn role_of(&self, unit: &str, classes: &Classes) -> Option<usize> {
+        if self.is_core(unit, classes) {
+            return None;
+        }
+        (self.roles.iter().position(|r| r.units.iter().any(|u| u == unit)))
+            .or_else(|| self.roles.iter().position(|r| r.units.iter().any(|u| classes.takes(u, unit))))
     }
 
-    pub fn is_core(&self, unit: &str) -> bool {
-        self.core.iter().any(|c| c == unit)
+    pub fn is_core(&self, unit: &str, classes: &Classes) -> bool {
+        self.core.iter().any(|c| c == unit || classes.takes(c, unit))
+    }
+
+    /// What a force made of these units has, for the roles' wants: by
+    /// unit type and metal.
+    pub fn force<'a>(&self, units: impl IntoIterator<Item = (&'a str, f32)>, classes: &Classes) -> Force {
+        let mut f = Force { roles: self.roles.iter().map(|r| (r.name.clone(), 0, 0.0)).collect(), ..Force::default() };
+        for (unit, metal) in units {
+            if self.is_core(unit, classes) {
+                f.cores += 1;
+                f.core_value += metal;
+            } else if let Some(i) = self.role_of(unit, classes) {
+                f.roles[i].1 += 1;
+                f.roles[i].2 += metal;
+            }
+        }
+        f
     }
 
     pub fn to_json(&self) -> Value {
@@ -223,6 +294,8 @@ impl Doctrine {
             "note": self.note,
             "enabled": self.enabled,
             "core": self.core,
+            "fire_state": self.fire_state,
+            "fire_at_radar": self.fire_at_radar,
             "roles": self.roles.iter().map(Role::to_json).collect::<Vec<_>>(),
             "cores_per_force": self.cores_per_force,
             "pool_with_allies": self.pool_with_allies,
@@ -251,6 +324,8 @@ impl Doctrine {
                 "note" => self.note = string(k, v)?,
                 "enabled" => self.enabled = flag(k, v)?,
                 "core" => self.core = names(k, v)?,
+                "fire_state" => self.fire_state = optional(v, |v| Ok(num(k, v, 0.0, 2.0)? as i32))?,
+                "fire_at_radar" => self.fire_at_radar = optional(v, |v| flag(k, v))?,
                 "roles" => {
                     let Value::Array(list) = v else { return Err("'roles' must be a list of roles".into()) };
                     let mut roles = Vec::new();
@@ -280,17 +355,21 @@ impl Doctrine {
         Ok(())
     }
 
-    /// Whether the doctrine makes sense: known unit types, a core, roles
-    /// with distinct names, shield thresholds in order. Unit types may
-    /// appear in one role only, and never as both core and role.
-    pub fn check(&self, defs: &Defs) -> Result<(), String> {
+    /// Whether the doctrine makes sense: known unit types and classes, a
+    /// core, roles with distinct names and wants that read only roles it
+    /// has, shield thresholds in order. A unit type may be named once
+    /// only (classes may overlap: the name wins).
+    pub fn check(&self, defs: &Defs, classes: &Classes) -> Result<(), String> {
         if self.core.is_empty() {
             return Err(format!("doctrine {}: no core", self.name));
         }
+        let known = |u: &str| {
+            if u.starts_with('@') { classes.known(u) } else { defs.get(u).is_some_and(|d| d.speed() > 0.0) }
+        };
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         for u in &self.core {
-            if defs.get(u).is_none_or(|d| d.speed() <= 0.0) {
-                return Err(format!("doctrine {}: core '{u}' is no mobile unit type", self.name));
+            if !known(u) {
+                return Err(format!("doctrine {}: core '{u}' is no mobile unit type or class", self.name));
             }
             seen.insert(u);
         }
@@ -300,11 +379,23 @@ impl Doctrine {
                 return Err(format!("doctrine {}: two roles named {}", self.name, r.name));
             }
             for u in &r.units {
-                if defs.get(u).is_none_or(|d| d.speed() <= 0.0) {
-                    return Err(format!("doctrine {}: role {}: '{u}' is no mobile unit type", self.name, r.name));
+                if !known(u) {
+                    return Err(format!(
+                        "doctrine {}: role {}: '{u}' is no mobile unit type or class ({})",
+                        self.name,
+                        r.name,
+                        classes.names().join(" ")
+                    ));
                 }
                 if !seen.insert(u) {
                     return Err(format!("doctrine {}: '{u}' is listed twice", self.name));
+                }
+            }
+        }
+        for r in &self.roles {
+            for n in r.want.as_ref().map_or(Vec::new(), Expr::names) {
+                if !role_names.contains(n) {
+                    return Err(format!("doctrine {}: role {}: its want reads '{n}', no role", self.name, r.name));
                 }
             }
         }
@@ -315,16 +406,20 @@ impl Doctrine {
     }
 
     /// What the squad wrapper needs of the doctrine, by unit def id.
-    pub fn shape(&self, defs: &Defs) -> Shape {
+    pub fn shape(&self, defs: &Defs, classes: &Classes) -> Shape {
         let mut by_def = BTreeMap::new();
-        for (i, r) in self.roles.iter().enumerate() {
-            for u in &r.units {
-                by_def.entry(defs.id(u)).or_insert(i);
+        let mut core = BTreeSet::new();
+        for d in defs.all() {
+            let name = defs.name(d);
+            if self.is_core(name, classes) {
+                core.insert(d.id());
+            } else if let Some(i) = self.role_of(name, classes) {
+                by_def.insert(d.id(), i);
             }
         }
         Shape {
             doctrine: self.name.clone(),
-            core: self.core.iter().map(|c| defs.id(c)).filter(|&id| id >= 0).collect(),
+            core,
             roles: (self.roles.iter())
                 .map(|r| RoleShape { orbit: r.orbit, gauge: r.gauge, switch_on: r.switch_on })
                 .collect(),
@@ -414,57 +509,105 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.flee_threat = false;
 
     let mut lance = Doctrine::new("lance");
-    lance.note = "Lances (980 range, 1000 hp) under a Mace screen against raiders, Scalpels and Halberds \
-                  as the line, a Flail when one is about."
+    lance.note = "Lances (980 range, 1000 hp) holding fire at radar dots, a Halberd to spot for them, a Mace \
+                  screen against raiders, Scalpels as the line, a Flail when one is about."
         .into();
+    lance.enabled = false;
     lance.core = vec!["hoverarty".into()];
+    lance.fire_at_radar = Some(false);
     lance.roles = vec![
-        Role::escort("screen", &["hoverriot"], 2.0, 130.0, 0.5),
-        Role::escort("line", &["hoverskirm", "hoverassault"], 2.0, 170.0, 0.0),
-        Role::escort("aa", &["hoveraa"], 1.0, 80.0, 0.0),
+        Role::escort("spotter", &["hoverassault"], "1", 300.0, 0.3),
+        Role::escort("screen", &["hoverriot"], "ceil(cores)", 130.0, 0.5),
+        Role::escort("line", &["hoverskirm"], "ceil(cores)", 170.0, 0.0),
+        Role::escort("aa", &["hoveraa"], "cores >= 2 ? 1 : 0", 80.0, 0.0),
     ];
     lance.engage_value = 1500.0;
     lance.muster = 75.0;
     lance.retreat_health = 0.7;
 
     let mut phantom = Doctrine::new("phantom");
-    phantom.note = "Phantoms (700 range, 560 hp) behind Reavers against raiders, Knights and Ronins as the \
-                    line, a Gremlin when one is about."
+    phantom.note = "Phantoms (700 range, 560 hp) holding fire at radar dots, a Scythe to spot for them, \
+                    Reavers against raiders, Knights and Ronins as the line, a Gremlin when one is about."
         .into();
+    phantom.enabled = false;
     phantom.core = vec!["cloaksnipe".into()];
+    phantom.fire_at_radar = Some(false);
     phantom.roles = vec![
-        Role::escort("screen", &["cloakriot"], 2.0, 110.0, 0.5),
-        Role::escort("line", &["cloakassault", "cloakskirm"], 2.0, 160.0, 0.0),
-        Role::escort("aa", &["cloakaa"], 1.0, 70.0, 0.0),
+        Role::escort("spotter", &["cloakheavyraid"], "1", 300.0, 0.3),
+        Role::escort("screen", &["cloakriot"], "ceil(cores)", 110.0, 0.5),
+        Role::escort("line", &["cloakassault", "cloakskirm"], "ceil(cores)", 160.0, 0.0),
+        Role::escort("aa", &["cloakaa"], "cores >= 2 ? 1 : 0", 70.0, 0.0),
     ];
     phantom.engage_value = 1100.0;
     phantom.muster = 75.0;
     phantom.retreat_health = 0.7;
 
     let mut tremor = Doctrine::new("tremor");
-    tremor.note = "Tremors with an Ogre against raiders, a Minotaur as the line, an Ettin when one is about.".into();
+    tremor.note = "A siege detachment: Tremors stand where they reach the most and fire at everything, an \
+                   Ogre per two against raiders, Minotaurs as the line, an Ettin past 3000 metal."
+        .into();
+    tremor.enabled = false;
     tremor.core = vec!["tankheavyarty".into()];
+    tremor.cores_per_force = 3;
     tremor.roles = vec![
-        Role::escort("screen", &["tankriot"], 1.0, 140.0, 0.5),
-        Role::escort("line", &["tankassault"], 1.0, 180.0, 0.0),
-        Role::escort("aa", &["tankaa"], 1.0, 90.0, 0.0),
+        Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),
+        Role::escort("line", &["tankassault"], "cores", 180.0, 0.0),
+        Role::escort("aa", &["tankaa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
     ];
+    tremor.aim = Aim::Siege;
     tremor.engage_value = 2000.0;
     tremor.muster = 90.0;
 
+    let mut emissary = Doctrine::new("emissary");
+    emissary.note = "A siege detachment: Emissaries stand where they reach the most and fire at everything, \
+                     Ogres against raiders, an Ettin past 3000 metal."
+        .into();
+    emissary.enabled = false;
+    emissary.core = vec!["tankarty".into()];
+    emissary.cores_per_force = 4;
+    emissary.roles = vec![
+        Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),
+        Role::escort("aa", &["tankaa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
+    ];
+    emissary.aim = Aim::Siege;
+    emissary.engage_value = 1500.0;
+    emissary.muster = 90.0;
+
     let mut impaler = Doctrine::new("impaler");
-    impaler.note = "Impalers (1500 range) standing off behind our lines with Rippers against raiders, \
-                    a Crasher when one is about."
+    impaler.note = "Impaler batteries (see `military::impalers`): a Leveler per two guns against raiders, a \
+                    Crasher once three guns stand together."
         .into();
     impaler.core = vec!["vehheavyarty".into()];
     impaler.roles = vec![
-        Role::escort("screen", &["vehriot"], 2.0, 120.0, 0.5),
-        Role::escort("aa", &["vehaa"], 1.0, 80.0, 0.0),
+        Role::escort("screen", &["vehriot"], "ceil(0.5 * cores)", 120.0, 0.5),
+        Role::escort("aa", &["vehaa"], "cores >= 3 ? 1 : 0", 80.0, 0.0),
     ];
-    impaler.aim = Aim::Standoff;
+    impaler.aim = Aim::Battery;
     impaler.engage_value = 900.0;
 
-    vec![felon, lance, phantom, tremor, impaler]
+    let mut ravager = Doctrine::new("ravager");
+    ravager.note = "Rover assault squads: five Ravagers and a Leveler.".into();
+    ravager.enabled = false;
+    ravager.core = vec!["vehassault".into()];
+    ravager.cores_per_force = 5;
+    ravager.roles = vec![Role::escort("screen", &["vehriot"], "ceil(cores / 5)", 100.0, 0.5)];
+    ravager.aim = Aim::Assault;
+    ravager.engage_value = 1200.0;
+
+    let mut ghostbombs = Doctrine::new("ghostbombs");
+    ghostbombs.note = "An Iris cloaking bombs (orbiting within its 350 cloak, holding fire) unseen to a \
+                       valuable target, where they charge in."
+        .into();
+    ghostbombs.enabled = false;
+    ghostbombs.core = vec!["cloakjammer".into()];
+    ghostbombs.roles =
+        vec![Role { fire_state: Some(0), release: true, ..Role::escort("bombs", &["@sapper"], "6", 200.0, 0.0) }];
+    ghostbombs.aim = Aim::Strike;
+    ghostbombs.pace = 40.0;
+    ghostbombs.engage_value = 600.0;
+    ghostbombs.muster = 90.0;
+
+    vec![felon, lance, phantom, tremor, emissary, impaler, ravager, ghostbombs]
 }
 
 fn string(k: &str, v: &Value) -> Result<String, String> {
@@ -478,6 +621,11 @@ fn flag(k: &str, v: &Value) -> Result<bool, String> {
         Value::String(s) if s == "false" || s == "off" => Ok(false),
         _ => Err(format!("'{k}' must be true or false")),
     }
+}
+
+/// `null` for none, else what `f` makes of it.
+fn optional<T>(v: &Value, f: impl Fn(&Value) -> Result<T, String>) -> Result<Option<T>, String> {
+    if v.is_null() { Ok(None) } else { f(v).map(Some) }
 }
 
 fn num(k: &str, v: &Value, lo: f32, hi: f32) -> Result<f32, String> {
@@ -536,14 +684,16 @@ mod tests {
         assert!(felon.pool_with_allies && !felon.flee_threat);
         // Every role takes all that come; Aspis go to the strongest ball
         // and their area shields are not gauged.
-        assert!(felon.roles.iter().all(|r| r.per_core.is_none() && r.produce == 0.0));
+        assert!(felon.roles.iter().all(|r| r.want.is_none() && r.produce == 0.0));
         let aspis = felon.role("aspis").unwrap();
         assert!(aspis.to_strongest && !aspis.gauge && aspis.orbit == 40.0);
         assert!(felon.role("outlaws").unwrap().switch_on);
         assert_eq!(felon.role("thugs").unwrap().orbit, 125.0);
         assert_eq!(felon.role("dominatrices").unwrap().orbit, 250.0);
-        assert_eq!(felon.role_of("shieldarty"), Some(3));
-        assert!(felon.is_core("shieldfelon") && felon.role_of("shieldfelon").is_none());
+        let classes = Classes::default();
+        assert_eq!(felon.role_of("shieldarty", &classes), Some(3));
+        assert!(felon.is_core("shieldfelon", &classes) && felon.role_of("shieldfelon", &classes).is_none());
+        assert!(felon.enabled);
     }
 
     #[test]
@@ -556,8 +706,14 @@ mod tests {
         assert_eq!(d.roles, before.roles);
         let Value::Object(p) = json!({"per_core": "all", "units": "hoverriot,hoverdepthcharge"}) else { panic!() };
         d.roles[0].apply(&p).unwrap();
-        assert_eq!(d.roles[0].per_core, None);
+        assert_eq!(d.roles[0].want, None);
         assert_eq!(d.roles[0].units, vec!["hoverriot", "hoverdepthcharge"]);
+        let Value::Object(p) = json!({"want": "floor(0.2 * cores)", "fire_at_radar": false}) else { panic!() };
+        d.roles[0].apply(&p).unwrap();
+        assert_eq!(d.roles[0].want.as_ref().map(Expr::source), Some("floor(0.2 * cores)"));
+        assert_eq!(d.roles[0].fire_at_radar, Some(false));
+        let Value::Object(bad) = json!({"want": "ceil(cores"}) else { panic!() };
+        assert!(d.roles[0].apply(&bad).is_err());
         let Value::Object(bad) = json!({"orbit": 5000}) else { panic!() };
         assert!(d.roles[0].apply(&bad).is_err());
         let Value::Object(bad) = json!({"speed": 1}) else { panic!() };
@@ -565,9 +721,33 @@ mod tests {
     }
 
     #[test]
-    fn wants_round_up_per_core() {
-        let r = Role::escort("x", &["a"], 1.5, 100.0, 0.0);
-        assert_eq!((r.want(1), r.want(2), r.want(0)), (Some(2), Some(3), Some(0)));
-        assert_eq!(Role::fill("y", &["b"], 90.0).want(3), None);
+    fn wants_read_the_force() {
+        let classes = Classes::default();
+        let impaler = seeds().into_iter().find(|d| d.name == "impaler").unwrap();
+        let force = |guns: usize| impaler.force((0..guns).map(|_| ("vehheavyarty", 700.0)), &classes);
+        let (screen, aa) = (&impaler.roles[0], &impaler.roles[1]);
+        assert_eq!((screen.want(&force(1)), screen.want(&force(4))), (Some(1), Some(2)));
+        assert_eq!((aa.want(&force(2)), aa.want(&force(3))), (Some(0), Some(1)));
+        let f = impaler
+            .force([("vehheavyarty", 700.0), ("vehriot", 220.0), ("vehaa", 220.0), ("cloakraid", 65.0)], &classes);
+        assert_eq!((f.cores, f.roles[0].1, f.roles[1].1), (1, 1, 1));
+        let r = Role { want: Some(Expr::per_core(1.5)), ..Role::new("x") };
+        assert_eq!((r.want(&Force { cores: 2, ..Force::default() })), Some(3));
+        assert_eq!(Role::fill("y", &["b"], 90.0).want(&Force::default()), None);
+    }
+
+    #[test]
+    fn classes_take_what_no_role_names() {
+        let mut classes = Classes::default();
+        classes.insert("@direct", &["vehriot", "vehassault", "vehraid"]);
+        let mut d = Doctrine::new("x");
+        d.core = vec!["vehheavyarty".into()];
+        d.roles = vec![
+            Role::escort("any", &["@direct"], "cores", 100.0, 0.0),
+            Role::escort("screen", &["vehriot"], "1", 100.0, 0.0),
+        ];
+        assert_eq!(d.role_of("vehriot", &classes), Some(1));
+        assert_eq!(d.role_of("vehraid", &classes), Some(0));
+        assert_eq!(d.role_of("cloakraid", &classes), None);
     }
 }

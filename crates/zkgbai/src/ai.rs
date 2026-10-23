@@ -131,6 +131,7 @@ pub struct Ai {
     pub jaegers: Jaegers,
     /// Impaler batteries.
     pub impalers: crate::military::impalers::Impalers,
+    pub taskforces: crate::military::taskforce::Taskforces,
     pub qrf: crate::military::qrf::Qrf,
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
@@ -237,6 +238,7 @@ impl SkirmishAi for Ai {
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),
+            taskforces: Default::default(),
             qrf: Default::default(),
             firefighters: Default::default(),
             raid_test: Default::default(),
