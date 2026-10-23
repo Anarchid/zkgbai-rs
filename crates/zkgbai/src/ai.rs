@@ -455,12 +455,6 @@ impl Ai {
             self.say("glhf!");
         }
         if self.resigned {
-            // Keep self-destructing whatever is left (or given to us).
-            if frame % 300 == 0 {
-                for u in self.cb.team_units() {
-                    u.self_destruct(0);
-                }
-            }
             return;
         }
         if !self.initialized {
@@ -507,13 +501,14 @@ impl Ai {
         if self.test.is_some() {
             return;
         }
-        // With an ally the game is the alliance's to give up, and the AI
-        // interface has no resign: "gg" and a self-destruct beside an ally
-        // is a base blown up in a game that goes on (a 2v2 on The Cold
-        // Place, Oct 23: the enemy alliance's spots against this team's
-        // own, 28 to 18, and the base gone at 15:00 with the human ally
-        // still fighting). So with any ally, play on.
-        if !self.allies.is_empty() {
+        // With an ally the game is the alliance's to give up: "gg" and a
+        // resign beside an ally is a base gone in a game that goes on (a 2v2
+        // on The Cold Place, Oct 23: the enemy alliance's spots against this
+        // team's own, 28 to 18, and the base gone at 15:00 with the human
+        // ally still fighting). So with any ally but our own merged
+        // instances, play on. Those hand us all their units, so this
+        // judgement is already the whole alliance's.
+        if self.allies.iter().any(|a| !self.comrades.contains(a)) {
             return;
         }
         let espots = self.graph.get_enemy_spots().len() as f32;
@@ -522,13 +517,28 @@ impl Ai {
             && espots > 1.5 * ospots
             && (self.war.enemy_fighter_value > self.fac.army_value * 1.5 || self.fac.factories.is_empty())
         {
-            self.resigned = true;
-            self.say("gg!");
-            self.emote("resigned");
-            for u in self.cb.team_units() {
-                u.self_destruct(0);
-            }
+            self.resign();
         }
+    }
+
+    /// Give up the game by leaving it. Merged instances follow as our units
+    /// reach them (see `unit_given`). A self-destruct is no resign: Zero-K's
+    /// blocker (unit_self_destruct.lua) cancels one in any game but a 1v1 or
+    /// FFA.
+    fn resign(&mut self) {
+        self.say("gg!");
+        self.emote("resigned");
+        self.leave_game();
+        self.log("resign: left the game");
+    }
+
+    /// Leave the game as a crashed AI does: the hosting player kills this
+    /// AI (`/aikill`), and Zero-K hands the team's units to an AI ally
+    /// (game_lagmonitor.lua, never to a human one) and counts a team with
+    /// neither AI nor players out (game_over.lua).
+    fn leave_game(&mut self) {
+        self.cb.game().send_text_message(&format!("/aikill {}", self.team_id), 0);
+        self.resigned = true;
     }
 
     fn maybe_taunt(&mut self) {
@@ -622,8 +632,12 @@ impl Ai {
     fn unit_given(&mut self, unit: Unit, old_team: i32, new_team: i32) {
         if self.slave && new_team == self.team_id {
             if self.comrades.contains(&old_team) {
-                // Merged teams resign by self-destructing individually.
-                unit.self_destruct(0);
+                // A comrade's units come to us when it has left the game
+                // (Zero-K hands a gone AI's units to an AI ally): follow it
+                // out, the units passing on to the next of us.
+                if !self.resigned {
+                    self.leave_game();
+                }
             } else {
                 // Got the unit from someone else: pass it on to the leader.
                 self.cb.send_units(&[unit], self.merge_target);
