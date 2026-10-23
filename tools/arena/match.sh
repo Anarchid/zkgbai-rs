@@ -28,6 +28,11 @@
 #   ARENA_MAX_ENGINES (6), ARENA_MIN_FREE_MB (5000): the engine waits to
 #                start while that many spring-headless run on the machine (any
 #                session's) or less memory is available
+#   ARENA_CONF   machine limits, sourced if present (default
+#                ~/.config/zkgbai/arena.conf): ARENA_ENGINE_CEILING caps
+#                ARENA_MAX_ENGINES (and is its default), ARENA_ENGINE_MEMORY
+#                (e.g. 8G) runs each engine in a systemd scope with that
+#                MemoryMax and no swap; a killed engine prints ARENA_KILLED
 #   ARENA_WIDGETS  more LuaUI widget files to install for the match
 #
 # Prints a final line: RESULT winner=<A|B|allyN|draw|frames|timeout|crash> ...
@@ -207,8 +212,24 @@ LOG="$WD/infolog.txt"
 # too): wait while ARENA_MAX_ENGINES headless engines run, or less than
 # ARENA_MIN_FREE_MB of memory is available (an engine takes ~3.3 GB). The
 # lock makes the check and the launch one step across all match.sh runs.
-ARENA_MAX_ENGINES=${ARENA_MAX_ENGINES:-6}
+# The machine's own limits live outside the repo, so they bind every
+# branch's series whatever it exports: ARENA_ENGINE_CEILING caps
+# ARENA_MAX_ENGINES, ARENA_ENGINE_MEMORY caps each engine.
+ARENA_CONF=${ARENA_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/zkgbai/arena.conf}
+# shellcheck source=/dev/null
+[ -f "$ARENA_CONF" ] && . "$ARENA_CONF"
+ARENA_MAX_ENGINES=${ARENA_MAX_ENGINES:-${ARENA_ENGINE_CEILING:-6}}
+if [ -n "${ARENA_ENGINE_CEILING:-}" ] && [ "$ARENA_MAX_ENGINES" -gt "$ARENA_ENGINE_CEILING" ]; then
+    ARENA_MAX_ENGINES=$ARENA_ENGINE_CEILING
+fi
 ARENA_MIN_FREE_MB=${ARENA_MIN_FREE_MB:-5000}
+# Each engine in its own cgroup without swap: a runaway is killed alone at
+# the cap instead of driving the machine into swap (2026-10-23 one engine
+# went 3.6 -> 20 GB in seconds, and later the whole box froze).
+launch=()
+if [ -n "${ARENA_ENGINE_MEMORY:-}" ] && systemd-run --user --scope -q true 2>/dev/null; then
+    launch=(systemd-run --user --scope -q -p MemoryMax="$ARENA_ENGINE_MEMORY" -p MemorySwapMax=0 --)
+fi
 exec 9> "${TMPDIR:-/tmp}/zkgbai-arena.lock"
 while :; do
     flock 9
@@ -218,7 +239,8 @@ while :; do
     flock -u 9
     sleep 10
 done
-"$ENGINE" --write-dir "$WD" "$SCRIPT" > "$OUT/stdout.txt" 2>&1 &
+# (systemd-run --scope execs the engine: $! is the engine itself.)
+"${launch[@]}" "$ENGINE" --write-dir "$WD" "$SCRIPT" > "$OUT/stdout.txt" 2>&1 &
 PID=$!
 # Hold the lock until the engine has taken its memory.
 sleep 15
@@ -236,6 +258,7 @@ while kill -0 "$PID" 2>/dev/null; do
     fi
 done
 wait "$PID" 2>/dev/null
+status=$?
 
 frame=$(grep -oE '\[f=[0-9]+\]' "$LOG" 2>/dev/null | tail -1 | tr -dc '0-9' | sed 's/^0*//')
 over=$(grep -oE "ARENA_GAMEOVER f=[0-9]+ winners=[0-9,]*" "$LOG" 2>/dev/null | tail -1)
@@ -253,6 +276,10 @@ elif [ $(( $(date +%s) - start )) -ge "$TIMEOUT" ]; then
     winner=timeout
 else
     winner=crash
+    # SIGKILL that was not our timeout: most likely the memory cap.
+    if [ "$status" -eq 137 ]; then
+        echo "ARENA_KILLED engine got SIGKILL (memory cap ${ARENA_ENGINE_MEMORY:-none})" | tee -a "$OUT/stdout.txt"
+    fi
 fi
 
 cp "$LOG" "$OUT/infolog.txt" 2>/dev/null

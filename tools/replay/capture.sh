@@ -11,7 +11,7 @@
 #   -D DIR        write the saves straight to DIR instead (e.g. a big disk)
 #
 # Waits for the machine-wide engine budget like tools/arena/match.sh
-# (ARENA_MAX_ENGINES, ARENA_MIN_FREE_MB).
+# (ARENA_MAX_ENGINES, ARENA_MIN_FREE_MB, and the limits in ARENA_CONF).
 set -uo pipefail
 
 ENGINE_DIR=""
@@ -57,8 +57,19 @@ cp "$DEMO" "$WD/demos/replay.sdfz"
 # The playback's local server binds HostPortDefault (8452): one port per run.
 echo "HostPortDefault = $((20000 + $$ % 30000))" > "$WD/springsettings.cfg"
 
-ARENA_MAX_ENGINES=${ARENA_MAX_ENGINES:-6}
+# The machine's limits, as in tools/arena/match.sh (ARENA_CONF).
+ARENA_CONF=${ARENA_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/zkgbai/arena.conf}
+# shellcheck source=/dev/null
+[ -f "$ARENA_CONF" ] && . "$ARENA_CONF"
+ARENA_MAX_ENGINES=${ARENA_MAX_ENGINES:-${ARENA_ENGINE_CEILING:-6}}
+if [ -n "${ARENA_ENGINE_CEILING:-}" ] && [ "$ARENA_MAX_ENGINES" -gt "$ARENA_ENGINE_CEILING" ]; then
+    ARENA_MAX_ENGINES=$ARENA_ENGINE_CEILING
+fi
 ARENA_MIN_FREE_MB=${ARENA_MIN_FREE_MB:-5000}
+launch=()
+if [ -n "${ARENA_ENGINE_MEMORY:-}" ] && systemd-run --user --scope -q true 2>/dev/null; then
+    launch=(systemd-run --user --scope -q -p MemoryMax="$ARENA_ENGINE_MEMORY" -p MemorySwapMax=0 --)
+fi
 exec 9> "${TMPDIR:-/tmp}/zkgbai-arena.lock"
 while :; do
     flock 9
@@ -68,7 +79,7 @@ while :; do
     flock -u 9
     sleep 10
 done
-"$ENGINE" --write-dir "$WD" "$WD/demos/replay.sdfz" > "$OUT/stdout.txt" 2>&1 &
+"${launch[@]}" "$ENGINE" --write-dir "$WD" "$WD/demos/replay.sdfz" > "$OUT/stdout.txt" 2>&1 &
 PID=$!
 sleep 15
 flock -u 9
