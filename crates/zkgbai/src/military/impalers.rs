@@ -72,10 +72,14 @@ const ORDER_TIMEOUT: i32 = 30 * 8;
 const SYNC: i32 = 30 * 3;
 
 /// A mobile in sight that has stood within `STILL_SLOP` of one place this
-/// long is a target, while it stands (`STILL_SPEED` elmos a frame).
-const STILL_FOR: i32 = 30 * 6;
+/// long is a target, while it stands (`STILL_SPEED` elmos a frame), if it
+/// is worth `STILL_WORTH` a missile and is not a raider: against CircuitAI,
+/// raiders that stood 6 s walked off from 12 of 27 missiles, at 65-90
+/// metal each.
+const STILL_FOR: i32 = 30 * 10;
 const STILL_SLOP: f32 = 8.0;
 const STILL_SPEED: f32 = 0.05;
+const STILL_WORTH: f32 = 120.0;
 
 /// How much more a volley is worth that kills outright.
 const KILL_BONUS: f32 = 4.0;
@@ -599,20 +603,27 @@ impl Ai {
         let mut targets: Vec<Target> = (self.war.targets.values())
             .filter(|e| e.identified && !e.is_dead && !e.can_fly() && e.position != NULLPOS && e.def_health() > 0.0)
             .filter(|e| e.def_name != "wolverine_mine" && self.war.can_hit(reach, e))
-            .filter(|e| if e.is_static { !h.gone.contains_key(&e.unit_id) } else { self.impalers_still(e, frame) })
+            .filter(|e| {
+                if e.is_static {
+                    !h.gone.contains_key(&e.unit_id)
+                } else {
+                    !e.is_raider && self.impalers_still(e, frame)
+                }
+            })
             .filter(|e| !shields.iter().any(|&(p, r)| distance(p, e.position) <= r + 10.0))
             .filter_map(|e| {
                 let per_shot = self.impalers_per_shot(e);
                 let left = self.impalers_health(e) - per_shot * pending.get(&e.unit_id).copied().unwrap_or(0.0);
                 let cost = e.ud.map_or(e.value, |d| d.cost(self.metal));
-                (left > 0.0).then(|| Target {
+                let t = Target {
                     id: e.unit_id,
                     pos: e.position,
                     mobile: !e.is_static,
                     left,
                     per_shot,
                     worth: worth(e, cost),
-                })
+                };
+                (left > 0.0 && (!t.mobile || t.worth / t.shots() as f32 >= STILL_WORTH)).then_some(t)
             })
             .collect();
         targets.extend(self.impalers_radar_mexes(&pending, &shields));
