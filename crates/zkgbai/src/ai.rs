@@ -746,6 +746,10 @@ impl Ai {
         }
     }
 
+    /// The start position goes to the engine with the AI marked ready, so
+    /// it shows in the pregame like a player's (Zero-K's start gadget takes
+    /// an AI's engine position as given; sent not-ready it was placed at
+    /// the zeroth frame, unseen by allies until then).
     fn choose_start_pos(&mut self) {
         let map_center = self.graph.get_map_center();
         let mut spots: Vec<Vec3> = self.graph.get_ally_territory().iter().map(|s| s.get_pos()).collect();
@@ -779,7 +783,7 @@ impl Ai {
             // Starting solo (or first of a team): pick a spot near map center.
             let best = central_spot(&spots);
             let startpos = get_directional_point(best, map_center, 75.0);
-            self.cb.game().send_start_position(false, startpos);
+            self.cb.game().send_start_position(true, startpos);
             self.graph.set_start_pos(startpos);
             self.log("Solo Mode: Start Position Selected!");
             return;
@@ -819,7 +823,7 @@ impl Ai {
         }
 
         let startpos = get_directional_point(best, map_center, 75.0);
-        self.cb.game().send_start_position(false, startpos);
+        self.cb.game().send_start_position(true, startpos);
         self.graph.set_start_pos(startpos);
         self.log("Teams Mode: Start Position Selected!");
     }
