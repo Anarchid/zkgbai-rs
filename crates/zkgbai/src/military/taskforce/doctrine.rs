@@ -233,6 +233,9 @@ pub struct Doctrine {
     /// Engaged, it falls back from enemy threat where it stands (beyond
     /// what the operator's courage tolerates), as assault squads do.
     pub flee_threat: bool,
+    /// Units no doctrine takes, left without a squad, join its least
+    /// valuable force (the shield ball's old habit with stray Pyros).
+    pub strays: bool,
 }
 
 impl Doctrine {
@@ -257,6 +260,7 @@ impl Doctrine {
             shields_ok: 0.8,
             rallied: 0.75,
             flee_threat: true,
+            strays: false,
         }
     }
 
@@ -315,6 +319,7 @@ impl Doctrine {
             "shields_ok": self.shields_ok,
             "rallied": self.rallied,
             "flee_threat": self.flee_threat,
+            "strays": self.strays,
         })
     }
 
@@ -357,6 +362,7 @@ impl Doctrine {
                 "shields_ok" => self.shields_ok = num(k, v, 0.0, 1.0)?,
                 "rallied" => self.rallied = num(k, v, 0.0, 1.0)?,
                 "flee_threat" => self.flee_threat = flag(k, v)?,
+                "strays" => self.strays = flag(k, v)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -451,6 +457,7 @@ impl Doctrine {
             shields_low: self.shields_low,
             shields_ok: self.shields_ok,
             flee_threat: self.flee_threat,
+            strays: self.strays,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -493,6 +500,7 @@ pub struct Shape {
     pub shields_low: f32,
     pub shields_ok: f32,
     pub flee_threat: bool,
+    pub strays: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -520,6 +528,7 @@ impl Default for Shape {
             shields_low: 0.5,
             shields_ok: 0.8,
             flee_threat: true,
+            strays: false,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -576,6 +585,7 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.muster = 0.0;
     felon.retreat_health = 0.85;
     felon.flee_threat = false;
+    felon.strays = true;
 
     let mut lance = Doctrine::new("lance");
     lance.note = "Lances (980 range, 1000 hp) holding fire at radar dots, a Halberd to spot for them, a Mace \
@@ -754,7 +764,7 @@ mod tests {
         assert_eq!(felon.aim, Aim::Assault);
         assert_eq!((felon.pace, felon.engage_value, felon.muster), (45.0, 1300.0, 0.0));
         assert_eq!((felon.retreat_health, felon.shields_low, felon.shields_ok), (0.85, 0.5, 0.8));
-        assert!(felon.pool_with_allies && !felon.flee_threat);
+        assert!(felon.pool_with_allies && !felon.flee_threat && felon.strays);
         // Every role takes all that come; Aspis go to the strongest ball
         // and their area shields are not gauged.
         assert!(felon.roles.iter().all(|r| r.want.is_none() && r.produce == 0.0));

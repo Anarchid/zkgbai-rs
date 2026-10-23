@@ -370,7 +370,8 @@ impl Ai {
     /// fewest of the role (the most valuable of those, where it does most
     /// good, as Aspis do), else the least valuable. With no force to join
     /// it fights as an assault. A unit no doctrine takes (a squadless Pyro)
-    /// joins the least valuable taskforce, as with the shield ball always.
+    /// joins the least valuable force of a doctrine taking `strays` (the
+    /// shield ball, as always), else fights as an assault too.
     fn squad_assign_taskforce_member(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
@@ -381,10 +382,12 @@ impl Ai {
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));
         let to_strongest = doctrine.zip(role).is_some_and(|(d, r)| d.roles[r].to_strongest);
         let (pool, cores_per_force) = doctrine.map_or((false, 1), |d| (d.pool_with_allies, d.cores_per_force as usize));
-        // Forces of its doctrine (of any, for a unit none takes) that go
-        // where it goes.
+        // Forces of its doctrine (of those taking strays, for a unit none
+        // takes) that go where it goes.
         let forces: Vec<SquadId> = (self.squad_handler.taskforces.iter().copied())
-            .filter(|&sid| self.squads.get(sid).is_some_and(|q| dname.as_ref().is_none_or(|d| &q.shape.doctrine == d)))
+            .filter(|&sid| {
+                self.squads.get(sid).is_some_and(|q| dname.as_ref().map_or(q.shape.strays, |d| &q.shape.doctrine == d))
+            })
             .filter(|&sid| is_core || self.squad_fits(sid, id))
             .collect();
         let needed = if is_core {
