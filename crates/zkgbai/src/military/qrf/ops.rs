@@ -108,7 +108,7 @@ pub fn view(ai: &mut Ai, _: &Args) -> Out {
                    "army": b.army.round(), "moonlight": b.moonlight.round(), "cap": b.cap, "gain": b.gain, "size": b.size.name(),
                    "reason": b.reason, "recent": {"raids_at_once": raids_at_once, "typical_raid": typical.round()}},
         "teams": teams, "raids": raids,
-        "stats": {"ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts,
+        "stats": {"ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts, "redrafts": s.redrafts,
                   "losses": s.losses, "losses_while_marked": s.losses_marked, "losses_metal": s.losses_metal.round()},
         "hint": "team ids: numbers are dedicated teams, mN the moonlighting raider squad N; qrf_team sets roles",
     }))

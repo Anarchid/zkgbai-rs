@@ -29,7 +29,7 @@ pub mod ops;
 pub mod station;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use springai::{Unit, UnitDef, Vec3, reserved};
@@ -102,6 +102,10 @@ pub struct Track {
     pub in_los: bool,
     /// Health, known in sight; else its type's.
     pub health: f32,
+    /// The frame it last damaged an asset of ours (0: never), and which
+    /// asset: a raid that has pressed, not only been seen.
+    pub pressed: i32,
+    pub pressed_on: i32,
 }
 
 impl Track {
@@ -137,6 +141,10 @@ pub struct RaidGroup {
     pub speed: f32,
     pub power: f32,
     pub mobility: Mobility,
+    /// The latest frame a member damaged an asset of ours (0: never), and
+    /// the assets (unit ids) its members have been pressing.
+    pub pressed: i32,
+    pub pressed_on: Vec<i32>,
 }
 
 /// Something of ours worth defending.
@@ -173,8 +181,18 @@ pub struct Qrf {
     pub budget: live::Budget,
     /// The operator's roles for teams.
     pub roles: BTreeMap<usize, live::Role>,
-    /// Moonlighting squads sent at a raid, with the frame last sent.
+    /// Moonlighting squads sent at a raid, with the frame last sent;
+    /// periods each has gone unmatched since; and every squad ever drafted
+    /// (a second draft is a redraft, counted apart).
     pub drafted: BTreeMap<SquadId, i32>,
+    pub draft_unmatched: BTreeMap<SquadId, i32>,
+    pub drafted_ever: BTreeSet<SquadId>,
+    /// The raid (track ids) each drafted squad was sent at, and when each
+    /// released squad was let go (no second draft for a while).
+    pub draft_raid: BTreeMap<SquadId, BTreeSet<i32>>,
+    pub draft_released: BTreeMap<SquadId, i32>,
+    /// Why and when each squad last left the draft (for the log).
+    pub draft_left: BTreeMap<SquadId, (i32, String)>,
     /// What each team did last (for the operator and the log).
     pub doing: BTreeMap<usize, live::Doing>,
     pub next_team: usize,
@@ -366,6 +384,8 @@ impl Ai {
                 guess: None,
                 in_los: false,
                 health: 0.0,
+                pressed: 0,
+                pressed_on: 0,
             });
             t.pos = pos;
             t.vel = vel;
@@ -434,8 +454,14 @@ impl Ai {
                 let n = idx.len() as f32;
                 let (mut c, mut v, mut speed, mut power) = (Vec3::ZERO, Vec3::ZERO, f32::INFINITY, 0.0);
                 let mut mobility = None;
+                let mut pressed = 0;
+                let mut pressed_on = Vec::new();
                 for &i in &idx {
                     let t = &self.qrf.tracks[&ids[i]];
+                    pressed = pressed.max(t.pressed);
+                    if t.pressed > 0 && !pressed_on.contains(&t.pressed_on) {
+                        pressed_on.push(t.pressed_on);
+                    }
                     c += t.pos * (1.0 / n);
                     v += t.vel * (1.0 / n);
                     speed = speed.min(t.max_speed().max(30.0));
@@ -451,6 +477,8 @@ impl Ai {
                     speed,
                     power,
                     mobility: mobility.unwrap_or(Mobility::BOT),
+                    pressed,
+                    pressed_on,
                 }
             })
             .collect();

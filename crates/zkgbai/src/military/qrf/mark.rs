@@ -22,8 +22,9 @@ use std::sync::Arc;
 use springai::Vec3;
 
 use super::field::{Field, NEVER};
-use super::live::{Doing, MOON, RoleKind, Tactic};
+use super::live::{DRAFT_COOLDOWN, Doing, MOON, PRESSED_RECALL, RAID_WEAK, RoleKind, Tactic};
 use crate::Ai;
+use crate::military::SquadId;
 use crate::military::qrf::station::k_means;
 use crate::util::distance;
 
@@ -32,6 +33,11 @@ const HORIZON: f32 = 45.0;
 
 /// Seconds a team should be at an asset ahead of the raid.
 const MARGIN: f32 = 2.0;
+/// A moonlighting squad is sent only at a raid that damaged an asset of
+/// ours within `PRESSED_RECALL` (heavy raids, `RAID_WEAK` and up, need
+/// not have), and only where it gets to a threatened asset this many
+/// seconds before the raid does (an asset under fire: before it dies).
+const SLACK: f32 = 10.0;
 
 /// Ground is this much longer than straight, for a team from a candidate
 /// place (the raid's times are true travel times).
@@ -121,7 +127,7 @@ impl Default for Tune {
 pub struct Mark {
     tune: Option<Tune>,
     /// Team -> track ids of what it marked last.
-    marks: BTreeMap<usize, BTreeSet<i32>>,
+    pub(super) marks: BTreeMap<usize, BTreeSet<i32>>,
     /// Where raids were first seen.
     entries: Vec<Vec3>,
     seen: BTreeSet<i32>,
@@ -339,11 +345,30 @@ impl Ai {
         // Of that, what is late among the assets the raid reaches soon: a
         // breach (the raid is inside our value), where guarding has failed.
         let mut breach = vec![vec![0.0f32; targets.len()]; team_ids.len()];
+        // A moonlighting squad goes only at a raid that has pressed, and
+        // only where it arrives with slack (its path time, not the crow's).
+        let pressed = |t: &Target, ai: &Ai| {
+            t.power >= RAID_WEAK || t.groups.iter().any(|&g| frame - ai.qrf.groups[g].pressed <= PRESSED_RECALL)
+        };
+        // An asset the raid is shooting: its deadline is its time to die
+        // (health over a tenth of the raid's power a second), not the
+        // raid's path time, which is nought.
+        let deadline = |t: &Target, i: usize, tr: f32, ai: &Ai| -> f32 {
+            let a = &ai.qrf.assets[i];
+            let id = a.unit.id();
+            let under_fire = (t.groups.iter()).any(|&g| {
+                let g = &ai.qrf.groups[g];
+                frame - g.pressed <= PRESSED_RECALL && g.pressed_on.contains(&id)
+            });
+            if under_fire { a.unit.health() / (t.power / 10.0).max(1.0) } else { tr }
+        };
+        let mut allowed = vec![vec![true; targets.len()]; team_ids.len()];
         for (a, &team) in team_ids.iter().enumerate() {
             let (pos, _) = self.qrf_team_pos(&teams[&team]);
             for (b, t) in targets.iter().enumerate() {
                 let value: f32 = t.threatened.iter().map(|&(i, _)| self.qrf.assets[i].cost).sum();
                 let mut late = 0.0;
+                let mut slack = false;
                 for &(i, tr) in &t.threatened {
                     let at = self.qrf.assets[i].pos;
                     let mine = fields[a].as_ref().map_or(NEVER, |f| f.at(at)).min(HORIZON * 2.0);
@@ -352,18 +377,25 @@ impl Ai {
                     if tr < BREACH {
                         breach[a][b] += l;
                     }
+                    if mine + SLACK <= deadline(t, i, tr, self) {
+                        slack = true;
+                    }
                 }
                 let ids = tracks_of(t, self);
                 let kept = self.qrf.mark.marks.get(&team).is_some_and(|m| !m.is_disjoint(&ids));
                 cost[a][b] =
                     late + 0.01 * value * distance(pos, t.center) / 100.0 - if kept { 3.0 * value } else { 0.0 };
-                if !self.qrf_mark_allows(team, t) {
+                let cooling = team >= MOON
+                    && (self.qrf.draft_released.get(&((team - MOON) as SquadId)))
+                        .is_some_and(|f| frame - f < DRAFT_COOLDOWN);
+                allowed[a][b] = self.qrf_mark_allows(team, t) && (team < MOON || slack && pressed(t, self) && !cooling);
+                if !allowed[a][b] {
                     cost[a][b] += 1e9;
                 }
             }
         }
         let mut plan: Vec<(usize, usize)> = (best_match(&cost).into_iter())
-            .filter(|&(a, b)| self.qrf_mark_allows(team_ids[a], &targets[b]))
+            .filter(|&(a, b)| allowed[a][b])
             .map(|(a, b)| (team_ids[a], b))
             .collect();
         let mut free: BTreeSet<usize> = all_teams.keys().copied().collect();
@@ -375,8 +407,14 @@ impl Ai {
             if free.is_empty() || t.power < DOUBLE_RATIO * mine {
                 continue;
             }
-            let Some(team) =
-                free.iter().copied().filter(|&f| teams.contains_key(&f) && self.qrf_mark_allows(f, t)).min_by(
+            let cooling = |f: usize, ai: &Ai| {
+                f >= MOON && (ai.qrf.draft_released.get(&((f - MOON) as SquadId))).is_some_and(|r| frame - r < DRAFT_COOLDOWN)
+            };
+            let Some(team) = (free.iter().copied())
+                .filter(|&f| {
+                    teams.contains_key(&f) && self.qrf_mark_allows(f, t) && (f < MOON || pressed(t, self) && !cooling(f, self))
+                })
+                .min_by(
                     |&a, &b| {
                         let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
                         let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);

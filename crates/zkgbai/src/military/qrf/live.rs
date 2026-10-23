@@ -60,7 +60,7 @@ const ARMY_RATIO: f32 = 2.0;
 /// assaults), or this weak; and never stronger than this, or this share
 /// of our army.
 const RAID_SPEED: f32 = 80.0;
-const RAID_WEAK: f32 = 400.0;
+pub(super) const RAID_WEAK: f32 = 400.0;
 const RAID_FLOOR: f32 = 800.0;
 const RAID_SHARE: f32 = 0.5;
 
@@ -123,7 +123,19 @@ const SLACK: f32 = 0.3;
 const OVER_FOR: i32 = 30 * 30;
 
 /// A drafted squad is let go this long after it was last sent (frames).
-const DRAFT_HOLD: i32 = PERIOD * 2;
+/// A draft lapses this long (frames) after its last match or press, and
+/// a drafted squad unmatched this long (its raid turned, or flickers out
+/// of radar) is let go. In seconds: `PERIOD` is half a second, and with
+/// the hold and the release at two periods a drafted squad was let go
+/// one second after its raid blinked and taken again the next period,
+/// 18-24 redrafts a game (Oct 23-24).
+const DRAFT_HOLD: i32 = 30 * 20;
+const DRAFT_IDLE: i32 = 30 * 20;
+/// A released squad is not drafted again this soon (frames), and a drafted
+/// one is not released while the raid it was sent at is still pressing
+/// (within `PRESSED_RECALL`).
+pub(super) const DRAFT_COOLDOWN: i32 = 30 * 60;
+pub(super) const PRESSED_RECALL: i32 = 30 * 60;
 
 /// Factories build raiders for the force once it has been short of the
 /// budget (by more than a raider) this long; an order is counted as on
@@ -407,6 +419,8 @@ pub struct Stats {
     pub recruited: u32,
     pub released: u32,
     pub drafts: u32,
+    /// Squads drafted again after a release (thrash, if many).
+    pub redrafts: u32,
     /// Our assets lost, and of those while some team marked the raid.
     pub losses: u32,
     pub losses_marked: u32,
@@ -461,6 +475,36 @@ impl Ai {
         self.eco.adjusted_income >= LATE_INCOME || self.frame >= LATE_FRAME
     }
 
+    /// An asset of ours (a static or a worker) took damage: the attacker's
+    /// track has pressed, which is what lets a moonlighting squad be sent
+    /// at its raid (a sighting alone drafted 30 squads a game against
+    /// Circuit for 3-4 raids that ever touched a mex).
+    pub fn qrf_asset_pressed(&mut self, unit: Unit, attacker: Option<Unit>) {
+        if !self.qrf.on || !self.qrf.live {
+            return;
+        }
+        let Some(a) = attacker else { return };
+        let Some(def) = unit.def() else { return };
+        let worker = def.speed() > 0.0 && !def.build_options().is_empty();
+        if def.speed() > 0.0 && !worker || self.defs.name(def) == "terraunit" {
+            return;
+        }
+        let frame = self.frame;
+        let (id, on) = (a.id(), unit.id());
+        if let Some(t) = self.qrf.tracks.get_mut(&id) {
+            t.pressed = frame;
+            t.pressed_on = on;
+        }
+        for g in &mut self.qrf.groups {
+            if g.members.contains(&id) {
+                g.pressed = frame;
+                if !g.pressed_on.contains(&on) {
+                    g.pressed_on.push(on);
+                }
+            }
+        }
+    }
+
     /// Whether `sid` is a moonlighting squad the QRF sent at a raid (its
     /// handler then leaves it be).
     pub fn qrf_drafted(&self, sid: SquadId) -> bool {
@@ -507,7 +551,35 @@ impl Ai {
                 }
             }
         }
-        self.qrf.drafted.retain(|sid, at| eligible.contains_key(sid) && frame - *at <= DRAFT_HOLD);
+        let mut left: Vec<(SquadId, String)> = Vec::new();
+        self.qrf.drafted.retain(|sid, at| {
+            let keep = eligible.contains_key(sid) && frame - *at <= DRAFT_HOLD;
+            if !keep {
+                let why = if !eligible.contains_key(sid) {
+                    let sq = self.squads.get(*sid);
+                    format!(
+                        "ineligible: status {} kind {:?} dead {} intent {} incursion {}",
+                        sq.map_or('?', |s| s.status),
+                        sq.map(|s| s.kind),
+                        sq.is_none_or(|s| s.is_dead(&self.fighters)),
+                        self.op.over.squad_intents.contains_key(sid) || self.op.over.squad_targets.contains_key(sid),
+                        self.incursions.orders.contains_key(sid)
+                    )
+                } else {
+                    format!("hold expired ({} s since refresh)", (frame - *at) / 30)
+                };
+                left.push((*sid, why));
+            }
+            keep
+        });
+        for (sid, why) in left {
+            self.qrf.draft_left.insert(sid, (frame, why));
+            // Dropped is released: the cooldown applies, or the thrash
+            // moves here.
+            self.qrf.draft_released.insert(sid, frame);
+            self.qrf.draft_unmatched.remove(&sid);
+            self.qrf.draft_raid.remove(&sid);
+        }
         self.qrf.members.retain(|id, m| m.squad.is_none_or(|s| eligible.get(&s).is_some_and(|ids| ids.contains(id))));
         let metal = self.metal;
         for (sid, ids) in eligible {
@@ -829,10 +901,49 @@ impl Ai {
             .map(|(&t, d)| ((t - MOON) as SquadId, d.frame == frame && matches!(d.what, "mark" | "goal" | "strike")))
             .collect();
         for (sid, now) in sent {
-            if now && self.qrf.drafted.insert(sid, frame).is_none() {
-                self.qrf.live_stats.drafts += 1;
+            if now {
+                self.qrf.draft_unmatched.remove(&sid);
+                let raid = self.qrf.mark.marks.get(&(MOON + sid as usize)).cloned().unwrap_or_default();
+                if self.qrf.drafted.insert(sid, frame).is_none() {
+                    if self.qrf.drafted_ever.insert(sid) {
+                        self.qrf.live_stats.drafts += 1;
+                    } else {
+                        self.qrf.live_stats.redrafts += 1;
+                        let (at, why) = self.qrf.draft_left.get(&sid).cloned().unwrap_or((frame, "never left?".into()));
+                        let line = format!("qrf: redraft squad {sid} after {} s, left: {why}", (frame - at) / 30);
+                        self.log(&line);
+                    }
+                }
+                if !raid.is_empty() {
+                    self.qrf.draft_raid.insert(sid, raid);
+                }
+            } else if self.qrf.drafted.contains_key(&sid) {
+                // Still pressing: the squad stays with it (a mark comes
+                // and goes with radar).
+                let pressing = self.qrf.draft_raid.get(&sid).is_some_and(|ids| {
+                    (self.qrf.groups.iter())
+                        .any(|g| frame - g.pressed <= PRESSED_RECALL && g.members.iter().any(|m| ids.contains(m)))
+                });
+                if pressing {
+                    // (And the hold runs from now.)
+                    self.qrf.draft_unmatched.remove(&sid);
+                    self.qrf.drafted.insert(sid, frame);
+                    continue;
+                }
+                // Unmatched `DRAFT_IDLE` running (the raid turned, or stopped
+                // threatening anything): let the squad go, and not take it
+                // again for a while.
+                let since = *self.qrf.draft_unmatched.entry(sid).or_insert(frame);
+                if frame - since >= DRAFT_IDLE {
+                    self.qrf.drafted.remove(&sid);
+                    self.qrf.draft_unmatched.remove(&sid);
+                    self.qrf.draft_raid.remove(&sid);
+                    self.qrf.draft_released.insert(sid, frame);
+                    self.qrf.draft_left.insert(sid, (frame, format!("released (unmatched {} s)", (frame - since) / 30)));
+                }
             }
         }
+        self.qrf.draft_released.retain(|_, f| frame - *f < DRAFT_COOLDOWN);
         // Moonlighters gone: forget what they did.
         let members = &self.qrf.members;
         self.qrf.doing.retain(|t, _| members.values().any(|m| m.team == *t));
@@ -872,7 +983,7 @@ impl Ai {
             "wanted": b.wanted.round(), "have": b.have.round(), "army": b.army.round(), "moonlight": b.moonlight.round(),
             "mode": format!("{:?}", b.mode), "reason": b.reason, "teams": dedicated, "moonlighters": moon,
             "drafted": self.qrf.drafted.len(), "raids": self.qrf.groups.len(),
-            "ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts,
+            "ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts, "redrafts": s.redrafts,
             "losses": s.losses, "losses_marked": s.losses_marked, "losses_metal": s.losses_metal.round(),
         });
         self.op_emit("qrf", v);

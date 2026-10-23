@@ -838,6 +838,7 @@ impl Ai {
         {
             return;
         }
+        self.qrf_asset_pressed(unit, attacker);
 
         // check if the damaged unit is on fire.
         let on_fire = h.rules_param_float("on_fire", 0.0) > 0.0;
