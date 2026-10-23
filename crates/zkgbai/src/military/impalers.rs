@@ -12,6 +12,9 @@
 //! - buildings, where they were seen: the engine gives a building it once
 //!   showed us its true place on radar too (ghosts have no radar error),
 //!   and we remember it out of radar as well;
+//! - mexes never seen but on radar: a contact standing still on a metal
+//!   spot is taken for a mex there, and mexes sit on their spots (radar
+//!   blurs where a contact is, not how fast it goes);
 //! - mobiles in sight that have stood still a while (a constructor at work,
 //!   anything left idle), and only when a volley kills them outright.
 //!
@@ -115,6 +118,15 @@ const GONE_MEMORY: i32 = 30 * 300;
 /// A hit this recent tells what the next missile does to its target.
 const HIT_TELLS: i32 = 30 * 10;
 
+/// A radar contact never seen is taken for a mex on a metal spot once it
+/// has stood still this long with where radar shows it, on average, this
+/// near the spot, and nearer by `SPOT_CLEAR` than to any other spot (radar
+/// shows a contact up to ~135 elmos off, wandering).
+const SPOT_FOR: i32 = 30 * 20;
+const SPOT_SNAP: f32 = 60.0;
+const SPOT_CLEAR: f32 = 60.0;
+const MEX: &str = "staticmex";
+
 /// Mobile shields seen this lately still cover where they were seen.
 const SHIELD_SEEN: i32 = 30 * 20;
 
@@ -146,11 +158,12 @@ struct Battery {
     since: i32,
 }
 
-/// A missile in flight: from which gun, at which enemy, when fired and
-/// due, and whether it hit.
+/// A missile in flight: from which gun, at which enemy and where, when
+/// fired and due, and whether it hit.
 struct Shot {
     gun: i32,
     target: i32,
+    at: Vec3,
     fired: i32,
     due: i32,
     hit: bool,
@@ -213,6 +226,11 @@ pub struct Impalers {
     still: BTreeMap<i32, (Vec3, i32)>,
     /// Buildings taken as killed out of our sight, since when.
     gone: BTreeMap<i32, i32>,
+    /// Radar contacts never seen, standing still: the sum of where radar
+    /// showed them, how many times, since when.
+    contacts: BTreeMap<i32, (f32, f32, u32, i32)>,
+    /// Contacts shot at as a mex on a spot (by spot index) and missed.
+    not_mexes: BTreeSet<(i32, usize)>,
     /// The last hit on each enemy: when, how much.
     last_hit: BTreeMap<i32, (i32, f32)>,
     /// Shield radius by enemy unit def id (0 without one).
@@ -381,10 +399,20 @@ impl Ai {
     fn impalers_watch(&mut self, frame: i32) {
         let h = &mut self.impalers;
         for (&id, e) in &self.war.targets {
+            if !e.identified && !e.is_dead && e.is_radar_visible {
+                let v = e.unit.vel();
+                if v.x.hypot(v.z) < STILL_SPEED {
+                    let c = h.contacts.entry(id).or_insert((0.0, 0.0, 0, frame));
+                    *c = (c.0 + e.position.x, c.1 + e.position.z, c.2 + 1, c.3);
+                } else {
+                    h.contacts.remove(&id);
+                }
+            }
             if !e.visible || e.is_dead {
                 h.still.remove(&id);
                 continue;
             }
+            h.contacts.remove(&id);
             // (Reading its health keeps it for when it is out of sight.)
             e.get_health();
             h.sighted.insert(id, frame);
@@ -400,6 +428,8 @@ impl Ai {
         let targets = &self.war.targets;
         h.sighted.retain(|id, _| targets.contains_key(id));
         h.still.retain(|id, _| targets.contains_key(id));
+        h.contacts.retain(|id, _| targets.get(id).is_some_and(|e| !e.identified && !e.is_dead));
+        h.not_mexes.retain(|(id, _)| targets.contains_key(id));
         h.gone.retain(|id, t| targets.contains_key(id) && frame - *t < GONE_MEMORY);
         h.last_hit.retain(|_, x| frame - x.0 < HIT_TELLS);
         h.dealt.retain(|id, d| {
@@ -423,6 +453,13 @@ impl Ai {
             };
             if e.visible || e.is_radar_visible {
                 self.impalers.stats.misses += 1;
+                if !e.identified
+                    && let Some(spot) = self.graph.get_closest_spot_index(s.at)
+                {
+                    self.impalers.not_mexes.insert((s.target, spot));
+                    let p = s.at;
+                    self.log(&format!("impalers: no mex at ({:.0}, {:.0}) after all", p.x, p.z));
+                }
                 continue;
             }
             self.impalers.stats.unseen += 1;
@@ -489,11 +526,13 @@ impl Ai {
                 let fired = (rf - weapon.as_ref().map_or(0, |w| w.reload_time())).min(frame);
                 let p = unit.pos();
                 let due = fired + flight_frames(distance(p, at), p.y - at.y);
-                self.impalers.shots.push(Shot { gun: id, target, fired, due, hit: false });
+                self.impalers.shots.push(Shot { gun: id, target, at, fired, due, hit: false });
                 self.impalers.stats.shots += 1;
             } else {
                 let e = self.war.targets.get(&target).filter(|e| !e.is_dead);
-                let still = e.is_some_and(|e| e.is_static || self.impalers_still(e, frame));
+                let still = e.is_some_and(|e| {
+                    e.is_static || self.impalers.contacts.contains_key(&e.unit_id) || self.impalers_still(e, frame)
+                });
                 if frame - since <= ORDER_TIMEOUT && still && !retreating {
                     continue;
                 }
@@ -520,6 +559,11 @@ impl Ai {
 
     /// Known shields: where, how far they reach.
     fn impalers_shields(&mut self) -> Vec<(Vec3, f32)> {
+        self.impalers_shield_sources().into_iter().map(|s| (s.0, s.1)).collect()
+    }
+
+    /// Known shields: where, how far they reach, whose.
+    fn impalers_shield_sources(&mut self) -> Vec<(Vec3, f32, String)> {
         let frame = self.frame;
         let mut shields = Vec::new();
         for e in self.war.targets.values() {
@@ -529,7 +573,7 @@ impl Ai {
             }
             let r = *self.impalers.shield_radius.entry(ud.id()).or_insert_with(|| shield_radius(ud));
             if r > 0.0 {
-                shields.push((e.position, r));
+                shields.push((e.position, r, e.def_name.clone()));
             }
         }
         shields
@@ -571,8 +615,53 @@ impl Ai {
                 })
             })
             .collect();
+        targets.extend(self.impalers_radar_mexes(&pending, &shields));
         targets.sort_by(|a, b| b.score(0).total_cmp(&a.score(0)));
         targets
+    }
+
+    /// Radar contacts never seen taken for mexes on metal spots (see
+    /// [`SPOT_FOR`]), at the spot: but on our spots, where a known building
+    /// stands, under a shield, or where we missed one already.
+    fn impalers_radar_mexes(&self, pending: &BTreeMap<i32, f32>, shields: &[(Vec3, f32)]) -> Vec<Target> {
+        let Some(mex) = self.defs.get(MEX) else { return Vec::new() };
+        let frame = self.frame;
+        let spots = &self.graph.metal_spots;
+        let known: Vec<Vec3> = (self.war.targets.values())
+            .filter(|e| e.identified && e.is_static && !e.is_dead)
+            .map(|e| e.position)
+            .collect();
+        let mut taken: BTreeSet<usize> = BTreeSet::new();
+        let mut mexes = Vec::new();
+        for (&id, &(sx, sz, n, since)) in &self.impalers.contacts {
+            if frame - since < SPOT_FOR || n == 0 {
+                continue;
+            }
+            let mean = Vec3::xz(sx / n as f32, sz / n as f32);
+            let mut by: Vec<(usize, f32)> = spots.iter().map(|m| (m.index, distance(m.position, mean))).collect();
+            by.sort_by(|a, b| a.1.total_cmp(&b.1));
+            let Some(&(spot, d)) = by.first() else { continue };
+            if d > SPOT_SNAP || by.get(1).is_some_and(|o| o.1 - d < SPOT_CLEAR) {
+                continue;
+            }
+            let p = spots[spot].position;
+            if spots[spot].owned
+                || self.impalers.not_mexes.contains(&(id, spot))
+                || !taken.insert(spot)
+                || known.iter().any(|&k| distance(k, p) < 50.0)
+                || shields.iter().any(|&(s, r)| distance(s, p) <= r + 10.0)
+            {
+                continue;
+            }
+            let dealt: f32 = self.impalers.dealt.get(&id).map_or(0.0, |d| d.iter().map(|x| x.1).sum());
+            let left = mex.health() - dealt - DAMAGE * pending.get(&id).copied().unwrap_or(0.0);
+            if left > 0.0 {
+                let pos = Vec3::new(p.x, self.cb.map().elevation_at(p.x, p.z).max(0.0), p.z);
+                let worth = mex.cost(self.metal) * ECONOMY;
+                mexes.push(Target { id, pos, mobile: false, left, per_shot: DAMAGE, worth });
+            }
+        }
+        mexes
     }
 
     /// Fire what a battery's guns reach: the targets worth most per missile
@@ -618,7 +707,10 @@ impl Ai {
             for &id in &ids {
                 self.impalers_fire(id, &t);
             }
-            let name = self.war.targets.get(&t.id).map_or("?", |e| e.def_name.as_str());
+            let name = match self.war.targets.get(&t.id).map(|e| e.def_name.as_str()) {
+                Some("") => "mex on radar",
+                name => name.unwrap_or("?"),
+            };
             let n = ids.len();
             let volley = if n >= shots { format!("{n} to kill") } else { format!("{n} of the {shots} it takes") };
             self.log(&format!(
@@ -777,6 +869,28 @@ impl Ai {
             return;
         }
         self.impalers.last_report = frame;
+        // What there is to shoot, and what keeps buildings from being targets.
+        let shields = self.impalers_shield_sources();
+        let mut whose: BTreeMap<String, (usize, f32)> = BTreeMap::new();
+        for (_, r, name) in &shields {
+            let w = whose.entry(name.clone()).or_default();
+            *w = (w.0 + 1, r.max(w.1));
+        }
+        let buildings: Vec<&Enemy> =
+            self.war.targets.values().filter(|e| e.identified && e.is_static && !e.is_dead).collect();
+        let shielded =
+            buildings.iter().filter(|e| shields.iter().any(|s| distance(s.0, e.position) <= s.1 + 10.0)).count();
+        let gone = buildings.iter().filter(|e| self.impalers.gone.contains_key(&e.unit_id)).count();
+        let whose: Vec<String> = whose.iter().map(|(n, (k, r))| format!("{k} {n} ({r:.0})")).collect();
+        let frame_now = self.frame;
+        let standing = self.impalers.contacts.values().filter(|c| frame_now - c.3 >= SPOT_FOR).count();
+        self.log(&format!(
+            "impalers: {} buildings known, {shielded} under shields, {gone} taken as killed; {standing} radar \
+             contacts standing, {} not mexes; shields: {}",
+            buildings.len(),
+            self.impalers.not_mexes.len(),
+            if whose.is_empty() { "none".to_owned() } else { whose.join(", ") }
+        ));
         let h = &self.impalers;
         let s = &h.stats;
         let positions: Vec<Vec3> = h.guns.keys().filter_map(|id| self.fighters.get(id)).map(|f| f.get_pos()).collect();

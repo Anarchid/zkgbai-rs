@@ -52,7 +52,7 @@
 //! show it the fort, and a radar covering it, every few minutes: its
 //! batteries (see `impalers`) are what should dismantle the fort. With
 //! `test=impalerwar`, an AI plays as ever, and four Impalers join it at
-//! minutes 8, 13 and 18 (the only cheats): the same guns for batteries or,
+//! minutes 8, 12 and 16 (the only cheats): the same guns for batteries or,
 //! with `disable=impalers`, for the artillery handler. With
 //! `test=hijack`, from
 //! the first minute to the eighth up to three constructors about to start
@@ -112,8 +112,10 @@ const JAEGER_ARMY_ROUND: i32 = 30 * 180;
 const IMPALER_FRAME: i32 = 30 * 60;
 const IMPALER_ROUND: i32 = 30 * 300;
 
-/// When four Impalers join a real war (`impalerwar`): minutes 8, 13, 18.
-const IMPALER_WAR: [i32; 3] = [30 * 480, 30 * 780, 30 * 1080];
+/// When four Impalers join a real war (`impalerwar`): minutes 8, 12, 16
+/// (when Rovers play CircuitAI, games go on past 17; earlier drops found
+/// no enemy building known and raiders at home).
+const IMPALER_WAR: [i32; 3] = [30 * 480, 30 * 720, 30 * 960];
 
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
