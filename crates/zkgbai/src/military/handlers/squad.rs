@@ -428,9 +428,12 @@ impl Ai {
                 }
             }
         } else {
+            // Forces that take members now (engaged ones only if their
+            // doctrine reinforces them), short of its role.
+            let open = |sid: SquadId| self.squads.get(sid).is_some_and(|q| !q.engaging || q.shape.reinforce_engaged);
             let short: Vec<SquadId> = match role {
-                Some(r) => forces.iter().copied().filter(|&sid| self.squad_short_of(sid, r)).collect(),
-                None => forces.clone(),
+                Some(r) => forces.iter().copied().filter(|&sid| open(sid) && self.squad_short_of(sid, r)).collect(),
+                None => forces.iter().copied().filter(|&sid| open(sid)).collect(),
             };
             if short.is_empty() {
                 // No force to join: fight as an assault.
@@ -775,7 +778,8 @@ impl Ai {
 
     /// Process up to one taskforce at a time, four per second, by its
     /// doctrine's conduct: fall back on low shields or health; engage once
-    /// worth enough (or mustered long enough), rallied and led by a core,
+    /// worth enough (or mustered long enough), rallied and led by a core
+    /// (once engaged, it stays in though scattered unless it regroups),
     /// at what its aim says (falling back from threat it cannot take if
     /// the doctrine says to); else keep out of threat, at the rally point.
     fn squad_assign_taskforces(&mut self) {
@@ -812,6 +816,12 @@ impl Ai {
             let courage = s.courage;
             let mustered = shape.muster > 0.0 && (self.frame - s.formed) as f32 >= shape.muster * 30.0;
             let leader = s.get_leader(&self.fighters);
+            let engaging = s.engaging;
+            let worth = metal_value > shape.engage_value || mustered;
+            let led = leader.filter(|l| shape.is_core(l.def().map(|d| d.id())));
+            // Being rallied lets it go in; engaged, only a doctrine that
+            // regroups breaks off when its members scatter.
+            let rallied = self.squad_is_rallied(sid) || (engaging && !shape.regroup);
 
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
@@ -823,11 +833,7 @@ impl Ai {
                 let haven = self.graph_get_closest_haven(pos);
                 self.squad_retreat_to(sid, haven);
                 "hurt"
-            } else if let Some(leader) = leader.filter(|&l| {
-                (metal_value > shape.engage_value || mustered)
-                    && shape.is_core(l.def().map(|d| d.id()))
-                    && self.squad_is_rallied(sid)
-            }) {
+            } else if let Some(leader) = led.filter(|_| worth && rallied) {
                 let view = self.war.view(leader.def());
                 let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
                 if shape.flee_threat && view.get_effective_threat(pos) / courage > tolerance {
@@ -847,14 +853,24 @@ impl Ai {
                     engage_at = Some(target);
                     ""
                 }
-            } else if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
-                let haven = self.graph_get_closest_haven(pos);
-                self.squad_retreat_to(sid, haven);
-                "under strength, under threat"
             } else {
+                let short = if !worth {
+                    "worth too little"
+                } else if led.is_none() {
+                    "led by no core"
+                } else {
+                    "scattered"
+                };
+                if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
+                    let haven = self.graph_get_closest_haven(pos);
+                    self.squad_retreat_to(sid, haven);
+                    self.squad_conducted(sid, None, &format!("{short}, under threat"));
+                    self.squad_handler.taskforces.push_back(sid);
+                    return;
+                }
                 let rally = self.war_get_rally_point(pos);
                 self.squad_set_target(sid, rally);
-                "under strength"
+                short
             };
             self.squad_conducted(sid, engage_at, why);
             self.squad_handler.taskforces.push_back(sid);

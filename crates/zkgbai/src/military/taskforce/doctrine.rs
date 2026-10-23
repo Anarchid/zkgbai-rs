@@ -236,6 +236,13 @@ pub struct Doctrine {
     /// Units no doctrine takes, left without a squad, join its least
     /// valuable force (the shield ball's old habit with stray Pyros).
     pub strays: bool,
+    /// Engaged, it breaks off to regroup whenever its members scatter (the
+    /// shield ball, whose shields must overlap); else being rallied only
+    /// lets it go in, as with assault squads.
+    pub regroup: bool,
+    /// Members join it while engaged (the shield ball); else only while it
+    /// is not, so none drives to a fight alone.
+    pub reinforce_engaged: bool,
 }
 
 impl Doctrine {
@@ -261,6 +268,8 @@ impl Doctrine {
             rallied: 0.75,
             flee_threat: true,
             strays: false,
+            regroup: false,
+            reinforce_engaged: false,
         }
     }
 
@@ -320,6 +329,8 @@ impl Doctrine {
             "rallied": self.rallied,
             "flee_threat": self.flee_threat,
             "strays": self.strays,
+            "regroup": self.regroup,
+            "reinforce_engaged": self.reinforce_engaged,
         })
     }
 
@@ -363,6 +374,8 @@ impl Doctrine {
                 "rallied" => self.rallied = num(k, v, 0.0, 1.0)?,
                 "flee_threat" => self.flee_threat = flag(k, v)?,
                 "strays" => self.strays = flag(k, v)?,
+                "regroup" => self.regroup = flag(k, v)?,
+                "reinforce_engaged" => self.reinforce_engaged = flag(k, v)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -458,6 +471,8 @@ impl Doctrine {
             shields_ok: self.shields_ok,
             flee_threat: self.flee_threat,
             strays: self.strays,
+            regroup: self.regroup,
+            reinforce_engaged: self.reinforce_engaged,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -501,6 +516,8 @@ pub struct Shape {
     pub shields_ok: f32,
     pub flee_threat: bool,
     pub strays: bool,
+    pub regroup: bool,
+    pub reinforce_engaged: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -529,6 +546,8 @@ impl Default for Shape {
             shields_ok: 0.8,
             flee_threat: true,
             strays: false,
+            regroup: false,
+            reinforce_engaged: false,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -586,6 +605,8 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.retreat_health = 0.85;
     felon.flee_threat = false;
     felon.strays = true;
+    felon.regroup = true;
+    felon.reinforce_engaged = true;
 
     let mut lance = Doctrine::new("lance");
     lance.note = "Lances (980 range, 1000 hp) holding fire at radar dots, a Halberd to spot for them, a Mace \
@@ -765,6 +786,7 @@ mod tests {
         assert_eq!((felon.pace, felon.engage_value, felon.muster), (45.0, 1300.0, 0.0));
         assert_eq!((felon.retreat_health, felon.shields_low, felon.shields_ok), (0.85, 0.5, 0.8));
         assert!(felon.pool_with_allies && !felon.flee_threat && felon.strays);
+        assert!(felon.regroup && felon.reinforce_engaged);
         // Every role takes all that come; Aspis go to the strongest ball
         // and their area shields are not gauged.
         assert!(felon.roles.iter().all(|r| r.want.is_none() && r.produce == 0.0));
@@ -834,6 +856,7 @@ mod tests {
         // pace, going in on value alone (no muster clock).
         let mut d = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
         assert_eq!((d.cores_per_force, d.muster, d.pace_slowest), (0, 0.0, 0.85));
+        assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
         let Value::Object(p) = json!({"cores_per_force": 0, "pace_slowest": 0.5}) else { panic!() };
         d.apply(&p).unwrap();
         assert_eq!((d.cores_per_force, d.pace_slowest), (0, 0.5));
