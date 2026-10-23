@@ -7,12 +7,17 @@
 //!
 //! A free vent on safe ground of ours (our territory, off the front, no
 //! threat) is the first energy built once the income can carry it. The
-//! upgrade waits for an income that pays for it without a stall, a plant on
-//! safe ground, and little of ours within the blast; as it starts,
-//! constructors raise a box of walls round the plant, high enough to hide
-//! its aim point from direct fire over level ground (the engine fires only
-//! on a clear ground ray to the aim point, unless the ray hits the ground
-//! within the shot's splash of the target).
+//! upgrade is for the overdrive phase only: it takes the place of the next
+//! singularity reactor the fusion planner orders (a third of its metal for
+//! a third of its energy), if a plant stands on safe ground with little of
+//! ours within the blast. Started at an income of 30 (minutes 5 to 7), it
+//! cost a won game in three: 1000 metal off expansion for energy nothing
+//! could use yet (base 10 - 3 in series s1, Oct 23). As it starts, the
+//! plant is linked to a grid with metal spots, and constructors raise a box
+//! of walls round it, high enough to hide its aim point from direct fire
+//! over level ground (the engine fires only on a clear ground ray to the
+//! aim point, unless the ray hits the ground within the shot's splash of
+//! the target).
 
 use springai::{NO_TIMEOUT, Unit, Vec3};
 
@@ -33,10 +38,6 @@ const GEO_MIN_INCOME: f32 = 15.0;
 
 /// A plant's site is this close to its vent, elmos.
 const VENT_SNAP: f32 = 48.0;
-
-/// The upgrade, from this income on (it takes 11 metal/s and 11 energy/s
-/// for 90 s).
-const ADV_MIN_INCOME: f32 = 30.0;
 
 /// The advanced plant's blast reaches this far, elmos; it is not upgraded
 /// while more than this much metal of ours stands within it.
@@ -202,7 +203,10 @@ impl Ai {
         }
         self.eco_check_morph(frame);
         self.eco_check_box(frame);
-        self.eco_plan_upgrade(frame);
+        // (The staged test has no fusions; it upgrades as soon as it can.)
+        if self.test.as_deref() == Some("geo") {
+            self.eco_upgrade_geo(frame);
+        }
         // An advanced plant without its box (one that came another way, or
         // whose box went up before the morph failed and was tried again).
         if self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after && !self.dev_off("geobox") {
@@ -239,28 +243,20 @@ impl Ai {
         }
     }
 
-    /// Upgrade a plant if the income carries it and the plant is safe
-    /// enough to stand as a bomb.
-    fn eco_plan_upgrade(&mut self, frame: i32) {
+    /// Upgrade a plant that is safe enough to stand as a bomb, in place of
+    /// the singularity reactor the fusion planner is about to order. Returns
+    /// whether an upgrade started.
+    pub(super) fn eco_upgrade_geo(&mut self, frame: i32) -> bool {
         if self.eco.geo.morph.is_some() || frame < self.eco.geo.upgrade_after || self.dev_off("advgeo") {
-            return;
+            return false;
         }
-        let Some(advanced) = self.defs.get(ADVANCED) else { return };
+        let Some(advanced) = self.defs.get(ADVANCED) else { return false };
         let plants: Vec<Unit> =
             (self.eco.geos.iter().copied()).filter(|&g| self.defs.name_of(g) == PLANT && !g.is_being_built()).collect();
         if plants.is_empty() {
-            return;
+            return false;
         }
-        let eco = &self.eco;
-        // (The staged test cheats storage, not income.)
-        let staged = self.test.as_deref() == Some("geo");
-        let why = if eco.effective_income_metal < ADV_MIN_INCOME && !staged {
-            format!("income {:.1} < {ADV_MIN_INCOME:.0}", eco.effective_income_metal)
-        } else if eco.hard_estalled {
-            "energy stalled".to_owned()
-        } else {
-            String::new()
-        };
+        let why = if self.eco.hard_estalled { "energy stalled".to_owned() } else { String::new() };
         let mut best: Option<(Unit, f32)> = None;
         let mut reasons = Vec::new();
         if why.is_empty() {
@@ -285,21 +281,43 @@ impl Ai {
             // Logged when the reason changes kind (not on every number).
             let kind: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
             if kind != self.eco.geo.waiting && frame - self.eco.geo.waiting_logged >= 30 * 60 {
-                self.log(&format!("geo: no upgrade yet: {why}"));
+                self.log(&format!("geo: no upgrade (a singularity instead): {why}"));
                 (self.eco.geo.waiting, self.eco.geo.waiting_logged) = (kind, frame);
             }
-            return;
+            return false;
         };
         self.eco.geo.waiting.clear();
         let pos = g.pos();
         g.execute_custom_command(cmd::MORPH, &[advanced.id() as f32], 0, NO_TIMEOUT);
         self.eco.geo.morph = Some((g, pos, frame));
+        let eco = &self.eco;
         self.log(&format!(
-            "geo: upgrading the plant at ({:.0}, {:.0}) (income {:.1}, {var:.0} metal of ours within the blast)",
-            pos.x, pos.z, self.eco.effective_income_metal
+            "geo: upgrading the plant at ({:.0}, {:.0}) before a singularity (energy {:.1}, metal {:.1}, {} fusions; \
+             {var:.0} metal of ours within the blast)",
+            pos.x,
+            pos.z,
+            eco.effective_income_energy,
+            eco.effective_income_metal,
+            eco.fusions.len()
         ));
+        self.eco_link_geo(pos, advanced.id());
         if !self.dev_off("geobox") && self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
             self.eco_box_geo(pos, frame);
+        }
+        true
+    }
+
+    /// Pylons from the plant at `pos` to the nearest grid with metal spots,
+    /// unless it is on one: energy off such a grid overdrives nothing.
+    fn eco_link_geo(&mut self, pos: Vec3, def_id: i32) {
+        let Some(range) = self.eco.grid_defs.range(def_id) else { return };
+        let grid = self.eco_mex_grid_members();
+        if grid.iter().any(|m| distance(m.0, pos) < 1.0) {
+            return;
+        }
+        let Some(link) = self.eco_link_to(&grid, pos, range) else { return };
+        if link.pylons > 0 {
+            self.eco_lay_pylons(pos, range, link.to, link.range, "the advanced geothermal plant");
         }
     }
 
@@ -342,7 +360,7 @@ impl Ai {
     fn eco_send_raisers(&mut self, mid: Vec3, sides: &[Side]) -> Option<Unit> {
         let mut near: Vec<(f32, i32)> = (self.eco.workers.values())
             // (`assigned_plop` stays set once the plop is used.)
-            .filter(|w| !w.is_chicken && !(w.assigned_plop && w.has_plop()) && !w.unit.is_being_built())
+            .filter(|w| !(w.is_chicken || w.unit.is_being_built() || (w.assigned_plop && w.has_plop())))
             .map(|w| (distance(w.get_pos(), mid), w.id))
             .filter(|&(d, _)| d <= WORKER_RANGE)
             .collect();

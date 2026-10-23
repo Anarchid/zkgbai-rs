@@ -1911,7 +1911,10 @@ impl Ai {
             && !self.fac.factories.is_empty()
             && eco.fusion_tasks.is_empty()
         {
-            // for singus
+            // for singus; a geothermal plant is upgraded first
+            if self.eco_upgrade_geo(self.frame) {
+                return;
+            }
             "energysingu"
         } else {
             return;

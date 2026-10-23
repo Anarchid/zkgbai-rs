@@ -155,10 +155,10 @@ struct Hill {
 
 /// How a site links to the grid: the nearest member of a grid with metal
 /// spots, its pylon range, and the pylons between.
-struct Link {
-    to: Vec3,
-    range: f32,
-    pylons: usize,
+pub(super) struct Link {
+    pub(super) to: Vec3,
+    pub(super) range: f32,
+    pub(super) pylons: usize,
 }
 
 impl Ai {
@@ -355,7 +355,7 @@ impl Ai {
 
     /// How `p` (a building of pylon range `r`) links to `grid` (see
     /// [`Link`]); none without a grid.
-    fn eco_link_to(&self, grid: &[(Vec3, f32)], p: Vec3, r: f32) -> Option<Link> {
+    pub(super) fn eco_link_to(&self, grid: &[(Vec3, f32)], p: Vec3, r: f32) -> Option<Link> {
         let gap = |m: &(Vec3, f32)| distance(m.0, p) - m.1;
         let &(to, range) = grid.iter().min_by(|a, b| gap(a).total_cmp(&gap(b)))?;
         let pylons = if distance(to, p) < r + range {
