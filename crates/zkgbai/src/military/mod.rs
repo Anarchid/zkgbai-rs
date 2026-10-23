@@ -761,6 +761,15 @@ impl Ai {
             }
         }
 
+        // Units a doctrine takes form taskforces (see `taskforce`): the
+        // shield ball, and the forces other doctrines make.
+        self.taskforce_load();
+        if self.taskforces.squad_doctrine(name).is_some() {
+            let mut f = Fighter::new(unit, cost, team);
+            f.shield_mob = true;
+            self.squad_add_taskforce_member(f);
+            return;
+        }
         let classes = &self.unit_classes;
         if classes.small_raiders.contains(name) {
             if name == "amphbomb" {
@@ -776,10 +785,6 @@ impl Ai {
         } else if classes.assaults.contains(name) {
             unit.set_move_state(1, 0);
             self.squad_add_assault(Fighter::new(unit, cost, team));
-        } else if classes.shield_mobs.contains(name) {
-            let mut f = Fighter::new(unit, cost, team);
-            f.shield_mob = true;
-            self.squad_add_shield_mob(f);
         } else if classes.mob_supports.contains(name) {
             self.misc_add_support(Fighter::new(unit, cost, team));
         } else if classes.loners.contains(name) {
@@ -1185,7 +1190,7 @@ impl Ai {
             war.value_graphics.unpaint_circle(x, y, rr, value);
         }
 
-        for s in self.squad_handler.shield_squads.iter().filter_map(|&id| self.squads.get(id)) {
+        for s in self.squad_handler.taskforces.iter().filter_map(|&id| self.squads.get(id)) {
             if !s.is_dead(fighters) {
                 let (x, y) = cell(s.get_pos(fighters));
                 let value = (s.metal_value / 10.0) as i32;
@@ -1270,7 +1275,7 @@ impl Ai {
             for (list, rad) in [
                 (&self.squad_handler.squads, 10),
                 (&self.squad_handler.air_squads, 13),
-                (&self.squad_handler.shield_squads, 10),
+                (&self.squad_handler.taskforces, 10),
             ] {
                 for s in list.iter().filter_map(|&id| squads.get(id)) {
                     if s.is_dead(fighters) {

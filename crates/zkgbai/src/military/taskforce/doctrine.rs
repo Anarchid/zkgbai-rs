@@ -421,12 +421,29 @@ impl Doctrine {
             doctrine: self.name.clone(),
             core,
             roles: (self.roles.iter())
-                .map(|r| RoleShape { orbit: r.orbit, gauge: r.gauge, switch_on: r.switch_on })
+                .map(|r| RoleShape {
+                    orbit: r.orbit,
+                    gauge: r.gauge,
+                    switch_on: r.switch_on,
+                    fire_state: r.fire_state,
+                    fire_at_radar: r.fire_at_radar,
+                })
                 .collect(),
             by_def,
             pace: self.pace,
             fight: self.aim == Aim::Artillery,
             rallied: self.rallied,
+            aim: self.aim,
+            cores_per_force: self.cores_per_force,
+            pool_with_allies: self.pool_with_allies,
+            engage_value: self.engage_value,
+            muster: self.muster,
+            retreat_health: self.retreat_health,
+            shields_low: self.shields_low,
+            shields_ok: self.shields_ok,
+            flee_threat: self.flee_threat,
+            fire_state: self.fire_state,
+            fire_at_radar: self.fire_at_radar,
         }
     }
 }
@@ -437,6 +454,8 @@ pub struct RoleShape {
     pub orbit: f32,
     pub gauge: bool,
     pub switch_on: bool,
+    pub fire_state: Option<i32>,
+    pub fire_at_radar: Option<bool>,
 }
 
 /// A doctrine compiled for the squad wrapper: by unit def id.
@@ -453,6 +472,18 @@ pub struct Shape {
     /// rather than move orders.
     pub fight: bool,
     pub rallied: f32,
+    /// The doctrine's conduct (see [`Doctrine`]).
+    pub aim: Aim,
+    pub cores_per_force: u32,
+    pub pool_with_allies: bool,
+    pub engage_value: f32,
+    pub muster: f32,
+    pub retreat_health: f32,
+    pub shields_low: f32,
+    pub shields_ok: f32,
+    pub flee_threat: bool,
+    pub fire_state: Option<i32>,
+    pub fire_at_radar: Option<bool>,
 }
 
 /// Orbit radius of members that are in no role (extra cores).
@@ -468,6 +499,17 @@ impl Default for Shape {
             pace: 0.0,
             fight: false,
             rallied: 0.75,
+            aim: Aim::Assault,
+            cores_per_force: 1,
+            pool_with_allies: false,
+            engage_value: 0.0,
+            muster: 0.0,
+            retreat_health: 0.6,
+            shields_low: 0.5,
+            shields_ok: 0.8,
+            flee_threat: true,
+            fire_state: None,
+            fire_at_radar: None,
         }
     }
 }
@@ -483,6 +525,21 @@ impl Shape {
 
     pub fn orbit(&self, def: Option<i32>) -> f32 {
         self.role(def).map_or(ORBIT, |r| r.orbit)
+    }
+
+    /// A member's fire orders by its doctrine: the core's, or its role's.
+    pub fn fire_orders(&self, def: Option<i32>) -> (Option<i32>, Option<bool>) {
+        if self.is_core(def) {
+            (self.fire_state, self.fire_at_radar)
+        } else {
+            self.role(def).map_or((None, None), |r| (r.fire_state, r.fire_at_radar))
+        }
+    }
+
+    /// Whether the shield gauge says to fall back: low below `shields_low`,
+    /// until back above `shields_ok`.
+    pub fn low_shields(&self, low: bool, shields: f32) -> bool {
+        if low { shields <= self.shields_ok } else { shields < self.shields_low }
     }
 }
 
@@ -734,6 +791,15 @@ mod tests {
         let r = Role { want: Some(Expr::per_core(1.5)), ..Role::new("x") };
         assert_eq!((r.want(&Force { cores: 2, ..Force::default() })), Some(3));
         assert_eq!(Role::fill("y", &["b"], 90.0).want(&Force::default()), None);
+    }
+
+    #[test]
+    fn low_shields_hysteresis() {
+        let shape = Shape::default();
+        assert!(!shape.low_shields(false, 0.6));
+        assert!(shape.low_shields(false, 0.4));
+        assert!(shape.low_shields(true, 0.7));
+        assert!(!shape.low_shields(true, 0.85));
     }
 
     #[test]

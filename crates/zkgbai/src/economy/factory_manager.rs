@@ -1093,7 +1093,7 @@ impl Ai {
             return "veharty";
         }
 
-        if (fm.num_aspis > 0 && !self.squad_handler.shield_squads.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
+        if (fm.num_aspis > 0 && !self.squad_handler.taskforces.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
             return "vehcapture";
         }
 

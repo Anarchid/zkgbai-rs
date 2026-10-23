@@ -318,7 +318,7 @@ impl Ai {
             let sid = match self.jaegers.forming.get(kind.name) {
                 Some(&sid) if self.squads.contains(sid) => sid,
                 _ => {
-                    let sid = self.squads.create(SquadKind::Jaeger, team, &self.defs);
+                    let sid = self.squads.create(SquadKind::Jaeger, team);
                     self.jaegers.forming.insert(kind.name, sid);
                     self.jaegers.hunts.insert(sid, Hunt { kind, phase: Phase::Forming });
                     sid
@@ -341,7 +341,7 @@ impl Ai {
 
     /// Positions of our army: squads under way and the big loners.
     fn jaeger_army(&self) -> Vec<Vec3> {
-        let squads = (self.squad_handler.squads.iter().chain(&self.squad_handler.shield_squads))
+        let squads = (self.squad_handler.squads.iter().chain(&self.squad_handler.taskforces))
             .filter_map(|&sid| self.squads.get(sid))
             .filter(|s| s.status != 'f' && !s.is_dead(&self.fighters))
             .map(|s| s.get_pos(&self.fighters));

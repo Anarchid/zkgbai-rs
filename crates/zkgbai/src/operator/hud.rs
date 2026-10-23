@@ -235,7 +235,7 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                         let kind = match sq.kind {
                             SquadKind::Assault => "assault",
                             SquadKind::Raider => "raider",
-                            SquadKind::Shield => "shield",
+                            SquadKind::Taskforce => "taskforce",
                             SquadKind::Hover => "hover",
                             SquadKind::Jaeger => "jaeger",
                         };

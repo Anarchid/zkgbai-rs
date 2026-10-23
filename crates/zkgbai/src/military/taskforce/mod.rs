@@ -19,6 +19,7 @@ pub mod doctrine;
 pub mod expr;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde_json::Value;
 
@@ -105,18 +106,38 @@ impl Classes {
     }
 }
 
-/// The doctrines in force, and the classes they may name.
+/// The doctrines in force, the classes they may name, and each one's
+/// shape for the squad wrapper.
 #[derive(Default)]
 pub struct Taskforces {
     pub doctrines: Vec<Doctrine>,
     pub classes: Classes,
+    shapes: BTreeMap<String, Arc<Shape>>,
     loaded: bool,
+}
+
+/// Aims whose forces are squads of the squad handler (see
+/// `handlers::squad`); the others have modules of their own.
+pub fn squad_aim(aim: Aim) -> bool {
+    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff)
 }
 
 impl Taskforces {
     /// A doctrine switched on, by name.
     pub fn doctrine(&self, name: &str) -> Option<&Doctrine> {
         self.doctrines.iter().find(|d| d.name == name && d.enabled)
+    }
+
+    /// The doctrine switched on, of those the squad handler runs, that
+    /// takes unit type `unit` as core or role (the first listed).
+    pub fn squad_doctrine(&self, unit: &str) -> Option<&Doctrine> {
+        (self.doctrines.iter())
+            .filter(|d| d.enabled && squad_aim(d.aim))
+            .find(|d| d.is_core(unit, &self.classes) || d.role_of(unit, &self.classes).is_some())
+    }
+
+    pub fn shape(&self, doctrine: &str) -> Arc<Shape> {
+        self.shapes.get(doctrine).cloned().unwrap_or_default()
     }
 }
 
@@ -184,6 +205,8 @@ impl Ai {
         let on: Vec<&str> = doctrines.iter().filter(|d| d.enabled).map(|d| d.name.as_str()).collect();
         let off: Vec<&str> = doctrines.iter().filter(|d| !d.enabled).map(|d| d.name.as_str()).collect();
         self.cb.log(&format!("doctrines: on {}; off {}", on.join(", "), off.join(", ")));
+        self.taskforces.shapes =
+            doctrines.iter().map(|d| (d.name.clone(), Arc::new(d.shape(&self.defs, &classes)))).collect();
         self.taskforces.doctrines = doctrines;
         self.taskforces.classes = classes;
     }

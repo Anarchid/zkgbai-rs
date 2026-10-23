@@ -1194,7 +1194,7 @@ impl Ai {
             }
         }
         let home = self.graph.get_ally_center();
-        let squads = self.squad_handler.squads.iter().chain(&self.squad_handler.shield_squads);
+        let squads = self.squad_handler.squads.iter().chain(&self.squad_handler.taskforces);
         for s in squads.filter_map(|&id| self.squads.get(id)).filter(|s| !s.is_dead(&self.fighters)) {
             let at = s.get_pos(&self.fighters);
             if at != NULLPOS && distance(at, home) > BEHIND_SQUAD {
