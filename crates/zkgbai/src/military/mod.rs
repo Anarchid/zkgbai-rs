@@ -23,6 +23,7 @@ pub mod scouts;
 pub mod shadow_probe;
 pub mod strike_test;
 pub mod sweeps;
+pub mod taskforce;
 pub mod tasks;
 pub mod teleport;
 pub mod unit_classes;
@@ -637,6 +638,11 @@ impl Ai {
         }
         // Impalers form batteries (see `impalers`).
         if name == impalers::IMPALER && self.impalers_claims(unit, cost) {
+            return;
+        }
+        // Batteries take escorts (see `impalers`).
+        if self.impalers_claims_escort(unit, name, cost) {
+            self.retreat_add_coward(unit);
             return;
         }
         // Anti-heavies hunt heavies (see `jaeger`); other Widows scout.

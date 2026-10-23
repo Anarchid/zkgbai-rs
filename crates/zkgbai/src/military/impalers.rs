@@ -26,6 +26,13 @@
 //! missile). With nothing in reach, a battery goes to a station within
 //! range of the most it would kill, out of the enemy's reach.
 //!
+//! Batteries take escorts by the `impaler` doctrine (see
+//! `military::taskforce`): new Levelers screen them against the raiders
+//! that kill guns left alone, and Crashers against air, orbiting a gun.
+//! While a battery is short of its screen, Rover factories build Levelers
+//! more often. Escorts whose battery is gone join the next one short of
+//! them, or the army. `disable=escorts` keeps batteries alone.
+//!
 //! A gun's reload tells each shot. The engine reports our hits on what our
 //! radar or sight covers, so a missile due at a covered target that did
 //! not hit missed. One due at a building out of our sight is taken to have
@@ -36,10 +43,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
 use crate::Ai;
+use crate::defs::cmd;
+use crate::military::taskforce::{Doctrine, seeds};
 use crate::military::{Enemy, Fighter};
 use crate::nav;
 use crate::terrain::reaches;
-use crate::util::{NULLPOS, distance, get_directional_point};
+use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance, get_directional_point};
 
 pub const IMPALER: &str = "vehheavyarty";
 
@@ -185,6 +194,14 @@ struct Gun {
     hurt_while: String,
 }
 
+/// An escort: its battery, its role in the doctrine, and the gun it was
+/// told to orbit (none since it retreated, or not told yet).
+struct Escort {
+    battery: u32,
+    role: usize,
+    orbits: Option<i32>,
+}
+
 struct Battery {
     guns: Vec<i32>,
     /// Where it stands to fire, since when, and our cover there then.
@@ -284,6 +301,9 @@ pub struct Impalers {
     shield_radius: BTreeMap<i32, f32>,
     /// Worth given up for safety (see [`EPS`]).
     eps: Option<f32>,
+    /// What escorts a battery takes, and those it has.
+    doctrine: Option<Doctrine>,
+    escorts: BTreeMap<i32, Escort>,
     stats: Stats,
     last_report: i32,
 }
@@ -332,6 +352,9 @@ impl Ai {
         if self.impalers.eps.is_none() {
             let eps = self.cb.option("impaler_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(EPS);
             self.impalers.eps = Some(eps.clamp(0.0, 1.0));
+        }
+        if self.impalers.doctrine.is_none() && !self.dev_off("escorts") {
+            self.impalers.doctrine = seeds().into_iter().find(|d| d.name == "impaler");
         }
         self.impalers_add(unit, cost);
         true
@@ -452,6 +475,12 @@ impl Ai {
             };
             self.log(&format!("impalers: lost an Impaler at ({:.0}, {:.0}){line}", p.x, p.z));
         }
+        if self.impalers.escorts.remove(&id).is_some() {
+            let cost = self.fighters.remove(&id).map_or(0.0, |f| f.metal_value);
+            let name = self.defs.name_of(unit).to_owned();
+            self.log(&format!("impalers: lost an escort, a {name} ({cost:.0} metal)"));
+            return;
+        }
         let h = &mut self.impalers;
         let Some(gun) = h.guns.remove(&id) else { return };
         if let Some(b) = h.batteries.get_mut(&gun.battery) {
@@ -488,6 +517,12 @@ impl Ai {
         self.impalers.last_hit.remove(&id);
         self.impalers.still.remove(&id);
         self.impalers.gone.remove(&id);
+        if attacker.is_some_and(|a| self.impalers.escorts.contains_key(&a.id())) {
+            let e = self.war.targets.get(&id);
+            let cost = e.and_then(|e| e.ud).map_or(0.0, |d| d.cost(self.metal));
+            let name = e.map_or("?", |e| e.def_name.as_str()).to_owned();
+            self.log(&format!("impalers: an escort killed a {name} ({cost:.0} metal)"));
+        }
         // (Any Impaler of ours, in a battery or not: see `disable=impalers`.)
         if attacker.is_some_and(|a| a.team() == self.team_id && self.defs.name_of(a) == IMPALER) {
             let e = self.war.targets.get(&id);
@@ -504,7 +539,7 @@ impl Ai {
         if (frame + self.offset + 7) % PERIOD != 0 {
             return;
         }
-        if self.impalers.guns.is_empty() && self.impalers.shots.is_empty() {
+        if self.impalers.guns.is_empty() && self.impalers.shots.is_empty() && self.impalers.escorts.is_empty() {
             return;
         }
         self.impalers_watch(frame);
@@ -516,7 +551,116 @@ impl Ai {
             self.impalers_volley(bid, &mut targets);
             self.impalers_station(bid, &targets, frame);
         }
+        self.impalers_escort();
         self.impalers_report(frame, &targets);
+    }
+
+    /// How many escorts of role `role` battery `bid` lacks.
+    fn impalers_short(&self, bid: u32, role: usize) -> usize {
+        let h = &self.impalers;
+        let Some((b, r)) = h.batteries.get(&bid).zip(h.doctrine.as_ref().and_then(|d| d.roles.get(role))) else {
+            return 0;
+        };
+        let have = h.escorts.values().filter(|e| e.battery == bid && e.role == role).count();
+        r.want(b.guns.len()).map_or(1, |w| w.saturating_sub(have))
+    }
+
+    /// The battery most short of role `role`, the nearest to `p` of those.
+    fn impalers_short_battery(&self, role: usize, p: Vec3) -> Option<u32> {
+        (self.impalers.batteries.iter())
+            .map(|(&bid, b)| (bid, self.impalers_short(bid, role), distance(self.impalers_battery_pos(b), p)))
+            .filter(|x| x.1 > 0)
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.2.total_cmp(&a.2)))
+            .map(|x| x.0)
+    }
+
+    /// A new unit: an escort of the battery most short of its role, if any
+    /// is. It retreats when hurt, as the army does.
+    pub fn impalers_claims_escort(&mut self, unit: Unit, name: &str, cost: f32) -> bool {
+        let Some(role) = self.impalers.doctrine.as_ref().and_then(|d| d.role_of(name)) else { return false };
+        let Some(bid) = self.impalers_short_battery(role, unit.pos()) else { return false };
+        unit.set_move_state(1, 0);
+        let f = Fighter::new(unit, cost, self.team_id);
+        self.fighters.insert(f.id, f);
+        self.impalers.escorts.insert(unit.id(), Escort { battery: bid, role, orbits: None });
+        let n = self.impalers.batteries.get(&bid).map_or(0, |b| b.guns.len());
+        let r = self.impalers.doctrine.as_ref().and_then(|d| d.roles.get(role)).map_or("?", |r| r.name.as_str());
+        let short = self.impalers_short(bid, role);
+        self.log(&format!("impalers: a {name} joins a battery of {n} as its {r} ({short} short now)"));
+        true
+    }
+
+    /// The chance a factory pick that could build `name` builds it: a
+    /// role's `produce` while some battery is short of it.
+    pub fn impalers_escort_produce(&self, name: &str) -> f32 {
+        let Some(d) = self.impalers.doctrine.as_ref() else { return 0.0 };
+        let Some(role) = d.role_of(name) else { return 0.0 };
+        let short = self.impalers.batteries.keys().any(|&bid| self.impalers_short(bid, role) > 0);
+        if short { d.roles[role].produce } else { 0.0 }
+    }
+
+    /// Keep the escorts orbiting a gun of their battery (one not
+    /// retreating, if any is), unless they retreat; those whose battery is
+    /// gone join the next short of them, or the army.
+    fn impalers_escort(&mut self) {
+        let ids: Vec<i32> = self.impalers.escorts.keys().copied().collect();
+        for id in ids {
+            let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else {
+                self.impalers.escorts.remove(&id);
+                continue;
+            };
+            if self.retreat_handler.is_retreating(id) {
+                if let Some(e) = self.impalers.escorts.get_mut(&id) {
+                    e.orbits = None;
+                }
+                continue;
+            }
+            let Some(&Escort { battery, role, orbits }) = self.impalers.escorts.get(&id) else { continue };
+            if !self.impalers.batteries.contains_key(&battery) {
+                match self.impalers_short_battery(role, unit.pos()) {
+                    Some(bid) => {
+                        if let Some(e) = self.impalers.escorts.get_mut(&id) {
+                            (e.battery, e.orbits) = (bid, None);
+                        }
+                    }
+                    None => {
+                        self.impalers_release_escort(id, unit);
+                        continue;
+                    }
+                }
+            }
+            let Some(b) = self.impalers.escorts.get(&id).and_then(|e| self.impalers.batteries.get(&e.battery)) else {
+                continue;
+            };
+            let calm = |g: &i32| !self.retreat_handler.is_retreating(*g);
+            let leader = match orbits {
+                Some(g) if b.guns.contains(&g) && calm(&g) => g,
+                _ => match b.guns.iter().find(|g| calm(g)).or(b.guns.first()) {
+                    Some(&g) => g,
+                    None => continue,
+                },
+            };
+            if orbits == Some(leader) {
+                continue;
+            }
+            let radius = self.impalers.doctrine.as_ref().and_then(|d| d.roles.get(role)).map_or(120.0, |r| r.orbit);
+            unit.execute_custom_command(cmd::ORBIT, &[leader as f32, radius], 0, NO_TIMEOUT);
+            unit.execute_custom_command(cmd::ORBIT_DRAW, &[leader as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
+            if let Some(e) = self.impalers.escorts.get_mut(&id) {
+                e.orbits = Some(leader);
+            }
+        }
+    }
+
+    /// An escort no battery wants goes to the army, as a new unit does.
+    fn impalers_release_escort(&mut self, id: i32, unit: Unit) {
+        self.impalers.escorts.remove(&id);
+        self.fighters.remove(&id);
+        unit.stop(0);
+        let name = self.defs.name_of(unit).to_owned();
+        self.log(&format!("impalers: a {name} escort goes back to the army"));
+        self.war.new_units.insert(id);
+        self.war_unit_idle(unit);
     }
 
     /// Mean position of a battery's guns.
