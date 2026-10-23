@@ -26,7 +26,7 @@ use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, SyncSender, sync_channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -521,8 +521,12 @@ fn call(shared: &Shared, tool: &str, args: Value) -> Result<Value, String> {
 pub(super) fn call_internal(shared: &Shared, tool: &str, args: Value, timeout: Duration) -> Result<Value, String> {
     let (tx, rx) = sync_channel(1);
     shared.calls.send(Call { tool: tool.to_owned(), args, reply: tx }).map_err(|_| "the AI is gone".to_owned())?;
-    rx.recv_timeout(timeout).unwrap_or_else(|_| {
-        Err(format!("no answer within {:.1}s: the AI only answers while the game runs (paused?)", timeout.as_secs_f64()))
+    rx.recv_timeout(timeout).unwrap_or_else(|e| match e {
+        RecvTimeoutError::Disconnected => Err("the AI is gone".to_owned()),
+        RecvTimeoutError::Timeout => Err(format!(
+            "no answer within {:.1}s: the AI only answers while the game runs (paused?)",
+            timeout.as_secs_f64()
+        )),
     })
 }
 

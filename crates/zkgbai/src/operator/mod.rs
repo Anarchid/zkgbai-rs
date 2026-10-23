@@ -293,11 +293,15 @@ impl Operator {
     fn stop(&mut self) {
         self.flush();
         *self.journal.borrow_mut() = None;
+        // Drop the call queue before joining the server's threads: that drops
+        // the reply channels of calls still queued, so their callers return at
+        // once instead of waiting out CALL_TIMEOUT (15 s) on the engine's
+        // thread at game end.
+        self.calls = None;
         if let Some(mut s) = self.server.take() {
             s.stop();
         }
         self.shared = None;
-        self.calls = None;
         if let Some(p) = self.discovery.take() {
             let _ = std::fs::remove_file(p);
         }
