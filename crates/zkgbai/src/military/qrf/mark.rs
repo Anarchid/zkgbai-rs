@@ -22,7 +22,7 @@ use std::sync::Arc;
 use springai::Vec3;
 
 use super::field::{Field, NEVER};
-use super::live::{DRAFT_COOLDOWN, Doing, MOON, PRESSED_RECALL, RAID_WEAK, RoleKind, Tactic};
+use super::live::{DRAFT_COOLDOWN, Doing, MOON, PRESSED_RECALL, RoleKind, Tactic};
 use crate::Ai;
 use crate::military::SquadId;
 use crate::military::qrf::station::k_means;
@@ -347,9 +347,6 @@ impl Ai {
         let mut breach = vec![vec![0.0f32; targets.len()]; team_ids.len()];
         // A moonlighting squad goes only at a raid that has pressed, and
         // only where it arrives with slack (its path time, not the crow's).
-        let pressed = |t: &Target, ai: &Ai| {
-            t.power >= RAID_WEAK || t.groups.iter().any(|&g| frame - ai.qrf.groups[g].pressed <= PRESSED_RECALL)
-        };
         // An asset the raid is shooting: its deadline is its time to die
         // (health over a tenth of the raid's power a second), not the
         // raid's path time, which is nought.
@@ -388,7 +385,11 @@ impl Ai {
                 let cooling = team >= MOON
                     && (self.qrf.draft_released.get(&((team - MOON) as SquadId)))
                         .is_some_and(|f| frame - f < DRAFT_COOLDOWN);
-                allowed[a][b] = self.qrf_mark_allows(team, t) && (team < MOON || slack && pressed(t, self) && !cooling);
+                // (Pressed is no longer required: on Agalta the drafts it
+                // refused were answering raids before they pressed, and
+                // mexes lost by 10:00 went 5.5 to 8.7; the slack test and
+                // the hold in seconds are what the rule keeps.)
+                allowed[a][b] = self.qrf_mark_allows(team, t) && (team < MOON || slack && !cooling);
                 if !allowed[a][b] {
                     cost[a][b] += 1e9;
                 }
@@ -411,9 +412,7 @@ impl Ai {
                 f >= MOON && (ai.qrf.draft_released.get(&((f - MOON) as SquadId))).is_some_and(|r| frame - r < DRAFT_COOLDOWN)
             };
             let Some(team) = (free.iter().copied())
-                .filter(|&f| {
-                    teams.contains_key(&f) && self.qrf_mark_allows(f, t) && (f < MOON || pressed(t, self) && !cooling(f, self))
-                })
+                .filter(|&f| teams.contains_key(&f) && self.qrf_mark_allows(f, t) && (f < MOON || !cooling(f, self)))
                 .min_by(
                     |&a, &b| {
                         let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
