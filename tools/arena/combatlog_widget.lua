@@ -382,8 +382,8 @@ end
 -- continuous laser yields one shot per poll), an idle one every IDLE_POLL.
 -- Each poll yields one record for the shots fired since the last one, with
 -- the period's damage; a beam's damage ticks can trail the shot (beamTime),
--- so the record stays open until the next poll and takes that period's
--- damage if the weapon fired no more. A reload advance without a target
+-- so the record stays open until the next poll after the beam has ended
+-- and takes the damage of the meantime if the weapon fired no more. A reload advance without a target
 -- (commander module slots churn) is not a shot, unless damage says so.
 local function pollSalvos(f)
 	for uid, weapons in pairs(pollable) do
@@ -428,6 +428,8 @@ local function pollSalvos(f)
 						active[uid] = f
 						local rec = newShot("s", f, wdid, uid, f0)
 						rec.n = n * info.salvo
+						-- Open at least until the beam has finished ticking (Lance: 1 s).
+						rec.until_ = f0 + math.floor(info.beam * 30) + 1
 						aimAt(rec, f, ttype, target)
 						consumePending(uid, wdid, rec, lastPoll, f)
 						if prevRec then closeShot(prevRec, f) end
@@ -435,8 +437,10 @@ local function pollSalvos(f)
 						open[wnum] = rec
 					elseif prevRec then
 						consumePending(uid, wdid, prevRec, lastPoll, f)
-						closeShot(prevRec, f)
-						open[wnum] = nil
+						if f >= prevRec.until_ then
+							closeShot(prevRec, f)
+							open[wnum] = nil
+						end
 					end
 					last[wnum] = rf
 				end
