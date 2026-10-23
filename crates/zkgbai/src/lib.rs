@@ -19,6 +19,7 @@ pub mod ai;
 pub mod defs;
 pub mod economy;
 pub mod graph;
+pub mod iq;
 pub mod kgbutil;
 pub mod logistics;
 pub mod los;

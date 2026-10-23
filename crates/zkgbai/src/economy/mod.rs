@@ -672,6 +672,7 @@ impl Ai {
         }
 
         self.eco_assign_workers();
+        self.iq_tick();
     }
 
     /// The 15-frame income/stall bookkeeping block of `update`.

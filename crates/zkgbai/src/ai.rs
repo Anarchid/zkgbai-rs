@@ -128,6 +128,8 @@ pub struct Ai {
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
     pub jumps: Jumps,
+    /// The allies' initial queues, and our opening sent to them.
+    pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
@@ -231,6 +233,7 @@ impl SkirmishAi for Ai {
             firefighters: Default::default(),
             raid_test: Default::default(),
             jumps: Jumps::default(),
+            iq: Default::default(),
             puppies: Puppies::default(),
             air_intel: Default::default(),
             precision: Default::default(),
@@ -276,6 +279,9 @@ impl SkirmishAi for Ai {
                 if self.active() {
                     self.guard("graph.luaMessage", |ai| ai.graph_lua_message(&data));
                     self.guard("nukes.luaMessage", |ai| ai.nukes_lua_message(&data));
+                    if data.starts_with("IQ|") {
+                        self.guard("iq.luaMessage", |ai| ai.iq_lua_message(&data));
+                    }
                 }
             }
             Event::UnitCreated { unit, builder } => self.unit_created(unit, builder),

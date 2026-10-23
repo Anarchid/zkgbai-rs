@@ -1712,6 +1712,32 @@ impl Ai {
         let map = self.cb.map();
 
         for position in spots {
+            // A spot an ally queued a mex at in the pregame is the ally's
+            // (see `iq`): no task for it, and one made before the queue
+            // arrived is dropped, until the claim lapses.
+            if let Some(team) = self.iq_spot_claimed(position) {
+                if self.iq_note_skipped(position) {
+                    self.log(&format!(
+                        "economy: spot at ({:.0},{:.0}) left to ally team {team}'s queue",
+                        position.x, position.z
+                    ));
+                }
+                let claimed: Vec<TaskId> = (self.eco.construction_tasks.iter().copied())
+                    .filter(|&id| {
+                        self.eco.tasks.get(id).is_some_and(|t| {
+                            t.as_construction().is_some_and(|c| {
+                                c.build_type.id() == mex.id()
+                                    && c.target.is_none()
+                                    && distance(t.position, position) < 1.0
+                            })
+                        })
+                    })
+                    .collect();
+                for id in claimed {
+                    self.eco.drop_construction_task(id);
+                }
+                continue;
+            }
             if map.is_possible_to_build_at(mex, position, 0) && self.war.get_porc_threat(position) == 0.0 {
                 let ct = WorkerTask::construction(mex, position, 0);
                 if !self.eco.tasks.contains(&self.eco.construction_tasks, &ct) {

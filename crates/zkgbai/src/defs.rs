@@ -70,6 +70,11 @@ impl Defs {
         self.names.get(def.id() as usize).map(String::as_str).unwrap_or("")
     }
 
+    /// Internal name of the definition with engine id `id`, if any.
+    pub fn name_by_id(&self, id: i32) -> Option<&str> {
+        usize::try_from(id).ok().and_then(|i| self.names.get(i)).map(String::as_str).filter(|n| !n.is_empty())
+    }
+
     /// Whether `def` is a commander (Zero-K's are all `dyn*`, the dynamic
     /// commanders). The original told them by build power over 8, which the
     /// gunship constructor (10) has now.
