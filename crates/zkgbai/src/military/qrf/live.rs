@@ -17,8 +17,8 @@
 //!   never contend for a squad.
 //!
 //! The budget (AI options `qrf_defense`, `qrf_cap`, `qrf_gain`; the
-//! operator's `qrf_set`): on autopilot, nothing until raids come into our
-//! territory or kill our economy; then enough power for as many teams as
+//! operator's `qrf_set`): on autopilot, nothing until something is lost
+//! to a raid; then enough power for as many teams as
 //! raids came at once, each `gain` times a typical raid lately, less
 //! half of what moonlights, at most `cap` of our mobile army.
 //!
@@ -139,7 +139,9 @@ const ORDER_PENDING: i32 = 30 * 60;
 /// against raids), with light raiders then only where no factory of ours
 /// makes the former. A factory short of the budget builds the first of
 /// the phase's picks it can.
-pub const ANTI_RAIDERS: [&str; 5] = ["tankheavyraid", "hoverheavyraid", "jumpraid", "spideremp", "amphimpulse"];
+// No Venom: spiders have nothing else that fits, and a Venom ordered is a
+// Redback or Recluse not built (mirrors on Hide and Seek 0-6-2).
+pub const ANTI_RAIDERS: [&str; 4] = ["tankheavyraid", "hoverheavyraid", "jumpraid", "amphimpulse"];
 pub const RAIDERS: [&str; 6] = ["shieldraid", "vehraid", "cloakraid", "tankraid", "hoverraid", "amphraid"];
 
 /// The dedicated picks are made from this income (metal per second), or
@@ -159,6 +161,11 @@ const MOON_SPEED: f32 = 65.0;
 /// The budget's mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
+    /// No dedicated force: moonlighting only, until an operator sets one.
+    /// (Tried as the default, Oct 23: it gave up the Agalta gain, 15 wins
+    /// and 5.0 mexes lost to 12 and 7.2, and gained nothing at 15:00 in
+    /// self-play or against Circuit over the capped auto force.)
+    Off,
     /// From the raids seen and the losses (see the module doc).
     Auto,
     /// This much power (metal).
@@ -215,7 +222,7 @@ impl Default for Budget {
             short_since: None,
             pending: Vec::new(),
             door: VecDeque::new(),
-            production: true,
+            production: false,
             anti_raiders: false,
         }
     }
@@ -423,7 +430,8 @@ impl Ai {
         q.trace = opt("qrf_trace").and_then(|v| v.parse().ok()).unwrap_or(0);
         q.no_moonlight = opt("qrf_moonlight").is_some_and(|v| matches!(v.as_str(), "off" | "0" | "false"));
         q.budget.mode = match opt("qrf_defense").as_deref() {
-            None | Some("auto") => Mode::Auto,
+            None | Some("") | Some("auto") => Mode::Auto,
+            Some("off") => Mode::Off,
             Some(v) => match v.strip_suffix('%') {
                 Some(p) => Mode::Share(p.parse::<f32>().unwrap_or(30.0).clamp(0.0, 100.0) / 100.0),
                 None => Mode::Metal(v.parse::<f32>().unwrap_or(0.0).max(0.0)),
@@ -432,7 +440,7 @@ impl Ai {
         q.budget.cap = num("qrf_cap").unwrap_or(CAP).clamp(0.0, 1.0);
         q.budget.gain = num("qrf_gain").unwrap_or(GAIN).max(0.0);
         q.budget.size = opt("qrf_size").and_then(|v| Sizing::parse(&v)).unwrap_or(Sizing::Lossy);
-        q.budget.production = !opt("qrf_production").is_some_and(|v| matches!(v.as_str(), "off" | "0" | "false"));
+        q.budget.production = opt("qrf_production").is_some_and(|v| matches!(v.as_str(), "on" | "1" | "true"));
         q.grid = Some(Grid::new(self.cb));
         q.candidates = super::candidates(self.cb);
         let line = format!(
@@ -583,6 +591,7 @@ impl Ai {
         let raids = b.recent().0;
         let strongest = b.strongest();
         let (wanted, reason) = match b.mode {
+            Mode::Off => (0.0, "off: moonlighting only (qrf_set defense sets a force)".into()),
             Mode::Auto if !b.armed() => (0.0, format!("quiet [{}: nothing lost to a raid lately]", b.size.name())),
             Mode::Auto => {
                 let (w, r) = auto_wanted(raids, strongest, losses, moon, army, b.gain, b.cap);
@@ -641,7 +650,17 @@ impl Ai {
         let cost = def.cost(self.metal);
         let short = q.budget.have + 0.5 * cost <= q.budget.wanted;
         let frame = self.frame;
-        if !self.qrf.budget.may_recruit(frame, short) {
+        // A unit the force ordered is its own; the door share only governs
+        // what the factory built for itself. Otherwise the cap refuses the
+        // ordered units, the force stays short, and the factory keeps
+        // substituting raiders for its own picks.
+        let ordered = q.budget.pending.iter().position(|p| (p.1 - cost).abs() < 1.0);
+        if let Some(i) = ordered {
+            if !short {
+                return false;
+            }
+            self.qrf.budget.pending.remove(i);
+        } else if !self.qrf.budget.may_recruit(frame, short) {
             return false;
         }
         let Some(mobility) = Mobility::of(def) else { return false };
@@ -663,9 +682,6 @@ impl Ai {
             },
         );
         self.qrf.budget.have += cost;
-        if !self.qrf.budget.pending.is_empty() {
-            self.qrf.budget.pending.remove(0);
-        }
         self.qrf.live_stats.recruited += 1;
         unit.set_move_state(1, 0);
         unit.set_fire_state(2, 0);
@@ -863,22 +879,31 @@ impl Ai {
     }
 
     /// One of our assets died: who was on the raid (for the analysts).
-    pub fn qrf_asset_lost(&mut self, unit: Unit) {
+    pub fn qrf_asset_lost(&mut self, unit: Unit, attacker: Option<Unit>) {
         if !self.qrf.on || !self.qrf.live {
             return;
         }
         let Some(def) = unit.def() else { return };
         let worker = def.speed() > 0.0 && !def.build_options().is_empty();
-        if def.speed() > 0.0 && !worker {
+        // Terraform markers die on completion; they are not assets.
+        if def.speed() > 0.0 && !worker || self.defs.name(def) == "terraunit" {
             return;
         }
         let pos = unit.pos();
         let cost = def.cost(self.metal);
         let frame = self.frame;
-        let raid = (self.qrf.groups.iter().enumerate())
-            .map(|(i, g)| (i, distance(g.center, pos)))
-            .filter(|&(_, d)| d < 700.0)
-            .min_by(|a, b| a.1.total_cmp(&b.1));
+        // The attacker's raid group; the nearest group only when the
+        // attacker is unknown (a static, say, or one not seen).
+        let by_attacker = attacker.and_then(|a| {
+            let id = a.id();
+            (self.qrf.groups.iter().enumerate()).find(|(_, g)| g.members.contains(&id)).map(|(i, g)| (i, distance(g.center, pos)))
+        });
+        let raid = by_attacker.or_else(|| {
+            (self.qrf.groups.iter().enumerate())
+                .map(|(i, g)| (i, distance(g.center, pos)))
+                .filter(|&(_, d)| d < 700.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+        });
         let teams = self.qrf_teams();
         let nearest = (teams.iter())
             .map(|(&t, ids)| (t, distance(self.qrf_team_pos(ids).0, pos)))

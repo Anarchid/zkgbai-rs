@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'enable',
 		name   = 'Experimental features',
-		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets), caretakers (one caretaker per 10 metal income from the second constructor on, factories not counted, so the constructors leave the factory).',
+		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -37,7 +37,7 @@ local options = {
 	{
 		key    = 'qrf_defense',
 		name   = 'Home defense budget',
-		desc   = 'Raiders held back to keep raids off our economy (the quick-reaction force): auto (none until raids come, then sized to them, at most qrf_cap of the army), a metal value, or a share of the mobile army like 30%. Empty: auto.',
+		desc   = 'Raiders held back to keep raids off our economy (the quick-reaction force): auto (none until something is lost to a raid, then sized to the raids that cost us, at most qrf_cap of the army), off (forming squads moonlight, nothing held back), a metal value, or a share of the mobile army like 30%. Empty: auto.',
 		type   = 'string',
 		def    = '',
 		maxlen = 12,
@@ -61,7 +61,7 @@ local options = {
 	{
 		key    = 'qrf_production',
 		name   = 'Home defense production',
-		desc   = 'Factories build raiders for the home defense while it is short of its budget: on or off. Empty: on.',
+		desc   = 'Factories build raiders for the home defense while it is short of its budget: on or off. Empty: off (the orders cost the factory its own picks).',
 		type   = 'string',
 		def    = '',
 		maxlen = 4,

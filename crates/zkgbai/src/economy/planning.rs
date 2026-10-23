@@ -304,21 +304,15 @@ impl Ai {
         self.eco_create_fusion_task();
 
         // do we need caretakers? The AI's own rule: one per 10 static income,
-        // factories and caretakers counted together. `caretakers`: one per
-        // 10 income from the second constructor on, factories not counted
-        // (the human's 7 by 7:00 at 78 income; ours stand at the factory a
-        // third of their time instead).
-        let (built, want) = if self.dev_off("caretakers") {
-            (
-                self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len(),
-                (self.eco.static_income / 10.0).floor(),
-            )
-        } else {
-            (
-                self.eco.nanos.len() + self.eco.nano_tasks.len(),
-                if self.fac.num_workers >= 2 { (self.eco.static_income / 10.0).floor() } else { 0.0 },
-            )
-        };
+        // factories and caretakers counted together. It is also the floor
+        // the factory side needs: four caretakers at 54 income were the
+        // difference between an army of 6030 and 1150 at 10:00 (Oct 23).
+        // A clock rule from the second constructor on took the opening's
+        // mexes, and sinks triggered by free spots or by the metal float
+        // never fired in time; by 15:00 this rule plus the second factory
+        // already spend what buildpower 1.6 brings in.
+        let built = self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
+        let want = (self.eco.static_income / 10.0).floor();
         if !self.fac.factories.is_empty()
             && (built as f32) < want
             && let Some(target) = self.eco_get_caretaker_target()

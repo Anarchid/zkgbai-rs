@@ -915,7 +915,7 @@ impl Ai {
         self.war.new_units.remove(&id);
         self.raid_test_unit_destroyed(unit);
         self.firefighters_unit_destroyed(unit, attacker);
-        self.qrf_asset_lost(unit);
+        self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
 
         self.retreat_remove_unit(unit);

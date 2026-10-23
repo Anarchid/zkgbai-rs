@@ -13,6 +13,7 @@ use crate::operator::views::{Out, r1, xz};
 
 fn mode_name(m: Mode) -> String {
     match m {
+        Mode::Off => "off".into(),
         Mode::Auto => "auto".into(),
         Mode::Metal(v) => format!("{v:.0} metal"),
         Mode::Share(s) => format!("{:.0}% of the army", s * 100.0),
@@ -118,6 +119,7 @@ pub fn set(ai: &mut Ai, a: &Args) -> Out {
         let mode = match d {
             Value::Number(n) => Mode::Metal(n.as_f64().unwrap_or(0.0).max(0.0) as f32),
             Value::String(s) => match s.trim() {
+                "off" | "" => Mode::Off,
                 "auto" => Mode::Auto,
                 s => match s.strip_suffix('%') {
                     Some(p) => Mode::Share(

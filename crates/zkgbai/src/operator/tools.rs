@@ -660,16 +660,18 @@ pub static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "qrf_set",
-        description: "Set the QRF's budget: defense auto (the autopilot: none until raids come or kill our economy, \
-                       then gain x the strongest recent raid per raid at once, at most cap of our mobile army), a \
-                       metal value, or a share like '30%'; moonlighting of forming raider squads on or off.",
+        description: "Set the QRF's budget: defense auto (the default autopilot: none until something is lost to \
+                       a raid, then gain x the strongest raid that cost us per raid at once, at most cap of our \
+                       mobile army), off (forming raider squads moonlight, no units held back), a metal value, or a \
+                       share like '30%'. Raise it when raids under 400 power go unanswered (qrf-unanswered); set off \
+                       when the raids seen are escorted groups the force cannot take. Moonlighting on or off.",
         params: &[
-            P("defense", Str, false, "auto, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)"),
+            P("defense", Str, false, "auto (default), off, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)"),
             P("cap", Num, false, "auto: at most this share of the mobile army (default 0.3)"),
             P("gain", Num, false, "auto: power per team, times the strongest recent raid's (default 1.5)"),
             P("size", Str, false, "auto: the raid a team is sized against: lossy (default: the raids that cost us, and nothing until something was lost to one), typical, or largest"),
             P("moonlight", Bool, false, "forming raider squads answer raids at home while they fill (default true)"),
-            P("production", Bool, false, "factories build raiders for the force while it is short of the budget (default true)"),
+            P("production", Bool, false, "factories build raiders for the force while it is short of the budget (default false: it costs the factory its own picks)"),
             P("team_size", Int, false, "raiders per dedicated team (default 3)"),
             P("algo", Str, false, "mark (default), cover, station or intent"),
         ],
