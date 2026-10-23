@@ -431,6 +431,28 @@ impl Ai {
         for &(team, ti) in &plan {
             let tune = self.qrf_mark_team_tune(team, tune);
             let t = &targets[ti];
+            // A moonlighter's assignment, with how late it is: the asset it
+            // reaches with the most slack, its path time and the deadline
+            // (for the read; no behaviour hangs on it).
+            if team >= MOON {
+                let tf = team_ids.iter().position(|&x| x == team).and_then(|i| fields[i].clone());
+                let late = tf.as_ref().and_then(|tf| {
+                    (t.threatened.iter())
+                        .map(|&(i, tr)| (tf.at(self.qrf.assets[i].pos), deadline(t, i, tr, self)))
+                        .map(|(path, dl)| (dl - path, path, dl))
+                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                });
+                let sid = (team - MOON) as SquadId;
+                let line = match late {
+                    Some((margin, path, dl)) => format!(
+                        "qrf: draft squad {sid} at raid {:.0}: path {path:.0} s, deadline {dl:.0} s, margin {margin:+.0} s{}",
+                        t.power,
+                        if self.qrf.drafted.contains_key(&sid) { "" } else { " (new)" }
+                    ),
+                    None => format!("qrf: draft squad {sid} at raid {:.0}: no field", t.power),
+                };
+                self.log(&line);
+            }
             marks.insert(team, tracks_of(t, self));
             let ids = &teams[&team];
             let (pos, _) = self.qrf_team_pos(ids);
