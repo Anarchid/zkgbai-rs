@@ -62,7 +62,7 @@ pub struct GridDefs {
     /// Pylon range and power needed (0 if none), by unit def id.
     by_def: HashMap<i32, (f32, f32)>,
     /// The pylon's own range.
-    pylon_range: f32,
+    pub pylon_range: f32,
 }
 
 impl GridDefs {
@@ -84,6 +84,11 @@ impl GridDefs {
     /// Power a unit type needs from its grid (0 if none).
     pub fn needs(&self, def_id: i32) -> f32 {
         self.by_def.get(&def_id).map_or(0.0, |&(_, n)| n)
+    }
+
+    /// A unit type's pylon range, if it links.
+    pub fn range(&self, def_id: i32) -> Option<f32> {
+        self.by_def.get(&def_id).map(|&(r, _)| r)
     }
 }
 
@@ -113,6 +118,7 @@ impl Ai {
             .iter()
             .chain(&eco.windgens)
             .chain(&eco.fusions)
+            .chain(&eco.geos)
             .map(|u| u.rules_param_float("current_energyIncome", 0.0))
             .sum()
     }
@@ -310,9 +316,45 @@ impl Ai {
         if self.eco.pending_power.is_some() { MAX_PYLON_TASKS_WAITING } else { MAX_PYLON_TASKS }
     }
 
+    /// Members (position, pylon range) of our grids that have a metal spot
+    /// on them: where energy linked in can overdrive.
+    pub(super) fn eco_mex_grid_members(&self) -> Vec<(Vec3, f32)> {
+        let gd = &self.eco.grid_defs;
+        let eco = &self.eco;
+        let mex = eco.build_ids.mex_id;
+        let members: Vec<(Vec3, f32, bool)> = (eco.mexes.iter())
+            .chain(&eco.solars)
+            .chain(&eco.windgens)
+            .chain(&eco.pylons)
+            .chain(&eco.fusions)
+            .chain(&eco.geos)
+            .filter_map(|u| {
+                let id = u.def()?.id();
+                Some((u.pos(), gd.range(id)?, id == mex))
+            })
+            .collect();
+        let n = members.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        for i in 0..n {
+            for j in i + 1..n {
+                if distance(members[i].0, members[j].0) < members[i].1 + members[j].1 {
+                    let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let mut with_mex = vec![false; n];
+        for (i, m) in members.iter().enumerate() {
+            if m.2 {
+                with_mex[find(&mut parent, i)] = true;
+            }
+        }
+        (0..n).filter(|&i| with_mex[find(&mut parent, i)]).map(|i| (members[i].0, members[i].1)).collect()
+    }
+
     /// Queue the pylons of a chain from `a` (range `ra`) to `b` that are not
     /// there yet.
-    fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
+    pub(super) fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
         let Some(pylon) = self.defs.get("energypylon") else { return };
         let mut queued = 0;
         for p in chain(a, ra, b, rb, self.eco.grid_defs.pylon_range) {
@@ -337,7 +379,7 @@ impl Ai {
 /// Where the pylons (of range `pr`) of a chain from `a` (range `ra`) to `b`
 /// (range `rb`) stand: the first within reach of `a`, each next within
 /// reach of the last, the last within reach of `b`.
-fn chain(a: Vec3, ra: f32, b: Vec3, rb: f32, pr: f32) -> Vec<Vec3> {
+pub(super) fn chain(a: Vec3, ra: f32, b: Vec3, rb: f32, pr: f32) -> Vec<Vec3> {
     let d = distance(a, b);
     if d <= 0.0 || pr <= 0.0 {
         return Vec::new();

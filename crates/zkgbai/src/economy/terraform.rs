@@ -31,6 +31,10 @@ const RAISE: f32 = 2.0;
 /// Terraform tags are the AI's own; widgets count from 1.
 const FIRST_TAG: i32 = 1 << 20;
 
+/// Frames a worker just ordered to terraform is left to it before its
+/// orders tell (they reach the engine a frame or more later).
+const TERRAFORM_HOLD: i32 = 60;
+
 /// Whether `unit` is working on a terraform order: the gadget's own, or
 /// the repair of a terraunit it laid out, which the gadget orders first.
 pub fn is_terraforming(unit: Unit) -> bool {
@@ -166,6 +170,12 @@ impl Ai {
         self.terraform(builders, line, false, RAISE, height, queue);
     }
 
+    /// Have `builders` level the ground along `line` to `height` (a wall
+    /// with a flat top, if raised; done where it is that high already).
+    pub fn terraform_line_level(&mut self, builders: &[Unit], line: &[Vec3], height: f32, queue: bool) {
+        self.terraform(builders, line, false, LEVEL, height, queue);
+    }
+
     /// Have `builders` raise the ground inside the polygon `area` by
     /// `height` elmos (the gadget slopes its edges like a pyramid).
     pub fn terraform_area(&mut self, builders: &[Unit], area: &[Vec3], height: f32, queue: bool) {
@@ -206,6 +216,7 @@ impl Ai {
         let opts = if queue { OPTION_SHIFT_KEY } else { 0 };
         for b in builders {
             b.execute_custom_command(CMD_RAISE, &[cx, y, cz, tag], opts, NO_TIMEOUT);
+            self.eco.terraform_hold.insert(b.id(), self.frame + TERRAFORM_HOLD);
         }
     }
 }

@@ -159,6 +159,7 @@ pub enum Kind {
     Grid,
     Factory,
     Antinuke,
+    Energy,
     Operator,
 }
 
@@ -169,6 +170,7 @@ impl Kind {
             Kind::Grid => "grid",
             Kind::Factory => "factory",
             Kind::Antinuke => "antinuke",
+            Kind::Energy => "energy",
             Kind::Operator => "operator",
         }
     }
@@ -668,6 +670,17 @@ impl Ai {
         let value = value * VAR_UTILITY;
         let now = self.frame as f32 / 30.0;
         self.logistics_open(task, Kind::Factory, Worth::Stream { value, from: now, rate: value / PAYBACK }, why, 0.0);
+    }
+
+    /// A power plant the economy wants (task `task`): worth `value` (what
+    /// its energy would cost in solars), less a [`PAYBACK`] share of that
+    /// for every second it is not there.
+    pub fn logistics_energy(&mut self, task: TaskId, value: f32, why: &str) {
+        if self.dev_off("logistics") || self.dev_off("clients") || value <= 0.0 {
+            return;
+        }
+        let now = self.frame as f32 / 30.0;
+        self.logistics_open(task, Kind::Energy, Worth::Stream { value, from: now, rate: value / PAYBACK }, why, 0.0);
     }
 
     /// An anti-nuke (task `task`): worth what the worst blast on us would

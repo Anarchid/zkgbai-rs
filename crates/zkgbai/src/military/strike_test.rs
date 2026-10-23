@@ -54,7 +54,9 @@
 //! anyway);
 //! every few minutes the log tells how many construction jobs hold a
 //! finished building (stuck: whoever takes them repairs it, and builds
-//! nothing).
+//! nothing). With `test=geo`, the AI gets a geothermal plant on the vent
+//! nearest its base and upgrades it whatever its income (see
+//! `economy::geo`): the morph and the wall box, against `NullAI`.
 
 use springai::Vec3;
 
@@ -242,6 +244,11 @@ impl Ai {
                 units
             }
             ("jaeger", 60) => vec![("factoryspider", ahead(400.0)), ("planescout", ahead(-100.0))],
+            ("geo", 60) => {
+                let vents = self.eco_geo_vents();
+                let near = vents.into_iter().min_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
+                near.map(|v| vec![("energygeo", v)]).unwrap_or_default()
+            }
             ("jaeger", f) if f >= JAEGER_ARMY_FRAME && (f - JAEGER_ARMY_FRAME) % JAEGER_ARMY_ROUND == 0 => (0..6)
                 .map(|k| {
                     (["cloakassault", "cloakriot"][k % 2], get_directional_point(base, enemy, 1200.0 - 30.0 * k as f32))
