@@ -22,6 +22,7 @@ pub mod raid_test;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod strike_test;
+pub mod strikes;
 pub mod sweeps;
 pub mod taskforce;
 pub mod tasks;
@@ -517,6 +518,7 @@ impl Ai {
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
         self.guard("precision.update", |ai| ai.precision_update(frame));
         self.guard("water.update", |ai| ai.water_update(frame));
+        self.guard("strikes.update", |ai| ai.strikes_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
         self.guard("raid_test.update", |ai| ai.raid_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
@@ -680,6 +682,10 @@ impl Ai {
 
     pub fn war_unit_idle(&mut self, unit: Unit) {
         if !self.war.new_units.remove(&unit.id()) {
+            return;
+        }
+        // Posted sniper teams stay posted (see `strike_test`).
+        if self.strike_test_posted() {
             return;
         }
         // Staged raids are squads already (see `raid_test`).
@@ -856,6 +862,7 @@ impl Ai {
             return;
         }
         self.qrf_asset_pressed(unit, attacker);
+        self.strikes_unit_damaged(unit, attacker, dir, weapon);
 
         // check if the damaged unit is on fire.
         let on_fire = h.rules_param_float("on_fire", 0.0) > 0.0;
@@ -935,6 +942,7 @@ impl Ai {
         self.firefighters_unit_destroyed(unit, attacker);
         self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
+        self.strikes_unit_destroyed(unit, attacker);
 
         // (Before the retreat handler forgets whether it was retreating.)
         self.impalers_remove_unit(unit);
@@ -1055,6 +1063,7 @@ impl Ai {
             }
             war.targets.insert(id, e);
         }
+        self.strikes_enemy_seen(enemy);
     }
 
     pub fn war_enemy_finished(&mut self, enemy: Unit) {
@@ -1123,6 +1132,7 @@ impl Ai {
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
+        self.strikes_enemy_destroyed(enemy, attacker);
         self.impalers_enemy_destroyed(enemy, attacker);
         self.raid_test_enemy_destroyed(enemy);
         self.firefighters_enemy_destroyed(enemy, attacker);

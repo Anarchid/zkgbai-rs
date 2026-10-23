@@ -576,8 +576,11 @@ impl Ai {
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice);
+        // Dirtbags for the strikes while snipers are about (see `strikes`).
         let choice = match (ai_wants_builder || special, fac.unit) {
-            (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
+            (false, unit) => {
+                (self.strikes_production(unit, choice)).or_else(|| self.qrf_production(unit, choice)).unwrap_or(choice)
+            }
             _ => choice,
         };
         if !ai_wants_builder

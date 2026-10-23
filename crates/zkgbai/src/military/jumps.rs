@@ -230,6 +230,19 @@ impl Ai {
         true
     }
 
+    /// Jump `unit` to `to` if it can now, `to` is in reach and the arc is
+    /// clear; `why` is counted.
+    pub fn jump_to(&mut self, unit: Unit, to: Vec3, why: &str) -> bool {
+        let Some(jd) = self.jump_ready(unit) else { return false };
+        let from = unit.pos();
+        let d = distance(from, to);
+        if !(MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d) || !self.jump_clear(jd, from, to) {
+            return false;
+        }
+        self.jump_order(unit, to, why);
+        true
+    }
+
     /// A unit on its way to `home` jumps the first stretch of the way, if
     /// it can and enemies reach it here. (The way is found anew: the retreat
     /// orders just given reach the engine a frame later, so the unit's queue

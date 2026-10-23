@@ -63,7 +63,15 @@
 //! finished building (stuck: whoever takes them repairs it, and builds
 //! nothing). With `test=geo`, the AI gets a geothermal plant on the vent
 //! nearest its base and upgrades it whatever its income (see
-//! `economy::geo`): the morph and the wall box, against `NullAI`.
+//! `economy::geo`): the morph and the wall box, against `NullAI`. With
+//! `test=snipers` (or `test=lances`), a passive defender gets a Phantom
+//! (a Lance) posted 1400 elmos out toward the enemy every two and a half
+//! minutes, to one side then the other, every second one with a Reaver
+//! behind it; with `test=hunt`, the attacker gets a radar toward the
+//! enemy and, every two minutes, six Glaives, two Kodachis, a Blitz, a
+//! Scorcher and a Sparrow at home, which raid as ever: the strikes (see
+//! `strikes`) are what should kill the snipers, measured by `strikes:`
+//! lines (kills, metal lost per kill, units sniped outside strikes).
 
 use springai::Vec3;
 
@@ -117,11 +125,24 @@ const IMPALER_ROUND: i32 = 30 * 300;
 /// no enemy building known and raiders at home).
 const IMPALER_WAR: [i32; 3] = [30 * 480, 30 * 720, 30 * 960];
 
+/// How often a sniper team is posted (`snipers`, `lances`), where, and
+/// how often the hunters come (`hunt`).
+const SNIPER_ROUND: i32 = 30 * 150;
+const SNIPER_OUT: f32 = 1400.0;
+const SNIPER_ASIDE: f32 = 500.0;
+const HUNT_ROUND: i32 = 30 * 120;
+
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
 const DROP_ROUND: i32 = 30 * 180;
 
 impl Ai {
+    /// Whether this side's cheated units stand where they are posted (the
+    /// sniper teams), out of the handlers' hands.
+    pub fn strike_test_posted(&self) -> bool {
+        matches!(self.test.as_deref(), Some("snipers" | "lances"))
+    }
+
     pub fn strike_test_update(&mut self, frame: i32) {
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_update(frame);
@@ -133,13 +154,20 @@ impl Ai {
             return;
         }
         let Some(test) = self.test.clone() else { return };
-        let base = self.graph.get_ally_center();
-        let toward = self.graph.get_enemy_center();
-        let ahead = |d: f32| get_directional_point(base, toward, d);
+        // Our base: the commander's place (the ally center is unreliable
+        // on a passive side, and at the first frames).
+        let com = (self.cb.team_units().into_iter()).find(|u| self.defs.name_of(*u).starts_with("dyn")).map(|u| u.pos());
+        let base = com.filter(|p| p.x > 0.0 || p.z > 0.0).unwrap_or_else(|| self.graph.get_ally_center());
         let map = self.cb.map();
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
         // The enemy's base, before we have seen it: across the map from ours.
         let enemy = Vec3::xz(w - base.x, h - base.z);
+        // Toward the enemy: as known, else as guessed (an unknown enemy
+        // center sits on ours, and a direction from a point to itself is
+        // NaN: cheated units then land at (0, 0)).
+        let known = self.graph.get_enemy_center();
+        let toward = if distance(known, base) > 200.0 { known } else { enemy };
+        let ahead = |d: f32| get_directional_point(base, toward, d);
         // Off to the side of the way from the enemy, on the map.
         let (dx, dz) = (toward.x - base.x, toward.z - base.z);
         let n = (dx * dx + dz * dz).sqrt().max(1.0);
@@ -291,6 +319,39 @@ impl Ai {
                 units
             }
             ("impalerwar", f) if IMPALER_WAR.contains(&f) => vec![("vehheavyarty", ahead(-100.0)); 4],
+            ("snipers" | "lances", f) if f == 60 || (f > 0 && f % SNIPER_ROUND == 0) => {
+                let round = f / SNIPER_ROUND;
+                let s = if round % 2 == 0 { 1.0 } else { -1.0 };
+                let aside = |d: f32| {
+                    let p = ahead(d);
+                    Vec3::xz(p.x - dz / n * s * SNIPER_ASIDE, p.z + dx / n * s * SNIPER_ASIDE)
+                };
+                let sniper = if test == "snipers" { "cloaksnipe" } else { "hoverarty" };
+                let mut units = vec![(sniper, aside(SNIPER_OUT))];
+                if round % 2 == 1 {
+                    units.push(("cloakriot", aside(SNIPER_OUT - 120.0)));
+                }
+                // A fort about the commander, so the game runs its course
+                // (stage1: the hunters' raiders killed it at 4:29).
+                if f == 60 {
+                    units.push(("factorycloak", ahead(-250.0)));
+                    for (d, s) in [(250.0, 0.0), (0.0, 250.0), (0.0, -250.0), (-120.0, 160.0)] {
+                        let p = ahead(d);
+                        units.push(("turretlaser", Vec3::xz(p.x - dz / n * s, p.z + dx / n * s)));
+                    }
+                    units.push(("turretriot", ahead(120.0)));
+                }
+                units
+            }
+            ("hunt", f) if f == 60 || (f > 0 && f % HUNT_ROUND == 0) => {
+                let mut units = vec![("cloakraid", ahead(-100.0)); 6];
+                units.extend([("tankraid", ahead(-150.0)); 2]);
+                units.extend([("tankheavyraid", ahead(-200.0)), ("vehraid", ahead(-250.0)), ("planelightscout", ahead(-300.0))]);
+                if f == 60 {
+                    units.push(("staticradar", get_directional_point(enemy, base, 1800.0)));
+                }
+                units
+            }
             _ => Vec::new(),
         };
         // Impaler tests cheat only to spawn (and `impaler` to top up): the
@@ -316,18 +377,25 @@ impl Ai {
             let site = self.cb.map().find_closest_build_site(def, at, 1200.0, 4, 0);
             let unit = self.cb.cheat_new_unit(def, if site.x >= 0.0 { site } else { at });
             // A short walk, so it goes idle and joins its handler as if
-            // built (cheated units get no idle event otherwise).
+            // built (cheated units get no idle event otherwise). A sniper
+            // team stands its post instead, firing at will.
             if let Some(u) = unit.filter(|_| def.speed() > 0.0) {
-                let p = u.pos();
-                u.move_to(Vec3::new(p.x + 40.0, p.y, p.z + 40.0), 0);
+                if self.strike_test_posted() {
+                    u.set_move_state(0, 0);
+                    u.set_fire_state(2, 0);
+                } else {
+                    let p = u.pos();
+                    u.move_to(Vec3::new(p.x + 40.0, p.y, p.z + 40.0), 0);
+                }
             }
             // Precision raiders go solo (see `handlers::precision`).
             if let Some(u) = unit.filter(|_| test == "precision" && def.speed() > 0.0) {
                 let fighter = crate::military::Fighter::new_raider(u, def.cost(self.metal), self.team_id);
                 self.raider_add_solo_raider(fighter);
             }
-            let p = unit.map(|u| u.pos());
-            self.log(&format!("strike-test: {name} at {:?}", p.map(|p| (p.x as i32, p.z as i32))));
+            // (A cheated unit's own position reads (0, 0) this frame.)
+            let p = if site.x >= 0.0 { site } else { at };
+            self.log(&format!("strike-test: {name} at ({:.0}, {:.0}){}", p.x, p.z, if unit.is_none() { ": refused" } else { "" }));
         }
         if topped {
             for res in [self.metal, self.energy] {
@@ -339,7 +407,7 @@ impl Ai {
         }
         // Owls keep watch over the fort, and the commander holds its fire
         // (it would shoot the probes; losing it ends the game).
-        if matches!(test.as_str(), "fort" | "radarfort" | "heavies" | "farm") && frame == 300 {
+        if matches!(test.as_str(), "fort" | "radarfort" | "heavies" | "farm" | "snipers" | "lances") && frame == 300 {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
                 c.set_move_state(0, 0);
