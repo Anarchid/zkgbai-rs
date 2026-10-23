@@ -496,6 +496,15 @@ impl Ai {
         if self.test.is_some() {
             return;
         }
+        // With an ally the game is the alliance's to give up, and the AI
+        // interface has no resign: "gg" and a self-destruct beside an ally
+        // is a base blown up in a game that goes on (a 2v2 on The Cold
+        // Place, Oct 23: the enemy alliance's spots against this team's
+        // own, 28 to 18, and the base gone at 15:00 with the human ally
+        // still fighting). So with any ally, play on.
+        if !self.allies.is_empty() {
+            return;
+        }
         let espots = self.graph.get_enemy_spots().len() as f32;
         let ospots = self.graph.get_owned_spots().len() as f32;
         if !self.is_ffa
