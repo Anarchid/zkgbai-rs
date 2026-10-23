@@ -175,6 +175,7 @@ select, input[type=text], input[type=search], textarea {
       <label>overlay
         <select id="overlay" autocomplete="off">
           <option value="">none</option>
+          <optgroup label="segmentation"><option value="seg:regions">regions</option><option value="seg:holders">holders</option></optgroup>
           <option>threat</option><option>enemy_porc</option><option>aa_threat</option><option>aa_porc</option>
           <option>sub_threat</option><option>sub_porc</option><option>ally_sub</option>
           <option>ally_threat</option><option>ally_porc</option><option>ally_raider</option>
@@ -437,6 +438,67 @@ function buildOverlay(o) {
   return c;
 }
 
+// The terrain's segmentation (the terrain_map tool): run-length rows of
+// region ids (-1 an obstacle). Regions mode colours each region by a hue
+// from its id; holders mode by who holds it (ours, theirs, nobody);
+// cells on a region border are drawn darker. The chokepoints go on top
+// in the draw (see drawChokes).
+function regionHue(id) { return (id * 137.508) % 360; }
+function hsl2rgb(h, sl, l) {
+  const a = sl * Math.min(l, 1 - l);
+  const f = n => { const k = (n + h / 30) % 12; return Math.round(255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); };
+  return [f(0), f(8), f(4)];
+}
+function buildSegOverlay(o, mode) {
+  if (!o || !o.rows) return null;
+  const w = o.width, h = o.height;
+  const ids = new Int32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const row = o.rows[y]; let x = 0;
+    for (let i = 0; i + 1 < row.length; i += 2) for (let n = 0; n < row[i + 1] && x < w; n++) ids[y * w + x++] = row[i];
+  }
+  const holder = new Map();
+  for (const r of o.regions || []) holder.set(r.id, r.holder || 'none');
+  const rgbOurs = colors.ours.match(/\d+/g).map(Number), rgbEnemy = colors.enemy.match(/\d+/g).map(Number);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  const img = g.createImageData(w, h);
+  const hue = new Map();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const id = ids[y * w + x]; const i = (y * w + x) * 4;
+    if (id < 0) { img.data[i + 3] = 0; continue; }
+    let rgb;
+    if (mode === 'holders') {
+      const hd = holder.get(id);
+      rgb = hd === 'ally' ? rgbOurs : hd === 'enemy' ? rgbEnemy : [128, 128, 128];
+    } else {
+      if (!hue.has(id)) hue.set(id, hsl2rgb(regionHue(id), 0.55, 0.55));
+      rgb = hue.get(id);
+    }
+    const border = (x + 1 < w && ids[y * w + x + 1] !== id) || (y + 1 < h && ids[(y + 1) * w + x] !== id);
+    const k = border ? 0.45 : 1;
+    img.data[i] = rgb[0] * k; img.data[i + 1] = rgb[1] * k; img.data[i + 2] = rgb[2] * k; img.data[i + 3] = border ? 200 : 95;
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+function drawChokes(ctx, o) {
+  if (!o || !o.chokes) return;
+  for (const c of o.chokes) {
+    const flagged = c.hold || c.seal || c.fortify;
+    ctx.lineWidth = flagged ? 3 : 1.5;
+    ctx.strokeStyle = c.seal ? colors.enemy : c.hold || c.fortify ? colors.accent : colors.ink2;
+    if (c.gate) {
+      const [a, b] = c.gate.map(p => toScreen(p[0], p[1]));
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke();
+    } else {
+      const [x, y] = toScreen(c.pos[0], c.pos[1]);
+      ctx.beginPath(); ctx.arc(x, y, Math.max(3, c.width * view.k / 2), 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+}
+
 function unitRadius() { return Math.max(2.5, Math.min(7, view.k * 45)); }
 
 function shapeFor(role) {
@@ -503,10 +565,13 @@ function drawMap() {
     ctx.drawImage(terrain, x0, y0, h.width * h.cell * view.k, h.height * h.cell * view.k);
   }
   if (overlayCanvas && S.overlay) {
-    // The AI's map cells are centered on multiples of 64 elmos.
-    const [ox, oy] = toScreen(-32, -32);
-    ctx.imageSmoothingEnabled = true;
+    // The AI's map cells are centered on multiples of 64 elmos; the
+    // segmentation's start at the origin.
+    const seg = !!S.overlay.seg;
+    const [ox, oy] = seg ? toScreen(0, 0) : toScreen(-32, -32);
+    ctx.imageSmoothingEnabled = !seg;
     ctx.drawImage(overlayCanvas, ox, oy, S.overlay.width * S.overlay.cell * view.k, S.overlay.height * S.overlay.cell * view.k);
+    if (seg) drawChokes(ctx, S.overlay);
   }
   hits = [];
   const snap = snapNow();
@@ -1170,8 +1235,19 @@ async function pollOverlay() {
   const layer = $('#overlay').value;
   if (!layer || !S.live) { S.overlay = null; overlayCanvas = null; touch('map'); return; }
   try {
-    S.overlay = await call('threat_map', { layer, max_size: 160 });
-    overlayCanvas = buildOverlay(S.overlay);
+    if (layer.startsWith('seg:')) {
+      const mode = layer.slice(4);
+      const o = await call('terrain_map', { grid: true });
+      o.seg = mode;
+      // The grid changes rarely: keep the raster while its version holds.
+      if (!(S.overlay && S.overlay.seg === mode && S.overlay.grid_version === o.grid_version && overlayCanvas)) {
+        overlayCanvas = buildSegOverlay(o, mode);
+      }
+      S.overlay = o;
+    } else {
+      S.overlay = await call('threat_map', { layer, max_size: 160 });
+      overlayCanvas = buildOverlay(S.overlay);
+    }
     touch('map');
   } catch (e) { toast('overlay: ' + e.message, true); }
 }
@@ -1266,7 +1342,7 @@ function frame(now) {
 }
 new ResizeObserver(() => { if (!view.user) view.fitted = false; touch('map', 'charts'); }).observe(document.querySelector('.layout'));
 window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
-  readColors(); terrain = null; overlayCanvas = buildOverlay(S.overlay); touch('map', 'charts');
+  readColors(); terrain = null; overlayCanvas = S.overlay && S.overlay.seg ? buildSegOverlay(S.overlay, S.overlay.seg) : buildOverlay(S.overlay); touch('map', 'charts');
 });
 readColors();
 requestAnimationFrame(frame);
