@@ -883,6 +883,15 @@ pub fn terrain_map(ai: &mut Ai, a: &Args) -> Out {
             v
         })
         .collect();
+    // Each metal spot's region (-1 off the model), for reads that pair the
+    // spots with the gates: which gates lie on the ways to our spots.
+    let spots: Vec<Value> = (ai.graph.metal_spots.iter().enumerate())
+        .map(|(i, s)| {
+            let (cx, cz) = ((s.position.x / CELL) as usize, (s.position.z / CELL) as usize);
+            let region = if cx < w && cz < h { map.region_of_cell(cz * w + cx).map_or(-1, |r| r as i64) } else { -1 };
+            json!([i, s.position.x.round() as i32, s.position.z.round() as i32, region])
+        })
+        .collect();
     let mut v = json!({
         "tier": tier.name(),
         "strategy_tier": strategy_tier.map(|t| t.name()),
@@ -893,6 +902,8 @@ pub fn terrain_map(ai: &mut Ai, a: &Args) -> Out {
         "grid_version": version.to_string(),
         "regions": regions,
         "chokes": chokes,
+        "spots": spots,
+        "start": opt_xz(ai.graph.get_start_pos()),
     });
     if a.bool_or("grid", true) {
         v["rows"] = json!(rows);
