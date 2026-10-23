@@ -51,6 +51,9 @@
 //! (against `test=fort`), the attacker gets four Impalers, two Sparrows to
 //! show it the fort, and a radar covering it, every few minutes: its
 //! batteries (see `impalers`) are what should dismantle the fort. With
+//! `test=impalerwar`, an AI plays as ever, and four Impalers join it at
+//! minutes 8, 13 and 18 (the only cheats): the same guns for batteries or,
+//! with `disable=impalers`, for the artillery handler. With
 //! `test=hijack`, from
 //! the first minute to the eighth up to three constructors about to start
 //! a mex are handed a far mex job just then, as the AI does now and then
@@ -108,6 +111,9 @@ const JAEGER_ARMY_ROUND: i32 = 30 * 180;
 /// When the attacker's Impalers come, and how often.
 const IMPALER_FRAME: i32 = 30 * 60;
 const IMPALER_ROUND: i32 = 30 * 300;
+
+/// When four Impalers join a real war (`impalerwar`): minutes 8, 13, 18.
+const IMPALER_WAR: [i32; 3] = [30 * 480, 30 * 780, 30 * 1080];
 
 /// When the drop rounds start, and how often they come.
 const DROP_FRAME: i32 = 30 * 60;
@@ -216,10 +222,9 @@ impl Ai {
             ("impaler", f) if f >= IMPALER_FRAME && (f - IMPALER_FRAME) % IMPALER_ROUND == 0 => {
                 let mut units = vec![("vehheavyarty", ahead(-100.0)); 4];
                 units.extend([("planelightscout", ahead(-200.0)); 2]);
-                if f == IMPALER_FRAME {
-                    // Covering the fort: our hits on it are heard of.
-                    units.push(("staticradar", get_directional_point(enemy, base, 1800.0)));
-                }
+                // Covering the fort (out of its guns' reach, a new one each
+                // round): our hits on it are heard of.
+                units.push(("staticradar", get_directional_point(enemy, base, 2200.0)));
                 units
             }
             ("radarfort", 60) => {
@@ -283,9 +288,15 @@ impl Ai {
                 }
                 units
             }
+            ("impalerwar", f) if IMPALER_WAR.contains(&f) => vec![("vehheavyarty", ahead(-100.0)); 4],
             _ => Vec::new(),
         };
-        if frame == 60 {
+        // Impaler tests cheat only to spawn (and `impaler` to top up): the
+        // engine shows a cheating AI every unit's true place and health,
+        // which would make light of what batteries must know by sight.
+        let quiet = test == "impaler" || test == "impalerwar";
+        let topped = frame % 300 == 0 && test != "impalerwar";
+        if frame == 60 || (quiet && (topped || !spawn.is_empty())) {
             self.cb.cheats_set_enabled(true);
         }
         if test == "hijack" && frame >= HIJACK_REPORT && frame % 1800 == 0 {
@@ -316,10 +327,13 @@ impl Ai {
             let p = unit.map(|u| u.pos());
             self.log(&format!("strike-test: {name} at {:?}", p.map(|p| (p.x as i32, p.z as i32))));
         }
-        if frame % 300 == 0 {
+        if topped {
             for res in [self.metal, self.energy] {
                 self.cb.cheat_resource(res, 20000.0);
             }
+        }
+        if quiet {
+            self.cb.cheats_set_enabled(false);
         }
         // Owls keep watch over the fort, and the commander holds its fire
         // (it would shoot the probes; losing it ends the game).

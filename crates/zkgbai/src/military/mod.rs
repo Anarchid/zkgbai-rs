@@ -636,8 +636,7 @@ impl Ai {
             return;
         }
         // Impalers form batteries (see `impalers`).
-        if name == impalers::IMPALER && !self.dev_off("impalers") {
-            self.impalers_add(unit, cost);
+        if name == impalers::IMPALER && self.impalers_claims(unit, cost) {
             return;
         }
         // Anti-heavies hunt heavies (see `jaeger`); other Widows scout.

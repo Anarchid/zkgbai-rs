@@ -254,9 +254,21 @@ fn worth(e: &Enemy, cost: f32) -> f32 {
 }
 
 impl Ai {
+    /// A new Impaler: ours to command, unless `disable=impalers` leaves it
+    /// to the artillery handler (it is counted either way).
+    pub fn impalers_claims(&mut self, unit: Unit, cost: f32) -> bool {
+        let p = unit.pos();
+        self.log(&format!("impalers: an Impaler is built at ({:.0}, {:.0})", p.x, p.z));
+        if self.dev_off("impalers") {
+            return false;
+        }
+        self.impalers_add(unit, cost);
+        true
+    }
+
     /// A new Impaler: it holds its fire and its ground, and joins the
     /// nearest battery with room, or makes one.
-    pub fn impalers_add(&mut self, unit: Unit, cost: f32) {
+    fn impalers_add(&mut self, unit: Unit, cost: f32) {
         unit.set_fire_state(0, 0);
         unit.set_move_state(0, 0);
         self.retreat_add_coward(unit);
@@ -282,6 +294,10 @@ impl Ai {
 
     pub fn impalers_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
+        if self.defs.name_of(unit) == IMPALER {
+            let p = unit.pos();
+            self.log(&format!("impalers: lost an Impaler at ({:.0}, {:.0})", p.x, p.z));
+        }
         let h = &mut self.impalers;
         let Some(gun) = h.guns.remove(&id) else { return };
         if let Some(b) = h.batteries.get_mut(&gun.battery) {
