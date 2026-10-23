@@ -661,6 +661,7 @@ impl Ai {
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
                 self.guard("airIntel.unitDamaged", |ai| ai.air_intel_unit_damaged(unit, attacker, dir, weapon));
+                self.guard("impalers.unitDamaged", |ai| ai.impalers_unit_damaged(unit, attacker, damage, weapon));
             }
             Event::UnitDestroyed { unit, attacker } => {
                 self.guard("graph.unitDestroyed", |ai| ai.graph_unit_destroyed(unit, attacker));

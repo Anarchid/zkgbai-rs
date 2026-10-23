@@ -925,13 +925,14 @@ impl Ai {
         self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
 
+        // (Before the retreat handler forgets whether it was retreating.)
+        self.impalers_remove_unit(unit);
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
         self.squad_remove_unit(unit);
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);
         self.jaeger_remove_unit(unit);
-        self.impalers_remove_unit(unit);
         self.jumps_remove_unit(unit);
         self.puppies_remove_unit(unit);
 
