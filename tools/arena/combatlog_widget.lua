@@ -22,6 +22,8 @@
 --   unit  state of a unit in combat, every UNIT_SAMPLE frames
 --   meta  game, map, teams
 -- Positions are elmos, speeds elmos per frame, frames at 30 per second.
+-- UnitDamaged for frame f is delivered after GameFrame(f); the matching
+-- windows account for that (a projectile closes one poll after it vanishes).
 -- Echoes "COMBATLOG rows=<n> shots=<n> file=<path>" at game over.
 function widget:GetInfo()
 	return {
@@ -38,7 +40,7 @@ end
 local VERSION = 1
 local UNIT_SAMPLE = 30     -- frames between unit rows
 local ACTIVE_FRAMES = 600  -- a unit stays in combat this long after its last shot or wound
-local SALVO_POLL = 6       -- frames between reload polls of hitscan weapons in combat
+local SALVO_POLL = 6       -- longest poll period of a unit in combat (shorter for fast lasers)
 local IDLE_POLL = 30       -- ... and of those that have not shot or been shot lately
 local PROJ_POLL = 1        -- frames between projectile polls
 local PENDING_FRAMES = 12  -- unmatched damage waits this long for its salvo
@@ -96,6 +98,7 @@ local pollable = {}    -- unit id -> udHitscan entry
 local active = {}      -- unit id -> last combat frame
 local stateCache = {}  -- unit id -> state sampled this frame
 local cacheFrame = -1
+local fullView = false -- spectator with full view: projectile ids are complete
 
 local function num(v, digits)
 	if v == nil then return "" end
@@ -283,6 +286,7 @@ local function openProjectile(pid, f)
 end
 
 local liveSet = {}
+local gone = {}  -- projectiles that vanished at the last poll: closed at this one
 
 local function pollProjectiles(f)
 	local ids
@@ -297,12 +301,19 @@ local function pollProjectiles(f)
 		now[pid] = true
 		if not liveSet[pid] then openProjectile(pid, f) end
 	end
+	for pid, rec in pairs(gone) do
+		if shots[pid] == rec then
+			closeShot(rec, rec.gone)
+			shots[pid] = nil
+		end
+	end
+	gone = {}
 	for pid in pairs(liveSet) do
 		if not now[pid] then
 			local rec = shots[pid]
 			if rec then
-				closeShot(rec, f)
-				shots[pid] = nil
+				rec.gone = f
+				gone[pid] = rec
 			end
 		end
 	end
@@ -312,8 +323,9 @@ end
 -------------------------------------------------------------------------------
 -- Hitscan salvos, detected from reload state
 
--- Damage this attacker's weapon did in frames (fromFrame, toFrame] goes to
--- the record.
+-- Damage this attacker's weapon did in frames [fromFrame, toFrame) goes to
+-- the record. (UnitDamaged for frame f arrives after GameFrame(f), so a poll
+-- at f has seen damage up to f-1.)
 local function consumePending(aid, wdid, rec, fromFrame, toFrame)
 	local pa = pending[aid]
 	local list = pa and pa[wdid]
@@ -321,7 +333,7 @@ local function consumePending(aid, wdid, rec, fromFrame, toFrame)
 	local keep = {}
 	for i = 1, #list do
 		local d = list[i]
-		if d.f > fromFrame and d.f <= toFrame then
+		if d.f >= fromFrame and d.f < toFrame then
 			addDamage(rec, d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para)
 		else
 			keep[#keep + 1] = d
@@ -352,12 +364,33 @@ end
 -- the reload advance for weapons that fire faster than the poll). A beam's
 -- damage ticks can trail the shot (beamTime), so the record stays open until
 -- the next poll and takes the period's damage if the weapon fired no more.
+-- The first damage this attacker's weapon did in [fromFrame, toFrame).
+local function firstPending(aid, wdid, fromFrame, toFrame)
+	local pa = pending[aid]
+	local list = pa and pa[wdid]
+	if not list then return nil end
+	for i = 1, #list do
+		local d = list[i]
+		if d.f >= fromFrame and d.f < toFrame then return d end
+	end
+	return nil
+end
+
+-- Hitscan weapons leave no projectile to see, so shots are read off the
+-- reload state: reloadFrame = frame of the last shot + reload time. A unit
+-- in combat is polled every few frames (its shortest hitscan reload, so a
+-- continuous laser yields one shot per poll), an idle one every IDLE_POLL.
+-- Each poll yields one record for the shots fired since the last one, with
+-- the period's damage; a beam's damage ticks can trail the shot (beamTime),
+-- so the record stays open until the next poll and takes that period's
+-- damage if the weapon fired no more. A reload advance without a target
+-- (commander module slots churn) is not a shot, unless damage says so.
 local function pollSalvos(f)
 	for uid, weapons in pairs(pollable) do
 		local since = lastPolled[uid]
-		local due = since == nil or f - since >= IDLE_POLL or (active[uid] and f - active[uid] <= ACTIVE_FRAMES)
-		if due then
-			local lastPoll = since or (f - SALVO_POLL)
+		local hot = active[uid] and f - active[uid] <= ACTIVE_FRAMES
+		if since == nil or f - since >= (hot and weapons.period or IDLE_POLL) then
+			local lastPoll = since or (f - 1)
 			lastPolled[uid] = f
 			local last = lastReload[uid]
 			if not last then last = {}; lastReload[uid] = last end
@@ -368,20 +401,34 @@ local function pollSalvos(f)
 				if rf then
 					local prev = last[wnum]
 					local prevRec = open and open[wnum]
+					local ttype, target
 					if prev and rf > prev then
+						ttype, target = weaponTarget(uid, wnum)
+						if not ttype then
+							local d = firstPending(uid, wdid, lastPoll, f)
+							if d then ttype, target = "u", d.vid end
+						end
+					end
+					if ttype then
 						local info = wdInfo[wdid]
 						local reload = GetUnitWeaponState(uid, wnum, "reloadTime") or info.reload
 						local rframes = math.max(1, math.floor(reload * 30 + 0.5))
 						local f0 = rf - rframes
 						if f0 > f then f0 = f end
-						local n = math.floor((rf - prev) / rframes + 0.5)
-						local cap = math.floor((f - lastPoll) / rframes) + 1
-						if n > cap then n = cap end
-						if n < 1 then n = 1 end
+						-- Shots this period: one if the weapon was idle at the last
+						-- poll (when it started is unknown), else the reload advance,
+						-- at most what fits in the period.
+						local n = 1
+						if prev > lastPoll then
+							n = math.floor((rf - prev) / rframes + 0.5)
+							local cap = math.ceil((f - lastPoll) / rframes)
+							if n > cap then n = cap end
+							if n < 1 then n = 1 end
+						end
 						active[uid] = f
 						local rec = newShot("s", f, wdid, uid, f0)
 						rec.n = n * info.salvo
-						aimAt(rec, f, weaponTarget(uid, wnum))
+						aimAt(rec, f, ttype, target)
 						consumePending(uid, wdid, rec, lastPoll, f)
 						if prevRec then closeShot(prevRec, f) end
 						if not open then open = {}; openSalvo[uid] = open end
@@ -546,8 +593,10 @@ function widget:Initialize()
 		for i, w in ipairs(ud.weapons) do
 			local wi = wdInfo[w.weaponDef]
 			if wi and wi.hitscan then
-				list = list or {}
+				list = list or { period = SALVO_POLL }
 				list[#list + 1] = { i, w.weaponDef }
+				local rframes = math.max(1, math.floor(wi.reload * 30 + 0.5))
+				if rframes < list.period then list.period = rframes end
 			end
 		end
 		udHitscan[udid] = list
@@ -558,6 +607,8 @@ function widget:Initialize()
 	for _, uid in ipairs(sp.GetAllUnits()) do
 		trackUnit(uid, GetUnitDefID(uid))
 	end
+	local spec, full = sp.GetSpectatingState()
+	fullView = spec and full or false
 	if GetGameFrame() > 0 then writeMeta() end
 end
 
@@ -573,10 +624,8 @@ function widget:GameFrame(f)
 	local t0 = clock()
 	if f % PROJ_POLL == 0 then pollProjectiles(f) end
 	local t1 = clock()
-	if f % SALVO_POLL == 0 then
-		pollSalvos(f)
-		flushPending(f)
-	end
+	pollSalvos(f)
+	if f % SALVO_POLL == 0 then flushPending(f) end
 	local t2 = clock()
 	if f % UNIT_SAMPLE == 0 then sampleUnits(f) end
 	local t3 = clock()
@@ -620,8 +669,9 @@ local function unitDamaged(uid, udid, team, damage, paralyzer, wdid, pid, aid, a
 			return
 		end
 		-- Player view: no projectile id. The attacker's latest projectile of
-		-- this weapon, if it is still in flight.
-		if aid then
+		-- this weapon, if it is still in flight. (With full view a hit without
+		-- an id is damage the game applied itself: slow, burn.)
+		if aid and not fullView then
 			local lp = latestProj[aid]
 			local lpid = lp and lp[wdid]
 			local rec = lpid and shots[lpid]
@@ -681,16 +731,21 @@ function widget:UnitTaken(uid, udid)
 	trackUnit(uid, udid)
 end
 
+local function summary()
+	sp.Echo(format("COMBATLOG rows=%d shots=%d file=%s cpu proj=%.1fs salvo=%.1fs units=%.1fs dmg=%.1fs",
+		nrows, nshots, file or "", spent.proj, spent.salvo, spent.units, spent.dmg))
+end
+
 function widget:GameOver()
 	local f = GetGameFrame()
 	for pid, rec in pairs(shots) do closeShot(rec, f) end
 	shots = {}
 	for uid in pairs(openSalvo) do closeOpenSalvos(uid, f) end
 	flush()
-	sp.Echo(format("COMBATLOG rows=%d shots=%d file=%s cpu proj=%.1fs salvo=%.1fs units=%.1fs dmg=%.1fs",
-		nrows, nshots, file or "", spent.proj, spent.salvo, spent.units, spent.dmg))
+	summary()
 end
 
 function widget:Shutdown()
 	flush()
+	summary()
 end
