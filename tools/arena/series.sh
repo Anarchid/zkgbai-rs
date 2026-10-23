@@ -80,6 +80,13 @@ run_one() {
 export -f run_one
 export OUT FRAMES TIMEOUT PORT_BASE here
 
+# Each game binds PORT_BASE + idx; above 65535 the engine exits at frame 0
+# and every game reads "crash" (Oct 24: two series lost that way).
+njobs=$(wc -l < "$jobs_file")
+if [ $((PORT_BASE + njobs)) -gt 65535 ]; then
+    echo "series.sh: -P $PORT_BASE + $njobs games exceeds port 65535" >&2
+    exit 2
+fi
 echo "idx,map,a_slot,winner,frame,panics" > "$OUT/results.csv"
 xargs -P "$J" -I{} bash -c 'run_one "$@"' _ {} < "$jobs_file" >> "$OUT/results.csv"
 
@@ -87,5 +94,9 @@ total=$(($(wc -l < "$OUT/results.csv") - 1))
 wa=$(awk -F, 'NR>1 && $4=="A"' "$OUT/results.csv" | wc -l)
 wb=$(awk -F, 'NR>1 && $4=="B"' "$OUT/results.csv" | wc -l)
 other=$((total - wa - wb))
-echo "SERIES games=$total A=$wa B=$wb other=$other  A: $A  B: $B  dir=$OUT"
+crashes=$(awk -F, 'NR>1 && $4=="crash"' "$OUT/results.csv" | wc -l)
+if [ "$total" -gt 0 ] && [ "$crashes" -eq "$total" ]; then
+    echo "SERIES LAUNCH FAILURE: every game crashed at launch (see $OUT/m1/infolog.txt)" >&2
+fi
+echo "SERIES games=$total A=$wa B=$wb other=$other crashes=$crashes  A: $A  B: $B  dir=$OUT"
 awk -F, 'NR>1 {print "  " $2 ": " $4 " (f=" $5 ", panics=" $6 ")"}' "$OUT/results.csv" | sort
