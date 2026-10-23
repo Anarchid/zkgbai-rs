@@ -117,16 +117,19 @@ struct Opening {
 }
 
 /// The force a new core joins: pooled with allies, the least valuable;
-/// else the newest not engaged with room for it (`cores_per_force` 0: no
-/// limit), so cores never trickle to a fight alone. None: it starts one.
-fn core_room(forces: &[Opening], pooled: bool, cores_per_force: usize) -> Option<SquadId> {
+/// with room for it (`cores_per_force` 0: no limit), for a doctrine that
+/// reinforces engaged forces the least valuable (the shield ball, as
+/// always), else the newest not engaged, so cores never trickle to a fight
+/// alone. None: it starts one.
+fn core_room(forces: &[Opening], pooled: bool, reinforce: bool, cores_per_force: usize) -> Option<SquadId> {
+    let room = |f: &&Opening| cores_per_force == 0 || f.cores < cores_per_force;
     if pooled {
         return forces.iter().min_by(|a, b| a.value.total_cmp(&b.value)).map(|f| f.id);
     }
-    (forces.iter())
-        .filter(|f| !f.engaging && (cores_per_force == 0 || f.cores < cores_per_force))
-        .max_by_key(|f| f.formed)
-        .map(|f| f.id)
+    if reinforce {
+        return forces.iter().filter(room).min_by(|a, b| a.value.total_cmp(&b.value)).map(|f| f.id);
+    }
+    forces.iter().filter(room).filter(|f| !f.engaging).max_by_key(|f| f.formed).map(|f| f.id)
 }
 
 /// "; engaged N s, its leader averaging V" for a force's log line.
@@ -381,7 +384,8 @@ impl Ai {
         let is_core = doctrine.is_some_and(|d| d.is_core(&name, &tf.classes));
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));
         let to_strongest = doctrine.zip(role).is_some_and(|(d, r)| d.roles[r].to_strongest);
-        let (pool, cores_per_force) = doctrine.map_or((false, 1), |d| (d.pool_with_allies, d.cores_per_force as usize));
+        let (pool, reinforce, cores_per_force) =
+            doctrine.map_or((false, false, 1), |d| (d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize));
         // Forces of its doctrine (of those taking strays, for a unit none
         // takes) that go where it goes.
         let forces: Vec<SquadId> = (self.squad_handler.taskforces.iter().copied())
@@ -401,7 +405,7 @@ impl Ai {
                     value: q.metal_value,
                 })
                 .collect();
-            match core_room(&open, pooled, cores_per_force) {
+            match core_room(&open, pooled, reinforce, cores_per_force) {
                 Some(sid) => {
                     self.retreat_remove_unit(unit);
                     Some(sid)
@@ -932,13 +936,19 @@ mod tests {
         let f = |id, cores, engaging, formed, value| Opening { id, cores, engaging, formed, value };
         let forces = [f(1, 3, false, 100, 900.0), f(2, 1, true, 300, 200.0), f(3, 2, false, 200, 500.0)];
         // Not the engaged force, though it is the newest and least valuable.
-        assert_eq!(core_room(&forces, false, 0), Some(3));
+        assert_eq!(core_room(&forces, false, false, 0), Some(3));
         // Full forces take no more; with none open, a new force forms.
-        assert_eq!(core_room(&forces, false, 2), None);
-        assert_eq!(core_room(&forces, false, 3), Some(3));
-        assert_eq!(core_room(&[f(1, 1, true, 100, 250.0)], false, 0), None);
+        assert_eq!(core_room(&forces, false, false, 2), None);
+        assert_eq!(core_room(&forces, false, false, 3), Some(3));
+        assert_eq!(core_room(&[f(1, 1, true, 100, 250.0)], false, false, 0), None);
         // Pooled with allies, the least valuable takes it, engaged or not.
-        assert_eq!(core_room(&forces, true, 1), Some(2));
+        assert_eq!(core_room(&forces, true, false, 1), Some(2));
+        // A doctrine reinforcing engaged forces (the shield ball): the least
+        // valuable with room, engaged or not, as before doctrines.
+        assert_eq!(core_room(&forces, false, true, 0), Some(2));
+        assert_eq!(core_room(&forces, false, true, 3), Some(2));
+        assert_eq!(core_room(&forces, false, true, 2), Some(2));
+        assert_eq!(core_room(&forces, false, true, 1), None);
     }
 
     #[test]
