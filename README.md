@@ -144,7 +144,11 @@ raider or assault), `squad_intent` (hold a place, raid the enemy's economy aroun
 attack a place and hand the squad back; with a `courage` that divides the threat the squad
 perceives and the health level its units retreat at), `squad_disband`, `dial name=greed` (the
 economy's expansion horizon: perceived threat at jobs and workers divided by it), `porc_zone`
-(with `mexporc` off, circles where turrets by mexes and links are still allowed). The HUD can carry
+(with `mexporc` off, circles where turrets by mexes and links are still allowed), and the levers:
+`levers` lists the settings an operator may turn while the AI plays (greed, build power, the army's
+line, the home defense's budget and tactics) with their ranges and current values, `lever name=...
+value=...` (or `value=auto`) turns one. The dashboard's Levers card and the LuaUI widget's "levers"
+view draw them as sliders, choices and switches from that list. The HUD can carry
 pinned reads (`hud pin=enemies args={...}`) and the `board`, the map as a PNG (`GET /board` shows it;
 MCPL hosts get it as an image block). Calls run on the AI's thread at its next frame, so they are
 answered while the game runs.

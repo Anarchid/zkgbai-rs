@@ -114,8 +114,8 @@ impl Sizing {
 
 /// Defaults: dedicated power per unit of a typical raid's; the
 /// ceiling, as a share of our mobile army.
-const GAIN: f32 = 1.5;
-const CAP: f32 = 0.3;
+pub const GAIN: f32 = 1.5;
+pub const CAP: f32 = 0.3;
 
 /// Teams are let go when the force is over budget by this share (plus a
 /// raider) for this long.
