@@ -1052,6 +1052,11 @@ impl Ai {
             return "vehcon";
         }
 
+        // Screens for Impaler batteries short of them (see `impalers`).
+        if kgb_rand() < f64::from(self.impalers_escort_produce("vehriot")) {
+            return "vehriot";
+        }
+
         let slasher_value = war.slasher_spam as f32 * 140.0;
         if slasher_value > fm.assault_value && slasher_value > war.enemy_porc_value {
             return "vehassault";
@@ -1088,7 +1093,9 @@ impl Ai {
             return "veharty";
         }
 
-        if (fm.num_aspis > 0 && !self.squad_handler.shield_squads.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
+        // Dominatrices for shield balls: with only the felon doctrine on (the
+        // seeds), a taskforce is a shield ball, as this read before doctrines.
+        if (fm.num_aspis > 0 && !self.squad_handler.taskforces.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
             return "vehcapture";
         }
 

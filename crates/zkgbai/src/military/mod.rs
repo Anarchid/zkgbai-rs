@@ -23,6 +23,7 @@ pub mod scouts;
 pub mod shadow_probe;
 pub mod strike_test;
 pub mod sweeps;
+pub mod taskforce;
 pub mod tasks;
 pub mod teleport;
 pub mod unit_classes;
@@ -639,6 +640,11 @@ impl Ai {
         if name == impalers::IMPALER && self.impalers_claims(unit, cost) {
             return;
         }
+        // Batteries take escorts (see `impalers`).
+        if self.impalers_claims_escort(unit, name, cost) {
+            self.retreat_add_coward(unit);
+            return;
+        }
         // Anti-heavies hunt heavies (see `jaeger`); other Widows scout.
         if self.jaeger_claims(name) {
             self.jaeger_add(unit, cost);
@@ -755,6 +761,15 @@ impl Ai {
             }
         }
 
+        // Units a doctrine takes form taskforces (see `taskforce`): the
+        // shield ball, and the forces other doctrines make.
+        self.taskforce_load();
+        if self.taskforces.squad_doctrine(name).is_some() {
+            let mut f = Fighter::new(unit, cost, team);
+            f.shield_mob = true;
+            self.squad_add_taskforce_member(f);
+            return;
+        }
         let classes = &self.unit_classes;
         if classes.small_raiders.contains(name) {
             if name == "amphbomb" {
@@ -770,10 +785,6 @@ impl Ai {
         } else if classes.assaults.contains(name) {
             unit.set_move_state(1, 0);
             self.squad_add_assault(Fighter::new(unit, cost, team));
-        } else if classes.shield_mobs.contains(name) {
-            let mut f = Fighter::new(unit, cost, team);
-            f.shield_mob = true;
-            self.squad_add_shield_mob(f);
         } else if classes.mob_supports.contains(name) {
             self.misc_add_support(Fighter::new(unit, cost, team));
         } else if classes.loners.contains(name) {
@@ -925,13 +936,14 @@ impl Ai {
         self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
 
+        // (Before the retreat handler forgets whether it was retreating.)
+        self.impalers_remove_unit(unit);
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
         self.squad_remove_unit(unit);
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);
         self.jaeger_remove_unit(unit);
-        self.impalers_remove_unit(unit);
         self.jumps_remove_unit(unit);
         self.puppies_remove_unit(unit);
 
@@ -1178,7 +1190,7 @@ impl Ai {
             war.value_graphics.unpaint_circle(x, y, rr, value);
         }
 
-        for s in self.squad_handler.shield_squads.iter().filter_map(|&id| self.squads.get(id)) {
+        for s in self.squad_handler.taskforces.iter().filter_map(|&id| self.squads.get(id)) {
             if !s.is_dead(fighters) {
                 let (x, y) = cell(s.get_pos(fighters));
                 let value = (s.metal_value / 10.0) as i32;
@@ -1263,7 +1275,7 @@ impl Ai {
             for (list, rad) in [
                 (&self.squad_handler.squads, 10),
                 (&self.squad_handler.air_squads, 13),
-                (&self.squad_handler.shield_squads, 10),
+                (&self.squad_handler.taskforces, 10),
             ] {
                 for s in list.iter().filter_map(|&id| squads.get(id)) {
                     if s.is_dead(fighters) {

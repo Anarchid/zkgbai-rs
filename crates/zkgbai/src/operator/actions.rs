@@ -483,7 +483,7 @@ pub fn squad_form(ai: &mut Ai, a: &Args) -> Out {
             made.first().copied().ok_or("could not form the squad")?
         }
         _ => {
-            let sid = ai.squads.create(SquadKind::Raider, team, &ai.defs);
+            let sid = ai.squads.create(SquadKind::Raider, team);
             if let Some(sq) = ai.squads.get_mut(sid) {
                 sq.raider_type = 'm';
                 sq.status = 'a';
@@ -526,7 +526,7 @@ pub fn squad_disband(ai: &mut Ai, a: &Args) -> Out {
     let members = squad.disband(&mut ai.fighters);
     ai.raider_handler.raider_squads.retain(|&s| s != sid);
     ai.squad_handler.squads.retain(|&s| s != sid);
-    ai.squad_handler.shield_squads.retain(|&s| s != sid);
+    ai.squad_handler.taskforces.retain(|&s| s != sid);
     ai.squad_handler.air_squads.retain(|&s| s != sid);
     for slot in ai.raider_handler.next_squads.iter_mut() {
         if *slot == Some(sid) {

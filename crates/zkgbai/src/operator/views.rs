@@ -49,7 +49,7 @@ fn squad_kind(k: SquadKind) -> &'static str {
     match k {
         SquadKind::Assault => "assault",
         SquadKind::Raider => "raider",
-        SquadKind::Shield => "shield",
+        SquadKind::Taskforce => "taskforce",
         SquadKind::Hover => "hover",
         SquadKind::Jaeger => "jaeger",
     }
@@ -426,7 +426,7 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
             "raider_squads": r.raider_squads.len(),
             "assault_fighters": s.fighters.len(),
             "squads": s.squads.len(),
-            "shield_squads": s.shield_squads.len(),
+            "taskforces": s.taskforces.len(),
             "air_squads": s.air_squads.len(),
             "supports": m.supports.len(),
             "loners": m.loners.len(),
