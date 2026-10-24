@@ -36,13 +36,21 @@ use std::collections::BTreeMap;
 
 use springai::{NO_TIMEOUT, Unit, Vec3};
 
+use serde_json::json;
+
 use crate::Ai;
 use crate::defs::cmd;
+use crate::economy::terraform::is_terraforming;
 use crate::kgbutil::kgb_move_to_exact;
+use crate::kgbutil::line_of_fire::{Flight, Gun as Arm, ZK_CANNON_GRAVITY};
+use crate::military::taskforce::doctrine::Perch;
 use crate::military::taskforce::{Aim, doctrine::ORBIT, marksman::Mark};
 use crate::military::{Enemy, SquadId};
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance, get_directional_point};
+
+/// The engine's attack order; with a position alone it is attack-ground.
+const CMD_ATTACK: i32 = 20;
 
 /// A gun is at its spot within this.
 pub const AT_STATION: f32 = 60.0;
@@ -83,6 +91,24 @@ const RESEND: i32 = 30 * 8;
 /// A force says how it stood every so often.
 const REPORT: i32 = 30 * 60;
 
+/// A perched force (see [`Perch`]) stands off the statics' reach to its
+/// raised aim point by this much only (the window between a Stinger's 587
+/// at 200 up and a Crab's 738 is 150 wide), and looks for its site on
+/// tighter rings about the targets.
+const PERCH_STANDOFF: f32 = 40.0;
+const PERCH_SHARES: [f32; 2] = [0.97, 0.90];
+/// Aim points stand about this far above the ground (mid + aimposoffset).
+const AIM_ABOVE: f32 = 40.0;
+/// A perch site's top square must be this flat (its corners' spread).
+const PERCH_FLAT: f32 = 30.0;
+/// The leading core stands on the site within this before the raise.
+const ON_SITE: f32 = 24.0;
+/// The raise counts as up this close to the height asked.
+const UP_SLACK: f32 = 8.0;
+/// A perched gun's own sight (the Crab's 660), beyond which known statics
+/// are shelled as ground.
+const SIGHT: f32 = 640.0;
+
 /// Worth beyond metal of a defense, and of a mex or an energy building.
 const PORC: f32 = 1.5;
 const ECONOMY: f32 = 2.0;
@@ -98,12 +124,29 @@ struct Station {
     deployed: bool,
 }
 
+/// A perch going up under the leading core: the site, the ground there
+/// before, when the raise began, the constructors borrowed, and whether
+/// it is up or given up.
+struct PerchState {
+    site: Vec3,
+    ground: f32,
+    since: i32,
+    raisers: Vec<Unit>,
+    up: bool,
+    abandoned: bool,
+    /// Attack-ground target (enemy id) the core was last set on.
+    ground_target: Option<i32>,
+}
+
 #[derive(Default)]
 struct SiegeForce {
     station: Option<Station>,
     /// Guns given spots about the station: when each was last told to go.
     sent: BTreeMap<i32, i32>,
     last_report: i32,
+    /// The leading core told to stand exactly on its perch site: when.
+    on_site_sent: i32,
+    perch: Option<PerchState>,
 }
 
 /// What a gun was doing at the last conduct, since when (the frame of the
@@ -125,13 +168,15 @@ pub struct Siege {
     guns: BTreeMap<i32, Gun>,
 }
 
-/// A known enemy static: where, its ground-firing weapon range (0 for one
-/// unarmed, or anti-air only: neither fences the ground), its worth to the
-/// guns, and whether it is in sight.
+/// A known enemy static: where, how far its ground-firing weapons reach a
+/// target at the aim height asked (0 for one unarmed, or anti-air only:
+/// neither fences the ground; on the ground this is the nominal range,
+/// `nominal`), its worth to the guns, and whether it is in sight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Static {
     pub pos: Vec3,
     pub range: f32,
+    pub nominal: f32,
     pub worth: f32,
     pub visible: bool,
 }
@@ -162,11 +207,23 @@ pub fn candidates(
     standoff: f32,
     on_map: impl Fn(f32, f32) -> bool,
 ) -> Vec<(Vec3, f32)> {
+    candidates_on(from, reach, statics, standoff, &STATION_SHARES, on_map)
+}
+
+/// [`candidates`] on rings at the given shares of the reach.
+pub fn candidates_on(
+    from: Vec3,
+    reach: f32,
+    statics: &[Static],
+    standoff: f32,
+    shares: &[f32],
+    on_map: impl Fn(f32, f32) -> bool,
+) -> Vec<(Vec3, f32)> {
     let mut by_worth: Vec<&Static> = statics.iter().collect();
     by_worth.sort_by(|a, b| b.worth.total_cmp(&a.worth));
     let mut spots: Vec<(f32, f32)> = vec![(from.x, from.z)];
     for s in by_worth.iter().take(STATION_TARGETS) {
-        for share in STATION_SHARES {
+        for &share in shares {
             for d in 0..STATION_DIRS {
                 let a = d as f32 * std::f32::consts::TAU / STATION_DIRS as f32;
                 spots.push((s.pos.x + share * reach * a.cos(), s.pos.z + share * reach * a.sin()));
@@ -191,6 +248,12 @@ pub fn candidates(
     places
 }
 
+/// A perched gun fires out to the reach it was given (the margin is the
+/// station's business).
+fn range_of(reach: f32) -> f32 {
+    reach
+}
+
 /// What an enemy is worth to the guns.
 fn worth(e: &Enemy, cost: f32) -> f32 {
     let kind = if e.is_mex || e.def_name.starts_with("energy") {
@@ -205,38 +268,113 @@ fn worth(e: &Enemy, cost: f32) -> f32 {
     cost * kind
 }
 
+/// The ground-firing weapons of a unit type as guns at the origin (for
+/// their reach by height; see `Gun::reach_2d`): range, heightMod and how
+/// the shot flies (a cannon's arc under ZK's cannon gravity).
+pub fn arms_of(def: springai::UnitDef) -> Vec<Arm> {
+    (def.weapon_mounts().into_iter().filter_map(|m| m.weapon_def()))
+        .filter(|w| !w.is_shield() && w.range() > 0.0 && !w.name().contains("fake"))
+        .filter(|w| w.is_able_to_attack_ground())
+        .map(|w| {
+            let flight = if w.weapon_type() == "Cannon" && w.high_trajectory() != 1 {
+                let speed = w.projectile_speed();
+                Flight::Arc { speed: if speed < 100.0 { speed * 30.0 } else { speed }, gravity: ZK_CANNON_GRAVITY }
+            } else {
+                Flight::Line
+            };
+            Arm {
+                x: 0.0,
+                z: 0.0,
+                muzzle: 0.0,
+                range: w.range(),
+                height_mod: w.height_mod(),
+                aoe: w.area_of_effect(),
+                body: 0.0,
+                flight,
+                avoids_friends: false,
+                through_ground: false,
+            }
+        })
+        .collect()
+}
+
+/// How far guns reach a target standing `dh` above their muzzles: the
+/// farthest of them.
+pub fn reach_of(arms: &[Arm], dh: f32) -> f32 {
+    arms.iter().map(|g| g.reach_2d(dh)).fold(0.0, f32::max)
+}
+
 impl Ai {
     /// The enemy statics we know of (identified, and where they were seen:
-    /// a building's radar ghost stands where it is).
-    fn siege_statics(&self) -> Vec<Static> {
+    /// a building's radar ghost stands where it is), with their reach to a
+    /// target `up` elmos above their own ground.
+    fn siege_statics(&self, up: f32) -> Vec<Static> {
         (self.war.targets.values())
             .filter(|e| e.identified && e.is_static && !e.is_dead && e.position != NULLPOS)
-            .map(|e| Static {
-                pos: e.position,
-                range: if e.can_attack() && !e.is_aa { e.def_max_weapon_range() } else { 0.0 },
-                worth: worth(e, e.ud.map_or(e.value, |d| d.cost(self.metal))),
-                visible: e.visible,
+            .map(|e| {
+                let armed = e.can_attack() && !e.is_aa;
+                let nominal = if armed { e.def_max_weapon_range() } else { 0.0 };
+                let range = match (armed, up > 0.0, e.ud) {
+                    (true, true, Some(d)) => reach_of(&arms_of(d), up),
+                    _ => nominal,
+                };
+                Static {
+                    pos: e.position,
+                    range,
+                    nominal,
+                    worth: worth(e, e.ud.map_or(e.value, |d| d.cost(self.metal))),
+                    visible: e.visible,
+                }
             })
             .collect()
     }
 
-    /// The guns' reach: the leader's weapon range less a margin.
-    fn siege_reach(leader: Unit) -> f32 {
-        leader.def().map_or(1150.0, |d| d.max_weapon_range()) - RANGE_MARGIN
+    /// The guns' reach from `up` elmos above the ground, less a margin: the
+    /// leader's weapons by their flight (a cannon reaches farther from a
+    /// perch).
+    fn siege_reach(leader: Unit, up: f32) -> f32 {
+        let Some(def) = leader.def() else { return 1150.0 - RANGE_MARGIN };
+        let arms = arms_of(def);
+        let reach = if arms.is_empty() { def.max_weapon_range() } else { reach_of(&arms, -up) };
+        reach - RANGE_MARGIN
+    }
+
+    /// How high the perch of force `sid` raises its leading core's aim
+    /// point (0 without a perch, or one given up).
+    fn siege_up(&self, sid: SquadId) -> f32 {
+        let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
+        let given_up = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| p.abandoned);
+        match perch {
+            Some(p) if !given_up => p.height + AIM_ABOVE,
+            _ => 0.0,
+        }
     }
 
     /// Whether a station is still safe to stand at: beyond every known
     /// static's reach, and under no defense on the threat map.
-    fn siege_safe(&self, p: Vec3, leader: Unit, statics: &[Static]) -> bool {
-        stands_off(p, statics, STANDOFF) && self.war.view(leader.def()).get_porc_threat(p) <= 0.0
+    fn siege_safe_by(&self, p: Vec3, leader: Unit, statics: &[Static], standoff: f32) -> bool {
+        stands_off(p, statics, standoff) && self.war.view(leader.def()).get_porc_threat(p) <= 0.0
     }
 
     /// Whether the guns can stand at `p`: safe, reachable from where the
     /// leader is, and the straight way there under no known defense.
     fn siege_fits(&self, p: Vec3, leader: Unit, statics: &[Static]) -> bool {
-        self.siege_safe(p, leader, statics)
+        self.siege_fits_by(p, leader, statics, STANDOFF)
+    }
+
+    fn siege_fits_by(&self, p: Vec3, leader: Unit, statics: &[Static], standoff: f32) -> bool {
+        self.siege_safe_by(p, leader, statics, standoff)
             && leader.def().is_none_or(|d| reaches(self.reach_terrain(), d, leader.pos(), p, AT_STATION))
             && self.siege_way_clear(leader.pos(), p, leader)
+    }
+
+    /// Whether a perch can go up at `p`: the top square flat enough.
+    fn siege_perch_site_ok(&self, p: Vec3, perch: &Perch) -> bool {
+        let map = self.cb.map();
+        let h = perch.top / 2.0;
+        let corners = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| map.elevation_at(p.x + dx, p.z + dz));
+        let (lo, hi) = corners.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &c| (lo.min(c), hi.max(c)));
+        hi - lo <= PERCH_FLAT && map.elevation_at(p.x, p.z) > 0.0
     }
 
     /// Whether the straight way from `from` to `to` keeps out of every known
@@ -255,19 +393,22 @@ impl Ai {
     /// has yet to get there (so the wrapper moves it) or stands parked.
     pub(crate) fn siege_conduct(&mut self, sid: SquadId, leader: Unit) -> (Vec3, bool) {
         let pos = leader.pos();
-        let statics = self.siege_statics();
-        let reach = Self::siege_reach(leader);
+        let up = self.siege_up(sid);
+        let statics = self.siege_statics(up);
+        let reach = Self::siege_reach(leader, up);
+        let standoff = if up > 0.0 { PERCH_STANDOFF } else { STANDOFF };
         // A station is kept while it is safe and reaches something: the
         // guns stay until they have shot what they reach (every move costs
-        // them their aim).
+        // them their aim). A perch going up or up is kept whatever.
+        let perching = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned);
         let kept = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()))
-            .filter(|s| self.siege_safe(s.pos, leader, &statics))
-            .filter(|s| in_reach(s.pos, reach, &statics).0 > 0)
+            .filter(|s| perching || self.siege_safe_by(s.pos, leader, &statics, standoff))
+            .filter(|s| perching || in_reach(s.pos, reach, &statics).0 > 0)
             .map(|s| (s.pos, s.deployed));
         let station = match kept {
             Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
             None => {
-                let (s, k, v, how) = self.siege_pick(sid, leader, reach, &statics);
+                let (s, k, v, how) = self.siege_pick(sid, leader, reach, up, &statics);
                 let old = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos);
                 if old.is_none_or(|o| distance(o, s) > AT_STATION) {
                     let near = nearest(s, &statics);
@@ -275,11 +416,16 @@ impl Ai {
                     let doctrine = self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone());
                     self.log(&format!(
                         "taskforce: the {doctrine} force (squad {sid}) stations at ({:.0}, {:.0}), {:.0} off, in reach of \
-                         {k} statics worth {v:.0}; {how}; the nearest armed static {}",
+                         {k} statics worth {v:.0}{}; {how}; the nearest armed static {}",
                         s.x,
                         s.z,
                         distance(pos, s),
+                        if up > 0.0 { format!(" from {up:.0} up (reach {reach:.0})") } else { String::new() },
                         match near {
+                            Some((d, n)) if up > 0.0 => format!(
+                                "is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {margin:.0})",
+                                n.nominal, n.range
+                            ),
                             Some((d, n)) => format!("is {d:.0} away (range {:.0}, standoff {margin:.0})", n.range),
                             None => "is unknown".to_owned(),
                         }
@@ -311,13 +457,43 @@ impl Ai {
         sid: SquadId,
         leader: Unit,
         reach: f32,
+        up: f32,
         statics: &[Static],
     ) -> (Vec3, usize, f32, &'static str) {
         let from = leader.pos();
         let map = self.cb.map();
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
         let on_map = |x: f32, z: f32| x >= 50.0 && z >= 50.0 && x <= w - 50.0 && z <= h - 50.0;
-        if !statics.is_empty() {
+        // A perch: a site on the tight rings, flat, standing off the
+        // statics' reach to the raised aim point, reaching enough from up
+        // there; else the force stands flat (and says so).
+        let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
+        if let (Some(perch), true) = (&perch, up > 0.0 && !statics.is_empty()) {
+            let picks = candidates_on(from, reach, statics, PERCH_STANDOFF, &PERCH_SHARES, &on_map);
+            let site = picks.iter().find(|c| {
+                in_reach(c.0, reach, statics).0 >= perch.min_reach as usize
+                    && self.siege_perch_site_ok(c.0, perch)
+                    && self.siege_fits_by(c.0, leader, statics, PERCH_STANDOFF)
+            });
+            if let Some(&(p, _)) = site {
+                let (k, v) = in_reach(p, reach, statics);
+                return (Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z), k, v, "the best perch site");
+            }
+            let near = statics.iter().filter(|s| s.range > 0.0).count();
+            self.op_emit(
+                "siege-perch",
+                json!({"event": "refused", "squad": sid, "reason": "no site", "candidates": picks.len(), "armed_statics": near,
+                       "min_reach": perch.min_reach, "reach_up": reach}),
+            );
+            // Flat it is, then: the flat statics and reach.
+            let flat = self.siege_statics(0.0);
+            let reach0 = Self::siege_reach(leader, 0.0);
+            let picks = candidates(from, reach0, &flat, STANDOFF, on_map);
+            if let Some(&(p, _)) = picks.iter().find(|c| self.siege_fits(c.0, leader, &flat)) {
+                let (k, v) = in_reach(p, reach0, &flat);
+                return (Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z), k, v, "no perch site; the best flat stand");
+            }
+        } else if !statics.is_empty() {
             let picks = candidates(from, reach, statics, STANDOFF, on_map);
             if let Some(&(p, _)) = picks.iter().find(|c| self.siege_fits(c.0, leader, statics)) {
                 let (k, v) = in_reach(p, reach, statics);
@@ -363,12 +539,19 @@ impl Ai {
         if let Some(st) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.station.as_mut()) {
             st.deployed = parked_force;
         }
-        let statics = self.siege_statics();
-        let reach = leader.map_or(1100.0, Self::siege_reach);
+        let up = self.siege_up(sid);
+        let statics = self.siege_statics(up);
+        let reach = leader.map_or(1100.0, |l| Self::siege_reach(l, up));
         // A gun fires out to its range; the reach (less a margin) is for
         // choosing stations.
         let range = reach + RANGE_MARGIN;
         let shields = self.impalers_shields();
+        // The perch under the leading core (see `siege_perch`).
+        if let (Some(perch), true, Some(l), Some(st)) = (shape.perch.clone(), parked_force, leader, station) {
+            self.siege_perch(sid, &perch, l, st, frame);
+        } else if !parked_force && let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+            f.on_site_sent = 0;
+        }
         let mut k = 0usize;
         for &(id, unit, core) in &members {
             if !core {
@@ -420,7 +603,13 @@ impl Ai {
                             }
                         ));
                     }
-                    self.siege_aim(id, unit, range, &shields);
+                    let perched_up = is_leader
+                        && (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| p.up);
+                    if perched_up {
+                        self.siege_shell(sid, unit, range, &shields);
+                    } else {
+                        self.siege_aim(id, unit, range, &shields);
+                    }
                 } else if !is_leader {
                     let sent = self.taskforces.siege.forces.get(&sid).and_then(|f| f.sent.get(&id)).copied();
                     if sent.is_none_or(|t| frame - t >= RESEND) {
@@ -447,6 +636,162 @@ impl Ai {
             g.state = state;
         }
         self.siege_report(sid, frame);
+    }
+
+    /// The perch of force `sid` (the Crab spire): once the force is parked,
+    /// the leading core `leader` is walked exactly onto the station `site`;
+    /// standing there, constructors are borrowed from the economy (the
+    /// nearest free ones within the perch's range, as many as its count
+    /// says) and level the top square to its highest corner plus the
+    /// height; the raise is up within `UP_SLACK` of that, and given up
+    /// after `borrow_s` seconds (the core then fights flat). Journal
+    /// records `siege-perch` tell the start, the raisers called away, up
+    /// and given up.
+    fn siege_perch(&mut self, sid: SquadId, perch: &Perch, leader: Unit, site: Vec3, frame: i32) {
+        let p = leader.pos();
+        let f = self.taskforces.siege.forces.entry(sid).or_default();
+        match f.perch.as_mut() {
+            None => {
+                if distance(p, site) > ON_SITE {
+                    if frame - f.on_site_sent >= RESEND {
+                        kgb_move_to_exact(leader, site, 8.0, 0, frame);
+                        f.on_site_sent = frame;
+                    }
+                    return;
+                }
+                // On the site: hold, borrow the raisers, raise.
+                leader.set_move_state(0, 0);
+                let want = {
+                    let Some(q) = self.squads.get(sid) else { return };
+                    let Some(d) = self.taskforces.doctrine(&q.shape.doctrine) else { return };
+                    let units = q.everyone().filter_map(|id| self.fighters.get(&id));
+                    let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &self.taskforces.classes);
+                    perch.count.want(&force).max(1)
+                };
+                let mut near: Vec<(f32, i32)> = (self.eco.workers.values())
+                    .filter(|w| !w.is_chicken && !w.assigned_plop && !w.is_com && !w.unit.is_being_built())
+                    .filter(|w| perch.raisers.iter().any(|r| r == self.defs.name_of(w.unit)))
+                    .map(|w| (distance(w.get_pos(), site), w.id))
+                    .filter(|&(d, _)| d <= perch.range)
+                    .collect();
+                near.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut raisers = Vec::new();
+                for (_, wid) in near.into_iter().take(want) {
+                    if let Some(w) = self.eco.workers.get_mut(&wid) {
+                        w.clear_task(&mut self.eco.tasks);
+                        raisers.push(w.unit);
+                    }
+                }
+                let map = self.cb.map();
+                let ground = map.elevation_at(site.x, site.z);
+                if raisers.is_empty() {
+                    self.op_emit(
+                        "siege-perch",
+                        json!({"event": "refused", "squad": sid, "reason": "no raisers", "site": [site.x, site.z], "wanted": want}),
+                    );
+                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                        f.perch = Some(PerchState { site, ground, since: frame, raisers: Vec::new(), up: false, abandoned: true, ground_target: None });
+                    }
+                    self.log(&format!(
+                        "taskforce: a {} stands flat at ({:.0}, {:.0}): no constructor to raise its perch",
+                        self.defs.name_of(leader), site.x, site.z
+                    ));
+                    return;
+                }
+                let h = perch.top / 2.0;
+                let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
+                let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
+                let names: Vec<String> = raisers.iter().map(|u| self.defs.name_of(*u).to_owned()).collect();
+                self.terraform_level(&raisers, &square, top + perch.height, false);
+                self.op_emit(
+                    "siege-perch",
+                    json!({"event": "start", "squad": sid, "site": [site.x, site.z], "ground": ground, "height": perch.height,
+                           "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want}),
+                );
+                self.log(&format!(
+                    "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0} ({})",
+                    self.defs.name_of(leader), site.x, site.z, raisers.len(), perch.height, names.join(", ")
+                ));
+                if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                    f.perch = Some(PerchState { site, ground, since: frame, raisers, up: false, abandoned: false, ground_target: None });
+                }
+            }
+            Some(ps) if !ps.up && !ps.abandoned => {
+                let raised = self.cb.map().elevation_at(ps.site.x, ps.site.z) - ps.ground;
+                let working = ps.raisers.iter().filter(|u| u.health() > 0.0 && is_terraforming(**u)).count();
+                let since = (frame - ps.since) / 30;
+                if raised >= perch.height - UP_SLACK {
+                    ps.up = true;
+                    let (site, n) = (ps.site, ps.raisers.len());
+                    self.op_emit(
+                        "siege-perch",
+                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "raisers": n}),
+                    );
+                    self.log(&format!(
+                        "taskforce: a {} is perched {raised:.0} up at ({:.0}, {:.0}) after {since} s",
+                        self.defs.name_of(leader), site.x, site.z
+                    ));
+                } else if since as f32 >= perch.borrow_s || (working == 0 && since >= 20) {
+                    ps.abandoned = true;
+                    let site = ps.site;
+                    let why = if working == 0 { "the raisers were called away" } else { "time ran out" };
+                    self.op_emit(
+                        "siege-perch",
+                        json!({"event": "given up", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "reason": why}),
+                    );
+                    self.log(&format!(
+                        "taskforce: a {} gives up its perch at ({:.0}, {:.0}), {raised:.0} up after {since} s: {why}; it fights flat",
+                        self.defs.name_of(leader), site.x, site.z
+                    ));
+                }
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// A perched core shells the most valuable known static in its reach
+    /// beyond its sight as ground (an attack order at the building's place,
+    /// which a cannon with area of effect needs no sight for), and takes the
+    /// best thing in sight as its target otherwise.
+    fn siege_shell(&mut self, sid: SquadId, unit: Unit, reach: f32, shields: &[(Vec3, f32)]) {
+        let p = unit.pos();
+        let beyond = (self.war.targets.values())
+            .filter(|e| e.identified && e.is_static && !e.is_dead && e.position != NULLPOS)
+            .filter(|e| {
+                let d = distance(p, e.position);
+                d > SIGHT && d <= reach
+            })
+            .filter(|e| !shields.iter().any(|&(s, r)| distance(s, e.position) <= r + 10.0))
+            .map(|e| (e.unit_id, e.position, worth(e, e.ud.map_or(e.value, |d| d.cost(self.metal)))))
+            .max_by(|a, b| a.2.total_cmp(&b.2));
+        let in_sight = (self.war.targets.values())
+            .any(|e| e.identified && !e.is_dead && (e.visible || e.is_static) && distance(p, e.position) <= SIGHT);
+        let last = self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref()).and_then(|ps| ps.ground_target);
+        match beyond {
+            Some((id, at, _)) if !in_sight => {
+                if last != Some(id) {
+                    let y = self.cb.map().elevation_at(at.x, at.z);
+                    unit.execute_custom_command(CMD_ATTACK, &[at.x, y, at.z], 0, NO_TIMEOUT);
+                    if let Some(ps) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.perch.as_mut()) {
+                        ps.ground_target = Some(id);
+                    }
+                    let name = self.war.targets.get(&id).map_or("?", |e| e.def_name.as_str()).to_owned();
+                    self.log(&format!(
+                        "taskforce: a {} shells a {name} at ({:.0}, {:.0}), {:.0} off, beyond its sight",
+                        self.defs.name_of(unit), at.x, at.z, distance(p, at)
+                    ));
+                }
+            }
+            _ => {
+                if last.is_some() {
+                    unit.stop(0);
+                    if let Some(ps) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.perch.as_mut()) {
+                        ps.ground_target = None;
+                    }
+                }
+                self.siege_aim(unit.id(), unit, range_of(reach), shields);
+            }
+        }
     }
 
     /// Set gun `id` on the most valuable enemy in its reach whose place we
@@ -518,8 +863,13 @@ impl Ai {
         }
         if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
             f.sent.clear();
+            f.on_site_sent = 0;
             if let Some(st) = f.station.as_mut() {
                 st.deployed = false;
+            }
+            // A perch left is a perch lost (the pillar stays).
+            if f.perch.take().is_some_and(|p| !p.abandoned) {
+                self.op_emit("siege-perch", json!({"event": "left", "squad": sid, "reason": why}));
             }
         }
     }
@@ -610,7 +960,7 @@ mod tests {
     use super::*;
 
     fn s(x: f32, z: f32, range: f32, worth: f32) -> Static {
-        Static { pos: Vec3::xz(x, z), range, worth, visible: true }
+        Static { pos: Vec3::xz(x, z), range, nominal: range, worth, visible: true }
     }
 
     #[test]

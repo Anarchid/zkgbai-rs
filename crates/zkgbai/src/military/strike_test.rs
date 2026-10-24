@@ -77,7 +77,12 @@
 //! Sparrows to show it the fort and a radar covering it, every four
 //! minutes: its siege forces (see `taskforce::siege`) should station
 //! beyond the fort's guns and dismantle it, measured by the `taskforce:`
-//! deploy, undeploy and kill lines.
+//! deploy, undeploy and kill lines. With `test=crab` (against `test=fort`,
+//! with `enable=crab`), the attacker gets a Crab, three Weavers, two
+//! Redbacks, two Recluses, a Widow, two Sparrows and a radar covering the
+//! fort every four minutes: its Crab should park beyond the fort's reach,
+//! have a spike raised under it and shell the fort from up there (`siege-perch`
+//! journal records, `perches at` / `is perched` / `shells a` lines).
 
 use springai::Vec3;
 
@@ -129,6 +134,9 @@ const IMPALER_ROUND: i32 = 30 * 300;
 /// When the siege attacker gets its guns, and how often again.
 const SIEGE_FRAME: i32 = 30 * 60;
 const SIEGE_ROUND: i32 = 30 * 240;
+/// When the Crab attacker gets its Crab, and how often again.
+const CRAB_FRAME: i32 = 30 * 60;
+const CRAB_ROUND: i32 = 30 * 240;
 
 /// When four Impalers join a real war (`impalerwar`): minutes 8, 12, 16
 /// (when Rovers play CircuitAI, games go on past 17; earlier drops found
@@ -276,6 +284,16 @@ impl Ai {
                 units.push(("staticradar", get_directional_point(enemy, base, 2200.0)));
                 units
             }
+            ("crab", f) if f >= CRAB_FRAME && (f - CRAB_FRAME) % CRAB_ROUND == 0 => {
+                let mut units = vec![("spidercrabe", ahead(-100.0))];
+                units.extend([("spidercon", ahead(-200.0)); 3]);
+                units.extend([("spiderriot", ahead(-160.0)); 2]);
+                units.extend([("spiderskirm", ahead(-240.0)); 2]);
+                units.push(("spiderantiheavy", ahead(-280.0)));
+                units.extend([("planelightscout", ahead(-340.0)); 2]);
+                units.push(("staticradar", get_directional_point(enemy, base, 2200.0)));
+                units
+            }
             ("radarfort", 60) => {
                 let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
                 spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
@@ -376,7 +394,7 @@ impl Ai {
         // Impaler tests cheat only to spawn (and `impaler` to top up): the
         // engine shows a cheating AI every unit's true place and health,
         // which would make light of what batteries must know by sight.
-        let quiet = matches!(test.as_str(), "impaler" | "impalerwar" | "siege");
+        let quiet = matches!(test.as_str(), "impaler" | "impalerwar" | "siege" | "crab");
         let topped = frame % 300 == 0 && test != "impalerwar";
         if frame == 60 || (quiet && (topped || !spawn.is_empty())) {
             self.cb.cheats_set_enabled(true);

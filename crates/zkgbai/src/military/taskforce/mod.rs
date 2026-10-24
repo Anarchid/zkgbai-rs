@@ -212,10 +212,16 @@ impl Ai {
         self.taskforces.loaded = true;
         let classes = Classes::build(&self.unit_classes, &self.defs);
         let mut doctrines = seeds();
-        // `enable=siege` (or ZKGBAI_ENABLE=siege) switches the siege seeds
-        // on, as a `doctrines` patch would (see `siege`).
+        // `enable=siege` (or ZKGBAI_ENABLE=siege) switches the siege gun
+        // seeds on, `enable=crab` the Crab spire, as a `doctrines` patch
+        // would (see `siege`).
         if !self.dev_off("siege") {
-            for d in doctrines.iter_mut().filter(|d| d.aim == Aim::Siege) {
+            for d in doctrines.iter_mut().filter(|d| d.aim == Aim::Siege && d.perch.is_none()) {
+                d.enabled = true;
+            }
+        }
+        if !self.dev_off("crab") {
+            for d in doctrines.iter_mut().filter(|d| d.name == "crab") {
                 d.enabled = true;
             }
         }

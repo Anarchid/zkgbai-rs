@@ -51,9 +51,10 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `airtempo` (an air factory weighed up by the clock and the map's size)
 /// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
 /// `siege` switches on the Tremor and Emissary siege doctrines (see
-/// military/taskforce/siege.rs), under test.
-const OFF_BY_DEFAULT: [&str; 8] =
-    ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes", "siege"];
+/// military/taskforce/siege.rs), under test; `crab` the Crab spire (the
+/// `crab` doctrine with its perch), under test.
+const OFF_BY_DEFAULT: [&str; 9] =
+    ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes", "siege", "crab"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
