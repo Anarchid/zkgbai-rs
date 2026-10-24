@@ -75,8 +75,10 @@ for n in "${ALLY_SIZES[@]}"; do NUM_TEAMS=$((NUM_TEAMS + n)); done
 if [ -z "$ENGINE_DIR" ]; then
     ENGINE_DIR=$(ls -d "$HOME"/.spring/engine/linux64/20*/ 2>/dev/null | sort | tail -1)
 fi
-ENGINE="${ENGINE_DIR%/}/spring-headless"
-[ -f "$ENGINE" ] || { echo "no spring-headless in $ENGINE_DIR" >&2; exit 2; }
+# ARENA_ENGINE_BIN: engine binary in that dir (spring-headless; "spring" for
+# the GL build, which needs a display: the headless build segfaults on /save).
+ENGINE="${ENGINE_DIR%/}/${ARENA_ENGINE_BIN:-spring-headless}"
+[ -f "$ENGINE" ] || { echo "no ${ARENA_ENGINE_BIN:-spring-headless} in $ENGINE_DIR" >&2; exit 2; }
 # Lobby-downloaded engines may lack +x (the lobby sets it on launch, too).
 [ -x "$ENGINE" ] || chmod +x "$ENGINE"
 
@@ -100,6 +102,9 @@ ln -s "$CACHE" "$WD/cache"
 ARENA_CONF=${ARENA_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/zkgbai/arena.conf}
 # shellcheck source=/dev/null
 [ -f "$ARENA_CONF" ] && . "$ARENA_CONF"
+# ARENA_SETTINGS: a springsettings.cfg to seed the write-dir with (window
+# size etc. for the GL engine).
+[ -n "${ARENA_SETTINGS:-}" ] && cp "$ARENA_SETTINGS" "$WD/springsettings.cfg"
 mkdir -p "$WD/LuaUI/Widgets"
 sed "s/@MAX_FRAMES@/$MAX_FRAMES/" "$(dirname "$0")/arena_widget.lua" > "$WD/LuaUI/Widgets/arena_widget.lua"
 # ARENA_WIDGETS: more LuaUI widget files to install for the match;
@@ -291,6 +296,8 @@ fi
 cp "$LOG" "$OUT/infolog.txt" 2>/dev/null
 # The combat log widget's rows, when it ran (tools/arena/combatlog_widget.lua).
 for c in "$WD"/combatlog/*.tsv; do [ -f "$c" ] && gzip -c "$c" > "$OUT/combatlog.tsv.gz"; done
+# The engine's demo of the match (headless records one too).
+for d in "$WD"/demos/*.sdfz; do [ -f "$d" ] && cp "$d" "$OUT/"; done
 [ "$KEEP" -eq 1 ] || rm -rf "$WD"
 stats=$(grep -oE "ARENA_(FINAL|STATS f=[0-9]+) .*" "$OUT/infolog.txt" 2>/dev/null | tail -1)
 panics=$(grep -c "panicked" "$OUT/infolog.txt" 2>/dev/null)

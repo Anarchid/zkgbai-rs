@@ -103,7 +103,8 @@ impl Ai {
     fn retreat_sync_courage(&mut self) {
         let (fighters, squads) = (&self.fighters, &self.squads);
         for (id, c) in self.retreat_handler.cowards.iter_mut() {
-            c.courage = fighters.get(id).and_then(|f| f.squad).and_then(|sid| squads.get(sid)).map_or(1.0, |s| s.courage);
+            c.courage =
+                fighters.get(id).and_then(|f| f.squad).and_then(|sid| squads.get(sid)).map_or(1.0, |s| s.courage);
         }
     }
 
@@ -167,6 +168,24 @@ impl Ai {
             self.retreat_handler.retreating_units.insert(id);
             self.squad_remove_from_squad(unit);
             self.raider_remove_from_squad(unit);
+        }
+    }
+
+    /// Send `unit` for repairs now, out of its squad (spotters, see
+    /// `taskforce::spotter`); healed, it is assigned again.
+    pub fn retreat_send(&mut self, unit: Unit) {
+        if !self.retreat_handler.cowards.contains_key(&unit.id()) {
+            self.retreat_add_coward(unit);
+        }
+        if let Some(c) = self.retreat_handler.cowards.get_mut(&unit.id()) {
+            c.is_retreating = true;
+        }
+        self.retreat_handler.retreating_units.insert(unit.id());
+        self.squad_remove_from_squad(unit);
+        // A taskforce leaves its leaver's squad set; healed, it must be
+        // assigned again.
+        if let Some(f) = self.fighters.get_mut(&unit.id()) {
+            f.squad = None;
         }
     }
 

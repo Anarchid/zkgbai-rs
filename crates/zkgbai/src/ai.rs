@@ -22,7 +22,9 @@ use crate::military::jumps::Jumps;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
+use crate::military::stakeouts::Stakeouts;
 use crate::military::scouts::Scouts;
+use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
@@ -46,13 +48,18 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
 /// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
-const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "permanence", "mexporc"];
+/// `airtempo` (an air factory weighed up by the clock and the map's size)
+/// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
+const OFF_BY_DEFAULT: [&str; 7] = ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
+/// An option carried empty (a loaded save keeps the slot's options, blank)
+/// falls through to the environment.
 fn dev_features(cb: Callback) -> BTreeSet<String> {
     let list = |key: &str, var: &str| -> BTreeSet<String> {
         cb.option(key)
+            .filter(|v| !v.trim().is_empty())
             .or_else(|| std::env::var(var).ok())
             .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
             .unwrap_or_default()
@@ -68,6 +75,7 @@ fn dev_features(cb: Callback) -> BTreeSet<String> {
 /// operator's `modules` tool).
 fn muted_modules(cb: Callback) -> Vec<String> {
     cb.option("mute")
+        .filter(|v| !v.trim().is_empty())
         .or_else(|| std::env::var("ZKGBAI_MUTE").ok())
         .map(|v| v.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
         .unwrap_or_default()
@@ -125,12 +133,14 @@ pub struct Ai {
     pub nukes: Nukes,
     pub missiles: Missiles,
     pub sweeps: Sweeps,
+    pub strikes: Strikes,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
     /// Impaler batteries.
     pub impalers: crate::military::impalers::Impalers,
+    pub taskforces: crate::military::taskforce::Taskforces,
     pub qrf: crate::military::qrf::Qrf,
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
@@ -138,6 +148,7 @@ pub struct Ai {
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
+    pub stakeouts: Stakeouts,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -234,15 +245,18 @@ impl SkirmishAi for Ai {
             nukes: Nukes::default(),
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
+            strikes: Strikes::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),
+            taskforces: Default::default(),
             qrf: Default::default(),
             firefighters: Default::default(),
             raid_test: Default::default(),
             jumps: Jumps::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
+            stakeouts: Stakeouts::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,
@@ -275,7 +289,7 @@ impl SkirmishAi for Ai {
             return 0;
         }
         match event {
-            Event::Init { .. } => return self.init(),
+            Event::Init { saved_game } => return self.init(saved_game),
             Event::Release { reason } => {
                 self.log_profile();
                 self.op_finish(reason);
@@ -372,7 +386,17 @@ impl Ai {
         }
     }
 
-    fn init(&mut self) -> i32 {
+    /// `saved_game`: the engine resumed a save; the game is on, the
+    /// commander and start position are history and the factories stand
+    /// (the engine replays UnitCreated/UnitFinished for every unit next).
+    fn init(&mut self, saved_game: bool) -> i32 {
+        if saved_game {
+            // The journal's run record and anything else written before the
+            // first Update carry the resumed frame, not 0.
+            self.frame = self.cb.game().current_frame();
+            let standing = self.cb.team_units().len();
+            self.log(&format!("init: loaded game, standing units {standing}"));
+        }
         let h = self.cb.map().height() as f32;
         let w = self.cb.map().width() as f32;
         self.map_diag = (h * h + w * w).sqrt();
@@ -383,8 +407,10 @@ impl Ai {
         self.log("GraphManager initialized.");
 
         if self.slave {
-            self.select_random_commander();
-            self.choose_start_pos();
+            if !saved_game {
+                self.select_random_commander();
+                self.choose_start_pos();
+            }
             self.log("Entering merge mode! Discarding modules.");
             return 0;
         }
@@ -429,9 +455,11 @@ impl Ai {
             return 1;
         }
 
-        let opening = self.eco_roll_opening();
-        self.select_commander(opening.as_deref());
-        self.choose_start_pos();
+        if !saved_game {
+            let opening = self.eco_roll_opening();
+            self.select_commander(opening.as_deref());
+            self.choose_start_pos();
+        }
         if !self.disabled.is_empty() {
             let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
             self.log(&format!("dev: features off: {}", off.join(", ")));
@@ -485,7 +513,7 @@ impl Ai {
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),
-            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm")
+            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm" | "snipers" | "lances")
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
@@ -675,6 +703,7 @@ impl Ai {
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
                 self.guard("airIntel.unitDamaged", |ai| ai.air_intel_unit_damaged(unit, attacker, dir, weapon));
+                self.guard("impalers.unitDamaged", |ai| ai.impalers_unit_damaged(unit, attacker, damage, weapon));
             }
             Event::UnitDestroyed { unit, attacker } => {
                 self.guard("graph.unitDestroyed", |ai| ai.graph_unit_destroyed(unit, attacker));

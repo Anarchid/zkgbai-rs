@@ -91,6 +91,11 @@ site linked to power first); `test=colony` a constructor and a Charon, `test=col
 constructor, to colonize the free metal far off. `ZKGBAI?test=aaprobe` against `ZKGBAI?test=aafort`
 flies unarmed Charons over static and mobile anti-air the attacker never sees (`air-intel:` lines:
 the raw hits, and every minute the contacts it has placed, to compare with the fort's).
+`ZKGBAI?test=hunt` against `ZKGBAI?test=snipers` (or `test=lances`) stages assassination strikes: the defender
+posts a Phantom (a Lance) 1400 elmos out every 2.5 minutes, every second one with a Reaver behind it, and the
+attacker gets raiders every 2 minutes; the strikes (`strikes:` lines, scored by `tools/arena/strikes.py`) should
+kill the snipers. `disable=strikes` switches them off; `strike_margin` sets the gate (0 = break-even on a sniper
+worth 1.5x its metal, negative = every wave goes).
 `ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
 
 Operator API and run journal
@@ -139,7 +144,11 @@ raider or assault), `squad_intent` (hold a place, raid the enemy's economy aroun
 attack a place and hand the squad back; with a `courage` that divides the threat the squad
 perceives and the health level its units retreat at), `squad_disband`, `dial name=greed` (the
 economy's expansion horizon: perceived threat at jobs and workers divided by it), `porc_zone`
-(with `mexporc` off, circles where turrets by mexes and links are still allowed). The HUD can carry
+(with `mexporc` off, circles where turrets by mexes and links are still allowed), and the levers:
+`levers` lists the settings an operator may turn while the AI plays (greed, build power, the army's
+line, the home defense's budget and tactics) with their ranges and current values, `lever name=...
+value=...` (or `value=auto`) turns one. The dashboard's Levers card and the LuaUI widget's "levers"
+view draw them as sliders, choices and switches from that list. The HUD can carry
 pinned reads (`hud pin=enemies args={...}`) and the `board`, the map as a PNG (`GET /board` shows it;
 MCPL hosts get it as an image block). Calls run on the AI's thread at its next frame, so they are
 answered while the game runs.

@@ -6,7 +6,7 @@
 
 use serde_json::{Value, json};
 
-use super::{actions, views};
+use super::{actions, levers, views};
 use crate::military::qrf::ops as qrf_ops;
 use crate::Ai;
 
@@ -18,6 +18,8 @@ pub enum Ty {
     Bool,
     /// Unit ids: a list (or one number).
     Ids,
+    /// A number, a string or a boolean.
+    Any,
 }
 
 /// A parameter: name, type, required, description.
@@ -46,6 +48,7 @@ impl Tool {
                 Ty::Str => json!({"type": "string"}),
                 Ty::Bool => json!({"type": "boolean"}),
                 Ty::Ids => json!({"type": "array", "items": {"type": "integer"}}),
+                Ty::Any => json!({"type": ["number", "string", "boolean"]}),
             };
             let mut schema = schema;
             schema["description"] = json!(doc);
@@ -523,6 +526,28 @@ pub static TOOLS: &[Tool] = &[
         writes: true,
         needs_modules: false,
         run: actions::dial,
+    },
+    Tool {
+        name: "levers",
+        description: "The AI's levers, the settings an operator may turn while it plays (the dials and the home \
+                       defense budget), with their values, ranges and what each does now, for drawing as sliders \
+                       (range), choices or switches. auto: the AI's own setting is in effect.",
+        params: &[],
+        writes: false,
+        needs_modules: true,
+        run: levers::list,
+    },
+    Tool {
+        name: "lever",
+        description: "Turn one of the levers (see levers): a number within its range, one of its options, on or \
+                       off; or auto for the AI's own setting.",
+        params: &[
+            P("name", Str, true, "lever name, e.g. greed, buildpower, line, qrf_defense"),
+            P("value", Any, true, "the new value, or auto"),
+        ],
+        writes: true,
+        needs_modules: true,
+        run: levers::set,
     },
     Tool {
         name: "feature",

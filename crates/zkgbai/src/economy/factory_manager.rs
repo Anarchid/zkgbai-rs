@@ -543,8 +543,16 @@ impl Ai {
             scouts_needed -= self.raider_handler.kodachis.len() as i32;
         } else {
             scouts_needed -= self.raider_handler.solo_raiders.len() as i32;
+            scouts_needed -= self.stakeouts.count() as i32;
         }
-        self.fac.scout_budget = scouts_needed.min(fac.scout_allowance).max(0);
+        // Where the scout is a lane picket (Fleas, Darts; see `stakeouts`),
+        // the stakeouts say how many: a post unmanned is a raid unseen, and
+        // a picket more than they want is metal idle.
+        self.fac.scout_budget = if self.stakeouts_own(fac.kind()) {
+            self.stakeouts_short(fac.kind())
+        } else {
+            scouts_needed.min(fac.scout_allowance).max(0)
+        };
 
         self.fac.has_fusion = self.eco.fusions.first().is_some_and(|fusion| {
             !fusion.is_being_built() || fusion.def().is_some_and(|d| fusion.health() > d.health() / 2.0)
@@ -576,13 +584,29 @@ impl Ai {
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice);
+        // Dirtbags for the strikes while snipers are about (see `strikes`).
         let choice = match (ai_wants_builder || special, fac.unit) {
-            (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
+            (false, unit) => {
+                (self.strikes_production(unit, choice)).or_else(|| self.qrf_production(unit, choice)).unwrap_or(choice)
+            }
             _ => choice,
         };
         if !ai_wants_builder
             && let Some(def) = self.op_factory_order(fac_id, false)
         {
+            self.fac.factories.insert(fac_id, fac);
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
+        // Now and then, in place of a fighter, a unit a taskforce is short
+        // of (a role with `produce`; see `taskforce`).
+        let options = fac.unit.def().map(|d| d.build_options()).unwrap_or_default();
+        if !ai_wants_builder
+            && !special
+            && let Some((def, doctrine, role)) = self.squad_produce(&options)
+        {
+            let name = self.defs.name(def).to_owned();
+            self.log(&format!("taskforce: a {name} for a {doctrine} force short of its {role}"));
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);
             return;
@@ -1052,6 +1076,11 @@ impl Ai {
             return "vehcon";
         }
 
+        // Screens for Impaler batteries short of them (see `impalers`).
+        if kgb_rand() < f64::from(self.impalers_escort_produce("vehriot")) {
+            return "vehriot";
+        }
+
         let slasher_value = war.slasher_spam as f32 * 140.0;
         if slasher_value > fm.assault_value && slasher_value > war.enemy_porc_value {
             return "vehassault";
@@ -1088,7 +1117,9 @@ impl Ai {
             return "veharty";
         }
 
-        if (fm.num_aspis > 0 && !self.squad_handler.shield_squads.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
+        // Dominatrices for shield balls: with only the felon doctrine on (the
+        // seeds), a taskforce is a shield ball, as this read before doctrines.
+        if (fm.num_aspis > 0 && !self.squad_handler.taskforces.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
             return "vehcapture";
         }
 

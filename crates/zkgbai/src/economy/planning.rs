@@ -61,6 +61,73 @@ const DROP_INCOME: f32 = 30.0;
 /// (see `drops`).
 const DROP_PROSPECT: f32 = 5000.0;
 
+/// Air tempo: as a game runs on, and more so on larger maps, the speed of
+/// aircraft converts more of the enemy's value (raids across the map,
+/// strikes on whatever moves out). A dose (see [`air_tempo_dose`]) is
+/// zero before `AIR_TEMPO_FROM_MIN` minutes, rises to one by
+/// `AIR_TEMPO_FULL_MIN`, and scales with the map's diagonal (heightmap
+/// squares) against `AIR_TEMPO_DIAG` (a 14x14 map), between
+/// `AIR_TEMPO_DIAG_MIN` and `AIR_TEMPO_DIAG_MAX`. Two uses: the ordinary
+/// factory switch (the random pick of the next factory, and the roll of
+/// a new type) weighs the air factory it prefers 1 + `AIR_TEMPO_PICK` x
+/// dose against 1 for every other candidate; and when nothing else asks
+/// for a factory, an air factory is asked for once per game, if none
+/// stands or is going up, worth `AIR_TEMPO_SHARE` of the enemy's standing
+/// value times the dose, once that is worth the factory's cost. Planes
+/// rather than gunships where static anti-air worth `AIR_TEMPO_AA_PLANES`
+/// or an enemy air force worth `AIR_TEMPO_AIR_PLANES` was seen.
+/// Off by default (unverified): `enable=airtempo` turns both on.
+const AIR_TEMPO_SHARE: f32 = 0.15;
+const AIR_TEMPO_PICK: f32 = 3.0;
+const AIR_TEMPO_FROM_MIN: f32 = 10.0;
+const AIR_TEMPO_FULL_MIN: f32 = 30.0;
+const AIR_TEMPO_DIAG: f32 = 1270.0;
+const AIR_TEMPO_DIAG_MIN: f32 = 0.5;
+const AIR_TEMPO_DIAG_MAX: f32 = 1.5;
+const AIR_TEMPO_AA_PLANES: f32 = 800.0;
+const AIR_TEMPO_AIR_PLANES: f32 = 1000.0;
+/// How an air tempo requisition's reason starts (the consumer knows it
+/// by this).
+pub(super) const AIR_TEMPO_WHY: &str = "air tempo";
+
+/// Air fire: raids that cost us mexes and power where no home defense
+/// team was near (see `firefighters::UNANSWERED_DIST`) are what aircraft
+/// answer, and the firefighters only wait for an air factory. With none
+/// owned or going up, once the unanswered losses of the last five
+/// minutes weigh `firefighters::WANTED_AT`, an air factory is asked for,
+/// ahead of the Widow scout, worth the metal of those losses (a mex's
+/// income over the memory counted) continued over the payback. Once a
+/// game. `disable=airfire`.
+pub(super) const AIR_FIRE_WHY: &str = "air fire";
+
+/// Whether a requisition's reason is one of the air ones (fire or tempo).
+pub(super) fn is_air_requisition(why: &str) -> bool {
+    why.starts_with(AIR_FIRE_WHY) || why.starts_with(AIR_TEMPO_WHY)
+}
+
+/// The air tempo dose `minutes` into the game on a map of diagonal
+/// `map_diag` heightmap squares: zero before `AIR_TEMPO_FROM_MIN`, then
+/// growing with time and with the map's size (see `AIR_TEMPO_SHARE`).
+pub(super) fn air_tempo_dose(minutes: f32, map_diag: f32) -> f32 {
+    let time = ((minutes - AIR_TEMPO_FROM_MIN) / (AIR_TEMPO_FULL_MIN - AIR_TEMPO_FROM_MIN)).clamp(0.0, 1.0);
+    let size = (map_diag / AIR_TEMPO_DIAG).clamp(AIR_TEMPO_DIAG_MIN, AIR_TEMPO_DIAG_MAX);
+    time * size
+}
+
+/// One of `list` for the roll `roll` in [0, 1), each name's odds in
+/// proportion to `weight(name)` (uniform when all weigh the same).
+fn weighted_pick(list: &BTreeSet<String>, weight: impl Fn(&str) -> f64, roll: f64) -> Option<String> {
+    let total: f64 = list.iter().map(|f| weight(f).max(0.0)).sum();
+    let mut at = roll.clamp(0.0, 1.0) * total;
+    for f in list {
+        at -= weight(f).max(0.0);
+        if at < 0.0 {
+            return Some(f.clone());
+        }
+    }
+    list.iter().next_back().cloned()
+}
+
 /// Bertha sites are tried in this many headings across the half-circle
 /// facing the map's middle, at these shares of the way there, on the
 /// highest ground within this of each (elmos); an enemy metal spot counts
@@ -255,10 +322,14 @@ impl Ai {
                 || (frame > 900 && !has_plop && nfac < 1 + merged && no_fac_tasks)
                 // a factory a module asked for (that we have none of: it may be
                 // stale, asked for before one went up another way)
+                // (an air factory for tempo past the usual cap, with the room
+                // a factory of a new type gets)
                 || (eco.requisition.as_ref().is_some_and(|(f, _)| !self.eco_has_factory(f))
                     && eco.static_income > REQUISITION_INCOME
                     && nfac >= 1
-                    && nfac < 3 + merged
+                    && (nfac < 3 + merged
+                        || (eco.requisition.as_ref().is_some_and(|(_, why)| is_air_requisition(why))
+                            && (nfac as f32) < 1.0 + eco.static_income / NEW_FAC_PER))
                     && no_fac_tasks)
                 || (eco.static_income > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
                 // a factory of a new type, now and then
@@ -273,7 +344,7 @@ impl Ai {
                 || (merged > 0
                     && eco.big_map
                     && tf > 0.4
-                    && (!self.misc_handler.striders.is_empty() || !self.squad_handler.shield_squads.is_empty())
+                    && (!self.misc_handler.striders.is_empty() || !self.squad_handler.taskforces.is_empty())
                     && (!eco.has_planes || !eco.has_gunship)
                     && no_fac_tasks)
             {
@@ -535,9 +606,15 @@ impl Ai {
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
         } else if (nfac as i32) < 1 + merged.max(1) || has_striders || is_plop || self.eco.pylons.is_empty() {
-            let len = self.eco.potential_fac_list.len();
-            let n = ((kgb_rand() * len as f64) as usize).min(len - 1);
-            fac_name = self.eco.potential_fac_list.iter().nth(n).cloned().unwrap_or_default();
+            // (The air factory for tempo weighs more as the game runs on.)
+            let (gunship, plane) = self.eco_air_tempo_weights();
+            let weight = |f: &str| match f {
+                "factorygunship" => gunship,
+                "factoryplane" => plane,
+                _ => 1.0,
+            };
+            fac_name = weighted_pick(&self.eco.potential_fac_list, weight, kgb_rand()).unwrap_or_default();
+            self.eco_air_tempo_rolled(&fac_name, weight(&fac_name));
             // The opening rolled at the start (the commander suits it).
             if let Some(opening) =
                 self.eco.opening.take().filter(|f| nfac == 0 && self.eco.potential_fac_list.contains(f))
@@ -709,6 +786,9 @@ impl Ai {
                 && *f == fac_name
             {
                 self.logistics_factory(id, asked_value, why);
+                if is_air_requisition(why) {
+                    self.eco.air_asked = true;
+                }
             }
         } else {
             restore(self, &fac_name);
@@ -979,8 +1059,14 @@ impl Ai {
         if types.is_empty() {
             return None;
         }
-        let n = ((kgb_rand() * types.len() as f64) as usize).min(types.len() - 1);
-        Some(types.swap_remove(n))
+        // (The air factory for tempo weighs more as the game runs on.)
+        let (gunship, plane) = self.eco_air_tempo_weights();
+        let weight = |f: &str| match f {
+            "factorygunship" => gunship,
+            "factoryplane" => plane,
+            _ => 1.0,
+        };
+        weighted_pick(&types.into_iter().collect(), weight, kgb_rand())
     }
 
     fn eco_reach_gap(&self) -> Option<(&'static str, f32, f32)> {
@@ -1082,6 +1168,11 @@ impl Ai {
                 value,
             ));
         }
+        // (Ahead of the Widow scout, which otherwise takes the second
+        // factory in nearly every game.)
+        if let Some(r) = self.eco_air_fire() {
+            return Some(r);
+        }
         // (A cloak factory builds Scythes for it instead.)
         if !owned("factoryspider") && !owned("factorycloak") && self.scouts_deep_wanted() && !self.scouts_have_scout() {
             let (income, spare) = self.scouts_energy();
@@ -1112,7 +1203,9 @@ impl Ai {
                 skirms,
             ));
         }
-        let s = self.strategy.as_ref()?;
+        let Some(s) = self.strategy.as_ref() else {
+            return self.eco_air_tempo();
+        };
         if !self.dev_off("drops")
             && !owned("factorygunship")
             && self.eco.static_income > DROP_INCOME
@@ -1150,7 +1243,136 @@ impl Ai {
                 ));
             }
         }
-        None
+        self.eco_air_tempo()
+    }
+
+    /// The air tempo dose now (see [`AIR_TEMPO_SHARE`]); zero when off.
+    fn eco_air_tempo_dose(&self) -> f32 {
+        if self.dev_off("airtempo") {
+            return 0.0;
+        }
+        air_tempo_dose(self.frame as f32 / 1800.0, self.map_diag)
+    }
+
+    /// The enemy's standing value (the production estimate less what
+    /// died, or at least what we have seen and not seen die), the static
+    /// anti-air seen, and whether that or the enemy's air force calls for
+    /// planes rather than gunships.
+    fn eco_air_tempo_enemy(&self) -> (f32, f32, bool) {
+        let (mut seen, mut static_aa) = (0.0f32, 0.0f32);
+        for e in self.war.targets.values().filter(|e| e.identified && !e.is_dead) {
+            seen += e.value;
+            if e.is_static && e.is_aa {
+                static_aa += e.value;
+            }
+        }
+        let enemy = (self.intel.produced - self.intel.killed).max(seen);
+        let planes = static_aa >= AIR_TEMPO_AA_PLANES || self.war.max_enemy_air_value >= AIR_TEMPO_AIR_PLANES;
+        (enemy, static_aa, planes)
+    }
+
+    /// The weights of the gunship and the plane factory in the ordinary
+    /// switch's roll (every other candidate weighs 1): the one air tempo
+    /// prefers at 1 + `AIR_TEMPO_PICK` x dose.
+    fn eco_air_tempo_weights(&self) -> (f64, f64) {
+        let dose = self.eco_air_tempo_dose();
+        if dose <= 0.0 {
+            return (1.0, 1.0);
+        }
+        let w = 1.0 + f64::from(AIR_TEMPO_PICK * dose);
+        if self.eco_air_tempo_enemy().2 { (1.0, w) } else { (w, 1.0) }
+    }
+
+    /// Log an air factory the ordinary switch rolled with air tempo's
+    /// weight on it.
+    fn eco_air_tempo_rolled(&self, name: &str, weight: f64) {
+        if weight > 1.0 && matches!(name, "factorygunship" | "factoryplane") {
+            self.log(&format!(
+                "economy: {AIR_TEMPO_WHY} {:.2} weighed the roll: {name} at {weight:.1} to 1 ({:.0} min, map diagonal {:.0})",
+                self.eco_air_tempo_dose(),
+                self.frame as f32 / 1800.0,
+                self.map_diag
+            ));
+        }
+    }
+
+    /// Whether an air factory may be asked for: none stands or is going
+    /// up, and none was asked for this way before.
+    fn eco_air_open(&self) -> bool {
+        !self.eco.air_asked && !self.eco_has_factory("factorygunship") && !self.eco_has_factory("factoryplane")
+    }
+
+    /// An air factory for the firefighters (see [`AIR_FIRE_WHY`]): which,
+    /// why, and what it is worth in metal.
+    fn eco_air_fire(&self) -> Option<(String, String, f32)> {
+        use crate::military::firefighters::{MEMORY, UNANSWERED_DIST, WANTED_AT};
+        if self.dev_off("airfire") || self.dev_off("firefighters") || !self.eco_air_open() {
+            return None;
+        }
+        let (weight, metal) = self.firefighters_unanswered();
+        if weight < WANTED_AT {
+            return None;
+        }
+        let value = metal * crate::logistics::PAYBACK / (MEMORY as f32 / 30.0);
+        let (_, static_aa, planes) = self.eco_air_tempo_enemy();
+        let name = if planes { "factoryplane" } else { "factorygunship" };
+        self.defs.get(name)?;
+        let kind = if planes {
+            format!(
+                "planes, past {static_aa:.0} metal of anti-air and {:.0} of aircraft seen",
+                self.war.max_enemy_air_value
+            )
+        } else {
+            "gunships".to_owned()
+        };
+        Some((
+            name.to_owned(),
+            format!(
+                "{AIR_FIRE_WHY} {weight:.1}: {metal:.0} metal of mexes and power lost to raids in the last {:.0} min with no \
+                 home defense team within {UNANSWERED_DIST:.0}; firefighters, {kind}",
+                MEMORY as f32 / 1800.0
+            ),
+            value,
+        ))
+    }
+
+    /// An air factory for tempo (see [`AIR_TEMPO_SHARE`]): which, why, and
+    /// what it is worth in metal; none while one stands or is going up,
+    /// after one was taken this way, or before it pays for itself.
+    fn eco_air_tempo(&self) -> Option<(String, String, f32)> {
+        if !self.eco_air_open() {
+            return None;
+        }
+        let dose = self.eco_air_tempo_dose();
+        if dose <= 0.0 {
+            return None;
+        }
+        let (enemy, static_aa, planes) = self.eco_air_tempo_enemy();
+        let value = AIR_TEMPO_SHARE * enemy * dose;
+        let name = if planes { "factoryplane" } else { "factorygunship" };
+        let cost = self.defs.get(name)?.cost(self.metal);
+        if value < cost {
+            return None;
+        }
+        let kind = if planes {
+            format!(
+                "planes, past {static_aa:.0} metal of anti-air and {:.0} of aircraft seen",
+                self.war.max_enemy_air_value
+            )
+        } else {
+            "gunships".to_owned()
+        };
+        Some((
+            name.to_owned(),
+            format!(
+                "{AIR_TEMPO_WHY} {dose:.2} ({:.0} min, map diagonal {:.0}): {:.0}% of the enemy's {enemy:.0} metal \
+                 standing is what aircraft would convert; {kind}",
+                self.frame as f32 / 1800.0,
+                self.map_diag,
+                100.0 * AIR_TEMPO_SHARE
+            ),
+            value,
+        ))
     }
 
     /// An Urchin where enemies were seen under water lately, by the nearest
@@ -2186,5 +2408,56 @@ mod tests {
             assert_eq!(picked_factory(&with, k), picked_factory(&without, k));
         }
         assert_eq!(picked_factory(&list(&["factoryjump"]), 3), "factoryjump");
+    }
+
+    #[test]
+    fn air_tempo_dose_grows_with_time_and_map_size() {
+        // Nothing before the threshold, on any map.
+        for diag in [724.0, 1086.0, 1448.0, 2172.0] {
+            assert_eq!(air_tempo_dose(0.0, diag), 0.0);
+            assert_eq!(air_tempo_dose(AIR_TEMPO_FROM_MIN - 0.1, diag), 0.0);
+            assert!(air_tempo_dose(AIR_TEMPO_FROM_MIN + 1.0, diag) > 0.0);
+        }
+        // Monotone in time (non-decreasing, strictly while ramping).
+        let mut last = 0.0;
+        for m in 0..60 {
+            let d = air_tempo_dose(m as f32, 1448.0);
+            assert!(d >= last, "minute {m}: {d} < {last}");
+            if (m as f32) > AIR_TEMPO_FROM_MIN && (m as f32) <= AIR_TEMPO_FULL_MIN {
+                assert!(d > last, "minute {m} should still ramp");
+            }
+            last = d;
+        }
+        assert_eq!(air_tempo_dose(AIR_TEMPO_FULL_MIN, AIR_TEMPO_DIAG), 1.0);
+        assert_eq!(air_tempo_dose(90.0, AIR_TEMPO_DIAG), 1.0);
+        // Monotone in the map's diagonal, bounded both ways.
+        let mut last = 0.0;
+        for diag in (400..3000).step_by(100) {
+            let d = air_tempo_dose(AIR_TEMPO_FULL_MIN, diag as f32);
+            assert!(d >= last, "diagonal {diag}: {d} < {last}");
+            assert!((AIR_TEMPO_DIAG_MIN..=AIR_TEMPO_DIAG_MAX).contains(&d));
+            last = d;
+        }
+        assert!(air_tempo_dose(20.0, 2172.0) > air_tempo_dose(20.0, 724.0));
+    }
+
+    #[test]
+    fn weighted_pick_follows_the_weights() {
+        let l = list(&["factorycloak", "factorygunship", "factoryplane", "factoryveh"]);
+        let weight = |f: &str| if f == "factorygunship" { 3.0 } else { 1.0 };
+        let mut counts = std::collections::BTreeMap::new();
+        for i in 0..600 {
+            let pick = weighted_pick(&l, weight, i as f64 / 600.0).unwrap();
+            *counts.entry(pick).or_insert(0) += 1;
+        }
+        assert_eq!(counts["factorygunship"], 300);
+        assert_eq!(counts["factorycloak"], 100);
+        assert_eq!(counts["factoryplane"], 100);
+        assert_eq!(counts["factoryveh"], 100);
+        // Uniform when every weight is one; never past the end.
+        assert_eq!(weighted_pick(&l, |_| 1.0, 0.0).as_deref(), Some("factorycloak"));
+        assert_eq!(weighted_pick(&l, |_| 1.0, 0.999).as_deref(), Some("factoryveh"));
+        assert_eq!(weighted_pick(&l, |_| 1.0, 1.0).as_deref(), Some("factoryveh"));
+        assert_eq!(weighted_pick(&list(&[]), |_| 1.0, 0.5), None);
     }
 }
