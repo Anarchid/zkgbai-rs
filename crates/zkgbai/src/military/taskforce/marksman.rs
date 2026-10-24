@@ -83,6 +83,9 @@ const RESERVE: f32 = 300.0;
 /// Marksman v3: what a target makes or enables counts over this long.
 const STREAM_SECONDS: f32 = 60.0;
 
+/// Marksman v3: seconds a gun needs to aim once its target is in reach.
+const AIM_SECONDS: f32 = 1.0;
+
 /// A holding gun picks its mark from this many frames before it reloads.
 const PREAIM: i32 = 90;
 
@@ -274,6 +277,7 @@ impl Ai {
         max_move: f32,
         leads: bool,
         fix: Fix,
+        floor: f32,
         lines: &mut Vec<String>,
     ) -> bool {
         let frame = self.frame;
@@ -340,19 +344,30 @@ impl Ai {
             }
             let vel = if e.visible && !e.is_static { e.unit.vel() } else { Vec3::xz(0.0, 0.0) };
             let at = |t: i32| Vec3::xz(e.position.x + vel.x * 30.0 * t as f32, e.position.z + vel.z * 30.0 * t as f32);
+            // In reach by its own track, or after a gun move the gun has
+            // the time to make and still aim before the hold runs out.
+            let speed = unit.def().map_or(1.0, |d| d.speed()).max(1.0);
             let drift = (1..=steps).any(|t| distance(pos, at(t)) <= reach);
-            let moved = leads && (0..=steps).any(|t| distance(pos, at(t)) <= reach + max_move) && {
-                // Not into more threat than where it stands.
-                let view = self.war.view(unit.def());
-                let to = get_directional_point(pos, e.position, (d - range + 30.0).min(max_move));
-                view.get_effective_threat(to) <= 1.25 * view.get_effective_threat(pos) + 1.0
-            };
+            let moved = leads
+                && (1..=steps).any(|t| {
+                    let need = distance(pos, at(t)) - reach;
+                    need <= max_move && need / speed + AIM_SECONDS <= t as f32
+                })
+                && {
+                    // Not into more threat than where it stands.
+                    let view = self.war.view(unit.def());
+                    let to = get_directional_point(pos, e.position, (d - range + 30.0).min(max_move));
+                    view.get_effective_threat(to) <= 1.25 * view.get_effective_threat(pos) + 1.0
+                };
             if (drift || moved) && soon.is_none_or(|s| v > s.1) {
                 soon = Some((e.unit_id, v, !drift));
             }
         }
         let Some((t, v, moves)) = soon else { return false };
-        let over = now.map_or(0.0, |n| n.1);
+        // Over what it would shoot now: the best in reach, and with nothing
+        // in reach at least what a mark is worth (the chaff it would fire at
+        // instead is worth less).
+        let over = now.map_or(0.0, |n| n.1).max(floor);
         if v < k * over.max(1.0) {
             return false;
         }
@@ -431,7 +446,7 @@ impl Ai {
                 }
             }
             if wait > 0.0
-                && self.marksman_wait(id, unit, wait, hold_for, wait_move, leader == Some(id), fix, &mut lines)
+                && self.marksman_wait(id, unit, wait, hold_for, wait_move, leader == Some(id), fix, floor, &mut lines)
             {
                 continue;
             }
