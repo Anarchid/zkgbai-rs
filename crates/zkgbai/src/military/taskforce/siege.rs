@@ -468,16 +468,22 @@ impl Ai {
     fn siege_up(&self, sid: SquadId) -> f32 {
         let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
         let given_up = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| p.abandoned);
-        let station = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref());
-        let natural = station.map_or(0.0, |s| s.natural);
-        // A station picked as a flat stand raises nothing; the next pick
-        // looks for a perch site again (the perch height is asked for the
-        // search while no station stands).
-        let flat_stand = station.is_some_and(|s| !s.perch_site && !s.deployed);
+        let natural = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref())).map_or(0.0, |s| s.natural);
         match perch {
-            Some(p) if !given_up && !flat_stand => p.height.max(natural) + AIM_ABOVE,
+            Some(p) if !given_up => p.height.max(natural) + AIM_ABOVE,
             _ => 0.0,
         }
+    }
+
+    /// The aim height the force's standing station is judged by: a station
+    /// picked as a flat stand is kept by flat values (lib-v20 judged it by
+    /// the perch height once deployed and re-picked every pass: 1351
+    /// stations for 157 forces in crab arm (2)); a perch site by its
+    /// raised ones. The search for a new station always asks the perch
+    /// height (see [`Self::siege_up`]).
+    fn siege_up_keep(&self, sid: SquadId) -> f32 {
+        let station = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref());
+        if station.is_some_and(|s| !s.perch_site) { 0.0 } else { self.siege_up(sid) }
     }
 
     /// Whether a station is still safe to stand at: beyond every known
@@ -523,18 +529,24 @@ impl Ai {
     /// has yet to get there (so the wrapper moves it) or stands parked.
     pub(crate) fn siege_conduct(&mut self, sid: SquadId, leader: Unit) -> (Vec3, bool) {
         let pos = leader.pos();
+        // A station is kept while it is safe and reaches something, judged
+        // at the height it was picked for: the guns stay until they have
+        // shot what they reach (every move costs them their aim). A perch
+        // going up or up is kept whatever.
+        let up_keep = self.siege_up_keep(sid);
+        let statics_keep = self.siege_statics(up_keep);
+        let reach_keep = Self::siege_reach(leader, up_keep);
+        let standoff_keep = if up_keep > 0.0 { PERCH_STANDOFF } else { STANDOFF };
+        let perching = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned);
+        let kept = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()))
+            .filter(|s| perching || self.siege_safe_by(s.pos, leader, &statics_keep, standoff_keep))
+            .filter(|s| perching || in_reach(s.pos, reach_keep, &statics_keep).0 > 0)
+            .map(|s| (s.pos, s.deployed));
+        // A new station is searched for at the perch height (a perch site
+        // first, a flat stand else).
         let up = self.siege_up(sid);
         let statics = self.siege_statics(up);
         let reach = Self::siege_reach(leader, up);
-        let standoff = if up > 0.0 { PERCH_STANDOFF } else { STANDOFF };
-        // A station is kept while it is safe and reaches something: the
-        // guns stay until they have shot what they reach (every move costs
-        // them their aim). A perch going up or up is kept whatever.
-        let perching = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned);
-        let kept = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()))
-            .filter(|s| perching || self.siege_safe_by(s.pos, leader, &statics, standoff))
-            .filter(|s| perching || in_reach(s.pos, reach, &statics).0 > 0)
-            .map(|s| (s.pos, s.deployed));
         let station = match kept {
             Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
             None => {
@@ -770,7 +782,7 @@ impl Ai {
         if let Some(st) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.station.as_mut()) {
             st.deployed = parked_force;
         }
-        let up = self.siege_up(sid);
+        let up = self.siege_up_keep(sid);
         let statics = self.siege_statics(up);
         let reach = leader.map_or(1100.0, |l| Self::siege_reach(l, up));
         // A gun fires out to its range; the reach (less a margin) is for
