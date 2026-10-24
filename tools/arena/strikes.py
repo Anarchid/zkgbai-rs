@@ -13,7 +13,7 @@ import re
 import sys
 
 START = re.compile(r"strikes: #(\d+) on a (\w+) (seen|on radar|crossed|a bearing) at \((-?\d+), (-?\d+)\): (\d+) units \(([\d.]+) metal, ([\d.]+)/s\) go, the slowest in ([\d.]+) s; expected loss ([\d.]+), profit (-?[\d.]+) \(([\d.]+) x ([\d.]+)(?:, averted (-?[\d.]+))?\)(, escorts)?")
-END = re.compile(r"strikes: #(\d+) (killed|taken|lapsed|wiped|ran): the (\w+) (dead|not) after (\d+) s; lost ([\d.]+) metal \((\d+) of (\d+) units\), (\d+) back")
+END = re.compile(r"strikes: #(\d+) (killed|taken|lapsed|wiped|ran): the (\w+) (dead|not) after (\d+) s; lost ([\d.]+) metal \((\d+) of (\d+) units\), (\d+) back(?:, closest (-?[\d.]+))?")
 SEES = re.compile(r"strikes: #(\d+) sees its")
 REFUSED = re.compile(r"strikes: no strike on the (\w+) (seen|on radar|crossed|a bearing) at \((-?\d+), (-?\d+)\): (.*)")
 SNIPED = re.compile(r"strikes: a (\w+) \(([\d.]+)\) lost to a (\w+)")
@@ -34,6 +34,7 @@ def infologs(args):
 
 def score(path, verbose):
     g = dict(started=0, killed=0, taken=0, lapsed=0, wiped=0, ran=0, lost=0.0, refused=0, sniped=0, sniped_metal=0.0,
+             quick=0, reached=0, settled=0,
              unstruck=0, struck=0, seen={}, died={}, averted=0.0, worth=0.0, escorted_go=0,
              by_fix={}, kills_by_fix={}, refusals={}, lines=[])
     starts = {}
@@ -58,10 +59,14 @@ def score(path, verbose):
             sid, why = m.group(1), m.group(2)
             g[why] += 1
             g["lost"] += float(m.group(6))
+            # Mechanism gate: released within 5 s of conscription; nearest member within 155 (a Phantom's decloak radius) of the fix.
+            g["settled"] += 1
+            g["quick"] += 1 if int(m.group(5)) <= 5 and why != "killed" else 0
+            g["reached"] += 1 if m.group(10) is not None and 0 <= float(m.group(10)) <= 155 else 0
             if why == "killed":
                 fix = starts.get(sid, "?")
                 g["kills_by_fix"][fix] = g["kills_by_fix"].get(fix, 0) + 1
-            g["lines"].append(f"{t//60:2d}:{t%60:02d} #{sid} {why} after {m.group(5)} s, lost {float(m.group(6)):.0f} ({m.group(7)}/{m.group(8)})")
+            g["lines"].append(f"{t//60:2d}:{t%60:02d} #{sid} {why} after {m.group(5)} s, lost {float(m.group(6)):.0f} ({m.group(7)}/{m.group(8)}){', closest ' + m.group(10) if m.group(10) else ''}")
             continue
         m = REFUSED.search(line)
         if m:
@@ -94,7 +99,8 @@ def show(name, g):
     fmt = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "-"
     print(f"{name}: strikes {g['started']} ({fmt(g['by_fix'])}; escorted {g['escorted_go']}; averted share of worth {share:.2f}); "
           f"killed {g['killed']} ({fmt(g['kills_by_fix'])}), taken {g['taken']}, lapsed {g['lapsed']}, wiped {g['wiped']}, ran {g['ran']}; "
-          f"metal lost in strikes {g['lost']:.0f} ({per_kill:.0f}/kill); refused {g['refused']} ({fmt(g['refusals'])}); "
+          f"metal lost in strikes {g['lost']:.0f} ({per_kill:.0f}/kill); released unkilled within 5 s {g['quick']} of {g['settled']}, reached within 155 {g['reached']}; "
+          f"refused {g['refused']} ({fmt(g['refusals'])}); "
           f"sniped outside strikes {g['sniped']} ({g['sniped_metal']:.0f} metal); "
           f"snipers seen {fmt(g['seen'])}, died {fmt(g['died'])} (struck {g['struck']}, unstruck {g['unstruck']})")
 

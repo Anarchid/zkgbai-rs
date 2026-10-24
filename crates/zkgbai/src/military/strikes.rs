@@ -403,6 +403,9 @@ pub struct Strike {
     /// Each member's next point to look at.
     next_point: BTreeMap<i32, usize>,
     ordered: i32,
+    /// How near the wave's nearest member came to the fix (the last seen
+    /// point), over the strike's life: "walked nowhere" as a number.
+    closest: f32,
 }
 
 #[derive(Default)]
@@ -671,6 +674,7 @@ impl Ai {
             lost_n: 0,
             odds: o,
             next_point: BTreeMap::new(),
+            closest: f32::INFINITY,
             ordered: 0,
         });
         self.strikes.stats.started += 1;
@@ -883,7 +887,7 @@ impl Ai {
             self.strikes.cooldown_near.push((s.fix.pos(), frame + COOLDOWN));
         }
         let line = format!(
-            "strikes: #{} {why}: the {} {} after {} s; lost {:.0} metal ({} of {} units), {} back",
+            "strikes: #{} {why}: the {} {} after {} s; lost {:.0} metal ({} of {} units), {} back, closest {:.0}",
             s.id,
             s.kind,
             if why == "killed" || why == "taken" { "dead" } else { "not" },
@@ -891,7 +895,8 @@ impl Ai {
             s.lost,
             s.lost_n,
             s.lost_n as usize + s.members.len(),
-            s.members.len()
+            s.members.len(),
+            if s.closest.is_finite() { s.closest } else { -1.0 }
         );
         self.log(&line);
         self.strikes_release(&s.members);
@@ -905,6 +910,14 @@ impl Ai {
             let s = &self.strikes.strikes[i];
             (s.target, s.fix, s.members.clone(), s.ordered)
         };
+        let near = (members.iter())
+            .filter_map(|id| self.strikes.members.get(id))
+            .filter(|m| m.1.pos() != NULLPOS)
+            .map(|m| distance(m.1.pos(), fix.pos()))
+            .fold(f32::INFINITY, f32::min);
+        if near < self.strikes.strikes[i].closest {
+            self.strikes.strikes[i].closest = near;
+        }
         let seen = target
             .and_then(|t| self.war.targets.get(&t))
             .filter(|e| e.visible && !e.is_dead && e.unit.health() > 0.0 && e.unit.pos() != NULLPOS)
@@ -970,13 +983,13 @@ impl Ai {
             let ran = s.target.and_then(|t| self.war.targets.get(&t)).is_some_and(|e| {
                 e.visible && distance(e.unit.pos(), s.fix.pos()) > RAN
             });
-            // (A kill is heard of as the enemy dies; a target forgotten as
-            // outdated is one that got away.)
-            let gone = s.target.is_some_and(|t| !self.war.targets.contains_key(&t));
+            // (A kill is heard of as the enemy dies. A target forgotten is
+            // not settled on: a decloaked Phantom recloaks within seconds,
+            // and in ab2/ab3 most seen waves were released 1-5 s after
+            // conscription that way; the wave combs the last seen point
+            // until the lapse instead.)
             let why = if s.members.is_empty() {
                 Some("wiped")
-            } else if gone {
-                Some("lapsed")
             } else if ran {
                 Some("ran")
             } else if frame - s.fixed > LAPSE {
