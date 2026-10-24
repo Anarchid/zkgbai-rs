@@ -168,6 +168,9 @@ struct PerchState {
 /// A raiser this close to the site lets the core go onto it; the core
 /// waits this far from the site toward home until then.
 const RAISE_NEAR: f32 = 400.0;
+/// A force walking with its raisers waits only when one falls this far
+/// behind the leader (a guard trails at 400-440 while the leader walks).
+const RAISE_FAR: f32 = 800.0;
 const STAGE_OFF: f32 = 300.0;
 
 /// Raisers called away are replaced this many times within the borrow.
@@ -1640,7 +1643,12 @@ impl Ai {
         };
         let doctrine = self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone());
         let ids: Vec<String> = raisers.iter().map(|u| u.id().to_string()).collect();
-        let far: Vec<f32> = raisers.iter().map(|u| distance(u.pos(), lp)).filter(|&d| d > RAISE_NEAR).collect();
+        // Hysteresis (lib-v28): a guarding Weaver trails a walking Crab at
+        // 400-440, so a force already walking with its raisers waits only
+        // when one is farther than `RAISE_FAR`; a waiting force goes once
+        // all are within `RAISE_NEAR` (lib-v25 looped wait/join every 4 s).
+        let line = if said == -1 { RAISE_FAR } else { RAISE_NEAR };
+        let far: Vec<f32> = raisers.iter().map(|u| distance(u.pos(), lp)).filter(|&d| d > line).collect();
         let since = (frame - since_frame) / 30;
         if far.is_empty() {
             if said != -1 {
