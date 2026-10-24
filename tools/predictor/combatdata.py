@@ -22,7 +22,7 @@ import pandas as pd
 
 RUNS = os.path.expanduser("~/Programs/zkgbai-runs")
 
-INT_COLS = {"n", "f0", "f1", "lag", "pid", "own", "oteam", "tid", "tteam", "tstun", "tdis", "tfire",
+INT_COLS = {"tlos", "n", "f0", "f1", "lag", "pid", "own", "oteam", "tid", "tteam", "tstun", "tdis", "tfire",
             "hits", "nvict", "tdead", "f", "vid", "vteam", "aid", "ateam", "uid", "uteam", "on", "stun", "dis", "fire"}
 STR_COLS = {"src", "wd", "odef", "tt", "tdef", "vdef", "adef", "kind", "udef"}
 

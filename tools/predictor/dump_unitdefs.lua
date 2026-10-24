@@ -4,7 +4,7 @@ local dir = arg[1]
 Shared = setmetatable({}, {__index = function(t, k) return k end})
 local p = io.popen('ls "' .. dir .. '/units"')
 local cols = {"name", "humanname", "cost", "health", "speed", "category", "moveclass", "canfly",
-	"footprint", "radius", "builder", "weapons", "shieldpower", "shieldregen", "canmove", "description", "wextra"}
+	"footprint", "radius", "builder", "weapons", "shieldpower", "shieldregen", "canmove", "description", "wextra", "sight", "radar"}
 print(table.concat(cols, "\t"))
 local function s(v) return v == nil and "" or tostring(v) end
 for file in p:lines() do
@@ -50,7 +50,7 @@ for file in p:lines() do
 				print(table.concat({
 					name, s(ud.name), s(ud.metalCost or ud.buildCostMetal), s(ud.health or ud.maxDamage), s(ud.speed or ud.maxVelocity),
 					s(ud.category), s(ud.movementClass), s(ud.canFly and 1 or 0), s(ud.footprintX),
-					radius, s(ud.builder and 1 or 0), table.concat(weps, ","), sh, shregen, s(ud.canMove and 1 or 0), s(ud.description), table.concat(wx, ","),
+					radius, s(ud.builder and 1 or 0), table.concat(weps, ","), sh, shregen, s(ud.canMove and 1 or 0), s(ud.description), table.concat(wx, ","), s(ud.sightDistance), s(ud.radarDistance),
 				}, "\t"))
 			end
 		else
