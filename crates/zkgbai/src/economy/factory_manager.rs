@@ -545,10 +545,14 @@ impl Ai {
             scouts_needed -= self.raider_handler.solo_raiders.len() as i32;
             scouts_needed -= self.stakeouts.count() as i32;
         }
-        // The lane pickets' shortfall is built whatever the allowance
-        // (see `stakeouts`): a post unmanned is a raid unseen.
-        let pickets = self.stakeouts_short(fac.kind());
-        self.fac.scout_budget = scouts_needed.min(fac.scout_allowance).max(0).max(pickets);
+        // Where the scout is a lane picket (Fleas, Darts; see `stakeouts`),
+        // the stakeouts say how many: a post unmanned is a raid unseen, and
+        // a picket more than they want is metal idle.
+        self.fac.scout_budget = if self.stakeouts_own(fac.kind()) {
+            self.stakeouts_short(fac.kind())
+        } else {
+            scouts_needed.min(fac.scout_allowance).max(0)
+        };
 
         self.fac.has_fusion = self.eco.fusions.first().is_some_and(|fusion| {
             !fusion.is_being_built() || fusion.def().is_some_and(|d| fusion.health() > d.health() / 2.0)

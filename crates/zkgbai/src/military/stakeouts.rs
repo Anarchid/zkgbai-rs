@@ -81,12 +81,25 @@ const MAX_OFFSET: f32 = 460.0;
 /// A stakeout has arrived within this of where it was going.
 const ARRIVE: f32 = 80.0;
 
-/// Keep this much more than the enemy's weapon range...
-const RANGE_MARGIN: f32 = 120.0;
-/// ...and at least this far from any armed enemy.
-const KEEP_MIN: f32 = 280.0;
-/// Keep this much inside our own sight.
-const SIGHT_MARGIN: f32 = 120.0;
+/// A picket that cannot cloak keeps this much more than an enemy's weapon
+/// range, and at least `KEEP_MIN`...
+const RANGE_MARGIN: f32 = 150.0;
+const KEEP_MIN: f32 = 300.0;
+/// ...one that cloaks when still cannot be seen standing, so it moves only
+/// when an enemy would come this much closer than its decloak radius.
+const DECLOAK_MARGIN: f32 = 100.0;
+/// A static weapon (a turret) shoots a moving picket within its range plus
+/// this, cloak or not: moving decloaks.
+const TURRET_MARGIN: f32 = 100.0;
+/// Backing off, a picket goes to this much inside its own sight of the
+/// enemy: one decisive step, then it stands (and cloaks).
+const BACK_TO: f32 = 60.0;
+/// Following, it stops this much inside its own sight.
+const FOLLOW_TO: f32 = 100.0;
+/// Frames between follow moves (a step, then a look).
+const FOLLOW_EVERY: i32 = 45;
+/// A spot a looker fled from is left alone this long (frames).
+const SHUN: i32 = 30 * 120;
 
 /// Enemies seen within this many frames are where we saw them.
 const RECENT: i32 = 45;
@@ -107,7 +120,7 @@ const START_RADIUS: f32 = 900.0;
 
 /// With this many stakeouts lost within [`LOSS_RECALL`] frames, no more
 /// are asked for.
-const LOSS_CAP: usize = 6;
+const LOSS_CAP: usize = 4;
 const LOSS_RECALL: i32 = 30 * 60 * 5;
 
 /// Frames between journal summaries (the analysts read the posts' manning
@@ -148,6 +161,10 @@ struct Stakeout {
     /// A soft target under attack.
     sortie: Option<i32>,
     last_tick: i32,
+    /// Frame of the last move order.
+    moved: i32,
+    /// Cloaks for free when it stands still (the Flea).
+    cloaks: bool,
 }
 
 /// A gate to picket.
@@ -179,6 +196,8 @@ pub struct Stakeouts {
     /// Strategy frame the posts were planned from.
     posts_frame: i32,
     losses: VecDeque<i32>,
+    /// Metal spots lookers fled from, until a frame.
+    shunned: BTreeMap<usize, i32>,
     stats: Stats,
 }
 
@@ -218,6 +237,20 @@ fn mobile_armed(e: &Enemy) -> bool {
 /// Whether an enemy is worth a sortie: it cannot shoot back.
 fn soft(e: &Enemy) -> bool {
     !e.is_dead && e.identified && !e.can_attack() && (e.is_mex || e.is_worker || !e.is_static)
+}
+
+/// How close an enemy may come to a picket: a turret shoots a moving
+/// picket within its range; a mobile enemy cannot see a cloaked one
+/// standing, so only its coming within decloak distance matters; a picket
+/// that cannot cloak stays out of weapon range.
+fn keep_from(e: &Enemy, cloaks: bool) -> f32 {
+    if e.is_static {
+        e.threat_radius + TURRET_MARGIN
+    } else if cloaks {
+        e.ud.map_or(130.0, |d| d.decloak_distance().max(1.0)).max(130.0) + DECLOAK_MARGIN
+    } else {
+        (e.threat_radius + RANGE_MARGIN).max(KEEP_MIN)
+    }
 }
 
 /// Where to stand beside a gate: `POST_SETBACK` toward home and off the
@@ -271,6 +304,8 @@ impl Ai {
                 look: None,
                 sortie: None,
                 last_tick: frame - PERIOD,
+                moved: 0,
+                cloaks: def.is_able_to_cloak() && def.cloak_cost() <= 0.0,
             },
         );
         self.stakeouts.stats.claimed += 1;
@@ -302,10 +337,16 @@ impl Ai {
         );
     }
 
+    /// Whether the stakeouts decide how many scouts a factory of this kind
+    /// builds (its scout is one of theirs).
+    pub(crate) fn stakeouts_own(&self, kind: FacKind) -> bool {
+        !self.dev_off("stakeouts") && matches!(kind, FacKind::Spider | FacKind::Veh)
+    }
+
     /// How many scouts a factory of this kind should build for the
     /// stakeouts: what they are short of, if its scout is one of theirs.
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
-        if self.dev_off("stakeouts") || !matches!(kind, FacKind::Spider | FacKind::Veh) {
+        if !self.stakeouts_own(kind) {
             return 0;
         }
         let s = &self.stakeouts;
@@ -451,6 +492,7 @@ impl Ai {
             return;
         }
         let (unit, p, sight, speed, def, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.speed, m.def, m.duty);
+        let (cloaks, look) = (m.cloaks, m.look);
 
         // The nearest armed enemy that could shoot us, else the nearest
         // mobile one in or near our sight.
@@ -461,7 +503,7 @@ impl Ai {
                 continue;
             }
             let d = distance(p, e.position);
-            let keep = (e.threat_radius + RANGE_MARGIN).max(KEEP_MIN);
+            let keep = keep_from(e, cloaks);
             if d < keep && danger.is_none_or(|(_, b)| d - keep < b) {
                 danger = Some((e.unit_id, d - keep));
             }
@@ -470,6 +512,16 @@ impl Ai {
             }
         }
         if let Some((eid, _)) = danger.or(near) {
+            // A looker that fled leaves that spot alone for a while.
+            if danger.is_some()
+                && duty == Duty::Look
+                && let Some(spot) = look
+            {
+                self.stakeouts.shunned.insert(spot, frame + SHUN);
+                if let Some(m) = self.stakeouts.members.get_mut(&id) {
+                    m.look = None;
+                }
+            }
             self.stakeouts_shadow(id, eid, frame);
             return;
         }
@@ -525,6 +577,7 @@ impl Ai {
                     let mut nav = nav!(self);
                     if let Some(m) = self.stakeouts.members.get_mut(&id) {
                         m.standing = false;
+                        m.moved = frame;
                         m.f.sneak(target, &mut nav);
                     }
                 }
@@ -536,6 +589,7 @@ impl Ai {
                 if let Some(m) = self.stakeouts.members.get_mut(&id) {
                     m.look = Some(spot);
                     m.standing = false;
+                    m.moved = frame;
                     m.f.sneak(target, &mut nav);
                 }
             }
@@ -587,40 +641,40 @@ impl Ai {
         }
     }
 
-    /// Keep an enemy at a distance: outside its range, inside our sight;
+    /// Keep an enemy at a distance: outside its reach, inside our sight;
     /// follow it if we are as fast, else let it go.
     fn stakeouts_shadow(&mut self, id: i32, eid: i32, frame: i32) {
         let Some(e) = self.war.targets.get(&eid) else { return };
-        let (epos, erange, espeed, ename) = (e.position, e.threat_radius, e.speed(), e.def_name.clone());
+        let (epos, espeed, ename) = (e.position, e.speed(), e.def_name.clone());
         let Some(m) = self.stakeouts.members.get(&id) else { return };
-        let (p, sight, speed, def) = (m.f.get_pos(), m.sight, m.speed, m.def);
+        let (p, sight, speed, def, cloaks, moved) = (m.f.get_pos(), m.sight, m.speed, m.def, m.cloaks, m.moved);
         let d = distance(p, epos);
-        let keep_min = (erange + RANGE_MARGIN).max(KEEP_MIN);
-        let keep_max = (sight - SIGHT_MARGIN).max(keep_min + 60.0);
-        let mid = (keep_min + keep_max) / 2.0;
+        let keep = keep_from(e, cloaks);
+        let back_to = (sight - BACK_TO).max(keep + 100.0);
+        let follow_to = (sight - FOLLOW_TO).max(keep + 60.0);
+        let follows = speed >= SPEED_PARITY * espeed && !e.is_static;
         let new = m.bogey != Some(eid);
         if new {
             self.stakeouts.stats.sightings += 1;
             self.op_emit(
                 "stakeout",
                 json!({"event": "sighting", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
-                       "x": epos.x.round(), "z": epos.z.round(), "dist": d.round(),
-                       "follows": speed >= SPEED_PARITY * espeed}),
+                       "x": epos.x.round(), "z": epos.z.round(), "dist": d.round(), "follows": follows}),
             );
         }
         let start = self.graph.get_start_pos();
-        let target = if d < keep_min {
-            // Back off along the line away from it; toward home if that
-            // ground is not ours to walk.
-            let away = get_directional_point(epos, p, mid);
+        let target = if d < keep {
+            // One decisive step back along the line away from it; toward
+            // home if that ground is not ours to walk.
+            let away = get_directional_point(epos, p, back_to);
             let away = if self.terrain_reaches(def, p, away, SNAP) || start == NULLPOS {
                 away
             } else {
-                get_directional_point(p, start, mid - d)
+                get_directional_point(p, start, back_to - d)
             };
-            Some(away)
-        } else if d > keep_max && speed >= SPEED_PARITY * espeed {
-            Some(get_directional_point(p, epos, d - mid))
+            Some((away, true))
+        } else if d > sight - BACK_TO + 40.0 && follows && frame - moved >= FOLLOW_EVERY {
+            Some((get_directional_point(p, epos, d - follow_to), false))
         } else {
             None
         };
@@ -632,9 +686,9 @@ impl Ai {
             m.bogey = Some(eid);
         }
         match target {
-            Some(t) => {
+            Some((t, flight)) => {
                 let s = &mut self.stakeouts.stats;
-                if d < keep_min {
+                if flight {
                     s.flights += 1;
                 } else {
                     s.follows += 1;
@@ -642,6 +696,7 @@ impl Ai {
                 let mut nav = nav!(self);
                 if let Some(m) = self.stakeouts.members.get_mut(&id) {
                     m.standing = false;
+                    m.moved = frame;
                     m.f.sneak(t, &mut nav);
                 }
             }
@@ -676,16 +731,18 @@ impl Ai {
         });
         // Keep the spot we are going to until it is fresh.
         let current = self.stakeouts.members.get(&id).and_then(|m| m.look);
-        if let Some(i) = current.filter(|&i| pool.contains(&i) && frame - spots[i].last_seen > FRESH) {
+        let shunned_now = |i: usize| self.stakeouts.shunned.get(&i).is_some_and(|&until| until > frame);
+        if let Some(i) = current.filter(|&i| pool.contains(&i) && frame - spots[i].last_seen > FRESH && !shunned_now(i)) {
             return Some(i);
         }
         let taken: Vec<usize> =
             (self.stakeouts.members.iter()).filter(|(o, _)| **o != id).filter_map(|(_, m)| m.look).collect();
+        let shunned = |i: usize| self.stakeouts.shunned.get(&i).is_some_and(|&until| until > frame);
         let speed = speed.max(1.0);
         let mut best: Option<(usize, f32)> = None;
         for &i in &pool {
             let s = &spots[i];
-            if frame - s.last_seen <= FRESH || taken.contains(&i) {
+            if frame - s.last_seen <= FRESH || taken.contains(&i) || shunned(i) {
                 continue;
             }
             if self.war.get_porc_threat(s.position) > 0.0 || !self.terrain_reaches(def, p, s.position, SNAP) {
@@ -704,6 +761,7 @@ impl Ai {
     }
 
     fn stakeouts_summary(&mut self, frame: i32) {
+        self.stakeouts.shunned.retain(|_, until| *until > frame);
         let s = &self.stakeouts;
         let (mut look, mut post, mut shadow) = (0, 0, 0);
         for m in s.members.values() {
