@@ -544,8 +544,14 @@ impl Ai {
         };
         let by = attacker.and_then(|a| a.def()).map_or("?".to_owned(), |d| self.defs.name(d).to_owned());
         let depth = self.taskforce_depth(unit.pos()).map_or("-".to_owned(), |d| format!("{d:.2}"));
+        // How far it was from its leader: in transit to the force, or with it.
+        let far = match s.get_leader(&self.fighters) {
+            Some(l) if l.id() == unit.id() => "the leader".to_owned(),
+            Some(l) => format!("{:.0} from its leader", distance(l.pos(), unit.pos())),
+            None => "no leader".to_owned(),
+        };
         let line = format!(
-            "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth}",
+            "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth} ({far})",
             self.defs.name_of(unit),
             s.shape.doctrine
         );
@@ -976,7 +982,7 @@ impl Ai {
         }
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
-        s.keep_pace(&self.fighters);
+        s.keep_pace(&self.fighters, engage_at.is_some());
         let was = s.engaging;
         s.engaging = engage_at.is_some();
         let ran = if was { s.engaged_speed(frame) } else { None };

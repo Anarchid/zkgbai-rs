@@ -741,11 +741,20 @@ impl Squad {
 
     /// Taskforces kept to their slowest member: give the leader that
     /// limit whenever it changes (none while it is the slowest, or alone).
-    pub fn keep_pace(&mut self, fighters: &FighterStore) {
+    /// Only going in: forming, rallying or falling back, the leader takes
+    /// its own pace and the slower members catch up where it stops.
+    pub fn keep_pace(&mut self, fighters: &FighterStore, going_in: bool) {
         if self.shape.pace_slowest <= 0.0 {
             return;
         }
         let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        if !going_in {
+            if self.paced > 0.0 {
+                leader.execute_custom_command(cmd::WANTED_SPEED, &[self.pace(leader)], 0, NO_TIMEOUT);
+                self.paced = 0.0;
+            }
+            return;
+        }
         let slowest = (self.fighters.iter().filter_map(|id| fighters.get(id)))
             .filter_map(|f| f.unit.def())
             .map(|d| d.speed())

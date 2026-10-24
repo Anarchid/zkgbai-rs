@@ -211,8 +211,9 @@ pub struct Doctrine {
     pub pool_with_allies: bool,
     /// The leader's speed limit, elmos/s (0: none).
     pub pace: f32,
-    /// The leader also keeps to this share of its slowest member's speed
-    /// (0: no), so a slower screen keeps up (Levelers with Ravagers).
+    /// Going in, the leader also keeps to this share of its slowest
+    /// member's speed (0: no), so a slower screen keeps up (Levelers with
+    /// Ravagers); forming, rallying or falling back, it does not.
     pub pace_slowest: f32,
     pub aim: Aim,
     /// A force engages once worth this much metal (and rallied)...
@@ -526,7 +527,8 @@ pub struct Shape {
     pub by_def: BTreeMap<i32, usize>,
     /// The leader's speed limit, elmos/s (0: none).
     pub pace: f32,
-    /// Share of the slowest member's speed the leader keeps to (0: none).
+    /// Share of the slowest member's speed the leader keeps to going in
+    /// (0: none).
     pub pace_slowest: f32,
     /// The leader advances under fight orders (stopping where it reaches)
     /// rather than move orders.
@@ -711,7 +713,7 @@ pub fn seeds() -> Vec<Doctrine> {
 
     let mut ravager = Doctrine::new("ravager");
     ravager.note = "Rover assault: Ravagers with a Leveler per five against raiders, a composition grown \
-                    without end; kept to the Levelers' pace, it goes in once worth 1200 and rallied."
+                    without end; it goes in at the Levelers' pace once worth 1200 and rallied."
         .into();
     ravager.enabled = false;
     ravager.core = vec!["vehassault".into()];
