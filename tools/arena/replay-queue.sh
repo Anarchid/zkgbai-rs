@@ -30,7 +30,8 @@ tail -n +2 "$QUEUE" | cut -f1 | while IFS= read -r demo; do
     out="$ROOT/$name"
     if grep -q "^REPLAY " "$out/run.log" 2>/dev/null; then continue; fi
     [ -f "$HOME/.spring/demos/$demo" ] || { echo "missing $demo"; continue; }
-    while [ "$(pgrep -c spring-headless)" -ge "$CEILING" ] || [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
+    # same count as match.sh (the engine's process name is recoil-main, so match the command line)
+    while [ "$(pgrep -c -f '[s]pring-headless --write-dir')" -gt "$CEILING" ] || [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do
         sleep 15
         [ -f "$ROOT/STOP" ] && break
     done

@@ -44,7 +44,11 @@ if [ -n "${ARENA_ENGINE_MEMORY:-}" ] && systemd-run --user --scope -q true 2>/de
 fi
 echo "$DEMO" > "$OUT/demo.txt"
 start=$(date +%s)
-timeout "$TIMEOUT" "${launch[@]}" "$ENGINE" --write-dir "$WD" "$DEMO" > "$OUT/stdout.txt" 2>&1
+# The engine is exec'd from a bash -c so that only the engine's own command
+# line reads "spring-headless --write-dir": the arena counts engines with
+# pgrep -f '[s]pring-headless --write-dir' (the process name is recoil-main),
+# and the timeout / systemd-run wrappers must not be counted.
+"${launch[@]}" timeout "$TIMEOUT" bash -c 'exec "$0" --write-dir "$1" "$2"' "$ENGINE" "$WD" "$DEMO" > "$OUT/stdout.txt" 2>&1
 status=$?
 cp "$WD/infolog.txt" "$OUT/infolog.txt" 2>/dev/null
 for c in "$WD"/combatlog/*.tsv; do [ -f "$c" ] && gzip -c "$c" > "$OUT/combatlog.tsv.gz"; done
