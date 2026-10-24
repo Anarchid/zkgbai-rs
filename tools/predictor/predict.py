@@ -26,6 +26,7 @@ import units as unitmod
 from fit_hits import SPEED_EDGES, RBANDS, SHRINK
 
 DT = 3              # frames per sim step
+SIMUL = os.environ.get("PRED_SIMUL") == "1"  # check: apply a step's damage after all units fired
 HORIZON = 2700      # frames (90 s)
 HITSCAN = {"BeamLaser", "LightningCannon", "Rifle"}
 MIN_COST = 100.0
@@ -296,6 +297,7 @@ def simulate(units, rng=None, hazard=None):
                 u.moving = True
                 moved = True
         # fire
+        pending = []
         for u in alive:
             if not u.armed or not u.alive:
                 continue
@@ -328,11 +330,20 @@ def simulate(units, rng=None, hazard=None):
                         k = rng.binomial(shots, p_tgt)
                         dmg = k * w.nominal * frac
                 if dmg > 0:
+                    if SIMUL:
+                        pending.append((tgt, dmg))
+                        continue
                     tgt.hp -= dmg
                     if tgt.hp <= 0:
                         tgt.alive = False
                         if tgt.armed:
                             killed[tgt.side] += tgt.cost
+        for tgt, dmg in pending:
+            tgt.hp -= dmg
+            if tgt.hp <= 0 and tgt.alive:
+                tgt.alive = False
+                if tgt.armed:
+                    killed[tgt.side] += tgt.cost
         quiet = 0 if (shot_fired or moved) else quiet + DT
         if quiet > 300:
             break
