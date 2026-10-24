@@ -13,6 +13,7 @@
 #   -s SPEED    sim speed set after the load (default 20; a loaded game
 #               otherwise runs at 1x, the saved MODOPTIONS are not applied)
 #   -l LABEL    output subdir name under the match dir (default load)
+#   -p PORT     host UDP port (default: derived from the process id, as match.sh)
 # Output: <out>/<label>/{script.txt,stdout.txt,infolog.txt,journal/}.
 # Environment as match.sh (ARENA_CONF ceiling/memory, ZKGBAI_* switches).
 # Prints: RESULT winner=... frame=... panics=... errors=... dir=...
@@ -23,7 +24,8 @@ ENGINE_DIR=""
 SAVE=""
 LABEL=load
 SPEED=20
-while getopts "f:t:e:n:s:l:" opt; do
+PORT=$((20000 + $$ % 30000))
+while getopts "f:t:e:n:s:l:p:" opt; do
     case $opt in
         f) MAX_FRAMES=$OPTARG ;;
         t) TIMEOUT=$OPTARG ;;
@@ -31,6 +33,7 @@ while getopts "f:t:e:n:s:l:" opt; do
         n) SAVE=$OPTARG ;;
         s) SPEED=$OPTARG ;;
         l) LABEL=$OPTARG ;;
+        p) PORT=$OPTARG ;;
         *) sed -n '2,17p' "$0"; exit 2 ;;
     esac
 done
@@ -72,6 +75,7 @@ cat > "$SCRIPT" <<EOT
     IsHost=1;
     OnlyLocal=1;
     MyPlayerName=$PLAYER;
+    HostPort=$PORT;
 }
 EOT
 # Keep the first run's infolog aside; the engine rewrites wd/infolog.txt.
