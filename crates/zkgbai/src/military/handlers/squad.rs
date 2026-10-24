@@ -15,7 +15,7 @@ use crate::military::taskforce::{self, Aim};
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
 use crate::terrain::tier_of;
-use crate::util::{NULLPOS, distance, kgb_rand};
+use crate::util::{NULLPOS, distance, get_directional_point, kgb_rand};
 
 #[derive(Default)]
 pub struct SquadHandler {
@@ -1033,6 +1033,17 @@ impl Ai {
             let perched = shape.aim == Aim::Siege && shape.perch.is_some() && self.siege_perched(sid);
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
+            // A siege force falls back toward home: the haven nearest the
+            // force itself may lie beside a far constructor on the flank or
+            // the map edge (an Emissary force deep in the enemy's base went
+            // that way and died chased); the guns are slow, the way home is
+            // the only safe one.
+            let home = self.graph.get_start_pos();
+            let fallback = if shape.aim == Aim::Siege && home != NULLPOS && distance(pos, home) > 1200.0 {
+                self.graph_get_closest_haven(get_directional_point(pos, home, 1200.0))
+            } else {
+                self.graph_get_closest_haven(pos)
+            };
             let why = if perched && let Some(leader) = led {
                 // What would have called it off, for the record.
                 if low_shields {
@@ -1051,15 +1062,13 @@ impl Ai {
                 self.squad_retreat_to(sid, haven);
                 "low shields"
             } else if health < shape.retreat_health {
-                let haven = self.graph_get_closest_haven(pos);
-                self.squad_retreat_to(sid, haven);
+                self.squad_retreat_to(sid, fallback);
                 "hurt"
             } else if let Some(leader) = led.filter(|_| worth && rallied && screened && beside) {
                 let view = self.war.view(leader.def());
                 let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
                 if shape.flee_threat && view.get_effective_threat(pos) / courage > tolerance {
-                    let haven = self.graph_get_closest_haven(pos);
-                    self.squad_retreat_to(sid, haven);
+                    self.squad_retreat_to(sid, fallback);
                     "threat"
                 } else {
                     // Siege forces park at a station (see `taskforce::siege`):

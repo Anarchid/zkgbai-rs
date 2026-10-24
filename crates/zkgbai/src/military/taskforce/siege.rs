@@ -152,7 +152,15 @@ struct PerchState {
     stranded: Option<String>,
     /// How much the raise asked (the perch height less the natural one).
     raise: f32,
+    /// Raisers sent so far (the first and each re-borrow).
+    tries: u32,
+    /// The top square and the height it is levelled to, for a re-borrow.
+    square: [Vec3; 4],
+    level: f32,
 }
+
+/// Raisers called away are replaced this many times within the borrow.
+const RAISE_TRIES: u32 = 3;
 
 /// An enemy this close to the site slows the raise 20x (the gadget's
 /// nearby-enemy check: half the top, 100, and 36 more).
@@ -839,27 +847,7 @@ impl Ai {
                 }
                 // On the site: hold, borrow the raisers, raise.
                 leader.set_move_state(0, 0);
-                let want = {
-                    let Some(q) = self.squads.get(sid) else { return };
-                    let Some(d) = self.taskforces.doctrine(&q.shape.doctrine) else { return };
-                    let units = q.everyone().filter_map(|id| self.fighters.get(&id));
-                    let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &self.taskforces.classes);
-                    perch.count.want(&force).max(1)
-                };
-                let mut near: Vec<(f32, i32)> = (self.eco.workers.values())
-                    .filter(|w| !w.is_chicken && !w.assigned_plop && !w.is_com && !w.unit.is_being_built())
-                    .filter(|w| perch.raisers.iter().any(|r| r == self.defs.name_of(w.unit)))
-                    .map(|w| (distance(w.get_pos(), site), w.id))
-                    .filter(|&(d, _)| d <= perch.range)
-                    .collect();
-                near.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let mut raisers = Vec::new();
-                for (_, wid) in near.into_iter().take(want) {
-                    if let Some(w) = self.eco.workers.get_mut(&wid) {
-                        w.clear_task(&mut self.eco.tasks);
-                        raisers.push(w.unit);
-                    }
-                }
+                let (raisers, want) = self.siege_borrow(sid, perch, site, &[]);
                 let map = self.cb.map();
                 let now = map.elevation_at(site.x, site.z);
                 // The ground before any pillar here (a raise taken up again
@@ -896,6 +884,9 @@ impl Ai {
                             returned: Some(frame),
                             stranded: None,
                             raise: perch.height,
+                            tries: 0,
+                            square: [site; 4],
+                            level: 0.0,
                         });
                     }
                     return;
@@ -919,6 +910,9 @@ impl Ai {
                             returned: Some(frame),
                             stranded: None,
                             raise: perch.height,
+                            tries: 0,
+                            square: [site; 4],
+                            level: 0.0,
                         });
                     }
                     self.log(&format!(
@@ -931,6 +925,7 @@ impl Ai {
                 let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
                 let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
                 let names: Vec<String> = raisers.iter().map(|u| self.defs.name_of(*u).to_owned()).collect();
+                let hold = (perch.borrow_s * 30.0) as i32;
                 // On a natural shoulder the raise asks the remainder only.
                 let natural = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map_or(0.0, |s| s.natural);
                 let raise = (perch.height - natural).max(0.0);
@@ -960,11 +955,18 @@ impl Ai {
                             returned: Some(frame),
                             stranded: None,
                             raise: 0.0,
+                            tries: 0,
+                            square,
+                            level: top,
                         });
                     }
                     return;
                 }
                 self.terraform_level(&raisers, &square, top + raise, false);
+                // Held for the borrow: the economy's assignment leaves them
+                // to the raise (crab save arms: 46 of 49 raises given up for
+                // raisers called away).
+                self.eco_hold_terraform(&raisers, hold);
                 // What the raised point reaches, and the nearest armed
                 // static's reach to it (the standoff the gates read).
                 let up = perch.height.max(natural) + AIM_ABOVE;
@@ -1008,6 +1010,9 @@ impl Ai {
                         returned: None,
                         stranded: None,
                         raise,
+                        tries: 1,
+                        square,
+                        level: top + raise,
                     });
                 }
             }
@@ -1042,6 +1047,30 @@ impl Ai {
                             u.stop(0);
                         }
                     }
+                } else if working == 0 && since >= 20 && ps.tries < RAISE_TRIES && (since as f32) < perch.borrow_s {
+                    // The raisers were called away (threatened, or taken):
+                    // others are sent, up to RAISE_TRIES within the borrow.
+                    let (square, level, tries) = (ps.square, ps.level, ps.tries);
+                    let gone: Vec<Unit> = ps.raisers.clone();
+                    let (more, _) = self.siege_borrow(sid, perch, site, &gone);
+                    let Some(ps) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.perch.as_mut()) else { return };
+                    if more.is_empty() {
+                        ps.tries = RAISE_TRIES;
+                    } else {
+                        ps.raisers = more.clone();
+                        ps.tries = tries + 1;
+                        let left = ((perch.borrow_s - since as f32) * 30.0) as i32;
+                        self.terraform_level(&more, &square, level, false);
+                        self.eco_hold_terraform(&more, left.max(60));
+                        self.op_emit(
+                            "siege-perch",
+                            json!({"event": "resent", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "raisers": more.len(), "try": tries + 1}),
+                        );
+                        self.log(&format!(
+                            "taskforce: a {}'s raisers were called away at ({:.0}, {:.0}), {raised:.0} up after {since} s; {} more sent (try {})",
+                            self.defs.name_of(leader), site.x, site.z, more.len(), tries + 1
+                        ));
+                    }
                 } else if since as f32 >= perch.borrow_s || (working == 0 && since >= 20) {
                     ps.abandoned = true;
                     ps.returned = Some(frame);
@@ -1066,6 +1095,36 @@ impl Ai {
             }
             Some(_) => {}
         }
+    }
+
+    /// Borrow constructors for the perch of force `sid` at `site`: the
+    /// nearest free ones of the perch's types within its range, as many as
+    /// its count says, not those in `not` (sent before and called away);
+    /// taken off their tasks. With how many were wanted.
+    fn siege_borrow(&mut self, sid: SquadId, perch: &Perch, site: Vec3, not: &[Unit]) -> (Vec<Unit>, usize) {
+        let want = {
+            let Some(q) = self.squads.get(sid) else { return (Vec::new(), 0) };
+            let Some(d) = self.taskforces.doctrine(&q.shape.doctrine) else { return (Vec::new(), 0) };
+            let units = q.everyone().filter_map(|id| self.fighters.get(&id));
+            let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &self.taskforces.classes);
+            perch.count.want(&force).max(1)
+        };
+        let mut near: Vec<(f32, i32)> = (self.eco.workers.values())
+            .filter(|w| !w.is_chicken && !w.assigned_plop && !w.is_com && !w.unit.is_being_built())
+            .filter(|w| perch.raisers.iter().any(|r| r == self.defs.name_of(w.unit)))
+            .filter(|w| !not.iter().any(|u| u.id() == w.id))
+            .map(|w| (distance(w.get_pos(), site), w.id))
+            .filter(|&(d, _)| d <= perch.range)
+            .collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut raisers = Vec::new();
+        for (_, wid) in near.into_iter().take(want) {
+            if let Some(w) = self.eco.workers.get_mut(&wid) {
+                w.clear_task(&mut self.eco.tasks);
+                raisers.push(w.unit);
+            }
+        }
+        (raisers, want)
     }
 
     /// A perched core shells the most valuable known static in its reach
