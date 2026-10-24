@@ -153,6 +153,7 @@ impl Ai {
         if frame % 7 == (self.offset + 4) % 7 {
             self.squad_assign_taskforces();
         }
+        self.taskforce_watch_volleys();
         if frame % 14 == (self.offset + 9) % 14 {
             self.squad_assign_air_squads();
         }
@@ -443,6 +444,22 @@ impl Ai {
                     return Some((def, d.name.clone(), r.name.clone()));
                 }
             }
+            // A spotter is called from the standing units, never built, but
+            // for one plane a game while the enemy shows no anti-air (see
+            // `taskforce::spotter`).
+            if self.taskforces.spotters.ordered > 0 || self.taskforce_enemy_aa() {
+                continue;
+            }
+            for (ri, r) in d.roles.iter().enumerate().filter(|(_, r)| r.spot.is_some()) {
+                let plane = |o: &&UnitDef| o.is_able_to_fly() && r.units.iter().any(|u| u == self.defs.name(**o));
+                let Some(&def) = options.iter().find(plane) else { continue };
+                let short = (self.squad_handler.taskforces.iter())
+                    .filter(|&&sid| self.squads.get(sid).is_some_and(|q| q.shape.doctrine == d.name))
+                    .any(|&sid| self.squad_short_of(sid, ri));
+                if short {
+                    return Some((def, d.name.clone(), r.name.clone()));
+                }
+            }
         }
         None
     }
@@ -516,8 +533,10 @@ impl Ai {
             }
         } else {
             // Forces that take members now (engaged ones only if their
-            // doctrine reinforces them), short of its role.
-            let open = |sid: SquadId| self.squads.get(sid).is_some_and(|q| !q.engaging || q.shape.reinforce_engaged);
+            // doctrine reinforces them, or for spotters), short of its role.
+            let spots = doctrine_role_spots(&self.taskforces, dname.as_deref(), role);
+            let open =
+                |sid: SquadId| self.squads.get(sid).is_some_and(|q| !q.engaging || q.shape.reinforce_engaged || spots);
             let short: Vec<SquadId> = match role {
                 Some(r) => forces.iter().copied().filter(|&sid| open(sid) && self.squad_short_of(sid, r)).collect(),
                 None => forces.iter().copied().filter(|&sid| open(sid)).collect(),

@@ -670,6 +670,9 @@ impl Squad {
         if let Some(radar) = radar {
             unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[if radar { 0.0 } else { 1.0 }], 0, NO_TIMEOUT);
         }
+        if let Some(state) = self.shape.okp.filter(|_| self.shape.is_core(def)) {
+            unit.execute_custom_command(cmd::PREVENT_OVERKILL, &[state as f32], 0, NO_TIMEOUT);
+        }
         self.gauge(id, unit);
 
         let old_leader = self.leader.and_then(|l| fighters.get(&l)).map(|l| (l.id, l.unit));

@@ -15,6 +15,20 @@
 //! the gun's cost, for the first volleys): chaff below that the engine
 //! picks as well.
 //!
+//! With `losfire`, a gun reserves its shot while a target worth its floor
+//! that one shot kills is known within `RESERVE` beyond its range (it may
+//! drift or be moved into reach over the reload): it holds fire and marks
+//! only what is in sight (a ghost will not do); with only chaff about, it
+//! fires at will. The changes are logged: `a G reserves: N deserving known
+//! within R` and `a G fires at will: only chaff about`. A spotter's errand (see
+//! `spotter`) may bring a better target into sight: a held mark then
+//! gives way to it.
+//!
+//! Every volley of a force's core is logged as it is fired (the gun's
+//! reload frame moves on, polled each frame): `taskforce: a G fires at a X
+//! (in sight|on radar), D off, its mark[, spotter R from it]`, or `a G
+//! fires at will` (the engine's own pick, which the AI cannot see).
+//!
 //! Each pass logs what the force's guns reach: `taskforce: the D force
 //! (squad N, state) reaches K known, I identified, V visible, M markable`
 //! (known: with a position, radar dots too; markable: identified and in
@@ -48,12 +62,28 @@ const REACH: f32 = 20.0;
 /// reloads.
 const KEEP: f32 = 150.0;
 
+/// With `losfire`, deserving targets this far beyond a gun's range keep it
+/// in reserve (a drift and a short gun move over the reload).
+const RESERVE: f32 = 300.0;
+
 /// A holding gun picks its mark from this many frames before it reloads.
 const PREAIM: i32 = 90;
 
 /// A loaded gun that has not fired at its held mark in this many frames
 /// (no line of fire, say) picks again.
 const HOLD_LOADED: i32 = 240;
+
+/// How exactly a gun must know where a target is to mark it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fix {
+    /// In sight, or a building (its ghost is exact).
+    Exact,
+    /// In sight only (`losfire`).
+    Sight,
+    /// Anywhere we know of, radar dots of a type we have seen too (what a
+    /// spotter may bring into sight).
+    Radar,
+}
 
 /// A gun's mark: the target, the frame it was set, and the gun's reload
 /// frame then (another one means it has fired since).
@@ -64,12 +94,15 @@ pub struct Mark {
     reload: i32,
 }
 
-/// What volleys have killed, by gun type (def id): metal and volleys; and
-/// each gun's last kill (frame).
+/// What volleys have killed, by gun type (def id): metal and volleys; each
+/// gun's last kill (frame), and its reload frame when last polled.
 #[derive(Default)]
 pub struct Volleys {
     by_def: BTreeMap<i32, (f32, f32)>,
     last: BTreeMap<i32, i32>,
+    reload: BTreeMap<i32, i32>,
+    /// With `losfire`: each gun in reserve (holding fire) or not.
+    reserve: BTreeMap<i32, bool>,
 }
 
 impl Volleys {
@@ -90,10 +123,95 @@ impl Volleys {
 }
 
 impl Ai {
+    /// What one shot of `damage` does to `e`: its worth and health if it
+    /// kills it and we know where it is as `fix` asks; else why not.
+    pub(crate) fn marksman_shot(
+        &self,
+        e: &Enemy,
+        damage: f32,
+        shields: &[(springai::Vec3, f32)],
+        fix: Fix,
+    ) -> Result<(f32, f32), &'static str> {
+        if e.is_dead || !e.identified || e.position == NULLPOS {
+            return Err("lost");
+        }
+        let known = match fix {
+            Fix::Exact => e.visible || e.is_static,
+            Fix::Sight => e.visible,
+            Fix::Radar => true,
+        };
+        if !known {
+            return Err("out of sight");
+        }
+        if shields.iter().any(|&(p, r)| distance(p, e.position) <= r + 10.0) {
+            return Err("shielded");
+        }
+        let health = if e.visible && e.unit.health() > 0.0 { e.unit.health() } else { e.get_health() * e.def_health() };
+        // Armored when closed or still: count it so.
+        let per_shot = damage * e.ud.map_or(1.0, |d| d.armored_multiple()).min(1.0);
+        if health <= 0.0 || health > per_shot {
+            return Err("no longer one shot");
+        }
+        Ok((e.ud.map_or(e.value, |d| d.cost(self.metal)), health))
+    }
+
+    /// A gun's floor: what a mark must be worth (see the module notes).
+    pub(crate) fn marksman_floor(&self, gun: Unit, share: f32) -> f32 {
+        let Some(ud) = gun.def() else { return f32::INFINITY };
+        let cost = ud.cost(self.metal);
+        if share > 0.0 { share * self.taskforces.volleys.kill(ud.id(), cost) } else { MARK_WORTH * cost }
+    }
+
+    /// Each frame: log every core volley of the marksmen's forces as it is
+    /// fired (see the module notes).
+    pub(crate) fn taskforce_watch_volleys(&mut self) {
+        let frame = self.frame;
+        let mut guns = Vec::new();
+        for &sid in &self.squad_handler.taskforces {
+            let Some(s) = self.squads.get(sid).filter(|s| s.shape.marksman) else { continue };
+            for f in s.everyone().filter_map(|id| self.fighters.get(&id)) {
+                if s.shape.is_core(f.unit.def().map(|d| d.id())) {
+                    guns.push((f.id, f.unit));
+                }
+            }
+        }
+        let mut lines = Vec::new();
+        for (id, unit) in guns {
+            let Some(w) = unit.weapon(0) else { continue };
+            let reload = w.reload_frame();
+            let last = self.taskforces.volleys.reload.insert(id, reload);
+            if last.is_none_or(|l| l == reload) || reload <= frame {
+                continue;
+            }
+            let gun = self.defs.name_of(unit);
+            let Some(e) = self.taskforces.marks.get(&id).and_then(|m| self.war.targets.get(&m.target)) else {
+                lines.push(format!("taskforce: a {gun} fires at will"));
+                continue;
+            };
+            let at = e.unit.pos();
+            let at = if at == NULLPOS { e.position } else { at };
+            let seen = if self.los.is_in_los(at) { "in sight" } else { "on radar" };
+            let spotter = (self.taskforces.spotters.by_unit.values())
+                .find(|sp| sp.serves(id, e.unit_id))
+                .and_then(|sp| self.fighters.get(&sp.unit))
+                .map_or(String::new(), |f| format!(", spotter {:.0} from it", distance(f.unit.pos(), at)));
+            lines.push(format!(
+                "taskforce: a {gun} fires at a {} ({seen}), {:.0} off, its mark{spotter}",
+                e.def_name,
+                distance(unit.pos(), at)
+            ));
+        }
+        for line in lines {
+            self.log(&line);
+        }
+    }
+
     /// Set each core gun of force `sid` on its best mark, or let it be.
     pub(crate) fn taskforce_mark(&mut self, sid: SquadId) {
         let Some(s) = self.squads.get(sid) else { return };
         let (hold, share) = (s.shape.mark_hold, s.shape.mark_share);
+        let losfire = s.shape.losfire;
+        let fix = if losfire { Fix::Sight } else { Fix::Exact };
         let guns: Vec<(i32, Unit)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
             .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())))
             .map(|f| (f.id, f.unit))
@@ -115,39 +233,42 @@ impl Ai {
             let range = w.range();
             let reload = w.reload_frame();
             let pos = unit.pos();
-            let Some(ud) = unit.def() else { continue };
-            let cost = ud.cost(self.metal);
-            let floor =
-                if share > 0.0 { share * self.taskforces.volleys.kill(ud.id(), cost) } else { MARK_WORTH * cost };
+            let floor = self.marksman_floor(unit, share);
+            if losfire {
+                let deserving = (self.war.targets.values())
+                    .filter(|e| !e.can_fly() && distance(pos, e.position) <= range + RESERVE)
+                    .filter(|e| self.marksman_shot(e, damage, &shields, Fix::Radar).is_ok_and(|(w, _)| w >= floor))
+                    .count();
+                let reserve = deserving > 0;
+                if self.taskforces.volleys.reserve.insert(id, reserve) != Some(reserve) {
+                    unit.set_fire_state(if reserve { 0 } else { 2 }, 0);
+                    let gun = self.defs.name_of(unit);
+                    lines.push(if reserve {
+                        format!(
+                            "taskforce: a {gun} reserves: {deserving} deserving known within {:.0}",
+                            range + RESERVE
+                        )
+                    } else {
+                        format!("taskforce: a {gun} fires at will: only chaff about")
+                    });
+                }
+            }
             let held = self.taskforces.marks.get(&id).copied();
             let taken: BTreeSet<i32> =
                 (self.taskforces.marks.iter()).filter(|(g, _)| **g != id).map(|(_, m)| m.target).collect();
-            // What one shot does to `e`: its worth and health if it kills
-            // it and we know where it is exactly; else why not.
-            let shot = |e: &Enemy| -> Result<(f32, f32), &'static str> {
-                if e.is_dead || !e.identified || e.position == NULLPOS {
-                    return Err("lost");
-                }
-                if !(e.visible || e.is_static) {
-                    return Err("out of sight");
-                }
-                if shields.iter().any(|&(p, r)| distance(p, e.position) <= r + 10.0) {
-                    return Err("shielded");
-                }
-                let health =
-                    if e.visible && e.unit.health() > 0.0 { e.unit.health() } else { e.get_health() * e.def_health() };
-                // Armored when closed or still: count it so.
-                let per_shot = damage * e.ud.map_or(1.0, |d| d.armored_multiple()).min(1.0);
-                if health <= 0.0 || health > per_shot {
-                    return Err("no longer one shot");
-                }
-                Ok((e.ud.map_or(e.value, |d| d.cost(self.metal)), health))
-            };
+            // A target a spotter brought into sight for this gun, worth more
+            // than its mark: the hold gives way to it.
+            let spotted = (self.taskforces.spotters.by_unit.values())
+                .filter_map(|sp| sp.errand_for(id))
+                .filter_map(|t| self.war.targets.get(&t))
+                .filter(|e| Some(e.unit_id) != held.map(|m| m.target) && distance(pos, e.position) <= range + REACH)
+                .filter_map(|e| self.marksman_shot(e, damage, &shields, fix).ok().map(|(w, _)| w))
+                .fold(0.0f32, f32::max);
             if hold && let Some(m) = held {
                 let fired = reload != m.reload;
                 let e = self.war.targets.get(&m.target);
                 let off = e.map_or(f32::INFINITY, |e| distance(pos, e.position));
-                let why = match e.map(&shot) {
+                let why = match e.map(|e| self.marksman_shot(e, damage, &shields, fix)) {
                     None | Some(Err("lost")) => Some(""),
                     Some(Err(why)) => Some(why),
                     Some(Ok(_)) if off > range + KEEP => Some("out of reach"),
@@ -163,6 +284,8 @@ impl Ai {
                     }
                 } else if !fired
                     && (reload > frame || (off <= range + REACH && frame - reload.max(m.at) <= HOLD_LOADED))
+                    && e.and_then(|e| self.marksman_shot(e, damage, &shields, fix).ok())
+                        .is_none_or(|(w, _)| spotted <= w)
                 {
                     // Held through the reload; a loaded gun lets go of a mark
                     // it cannot reach, or has not fired at for a while.
@@ -178,7 +301,12 @@ impl Ai {
             let best = (self.war.targets.values())
                 .filter(|e| !e.can_fly() && e.def_name != "wolverine_mine")
                 .filter(|e| !taken.contains(&e.unit_id) && distance(pos, e.position) <= reach)
-                .filter_map(|e| shot(e).ok().filter(|&(worth, _)| worth >= floor).map(|(w, h)| (e.unit_id, w, h)))
+                .filter_map(|e| {
+                    self.marksman_shot(e, damage, &shields, fix)
+                        .ok()
+                        .filter(|&(worth, _)| worth >= floor)
+                        .map(|(w, h)| (e.unit_id, w, h))
+                })
                 // Most worth; then the mark it has (no turning between equals);
                 // then the one nearest dead.
                 .max_by(|a, b| {
