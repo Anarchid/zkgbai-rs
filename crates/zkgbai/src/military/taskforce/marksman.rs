@@ -58,7 +58,13 @@ impl Ai {
                     let worth = e.ud.map_or(e.value, |d| d.cost(self.metal));
                     (health > 0.0 && health <= per_shot && worth >= floor).then_some((e.unit_id, worth, health))
                 })
-                .max_by(|a, b| a.1.total_cmp(&b.1));
+                // Most worth; then the mark it has (no turning between equals);
+                // then the one nearest dead.
+                .max_by(|a, b| {
+                    (a.1.total_cmp(&b.1))
+                        .then_with(|| (Some(a.0) == mine).cmp(&(Some(b.0) == mine)))
+                        .then_with(|| b.2.total_cmp(&a.2))
+                });
             match best {
                 Some((target, worth, health)) if Some(target) != mine => {
                     unit.execute_custom_command(cmd::UNIT_SET_TARGET, &[target as f32], 0, NO_TIMEOUT);
