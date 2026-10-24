@@ -783,6 +783,13 @@ impl Ai {
             self.squad_add_taskforce_member(f);
             return;
         }
+        // Dirtbags the strikes ordered (see `strikes_production`) that no
+        // stakeout took raid solo until a strike conscripts them.
+        if name == strikes::DIRTBAG {
+            unit.set_move_state(1, 0);
+            self.raider_add_solo_raider(Fighter::new_raider(unit, cost, team));
+            return;
+        }
         let classes = &self.unit_classes;
         if classes.small_raiders.contains(name) {
             if name == "amphbomb" {

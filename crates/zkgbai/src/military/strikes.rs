@@ -435,6 +435,9 @@ pub struct Strikes {
     margin: f32,
     set: bool,
     last_refusal: i32,
+    /// When a strike was last refused for want of units in reach: the
+    /// Dirtbag order (see `strikes_production`) runs only after one.
+    short: i32,
     pub stats: Stats,
 }
 
@@ -610,6 +613,7 @@ impl Ai {
         };
         if wave.is_empty() {
             let power: f32 = cands.iter().map(|c| c.power).sum();
+            self.strikes.short = frame;
             log_refusal(self, format!("{n_cands} in reach bring {power:.0}/s, {need:.0}/s wanted (escorts {escort:.0}/s)"));
             return;
         }
@@ -676,18 +680,22 @@ impl Ai {
     /// than a wave's worth: the cheapest thing to take a sniper's shot
     /// or a riot's splash, and a hit from it decloaks.
     pub fn strikes_production(&self, factory: Unit, choice: &str) -> Option<&'static str> {
-        if !self.strikes_on() || choice == DIRTBAG || self.strikes.last_sniper_seen == 0 {
+        if !self.strikes_on() || choice == DIRTBAG || self.strikes.last_sniper_seen == 0 || self.strikes.short == 0 {
             return None;
         }
-        if self.frame - self.strikes.last_sniper_seen > SNIPERS_LATELY {
+        // Only while a sniper is about and a strike lately found nobody in reach.
+        if self.frame - self.strikes.last_sniper_seen > SNIPERS_LATELY || self.frame - self.strikes.short > SNIPERS_LATELY {
             return None;
         }
         let def = self.defs.get(DIRTBAG)?;
         if !factory.def()?.build_options().iter().any(|d| d.id() == def.id()) {
             return None;
         }
-        let have = (self.fighters.values().filter(|f| f.unit.def().is_some_and(|d| d.id() == def.id())).count())
-            + (self.strikes.members.values().filter(|m| m.1.def().is_some_and(|d| d.id() == def.id())).count());
+        // Count them by definition over everything we own (built or not):
+        // Dirtbags are claimed by the stakeouts or the raiders, not kept
+        // here, and a count over one owner let the ab1 shield games build
+        // 99-446 of them.
+        let have = (self.cb.team_units().iter()).filter(|u| u.def().is_some_and(|d| d.id() == def.id())).count();
         (have < DIRTBAGS).then_some(DIRTBAG)
     }
 
