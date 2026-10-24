@@ -5,8 +5,11 @@
 --           unit types (cost, build power, speed, range...)
 --   snap    every SNAP_FRAMES: each team's resources and ZK economy params,
 --           every unit [id, def, team, x, z, hp%, build%, seen-by-enemy bits,
---           first command, command target x, z], each allyteam's LOS/radar
---           grid, wrecks with metal
+--           first command, command target x, z, (v2:) heading, hp, max hp,
+--           cloaked, submerged, LOS digits per ally team, command id, its
+--           unit target, queue length], each allyteam's LOS/radar grid,
+--           wrecks with metal
+--   terra   64-elmo blocks whose height changed since the last snapshot
 --   new/done/dead/give   unit lifecycle with positions and killers
 --   cmd     orders given (grouped per frame, team, command and parameters);
 --           AI teams only their build orders
@@ -23,10 +26,16 @@ function widget:GetInfo()
 	}
 end
 
-local SNAP_FRAMES = 300
+-- Frames between snapshots (capture.sh -n; 300 = 10 s, 30 = every second).
+local SNAP_FRAMES = @SNAP_FRAMES@
 local DMG_FRAMES = 150
 local CELL = 512
 local HEIGHT_CELL = 128
+-- Terraform: 64-elmo blocks whose centre height moved more than 1 elmo since
+-- the last snapshot are written as a `terra` record.
+local TERRA_CELL = 64
+local terraHeights = {}
+local terraform
 local SIGHT_CELL = 256
 local MIN_WRECK_METAL = 20
 -- Frames to write a full (creg) save at, as ZK's save menu does
@@ -43,6 +52,8 @@ local allyOf = {}
 local enemyAlly = {}
 local cmdNames = {}
 local cmdBuf = {}
+-- Ally teams in id order: the per-ally LOS digits of a unit row follow it.
+local allyList = {}
 local dmgBuf = {}
 local overAt
 
@@ -108,6 +119,13 @@ local function teamMeta()
 			if oa ~= ally then enemyAlly[team] = oa end
 		end
 	end
+	local seenAlly = {}
+	for i = #allyList, 1, -1 do allyList[i] = nil end
+	for _, ally in pairs(allyOf) do
+		if not seenAlly[ally] then seenAlly[ally] = true; allyList[#allyList + 1] = ally end
+	end
+	table.sort(allyList)
+	terraform(Spring.GetGameFrame(), true)
 	return teams
 end
 
@@ -131,7 +149,7 @@ local function writeMeta()
 			#(ud.weapons or {}), ud.isFactory and true or false, r(ud.health or 0), r(ud.maxWeaponRange or 0),
 			r(ud.losRadius or 0)}
 	end
-	emit({k = "meta", f = Spring.GetGameFrame(), map = Game.mapName, game = Game.gameName .. " " .. Game.gameVersion,
+	emit({k = "meta", v = 2, snap = SNAP_FRAMES, allies = allyList, f = Spring.GetGameFrame(), map = Game.mapName, game = Game.gameName .. " " .. Game.gameVersion,
 		mapX = Game.mapSizeX, mapZ = Game.mapSizeZ, teams = teamMeta(), mex = spots,
 		heights = {cell = HEIGHT_CELL, rows = rows}, defs = defs})
 end
@@ -149,27 +167,59 @@ local function unitRow(u)
 	local d = Spring.GetUnitDefID(u)
 	local ud = d and UnitDefs[d]
 	local team = Spring.GetUnitTeam(u)
-	local x, _, z = Spring.GetUnitPosition(u)
+	local x, y, z = Spring.GetUnitPosition(u)
 	if not (ud and x) then return nil end
 	local hp, maxhp, _, _, bp = Spring.GetUnitHealth(u)
 	local seen = 0
 	if enemyAlly[team] then seen = Spring.GetUnitLosState(u, enemyAlly[team], true) or 0 end
-	local cmd, cx, cz
+	local cmd, cx, cz, cid, ctgt
 	local cmds = Spring.GetUnitCommands(u, 1)
 	if (not cmds or #cmds == 0) and ud.isFactory then cmds = Spring.GetFactoryCommands(u, 1) end
 	local c = cmds and cmds[1]
 	if c then
 		cmd = cmdName(c.id)
+		cid = c.id
 		local p = c.params or {}
 		if #p >= 3 then
 			cx, cz = p[1], p[3]
 		elseif #p == 1 then
+			ctgt = p[1]
 			local tx, _, tz = Spring.GetUnitPosition(p[1])
 			cx, cz = tx, tz
 		end
 	end
+	-- v2 fields (from index 12): heading, hp, max hp, cloaked, submerged,
+	-- LOS state per ally team (one digit each, allyList order: 2 in sight,
+	-- 1 radar only, 0 neither), command id, its unit target, queue length.
+	local los = {}
+	for i, ally in ipairs(allyList) do
+		local st = Spring.GetUnitLosState(u, ally, false)
+		los[i] = st and (st.los and "2" or (st.radar and "1" or "0")) or "?"
+	end
+	local qlen = Spring.GetUnitCommandCount and Spring.GetUnitCommandCount(u) or (cmds and #cmds or 0)
 	return {u, ud.name, team, r(x), r(z), maxhp and maxhp > 0 and math.floor(100 * hp / maxhp) or 0,
-		math.floor(100 * (bp or 1)), seen, cmd or "", r(cx) or -1, r(cz) or -1}
+		math.floor(100 * (bp or 1)), seen, cmd or "", r(cx) or -1, r(cz) or -1,
+		r(Spring.GetUnitHeading(u)) or 0, r(hp) or 0, r(maxhp) or 0, Spring.GetUnitIsCloaked(u) and 1 or 0,
+		(y and y < -1) and 1 or 0, table.concat(los), cid or 0, ctgt or -1, qlen or 0}
+end
+
+-- Terraform since the last call: the 64-elmo blocks whose centre height
+-- moved more than 1 elmo (every block at the first call, `first`).
+terraform = function(f, first)
+	local rows = {}
+	local i = 0
+	for z = TERRA_CELL / 2, Game.mapSizeZ, TERRA_CELL do
+		for x = TERRA_CELL / 2, Game.mapSizeX, TERRA_CELL do
+			i = i + 1
+			local h = Spring.GetGroundHeight(x, z)
+			local old = terraHeights[i]
+			if old == nil or math.abs(h - old) > 1 then
+				terraHeights[i] = h
+				if not first then rows[#rows + 1] = {math.floor(x / TERRA_CELL), math.floor(z / TERRA_CELL), r(h)} end
+			end
+		end
+	end
+	if #rows > 0 then emit({k = "terra", f = f, cell = TERRA_CELL, rows = rows}) end
 end
 
 local function snapshot(f)
@@ -212,6 +262,7 @@ local function snapshot(f)
 		end
 	end
 	emit({k = "snap", f = f, res = res, units = units, sight = {cell = SIGHT_CELL, ally = sight}, wrecks = wrecks})
+	terraform(f, false)
 end
 
 local function flushCmds(f)
@@ -361,6 +412,11 @@ function widget:UnitDamaged(u, d, team, damage, paralyzer, weaponDef, projectile
 end
 
 function widget:AddConsoleLine(line)
+	-- A demo that ends without game over (the host quit) leaves the engine
+	-- simulating on with no orders: stop at the demo's end.
+	if out and line:find("End of demo reached", 1, true) then
+		overAt = overAt or Spring.GetGameFrame()
+	end
 	if line:sub(1, 1) == "<" or line:find("^%[") == nil and line:find("resigned") then
 		emit({k = "chat", f = Spring.GetGameFrame(), msg = line})
 	end

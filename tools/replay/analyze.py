@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Summarise a replay capture (replay_capture_widget.lua) as a markdown report.
+"""Summarise a replay capture (replay_capture_widget.lua) as a markdown report,
+or print the state of an episode.
 
 usage: analyze.py <replaycap.jsonl> [--maps DIR] > report.md
+       analyze.py <replaycap.jsonl> --episode FROM:TO [--units 1,2 | --at X,Z,R]   (or 9:00..9:30)
+       analyze.py <replaycap.jsonl> --track UID
 
 Positions are given as depth/lateral against the axis between the two
 starts: depth 0 = team A's start, 1 = team B's start; lateral is elmos to
@@ -440,12 +443,151 @@ def render_maps(g, outdir):
         plt.close(fig)
 
 
+# --- episode queries -----------------------------------------------------
+# Unit row fields: v1 [id, def, team, x, z, hp%, build%, seen, cmd, cx, cz];
+# v2 adds [hdg, hp, maxhp, cloak, sub, los digits per ally, cmd id, cmd
+# target unit, queue length].
+UNIT_FIELDS = ["uid", "def", "team", "x", "z", "hp%", "build%", "seen", "cmd", "cx", "cz",
+               "hdg", "hp", "maxhp", "cloak", "sub", "los", "cmdid", "ctgt", "queue"]
+
+
+def parse_frame(s):
+    """A frame number, or seconds with an 's' suffix, or m:ss."""
+    s = str(s)
+    if s.endswith("s"):
+        return int(float(s[:-1]) * FPS)
+    if ":" in s:
+        m, sec = s.split(":")
+        return (int(m) * 60 + int(sec)) * FPS
+    return int(s)
+
+
+def unit_dict(g, row, f):
+    d = {"f": f, "t": mmss(f)}
+    d.update(zip(UNIT_FIELDS, row))
+    if "los" not in d:
+        d["los"] = str(d.get("seen", ""))
+    d["team"] = f"{d['team']}:{g.name(d['team'])[:8]}" if d["team"] in g.teams else d["team"]
+    return d
+
+
+def episode_rows(g, f0, f1, units=None, at=None):
+    """Rows of the chosen units at every snapshot in f0..f1: the given unit
+    ids, or every unit that comes within `at` = (x, z, r) during the window
+    (all of them if neither)."""
+    snaps = [s for s in g.snaps if f0 <= s["f"] <= f1]
+    chosen = set(units or [])
+    if at is not None:
+        x, z, r = at
+        for s in snaps:
+            for u in s["units"]:
+                if math.hypot(u[3] - x, u[4] - z) <= r:
+                    chosen.add(u[0])
+    rows = []
+    for s in snaps:
+        for u in s["units"]:
+            if not chosen or u[0] in chosen:
+                rows.append(unit_dict(g, u, s["f"]))
+    return rows, chosen
+
+
+def episode_events(g, f0, f1, chosen):
+    out = []
+    for r in g.recs:
+        if r["k"] in ("new", "done", "dead", "give") and f0 <= r["f"] <= f1 and (not chosen or r.get("u") in chosen):
+            out.append(r)
+    return out
+
+
+def episode_damage(g, f0, f1, at=None):
+    """dmg windows closing in (f0, f1 + window]: attacker team/def, victim
+    team/def, cell, damage, paralyze damage; near `at` only if given."""
+    out = []
+    for r in g.recs:
+        if r["k"] != "dmg" or not (f0 < r["f"] <= f1 + DMG_WINDOW):
+            continue
+        for at_, ad, vt, vd, cx, cz, dmg, para in r["rows"]:
+            if at is not None:
+                x, z, rad = at
+                if math.hypot((cx + 0.5) * r["cell"] - x, (cz + 0.5) * r["cell"] - z) > rad + r["cell"]:
+                    continue
+            out.append({"f": r["f"], "t": mmss(r["f"]), "att_team": at_, "att": ad, "vic_team": vt, "vic": vd,
+                        "cell": f"{cx},{cz}", "dmg": dmg, "para": para})
+    return out
+
+
+DMG_WINDOW = 150
+
+
+def table(rows, cols=None):
+    if not rows:
+        return "(no rows)"
+    cols = cols or [c for c in rows[0] if c != "f"]
+    width = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    lines = ["  ".join(c.ljust(width[c]) for c in cols)]
+    for r in rows:
+        lines.append("  ".join(str(r.get(c, "")).ljust(width[c]) for c in cols))
+    return "\n".join(lines)
+
+
+def print_episode(g, f0, f1, units=None, at=None):
+    rows, chosen = episode_rows(g, f0, f1, units, at)
+    allies = g.meta.get("allies")
+    print(f"# episode {mmss(f0)}-{mmss(f1)} (frames {f0}-{f1}), {len(chosen) if chosen else 'all'} units"
+          + (f", within {at[2]:.0f} of ({at[0]:.0f}, {at[1]:.0f})" if at else "")
+          + (f"; los digits per ally team {allies}" if allies else "; seen = by the enemy (v1 capture)"))
+    cols = ["t", "uid", "def", "team", "x", "z", "hp", "maxhp", "hp%", "build%", "cloak", "sub", "los", "cmd", "ctgt", "cx", "cz", "queue"]
+    cols = [c for c in cols if any(c in r for r in rows)]
+    last = None
+    for r in rows:
+        if r["f"] != last:
+            print(f"\n## {r['t']} (f={r['f']})")
+            last = r["f"]
+            block = [x for x in rows if x["f"] == r["f"]]
+            print(table(block, cols))
+    ev = episode_events(g, f0, f1, chosen)
+    print("\n## events")
+    print(table([{"t": mmss(r["f"]), "kind": r["k"], "uid": r.get("u"), "def": r.get("d"), "team": r.get("t"),
+                  "x": r.get("x"), "z": r.get("z"), "by": r.get("ad", ""), "by_team": r.get("at", "")} for r in ev]))
+    print("\n## damage windows")
+    print(table(episode_damage(g, f0, f1, at)))
+
+
+def print_track(g, uids):
+    rows = []
+    for s in g.snaps:
+        for u in s["units"]:
+            if u[0] in uids:
+                rows.append(unit_dict(g, u, s["f"]))
+    rows.sort(key=lambda r: (r["uid"], r["f"]))
+    cols = ["uid", "t", "def", "team", "x", "z", "hp", "hp%", "build%", "cloak", "sub", "los", "cmd", "ctgt", "cx", "cz"]
+    print(table(rows, [c for c in cols if any(c in r for r in rows)]))
+    print("\n## events")
+    ev = episode_events(g, 0, 10 ** 9, set(uids))
+    print(table([{"t": mmss(r["f"]), "kind": r["k"], "uid": r.get("u"), "def": r.get("d"), "team": r.get("t"),
+                  "by": r.get("ad", ""), "by_team": r.get("at", "")} for r in ev]))
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture")
     ap.add_argument("--maps")
+    ap.add_argument("--episode", metavar="FROM:TO", help="state table per snapshot for a frame range "
+                    "(frames or Ns seconds; m:ss with '..' between: 9:00..9:30); with --units or --at")
+    ap.add_argument("--units", help="comma-separated unit ids for --episode")
+    ap.add_argument("--at", metavar="X,Z,R", help="units within R elmos of (X, Z) during the episode")
+    ap.add_argument("--track", metavar="UID[,UID]", help="one unit's rows over the game, with its events")
     args = ap.parse_args()
     g = Game(args.capture)
+    if args.episode:
+        a, b = args.episode.split("..") if ".." in args.episode else args.episode.split(":")
+        units = [int(x) for x in args.units.split(",")] if args.units else None
+        at = tuple(float(x) for x in args.at.split(",")) if args.at else None
+        print_episode(g, parse_frame(a or "0"), parse_frame(b) if b else 10 ** 9, units, at)
+        return
+    if args.track:
+        print_track(g, {int(x) for x in args.track.split(",")})
+        return
     out = []
     section_setup(g, out)
     section_chat(g, out)
