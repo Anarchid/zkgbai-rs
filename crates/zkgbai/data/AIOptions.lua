@@ -13,7 +13,7 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), airfire (an air factory for the firefighters once raids cost us mexes no home defense team was near).',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), strikes (assassination strikes on Phantoms and Lances), airfire (an air factory for the firefighters once raids cost us mexes no home defense team was near).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -131,6 +131,16 @@ local options = {
 		min    = -1,
 		max    = 1000,
 		step   = 1,
+	},
+	{
+		key    = 'strike_margin',
+		name   = 'Strike margin',
+		desc   = 'Assassination strikes go when the expected profit (on a sniper worth 1.5x its metal) is at least this many times the expected loss; 0 = break-even; negative: every wave goes (testing).',
+		type   = 'number',
+		def    = 0,
+		min    = -1,
+		max    = 10,
+		step   = 0.1,
 	},
 	{
 		key    = 'factory',

@@ -344,7 +344,7 @@ impl Ai {
                 || (merged > 0
                     && eco.big_map
                     && tf > 0.4
-                    && (!self.misc_handler.striders.is_empty() || !self.squad_handler.shield_squads.is_empty())
+                    && (!self.misc_handler.striders.is_empty() || !self.squad_handler.taskforces.is_empty())
                     && (!eco.has_planes || !eco.has_gunship)
                     && no_fac_tasks)
             {

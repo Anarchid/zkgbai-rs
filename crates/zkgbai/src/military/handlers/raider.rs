@@ -194,7 +194,7 @@ impl Ai {
     /// Take raiders in as one squad of their own, ready to raid (the
     /// staged raid game's raids, see `raid_test`).
     pub(crate) fn raider_add_squad(&mut self, raiders: Vec<Fighter>, raider_type: char) {
-        let sid = self.squads.create(SquadKind::Raider, self.team_id, &self.defs);
+        let sid = self.squads.create(SquadKind::Raider, self.team_id);
         if let Some(sq) = self.squads.get_mut(sid) {
             sq.raider_type = raider_type;
         }
@@ -530,7 +530,7 @@ impl Ai {
         let sid = match self.raider_handler.next_squads[slot] {
             Some(sid) if self.squads.contains(sid) => sid,
             _ => {
-                let sid = self.squads.create(SquadKind::Raider, self.team_id, &self.defs);
+                let sid = self.squads.create(SquadKind::Raider, self.team_id);
                 if let Some(sq) = self.squads.get_mut(sid) {
                     sq.raider_type = raider_type;
                 }
