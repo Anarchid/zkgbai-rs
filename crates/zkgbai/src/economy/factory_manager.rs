@@ -598,6 +598,19 @@ impl Ai {
             self.fac_build_ordered(fac_id, def);
             return;
         }
+        // Now and then, in place of a fighter, a unit a taskforce is short
+        // of (a role with `produce`; see `taskforce`).
+        let options = fac.unit.def().map(|d| d.build_options()).unwrap_or_default();
+        if !ai_wants_builder
+            && !special
+            && let Some((def, doctrine, role)) = self.squad_produce(&options)
+        {
+            let name = self.defs.name(def).to_owned();
+            self.log(&format!("taskforce: a {name} for a {doctrine} force short of its {role}"));
+            self.fac.factories.insert(fac_id, fac);
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
         let (unit, pos) = (fac.unit, fac.get_pos());
         self.fac.factories.insert(fac_id, fac);
         match choice {

@@ -7,15 +7,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use springai::{Unit, Vec3};
+use springai::{Unit, UnitDef, Vec3};
 use zk_terrain::Tier;
 
 use crate::Ai;
-use crate::military::taskforce::Aim;
+use crate::military::taskforce::{self, Aim};
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
 use crate::terrain::tier_of;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, distance, kgb_rand};
 
 #[derive(Default)]
 pub struct SquadHandler {
@@ -101,6 +101,11 @@ impl SquadHandler {
     }
 }
 
+/// Whether role `role` of doctrine `doctrine` spots (see `taskforce::spotter`).
+fn doctrine_role_spots(tf: &taskforce::Taskforces, doctrine: Option<&str>, role: Option<usize>) -> bool {
+    doctrine.and_then(|d| tf.doctrine(d)).zip(role).is_some_and(|(d, r)| d.roles[r].spot.is_some())
+}
+
 /// Whether units of movement tiers `a` and `b` go the same ways (as far as
 /// following a leader of either goes: amphibious bots with bots).
 fn same_ways(a: Option<Tier>, b: Option<Tier>) -> bool {
@@ -161,7 +166,10 @@ impl Ai {
         let mut mixed = Vec::new();
         for sid in self.squads.ids() {
             let Some(s) = self.squads.get(sid) else { continue };
-            let tiers: BTreeSet<Option<Tier>> = s.fighters.iter().map(|&m| self.squad_tier(m)).collect();
+            let spots =
+                |m: &i32| self.fighters.get(m).is_some_and(|f| s.shape.spot(f.unit.def().map(|d| d.id())).is_some());
+            let tiers: BTreeSet<Option<Tier>> =
+                s.fighters.iter().filter(|m| !spots(m)).map(|&m| self.squad_tier(m)).collect();
             if tiers.iter().any(|&a| tiers.iter().any(|&b| !same_ways(a, b))) {
                 mixed.push(format!("squad {sid}: {tiers:?}"));
             }
@@ -220,6 +228,13 @@ impl Ai {
         self.squad_handler.fighters.remove(&id);
     }
 
+    /// Let go of fighter `id` altogether (out of its squad and the store),
+    /// for another handler to take.
+    pub(crate) fn squad_forget_fighter(&mut self, id: i32) {
+        self.squad_leave_squad(id);
+        self.squad_delete_fighter(id);
+    }
+
     /// Remove a fighter from whatever squad it is in.
     fn squad_leave_squad(&mut self, id: i32) {
         let Some(sid) = self.fighters.get(&id).and_then(|f| f.squad) else { return };
@@ -254,8 +269,15 @@ impl Ai {
     /// Whether fighter `id` goes the same ways as every member of squad
     /// `sid`.
     fn squad_fits(&self, sid: SquadId, id: i32) -> bool {
+        let Some(s) = self.squads.get(sid) else { return false };
+        // Spotters go their own ways.
+        let spots =
+            |m: i32| self.fighters.get(&m).is_some_and(|f| s.shape.spot(f.unit.def().map(|d| d.id())).is_some());
+        if spots(id) {
+            return true;
+        }
         let tier = self.squad_tier(id);
-        self.squads.get(sid).is_some_and(|s| s.fighters.iter().all(|&m| same_ways(self.squad_tier(m), tier)))
+        s.fighters.iter().filter(|&&m| !spots(m)).all(|&m| same_ways(self.squad_tier(m), tier))
     }
 
     fn squad_assign_assault(&mut self, id: i32) {
@@ -351,7 +373,7 @@ impl Ai {
 
     /// Whether taskforce `sid` is short of role `role` of its doctrine
     /// (a role that takes all that come always is).
-    fn squad_short_of(&self, sid: SquadId, role: usize) -> bool {
+    pub(crate) fn squad_short_of(&self, sid: SquadId, role: usize) -> bool {
         let Some(q) = self.squads.get(sid) else { return false };
         let tf = &self.taskforces;
         let Some(d) = tf.doctrine(&q.shape.doctrine) else { return false };
@@ -362,6 +384,67 @@ impl Ai {
         let units = q.everyone().filter_map(|id| self.fighters.get(&id));
         let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
         r.want(&force).is_some_and(|w| force.roles.get(role).is_some_and(|x| x.1 < w))
+    }
+
+    /// The metal force `sid` must be worth to go in: its doctrine's `engage`
+    /// over the force and our income (as assault squads count it), else
+    /// its `engage_value`.
+    fn squad_engage_threshold(&self, sid: SquadId) -> f32 {
+        let Some(q) = self.squads.get(sid) else { return f32::INFINITY };
+        let Some(e) = q.shape.engage.as_ref() else { return q.shape.engage_value };
+        let tf = &self.taskforces;
+        let Some(d) = tf.doctrine(&q.shape.doctrine) else { return q.shape.engage_value };
+        let units = q.everyone().filter_map(|id| self.fighters.get(&id));
+        let mut force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
+        let terr = self.graph.territory_fraction;
+        force.income = self.eco.effective_income / (1.0 + self.merged_allies as f32 * terr * terr);
+        (force.density, force.openness, force.reach) = self.taskforce_map();
+        e.eval(&force)
+    }
+
+    /// How far `p` lies along the line from our start to the enemy's start
+    /// box (0 ours, 1 theirs; see `taskforce: depth axis` in the log).
+    fn taskforce_depth(&self, p: Vec3) -> Option<f32> {
+        let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base()?);
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let len2 = dx * dx + dz * dz;
+        (len2 > 0.0 && a != NULLPOS).then(|| ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2)
+    }
+
+    /// The median depth of our ground fighters outside force `sid`, and how
+    /// many they are.
+    fn squad_army_depth(&self, sid: SquadId) -> Option<(f32, usize)> {
+        let mut ds: Vec<f32> = (self.fighters.values())
+            .filter(|f| f.squad != Some(sid) && f.unit.health() > 0.0)
+            .filter(|f| f.unit.def().is_some_and(|d| !d.is_able_to_fly()))
+            .filter_map(|f| self.taskforce_depth(f.get_pos()))
+            .collect();
+        if ds.is_empty() {
+            return None;
+        }
+        ds.sort_by(f32::total_cmp);
+        Some((ds[ds.len() / 2], ds.len()))
+    }
+
+    /// A unit of `options` (what a factory builds) that a force is short of,
+    /// for a role with `produce`: rolled at its `produce` chance, the first
+    /// that comes up; with the doctrine and role, for the log.
+    pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
+        let tf = &self.taskforces;
+        for d in tf.doctrines.iter().filter(|d| d.enabled && taskforce::squad_aim(d.aim)) {
+            for (ri, r) in d.roles.iter().enumerate().filter(|(_, r)| r.produce > 0.0) {
+                let Some(&def) = options.iter().find(|o| r.units.iter().any(|u| u == self.defs.name(**o))) else {
+                    continue;
+                };
+                let short = (self.squad_handler.taskforces.iter())
+                    .filter(|&&sid| self.squads.get(sid).is_some_and(|q| q.shape.doctrine == d.name))
+                    .any(|&sid| self.squad_short_of(sid, ri));
+                if short && kgb_rand() < f64::from(r.produce) {
+                    return Some((def, d.name.clone(), r.name.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// Place a unit in a taskforce (see `military::taskforce`), by the
@@ -384,8 +467,8 @@ impl Ai {
         let is_core = doctrine.is_some_and(|d| d.is_core(&name, &tf.classes));
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));
         let to_strongest = doctrine.zip(role).is_some_and(|(d, r)| d.roles[r].to_strongest);
-        let (pool, reinforce, cores_per_force) =
-            doctrine.map_or((false, false, 1), |d| (d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize));
+        let (pool, reinforce, cores_per_force) = doctrine
+            .map_or((false, false, 1), |d| (d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize));
         // Forces of its doctrine (of those taking strays, for a unit none
         // takes) that go where it goes.
         let forces: Vec<SquadId> = (self.squad_handler.taskforces.iter().copied())
@@ -440,6 +523,11 @@ impl Ai {
                 None => forces.iter().copied().filter(|&sid| open(sid)).collect(),
             };
             if short.is_empty() {
+                // A spotter no force wants goes back where it came from.
+                if doctrine_role_spots(&self.taskforces, dname.as_deref(), role) {
+                    self.taskforce_spotter_release(id);
+                    return;
+                }
                 // No force to join: fight as an assault.
                 self.retreat_add_coward(unit);
                 self.squad_assign_assault(id);
@@ -469,6 +557,34 @@ impl Ai {
         if let Some(s) = self.squads.get_mut(sid) {
             s.add_unit_nav(id, &mut self.fighters, &mut nav);
         }
+    }
+
+    /// Log a taskforce member's death: its force, whether that force was
+    /// forming (never yet engaged), engaged or rallying, what killed it, and
+    /// where along the start axis.
+    pub fn squad_log_death(&mut self, unit: Unit, attacker: Option<Unit>) {
+        let Some(sid) = self.fighters.get(&unit.id()).and_then(|f| f.squad) else { return };
+        let Some(s) = self.squads.get(sid).filter(|s| s.is_taskforce()) else { return };
+        let state = match (s.engaging, s.engaged) {
+            (true, _) => "engaged",
+            (false, 0) => "forming",
+            _ => "rallying",
+        };
+        let by = attacker.and_then(|a| a.def()).map_or("?".to_owned(), |d| self.defs.name(d).to_owned());
+        let depth = self.taskforce_depth(unit.pos()).map_or("-".to_owned(), |d| format!("{d:.2}"));
+        // How far it was from its leader: in transit to the force, or with it.
+        let far = match s.get_leader(&self.fighters) {
+            Some(l) if l.id() == unit.id() => "the leader".to_owned(),
+            Some(l) => format!("{:.0} from its leader", distance(l.pos(), unit.pos())),
+            None => "no leader".to_owned(),
+        };
+        let spotter = self.taskforce_spotter_doing(unit.id()).map_or(String::new(), |j| format!(", spotter {j}"));
+        let line = format!(
+            "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth} ({far}){spotter}",
+            self.defs.name_of(unit),
+            s.shape.doctrine
+        );
+        self.log(&line);
     }
 
     /// Log a unit about to join force `sid`: the force's state and how far
@@ -508,7 +624,10 @@ impl Ai {
             if s.is_dead(&self.fighters) || s.cores(&self.fighters) == 0 {
                 let doctrine = s.shape.doctrine.clone();
                 let gone = s.disband(&mut self.fighters);
-                let line = format!("taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere", gone.len());
+                let line = format!(
+                    "taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere",
+                    gone.len()
+                );
                 self.log(&line);
                 fit.extend(gone);
                 self.squad_delete_squad(sid);
@@ -699,7 +818,8 @@ impl Ai {
             'f' => {
                 if view.get_threat(pos) / courage > 2.0 * view.get_total_friendly_threat(pos)
                     || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
-                    || (target != NULLPOS && view.get_porc_threat(target) / courage > tolerance(view.get_total_friendly_threat(pos)))
+                    || (target != NULLPOS
+                        && view.get_porc_threat(target) / courage > tolerance(view.get_total_friendly_threat(pos)))
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
@@ -720,7 +840,8 @@ impl Ai {
             'a' => {
                 let view = self.war.view_dive(dive);
                 if view.get_effective_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
-                    && (!self.graph.is_ally_territory(pos) || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos)))
+                    && (!self.graph.is_ally_territory(pos)
+                        || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos)))
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
@@ -821,7 +942,11 @@ impl Ai {
             let mustered = shape.muster > 0.0 && (self.frame - s.formed) as f32 >= shape.muster * 30.0;
             let leader = s.get_leader(&self.fighters);
             let engaging = s.engaging;
-            let worth = metal_value > shape.engage_value || mustered;
+            // Going in takes the threshold; engaged, a force stays in above
+            // `engage_value` (the same, without an `engage` expression), as
+            // an attacking assault squad does.
+            let threshold = self.squad_engage_threshold(sid);
+            let worth = mustered || metal_value > if engaging { shape.engage_value.min(threshold) } else { threshold };
             let led = leader.filter(|l| shape.is_core(l.def().map(|d| d.id())));
             // Being rallied lets it go in; engaged, only a doctrine that
             // regroups breaks off when its members scatter.
@@ -886,9 +1011,15 @@ impl Ai {
     /// log when it starts (its make-up then) or stops (and why).
     fn squad_conducted(&mut self, sid: SquadId, engage_at: Option<Vec3>, why: &str) {
         let frame = self.frame;
+        if self.squads.get(sid).is_some_and(|s| s.shape.marksman) {
+            self.taskforce_mark(sid);
+        }
+        if self.squads.get(sid).is_some_and(|s| s.shape.roles.iter().any(|r| r.spot.is_some())) {
+            self.taskforce_spot(sid);
+        }
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
-        s.keep_pace(&self.fighters);
+        s.keep_pace(&self.fighters, engage_at.is_some());
         let was = s.engaging;
         s.engaging = engage_at.is_some();
         let ran = if was { s.engaged_speed(frame) } else { None };
@@ -913,15 +1044,22 @@ impl Ai {
             s.metal_value,
             s.rally_fraction(&self.fighters).map_or("-".to_owned(), |r| format!("{:.0}%", 100.0 * r))
         );
+        let pace = if s.paced() > 0.0 { format!("{:.0}", s.paced()) } else { "free".to_owned() };
+        let pos = s.get_pos(&self.fighters);
+        let threshold = self.squad_engage_threshold(sid);
+        let depth = self.taskforce_depth(pos).map_or("-".to_owned(), |d| format!("{d:.2}"));
+        let army = self.squad_army_depth(sid).map_or("-".to_owned(), |(d, n)| format!("{d:.2} (n {n})"));
         let line = match engage_at {
             Some(t) => format!(
-                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {}; target ({:.0}, {:.0})",
+                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {pace}; to go {threshold:.0}; \
+                 depth {depth}, our army {army}; target ({:.0}, {:.0})",
                 if first { " first" } else { " again" },
-                if s.paced() > 0.0 { format!("{:.0}", s.paced()) } else { "free".to_owned() },
                 t.x,
                 t.z
             ),
-            None => format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}{}", engaged_for(ran)),
+            None => {
+                format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}{}", engaged_for(ran))
+            }
         };
         self.log(&line);
     }

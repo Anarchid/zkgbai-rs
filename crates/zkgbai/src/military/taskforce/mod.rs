@@ -1,8 +1,11 @@
 //! Combined-arms taskforces: forces formed around a core unit by a
 //! doctrine (see `doctrine`), with wants written as expressions over what
-//! the force has (see `expr`). The doctrines survived the Oct 23 crash; so
-//! far only the `impaler` one is in use, for the escorts of Impaler
-//! batteries (see `military::impalers`).
+//! the force has (see `expr`). On by default: `felon` (the shield ball),
+//! `impaler` (the escorts of Impaler batteries, see `military::impalers`)
+//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`,
+//! `phantom` and `envoy` are seeded off; the rest wait for conducts of
+//! their own. The `disable` option switches off doctrines it names
+//! (`disable=lance`).
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -17,6 +20,8 @@
 
 pub mod doctrine;
 pub mod expr;
+pub mod marksman;
+pub mod spotter;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -114,6 +119,12 @@ pub struct Taskforces {
     pub classes: Classes,
     shapes: BTreeMap<String, Arc<Shape>>,
     loaded: bool,
+    /// Marksmen's marks by gun, and what their volleys kill by gun type
+    /// (see `marksman`).
+    pub marks: BTreeMap<i32, marksman::Mark>,
+    pub volleys: marksman::Volleys,
+    /// Spotters (see `spotter`).
+    pub spotters: spotter::Spotters,
 }
 
 /// Aims whose forces are squads of the squad handler (see
@@ -134,6 +145,15 @@ impl Taskforces {
         (self.doctrines.iter())
             .filter(|d| d.enabled && squad_aim(d.aim))
             .find(|d| d.is_core(unit, &self.classes) || d.role_of(unit, &self.classes).is_some())
+    }
+
+    /// Whether a new unit of type `unit` goes to the squad handler's
+    /// taskforces: some doctrine there takes it as a core or in a role
+    /// other than spotting (spotters are claimed, see `spotter`).
+    pub fn routes(&self, unit: &str) -> bool {
+        (self.doctrines.iter()).filter(|d| d.enabled && squad_aim(d.aim)).any(|d| {
+            d.is_core(unit, &self.classes) || d.role_of(unit, &self.classes).is_some_and(|r| d.roles[r].spot.is_none())
+        })
     }
 
     pub fn shape(&self, doctrine: &str) -> Arc<Shape> {
@@ -172,6 +192,12 @@ pub fn patch(doctrines: &mut Vec<Doctrine>, patches: &Value, defs: &Defs, classe
 }
 
 impl Ai {
+    /// The map's density, openness and reach for doctrine expressions (see
+    /// [`Force`]): reserved, 0 until intel measures them.
+    pub fn taskforce_map(&self) -> (f32, f32, f32) {
+        (0.0, 0.0, 0.0)
+    }
+
     /// The doctrines, once: the seeds, patched by the `doctrines` option.
     pub fn taskforce_load(&mut self) {
         if self.taskforces.loaded {
@@ -202,6 +228,18 @@ impl Ai {
             for line in said {
                 self.cb.log(&line);
             }
+        }
+        // The `disable` option switches off the doctrines it names, whatever
+        // the seeds and patches say.
+        for d in doctrines.iter_mut().filter(|d| d.enabled) {
+            if self.dev_off(&d.name) {
+                d.enabled = false;
+                self.cb.log(&format!("doctrines: {} switched off (disable)", d.name));
+            }
+        }
+        let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base());
+        if let Some(b) = b {
+            self.cb.log(&format!("taskforce: depth axis ({:.0}, {:.0}) to ({:.0}, {:.0})", a.x, a.z, b.x, b.z));
         }
         let on: Vec<&str> = doctrines.iter().filter(|d| d.enabled).map(|d| d.name.as_str()).collect();
         let off: Vec<&str> = doctrines.iter().filter(|d| !d.enabled).map(|d| d.name.as_str()).collect();

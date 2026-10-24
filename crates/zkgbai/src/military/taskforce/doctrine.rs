@@ -11,7 +11,8 @@
 //!
 //! The seeds are the shield ball as it always was (`felon`), Impaler
 //! batteries' escorts (`impaler`), and, off until switched on, shooter
-//! teams with spotters (`lance`, `phantom`), siege detachments (`tremor`,
+//! teams (`lance`, `phantom`, `envoy`; a doctrine's spotter role, see
+//! `spotter`, sees for them), siege detachments (`tremor`,
 //! `emissary`), Ravager squads (`ravager`) and cloaked bombs
 //! (`ghostbombs`). A file named by the `doctrines` option patches them and
 //! adds more (see `taskforce::load`).
@@ -22,6 +23,7 @@ use serde_json::{Map, Value, json};
 
 use super::Classes;
 use super::expr::{Expr, Force};
+use super::spotter::Spot;
 use crate::defs::Defs;
 
 /// Where an engaged force goes.
@@ -98,6 +100,9 @@ pub struct Role {
     pub fire_at_radar: Option<bool>,
     /// Striking forces: they charge in once the force is there.
     pub release: bool,
+    /// Spotters: they see for the core's guns instead of fighting (see
+    /// `spotter`), each in its way.
+    pub spot: Option<Spot>,
 }
 
 impl Role {
@@ -114,6 +119,7 @@ impl Role {
             fire_state: None,
             fire_at_radar: None,
             release: false,
+            spot: None,
         }
     }
 
@@ -149,6 +155,7 @@ impl Role {
             "fire_state": self.fire_state,
             "fire_at_radar": self.fire_at_radar,
             "release": self.release,
+            "spot": self.spot.map(Spot::name),
         })
     }
 
@@ -178,6 +185,7 @@ impl Role {
                 "fire_state" => self.fire_state = optional(v, |v| Ok(num(k, v, 0.0, 2.0)? as i32))?,
                 "fire_at_radar" => self.fire_at_radar = optional(v, |v| flag(k, v))?,
                 "release" => self.release = flag(k, v)?,
+                "spot" => self.spot = optional(v, |v| Spot::parse(&string(k, v)?))?,
                 "orbit" => self.orbit = num(k, v, 20.0, 600.0)?,
                 "to_strongest" => self.to_strongest = flag(k, v)?,
                 "gauge" => self.gauge = flag(k, v)?,
@@ -211,12 +219,17 @@ pub struct Doctrine {
     pub pool_with_allies: bool,
     /// The leader's speed limit, elmos/s (0: none).
     pub pace: f32,
-    /// The leader also keeps to this share of its slowest member's speed
-    /// (0: no), so a slower screen keeps up (Levelers with Ravagers).
+    /// Going in, the leader also keeps to this share of its slowest
+    /// member's speed (0: no), so a slower screen keeps up (Levelers with
+    /// Ravagers); forming, rallying or falling back, it does not.
     pub pace_slowest: f32,
     pub aim: Aim,
     /// A force engages once worth this much metal (and rallied)...
     pub engage_value: f32,
+    /// ...or, given, worth more than this, over the force and our `income`
+    /// (`"min(2500, max(1200, 45 * income))"`, as assault squads complete);
+    /// engaged, it then stays in while worth more than `engage_value`...
+    pub engage: Option<Expr>,
     /// ...or once it has mustered this many seconds (0: never; it waits
     /// for its value).
     pub muster: f32,
@@ -243,6 +256,16 @@ pub struct Doctrine {
     /// Members join it while engaged (the shield ball); else only while it
     /// is not, so none drives to a fight alone.
     pub reinforce_engaged: bool,
+    /// Its cores, firing at will, are each set on the most valuable target
+    /// in reach that one shot kills, of those whose place we know exactly
+    /// (Lances, Phantoms; see `marksman`).
+    pub marksman: bool,
+    /// Marksmen: a gun keeps its mark until it has fired (or the mark is
+    /// gone), picking one only as it reloads; else it re-picks every pass.
+    pub mark_hold: bool,
+    /// Marksmen: a mark is worth setting from this share of what a volley
+    /// of the gun's type has killed so far (0: a tenth of the gun's cost).
+    pub mark_share: f32,
 }
 
 impl Doctrine {
@@ -261,6 +284,7 @@ impl Doctrine {
             pace_slowest: 0.0,
             aim: Aim::Artillery,
             engage_value: 0.0,
+            engage: None,
             muster: 60.0,
             retreat_health: 0.6,
             shields_low: 0.5,
@@ -270,6 +294,9 @@ impl Doctrine {
             strays: false,
             regroup: false,
             reinforce_engaged: false,
+            marksman: false,
+            mark_hold: true,
+            mark_share: 0.5,
         }
     }
 
@@ -322,6 +349,7 @@ impl Doctrine {
             "pace_slowest": self.pace_slowest,
             "aim": self.aim.name(),
             "engage_value": self.engage_value,
+            "engage": self.engage.as_ref().map(Expr::source),
             "muster": self.muster,
             "retreat_health": self.retreat_health,
             "shields_low": self.shields_low,
@@ -331,6 +359,9 @@ impl Doctrine {
             "strays": self.strays,
             "regroup": self.regroup,
             "reinforce_engaged": self.reinforce_engaged,
+            "marksman": self.marksman,
+            "mark_hold": self.mark_hold,
+            "mark_share": self.mark_share,
         })
     }
 
@@ -367,6 +398,13 @@ impl Doctrine {
                 "pace_slowest" => self.pace_slowest = num(k, v, 0.0, 1.0)?,
                 "aim" => self.aim = Aim::parse(&string(k, v)?)?,
                 "engage_value" => self.engage_value = num(k, v, 0.0, 1e6)?,
+                "engage" => {
+                    self.engage = match v {
+                        Value::Null => None,
+                        Value::String(s) => Some(Expr::parse(s).map_err(|e| format!("engage: {e}"))?),
+                        _ => return Err("'engage' must be an expression (a string) or null".into()),
+                    }
+                }
                 "muster" => self.muster = num(k, v, 0.0, 3600.0)?,
                 "retreat_health" => self.retreat_health = num(k, v, 0.0, 1.0)?,
                 "shields_low" => self.shields_low = num(k, v, 0.0, 1.0)?,
@@ -376,6 +414,9 @@ impl Doctrine {
                 "strays" => self.strays = flag(k, v)?,
                 "regroup" => self.regroup = flag(k, v)?,
                 "reinforce_engaged" => self.reinforce_engaged = flag(k, v)?,
+                "marksman" => self.marksman = flag(k, v)?,
+                "mark_hold" => self.mark_hold = flag(k, v)?,
+                "mark_share" => self.mark_share = num(k, v, 0.0, 10.0)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -405,6 +446,9 @@ impl Doctrine {
             if !role_names.insert(r.name.as_str()) {
                 return Err(format!("doctrine {}: two roles named {}", self.name, r.name));
             }
+            if super::expr::GLOBALS.contains(&r.name.as_str()) {
+                return Err(format!("doctrine {}: '{}' is no role name (expressions read it)", self.name, r.name));
+            }
             for u in &r.units {
                 if !known(u) {
                     return Err(format!(
@@ -423,6 +467,20 @@ impl Doctrine {
             for n in r.want.as_ref().map_or(Vec::new(), Expr::names) {
                 if !role_names.contains(n) {
                     return Err(format!("doctrine {}: role {}: its want reads '{n}', no role", self.name, r.name));
+                }
+            }
+        }
+        for n in self.engage.as_ref().map_or(Vec::new(), Expr::names) {
+            if !role_names.contains(n) {
+                return Err(format!("doctrine {}: engage reads '{n}', no role", self.name));
+            }
+        }
+        for r in &self.roles {
+            let Some(spot) = r.spot else { continue };
+            for u in r.units.iter().filter(|u| !u.starts_with('@')) {
+                let Some(d) = defs.get(u) else { continue };
+                if let Err(e) = spot.fits(d) {
+                    return Err(format!("doctrine {}: role {}: '{u}' {e}", self.name, r.name));
                 }
             }
         }
@@ -454,6 +512,7 @@ impl Doctrine {
                     switch_on: r.switch_on,
                     fire_state: r.fire_state,
                     fire_at_radar: r.fire_at_radar,
+                    spot: r.spot,
                 })
                 .collect(),
             by_def,
@@ -465,6 +524,7 @@ impl Doctrine {
             cores_per_force: self.cores_per_force,
             pool_with_allies: self.pool_with_allies,
             engage_value: self.engage_value,
+            engage: self.engage.clone(),
             muster: self.muster,
             retreat_health: self.retreat_health,
             shields_low: self.shields_low,
@@ -473,6 +533,9 @@ impl Doctrine {
             strays: self.strays,
             regroup: self.regroup,
             reinforce_engaged: self.reinforce_engaged,
+            marksman: self.marksman,
+            mark_hold: self.mark_hold,
+            mark_share: self.mark_share,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -487,6 +550,7 @@ pub struct RoleShape {
     pub switch_on: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
+    pub spot: Option<Spot>,
 }
 
 /// A doctrine compiled for the squad wrapper: by unit def id.
@@ -499,7 +563,8 @@ pub struct Shape {
     pub by_def: BTreeMap<i32, usize>,
     /// The leader's speed limit, elmos/s (0: none).
     pub pace: f32,
-    /// Share of the slowest member's speed the leader keeps to (0: none).
+    /// Share of the slowest member's speed the leader keeps to going in
+    /// (0: none).
     pub pace_slowest: f32,
     /// The leader advances under fight orders (stopping where it reaches)
     /// rather than move orders.
@@ -510,6 +575,7 @@ pub struct Shape {
     pub cores_per_force: u32,
     pub pool_with_allies: bool,
     pub engage_value: f32,
+    pub engage: Option<Expr>,
     pub muster: f32,
     pub retreat_health: f32,
     pub shields_low: f32,
@@ -518,6 +584,9 @@ pub struct Shape {
     pub strays: bool,
     pub regroup: bool,
     pub reinforce_engaged: bool,
+    pub marksman: bool,
+    pub mark_hold: bool,
+    pub mark_share: f32,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -540,6 +609,7 @@ impl Default for Shape {
             cores_per_force: 1,
             pool_with_allies: false,
             engage_value: 0.0,
+            engage: None,
             muster: 0.0,
             retreat_health: 0.6,
             shields_low: 0.5,
@@ -548,6 +618,9 @@ impl Default for Shape {
             strays: false,
             regroup: false,
             reinforce_engaged: false,
+            marksman: false,
+            mark_hold: true,
+            mark_share: 0.5,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -561,6 +634,11 @@ impl Shape {
 
     pub fn role(&self, def: Option<i32>) -> Option<&RoleShape> {
         def.and_then(|d| self.by_def.get(&d)).and_then(|&i| self.roles.get(i))
+    }
+
+    /// Whether members of this type are spotters (see `spotter`).
+    pub fn spot(&self, def: Option<i32>) -> Option<Spot> {
+        self.role(def).and_then(|r| r.spot)
     }
 
     pub fn orbit(&self, def: Option<i32>) -> f32 {
@@ -609,38 +687,45 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.reinforce_engaged = true;
 
     let mut lance = Doctrine::new("lance");
-    lance.note = "Lances (980 range, 1000 hp) holding fire at radar dots, a Halberd to spot for them, a Mace \
-                  screen against raiders, Scalpels as the line, a Flail when one is about."
+    lance.note = "Lances (980 range, 3000 a shot) with a Mace, or two Bolas, against the raiders that pick \
+                  them off alone; firing at will, each set on the best target in reach one shot kills. On \
+                  since the 2026-10-24 Circuit read (ab16: army@15 +1402, 15-3-2 against 12-7-1); \
+                  disable=lance switches it off."
         .into();
-    lance.enabled = false;
     lance.core = vec!["hoverarty".into()];
-    lance.fire_at_radar = Some(false);
     lance.roles = vec![
-        Role::escort("spotter", &["hoverassault"], "1", 300.0, 0.3),
-        Role::escort("screen", &["hoverriot"], "ceil(cores)", 130.0, 0.5),
-        Role::escort("line", &["hoverskirm"], "ceil(cores)", 170.0, 0.0),
-        Role::escort("aa", &["hoveraa"], "cores >= 2 ? 1 : 0", 80.0, 0.0),
+        Role::escort("mace", &["hoverriot"], "cores", 130.0, 0.5),
+        Role::escort("bolas", &["hoverheavyraid"], "2 * max(0, cores - mace)", 150.0, 0.0),
     ];
-    lance.engage_value = 1500.0;
-    lance.muster = 75.0;
+    lance.marksman = true;
+    lance.engage_value = 1400.0;
+    lance.muster = 0.0;
     lance.retreat_health = 0.7;
 
     let mut phantom = Doctrine::new("phantom");
-    phantom.note = "Phantoms (700 range, 560 hp) holding fire at radar dots, a Scythe to spot for them, \
-                    Reavers against raiders, Knights and Ronins as the line, a Gremlin when one is about."
+    phantom.note = "Phantoms (700 range, 1500 a shot) with a Scythe, cloaked as they are; firing at will, \
+                    each set on the best target in reach one shot kills."
         .into();
     phantom.enabled = false;
     phantom.core = vec!["cloaksnipe".into()];
-    phantom.fire_at_radar = Some(false);
-    phantom.roles = vec![
-        Role::escort("spotter", &["cloakheavyraid"], "1", 300.0, 0.3),
-        Role::escort("screen", &["cloakriot"], "ceil(cores)", 110.0, 0.5),
-        Role::escort("line", &["cloakassault", "cloakskirm"], "ceil(cores)", 160.0, 0.0),
-        Role::escort("aa", &["cloakaa"], "cores >= 2 ? 1 : 0", 70.0, 0.0),
-    ];
-    phantom.engage_value = 1100.0;
-    phantom.muster = 75.0;
+    phantom.roles = vec![Role::escort("scythe", &["cloakheavyraid"], "cores", 200.0, 0.5)];
+    phantom.marksman = true;
+    phantom.engage_value = 900.0;
+    phantom.muster = 0.0;
     phantom.retreat_health = 0.7;
+
+    let mut envoy = Doctrine::new("envoy");
+    envoy.note = "Envoys (1200 range, 600 a shell every 7.3 s, fired on the move) with a Siren each, which \
+                  tanks for them and takes riot and anti-sub duty (its Sonic Blaster hits under water: \
+                  subs are SINK); firing at will, each set on the best target in reach one shell kills."
+        .into();
+    envoy.enabled = false;
+    envoy.core = vec!["shiparty".into()];
+    envoy.roles = vec![Role::escort("siren", &["shipassault"], "cores", 130.0, 0.5)];
+    envoy.marksman = true;
+    envoy.engage_value = 1800.0;
+    envoy.muster = 0.0;
+    envoy.retreat_health = 0.6;
 
     let mut tremor = Doctrine::new("tremor");
     tremor.note = "A siege detachment: Tremors stand where they reach the most and fire at everything, an \
@@ -687,7 +772,7 @@ pub fn seeds() -> Vec<Doctrine> {
 
     let mut ravager = Doctrine::new("ravager");
     ravager.note = "Rover assault: Ravagers with a Leveler per five against raiders, a composition grown \
-                    without end; kept to the Levelers' pace, it goes in once worth 1200 and rallied."
+                    without end; it goes in at the Levelers' pace once worth 1200 and rallied."
         .into();
     ravager.enabled = false;
     ravager.core = vec!["vehassault".into()];
@@ -711,7 +796,7 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.engage_value = 600.0;
     ghostbombs.muster = 90.0;
 
-    vec![felon, lance, phantom, tremor, emissary, impaler, ravager, ghostbombs]
+    vec![felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, ghostbombs]
 }
 
 fn string(k: &str, v: &Value) -> Result<String, String> {
@@ -848,6 +933,35 @@ mod tests {
         assert!(shape.low_shields(false, 0.4));
         assert!(shape.low_shields(true, 0.7));
         assert!(!shape.low_shields(true, 0.85));
+    }
+
+    #[test]
+    fn a_mace_or_two_bolas_per_lance() {
+        let classes = Classes::default();
+        let lance = seeds().into_iter().find(|d| d.name == "lance").unwrap();
+        assert!(lance.marksman && lance.enabled);
+        let force = |units: &[&'static str]| lance.force(units.iter().map(|u| (*u, 100.0)), &classes);
+        let (mace, bolas) = (&lance.roles[0], &lance.roles[1]);
+        let one = force(&["hoverarty"]);
+        assert_eq!((mace.want(&one), bolas.want(&one)), (Some(1), Some(2)));
+        let maced = force(&["hoverarty", "hoverriot"]);
+        assert_eq!((mace.want(&maced), bolas.want(&maced)), (Some(1), Some(0)));
+        let two = force(&["hoverarty", "hoverarty", "hoverriot"]);
+        assert_eq!((mace.want(&two), bolas.want(&two)), (Some(2), Some(2)));
+    }
+
+    #[test]
+    fn engage_scales_with_income() {
+        let mut d = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
+        let Value::Object(p) = json!({"engage": "max(1200, 45 * income)"}) else { panic!() };
+        d.apply(&p).unwrap();
+        let e = d.engage.as_ref().unwrap();
+        let at = |income: f32| e.eval(&Force { income, ..Force::default() });
+        assert_eq!((at(10.0), at(40.0)), (1200.0, 1800.0));
+        assert!(e.names().is_empty());
+        let Value::Object(p) = json!({"engage": "2 * guns"}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert!(d.engage.as_ref().unwrap().names() == vec!["guns"]);
     }
 
     #[test]

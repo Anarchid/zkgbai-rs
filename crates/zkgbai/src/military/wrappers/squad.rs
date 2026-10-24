@@ -237,10 +237,15 @@ impl Squad {
         if self.fighters.is_empty() {
             return None;
         }
-        let rallied = (self.fighters.iter().filter_map(|id| fighters.get(id)))
-            .filter(|f| distance(f.get_pos(), lpos) < 350.0)
-            .count() as f32;
-        Some(rallied / self.fighters.len() as f32)
+        // Spotters go their own ways (see `taskforce::spotter`).
+        let members: Vec<_> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter(|f| self.shape.spot(def_id(f.unit)).is_none())
+            .collect();
+        if members.is_empty() {
+            return None;
+        }
+        let rallied = members.iter().filter(|f| distance(f.get_pos(), lpos) < 350.0).count() as f32;
+        Some(rallied / members.len() as f32)
     }
 
     pub fn is_rallied(&mut self, fighters: &mut FighterStore, nav: &mut Nav) -> bool {
@@ -381,11 +386,14 @@ impl Squad {
         if leader.is_dead() {
             return 0.0;
         }
-        let count = (self.fighters.len() + 1) as f32;
+        // Spotters go for repairs on their own (see `taskforce::spotter`).
+        let members: Vec<f32> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter(|f| self.shape.spot(def_id(f.unit)).is_none())
+            .map(|f| health_fraction(f.unit))
+            .collect();
         let leader_health = health_fraction(leader.unit);
-        let health = leader_health
-            + self.fighters.iter().filter_map(|id| fighters.get(id)).map(|f| health_fraction(f.unit)).sum::<f32>();
-        leader_health.min(health / count)
+        let health = leader_health + members.iter().sum::<f32>();
+        leader_health.min(health / (members.len() + 1) as f32)
     }
 
     pub fn get_shields(&self) -> f32 {
@@ -741,11 +749,20 @@ impl Squad {
 
     /// Taskforces kept to their slowest member: give the leader that
     /// limit whenever it changes (none while it is the slowest, or alone).
-    pub fn keep_pace(&mut self, fighters: &FighterStore) {
+    /// Only going in: forming, rallying or falling back, the leader takes
+    /// its own pace and the slower members catch up where it stops.
+    pub fn keep_pace(&mut self, fighters: &FighterStore, going_in: bool) {
         if self.shape.pace_slowest <= 0.0 {
             return;
         }
         let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        if !going_in {
+            if self.paced > 0.0 {
+                leader.execute_custom_command(cmd::WANTED_SPEED, &[self.pace(leader)], 0, NO_TIMEOUT);
+                self.paced = 0.0;
+            }
+            return;
+        }
         let slowest = (self.fighters.iter().filter_map(|id| fighters.get(id)))
             .filter_map(|f| f.unit.def())
             .map(|d| d.speed())
@@ -855,7 +872,8 @@ impl Squad {
         for id in &self.fighters {
             let Some(f) = fighters.get_mut(id) else { continue };
             let fpos = f.get_pos();
-            if distance(leader_pos, fpos) <= 600.0 {
+            // Spotters come back on their own (see `taskforce::spotter`).
+            if distance(leader_pos, fpos) <= 600.0 || self.shape.spot(def_id(f.unit)).is_some() {
                 continue;
             }
             // Have units that haven't rallied yet avoid enemies.
