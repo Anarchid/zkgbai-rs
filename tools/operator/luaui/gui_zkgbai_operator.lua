@@ -23,10 +23,16 @@
 -- Units ordered so are held by the operator (the AI leaves them alone) until
 -- released (panel button, or /luaui zkop release).
 --
+-- Levers: the panel's "levers" button swaps the log for the AI's settings an
+-- operator may turn while it plays (greed, build power, the army's line, the
+-- home defense's budget and tactics), as sliders, choices and switches drawn
+-- from the AI's own list of them.
+--
 -- Text commands (/luaui zkop ...): focus <team>, layer <name|none>,
 -- terrain <off|regions|holders> [tier], render <auto|screen|mesh>, release,
 -- build <unitdef> (at the mouse), fac <unitdef> [count], defend (at the
--- mouse), say <text>, note <text>, feature <name> on|off, toggle <what>.
+-- mouse), say <text>, note <text>, feature <name> on|off, toggle <what>,
+-- lever <name> <value|auto>.
 --
 -- The panel is a Chili window in Zero-K; without Chili it is drawn by hand,
 -- and without GL4 shaders the value map falls back to plain quads.
@@ -220,6 +226,7 @@ local flashes = {}  -- feedback marks on the ground: {x, z, t, color}
 local message, messageTime, messageBad
 
 local panel -- the Chili panel, if any (see below)
+local leversShown = false -- the panel shows the levers instead of the log
 
 local function say(text, bad)
 	message, messageTime, messageBad = text, clock(), bad
@@ -246,7 +253,8 @@ local function sortedPorts()
 	return ports
 end
 
-local function poll(inst, kind, period, path, handler)
+-- onError, if given, takes the errors (they do not count against the AI).
+local function poll(inst, kind, period, path, handler, onError)
 	local now = clock()
 	if inst.busy[kind] or (inst.due[kind] or 0) > now then
 		return
@@ -255,7 +263,9 @@ local function poll(inst, kind, period, path, handler)
 	inst.due[kind] = now + period
 	httpRequest(inst.port, "GET", path, nil, function(value, err)
 		inst.busy[kind] = false
-		if err then
+		if err and onError then
+			onError(err)
+		elseif err then
 			inst.fails = inst.fails + 1
 			inst.lastError = err
 		else
@@ -926,6 +936,14 @@ local function pollInstances()
 						inst.overlayDirty = true
 					end)
 				end
+				if leversShown and panel then
+					-- Before the AI's modules run, the levers are an error.
+					poll(inst, "levers", 2, "/call/levers", function(v)
+						inst.levers, inst.leverError, inst.leversChanged = v.levers, nil, true
+					end, function(err)
+						inst.leverError = err
+					end)
+				end
 				if segmentation ~= "off" or show.chokes then
 					-- The regions only when they changed (or the tier did).
 					poll(inst, "terrain", 6, terrainPath(false), function(v)
@@ -1103,6 +1121,68 @@ local function cycleFocus()
 	focus, focusChosen = cycle(ports, focus), true
 end
 
+--------------------------------------------------------------------------------
+-- Levers: the AI's settings an operator may turn (its `levers` tool)
+--------------------------------------------------------------------------------
+
+local function leverText(l, v)
+	if v == nil then
+		return "auto"
+	elseif l.kind == "switch" then
+		return v and "on" or "off"
+	elseif l.kind == "choice" then
+		return tostring(v)
+	elseif l.format == "percent" then
+		return format("%d%%", floor(v * 100 + 0.5))
+	elseif l.format == "count" then
+		return tostring(floor(v + 0.5))
+	end
+	return format("x%.2f", v)
+end
+
+-- A range lever's slider runs over log(value) when spaced by ratio.
+local function leverPos(l, v)
+	return l.log and math.log(v) or v
+end
+
+local function leverValue(l, pos)
+	local v = l.log and math.exp(pos) or pos
+	return max(l.min, min(l.max, floor(v / l.step + 0.5) * l.step))
+end
+
+local function turnLever(inst, name, value)
+	local label = name
+	for _, l in ipairs(inst.levers or {}) do
+		if l.name == name then
+			label = l.label
+		end
+	end
+	inst.leverSending = inst.leverSending or {}
+	inst.leverSending[name] = true
+	httpRequest(inst.port, "POST", "/call/lever", json.encode({name = name, value = value}), function(v, err)
+		inst.leverSending[name] = nil
+		inst.leversChanged = true
+		if err then
+			say(label .. ": " .. tostring(err), true)
+			return
+		end
+		for i, l in ipairs(inst.levers or {}) do
+			if l.name == v.name then
+				inst.levers[i] = v
+			end
+		end
+		say(label .. ": " .. leverText(v, v.value) .. (v.auto and " (auto)" or ""))
+	end)
+end
+
+local function showLevers(on)
+	leversShown = on
+	local inst = focused()
+	if inst then
+		inst.due.levers = 0
+	end
+end
+
 function widget:TextCommand(command)
 	local words = {}
 	for w in command:gmatch("%S+") do
@@ -1130,6 +1210,8 @@ function widget:TextCommand(command)
 		show[words[3]] = not show[words[3]]
 	elseif cmd == "release" then
 		releaseSelected()
+	elseif cmd == "levers" then
+		showLevers(not leversShown)
 	elseif not inst then
 		say("no ZKGBAI with the operator on found", true)
 	elseif cmd == "build" and words[3] then
@@ -1152,8 +1234,10 @@ function widget:TextCommand(command)
 		act(inst, "note", {text = rest, tag = "widget"}, "note")
 	elseif cmd == "feature" and words[3] then
 		act(inst, "feature", {name = words[3], off = words[4] ~= "on"}, "feature " .. words[3])
+	elseif cmd == "lever" and words[3] then
+		turnLever(inst, words[3], tonumber(words[4]) or words[4] or "auto")
 	else
-		say("zkop: focus <team> | layer <name> | terrain <off|regions|holders> [tier] | render <auto|screen|mesh> | toggle <what> | release | build <def> | defend | fac <def> [n] | say | note | feature <name> on|off", true)
+		say("zkop: focus <team> | layer <name> | terrain <off|regions|holders> [tier] | render <auto|screen|mesh> | toggle <what> | release | build <def> | defend | fac <def> [n] | say | note | feature <name> on|off | levers | lever <name> <value|auto>", true)
 	end
 	if panel then
 		panel.sync()
@@ -1548,17 +1632,204 @@ function makeChiliPanel()
 		config.tier = v
 	end, "62%", "36%")
 	p.focusButton = Chili.Button:New{
-		parent = window, x = 4, y = 196, width = "48%", height = 24, caption = "AI: -", objectOverrideFont = font,
+		parent = window, x = 4, y = 196, width = "32%", height = 24, caption = "AI: -", objectOverrideFont = font,
 		OnClick = {function() cycleFocus() end},
 	}
 	Chili.Button:New{
-		parent = window, x = "51%", y = 196, right = 4, height = 24, caption = "release held", objectOverrideFont = font,
+		parent = window, x = "34%", y = 196, width = "32%", height = 24, caption = "release held", objectOverrideFont = font,
 		OnClick = {releaseSelected},
+	}
+	p.viewButton = Chili.Button:New{
+		parent = window, x = "67%", y = 196, right = 4, height = 24, caption = "levers", objectOverrideFont = font,
+		tooltip = "The AI's settings you may turn while it plays, or back to its log",
+		OnClick = {function()
+			showLevers(not leversShown)
+			p.sync()
+		end},
 	}
 	p.message = Chili.Label:New{parent = window, x = 4, y = 224, right = 4, height = 16, caption = "", objectOverrideFont = font}
 	local scroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 244, right = 4, bottom = 4, horizontalScrollbar = false}
 	p.feed = Chili.TextBox:New{parent = scroll, x = 0, y = 0, right = 0, text = "", fontsize = 11}
 	p.scroll = scroll
+
+	-- The levers, in place of the log: a row per lever, built from the AI's
+	-- list of them (rebuilt when that changes shape). Chili's setters call
+	-- the change listeners too, so values shown from the AI are set under
+	-- `syncing`; a slider moved by hand is sent once the mouse lets go.
+	local leverScroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 244, right = 4, bottom = 4, horizontalScrollbar = false}
+	local leverRows, leverShape, leverPort = {}, nil, nil
+	local syncing = false
+	local moved = {} -- name -> {pos, t}: slid by hand, not sent yet
+	local GREY, WHITE = "\255\140\140\140", "\255\235\235\230"
+
+	local function caption(l, v, auto)
+		local text = leverText(l, v)
+		if auto and v ~= nil then
+			text = text .. " auto"
+		end
+		return WHITE .. l.label .. "  " .. (auto and GREY or "\255\30\200\140") .. text
+	end
+
+	local function shapeOf(levers)
+		local parts = {}
+		for i, l in ipairs(levers) do
+			parts[i] = l.name .. ":" .. l.kind .. (l.note and "+" or "")
+		end
+		return table.concat(parts, ",")
+	end
+
+	local function placeholder(text)
+		leverScroll:ClearChildren()
+		leverRows = {}
+		Chili.Label:New{parent = leverScroll, x = 0, y = 4, right = 0, height = 18, caption = GREY .. text, objectOverrideFont = font}
+	end
+
+	local function buildLevers(levers)
+		leverScroll:ClearChildren()
+		leverRows = {}
+		syncing = true
+		local y, group = 0, nil
+		for _, l in ipairs(levers) do
+			if l.group ~= group then
+				group = l.group
+				Chili.Label:New{parent = leverScroll, x = 0, y = y + 4, right = 0, height = 18, caption = GREY .. group, objectOverrideFont = font}
+				y = y + 22
+			end
+			local row = {lever = l}
+			row.label = Chili.Label:New{
+				parent = leverScroll, x = 0, y = y + 3, width = "50%", height = 20,
+				caption = l.label, tooltip = l.help, objectOverrideFont = font,
+			}
+			if l.kind == "range" then
+				row.bar = Chili.Trackbar:New{
+					parent = leverScroll, x = "51%", y = y + 2, right = 44, height = 20,
+					min = leverPos(l, l.min), max = leverPos(l, l.max), step = l.log and 0.01 or l.step,
+					value = leverPos(l, l.value or (l.min + l.max) / 2),
+					tooltipFunction = function(_, pos)
+						return leverText(l, leverValue(l, pos)) .. ": " .. l.help
+					end,
+					OnChange = {function(_, pos)
+						if not syncing then
+							moved[l.name] = {pos = pos, t = clock()}
+							row.label:SetCaption(caption(l, leverValue(l, pos), false))
+						end
+					end},
+				}
+				row.reset = Chili.Button:New{
+					parent = leverScroll, y = y, right = 0, width = 42, height = 24, caption = "auto",
+					tooltip = "Back to the AI's own setting", objectOverrideFont = font,
+					OnClick = {function()
+						local inst = focused()
+						if inst then
+							moved[l.name] = nil
+							turnLever(inst, l.name, "auto")
+						end
+					end},
+				}
+			elseif l.kind == "choice" then
+				row.box = Chili.ComboBox:New{
+					parent = leverScroll, x = "51%", y = y, right = 0, height = 24, items = l.options, selected = 1,
+					objectOverrideFont = font,
+					OnSelect = {function(_, i)
+						local inst = focused()
+						if not syncing and inst then
+							turnLever(inst, l.name, l.options[i])
+						end
+					end},
+				}
+			else
+				row.check = Chili.Checkbox:New{
+					parent = leverScroll, x = "51%", y = y + 2, right = 0, height = 20, caption = "", checked = l.value and true or false,
+					OnChange = {function(_, on)
+						local inst = focused()
+						if not syncing and inst then
+							turnLever(inst, l.name, on)
+						end
+					end},
+				}
+			end
+			y = y + 26
+			if l.note then
+				row.note = Chili.TextBox:New{parent = leverScroll, x = 4, y = y, right = 0, text = "", fontsize = 11}
+				y = y + 30
+			end
+			leverRows[l.name] = row
+		end
+		syncing = false
+	end
+
+	local function syncLevers(inst)
+		syncing = true
+		local sending = inst.leverSending or {}
+		for _, l in ipairs(inst.levers) do
+			local row = leverRows[l.name]
+			if row and not moved[l.name] and not sending[l.name] then
+				row.lever = l
+				row.label:SetCaption(caption(l, l.value, l.auto))
+				if row.bar then
+					local pos = l.value and leverPos(l, l.value) or (row.bar.min + row.bar.max) / 2
+					if math.abs(row.bar.value - pos) > 1e-4 then
+						row.bar:SetValue(pos)
+					end
+					row.reset:SetCaption(l.auto and (GREY .. "auto") or "auto")
+				elseif row.box then
+					for i = 1, #l.options do
+						if l.options[i] == l.value and row.box.selected ~= i then
+							row.box:Select(i)
+						end
+					end
+				elseif row.check and row.check.checked ~= (l.value and true or false) then
+					row.check:Toggle() -- (the older Chili has no SetToggle)
+				end
+				if row.note then
+					row.note:SetText(GREY .. (l.note or ""))
+				end
+			end
+		end
+		syncing = false
+	end
+
+	-- Every frame: send what was slid by hand once the mouse let go.
+	function p.flushLevers()
+		local inst = focused()
+		if not inst or next(moved) == nil then
+			return
+		end
+		local _, _, held = spGetMouseState()
+		if held then
+			return
+		end
+		for name, m in pairs(moved) do
+			if clock() - m.t > 0.25 then
+				moved[name] = nil
+				local row = leverRows[name]
+				if row then
+					turnLever(inst, name, leverValue(row.lever, m.pos))
+				end
+			end
+		end
+	end
+
+	local function updateLevers(inst)
+		if not inst.levers then
+			local text = inst.leverError and ("levers: " .. inst.leverError) or "asking the AI for its levers…"
+			if leverShape ~= text then
+				leverShape = text
+				placeholder(text)
+			end
+			return
+		end
+		local shape = shapeOf(inst.levers)
+		if shape ~= leverShape and next(moved) == nil then
+			leverShape = shape
+			buildLevers(inst.levers)
+			inst.leversChanged = true
+		end
+		if inst.leversChanged or leverPort ~= inst.port then
+			inst.leversChanged, leverPort = false, inst.port
+			syncLevers(inst)
+		end
+	end
 
 	local shownFeed, shownPort
 	function p.update()
@@ -1571,6 +1842,11 @@ function makeChiliPanel()
 		p.header:SetCaption(format("team %d · port %d · %s", inst.team, inst.port, st and st.state or "…"))
 		p.stats:SetText(statusLines(inst))
 		p.focusButton:SetCaption("AI: team " .. inst.team)
+		if leversShown then
+			updateLevers(inst)
+			shownFeed = nil
+			return
+		end
 		local feed = inst.feed
 		local last = feed[#feed]
 		local key = (last and last.f or -1) .. ":" .. #feed
@@ -1598,6 +1874,10 @@ function makeChiliPanel()
 		p.message:SetCaption((bad and "\255\230\100\100" or "\255\30\200\140") .. text)
 	end
 	function p.sync()
+		scroll:SetVisibility(not leversShown)
+		leverScroll:SetVisibility(leversShown)
+		p.viewButton:SetCaption(leversShown and "log" or "levers")
+		config.levers = leversShown
 		for key, box in pairs(p.checks) do
 			if box.checked ~= show[key] then
 				box:Toggle()
@@ -1619,6 +1899,7 @@ function makeChiliPanel()
 		p.save()
 		window:Dispose()
 	end
+	p.sync()
 	return p
 end
 
@@ -1751,6 +2032,7 @@ function widget:GetConfigData()
 		panel.save()
 	end
 	config.show, config.layer, config.segmentation, config.tier = show, layer, segmentation, segTier
+	config.levers = leversShown
 	return config
 end
 
@@ -1764,6 +2046,7 @@ function widget:SetConfigData(data)
 	layer = config.layer or layer
 	segmentation = config.segmentation or segmentation
 	segTier = config.tier or segTier
+	leversShown = config.levers and true or false
 end
 
 function widget:Initialize()
@@ -1805,9 +2088,12 @@ local function tick()
 	discover()
 	pollInstances()
 	pumpRequests()
-	if panel and clock() > nextPanelUpdate then
-		nextPanelUpdate = clock() + 0.5
-		panel.update()
+	if panel then
+		panel.flushLevers()
+		if clock() > nextPanelUpdate then
+			nextPanelUpdate = clock() + 0.5
+			panel.update()
+		end
 	end
 end
 
