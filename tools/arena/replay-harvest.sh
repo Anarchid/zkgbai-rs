@@ -25,6 +25,8 @@ OUT=$2
 VER=$(basename "$DEMO" | sed -E 's/.*_([0-9]{4}\.[0-9]{2}\.[0-9]{2})\.sdfz$/\1/')
 ENGINE="$HOME/.spring/engine/linux64/$VER/spring-headless"
 [ -f "$ENGINE" ] || { echo "no engine $VER for $DEMO" >&2; exit 2; }
+# Lobby-downloaded engines may lack +x (the lobby sets it on launch, too).
+[ -x "$ENGINE" ] || chmod +x "$ENGINE"
 mkdir -p "$OUT"
 WD="$OUT/wd"
 rm -rf "$WD"
