@@ -112,8 +112,30 @@ select, input[type=text], input[type=search], textarea {
 .chart .title { font-weight: 600; }
 .chart canvas { width: 100%; height: 92px; display: block; cursor: crosshair; }
 .key { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
-.inspector { padding: 8px 10px; }
-.inspector h2, .log h2, .console h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+.inspector, .levers { padding: 8px 10px; }
+.inspector h2, .log h2, .console h2, .levers h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+.levers h3 { font-size: 12px; font-weight: 600; color: var(--ink-2); margin: 10px 0 2px; }
+.levers h3:first-of-type { margin-top: 0; }
+.levers h2 .fold { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.levers h2 .fold::before { content: "▾"; color: var(--muted); font-size: 11px; }
+.levers h2 .fold:focus-visible { outline: 2px solid var(--ours); outline-offset: 2px; border-radius: 4px; }
+.levers.folded h2 { margin: 0; }
+.levers.folded h2 .fold::before { content: "▸"; }
+.levers.folded > :not(h2) { display: none; }
+.lever { padding: 3px 0; }
+.lever .top { display: flex; align-items: center; gap: 6px; min-height: 22px; }
+.lever .name { cursor: help; }
+.lever .val { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.lever .val.auto { color: var(--muted); font-weight: 400; }
+.lever .reset { padding: 0 6px; font-size: 11px; line-height: 18px; }
+.lever input[type=range] { width: 100%; margin: 2px 0 0; accent-color: var(--accent); }
+.lever.auto input[type=range] { accent-color: var(--muted); }
+.lever .ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: -2px; }
+.lever .note { color: var(--ink-2); font-size: 11px; overflow-wrap: anywhere; }
+.seg { display: inline-flex; margin-left: auto; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 1px 8px; font-size: 12px; }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; font-size: 12px; }
 .kv .k { color: var(--ink-2); }
 .kv .v { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
@@ -197,6 +219,7 @@ select, input[type=text], input[type=search], textarea {
 
   <aside class="side">
     <div class="tiles" id="tiles"></div>
+    <div class="card levers" id="levers"><h2>Levers</h2><div class="empty">Levers need a live game.</div></div>
     <div class="card chart" data-chart="metal">
       <div class="head"><span class="title">Metal</span><span class="legend"><span><i class="key" style="background:var(--ours)"></i>income</span><span><i class="key" style="background:var(--series-2)"></i>spent</span></span></div>
       <canvas></canvas>
@@ -268,9 +291,9 @@ const S = {
   live: false, run: null, map: null, ticks: [], snaps: [], events: [], lastFrame: 0, lastSeq: -1,
   liveSnap: null, cursor: 0, follow: true, playing: false,
   selected: new Set(), selSquad: null, selEnemy: null, selSpot: null,
-  overlay: null, tools: [], status: null,
+  overlay: null, tools: [], status: null, levers: null, leverError: null,
 };
-const dirty = { map: true, charts: true, log: true, tiles: true, inspector: true };
+const dirty = { map: true, charts: true, log: true, tiles: true, inspector: true, levers: true };
 const touch = (...k) => { for (const x of k) dirty[x] = true; };
 
 function resetStore() {
@@ -950,8 +973,163 @@ function renderInspector() {
   box.append(el('div', 'empty', 'Click a unit, enemy, squad or metal spot. Shift-drag to select several of ours.'));
 }
 
+// ---------------------------------------------------------------- levers
+// The AI's settings an operator may turn, drawn from their own description
+// (the `levers` tool): a slider per range, buttons per choice, a switch.
+const leverRows = new Map(); // name -> {row, set(lever)}
+const leverHeld = new Set(); // being dragged
+const leverSending = new Set(); // sent, not answered yet
+let leverShape = '';
+let leversOpen = true;
+try { leversOpen = localStorage.getItem('zkop.levers') !== 'folded'; } catch (e) { /* no storage */ }
+function leverHead() {
+  const h = el('h2');
+  const b = el('button', 'fold', 'Levers');
+  b.setAttribute('aria-expanded', String(leversOpen));
+  b.addEventListener('click', () => {
+    leversOpen = !leversOpen;
+    try { localStorage.setItem('zkop.levers', leversOpen ? 'open' : 'folded'); } catch (e) { /* no storage */ }
+    b.setAttribute('aria-expanded', String(leversOpen));
+    $('#levers').classList.toggle('folded', !leversOpen);
+  });
+  h.append(b);
+  return h;
+}
+function leverText(l, v) {
+  if (v === null || v === undefined) return 'auto';
+  if (l.kind === 'switch') return v ? 'on' : 'off';
+  if (l.kind === 'choice') return String(v);
+  if (l.format === 'percent') return Math.round(v * 100) + '%';
+  if (l.format === 'count') return String(Math.round(v));
+  return '×' + Number(v).toFixed(2);
+}
+const leverPos = (l, v) => (l.log ? Math.log(v) : v);
+function leverFromPos(l, p) {
+  const v = Math.round((l.log ? Math.exp(p) : p) / l.step) * l.step;
+  return Math.min(l.max, Math.max(l.min, Number(v.toFixed(4))));
+}
+async function turnLever(l, value) {
+  leverSending.add(l.name);
+  try {
+    const r = await call('lever', { name: l.name, value });
+    const i = S.levers ? S.levers.findIndex((x) => x.name === r.name) : -1;
+    if (i >= 0) S.levers[i] = r;
+    toast(`${l.label}: ${leverText(r, r.value)}${r.auto ? ' (auto)' : ''}`);
+  } catch (e) { toast(`${l.label}: ${e.message}`, true); }
+  leverSending.delete(l.name);
+  touch('levers');
+}
+function leverRow(l) {
+  const row = el('div', 'lever');
+  const top = el('div', 'top');
+  const name = el('span', 'name', l.label);
+  name.title = l.help;
+  top.append(name);
+  const note = el('div', 'note');
+  let set;
+  if (l.kind === 'range') {
+    const val = el('span', 'val');
+    const reset = el('button', 'reset', 'auto');
+    reset.title = "Back to the AI's own setting";
+    reset.addEventListener('click', () => turnLever(l, 'auto'));
+    top.append(val, reset);
+    const input = el('input');
+    Object.assign(input, { type: 'range', min: leverPos(l, l.min), max: leverPos(l, l.max), step: l.log ? 'any' : l.step });
+    input.setAttribute('aria-label', l.label);
+    input.addEventListener('input', () => {
+      leverHeld.add(l.name);
+      val.textContent = leverText(l, leverFromPos(l, Number(input.value)));
+      val.className = 'val';
+    });
+    input.addEventListener('change', () => turnLever(l, leverFromPos(l, Number(input.value))));
+    // A drag that ends where it began sends nothing: let go of it anyway.
+    for (const ev of ['pointerup', 'keyup', 'blur']) {
+      input.addEventListener(ev, () => setTimeout(() => { leverHeld.delete(l.name); touch('levers'); }, 250));
+    }
+    row.append(top, input);
+    if (l.ends && (l.ends[0] || l.ends[1])) {
+      const ends = el('div', 'ends');
+      ends.append(el('span', null, l.ends[0]), el('span', null, l.ends[1]));
+      row.append(ends);
+    }
+    set = (x) => {
+      input.value = x.value === null ? (Number(input.min) + Number(input.max)) / 2 : leverPos(x, x.value);
+      val.textContent = leverText(x, x.value) + (x.auto && x.value !== null ? ' · auto' : '');
+      val.className = x.auto ? 'val auto' : 'val';
+      reset.hidden = x.auto;
+    };
+  } else if (l.kind === 'choice') {
+    const seg = el('span', 'seg');
+    seg.setAttribute('role', 'group');
+    seg.setAttribute('aria-label', l.label);
+    const btns = l.options.map((o) => {
+      const b = el('button', null, o);
+      b.addEventListener('click', () => turnLever(l, o));
+      seg.append(b);
+      return b;
+    });
+    top.append(seg);
+    row.append(top);
+    set = (x) => btns.forEach((b, i) => b.setAttribute('aria-pressed', String(x.options[i] === x.value)));
+  } else {
+    const val = el('span', 'val');
+    const box = el('input');
+    box.type = 'checkbox';
+    box.setAttribute('aria-label', l.label);
+    box.addEventListener('change', () => turnLever(l, box.checked));
+    top.append(val, box);
+    row.append(top);
+    set = (x) => { box.checked = !!x.value; val.textContent = leverText(x, x.value); val.className = x.auto ? 'val auto' : 'val'; };
+  }
+  row.append(note);
+  return {
+    row,
+    set(x) {
+      set(x);
+      row.classList.toggle('auto', !!x.auto);
+      note.textContent = x.note || '';
+      note.hidden = !x.note;
+    },
+  };
+}
+function renderLevers() {
+  const box = $('#levers');
+  box.classList.toggle('folded', !leversOpen);
+  if (!S.live || !S.levers) {
+    const msg = S.live ? (S.leverError || 'waiting for the AI…') : 'Levers need a live game.';
+    if (leverShape !== 'none:' + msg) {
+      leverShape = 'none:' + msg;
+      leverRows.clear();
+      box.replaceChildren(leverHead(), el('div', 'empty', msg));
+    }
+    return;
+  }
+  const shape = S.levers.map((l) => l.name + ':' + l.kind).join(',');
+  if (shape !== leverShape) {
+    leverShape = shape;
+    leverRows.clear();
+    box.replaceChildren(leverHead());
+    let group = null;
+    for (const l of S.levers) {
+      if (l.group !== group) { group = l.group; box.append(el('h3', null, group)); }
+      const r = leverRow(l);
+      leverRows.set(l.name, r);
+      box.append(r.row);
+    }
+  }
+  for (const l of S.levers) {
+    const r = leverRows.get(l.name);
+    if (r && !leverHeld.has(l.name) && !leverSending.has(l.name)) r.set(l);
+  }
+}
+async function pollLevers() {
+  if (!S.live) return;
+  try { S.levers = (await call('levers')).levers; S.leverError = null; } catch (e) { S.leverError = e.message; }
+  touch('levers');
+}
+
 // ---------------------------------------------------------------- charts
-const charts = [...document.querySelectorAll('.chart')].map((c) => ({ kind: c.dataset.chart, canvas: c.querySelector('canvas'), hover: null, geom: null }));
+const charts =[...document.querySelectorAll('.chart')].map((c) => ({ kind: c.dataset.chart, canvas: c.querySelector('canvas'), hover: null, geom: null }));
 function chartSeries(kind) {
   if (kind === 'metal') return [{ name: 'income', color: colors.ours, get: (r) => r.m[1] }, { name: 'spent', color: colors.series2, get: (r) => r.m[2] }];
   if (kind === 'energy') return [{ name: 'income', color: colors.ours, get: (r) => r.e[1] }, { name: 'spent', color: colors.series2, get: (r) => r.e[2] }];
@@ -1217,6 +1395,8 @@ async function connectLive() {
   source.onerror = () => setConn('down', 'reconnecting');
   source.onopen = () => setConn('live', 'live');
   timers.push(setInterval(pollSnapshot, 1000));
+  pollLevers();
+  timers.push(setInterval(pollLevers, 2000));
   timers.push(setInterval(async () => { try { S.status = await call('status'); touch('tiles'); } catch (e) { /* paused */ } }, 5000));
 }
 async function pollSnapshot() {
@@ -1280,7 +1460,7 @@ function loadJournalText(text, name) {
   $('#callBtn').disabled = true;
   $('#toolDesc').textContent = 'Replaying a journal: tools act only on a live game.';
   if (bad) toast(`${bad} lines could not be read`, true);
-  touch('map', 'charts', 'log', 'tiles', 'inspector');
+  touch('map', 'charts', 'log', 'tiles', 'inspector', 'levers');
 }
 $('#openBtn').addEventListener('click', () => $('#file').click());
 $('#file').addEventListener('change', async (ev) => {
@@ -1337,6 +1517,7 @@ function frame(now) {
   if (dirty.log) { dirty.log = false; renderLog(); }
   if (dirty.tiles) { dirty.tiles = false; renderTiles(); renderMeta(); }
   if (dirty.inspector) { dirty.inspector = false; renderInspector(); }
+  if (dirty.levers) { dirty.levers = false; renderLevers(); }
   renderTimeline();
   requestAnimationFrame(frame);
 }

@@ -33,6 +33,7 @@ pub mod actions;
 pub mod board;
 pub mod bus;
 pub mod hud;
+pub mod levers;
 pub mod mcpl;
 pub mod server;
 pub mod tools;
