@@ -109,9 +109,7 @@ const SORTIE_RECENT: i32 = 90;
 /// A cloaking stakeout follows an enemy at least this share of its speed
 /// (standing again, it vanishes)...
 const SPEED_PARITY: f32 = 0.95;
-/// ...one that cannot cloak only with this much speed in hand, and only
-/// where it can stand outside the enemy's sight inside its own.
-const SPEED_MARGIN: f32 = 1.1;
+/// ...one that cannot cloak does not follow at all.
 /// Outside an enemy's sight by this much.
 const SIGHT_CLEAR: f32 = 50.0;
 
@@ -125,9 +123,14 @@ const START_WORTH: f32 = 20.0;
 const START_RADIUS: f32 = 900.0;
 
 /// With this many stakeouts lost within [`LOSS_RECALL`] frames, no more
-/// are asked for.
+/// are asked for...
 const LOSS_CAP: usize = 4;
 const LOSS_RECALL: i32 = 30 * 60 * 5;
+/// ...and none within this many frames of the last loss: the lane that
+/// killed the picket is still hot.
+const REPLACE_DELAY: i32 = 30 * 90;
+/// A commander's drones reach this far beyond its own weapons.
+const DRONE_REACH: f32 = 400.0;
 
 /// Frames between journal summaries (the analysts read the posts' manning
 /// and the lookers' targets from them).
@@ -252,6 +255,8 @@ fn soft(e: &Enemy) -> bool {
 fn keep_from(e: &Enemy, cloaks: bool) -> f32 {
     if e.is_static {
         e.threat_radius + TURRET_MARGIN
+    } else if e.is_com {
+        e.threat_radius + DRONE_REACH
     } else if cloaks {
         e.ud.map_or(130.0, |d| d.decloak_distance().max(1.0)).max(130.0) + DECLOAK_MARGIN
     } else {
@@ -356,7 +361,7 @@ impl Ai {
             return 0;
         }
         let s = &self.stakeouts;
-        if s.losses.len() >= LOSS_CAP {
+        if s.losses.len() >= LOSS_CAP || s.losses.back().is_some_and(|&l| self.frame - l < REPLACE_DELAY) {
             return 0;
         }
         (s.wanted(self.frame) as i32 - s.count() as i32).max(0)
@@ -670,9 +675,11 @@ impl Ai {
         let mut follow_to = sight - FOLLOW_TO;
         let mut follows = speed >= SPEED_PARITY * espeed;
         if !cloaks {
+            // Seen whenever it is in the enemy's sight, and 120 health: it
+            // gets out of that sight and does not follow.
             back_to = back_to.max(elos + SIGHT_CLEAR);
             follow_to = sight - 40.0;
-            follows = speed >= SPEED_MARGIN * espeed && follow_to >= elos + SIGHT_CLEAR;
+            follows = false;
         }
         let follows = follows && !e.is_static && keep + 150.0 <= follow_to;
         let new = m.bogey != Some(eid);
