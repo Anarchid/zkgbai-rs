@@ -112,6 +112,10 @@ pub struct Gun {
     pub through_ground: bool,
 }
 
+/// Zero-K sets every cannon's gravity (`myGravity` in weapondefs_post.lua)
+/// to 120 elmos/s², whatever the map's.
+pub const ZK_CANNON_GRAVITY: f32 = 120.0;
+
 impl Gun {
     /// Whether a target at `(x, z)` with its aim point at absolute height `y`
     /// is within reach (`CWeapon::TestRange`), give or take `margin` elmos.
@@ -120,6 +124,50 @@ impl Gun {
         let range = self.range + margin;
         let reach = (range * range - dh * dh).max(0.0);
         (x - self.x).powi(2) + (z - self.z).powi(2) <= reach
+    }
+
+    /// How far out (2D) the gun reaches a target standing `dh` above its
+    /// muzzle: a sphere for straight shots (`CWeapon::GetRange2D`), and for
+    /// a cannon's arc the engine's ballistic range (`CCannon::GetStaticRange2D`,
+    /// Cannon.cpp): farther downhill, less uphill, the height difference
+    /// scaled by `height_mod` and, below 100 down, boosted by the gun's
+    /// `heightBoostFactor` as the engine derives it. `range` is the gun's
+    /// nominal range, so a perched gun's gain reads against it. The sphere
+    /// (`reaches`) stays what the raid model was calibrated on.
+    pub fn reach_2d(&self, dh: f32) -> f32 {
+        let h = dh * self.height_mod;
+        match self.flight {
+            Flight::Arc { speed, gravity } if speed > 0.0 && gravity > 0.0 && self.range > 0.0 => {
+                let speed2d = speed / std::f32::consts::SQRT_2;
+                let sq = speed2d * speed2d;
+                let g = -gravity;
+                // The 45-degree range the shot could have, and the share of
+                // it the def allows (`rangeBoostFactor`), with the engine's
+                // height boost for shooting down.
+                let physical = speed * speed / gravity;
+                let rb = (self.range / physical).min(1.0);
+                let hb = (2.0 - rb) / rb.sqrt();
+                let h = if h < -100.0 {
+                    h * hb
+                } else if h < 0.0 {
+                    h * (1.0 + (hb - 1.0) * (-h / 100.0))
+                } else {
+                    h
+                };
+                let root = sq + 2.0 * g * h;
+                if root < 0.0 {
+                    return 0.0;
+                }
+                rb * (sq + speed2d * root.sqrt()) / -g
+            }
+            _ => (self.range * self.range - h * h).max(0.0).sqrt(),
+        }
+    }
+
+    /// [`reaches`](Self::reaches) by the ballistic reach of [`reach_2d`](Self::reach_2d).
+    pub fn reaches_ballistic(&self, x: f32, z: f32, y: f32, margin: f32) -> bool {
+        let reach = self.reach_2d(y - self.muzzle) + margin;
+        reach > 0.0 && (x - self.x).powi(2) + (z - self.z).powi(2) <= reach * reach
     }
 }
 
@@ -370,6 +418,43 @@ mod tests {
             avoids_friends: true,
             through_ground: false,
         }
+    }
+
+    /// A Crab's gauss (units/spidercrabe.lua): range 600, 290 elmos/s, the
+    /// engine's cannon default heightMod 0.8, ZK's cannon gravity.
+    fn crab(muzzle: f32) -> Gun {
+        Gun {
+            x: 0.0,
+            z: 0.0,
+            muzzle,
+            range: 600.0,
+            height_mod: 0.8,
+            aoe: 200.0,
+            body: 60.0,
+            flight: Flight::Arc { speed: 290.0, gravity: ZK_CANNON_GRAVITY },
+            avoids_friends: false,
+            through_ground: false,
+        }
+    }
+
+    #[test]
+    fn a_cannon_reaches_farther_from_a_perch() {
+        // The design note's table (CRAB-SPIRE.md section 1, from Cannon.cpp):
+        // 600 flat, 708 from 150 up, 738 from 200, 792 from 300.
+        let g = crab(0.0);
+        for (up, want) in [(0.0, 600.0), (50.0, 635.0), (150.0, 708.0), (200.0, 738.0), (300.0, 792.0), (400.0, 841.0)] {
+            let got = g.reach_2d(-up);
+            assert!((got - want).abs() <= 3.0, "{up} up: {got} for {want}");
+        }
+        // Uphill it reaches less, and the sphere is what a beam gets.
+        assert!(g.reach_2d(150.0) < 500.0);
+        let beam = Gun { flight: Flight::Line, height_mod: 1.0, ..crab(0.0) };
+        assert!((beam.reach_2d(-150.0) - (600.0f32 * 600.0 - 150.0 * 150.0).sqrt()).abs() < 0.5);
+        // Perched 200 up, a target 700 out is in reach by the arc, not by
+        // the sphere.
+        let perched = crab(200.0);
+        assert!(perched.reaches_ballistic(700.0, 0.0, 0.0, 0.0));
+        assert!(!perched.reaches(700.0, 0.0, 0.0, 0.0));
     }
 
     #[test]
