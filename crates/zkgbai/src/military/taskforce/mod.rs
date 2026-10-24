@@ -206,6 +206,10 @@ impl Ai {
                 self.cb.log(&line);
             }
         }
+        let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base());
+        if let Some(b) = b {
+            self.cb.log(&format!("taskforce: depth axis ({:.0}, {:.0}) to ({:.0}, {:.0})", a.x, a.z, b.x, b.z));
+        }
         let on: Vec<&str> = doctrines.iter().filter(|d| d.enabled).map(|d| d.name.as_str()).collect();
         let off: Vec<&str> = doctrines.iter().filter(|d| !d.enabled).map(|d| d.name.as_str()).collect();
         self.cb.log(&format!("doctrines: on {}; off {}", on.join(", "), off.join(", ")));

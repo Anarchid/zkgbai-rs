@@ -71,6 +71,9 @@ pub struct Force {
     pub core_value: f32,
     /// By role: name, how many, their metal.
     pub roles: Vec<(String, usize, f32)>,
+    /// Our metal income, as assault squads count it (`income`; 0 where a
+    /// want is read without it).
+    pub income: f32,
 }
 
 impl Force {
@@ -115,12 +118,12 @@ impl Expr {
         &self.src
     }
 
-    /// The names it reads (other than `cores` and `value`), for checking
+    /// The names it reads (other than `cores`, `value` and `income`), for checking
     /// against the doctrine's roles.
     pub fn names(&self) -> Vec<&str> {
         fn walk<'a>(n: &'a Node, out: &mut Vec<&'a str>) {
             match n {
-                Node::Name(s) if s != "cores" && s != "value" && s != "core" => out.push(s),
+                Node::Name(s) if !matches!(s.as_str(), "cores" | "value" | "core" | "income") => out.push(s),
                 Node::Of(_, s) if s != "core" && s != "cores" => out.push(s),
                 Node::Call(_, args) => args.iter().for_each(|a| walk(a, out)),
                 Node::Neg(a) | Node::Not(a) => walk(a, out),
@@ -162,6 +165,7 @@ fn eval(n: &Node, f: &Force) -> f32 {
     match n {
         Node::Num(x) => *x,
         Node::Name(s) if s == "value" => f.value(),
+        Node::Name(s) if s == "income" => f.income,
         Node::Name(s) => f.count(s).unwrap_or(0.0),
         Node::Of(false, s) => f.count(s).unwrap_or(0.0),
         Node::Of(true, s) => f.value_of(s).unwrap_or(0.0),
@@ -402,7 +406,7 @@ mod tests {
     use super::*;
 
     fn force(cores: usize, core_value: f32) -> Force {
-        Force { cores, core_value, roles: vec![("guns".into(), 7, 2100.0), ("eraser".into(), 0, 0.0)] }
+        Force { cores, core_value, roles: vec![("guns".into(), 7, 2100.0), ("eraser".into(), 0, 0.0)], income: 0.0 }
     }
 
     fn want(src: &str, f: &Force) -> usize {

@@ -217,6 +217,9 @@ pub struct Doctrine {
     pub aim: Aim,
     /// A force engages once worth this much metal (and rallied)...
     pub engage_value: f32,
+    /// ...or, given, worth more than this, over the force and our `income`
+    /// (`"max(1200, 45 * income)"`, as assault squads scale)...
+    pub engage: Option<Expr>,
     /// ...or once it has mustered this many seconds (0: never; it waits
     /// for its value).
     pub muster: f32,
@@ -265,6 +268,7 @@ impl Doctrine {
             pace_slowest: 0.0,
             aim: Aim::Artillery,
             engage_value: 0.0,
+            engage: None,
             muster: 60.0,
             retreat_health: 0.6,
             shields_low: 0.5,
@@ -327,6 +331,7 @@ impl Doctrine {
             "pace_slowest": self.pace_slowest,
             "aim": self.aim.name(),
             "engage_value": self.engage_value,
+            "engage": self.engage.as_ref().map(Expr::source),
             "muster": self.muster,
             "retreat_health": self.retreat_health,
             "shields_low": self.shields_low,
@@ -373,6 +378,13 @@ impl Doctrine {
                 "pace_slowest" => self.pace_slowest = num(k, v, 0.0, 1.0)?,
                 "aim" => self.aim = Aim::parse(&string(k, v)?)?,
                 "engage_value" => self.engage_value = num(k, v, 0.0, 1e6)?,
+                "engage" => {
+                    self.engage = match v {
+                        Value::Null => None,
+                        Value::String(s) => Some(Expr::parse(s).map_err(|e| format!("engage: {e}"))?),
+                        _ => return Err("'engage' must be an expression (a string) or null".into()),
+                    }
+                }
                 "muster" => self.muster = num(k, v, 0.0, 3600.0)?,
                 "retreat_health" => self.retreat_health = num(k, v, 0.0, 1.0)?,
                 "shields_low" => self.shields_low = num(k, v, 0.0, 1.0)?,
@@ -433,6 +445,11 @@ impl Doctrine {
                 }
             }
         }
+        for n in self.engage.as_ref().map_or(Vec::new(), Expr::names) {
+            if !role_names.contains(n) {
+                return Err(format!("doctrine {}: engage reads '{n}', no role", self.name));
+            }
+        }
         if self.shields_low > self.shields_ok {
             return Err(format!("doctrine {}: shields_low above shields_ok", self.name));
         }
@@ -472,6 +489,7 @@ impl Doctrine {
             cores_per_force: self.cores_per_force,
             pool_with_allies: self.pool_with_allies,
             engage_value: self.engage_value,
+            engage: self.engage.clone(),
             muster: self.muster,
             retreat_health: self.retreat_health,
             shields_low: self.shields_low,
@@ -518,6 +536,7 @@ pub struct Shape {
     pub cores_per_force: u32,
     pub pool_with_allies: bool,
     pub engage_value: f32,
+    pub engage: Option<Expr>,
     pub muster: f32,
     pub retreat_health: f32,
     pub shields_low: f32,
@@ -549,6 +568,7 @@ impl Default for Shape {
             cores_per_force: 1,
             pool_with_allies: false,
             engage_value: 0.0,
+            engage: None,
             muster: 0.0,
             retreat_health: 0.6,
             shields_low: 0.5,
@@ -866,6 +886,20 @@ mod tests {
         assert_eq!((mace.want(&maced), bolas.want(&maced)), (Some(1), Some(0)));
         let two = force(&["hoverarty", "hoverarty", "hoverriot"]);
         assert_eq!((mace.want(&two), bolas.want(&two)), (Some(2), Some(2)));
+    }
+
+    #[test]
+    fn engage_scales_with_income() {
+        let mut d = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
+        let Value::Object(p) = json!({"engage": "max(1200, 45 * income)"}) else { panic!() };
+        d.apply(&p).unwrap();
+        let e = d.engage.as_ref().unwrap();
+        let at = |income: f32| e.eval(&Force { income, ..Force::default() });
+        assert_eq!((at(10.0), at(40.0)), (1200.0, 1800.0));
+        assert!(e.names().is_empty());
+        let Value::Object(p) = json!({"engage": "2 * guns"}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert!(d.engage.as_ref().unwrap().names() == vec!["guns"]);
     }
 
     #[test]

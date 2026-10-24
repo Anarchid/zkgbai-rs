@@ -109,6 +109,8 @@ pub struct GraphManager {
     enemy_center: Vec3,
     map_center: Vec3,
     ally_base: Vec3,
+    /// The middle of the enemy start box's metal spots (NULLPOS without one).
+    enemy_base: Vec3,
     start_pos: Vec3,
 }
 
@@ -167,6 +169,7 @@ impl GraphManager {
             enemy_center: NULLPOS,
             map_center: Vec3::new((w * 4) as f32, 0.0, (h * 4) as f32),
             ally_base: NULLPOS,
+            enemy_base: NULLPOS,
             start_pos: NULLPOS,
         }
     }
@@ -258,6 +261,7 @@ impl GraphManager {
     /// Initial guesses from the start boxes, and water map detection.
     fn do_initial_inference(&mut self) {
         let map = self.cb.map();
+        let (mut ex, mut ez, mut en) = (0.0, 0.0, 0);
         for i in 0..self.metal_spots.len() {
             let pos = self.metal_spots[i].position;
             if !self.is_water_map && map.elevation_at(pos.x, pos.z) < 10.0 {
@@ -273,7 +277,13 @@ impl GraphManager {
             if self.cb.call_lua_rules(&checkpos).as_deref() == Some("1") {
                 self.set_hostile(i);
                 self.set_neutral(i);
+                ex += pos.x;
+                ez += pos.z;
+                en += 1;
             }
+        }
+        if en > 0 {
+            self.enemy_base = Vec3::xz(ex / en as f32, ez / en as f32);
         }
         self.calc_ally_base();
     }
@@ -618,6 +628,11 @@ impl GraphManager {
 
     pub fn get_start_pos(&self) -> Vec3 {
         self.start_pos
+    }
+
+    /// The middle of the enemy start box's metal spots, if it had any.
+    pub fn get_enemy_base(&self) -> Option<Vec3> {
+        (self.enemy_base != NULLPOS).then_some(self.enemy_base)
     }
 
     pub fn get_links(&self) -> &[Link] {

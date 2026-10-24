@@ -364,6 +364,45 @@ impl Ai {
         r.want(&force).is_some_and(|w| force.roles.get(role).is_some_and(|x| x.1 < w))
     }
 
+    /// The metal force `sid` must be worth to go in: its doctrine's `engage`
+    /// over the force and our income (as assault squads count it), else
+    /// its `engage_value`.
+    fn squad_engage_threshold(&self, sid: SquadId) -> f32 {
+        let Some(q) = self.squads.get(sid) else { return f32::INFINITY };
+        let Some(e) = q.shape.engage.as_ref() else { return q.shape.engage_value };
+        let tf = &self.taskforces;
+        let Some(d) = tf.doctrine(&q.shape.doctrine) else { return q.shape.engage_value };
+        let units = q.everyone().filter_map(|id| self.fighters.get(&id));
+        let mut force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
+        let terr = self.graph.territory_fraction;
+        force.income = self.eco.effective_income / (1.0 + self.merged_allies as f32 * terr * terr);
+        e.eval(&force)
+    }
+
+    /// How far `p` lies along the line from our start to the enemy's start
+    /// box (0 ours, 1 theirs; see `taskforce: depth axis` in the log).
+    fn taskforce_depth(&self, p: Vec3) -> Option<f32> {
+        let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base()?);
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let len2 = dx * dx + dz * dz;
+        (len2 > 0.0 && a != NULLPOS).then(|| ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2)
+    }
+
+    /// The median depth of our ground fighters outside force `sid`, and how
+    /// many they are.
+    fn squad_army_depth(&self, sid: SquadId) -> Option<(f32, usize)> {
+        let mut ds: Vec<f32> = (self.fighters.values())
+            .filter(|f| f.squad != Some(sid) && f.unit.health() > 0.0)
+            .filter(|f| f.unit.def().is_some_and(|d| !d.is_able_to_fly()))
+            .filter_map(|f| self.taskforce_depth(f.get_pos()))
+            .collect();
+        if ds.is_empty() {
+            return None;
+        }
+        ds.sort_by(f32::total_cmp);
+        Some((ds[ds.len() / 2], ds.len()))
+    }
+
     /// A unit of `options` (what a factory builds) that a force is short of,
     /// for a role with `produce`: rolled at its `produce` chance, the first
     /// that comes up; with the doctrine and role, for the log.
@@ -842,7 +881,7 @@ impl Ai {
             let mustered = shape.muster > 0.0 && (self.frame - s.formed) as f32 >= shape.muster * 30.0;
             let leader = s.get_leader(&self.fighters);
             let engaging = s.engaging;
-            let worth = metal_value > shape.engage_value || mustered;
+            let worth = metal_value > self.squad_engage_threshold(sid) || mustered;
             let led = leader.filter(|l| shape.is_core(l.def().map(|d| d.id())));
             // Being rallied lets it go in; engaged, only a doctrine that
             // regroups breaks off when its members scatter.
@@ -937,11 +976,16 @@ impl Ai {
             s.metal_value,
             s.rally_fraction(&self.fighters).map_or("-".to_owned(), |r| format!("{:.0}%", 100.0 * r))
         );
+        let pace = if s.paced() > 0.0 { format!("{:.0}", s.paced()) } else { "free".to_owned() };
+        let pos = s.get_pos(&self.fighters);
+        let threshold = self.squad_engage_threshold(sid);
+        let depth = self.taskforce_depth(pos).map_or("-".to_owned(), |d| format!("{d:.2}"));
+        let army = self.squad_army_depth(sid).map_or("-".to_owned(), |(d, n)| format!("{d:.2} (n {n})"));
         let line = match engage_at {
             Some(t) => format!(
-                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {}; target ({:.0}, {:.0})",
+                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {pace}; to go {threshold:.0}; \
+                 depth {depth}, our army {army}; target ({:.0}, {:.0})",
                 if first { " first" } else { " again" },
-                if s.paced() > 0.0 { format!("{:.0}", s.paced()) } else { "free".to_owned() },
                 t.x,
                 t.z
             ),
