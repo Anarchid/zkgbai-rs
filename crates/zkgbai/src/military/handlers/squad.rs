@@ -902,7 +902,11 @@ impl Ai {
             let mustered = shape.muster > 0.0 && (self.frame - s.formed) as f32 >= shape.muster * 30.0;
             let leader = s.get_leader(&self.fighters);
             let engaging = s.engaging;
-            let worth = metal_value > self.squad_engage_threshold(sid) || mustered;
+            // Going in takes the threshold; engaged, a force stays in above
+            // `engage_value` (the same, without an `engage` expression), as
+            // an attacking assault squad does.
+            let threshold = self.squad_engage_threshold(sid);
+            let worth = mustered || metal_value > if engaging { shape.engage_value.min(threshold) } else { threshold };
             let led = leader.filter(|l| shape.is_core(l.def().map(|d| d.id())));
             // Being rallied lets it go in; engaged, only a doctrine that
             // regroups breaks off when its members scatter.

@@ -218,7 +218,8 @@ pub struct Doctrine {
     /// A force engages once worth this much metal (and rallied)...
     pub engage_value: f32,
     /// ...or, given, worth more than this, over the force and our `income`
-    /// (`"max(1200, 45 * income)"`, as assault squads scale)...
+    /// (`"min(2500, max(1200, 45 * income))"`, as assault squads complete);
+    /// engaged, it then stays in while worth more than `engage_value`...
     pub engage: Option<Expr>,
     /// ...or once it has mustered this many seconds (0: never; it waits
     /// for its value).
