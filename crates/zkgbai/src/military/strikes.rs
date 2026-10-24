@@ -121,7 +121,10 @@ const COOLDOWN_NEAR: f32 = 500.0;
 const P_SEEN: f32 = 0.8;
 const P_RADAR: f32 = 0.7;
 const P_CROSS: f32 = 0.6;
-const P_CONE: f32 = 0.45;
+/// A single bearing's comb walk: 0 since ab1 (2026-10-24), where 24 such
+/// strikes killed 4 Phantoms and lost 13,710 metal (11 wiped) against the
+/// seen fix's 6 of 9 for 170; a fix with no chance is not considered.
+const P_CONE: f32 = 0.0;
 
 /// Enemies within this far of the fix guard it (the target's own power
 /// does not count: it is what the wave is for).
@@ -549,6 +552,9 @@ impl Ai {
     /// Weigh a strike on `target` (or an unseen one of `kind`) fixed by
     /// `fix`, and launch it when the gate opens.
     fn strikes_consider(&mut self, target: Option<i32>, kind: &'static str, fix: Fix) {
+        if fix.p_kill() <= 0.0 {
+            return;
+        }
         self.strikes_setup();
         let frame = self.frame;
         let at = fix.pos();
@@ -1016,9 +1022,11 @@ mod tests {
         // Two Glaives there: wiped before the kill.
         let two = odds(&six[..2], 560.0, 750.0, P_SEEN, 1, &[REAVER]);
         assert!(two.p_kill < 0.3 && !go(two, MARGIN), "{two:?}");
-        // Three Glaives at a lone Phantom: an easy go even on a bearing.
+        // Three Glaives at a lone Phantom: an easy go on a crossing; a
+        // single bearing is never considered (P_CONE 0 since ab1).
         let glaives = [c(1, 65.0, 5.0, 100.0), c(2, 65.0, 6.0, 100.0), c(3, 65.0, 7.0, 100.0)];
-        assert!(go(odds(&glaives, 560.0, 750.0, P_CONE, 1, &[]), MARGIN));
+        assert!(go(odds(&glaives, 560.0, 750.0, P_CROSS, 1, &[]), MARGIN));
+        assert!(!go(odds(&glaives, 560.0, 750.0, P_CONE, 1, &[]), MARGIN));
         // A Blitz at a Lance: 800 up.
         assert!(go(odds(&[c(1, 300.0, 9.0, 200.0)], 1000.0, 1100.0, P_SEEN, 1, &[]), MARGIN));
     }
