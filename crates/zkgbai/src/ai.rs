@@ -54,9 +54,12 @@ const OFF_BY_DEFAULT: [&str; 7] = ["pairs", "currency", "permanence", "mexporc",
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
+/// An option carried empty (a loaded save keeps the slot's options, blank)
+/// falls through to the environment.
 fn dev_features(cb: Callback) -> BTreeSet<String> {
     let list = |key: &str, var: &str| -> BTreeSet<String> {
         cb.option(key)
+            .filter(|v| !v.trim().is_empty())
             .or_else(|| std::env::var(var).ok())
             .map(|v| v.split(',').map(|f| f.trim().to_owned()).filter(|f| !f.is_empty()).collect())
             .unwrap_or_default()
@@ -72,6 +75,7 @@ fn dev_features(cb: Callback) -> BTreeSet<String> {
 /// operator's `modules` tool).
 fn muted_modules(cb: Callback) -> Vec<String> {
     cb.option("mute")
+        .filter(|v| !v.trim().is_empty())
         .or_else(|| std::env::var("ZKGBAI_MUTE").ok())
         .map(|v| v.split(',').map(|m| m.trim().to_owned()).filter(|m| !m.is_empty()).collect())
         .unwrap_or_default()

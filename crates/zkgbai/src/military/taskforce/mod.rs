@@ -212,7 +212,8 @@ impl Ai {
                 d.enabled = false;
             }
         }
-        let option = self.cb.option("doctrines").or_else(|| std::env::var("ZKGBAI_DOCTRINES").ok());
+        let option = (self.cb.option("doctrines").filter(|v| !v.trim().is_empty()))
+            .or_else(|| std::env::var("ZKGBAI_DOCTRINES").ok());
         if let Some(v) = option.filter(|v| !v.trim().is_empty()) {
             let text = if v.trim_start().starts_with('{') {
                 Ok(v.clone())
