@@ -182,6 +182,11 @@ impl Ai {
         }
         self.retreat_handler.retreating_units.insert(unit.id());
         self.squad_remove_from_squad(unit);
+        // A taskforce leaves its leaver's squad set; healed, it must be
+        // assigned again.
+        if let Some(f) = self.fighters.get_mut(&unit.id()) {
+            f.squad = None;
+        }
     }
 
     pub fn retreat_remove_unit(&mut self, unit: Unit) {
