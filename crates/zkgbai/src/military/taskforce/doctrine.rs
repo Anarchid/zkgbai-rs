@@ -391,6 +391,10 @@ pub struct Doctrine {
     /// Siege forces: the perch raised under the leading core once parked
     /// (the Crab spire); none for guns that stand on the ground.
     pub perch: Option<Perch>,
+    /// Siege forces with a perch: a new core is claimed only while a perch
+    /// site is known for it (else it fights as the army would have it, a
+    /// loner, until one is); false: every core is claimed.
+    pub claim_with_site: bool,
 }
 
 impl Doctrine {
@@ -427,6 +431,7 @@ impl Doctrine {
             wait_army: false,
             engage_screen: false,
             perch: None,
+            claim_with_site: false,
         }
     }
 
@@ -497,6 +502,7 @@ impl Doctrine {
             "wait_army": self.wait_army,
             "engage_screen": self.engage_screen,
             "perch": self.perch.as_ref().map(Perch::to_json),
+            "claim_with_site": self.claim_with_site,
         })
     }
 
@@ -556,6 +562,7 @@ impl Doctrine {
                 "produce_cores" => self.produce_cores = num(k, v, 0.0, 1000.0)? as u32,
                 "wait_army" => self.wait_army = flag(k, v)?,
                 "engage_screen" => self.engage_screen = flag(k, v)?,
+                "claim_with_site" => self.claim_with_site = flag(k, v)?,
                 "perch" => {
                     self.perch = match v {
                         Value::Null => None,
@@ -1241,8 +1248,12 @@ mod tests {
         assert!(e.perch.is_none());
         let Value::Object(bad) = json!({"perch": {"size": 1}}) else { panic!() };
         assert!(d.clone().apply(&bad).is_err());
-        // The natural dial, one change: off in the seed, on by a patch.
-        assert!(d.perch.as_ref().unwrap().natural.is_none());
+        // The natural and claim dials, one change each: off in the seed, on by a patch.
+        assert!(d.perch.as_ref().unwrap().natural.is_none() && !d.claim_with_site);
+        let mut c = d.clone();
+        let Value::Object(patch) = json!({"claim_with_site": true}) else { panic!() };
+        c.apply(&patch).unwrap();
+        assert!(c.claim_with_site);
         let mut n = d.clone();
         let Value::Object(patch) = json!({"perch": {"natural": {"min_height": 120}}}) else { panic!() };
         n.apply(&patch).unwrap();

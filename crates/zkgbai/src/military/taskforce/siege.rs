@@ -1283,6 +1283,44 @@ impl Ai {
         }
     }
 
+    /// Whether a new unit of type `name` is claimed by its siege doctrine:
+    /// not while the doctrine's `claim_with_site` holds and no perch site
+    /// is known for a force led by it from where it stands (it then goes
+    /// the army's way, a loner, until one is; said once per unit).
+    pub(crate) fn siege_claims(&mut self, unit: Unit, name: &str) -> bool {
+        let tf = &self.taskforces;
+        let Some(d) = (tf.doctrines.iter())
+            .find(|d| d.enabled && d.aim == Aim::Siege && d.claim_with_site && d.is_core(name, &tf.classes))
+        else {
+            return true;
+        };
+        let Some(perch) = d.perch.clone() else { return true };
+        let min_reach = perch.min_reach as usize;
+        let up = perch.height + AIM_ABOVE;
+        let statics = self.siege_statics(up);
+        let known = if statics.is_empty() {
+            false
+        } else {
+            let reach = Self::siege_reach(unit, perch.height);
+            let map = self.cb.map();
+            let size = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+            let picks = self.taskforces.siege.sites.sites(unit.pos(), reach, &statics, PERCH_STANDOFF, size);
+            picks.iter().any(|&c| {
+                in_reach(c, reach, &statics).0 >= min_reach
+                    && self.siege_perch_site_ok(c, &perch)
+                    && self.siege_fits_by(c, unit, &statics, PERCH_STANDOFF)
+            })
+        };
+        if !known {
+            self.log(&format!(
+                "taskforce: a {name} fights alone: no perch site known for a {} force yet (unit {})",
+                d.name,
+                unit.id()
+            ));
+        }
+        known
+    }
+
     /// Where force `sid` would stand: its station as last picked (for the
     /// `wait_army` dial).
     pub(crate) fn siege_station(&self, sid: SquadId) -> Option<Vec3> {

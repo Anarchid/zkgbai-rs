@@ -806,7 +806,7 @@ impl Ai {
         // Units a doctrine takes form taskforces (see `taskforce`): the
         // shield ball, and the forces other doctrines make.
         self.taskforce_load();
-        if self.taskforces.routes(name) {
+        if self.taskforces.routes(name) && self.siege_claims(unit, name) {
             let mut f = Fighter::new(unit, cost, team);
             f.shield_mob = true;
             self.squad_add_taskforce_member(f);
