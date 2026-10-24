@@ -22,7 +22,9 @@ use crate::military::jumps::Jumps;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
+use crate::military::stakeouts::Stakeouts;
 use crate::military::scouts::Scouts;
+use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
@@ -46,7 +48,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
 /// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
-const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "permanence", "mexporc"];
+/// `airtempo` (an air factory weighed up by the clock and the map's size)
+/// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
+const OFF_BY_DEFAULT: [&str; 7] = ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
@@ -125,6 +129,7 @@ pub struct Ai {
     pub nukes: Nukes,
     pub missiles: Missiles,
     pub sweeps: Sweeps,
+    pub strikes: Strikes,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
@@ -139,6 +144,7 @@ pub struct Ai {
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
+    pub stakeouts: Stakeouts,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -235,6 +241,7 @@ impl SkirmishAi for Ai {
             nukes: Nukes::default(),
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
+            strikes: Strikes::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),
@@ -245,6 +252,7 @@ impl SkirmishAi for Ai {
             jumps: Jumps::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
+            stakeouts: Stakeouts::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,
@@ -487,7 +495,7 @@ impl Ai {
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),
-            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm")
+            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm" | "snipers" | "lances")
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;

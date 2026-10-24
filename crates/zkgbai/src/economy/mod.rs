@@ -159,6 +159,9 @@ pub struct EconomyManager {
     /// (see `planning::NEW_FAC_INCOME`).
     pub new_fac_at: Option<i32>,
     pub new_fac_due: bool,
+    /// Whether an air factory was taken for firefighters or for tempo (see
+    /// `planning::is_air_requisition`): once a game.
+    pub air_asked: bool,
     /// Terraform commands issued (for their tags).
     pub terraform_tags: i32,
     /// Development aid: the terraform test, when on.
@@ -352,6 +355,7 @@ impl EconomyManager {
             requisition_logged: None,
             new_fac_at: None,
             new_fac_due: false,
+            air_asked: false,
             terraform_tags: 0,
             terraform_test: None,
             ditch: None,

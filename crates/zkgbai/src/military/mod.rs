@@ -16,12 +16,14 @@ pub mod missiles;
 pub mod nukes;
 pub mod precision;
 pub mod puppies;
+pub mod stakeouts;
 pub mod qrf;
 pub mod radar;
 pub mod raid_test;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod strike_test;
+pub mod strikes;
 pub mod sweeps;
 pub mod taskforce;
 pub mod tasks;
@@ -514,9 +516,11 @@ impl Ai {
         self.guard("firefighters.update", |ai| ai.firefighters_update(frame));
         self.guard("jumps.update", |ai| ai.jumps_update(frame));
         self.guard("puppies.update", |ai| ai.puppies_update(frame));
+        self.guard("stakeouts.update", |ai| ai.stakeouts_update(frame));
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
         self.guard("precision.update", |ai| ai.precision_update(frame));
         self.guard("water.update", |ai| ai.water_update(frame));
+        self.guard("strikes.update", |ai| ai.strikes_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
         self.guard("raid_test.update", |ai| ai.raid_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
@@ -581,6 +585,11 @@ impl Ai {
         // Raids on our economy call for air (see `firefighters`).
         if self.firefighters_claims(name) {
             self.firefighters_add(unit);
+            return;
+        }
+        // Scouts picket the lanes to our economy (see `stakeouts`).
+        if self.stakeouts_claims(name) {
+            self.stakeouts_add(unit);
             return;
         }
 
@@ -682,6 +691,10 @@ impl Ai {
         if !self.war.new_units.remove(&unit.id()) {
             return;
         }
+        // Posted sniper teams stay posted (see `strike_test`).
+        if self.strike_test_posted() {
+            return;
+        }
         // Staged raids are squads already (see `raid_test`).
         if self.raid_test_claims(unit.id()) || self.qrf_claims(unit.id()) {
             return;
@@ -770,6 +783,13 @@ impl Ai {
             self.squad_add_taskforce_member(f);
             return;
         }
+        // Dirtbags the strikes ordered (see `strikes_production`) that no
+        // stakeout took raid solo until a strike conscripts them.
+        if name == strikes::DIRTBAG {
+            unit.set_move_state(1, 0);
+            self.raider_add_solo_raider(Fighter::new_raider(unit, cost, team));
+            return;
+        }
         let classes = &self.unit_classes;
         if classes.small_raiders.contains(name) {
             if name == "amphbomb" {
@@ -856,6 +876,7 @@ impl Ai {
             return;
         }
         self.qrf_asset_pressed(unit, attacker);
+        self.strikes_unit_damaged(unit, attacker, dir, weapon);
 
         // check if the damaged unit is on fire.
         let on_fire = h.rules_param_float("on_fire", 0.0) > 0.0;
@@ -935,6 +956,7 @@ impl Ai {
         self.firefighters_unit_destroyed(unit, attacker);
         self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
+        self.strikes_unit_destroyed(unit, attacker);
 
         // (Before the retreat handler forgets whether it was retreating.)
         self.impalers_remove_unit(unit);
@@ -947,6 +969,7 @@ impl Ai {
         self.jaeger_remove_unit(unit);
         self.jumps_remove_unit(unit);
         self.puppies_remove_unit(unit);
+        self.stakeouts_remove_unit(unit, attacker);
 
         if is_nuke {
             self.war.has_nuke = false;
@@ -1056,6 +1079,7 @@ impl Ai {
             }
             war.targets.insert(id, e);
         }
+        self.strikes_enemy_seen(enemy);
     }
 
     pub fn war_enemy_finished(&mut self, enemy: Unit) {
@@ -1124,6 +1148,7 @@ impl Ai {
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
+        self.strikes_enemy_destroyed(enemy, attacker);
         self.impalers_enemy_destroyed(enemy, attacker);
         self.taskforce_enemy_destroyed(enemy, attacker);
         self.raid_test_enemy_destroyed(enemy);

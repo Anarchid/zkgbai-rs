@@ -37,11 +37,16 @@ use crate::util::{distance, kgb_rand};
 const PERIOD: i32 = 15;
 
 /// Losses are remembered this long.
-const MEMORY: i32 = 30 * 300;
+pub(crate) const MEMORY: i32 = 30 * 300;
 
 /// Firefighters are wanted from this much loss weight in the memory (a
 /// mex counts 1, an energy building 0.5; to Scythes, double).
-const WANTED_AT: f32 = 2.0;
+pub(crate) const WANTED_AT: f32 = 2.0;
+
+/// A loss goes unanswered when the nearest home defense team was further
+/// than this (elmos), or there was none: the ground answer was not there
+/// in time, which is what aircraft buy (see `eco_air_fire`).
+pub(crate) const UNANSWERED_DIST: f32 = 1500.0;
 
 /// Raiders within this far of a loss, seen within this many frames, were
 /// the raid.
@@ -166,6 +171,10 @@ struct Loss {
     /// Health of the raid seen about it.
     raid_hp: f32,
     scythes: usize,
+    /// No home defense team within `UNANSWERED_DIST` when it died.
+    unanswered: bool,
+    /// What it cost, plus a mex's income over the memory.
+    metal: f32,
 }
 
 /// A group of enemies near our mexes.
@@ -384,7 +393,22 @@ impl Ai {
             raid_hp = attacker.and_then(|a| a.def()).map_or(DEFAULT_RAID_HP, |d| d.health());
         }
         let weight = weight * if scythes > 0 { 2.0 } else { 1.0 };
-        self.firefighters.losses.push(Loss { frame, weight, raid_hp, scythes });
+        let nearest =
+            (self.qrf_teams().values()).map(|ids| distance(self.qrf_team_pos(ids).0, pos)).min_by(f32::total_cmp);
+        let unanswered = nearest.is_none_or(|d| d > UNANSWERED_DIST);
+        let mut metal = def.cost(self.metal);
+        if name == "staticmex" {
+            let income = self.graph.get_closest_spot(pos).map_or(0.0, |s| s.value);
+            metal += income * MEMORY as f32 / 30.0;
+        }
+        self.firefighters.losses.push(Loss { frame, weight, raid_hp, scythes, unanswered, metal });
+    }
+
+    /// Of the losses remembered, those no home defense team was near: their
+    /// weight and their metal (see `UNANSWERED_DIST`).
+    pub(crate) fn firefighters_unanswered(&self) -> (f32, f32) {
+        let ls = self.firefighters.losses.iter().filter(|l| l.unanswered);
+        ls.fold((0.0, 0.0), |(w, m), l| (w + l.weight, m + l.metal))
     }
 
     pub fn firefighters_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {

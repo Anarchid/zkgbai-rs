@@ -165,6 +165,9 @@ pub struct Qrf {
     pub members: BTreeMap<i32, Member>,
     pub tracks: BTreeMap<i32, Track>,
     pub groups: Vec<RaidGroup>,
+    /// Raids too strong for the force to take on: no targets, but a loss
+    /// to them still counts (see `qrf_live_filter`).
+    pub heavies: Vec<RaidGroup>,
     pub assets: Vec<Asset>,
     pub grid: Option<Grid>,
     /// Types a contact may be, slowest first: armed mobile ground units.
