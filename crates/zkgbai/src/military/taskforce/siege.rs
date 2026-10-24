@@ -162,6 +162,9 @@ struct SiegeForce {
     /// The leading core told to stand exactly on its perch site: when.
     on_site_sent: i32,
     perch: Option<PerchState>,
+    /// When a perch site was last refused for want of one (said once a
+    /// minute, not every pass).
+    refused_at: i32,
 }
 
 /// What a gun was doing at the last conduct, since when (the frame of the
@@ -511,17 +514,22 @@ impl Ai {
                 return (Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z), k, v, "the best perch site");
             }
             let near = statics.iter().filter(|s| s.range > 0.0).count();
-            self.op_emit(
-                "siege-perch",
-                json!({"event": "refused", "squad": sid, "reason": "no site", "candidates": picks.len(), "armed_statics": near,
-                       "min_reach": perch.min_reach, "reach_up": reach}),
-            );
-            self.log(&format!(
-                "taskforce: a {} finds no perch site: {} candidates about {near} armed statics reach fewer than {} or stand in reach; it stands flat",
-                self.defs.name_of(leader),
-                picks.len(),
-                perch.min_reach
-            ));
+            let frame = self.frame;
+            let said = self.taskforces.siege.forces.get(&sid).is_some_and(|f| frame - f.refused_at < REPORT);
+            if !said {
+                self.taskforces.siege.forces.entry(sid).or_default().refused_at = frame;
+                self.op_emit(
+                    "siege-perch",
+                    json!({"event": "refused", "squad": sid, "reason": "no site", "candidates": picks.len(), "armed_statics": near,
+                           "min_reach": perch.min_reach, "reach_up": reach}),
+                );
+                self.log(&format!(
+                    "taskforce: a {} finds no perch site: {} candidates about {near} armed statics reach fewer than {} or stand in reach; it stands flat",
+                    self.defs.name_of(leader),
+                    picks.len(),
+                    perch.min_reach
+                ));
+            }
             // Flat it is, then: the flat statics and reach.
             let flat = self.siege_statics(0.0);
             let reach0 = Self::siege_reach(leader, 0.0);
