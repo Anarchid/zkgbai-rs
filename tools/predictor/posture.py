@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Posture labels for fights (round 3 predeclaration input): what each side did.
 
+Rule v2 (after the Analyst's hand check of v1, HANDCHECK.md): mobile ground
+units only; denominator = every engaged mobile armed unit (died = did not
+withdraw); tail end + 10 s; enemy wiped or enemy left first => commit; no rows =>
+not part of the posture; fights under 2 s unresolved; whole/piece spread 10 s.
 Per closed fight (10 s window) and side, from the unit rows (1 s cadence while a
 unit is in combat) of its initial units:
   For each unit: d(t) = distance to the enemy side's centroid at the fight start.
@@ -32,8 +36,9 @@ import split
 import units as unitmod
 
 WITHDRAW = 200.0   # elmos of ground given up after the closest approach
-SYNC = 5           # seconds: withdrawals within this of each other are "together"
-TAIL = 90          # frames after the last event still part of the fight
+SYNC = 10          # seconds: withdrawals within this of each other are "together"
+TAIL = 300         # frames after the last event still part of the fight (10 s)
+MIN_DUR = 60       # frames: shorter fights are unresolved
 UD = None
 FIGHTS = None
 
@@ -49,25 +54,36 @@ def _init(fights_path):
 
 
 def side_posture(side, enemy_c, uidx, start, end):
+    """-> (label, n_engaged, n_dead, n_withdrew, first_loss_f, first_withdraw_f)"""
     armed = [r for r in side if r["armed"]]
     if not armed:
         return "noarmed", 0, 0, 0, None, None
-    dead = [r for r in armed if r["died"]]
-    alive = [r for r in armed if not r["died"]]
-    if not alive:
-        return "wiped", len(armed), len(dead), 0, None, None
-    first_loss = min((r["kill_f"] for r in dead), default=None)
-    withdrew = []
-    seen = 0
-    for r in alive:
+    mobile = []
+    for r in armed:
+        ud = UD.get(r["def"])
+        if ud is None or ud.static:
+            continue
+        if ud.canfly:
+            continue
+        mobile.append(r)
+    if not mobile:
+        kinds = {("air" if (UD.get(r["def"]) and UD.get(r["def"]).canfly) else "static") for r in armed}
+        return ("strike" if kinds == {"air"} else "static"), 0, sum(r["died"] for r in armed), 0, None, None
+    if end - start < MIN_DUR:
+        return "unresolved", 0, 0, 0, None, None
+    engaged, withdrew = [], []
+    for r in mobile:
         tr = uidx.get(r["uid"])
-        if tr is None:
+        has_rows = False
+        if tr is not None:
+            f, x, z = tr
+            m = (f >= start) & (f <= end + TAIL)
+            has_rows = bool(m.any())
+        if not (has_rows or r["died"]):
             continue
-        f, x, z = tr
-        m = (f >= start) & (f <= end + TAIL)
-        if not m.any():
+        engaged.append(r)
+        if r["died"] or not has_rows:
             continue
-        seen += 1
         f, x, z = f[m], x[m], z[m]
         d = np.hypot(x - enemy_c[0], z - enemy_c[1])
         imin = int(np.argmin(d))
@@ -77,9 +93,13 @@ def side_posture(side, enemy_c, uidx, start, end):
         grown = np.flatnonzero(d[imin:] - dmin >= WITHDRAW)
         if len(grown) and d[-1] - dmin >= WITHDRAW and d[-1] > rng + 100:
             withdrew.append(int(f[imin + grown[0]]) - start)
-    if seen == 0:
-        return "unresolved", len(armed), len(dead), 0, first_loss, None
-    share = len(withdrew) / len(alive)
+    if not engaged:
+        return "unresolved", 0, 0, 0, None, None
+    dead = [r for r in engaged if r["died"]]
+    first_loss = min((r["kill_f"] for r in dead), default=None)
+    if len(dead) == len(engaged):
+        return "wiped", len(engaged), len(dead), 0, first_loss, None
+    share = len(withdrew) / len(engaged)
     tw = min(withdrew) if withdrew else None
     if share < 0.2:
         lab = "commit"
@@ -87,7 +107,7 @@ def side_posture(side, enemy_c, uidx, start, end):
         lab = "retreat-whole"
     else:
         lab = "retreat-piece"
-    return lab, len(armed), len(dead), len(withdrew), first_loss, tw
+    return lab, len(engaged), len(dead), len(withdrew), first_loss, tw
 
 
 def unit_tracks(d):
@@ -118,8 +138,18 @@ def game(path):
         ca, cb = cent(fi["A"]), cent(fi["B"])
         if ca is None or cb is None:
             continue
-        pa = side_posture(fi["A"], cb, uidx, fi["start"], fi["end"])
-        pb = side_posture(fi["B"], ca, uidx, fi["start"], fi["end"])
+        pa = list(side_posture(fi["A"], cb, uidx, fi["start"], fi["end"]))
+        pb = list(side_posture(fi["B"], ca, uidx, fi["start"], fi["end"]))
+        # rule 4: a side whose enemy was wiped, or left first, committed by definition
+        def enemy_gone(own, foe):
+            if foe[0] == "wiped":
+                return True
+            return foe[0] in ("retreat-whole", "retreat-piece") and own[5] is not None and foe[5] is not None and foe[5] < own[5]
+        oa, ob = pa[0], pb[0]
+        if oa in ("retreat-whole", "retreat-piece") and enemy_gone(pa, pb):
+            pa[0] = "commit"
+        if ob in ("retreat-whole", "retreat-piece") and enemy_gone(pb, pa):
+            pb[0] = "commit"
         def timing(p):
             lab, n, nd, nw, fl, tw = p
             if tw is None:
@@ -130,7 +160,7 @@ def game(path):
         rows.append({"game": fi["game"], "fid": fi["fid"], "series": series, "split": split.split_of(fi["game"], series),
                      "nA": pa[1], "nB": pb[1], "postureA": pa[0], "postureB": pb[0], "timingA": timing(pa), "timingB": timing(pb),
                      "withdrewA": pa[3], "withdrewB": pb[3], "yA": fi["yA"], "yB": fi["yB"], "dur_s": (fi["end"] - fi["start"]) / 30.0,
-                     "multi": int(pa[1] >= 3 and pb[1] >= 3)})
+                     "multi": int(pa[1] >= 3 and pb[1] >= 3), "rawA": oa, "rawB": ob})
     return rows
 
 
