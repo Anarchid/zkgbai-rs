@@ -414,7 +414,11 @@ impl Ai {
     /// How far `p` lies along the line from our start to the enemy's start
     /// box (0 ours, 1 theirs; see `taskforce: depth axis` in the log).
     fn taskforce_depth(&self, p: Vec3) -> Option<f32> {
-        let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base()?);
+        // After a save is loaded the start position is not set (the
+        // loaded-game guard skips the opening): the ally center stands in.
+        let start = self.graph.get_start_pos();
+        let a = if start == NULLPOS { self.graph.get_ally_center() } else { start };
+        let b = self.graph.get_enemy_base()?;
         let (dx, dz) = (b.x - a.x, b.z - a.z);
         let len2 = dx * dx + dz * dz;
         (len2 > 0.0 && a != NULLPOS).then(|| ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2)
