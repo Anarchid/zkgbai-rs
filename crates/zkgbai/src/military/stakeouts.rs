@@ -175,8 +175,11 @@ struct Stakeout {
     last_tick: i32,
     /// Frame of the last move order.
     moved: i32,
-    /// Cloaks for free when it stands still (the Flea).
+    /// Cloaks for free when it stands still (the Flea: ZK's idle cloak,
+    /// a gadget, not the engine's `canCloak`).
     cloaks: bool,
+    /// Our own decloak radius: an enemy this close uncloaks us.
+    decloak: f32,
 }
 
 /// A gate to picket.
@@ -253,15 +256,15 @@ fn soft(e: &Enemy) -> bool {
 
 /// How close an enemy may come to a picket: a turret shoots a moving
 /// picket within its range; a mobile enemy cannot see a cloaked one
-/// standing, so only its coming within decloak distance matters; a picket
-/// that cannot cloak stays out of weapon range.
-fn keep_from(e: &Enemy, cloaks: bool) -> f32 {
+/// standing, so only its coming within our decloak radius (`cloaks`)
+/// matters; a picket that cannot cloak stays out of weapon range.
+fn keep_from(e: &Enemy, cloaks: Option<f32>) -> f32 {
     if e.is_static {
         e.threat_radius + TURRET_MARGIN
     } else if e.is_com {
         e.threat_radius + DRONE_REACH
-    } else if cloaks {
-        e.ud.map_or(130.0, |d| d.decloak_distance().max(1.0)).max(130.0) + DECLOAK_MARGIN
+    } else if let Some(decloak) = cloaks {
+        decloak + DECLOAK_MARGIN
     } else {
         (e.threat_radius + RANGE_MARGIN).max(KEEP_MIN)
     }
@@ -319,10 +322,21 @@ impl Ai {
                 sortie: None,
                 last_tick: frame - PERIOD,
                 moved: 0,
-                cloaks: def.is_able_to_cloak() && def.cloak_cost() <= 0.0,
+                cloaks: def.custom_param("idle_cloak").is_some() || (def.is_able_to_cloak() && def.cloak_cost() <= 0.0),
+                decloak: Some(def.decloak_distance()).filter(|&d| d > 0.0).unwrap_or(130.0),
             },
         );
         self.stakeouts.stats.claimed += 1;
+        if self.stakeouts.stats.claimed == 1 {
+            self.log(&format!(
+                "stakeouts: first picket {} (sight {:.0}, speed {:.0}, cloaks when still: {}, decloak {:.0})",
+                self.defs.name(def),
+                def.los_radius(),
+                def.speed(),
+                self.stakeouts.members[&unit.id()].cloaks,
+                self.stakeouts.members[&unit.id()].decloak
+            ));
+        }
     }
 
     pub fn stakeouts_remove_unit(&mut self, unit: Unit, attacker: Option<Unit>) {
@@ -512,7 +526,7 @@ impl Ai {
             return;
         }
         let (unit, p, sight, speed, def, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.speed, m.def, m.duty);
-        let (cloaks, look, bogey) = (m.cloaks, m.look, m.bogey);
+        let (cloaks, look, bogey) = (m.cloaks.then_some(m.decloak), m.look, m.bogey);
 
         // The nearest armed enemy that could shoot us, else the nearest
         // mobile one in or near our sight (the one we shadow a while
@@ -667,10 +681,12 @@ impl Ai {
     /// follow it if we are as fast, else let it go.
     fn stakeouts_shadow(&mut self, id: i32, eid: i32, frame: i32) {
         let Some(e) = self.war.targets.get(&eid) else { return };
-        let (epos, espeed, ename) = (e.position, e.speed(), e.def_name.clone());
+        // (`Enemy::speed` is elmos per frame; ours per second.)
+        let (epos, espeed, ename) = (e.position, e.speed() * 30.0, e.def_name.clone());
         let elos = e.ud.map_or(0.0, |d| d.los_radius());
         let Some(m) = self.stakeouts.members.get(&id) else { return };
-        let (p, sight, speed, def, cloaks, moved) = (m.f.get_pos(), m.sight, m.speed, m.def, m.cloaks, m.moved);
+        let (p, sight, speed, def, moved) = (m.f.get_pos(), m.sight, m.speed, m.def, m.moved);
+        let cloaks = m.cloaks.then_some(m.decloak);
         let d = distance(p, epos);
         let keep = keep_from(e, cloaks);
         // Back off to the edge of our sight, or farther if its reach leaves
@@ -679,7 +695,7 @@ impl Ai {
         let mut back_to = (sight - BACK_TO).max(keep + 150.0);
         let mut follow_to = sight - FOLLOW_TO;
         let mut follows = speed >= SPEED_PARITY * espeed;
-        if !cloaks {
+        if cloaks.is_none() {
             // Seen whenever it is in the enemy's sight, and 120 health: it
             // gets out of that sight and does not follow.
             back_to = back_to.max(elos + SIGHT_CLEAR);
