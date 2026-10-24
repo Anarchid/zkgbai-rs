@@ -16,8 +16,9 @@
 //! picks as well.
 //!
 //! Each pass logs what the force's guns reach: `taskforce: the D force
-//! (squad N, state) reaches K known, I identified, V visible` (known: with
-//! a position, radar dots too; only when it is some).
+//! (squad N, state) reaches K known, I identified, V visible, M markable`
+//! (known: with a position, radar dots too; markable: identified and in
+//! sight, or a building; only when some is known).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -229,7 +230,7 @@ impl Ai {
     fn taskforce_log_reach(&mut self, sid: SquadId, doctrine: &str, state: &str, guns: &[(i32, Unit)]) {
         let reach: Vec<(springai::Vec3, f32)> =
             guns.iter().filter_map(|(_, u)| u.weapon(0).map(|w| (u.pos(), w.range() + REACH))).collect();
-        let (mut known, mut identified, mut visible) = (0, 0, 0);
+        let (mut known, mut identified, mut visible, mut markable) = (0, 0, 0, 0);
         for e in self.war.targets.values().filter(|e| !e.is_dead && e.position != NULLPOS && !e.can_fly()) {
             if !reach.iter().any(|&(p, r)| distance(p, e.position) <= r) {
                 continue;
@@ -237,11 +238,12 @@ impl Ai {
             known += 1;
             identified += usize::from(e.identified);
             visible += usize::from(e.visible);
+            markable += usize::from(e.identified && (e.visible || e.is_static));
         }
         if known > 0 {
             self.log(&format!(
                 "taskforce: the {doctrine} force (squad {sid}, {state}) reaches {known} known, {identified} identified, \
-                 {visible} visible"
+                 {visible} visible, {markable} markable"
             ));
         }
     }
