@@ -53,8 +53,11 @@ pub const AT_STATION: f32 = 60.0;
 /// leader is farther than `PARK_LEAVE` (a nudge is not a move).
 const PARK: f32 = 200.0;
 const PARK_LEAVE: f32 = 320.0;
-/// How far short of its target the wrapper stops a leader.
-const SHORT: f32 = 135.0;
+
+/// The way to a station is looked at every this many elmos: none of it may
+/// be under a known defense (a gun cannot walk through a fort to stand
+/// behind it).
+const WAY_STEP: f32 = 100.0;
 
 /// A station lies this far beyond the reach of every enemy static we know
 /// of (the Analyst's gate asks for 100).
@@ -64,9 +67,11 @@ const STANDOFF: f32 = 120.0;
 const RANGE_MARGIN: f32 = 60.0;
 
 /// Stations are looked for about the statics worth most, this many, at
-/// these shares of the guns' reach in this many directions.
+/// these shares of the guns' reach in this many directions (the leader
+/// stops up to 135 short of its station, see `Squad::taskforce_set_target`,
+/// so the rings leave that much reach to spare).
 const STATION_TARGETS: usize = 16;
-const STATION_SHARES: [f32; 2] = [0.92, 0.78];
+const STATION_SHARES: [f32; 2] = [0.85, 0.72];
 const STATION_DIRS: usize = 16;
 
 /// The guns spread this far about the station, each at its own spot.
@@ -226,11 +231,24 @@ impl Ai {
         stands_off(p, statics, STANDOFF) && self.war.view(leader.def()).get_porc_threat(p) <= 0.0
     }
 
-    /// Whether the guns can stand at `p`: safe, and reachable from where
-    /// the leader is.
+    /// Whether the guns can stand at `p`: safe, reachable from where the
+    /// leader is, and the straight way there under no known defense.
     fn siege_fits(&self, p: Vec3, leader: Unit, statics: &[Static]) -> bool {
         self.siege_safe(p, leader, statics)
             && leader.def().is_none_or(|d| reaches(self.reach_terrain(), d, leader.pos(), p, AT_STATION))
+            && self.siege_way_clear(leader.pos(), p, leader)
+    }
+
+    /// Whether the straight way from `from` to `to` keeps out of every known
+    /// defense's reach.
+    fn siege_way_clear(&self, from: Vec3, to: Vec3, leader: Unit) -> bool {
+        let view = self.war.view(leader.def());
+        let d = distance(from, to);
+        let steps = (d / WAY_STEP).ceil().max(1.0) as usize;
+        (1..steps).all(|k| {
+            let f = k as f32 / steps as f32;
+            view.get_porc_threat(Vec3::xz(from.x + f * (to.x - from.x), from.z + f * (to.z - from.z))) <= 0.0
+        })
     }
 
     /// The station of force `sid` led by `leader`, and whether the force
@@ -247,9 +265,7 @@ impl Ai {
             .filter(|s| in_reach(s.pos, reach, &statics).0 > 0)
             .map(|s| (s.pos, s.deployed));
         let station = match kept {
-            Some((s, deployed)) => {
-                return (Self::siege_walk(pos, s), distance(pos, s) > if deployed { PARK_LEAVE } else { PARK });
-            }
+            Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
             None => {
                 let (s, k, v, how) = self.siege_pick(sid, leader, reach, &statics);
                 let old = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos);
@@ -283,14 +299,7 @@ impl Ai {
                 s
             }
         };
-        (Self::siege_walk(pos, station), distance(pos, station) > PARK)
-    }
-
-    /// Where the wrapper is told to take the leader so that it stops at the
-    /// station: the wrapper stops a leader `SHORT` before its target (see
-    /// `Squad::taskforce_set_target`), so the target is that far past it.
-    fn siege_walk(from: Vec3, station: Vec3) -> Vec3 {
-        if distance(from, station) < 1.0 { station } else { get_directional_point(station, from, -SHORT) }
+        (station, distance(pos, station) > PARK)
     }
 
     /// A station for force `sid`: the best candidate the guns can reach
