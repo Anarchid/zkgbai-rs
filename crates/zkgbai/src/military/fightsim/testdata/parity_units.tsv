@@ -1,0 +1,14 @@
+# unit specs for the parity cases: speed in elmos per frame; weapons name:type:range:reload:salvo:damage
+def	cls	cost	health	speed	mobile	weapons
+cloakassault	medium	350	2500	1.7	1	cloakassault_lightning:LightningCannon:340:2.2:1:230
+cloakraid	small	65	230	3.85	1	cloakraid_emg:Cannon:185:0.3:3:10.5
+cloakriot	medium	210	820	1.75	1	cloakriot_warrior_weapon:Cannon:270:0.5:3:45
+cloakskirm	medium	90	400	2.8	1	cloakskirm_bot_rocket:MissileLauncher:455:3.5:1:180
+hoverskirm	medium	220	660	2.2	1	hoverskirm_missile:MissileLauncher:440:10:2:320
+shieldassault	small	175	960	2	1	shieldassault_thud_weapon:Cannon:280:3.9:1:180
+shieldraid	small	75	350	3.1	1	shieldraid_laser:LaserCannon:232:0.1:1:8.5
+shieldriot	small	250	1200	2	1	shieldriot_blast:Cannon:300:0.93:1:30
+shieldskirm	medium	125	520	1.8	1	shieldskirm_storm_rocket:MissileLauncher:530:7:1:330
+staticmex	static	85	560	0	0	
+turretlaser	static	90	785	0	0	turretlaser_laser:BeamLaser:460:0.1:1:7.5
+vehraid	medium	130	480	3.7	1	vehraid_heatray:LaserCannon:262:0.1:1:30

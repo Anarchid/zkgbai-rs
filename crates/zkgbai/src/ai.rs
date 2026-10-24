@@ -38,6 +38,10 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// losing fewer; `currency` (the danger of a job on an issue's crew priced
 /// as the worker's expected loss, and the crew holding where it pays) lost
 /// its mirrors 17-23 twice where the issue clients alone won 25-15.
+/// `fightsim`: attacking squads fall back on the fight predictor's verdict
+/// (`military::fightsim`) instead of the threat map's; its first arm pending.
+/// The predictor itself runs in shadow in every game (its verdicts logged,
+/// not acted on) unless `fightshadow` is disabled.
 /// `permanence` (the interception planner keeps unseen enemy groups 45 s,
 /// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
@@ -50,7 +54,8 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
 /// `airtempo` (an air factory weighed up by the clock and the map's size)
 /// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
-const OFF_BY_DEFAULT: [&str; 7] = ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes"];
+const OFF_BY_DEFAULT: [&str; 8] =
+    ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes", "fightsim"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.

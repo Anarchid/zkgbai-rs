@@ -2,9 +2,14 @@
 # Play a demo (.sdfz) headless with the replay capture widget and keep its
 # JSON lines dump (see replay_capture_widget.lua).
 #
-# usage: capture.sh [-e ENGINE_DIR] [-t SECONDS] [-S FRAMES] [-I N] [-D DIR]
+# usage: capture.sh [-e ENGINE_DIR] [-t SECONDS] [-n FRAMES] [-S FRAMES] [-I N] [-D DIR]
 #                   <demo.sdfz> <out dir>
 #   writes <out dir>/replaycap.jsonl and <out dir>/infolog.txt
+#   -n FRAMES     frames between snapshots (default 300 = 10 s; 30 = every
+#                 second, about 10x the file: ~25 MB per 20-minute 1v1)
+#   -L SAVE.ssf   the save the recorded game was loaded from (its start script
+#                 names it, SaveFile=...): copied into the playback's Saves/,
+#                 without which the demo replays as a fresh game and desyncs
 #   -S f1,f2,...  also write full engine saves (creg, like ZK's save menu) at
 #                 those frames to <out dir>/saves/replay_f<frame>.ssf
 #   -I N          ... and every N frames (30 = every game second, ~7 MB each)
@@ -19,18 +24,22 @@ TIMEOUT=1800
 SAVES=""
 SAVE_EVERY=0
 SAVE_DIR=""
-while getopts "e:t:S:I:D:" opt; do
+SNAP=300
+LOADS=()
+while getopts "e:t:n:L:S:I:D:" opt; do
     case $opt in
         e) ENGINE_DIR=$OPTARG ;;
         t) TIMEOUT=$OPTARG ;;
+        n) SNAP=$OPTARG ;;
+        L) LOADS+=("$(realpath "$OPTARG")") ;;
         S) SAVES=$OPTARG ;;
         I) SAVE_EVERY=$OPTARG ;;
         D) SAVE_DIR=$(realpath -m "$OPTARG") ;;
-        *) sed -n '2,15p' "$0"; exit 2 ;;
+        *) sed -n '2,20p' "$0"; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
-[ $# -eq 2 ] || { sed -n '2,15p' "$0"; exit 2; }
+[ $# -eq 2 ] || { sed -n '2,20p' "$0"; exit 2; }
 DEMO=$(realpath "$1")
 OUT=$(realpath -m "$2")
 
@@ -50,9 +59,10 @@ rm -rf "$WD"
 mkdir -p "$WD/LuaUI/Widgets" "$WD/demos"
 CACHE=${ARENA_CACHE:-$(cd "$(dirname "$0")/../.." && pwd)/target/arena-cache}
 [ -d "$CACHE" ] && ln -s "$CACHE" "$WD/cache"
-sed "s/@SAVE_FRAMES@/$SAVES/; s/@SAVE_EVERY@/$SAVE_EVERY/" "$(dirname "$0")/replay_capture_widget.lua" \
+sed "s/@SAVE_FRAMES@/$SAVES/; s/@SAVE_EVERY@/$SAVE_EVERY/; s/@SNAP_FRAMES@/$SNAP/" "$(dirname "$0")/replay_capture_widget.lua" \
     > "$WD/LuaUI/Widgets/replay_capture_widget.lua"
 if [ -n "$SAVE_DIR" ]; then mkdir -p "$SAVE_DIR" && ln -s "$SAVE_DIR" "$WD/Saves"; fi
+for f in "${LOADS[@]}"; do mkdir -p "$WD/Saves" && cp "$f" "$WD/Saves/"; done
 cp "$DEMO" "$WD/demos/replay.sdfz"
 # The playback's local server binds HostPortDefault (8452): one port per run.
 echo "HostPortDefault = $((20000 + $$ % 30000))" > "$WD/springsettings.cfg"
