@@ -125,6 +125,9 @@ struct Station {
     /// Enemy statics in reach of it when picked, and their worth.
     reach: (usize, f32),
     deployed: bool,
+    /// A perch site's natural height over the nearest defense (0 unless
+    /// the perch's `natural` dial is on): the raise asks the remainder.
+    natural: f32,
 }
 
 /// A perch going up under the leading core: the site, the ground there
@@ -147,6 +150,8 @@ struct PerchState {
     returned: Option<i32>,
     /// Why the perched core would have left, said once (it cannot come down).
     stranded: Option<String>,
+    /// How much the raise asked (the perch height less the natural one).
+    raise: f32,
 }
 
 /// An enemy this close to the site slows the raise 20x (the gadget's
@@ -165,6 +170,9 @@ struct SiegeForce {
     /// When a perch site was last refused for want of one (said once a
     /// minute, not every pass).
     refused_at: i32,
+    /// The natural height of the site the last pick chose (see
+    /// [`Perch::natural`]); taken into the station as it is set.
+    pending_natural: f32,
 }
 
 /// What a gun was doing at the last conduct, since when (the frame of the
@@ -180,7 +188,6 @@ struct Gun {
     frames: BTreeMap<&'static str, i32>,
 }
 
-#[derive(Default)]
 pub struct Siege {
     forces: BTreeMap<SquadId, SiegeForce>,
     guns: BTreeMap<i32, Gun>,
@@ -188,6 +195,34 @@ pub struct Siege {
     /// a raise taken up again at the same place does not stack another
     /// height on the first.
     pillars: Vec<(Vec3, f32)>,
+    /// Where perch sites come from (see [`PerchSites`]).
+    pub sites: Box<dyn PerchSites>,
+}
+
+impl Default for Siege {
+    fn default() -> Self {
+        Siege { forces: BTreeMap::new(), guns: BTreeMap::new(), pillars: Vec::new(), sites: Box::new(RingSites) }
+    }
+}
+
+/// A source of candidate perch sites for a force at `from` whose guns reach
+/// `reach` from the perch, against the known statics: the conduct scores
+/// and checks whatever it is given (standoff, flatness, reach, the way
+/// there). The first provider lays rings about the statics worth most
+/// ([`RingSites`]); a terrain catalog of natural perches (peaks, cliff
+/// tops over the lanes) may replace it without touching the conduct.
+pub trait PerchSites: Send + Sync {
+    fn sites(&self, from: Vec3, reach: f32, statics: &[Static], standoff: f32, map_size: (f32, f32)) -> Vec<Vec3>;
+}
+
+/// Rings about the statics worth most, at the perch's shares of the reach.
+pub struct RingSites;
+
+impl PerchSites for RingSites {
+    fn sites(&self, from: Vec3, reach: f32, statics: &[Static], standoff: f32, (w, h): (f32, f32)) -> Vec<Vec3> {
+        let on_map = |x: f32, z: f32| x >= 50.0 && z >= 50.0 && x <= w - 50.0 && z <= h - 50.0;
+        candidates_on(from, reach, statics, standoff, &PERCH_SHARES, on_map).into_iter().map(|c| c.0).collect()
+    }
 }
 
 /// A pillar begun within this of a site is the same pillar.
@@ -378,8 +413,9 @@ impl Ai {
     fn siege_up(&self, sid: SquadId) -> f32 {
         let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
         let given_up = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| p.abandoned);
+        let natural = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref())).map_or(0.0, |s| s.natural);
         match perch {
-            Some(p) if !given_up => p.height + AIM_ABOVE,
+            Some(p) if !given_up => p.height.max(natural) + AIM_ABOVE,
             _ => 0.0,
         }
     }
@@ -442,7 +478,7 @@ impl Ai {
         let station = match kept {
             Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
             None => {
-                let (s, k, v, how) = self.siege_pick(sid, leader, reach, up, &statics);
+                let (s, k, v, how, nat) = self.siege_pick(sid, leader, reach, up, &statics);
                 let old = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos);
                 if old.is_none_or(|o| distance(o, s) > AT_STATION) {
                     let near = nearest(s, &statics);
@@ -450,11 +486,12 @@ impl Ai {
                     let doctrine = self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone());
                     self.log(&format!(
                         "taskforce: the {doctrine} force (squad {sid}) stations at ({:.0}, {:.0}), {:.0} off, in reach of \
-                         {k} statics worth {v:.0}{}; {how}; the nearest armed static {}",
+                         {k} statics worth {v:.0}{}{}; {how}; the nearest armed static {}",
                         s.x,
                         s.z,
                         distance(pos, s),
                         if up > 0.0 { format!(" from {up:.0} up (reach {reach:.0})") } else { String::new() },
+                        if nat > 0.0 { format!(", natural {nat:.0}") } else { String::new() },
                         match near {
                             Some((d, n)) if up > 0.0 => format!(
                                 "is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {margin:.0})",
@@ -472,9 +509,10 @@ impl Ai {
                 // The same place again keeps the station as it is (parked
                 // stays parked); a new one starts unparked.
                 if old.is_none_or(|o| distance(o, s) > AT_STATION) {
-                    f.station = Some(Station { pos: s, reach: (k, v), deployed: false });
+                    f.station = Some(Station { pos: s, reach: (k, v), deployed: false, natural: nat });
                 } else if let Some(st) = f.station.as_mut() {
                     st.reach = (k, v);
+                    st.natural = nat;
                 }
                 s
             }
@@ -493,6 +531,31 @@ impl Ai {
         reach: f32,
         up: f32,
         statics: &[Static],
+    ) -> (Vec3, usize, f32, &'static str, f32) {
+        if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+            f.pending_natural = 0.0;
+        }
+        let (s, k, v, how) = self.siege_pick_at(sid, leader, reach, up, statics);
+        let nat = self.taskforces.siege.forces.get(&sid).map_or(0.0, |f| f.pending_natural);
+        (s, k, v, how, nat)
+    }
+
+    /// The natural height of a site over the nearest armed static we know
+    /// (its ground to the static's ground), 0 if none is known or it lies
+    /// lower.
+    fn siege_natural(&self, p: Vec3, statics: &[Static]) -> f32 {
+        let map = self.cb.map();
+        let Some((_, n)) = nearest(p, statics) else { return 0.0 };
+        (map.elevation_at(p.x, p.z) - map.elevation_at(n.pos.x, n.pos.z)).max(0.0)
+    }
+
+    fn siege_pick_at(
+        &mut self,
+        sid: SquadId,
+        leader: Unit,
+        reach: f32,
+        up: f32,
+        statics: &[Static],
     ) -> (Vec3, usize, f32, &'static str) {
         let from = leader.pos();
         let map = self.cb.map();
@@ -503,13 +566,58 @@ impl Ai {
         // there; else the force stands flat (and says so).
         let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
         if let (Some(perch), true) = (&perch, up > 0.0 && !statics.is_empty()) {
-            let picks = candidates_on(from, reach, statics, PERCH_STANDOFF, &PERCH_SHARES, &on_map);
-            let site = picks.iter().find(|c| {
-                in_reach(c.0, reach, statics).0 >= perch.min_reach as usize
-                    && self.siege_perch_site_ok(c.0, perch)
-                    && self.siege_fits_by(c.0, leader, statics, PERCH_STANDOFF)
+            // Natural perches: each candidate scored by the reach from its
+            // own height (plus the raise that would complete it) over the
+            // nearest defense, natural ones preferred.
+            if let Some(natural) = &perch.natural {
+                let flat = self.siege_statics(0.0);
+                let picks = self.taskforces.siege.sites.sites(from, reach, statics, PERCH_STANDOFF, (w, h));
+                let mut best: Option<(Vec3, f32, f32, usize, f32)> = None;
+                let mut cache: Vec<(i32, Vec<Static>, f32)> = Vec::new();
+                for &p in &picks {
+                    let nat = self.siege_natural(p, &flat);
+                    let total = nat.max(perch.height);
+                    let key = (total / 10.0).round() as i32;
+                    let (st, rch) = match cache.iter().find(|c| c.0 == key) {
+                        Some(c) => (c.1.clone(), c.2),
+                        None => {
+                            let st = self.siege_statics(total + AIM_ABOVE);
+                            let rch = Self::siege_reach(leader, total);
+                            cache.push((key, st.clone(), rch));
+                            (st, rch)
+                        }
+                    };
+                    let (k, v) = in_reach(p, rch, &st);
+                    if k < perch.min_reach as usize
+                        || !self.siege_perch_site_ok(p, perch)
+                        || !self.siege_fits_by(p, leader, &st, PERCH_STANDOFF)
+                    {
+                        continue;
+                    }
+                    let mut score = v / (1.0 + distance(from, p) / 1000.0);
+                    if nat >= natural.min_height {
+                        score *= natural.weight;
+                    }
+                    if best.is_none_or(|b| score > b.1 || (score == b.1 && nat > b.2)) {
+                        best = Some((p, score, nat, k, v));
+                    }
+                }
+                if let Some((p, _, nat, k, v)) = best {
+                    let how = if nat >= natural.min_height { "the best natural perch site" } else { "the best perch site" };
+                    let site = Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z);
+                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                        f.pending_natural = nat;
+                    }
+                    return (site, k, v, how);
+                }
+            }
+            let picks = self.taskforces.siege.sites.sites(from, reach, statics, PERCH_STANDOFF, (w, h));
+            let site = picks.iter().find(|&&c| {
+                in_reach(c, reach, statics).0 >= perch.min_reach as usize
+                    && self.siege_perch_site_ok(c, perch)
+                    && self.siege_fits_by(c, leader, statics, PERCH_STANDOFF)
             });
-            if let Some(&(p, _)) = site {
+            if let Some(&p) = site {
                 let (k, v) = in_reach(p, reach, statics);
                 return (Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z), k, v, "the best perch site");
             }
@@ -787,6 +895,7 @@ impl Ai {
                             foot_last: frame,
                             returned: Some(frame),
                             stranded: None,
+                            raise: perch.height,
                         });
                     }
                     return;
@@ -809,6 +918,7 @@ impl Ai {
                             foot_last: frame,
                             returned: Some(frame),
                             stranded: None,
+                            raise: perch.height,
                         });
                     }
                     self.log(&format!(
@@ -821,10 +931,43 @@ impl Ai {
                 let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
                 let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
                 let names: Vec<String> = raisers.iter().map(|u| self.defs.name_of(*u).to_owned()).collect();
-                self.terraform_level(&raisers, &square, top + perch.height, false);
+                // On a natural shoulder the raise asks the remainder only.
+                let natural = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map_or(0.0, |s| s.natural);
+                let raise = (perch.height - natural).max(0.0);
+                if raise < UP_SLACK {
+                    for u in &raisers {
+                        u.stop(0);
+                    }
+                    self.op_emit(
+                        "siege-perch",
+                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": 0.0, "natural": natural, "seconds": 0, "raisers": 0, "standing": true}),
+                    );
+                    self.log(&format!(
+                        "taskforce: a {} is perched at once at ({:.0}, {:.0}), {natural:.0} up by nature",
+                        self.defs.name_of(leader), site.x, site.z
+                    ));
+                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                        f.perch = Some(PerchState {
+                            site,
+                            ground,
+                            since: frame,
+                            raisers: Vec::new(),
+                            up: true,
+                            abandoned: false,
+                            ground_target: None,
+                            foot_frames: 0,
+                            foot_last: frame,
+                            returned: Some(frame),
+                            stranded: None,
+                            raise: 0.0,
+                        });
+                    }
+                    return;
+                }
+                self.terraform_level(&raisers, &square, top + raise, false);
                 // What the raised point reaches, and the nearest armed
                 // static's reach to it (the standoff the gates read).
-                let up = perch.height + AIM_ABOVE;
+                let up = perch.height.max(natural) + AIM_ABOVE;
                 let statics = self.siege_statics(up);
                 let reach = Self::siege_reach(leader, up);
                 let (k, v) = in_reach(site, reach, &statics);
@@ -832,17 +975,19 @@ impl Ai {
                 self.op_emit(
                     "siege-perch",
                     json!({"event": "start", "squad": sid, "site": [site.x, site.z], "ground": ground, "height": perch.height,
+                           "natural": natural, "raise": raise,
                            "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want,
                            "reach_up": reach, "statics_in_reach": k, "worth_in_reach": v,
                            "nearest": near.map(|(d, n)| json!({"distance": d, "range": n.nominal, "reach_up": n.raised, "standoff": d - n.range}))}),
                 );
                 self.log(&format!(
-                    "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0} ({}); {k} statics worth {v:.0} in reach from {up:.0} up (reach {reach:.0}); the nearest armed static {}",
+                    "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0}{} ({}); {k} statics worth {v:.0} in reach from {up:.0} up (reach {reach:.0}); the nearest armed static {}",
                     self.defs.name_of(leader),
                     site.x,
                     site.z,
                     raisers.len(),
-                    perch.height,
+                    raise,
+                    if natural > 0.0 { format!(" on a natural {natural:.0}") } else { String::new() },
                     names.join(", "),
                     match near {
                         Some((d, n)) => format!("is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {:.0})", n.nominal, n.raised, d - n.range),
@@ -862,6 +1007,7 @@ impl Ai {
                         foot_last: frame,
                         returned: None,
                         stranded: None,
+                        raise,
                     });
                 }
             }
@@ -877,7 +1023,7 @@ impl Ai {
                 }
                 ps.foot_last = frame;
                 let foot_s = ps.foot_frames / 30;
-                if raised >= perch.height - UP_SLACK {
+                if raised >= ps.raise - UP_SLACK {
                     ps.up = true;
                     ps.returned = Some(frame);
                     let n = ps.raisers.len();

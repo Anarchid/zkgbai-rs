@@ -217,6 +217,19 @@ pub struct Perch {
     /// known enemy gun may reach the aim point up there.
     pub min_reach: u32,
     pub refuse_if_reached: bool,
+    /// Natural perches: sites are scored by their existing height over the
+    /// nearest defense, those at least `min_height` up are preferred by
+    /// `weight`, and the raise asks only the remainder up to `height` (none
+    /// when the ground is that high already). None: every perch is raised
+    /// from the ground it stands on.
+    pub natural: Option<Natural>,
+}
+
+/// See [`Perch::natural`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Natural {
+    pub min_height: f32,
+    pub weight: f32,
 }
 
 impl Perch {
@@ -230,6 +243,7 @@ impl Perch {
             range: 4000.0,
             min_reach: 3,
             refuse_if_reached: true,
+            natural: None,
         }
     }
 
@@ -243,6 +257,7 @@ impl Perch {
             "range": self.range,
             "min_reach": self.min_reach,
             "refuse_if_reached": self.refuse_if_reached,
+            "natural": self.natural.as_ref().map(|n| json!({"min_height": n.min_height, "weight": n.weight})),
         })
     }
 
@@ -263,6 +278,23 @@ impl Perch {
                 "range" => self.range = num(k, v, 0.0, 20000.0)?,
                 "min_reach" => self.min_reach = num(k, v, 0.0, 1000.0)? as u32,
                 "refuse_if_reached" => self.refuse_if_reached = flag(k, v)?,
+                "natural" => {
+                    self.natural = match v {
+                        Value::Null => None,
+                        Value::Object(n) => {
+                            let mut nat = self.natural.clone().unwrap_or(Natural { min_height: 100.0, weight: 1.0 });
+                            for (nk, nv) in n {
+                                match nk.as_str() {
+                                    "min_height" => nat.min_height = num(nk, nv, 0.0, 600.0)?,
+                                    "weight" => nat.weight = num(nk, nv, 0.0, 100.0)?,
+                                    _ => return Err(format!("a natural perch has no field '{nk}' (see doctrines)")),
+                                }
+                            }
+                            Some(nat)
+                        }
+                        _ => return Err("perch 'natural' must be an object or null".into()),
+                    }
+                }
                 _ => return Err(format!("a perch has no field '{k}' (see doctrines)")),
             }
         }
@@ -1209,6 +1241,17 @@ mod tests {
         assert!(e.perch.is_none());
         let Value::Object(bad) = json!({"perch": {"size": 1}}) else { panic!() };
         assert!(d.clone().apply(&bad).is_err());
+        // The natural dial, one change: off in the seed, on by a patch.
+        assert!(d.perch.as_ref().unwrap().natural.is_none());
+        let mut n = d.clone();
+        let Value::Object(patch) = json!({"perch": {"natural": {"min_height": 120}}}) else { panic!() };
+        n.apply(&patch).unwrap();
+        let nat = n.perch.as_ref().unwrap().natural.as_ref().unwrap();
+        assert_eq!((nat.min_height, nat.weight), (120.0, 1.0));
+        let Value::Object(p) = n.to_json() else { panic!() };
+        let mut back = Doctrine::new("crab");
+        back.apply(&p).unwrap();
+        assert_eq!(back, n);
     }
 
     #[test]
