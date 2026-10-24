@@ -531,6 +531,27 @@ impl Ai {
         }
     }
 
+    /// Log a taskforce member's death: its force, whether that force was
+    /// forming (never yet engaged), engaged or rallying, what killed it, and
+    /// where along the start axis.
+    pub fn squad_log_death(&mut self, unit: Unit, attacker: Option<Unit>) {
+        let Some(sid) = self.fighters.get(&unit.id()).and_then(|f| f.squad) else { return };
+        let Some(s) = self.squads.get(sid).filter(|s| s.is_taskforce()) else { return };
+        let state = match (s.engaging, s.engaged) {
+            (true, _) => "engaged",
+            (false, 0) => "forming",
+            _ => "rallying",
+        };
+        let by = attacker.and_then(|a| a.def()).map_or("?".to_owned(), |d| self.defs.name(d).to_owned());
+        let depth = self.taskforce_depth(unit.pos()).map_or("-".to_owned(), |d| format!("{d:.2}"));
+        let line = format!(
+            "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth}",
+            self.defs.name_of(unit),
+            s.shape.doctrine
+        );
+        self.log(&line);
+    }
+
     /// Log a unit about to join force `sid`: the force's state and how far
     /// the unit has to go to its leader.
     fn squad_log_join(&mut self, sid: SquadId, id: i32, how: &str) {

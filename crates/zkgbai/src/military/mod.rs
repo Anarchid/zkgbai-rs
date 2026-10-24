@@ -940,6 +940,7 @@ impl Ai {
         self.impalers_remove_unit(unit);
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
+        self.squad_log_death(unit, attacker);
         self.squad_remove_unit(unit);
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);
