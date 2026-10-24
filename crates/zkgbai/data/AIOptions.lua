@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'enable',
 		name   = 'Experimental features',
-		desc   = 'Comma-separated features to switch on: strikes (assassination dives on sighted Phantoms and Lances: off since the 2026-10-24 A/B read them net negative vs Phantoms), airfire (an air factory for the firefighters once raids cost mexes no home defense team was near: off since its A/B failed the army gate), mexporc (a turret by every mex and link, the old default: off since the home defense force stands in for it), pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets), airtempo (an air factory weighed up as the game runs long, sooner on large maps).',
+		desc   = 'Comma-separated features to switch on: siege (the Tremor and Emissary siege doctrines, under test), strikes (assassination dives on sighted Phantoms and Lances: off since the 2026-10-24 A/B read them net negative vs Phantoms), airfire (an air factory for the firefighters once raids cost mexes no home defense team was near: off since its A/B failed the army gate), mexporc (a turret by every mex and link, the old default: off since the home defense force stands in for it), pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets), airtempo (an air factory weighed up as the game runs long, sooner on large maps).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
