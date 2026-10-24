@@ -139,7 +139,10 @@ else
     [ "$status" -eq 137 ] && echo "ARENA_KILLED engine got SIGKILL (memory cap ${ARENA_ENGINE_MEMORY:-none})" | tee -a "$OUT/stdout.txt"
 fi
 cp "$LOG" "$OUT/infolog.txt" 2>/dev/null
-for d in "$WD"/demos/*.sdfz; do [ -f "$d" ] && [ ! -f "$MATCH/$(basename "$d")" ] && cp "$d" "$OUT/"; done
+# This load's own demo: the newest in wd/demos (loads of one save run one at a
+# time); earlier loads' demos stay in their own dirs.
+newest=$(ls -t "$WD"/demos/*.sdfz 2>/dev/null | head -1)
+if [ -n "$newest" ]; then cp "$newest" "$OUT/"; echo "$(basename "$newest")" > "$OUT/DEMO"; fi
 panics=$(grep -c "panicked" "$OUT/infolog.txt" 2>/dev/null)
 errors=$(grep -cE "Skirmish AI <[^>]*>: error:" "$OUT/infolog.txt" 2>/dev/null)
 echo "RESULT winner=$winner frame=${frame:-0} panics=${panics:-0} errors=${errors:-0} seconds=$elapsed dir=$OUT"
