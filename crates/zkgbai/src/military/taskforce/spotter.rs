@@ -1,8 +1,10 @@
 //! Spotters: members of a doctrine's role with `spot`, who see for the
 //! core's guns instead of fighting. Guns that outrange their own sight
 //! (a Lance sees 660 and reaches 980, a Phantom 400 and 700) shoot what is
-//! only a radar dot blind; a spotter goes where a dot lies within the guns'
-//! reach (or nearly), until it is identified, then to the next, and with
+//! only a radar dot blind, and a marksman marks only what it sees (or a
+//! building's ghost); a spotter goes where a dot lies within the guns'
+//! reach (or nearly), never seen or seen before and now on radar only, the
+//! most valuable first, until it is in sight, then to the next, and with
 //! nothing to look at orbits the force as any member. Spotters hold fire
 //! by their role's `fire_state`. Three ways, by the role's `spot`:
 //!
@@ -25,7 +27,8 @@
 //!
 //! Log lines (`taskforce:`): `a X spots for the D force (squad N, state), M
 //! from its leader (unit U)`; `a X spotting for the D force (squad N)
-//! identifies a Y (M metal), R from the guns`; `a X spotter of the D force
+//! identifies a Y (M metal), R from the guns` (`sights`, for a dot whose
+//! type we knew); `a X spotter of the D force
 //! (squad N, state) goes for repairs at H health, R from the force`; `a X
 //! spotter of the D force (squad N, state) is lost JOB to a K, R from the
 //! force` (JOB: escorting, scouting, loitering, overflight, retreating).
@@ -107,8 +110,11 @@ const CLOAK_MARGIN: f32 = 120.0;
 const RESEND_MOVED: f32 = 120.0;
 const RESEND_FRAMES: i32 = 90;
 
-/// A dot not identified after this long is given up (by that spotter).
+/// A dot not in sight after this long is given up (by that spotter).
 const GIVE_UP_FRAMES: i32 = 40 * 30;
+
+/// What a dot never seen is taken to be worth, for picking which to see.
+const UNKNOWN_WORTH: f32 = 300.0;
 
 /// An escorting spotter this far from the leader is sent back to it.
 const STRAYED: f32 = 600.0;
@@ -134,6 +140,8 @@ pub struct Spotter {
     sent_at: i32,
     /// Escorting: told to orbit the leader since its last errand.
     orbiting: bool,
+    /// Spotting: the dot was never seen when it was picked.
+    unknown: bool,
     gave_up: BTreeSet<i32>,
 }
 
@@ -249,11 +257,15 @@ impl Ai {
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .unwrap_or((f32::INFINITY, NULLPOS))
         };
-        let dots: Vec<(i32, Vec3, f32, Vec3)> = (self.war.targets.values())
-            .filter(|e| !e.identified && !e.visible && !e.is_dead && e.position != NULLPOS)
+        // Dots out of sight (a building we have seen needs no looking at),
+        // with what they are worth, and whether we know what they are.
+        let dots: Vec<(i32, Vec3, f32, Vec3, f32, bool)> = (self.war.targets.values())
+            .filter(|e| !e.visible && !e.is_dead && e.position != NULLPOS)
+            .filter(|e| !(e.identified && (e.is_static || e.can_fly())))
             .filter_map(|e| {
                 let (b, g) = beyond(e.position);
-                (b <= LOOK).then_some((e.unit_id, e.position, b, g))
+                let worth = if e.identified { e.ud.map_or(e.value, |d| d.cost(self.metal)) } else { UNKNOWN_WORTH };
+                (b <= LOOK).then_some((e.unit_id, e.position, b, g, worth, !e.identified))
             })
             .collect();
         let orbit = |unit: Unit| shape.orbit(unit.def().map(|d| d.id()));
@@ -275,6 +287,7 @@ impl Ai {
                     sent: NULLPOS,
                     sent_at: i32::MIN / 2,
                     orbiting: true,
+                    unknown: false,
                     gave_up: entry.map(|e| e.gave_up.clone()).unwrap_or_default(),
                 };
                 self.taskforces.spotters.by_unit.insert(id, sp);
@@ -300,17 +313,18 @@ impl Ai {
                 .filter_map(|(_, sp)| if let Job::Spotting(e) = sp.job { Some(e) } else { None })
                 .collect();
             let Some(sp) = self.taskforces.spotters.by_unit.get_mut(&id) else { continue };
-            // The dot it looks at: done once identified, gone or out of
-            // the guns' look, given up after a while.
+            // The dot it looks at: done once in sight, gone or out of the
+            // guns' look, given up after a while.
             if let Job::Spotting(e) = sp.job {
                 let target = self.war.targets.get(&e);
                 let looking = dots.iter().any(|d| d.0 == e);
-                if let Some(t) = target.filter(|t| (t.identified || t.visible) && !t.is_dead) {
+                if let Some(t) = target.filter(|t| t.visible && !t.is_dead) {
                     lines.push(format!(
-                        "taskforce: a {} spotting for the {} force (squad {sid}) identifies a {} ({:.0} metal), {:.0} \
-                         from the guns",
+                        "taskforce: a {} spotting for the {} force (squad {sid}) {} a {} ({:.0} metal), {:.0} from the \
+                         guns",
                         self.defs.name_of(unit),
                         shape.doctrine,
+                        if sp.unknown { "identifies" } else { "sights" },
                         t.def_name,
                         t.ud.map_or(t.value, |d| d.cost(self.metal)),
                         beyond(t.position).0.max(0.0)
@@ -327,18 +341,22 @@ impl Ai {
             }
             if sp.job == Job::Escorting {
                 let upos = unit.pos();
+                // The most worth for the way: the guns' way beyond reach and
+                // its own way there count against a dot's worth.
+                let cost = |d: &(i32, Vec3, f32, Vec3, f32, bool)| d.2.max(0.0) + 0.25 * distance(d.1, upos) - d.4;
                 let pick = (dots.iter())
                     .filter(|d| !taken.contains(&d.0) && !sp.gave_up.contains(&d.0))
-                    .min_by(|a, b| (a.2 + 0.25 * distance(a.1, upos)).total_cmp(&(b.2 + 0.25 * distance(b.1, upos))));
-                if let Some(&(e, ..)) = pick {
+                    .min_by(|a, b| cost(a).total_cmp(&cost(b)));
+                if let Some(&(e, .., unknown)) = pick {
                     sp.job = Job::Spotting(e);
                     sp.since = frame;
                     sp.sent = NULLPOS;
+                    sp.unknown = unknown;
                 }
             }
             match sp.job {
                 Job::Spotting(e) => {
-                    let Some(&(_, dot, _, gun)) = dots.iter().find(|d| d.0 == e) else { continue };
+                    let Some(&(_, dot, _, gun, ..)) = dots.iter().find(|d| d.0 == e) else { continue };
                     let to = spot_point(spot, unit.def(), dot, gun);
                     if distance(to, sp.sent) > RESEND_MOVED || frame - sp.sent_at > RESEND_FRAMES {
                         sp.sent = to;
