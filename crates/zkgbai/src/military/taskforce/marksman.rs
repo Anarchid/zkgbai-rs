@@ -24,6 +24,19 @@
 //! `spotter`) may bring a better target into sight: a held mark then
 //! gives way to it.
 //!
+//! With `mark_wait_ratio` k (marksman v3, from the regret pre-read
+//! impalers/ab16/REGRET.md), a loaded gun weighs what it could hit over
+//! the next `mark_hold_for` seconds, not only what is in reach now: a
+//! markable target (in sight or a building, unshielded, one shot kills it)
+//! that its track (or a gun move of up to `mark_move`, the gun leading its
+//! force so the escort comes) brings into reach by then, worth k times the
+//! best in reach, makes the gun hold its fire on it (Set Target) until it
+//! fires or the time is up. Worth then counts what the target makes or
+//! enables over `STREAM_SECONDS` (commanders, factories, constructors,
+//! mexes). Logged: `a G holds for a X (W metal, k R, H s) over a Y (V
+//! metal)`, `a G moves M for a X`, `a G fires at a X after S s`, `a G hold
+//! abandoned (why)`.
+//!
 //! Every volley of a force's core is logged as it is fired (the gun's
 //! reload frame moves on, polled each frame): `taskforce: a G fires at a X
 //! (in sight|on radar), D off, its mark[, spotter R from it]`, or `a G
@@ -36,12 +49,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use springai::{NO_TIMEOUT, Unit};
+use springai::{NO_TIMEOUT, Unit, Vec3};
 
 use crate::Ai;
 use crate::defs::cmd;
+use crate::kgbutil::kgb_move_to;
 use crate::military::{Enemy, SquadId};
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, distance, get_directional_point};
 
 /// Marks are worth setting from this share of the gun's own cost (below,
 /// the engine's own pick is as good), without `mark_share`.
@@ -65,6 +79,9 @@ const KEEP: f32 = 150.0;
 /// With `losfire`, deserving targets this far beyond a gun's range keep it
 /// in reserve (a drift and a short gun move over the reload).
 const RESERVE: f32 = 300.0;
+
+/// Marksman v3: what a target makes or enables counts over this long.
+const STREAM_SECONDS: f32 = 60.0;
 
 /// A holding gun picks its mark from this many frames before it reloads.
 const PREAIM: i32 = 90;
@@ -103,6 +120,19 @@ pub struct Volleys {
     reload: BTreeMap<i32, i32>,
     /// With `losfire`: each gun in reserve (holding fire) or not.
     reserve: BTreeMap<i32, bool>,
+    /// Marksman v3: each gun's hold, and the reload frame of its last hold
+    /// (one hold per reload).
+    holds: BTreeMap<i32, Hold>,
+    held_at: BTreeMap<i32, i32>,
+}
+
+/// A loaded gun holding its fire for a better target (marksman v3).
+#[derive(Clone, Copy, Debug)]
+struct Hold {
+    target: i32,
+    start: i32,
+    /// It moved to get it.
+    moved: bool,
 }
 
 impl Volleys {
@@ -129,7 +159,7 @@ impl Ai {
         &self,
         e: &Enemy,
         damage: f32,
-        shields: &[(springai::Vec3, f32)],
+        shields: &[(Vec3, f32)],
         fix: Fix,
     ) -> Result<(f32, f32), &'static str> {
         if e.is_dead || !e.identified || e.position == NULLPOS {
@@ -153,6 +183,22 @@ impl Ai {
             return Err("no longer one shot");
         }
         Ok((e.ud.map_or(e.value, |d| d.cost(self.metal)), health))
+    }
+
+    /// What `e` makes or enables, metal a second (marksman v3).
+    fn marksman_stream(&self, e: &Enemy) -> f32 {
+        let Some(d) = e.ud else { return 0.0 };
+        if e.is_com {
+            4.0
+        } else if e.is_mex {
+            2.0
+        } else if d.speed() == 0.0 && !d.build_options().is_empty() || e.def_name == "staticcon" {
+            10.0
+        } else if e.is_worker {
+            d.build_speed()
+        } else {
+            0.0
+        }
     }
 
     /// A gun's floor: what a mark must be worth (see the module notes).
@@ -184,6 +230,16 @@ impl Ai {
                 continue;
             }
             let gun = self.defs.name_of(unit);
+            if let Some(h) = self.taskforces.volleys.holds.remove(&id) {
+                let e = self.war.targets.get(&h.target);
+                lines.push(format!(
+                    "taskforce: a {gun} fires at a {} after {:.1} s",
+                    e.map_or("?", |e| e.def_name.as_str()),
+                    (frame - h.start) as f32 / 30.0
+                ));
+                let reserve = self.taskforces.volleys.reserve.get(&id).copied().unwrap_or(false);
+                unit.set_fire_state(if reserve { 0 } else { 2 }, 0);
+            }
             let Some(e) = self.taskforces.marks.get(&id).and_then(|m| self.war.targets.get(&m.target)) else {
                 lines.push(format!("taskforce: a {gun} fires at will"));
                 continue;
@@ -206,12 +262,131 @@ impl Ai {
         }
     }
 
+    /// Marksman v3 for gun `id`: keep or end its hold, or, loaded, start
+    /// one (see the module notes). True: it holds (no other mark this pass).
+    #[allow(clippy::too_many_arguments)]
+    fn marksman_wait(
+        &mut self,
+        id: i32,
+        unit: Unit,
+        k: f32,
+        hold_for: f32,
+        max_move: f32,
+        leads: bool,
+        fix: Fix,
+        lines: &mut Vec<String>,
+    ) -> bool {
+        let frame = self.frame;
+        let Some(w) = unit.weapon(0) else { return false };
+        let damage = w.def().and_then(|d| d.damage_types().first().copied()).unwrap_or(0.0);
+        let (range, reload, pos) = (w.range(), w.reload_frame(), unit.pos());
+        let gun = self.defs.name_of(unit).to_owned();
+        let shields = self.impalers_shields();
+        let worth = |ai: &Ai, e: &Enemy| -> Option<f32> {
+            let (w, _) = ai.marksman_shot(e, damage, &shields, fix).ok()?;
+            Some(w + STREAM_SECONDS * ai.marksman_stream(e))
+        };
+        if let Some(h) = self.taskforces.volleys.holds.get(&id).copied() {
+            let e = self.war.targets.get(&h.target);
+            let why = match e {
+                None => Some("lost"),
+                Some(e) if worth(self, e).is_none() => Some("not markable"),
+                Some(_) if frame - h.start > (30.0 * hold_for) as i32 => Some("timeout"),
+                _ => None,
+            };
+            if let Some(why) = why {
+                self.taskforces.volleys.holds.remove(&id);
+                let reserve = self.taskforces.volleys.reserve.get(&id).copied().unwrap_or(false);
+                unit.set_fire_state(if reserve { 0 } else { 2 }, 0);
+                lines.push(format!(
+                    "taskforce: a {gun} hold abandoned ({why}) on a {}",
+                    e.map_or("?", |e| e.def_name.as_str())
+                ));
+                return false;
+            }
+            if h.moved
+                && let Some(e) = e
+            {
+                let d = distance(pos, e.position);
+                if d > range {
+                    kgb_move_to(
+                        unit,
+                        get_directional_point(pos, e.position, (d - range + 30.0).min(max_move)),
+                        0,
+                        frame,
+                    );
+                }
+            }
+            return true;
+        }
+        if reload > frame || self.taskforces.volleys.held_at.get(&id) == Some(&reload) {
+            return false;
+        }
+        // Loaded: the best in reach now, and the best hittable within the hold.
+        let reach = range + REACH;
+        let taken: BTreeSet<i32> =
+            (self.taskforces.marks.iter()).filter(|(g, _)| **g != id).map(|(_, m)| m.target).collect();
+        let steps = hold_for.max(0.0).ceil() as i32;
+        let mut now: Option<(i32, f32)> = None;
+        let mut soon: Option<(i32, f32, bool)> = None;
+        for e in self.war.targets.values().filter(|e| !e.can_fly() && !taken.contains(&e.unit_id)) {
+            let Some(v) = worth(self, e) else { continue };
+            let d = distance(pos, e.position);
+            if d <= reach {
+                if now.is_none_or(|n| v > n.1) {
+                    now = Some((e.unit_id, v));
+                }
+                continue;
+            }
+            let vel = if e.visible && !e.is_static { e.unit.vel() } else { Vec3::xz(0.0, 0.0) };
+            let at = |t: i32| Vec3::xz(e.position.x + vel.x * 30.0 * t as f32, e.position.z + vel.z * 30.0 * t as f32);
+            let drift = (1..=steps).any(|t| distance(pos, at(t)) <= reach);
+            let moved = leads && (0..=steps).any(|t| distance(pos, at(t)) <= reach + max_move) && {
+                // Not into more threat than where it stands.
+                let view = self.war.view(unit.def());
+                let to = get_directional_point(pos, e.position, (d - range + 30.0).min(max_move));
+                view.get_effective_threat(to) <= 1.25 * view.get_effective_threat(pos) + 1.0
+            };
+            if (drift || moved) && soon.is_none_or(|s| v > s.1) {
+                soon = Some((e.unit_id, v, !drift));
+            }
+        }
+        let Some((t, v, moves)) = soon else { return false };
+        let over = now.map_or(0.0, |n| n.1);
+        if v < k * over.max(1.0) {
+            return false;
+        }
+        unit.set_fire_state(0, 0);
+        unit.execute_custom_command(cmd::UNIT_SET_TARGET, &[t as f32], 0, NO_TIMEOUT);
+        self.taskforces.marks.insert(id, Mark { target: t, at: frame, reload });
+        self.taskforces.volleys.holds.insert(id, Hold { target: t, start: frame, moved: moves });
+        self.taskforces.volleys.held_at.insert(id, reload);
+        let e = &self.war.targets[&t];
+        let yielded = now.and_then(|n| self.war.targets.get(&n.0)).map_or("nothing".to_owned(), |y| y.def_name.clone());
+        lines.push(format!(
+            "taskforce: a {gun} holds for a {} ({v:.0} metal, k {:.1}, {hold_for:.0} s) over a {yielded} ({over:.0} metal)",
+            e.def_name,
+            v / over.max(1.0)
+        ));
+        if moves {
+            let d = distance(pos, e.position);
+            let by = (d - range + 30.0).min(max_move);
+            kgb_move_to(unit, get_directional_point(pos, e.position, by), 0, frame);
+            lines.push(format!("taskforce: a {gun} moves {by:.0} for a {}", e.def_name));
+        }
+        true
+    }
+
     /// Set each core gun of force `sid` on its best mark, or let it be.
     pub(crate) fn taskforce_mark(&mut self, sid: SquadId) {
         let Some(s) = self.squads.get(sid) else { return };
         let (hold, share) = (s.shape.mark_hold, s.shape.mark_share);
         let losfire = s.shape.losfire;
         let fix = if losfire { Fix::Sight } else { Fix::Exact };
+        let (wait, hold_for, wait_move) = (s.shape.mark_wait_ratio, s.shape.mark_hold_for, s.shape.mark_move);
+        // Only an engaged force's leader moves for a hold (its escort comes
+        // with it; a force falling back keeps falling back).
+        let leader = s.leader.filter(|_| s.engaging);
         let guns: Vec<(i32, Unit)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
             .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())))
             .map(|f| (f.id, f.unit))
@@ -241,7 +416,9 @@ impl Ai {
                     .count();
                 let reserve = deserving > 0;
                 if self.taskforces.volleys.reserve.insert(id, reserve) != Some(reserve) {
-                    unit.set_fire_state(if reserve { 0 } else { 2 }, 0);
+                    if !self.taskforces.volleys.holds.contains_key(&id) {
+                        unit.set_fire_state(if reserve { 0 } else { 2 }, 0);
+                    }
                     let gun = self.defs.name_of(unit);
                     lines.push(if reserve {
                         format!(
@@ -252,6 +429,11 @@ impl Ai {
                         format!("taskforce: a {gun} fires at will: only chaff about")
                     });
                 }
+            }
+            if wait > 0.0
+                && self.marksman_wait(id, unit, wait, hold_for, wait_move, leader == Some(id), fix, &mut lines)
+            {
+                continue;
             }
             let held = self.taskforces.marks.get(&id).copied();
             let taken: BTreeSet<i32> =
@@ -302,10 +484,12 @@ impl Ai {
                 .filter(|e| !e.can_fly() && e.def_name != "wolverine_mine")
                 .filter(|e| !taken.contains(&e.unit_id) && distance(pos, e.position) <= reach)
                 .filter_map(|e| {
-                    self.marksman_shot(e, damage, &shields, fix)
-                        .ok()
-                        .filter(|&(worth, _)| worth >= floor)
-                        .map(|(w, h)| (e.unit_id, w, h))
+                    self.marksman_shot(e, damage, &shields, fix).ok().filter(|&(worth, _)| worth >= floor).map(
+                        |(w, h)| {
+                            let stream = if wait > 0.0 { STREAM_SECONDS * self.marksman_stream(e) } else { 0.0 };
+                            (e.unit_id, w + stream, h)
+                        },
+                    )
                 })
                 // Most worth; then the mark it has (no turning between equals);
                 // then the one nearest dead.
@@ -348,7 +532,7 @@ impl Ai {
     /// Log what the guns of force `sid` reach: enemies with a position,
     /// identified, visible (aircraft aside).
     fn taskforce_log_reach(&mut self, sid: SquadId, doctrine: &str, state: &str, guns: &[(i32, Unit)]) {
-        let reach: Vec<(springai::Vec3, f32)> =
+        let reach: Vec<(Vec3, f32)> =
             guns.iter().filter_map(|(_, u)| u.weapon(0).map(|w| (u.pos(), w.range() + REACH))).collect();
         let (mut known, mut identified, mut visible, mut markable) = (0, 0, 0, 0);
         for e in self.war.targets.values().filter(|e| !e.is_dead && e.position != NULLPOS && !e.can_fly()) {
