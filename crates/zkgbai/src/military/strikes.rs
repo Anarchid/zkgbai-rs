@@ -120,7 +120,10 @@ const COOLDOWN_NEAR: f32 = 500.0;
 /// Kill chances by fix: seen, a radar dot, a crossing, a bearing.
 const P_SEEN: f32 = 0.8;
 const P_RADAR: f32 = 0.7;
-const P_CROSS: f32 = 0.6;
+/// Two bearings' crossing: 0 since ab2 (2026-10-24), where 10 such strikes
+/// killed 2 Phantoms, lost 4,270 metal and 5 waves, against the seen fix's
+/// 3 kills, 0 wiped, 105 lost; the fix is not considered.
+const P_CROSS: f32 = 0.0;
 /// A single bearing's comb walk: 0 since ab1 (2026-10-24), where 24 such
 /// strikes killed 4 Phantoms and lost 13,710 metal (11 wiped) against the
 /// seen fix's 6 of 9 for 170; a fix with no chance is not considered.
@@ -1033,10 +1036,12 @@ mod tests {
         // Two Glaives there: wiped before the kill.
         let two = odds(&six[..2], 560.0, 750.0, P_SEEN, 1, &[REAVER]);
         assert!(two.p_kill < 0.3 && !go(two, MARGIN), "{two:?}");
-        // Three Glaives at a lone Phantom: an easy go on a crossing; a
-        // single bearing is never considered (P_CONE 0 since ab1).
+        // Three Glaives at a lone Phantom on radar: an easy go; a bearing
+        // or a crossing is never considered (P_CONE 0 since ab1, P_CROSS 0
+        // since ab2).
         let glaives = [c(1, 65.0, 5.0, 100.0), c(2, 65.0, 6.0, 100.0), c(3, 65.0, 7.0, 100.0)];
-        assert!(go(odds(&glaives, 560.0, 750.0, P_CROSS, 1, &[]), MARGIN));
+        assert!(go(odds(&glaives, 560.0, 750.0, P_RADAR, 1, &[]), MARGIN));
+        assert!(!go(odds(&glaives, 560.0, 750.0, P_CROSS, 1, &[]), MARGIN));
         assert!(!go(odds(&glaives, 560.0, 750.0, P_CONE, 1, &[]), MARGIN));
         // A Blitz at a Lance: 800 up.
         assert!(go(odds(&[c(1, 300.0, 9.0, 200.0)], 1000.0, 1100.0, P_SEEN, 1, &[]), MARGIN));
