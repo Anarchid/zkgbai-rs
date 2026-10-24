@@ -1177,6 +1177,13 @@ impl Ai {
         if self.squads.get(sid).is_some_and(|s| s.shape.roles.iter().any(|r| r.spot.is_some())) {
             self.taskforce_spot(sid);
         }
+        // How long a siege force was held for the army before this sortie
+        // (taken as the sortie begins; 0 on a break-off or no change).
+        let waited = if engage_at.is_some() && self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege && !s.engaging) {
+            self.siege_take_wait(sid)
+        } else {
+            0
+        };
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
         s.keep_pace(&self.fighters, engage_at.is_some());
@@ -1212,9 +1219,10 @@ impl Ai {
         let line = match engage_at {
             Some(t) => format!(
                 "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {pace}; to go {threshold:.0}; \
-                 depth {depth}, our army {army}, target depth {}; target ({:.0}, {:.0})",
+                 depth {depth}, our army {army}, target depth {}; {}; target ({:.0}, {:.0})",
                 if first { " first" } else { " again" },
                 self.taskforce_depth(t).map_or("-".to_owned(), |d| format!("{d:.2}")),
+                if waited > 0 { format!("after {waited} s waiting") } else { "no wait".to_owned() },
                 t.x,
                 t.z
             ),

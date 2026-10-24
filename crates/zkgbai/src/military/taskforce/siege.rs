@@ -192,8 +192,11 @@ struct SiegeForce {
     /// The natural height of the site the last pick chose (see
     /// [`Perch::natural`]); taken into the station as it is set.
     pending_natural: f32,
-    /// When the force last said it waits for the army.
+    /// When the force last said it waits for the army; the last conduct
+    /// that held it; and the frames held since its last sortie.
     waited_at: i32,
+    wait_last: i32,
+    wait_frames: i32,
     /// Raisers borrowed when the station was picked, guarding the leader
     /// (they walk with the force); since when; times borrowed; and when
     /// the force last said it waits for them.
@@ -1564,6 +1567,11 @@ impl Ai {
     pub(crate) fn siege_note_wait(&mut self, sid: SquadId, waits: &str) {
         let frame = self.frame;
         let f = self.taskforces.siege.forces.entry(sid).or_default();
+        // The frames held since the last sortie (conducts are a second apart).
+        if f.wait_last > 0 && frame - f.wait_last <= 90 {
+            f.wait_frames += frame - f.wait_last;
+        }
+        f.wait_last = frame;
         if frame - f.waited_at < REPORT {
             return;
         }
@@ -1670,6 +1678,16 @@ impl Ai {
             self.log(&format!("taskforce: the {doctrine} force (squad {sid}) {why} at ({:.0}, {:.0})", haven.x, haven.z));
         }
         Some((haven, why))
+    }
+
+    /// How long force `sid` was held for the army before this sortie, in
+    /// seconds; taken (reset) as the sortie begins.
+    pub(crate) fn siege_take_wait(&mut self, sid: SquadId) -> i32 {
+        let Some(f) = self.taskforces.siege.forces.get_mut(&sid) else { return 0 };
+        let w = f.wait_frames / 30;
+        f.wait_frames = 0;
+        f.wait_last = 0;
+        w
     }
 
     /// Where force `sid` would stand: its station as last picked (for the
