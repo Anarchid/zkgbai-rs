@@ -106,8 +106,14 @@ const RECENT: i32 = 45;
 /// Soft targets seen within this many frames are worth a sortie.
 const SORTIE_RECENT: i32 = 90;
 
-/// A stakeout follows an enemy at least this share of its speed.
+/// A cloaking stakeout follows an enemy at least this share of its speed
+/// (standing again, it vanishes)...
 const SPEED_PARITY: f32 = 0.95;
+/// ...one that cannot cloak only with this much speed in hand, and only
+/// where it can stand outside the enemy's sight inside its own.
+const SPEED_MARGIN: f32 = 1.1;
+/// Outside an enemy's sight by this much.
+const SIGHT_CLEAR: f32 = 50.0;
 
 /// A looked-at spot counts as fresh this long (frames).
 const FRESH: i32 = 30 * 60;
@@ -652,15 +658,23 @@ impl Ai {
     fn stakeouts_shadow(&mut self, id: i32, eid: i32, frame: i32) {
         let Some(e) = self.war.targets.get(&eid) else { return };
         let (epos, espeed, ename) = (e.position, e.speed(), e.def_name.clone());
+        let elos = e.ud.map_or(0.0, |d| d.los_radius());
         let Some(m) = self.stakeouts.members.get(&id) else { return };
         let (p, sight, speed, def, cloaks, moved) = (m.f.get_pos(), m.sight, m.speed, m.def, m.cloaks, m.moved);
         let d = distance(p, epos);
         let keep = keep_from(e, cloaks);
         // Back off to the edge of our sight, or farther if its reach leaves
-        // no safe band inside it (then we lose it rather than die to it).
-        let back_to = (sight - BACK_TO).max(keep + 150.0);
-        let follow_to = sight - FOLLOW_TO;
-        let follows = speed >= SPEED_PARITY * espeed && !e.is_static && keep + 150.0 <= follow_to;
+        // no safe band inside it (then we lose it rather than die to it); a
+        // picket that cannot cloak also gets out of the enemy's sight.
+        let mut back_to = (sight - BACK_TO).max(keep + 150.0);
+        let mut follow_to = sight - FOLLOW_TO;
+        let mut follows = speed >= SPEED_PARITY * espeed;
+        if !cloaks {
+            back_to = back_to.max(elos + SIGHT_CLEAR);
+            follow_to = sight - 40.0;
+            follows = speed >= SPEED_MARGIN * espeed && follow_to >= elos + SIGHT_CLEAR;
+        }
+        let follows = follows && !e.is_static && keep + 150.0 <= follow_to;
         let new = m.bogey != Some(eid);
         if new {
             self.stakeouts.stats.sightings += 1;
