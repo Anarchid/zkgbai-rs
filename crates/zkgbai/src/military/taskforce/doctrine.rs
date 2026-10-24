@@ -266,6 +266,21 @@ pub struct Doctrine {
     /// Marksmen: a mark is worth setting from this share of what a volley
     /// of the gun's type has killed so far (0: a tenth of the gun's cost).
     pub mark_share: f32,
+    /// Marksmen fire only with a fix in sight: marks only what is in sight
+    /// (no building ghosts); give the core `fire_state` 0 so that nothing
+    /// else is shot at (a loaded gun with no mark waits), and `okp` 4 to
+    /// keep ZK's overkill prevention on hold fire.
+    pub losfire: bool,
+    /// The core's overkill prevention state (see `cmd::PREVENT_OVERKILL`);
+    /// `None`: ZK's default.
+    pub okp: Option<i32>,
+    /// Marksmen hold a loaded gun's fire up to `mark_hold_for` seconds for
+    /// a target worth this many times the best in reach that will be
+    /// hittable by then, moving it up to `mark_move` (0: never; see
+    /// `marksman`).
+    pub mark_wait_ratio: f32,
+    pub mark_hold_for: f32,
+    pub mark_move: f32,
 }
 
 impl Doctrine {
@@ -297,6 +312,11 @@ impl Doctrine {
             marksman: false,
             mark_hold: true,
             mark_share: 0.5,
+            losfire: false,
+            okp: None,
+            mark_wait_ratio: 0.0,
+            mark_hold_for: 3.0,
+            mark_move: 150.0,
         }
     }
 
@@ -362,6 +382,11 @@ impl Doctrine {
             "marksman": self.marksman,
             "mark_hold": self.mark_hold,
             "mark_share": self.mark_share,
+            "losfire": self.losfire,
+            "okp": self.okp,
+            "mark_wait_ratio": self.mark_wait_ratio,
+            "mark_hold_for": self.mark_hold_for,
+            "mark_move": self.mark_move,
         })
     }
 
@@ -417,6 +442,11 @@ impl Doctrine {
                 "marksman" => self.marksman = flag(k, v)?,
                 "mark_hold" => self.mark_hold = flag(k, v)?,
                 "mark_share" => self.mark_share = num(k, v, 0.0, 10.0)?,
+                "losfire" => self.losfire = flag(k, v)?,
+                "okp" => self.okp = optional(v, |v| Ok(num(k, v, 0.0, 4.0)? as i32))?,
+                "mark_wait_ratio" => self.mark_wait_ratio = num(k, v, 0.0, 100.0)?,
+                "mark_hold_for" => self.mark_hold_for = num(k, v, 0.0, 30.0)?,
+                "mark_move" => self.mark_move = num(k, v, 0.0, 1000.0)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -536,6 +566,11 @@ impl Doctrine {
             marksman: self.marksman,
             mark_hold: self.mark_hold,
             mark_share: self.mark_share,
+            losfire: self.losfire,
+            okp: self.okp,
+            mark_wait_ratio: self.mark_wait_ratio,
+            mark_hold_for: self.mark_hold_for,
+            mark_move: self.mark_move,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -587,6 +622,11 @@ pub struct Shape {
     pub marksman: bool,
     pub mark_hold: bool,
     pub mark_share: f32,
+    pub losfire: bool,
+    pub okp: Option<i32>,
+    pub mark_wait_ratio: f32,
+    pub mark_hold_for: f32,
+    pub mark_move: f32,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -621,6 +661,11 @@ impl Default for Shape {
             marksman: false,
             mark_hold: true,
             mark_share: 0.5,
+            losfire: false,
+            okp: None,
+            mark_wait_ratio: 0.0,
+            mark_hold_for: 3.0,
+            mark_move: 150.0,
             fire_state: None,
             fire_at_radar: None,
         }

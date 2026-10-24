@@ -479,6 +479,12 @@ impl Ai {
 
     /// A Widow, or a Scythe asked for, is ready: it holds its fire (it
     /// would show itself) and its ground.
+    /// Let go of scout `id` (a force calls it to spot, see
+    /// `taskforce::spotter`): whether it was one.
+    pub fn scouts_release(&mut self, id: i32) -> bool {
+        self.scouts.scouts.remove(&id).is_some()
+    }
+
     pub fn scouts_add(&mut self, unit: Unit) {
         let widow = self.defs.name_of(unit) == WIDOW;
         if widow {

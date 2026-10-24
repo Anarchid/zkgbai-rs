@@ -607,6 +607,7 @@ impl Ai {
         {
             let name = self.defs.name(def).to_owned();
             self.log(&format!("taskforce: a {name} for a {doctrine} force short of its {role}"));
+            self.taskforce_note_produced(&doctrine, &role);
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);
             return;
