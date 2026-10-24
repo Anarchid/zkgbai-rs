@@ -11,7 +11,8 @@
 //!
 //! The seeds are the shield ball as it always was (`felon`), Impaler
 //! batteries' escorts (`impaler`), and, off until switched on, shooter
-//! teams with spotters (`lance`, `phantom`), siege detachments (`tremor`,
+//! teams (`lance`, `phantom`, `envoy`; a doctrine's spotter role, see
+//! `spotter`, sees for them), siege detachments (`tremor`,
 //! `emissary`), Ravager squads (`ravager`) and cloaked bombs
 //! (`ghostbombs`). A file named by the `doctrines` option patches them and
 //! adds more (see `taskforce::load`).
@@ -22,6 +23,7 @@ use serde_json::{Map, Value, json};
 
 use super::Classes;
 use super::expr::{Expr, Force};
+use super::spotter::Spot;
 use crate::defs::Defs;
 
 /// Where an engaged force goes.
@@ -98,6 +100,9 @@ pub struct Role {
     pub fire_at_radar: Option<bool>,
     /// Striking forces: they charge in once the force is there.
     pub release: bool,
+    /// Spotters: they see for the core's guns instead of fighting (see
+    /// `spotter`), each in its way.
+    pub spot: Option<Spot>,
 }
 
 impl Role {
@@ -114,6 +119,7 @@ impl Role {
             fire_state: None,
             fire_at_radar: None,
             release: false,
+            spot: None,
         }
     }
 
@@ -149,6 +155,7 @@ impl Role {
             "fire_state": self.fire_state,
             "fire_at_radar": self.fire_at_radar,
             "release": self.release,
+            "spot": self.spot.map(Spot::name),
         })
     }
 
@@ -178,6 +185,7 @@ impl Role {
                 "fire_state" => self.fire_state = optional(v, |v| Ok(num(k, v, 0.0, 2.0)? as i32))?,
                 "fire_at_radar" => self.fire_at_radar = optional(v, |v| flag(k, v))?,
                 "release" => self.release = flag(k, v)?,
+                "spot" => self.spot = optional(v, |v| Spot::parse(&string(k, v)?))?,
                 "orbit" => self.orbit = num(k, v, 20.0, 600.0)?,
                 "to_strongest" => self.to_strongest = flag(k, v)?,
                 "gauge" => self.gauge = flag(k, v)?,
@@ -252,6 +260,12 @@ pub struct Doctrine {
     /// in reach that one shot kills, of those whose place we know exactly
     /// (Lances, Phantoms; see `marksman`).
     pub marksman: bool,
+    /// Marksmen: a gun keeps its mark until it has fired (or the mark is
+    /// gone), picking one only as it reloads; else it re-picks every pass.
+    pub mark_hold: bool,
+    /// Marksmen: a mark is worth setting from this share of what a volley
+    /// of the gun's type has killed so far (0: a tenth of the gun's cost).
+    pub mark_share: f32,
 }
 
 impl Doctrine {
@@ -281,6 +295,8 @@ impl Doctrine {
             regroup: false,
             reinforce_engaged: false,
             marksman: false,
+            mark_hold: true,
+            mark_share: 0.5,
         }
     }
 
@@ -344,6 +360,8 @@ impl Doctrine {
             "regroup": self.regroup,
             "reinforce_engaged": self.reinforce_engaged,
             "marksman": self.marksman,
+            "mark_hold": self.mark_hold,
+            "mark_share": self.mark_share,
         })
     }
 
@@ -397,6 +415,8 @@ impl Doctrine {
                 "regroup" => self.regroup = flag(k, v)?,
                 "reinforce_engaged" => self.reinforce_engaged = flag(k, v)?,
                 "marksman" => self.marksman = flag(k, v)?,
+                "mark_hold" => self.mark_hold = flag(k, v)?,
+                "mark_share" => self.mark_share = num(k, v, 0.0, 10.0)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -426,6 +446,9 @@ impl Doctrine {
             if !role_names.insert(r.name.as_str()) {
                 return Err(format!("doctrine {}: two roles named {}", self.name, r.name));
             }
+            if super::expr::GLOBALS.contains(&r.name.as_str()) {
+                return Err(format!("doctrine {}: '{}' is no role name (expressions read it)", self.name, r.name));
+            }
             for u in &r.units {
                 if !known(u) {
                     return Err(format!(
@@ -450,6 +473,15 @@ impl Doctrine {
         for n in self.engage.as_ref().map_or(Vec::new(), Expr::names) {
             if !role_names.contains(n) {
                 return Err(format!("doctrine {}: engage reads '{n}', no role", self.name));
+            }
+        }
+        for r in &self.roles {
+            let Some(spot) = r.spot else { continue };
+            for u in r.units.iter().filter(|u| !u.starts_with('@')) {
+                let Some(d) = defs.get(u) else { continue };
+                if let Err(e) = spot.fits(d) {
+                    return Err(format!("doctrine {}: role {}: '{u}' {e}", self.name, r.name));
+                }
             }
         }
         if self.shields_low > self.shields_ok {
@@ -480,6 +512,7 @@ impl Doctrine {
                     switch_on: r.switch_on,
                     fire_state: r.fire_state,
                     fire_at_radar: r.fire_at_radar,
+                    spot: r.spot,
                 })
                 .collect(),
             by_def,
@@ -501,6 +534,8 @@ impl Doctrine {
             regroup: self.regroup,
             reinforce_engaged: self.reinforce_engaged,
             marksman: self.marksman,
+            mark_hold: self.mark_hold,
+            mark_share: self.mark_share,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -515,6 +550,7 @@ pub struct RoleShape {
     pub switch_on: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
+    pub spot: Option<Spot>,
 }
 
 /// A doctrine compiled for the squad wrapper: by unit def id.
@@ -549,6 +585,8 @@ pub struct Shape {
     pub regroup: bool,
     pub reinforce_engaged: bool,
     pub marksman: bool,
+    pub mark_hold: bool,
+    pub mark_share: f32,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -581,6 +619,8 @@ impl Default for Shape {
             regroup: false,
             reinforce_engaged: false,
             marksman: false,
+            mark_hold: true,
+            mark_share: 0.5,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -594,6 +634,11 @@ impl Shape {
 
     pub fn role(&self, def: Option<i32>) -> Option<&RoleShape> {
         def.and_then(|d| self.by_def.get(&d)).and_then(|&i| self.roles.get(i))
+    }
+
+    /// Whether members of this type are spotters (see `spotter`).
+    pub fn spot(&self, def: Option<i32>) -> Option<Spot> {
+        self.role(def).and_then(|r| r.spot)
     }
 
     pub fn orbit(&self, def: Option<i32>) -> f32 {
@@ -668,6 +713,19 @@ pub fn seeds() -> Vec<Doctrine> {
     phantom.muster = 0.0;
     phantom.retreat_health = 0.7;
 
+    let mut envoy = Doctrine::new("envoy");
+    envoy.note = "Envoys (1200 range, 600 a shell every 7.3 s, fired on the move) with a Siren each, which \
+                  tanks for them and takes riot and anti-sub duty (its Sonic Blaster hits under water: \
+                  subs are SINK); firing at will, each set on the best target in reach one shell kills."
+        .into();
+    envoy.enabled = false;
+    envoy.core = vec!["shiparty".into()];
+    envoy.roles = vec![Role::escort("siren", &["shipassault"], "cores", 130.0, 0.5)];
+    envoy.marksman = true;
+    envoy.engage_value = 1800.0;
+    envoy.muster = 0.0;
+    envoy.retreat_health = 0.6;
+
     let mut tremor = Doctrine::new("tremor");
     tremor.note = "A siege detachment: Tremors stand where they reach the most and fire at everything, an \
                    Ogre per two against raiders, Minotaurs as the line, an Ettin past 3000 metal."
@@ -737,7 +795,7 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.engage_value = 600.0;
     ghostbombs.muster = 90.0;
 
-    vec![felon, lance, phantom, tremor, emissary, impaler, ravager, ghostbombs]
+    vec![felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, ghostbombs]
 }
 
 fn string(k: &str, v: &Value) -> Result<String, String> {

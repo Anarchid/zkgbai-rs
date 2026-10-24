@@ -63,6 +63,10 @@ impl fmt::Debug for Expr {
     }
 }
 
+/// Names any expression may read besides the force's roles: our income,
+/// and (reserved, 0 for now) the map's density, openness and reach.
+pub const GLOBALS: [&str; 4] = ["income", "density", "openness", "reach"];
+
 /// What a force has, for its wants: how many cores and their metal, and
 /// how many of each role and their metal (in the doctrine's role order).
 #[derive(Clone, Debug, Default)]
@@ -74,6 +78,16 @@ pub struct Force {
     /// Our metal income, as assault squads count it (`income`; 0 where a
     /// want is read without it).
     pub income: f32,
+    /// Reserved, so doctrines can be written against them, for the map's
+    /// crowding and closure (loop/f12/VERDICT-F12-density.md): `density`,
+    /// our and the known enemy's standing metal per square kilo-elmo of the
+    /// roster's usable ground; `openness`, the share of that ground outside
+    /// any direct-fire static's reach (either side's); `reach`, the share
+    /// of our start's free region still reachable outside the enemy's. All
+    /// read 0 until intel measures them.
+    pub density: f32,
+    pub openness: f32,
+    pub reach: f32,
 }
 
 impl Force {
@@ -118,12 +132,16 @@ impl Expr {
         &self.src
     }
 
-    /// The names it reads (other than `cores`, `value` and `income`), for checking
-    /// against the doctrine's roles.
+    /// The names it reads (other than `cores`, `value` and the force-wide
+    /// [`GLOBALS`]), for checking against the doctrine's roles.
     pub fn names(&self) -> Vec<&str> {
         fn walk<'a>(n: &'a Node, out: &mut Vec<&'a str>) {
             match n {
-                Node::Name(s) if !matches!(s.as_str(), "cores" | "value" | "core" | "income") => out.push(s),
+                Node::Name(s)
+                    if !matches!(s.as_str(), "cores" | "value" | "core") && !GLOBALS.contains(&s.as_str()) =>
+                {
+                    out.push(s)
+                }
                 Node::Of(_, s) if s != "core" && s != "cores" => out.push(s),
                 Node::Call(_, args) => args.iter().for_each(|a| walk(a, out)),
                 Node::Neg(a) | Node::Not(a) => walk(a, out),
@@ -166,6 +184,9 @@ fn eval(n: &Node, f: &Force) -> f32 {
         Node::Num(x) => *x,
         Node::Name(s) if s == "value" => f.value(),
         Node::Name(s) if s == "income" => f.income,
+        Node::Name(s) if s == "density" => f.density,
+        Node::Name(s) if s == "openness" => f.openness,
+        Node::Name(s) if s == "reach" => f.reach,
         Node::Name(s) => f.count(s).unwrap_or(0.0),
         Node::Of(false, s) => f.count(s).unwrap_or(0.0),
         Node::Of(true, s) => f.value_of(s).unwrap_or(0.0),
@@ -406,7 +427,12 @@ mod tests {
     use super::*;
 
     fn force(cores: usize, core_value: f32) -> Force {
-        Force { cores, core_value, roles: vec![("guns".into(), 7, 2100.0), ("eraser".into(), 0, 0.0)], income: 0.0 }
+        Force {
+            cores,
+            core_value,
+            roles: vec![("guns".into(), 7, 2100.0), ("eraser".into(), 0, 0.0)],
+            ..Force::default()
+        }
     }
 
     fn want(src: &str, f: &Force) -> usize {
@@ -441,5 +467,13 @@ mod tests {
         assert!(Expr::parse("cores 2").is_err());
         assert_eq!(Expr::parse("floor(0.2 * guns) + eraser").unwrap().names(), vec!["guns", "eraser"]);
         assert_eq!(Expr::per_core(1.5).source(), "ceil(1.5 * cores)");
+    }
+
+    #[test]
+    fn density_and_openness_are_reserved() {
+        let e = Expr::parse("density > 0.5 && openness < 0.3 && reach < 1 ? 2500 : max(1200, 45 * income)").unwrap();
+        assert!(e.names().is_empty());
+        assert_eq!(e.eval(&Force { income: 40.0, ..Force::default() }), 1800.0);
+        assert_eq!(e.eval(&Force { density: 1.0, ..Force::default() }), 2500.0);
     }
 }
