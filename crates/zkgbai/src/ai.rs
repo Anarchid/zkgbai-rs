@@ -285,7 +285,7 @@ impl SkirmishAi for Ai {
             return 0;
         }
         match event {
-            Event::Init { .. } => return self.init(),
+            Event::Init { saved_game } => return self.init(saved_game),
             Event::Release { reason } => {
                 self.log_profile();
                 self.op_finish(reason);
@@ -382,7 +382,17 @@ impl Ai {
         }
     }
 
-    fn init(&mut self) -> i32 {
+    /// `saved_game`: the engine resumed a save; the game is on, the
+    /// commander and start position are history and the factories stand
+    /// (the engine replays UnitCreated/UnitFinished for every unit next).
+    fn init(&mut self, saved_game: bool) -> i32 {
+        if saved_game {
+            // The journal's run record and anything else written before the
+            // first Update carry the resumed frame, not 0.
+            self.frame = self.cb.game().current_frame();
+            let standing = self.cb.team_units().len();
+            self.log(&format!("init: loaded game, standing units {standing}"));
+        }
         let h = self.cb.map().height() as f32;
         let w = self.cb.map().width() as f32;
         self.map_diag = (h * h + w * w).sqrt();
@@ -393,8 +403,10 @@ impl Ai {
         self.log("GraphManager initialized.");
 
         if self.slave {
-            self.select_random_commander();
-            self.choose_start_pos();
+            if !saved_game {
+                self.select_random_commander();
+                self.choose_start_pos();
+            }
             self.log("Entering merge mode! Discarding modules.");
             return 0;
         }
@@ -439,9 +451,11 @@ impl Ai {
             return 1;
         }
 
-        let opening = self.eco_roll_opening();
-        self.select_commander(opening.as_deref());
-        self.choose_start_pos();
+        if !saved_game {
+            let opening = self.eco_roll_opening();
+            self.select_commander(opening.as_deref());
+            self.choose_start_pos();
+        }
         if !self.disabled.is_empty() {
             let off: Vec<&str> = self.disabled.iter().map(String::as_str).collect();
             self.log(&format!("dev: features off: {}", off.join(", ")));
