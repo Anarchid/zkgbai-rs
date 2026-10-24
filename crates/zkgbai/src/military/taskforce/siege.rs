@@ -53,6 +53,8 @@ pub const AT_STATION: f32 = 60.0;
 /// leader is farther than `PARK_LEAVE` (a nudge is not a move).
 const PARK: f32 = 200.0;
 const PARK_LEAVE: f32 = 320.0;
+/// How far short of its target the wrapper stops a leader.
+const SHORT: f32 = 135.0;
 
 /// A station lies this far beyond the reach of every enemy static we know
 /// of (the Analyst's gate asks for 100).
@@ -106,6 +108,9 @@ struct Gun {
     state: &'static str,
     last: i32,
     parked: bool,
+    /// Told to hold position at its spot (the leader is on maneuver
+    /// otherwise, see `Squad::taskforce_add_unit`).
+    held: bool,
     frames: BTreeMap<&'static str, i32>,
 }
 
@@ -242,7 +247,9 @@ impl Ai {
             .filter(|s| in_reach(s.pos, reach, &statics).0 > 0)
             .map(|s| (s.pos, s.deployed));
         let station = match kept {
-            Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
+            Some((s, deployed)) => {
+                return (Self::siege_walk(pos, s), distance(pos, s) > if deployed { PARK_LEAVE } else { PARK });
+            }
             None => {
                 let (s, k, v, how) = self.siege_pick(sid, leader, reach, &statics);
                 let old = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos);
@@ -266,11 +273,24 @@ impl Ai {
                     }
                 }
                 let f = self.taskforces.siege.forces.entry(sid).or_default();
-                f.station = Some(Station { pos: s, reach: (k, v), deployed: false });
+                // The same place again keeps the station as it is (parked
+                // stays parked); a new one starts unparked.
+                if old.is_none_or(|o| distance(o, s) > AT_STATION) {
+                    f.station = Some(Station { pos: s, reach: (k, v), deployed: false });
+                } else if let Some(st) = f.station.as_mut() {
+                    st.reach = (k, v);
+                }
                 s
             }
         };
-        (station, distance(pos, station) > PARK)
+        (Self::siege_walk(pos, station), distance(pos, station) > PARK)
+    }
+
+    /// Where the wrapper is told to take the leader so that it stops at the
+    /// station: the wrapper stops a leader `SHORT` before its target (see
+    /// `Squad::taskforce_set_target`), so the target is that far past it.
+    fn siege_walk(from: Vec3, station: Vec3) -> Vec3 {
+        if distance(from, station) < 1.0 { station } else { get_directional_point(station, from, -SHORT) }
     }
 
     /// A station for force `sid`: the best candidate the guns can reach
@@ -369,7 +389,7 @@ impl Ai {
                         let near = nearest(p, &statics);
                         let (n, v) = in_reach(p, reach, &statics);
                         self.log(&format!(
-                            "taskforce: a {} deploys at ({:.0}, {:.0}), {}; {n} statics worth {v:.0} in reach",
+                            "taskforce: a {} deploys at ({:.0}, {:.0}), {}; {n} statics worth {v:.0} in reach (unit {id})",
                             self.defs.name_of(unit),
                             p.x,
                             p.z,
@@ -399,6 +419,12 @@ impl Ai {
                     }
                 }
                 let g = self.taskforces.siege.guns.entry(id).or_default();
+                if parked && !g.held {
+                    // Hold position: on maneuver a gun firing at will walks
+                    // after its targets and off its spot.
+                    unit.set_move_state(0, 0);
+                    g.held = true;
+                }
                 g.parked = parked;
             }
             let g = self.taskforces.siege.guns.entry(id).or_default();
@@ -450,6 +476,10 @@ impl Ai {
             .collect();
         for (id, unit) in cores {
             let Some(g) = self.taskforces.siege.guns.get_mut(&id) else { continue };
+            if g.held {
+                g.held = false;
+                unit.set_move_state(if Some(id) == leader { 1 } else { 0 }, 0);
+            }
             if g.parked {
                 g.parked = false;
                 let stood = g.frames.get("deployed in range").copied().unwrap_or(0)
@@ -457,7 +487,7 @@ impl Ai {
                 let p = unit.pos();
                 let state = g.state;
                 self.log(&format!(
-                    "taskforce: a {} undeploys ({why}) at ({:.0}, {:.0}), {state} lately, deployed {} s in all",
+                    "taskforce: a {} undeploys ({why}) at ({:.0}, {:.0}), {state} lately, deployed {} s in all (unit {id})",
                     self.defs.name_of(unit),
                     p.x,
                     p.z,
