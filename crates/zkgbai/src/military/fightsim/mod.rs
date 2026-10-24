@@ -584,28 +584,34 @@ fn simulate(template: &[SimUnit], hits: &HitTables, hazard: Option<&Hazard>, wit
         }
         // Fire: every reloaded weapon at its nearest living target in
         // range, damage applied at once (a kill removes the target for the
-        // units after it in order).
+        // weapons and units after it in order). The nearest living enemy is
+        // the target of every weapon that reaches it, so it is found once
+        // per unit and again only after a kill.
         let mut shot_fired = false;
         for i in 0..us.len() {
             if !us[i].alive || !us[i].armed {
                 continue;
             }
             let (side, ux) = (us[i].side, us[i].x);
+            let nearest = |us: &[SimUnit]| {
+                let mut best: Option<(f64, usize)> = None;
+                for (j, e) in us.iter().enumerate() {
+                    if e.alive && e.side != side {
+                        let d = (e.x - ux).abs();
+                        if best.is_none_or(|(bd, _)| d < bd) {
+                            best = Some((d, j));
+                        }
+                    }
+                }
+                best
+            };
+            let mut target = nearest(&us);
             for wi in 0..us[i].weapons.len() {
                 if f < us[i].weapons[wi].next {
                     continue;
                 }
                 let range = us[i].weapons[wi].range;
-                let mut best: Option<(f64, usize)> = None;
-                for (j, e) in us.iter().enumerate() {
-                    if e.alive && e.side != side {
-                        let d = (e.x - ux).abs();
-                        if d <= range && best.is_none_or(|(bd, _)| d < bd) {
-                            best = Some((d, j));
-                        }
-                    }
-                }
-                let Some((dist, j)) = best else { continue };
+                let Some((dist, j)) = target.filter(|(d, _)| *d <= range) else { continue };
                 us[i].weapons[wi].next = f + us[i].weapons[wi].reload;
                 shot_fired = true;
                 let rb = if range > 0.0 { ((RBANDS as f64 * dist / range) as i32).min(RBANDS) } else { RBANDS } as u8;
@@ -625,6 +631,7 @@ fn simulate(template: &[SimUnit], hits: &HitTables, hazard: Option<&Hazard>, wit
                         if t.armed {
                             killed[t.side as usize] += t.cost;
                         }
+                        target = nearest(&us);
                     }
                 }
             }

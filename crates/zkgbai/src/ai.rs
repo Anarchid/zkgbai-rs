@@ -40,6 +40,8 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// its mirrors 17-23 twice where the issue clients alone won 25-15.
 /// `fightsim`: attacking squads fall back on the fight predictor's verdict
 /// (`military::fightsim`) instead of the threat map's; its first arm pending.
+/// The predictor itself runs in shadow in every game (its verdicts logged,
+/// not acted on) unless `fightshadow` is disabled.
 /// `permanence` (the interception planner keeps unseen enemy groups 45 s,
 /// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
