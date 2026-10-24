@@ -243,7 +243,7 @@ def lanchester(units):
     return 1.0, 1.0 - math.sqrt(max(0.0, 1.0 - S[0] / S[1]))
 
 
-def simulate(units, rng=None, hazard=None):
+def simulate(units, rng=None, hazard=None, post=None, withdraw=False):
     """1D a-move fight. rng None -> expected damage (deterministic); else rolled shots.
     hazard: disengagement hazard applied at the end of every second (expected over stopping
     times when deterministic, sampled when rolled)."""
@@ -269,7 +269,7 @@ def simulate(units, rng=None, hazard=None):
     while f < HORIZON:
         if hazard is not None and f > 0 and f % 30 == 0:
             kA, kB = kfrac()
-            h = hazard.h(f // 30 - 1, kA, kB, lr)
+            h = hazard.h(f // 30 - 1, kA, kB, lr, post)
             if rng is None:
                 exp_k[0] += surv * h * kA; exp_k[1] += surv * h * kB
                 surv *= 1.0 - h
@@ -284,13 +284,21 @@ def simulate(units, rng=None, hazard=None):
         # movement: close until an enemy is within own range
         for u in alive:
             u.moving = False
-            if not u.mobile or not u.armed or u.speed <= 0:
+            if not u.mobile or u.speed <= 0:
                 continue
             foes = sides[1 - u.side]
             if not foes:
                 continue
             nearest = min(foes, key=lambda e: abs(e.x - u.x))
             dist = abs(nearest.x - u.x)
+            if withdraw and u.side == 0:
+                # query "A withdraws now": every mobile A unit reverses away from B at full speed
+                u.x -= u.speed * DT if nearest.x > u.x else -u.speed * DT
+                u.moving = True
+                moved = True
+                continue
+            if not u.armed:
+                continue
             if dist > u.max_range * 0.95:
                 step = min(u.speed * DT, dist - u.max_range * 0.9)
                 u.x += step if nearest.x > u.x else -step
@@ -344,8 +352,8 @@ def simulate(units, rng=None, hazard=None):
                 tgt.alive = False
                 if tgt.armed:
                     killed[tgt.side] += tgt.cost
-        quiet = 0 if (shot_fired or moved) else quiet + DT
-        if quiet > 300:
+        quiet = 0 if (shot_fired or (moved and not withdraw)) else quiet + DT
+        if quiet > (150 if withdraw else 300):
             break
         f += DT
     kA, kB = kfrac()
@@ -372,6 +380,22 @@ def predict_fight(args):
         ys = np.array([simulate(units, rng, hz) for _ in range(rollouts)])
         out["rstop_A"] = ys[:, 0]
         out["rstop_B"] = ys[:, 1]
+    hp = G.get("hazard_post")
+    post = G.get("posture", {}).get((fight["game"], fight["fid"]))
+    if hp is not None and post is not None:
+        pa, pb = post[0], post[1]
+        out["postureA"], out["postureB"], out["rawA"], out["rawB"] = post
+        import disengage as _d
+        _d.POST = True
+        rng = np.random.default_rng(seed + 2)
+        ys = np.array([simulate(units, rng, hp, (pa, pb)) for _ in range(rollouts)])
+        out["robs_A"], out["robs_B"] = ys[:, 0], ys[:, 1]
+        rng = np.random.default_rng(seed + 3)
+        ys = np.array([simulate(units, rng, hp, ("commit", pb)) for _ in range(rollouts)])
+        out["qcom_A"], out["qcom_B"] = ys[:, 0], ys[:, 1]
+        rng = np.random.default_rng(seed + 4)
+        ys = np.array([simulate(units, rng, hp, ("retreat-whole", pb), withdraw=True) for _ in range(rollouts)])
+        out["qwd_A"], out["qwd_B"] = ys[:, 0], ys[:, 1]
     out["n_armedA"] = sum(u.armed for u in units if u.side == 0)
     out["n_armedB"] = sum(u.armed for u in units if u.side == 1)
     return out
@@ -390,6 +414,14 @@ def _init(pdir, cache):
         G["hazard"] = disengage.Hazard(hd["w"])
     else:
         G["hazard"] = None
+    hpp = os.environ.get("PRED_HAZARD_POST")
+    G["hazard_post"] = None
+    if hpp:
+        hd = pickle.load(open(hpp, "rb"))
+        G["hazard_post"] = disengage.Hazard(hd["w"])
+        pl = pd.read_csv(os.environ["PRED_POSTURE"], sep="\t")
+        G["posture"] = {(g, int(i)): (a, b, ra, rb) for g, i, a, b, ra, rb in
+                        zip(pl["game"], pl["fid"], pl["postureA"], pl["postureB"], pl["rawA"], pl["rawB"])}
 
 
 # ----------------------------------------------------------------------------- calibration + scoring
@@ -503,6 +535,19 @@ def evaluate(pdir, workers=4, rollouts=64):
             "roll_pAwin": (np.sum(p["roll_B"] - p["roll_A"] > DECIDE) + 0.5) / (np.sum(np.abs(p["roll_B"] - p["roll_A"]) > DECIDE) + 1.0),
             "roll_crpsA": crps_ensemble(p["roll_A"], f["yA"]), "roll_crpsB": crps_ensemble(p["roll_B"], f["yB"]),
         })
+        if "robs_A" in p:
+            rows[-1].update({
+                "postureA": p["postureA"], "postureB": p["postureB"], "rawA": p["rawA"], "rawB": p["rawB"],
+                "robs_A": p["robs_A"].mean(), "robs_B": p["robs_B"].mean(),
+                "robs_pAwin": (np.sum(p["robs_B"] - p["robs_A"] > DECIDE) + 0.5) / (np.sum(np.abs(p["robs_B"] - p["robs_A"]) > DECIDE) + 1.0),
+                "robs_crpsA": crps_ensemble(p["robs_A"], f["yA"]), "robs_crpsB": crps_ensemble(p["robs_B"], f["yB"]),
+                "qcom_A": p["qcom_A"].mean(), "qcom_B": p["qcom_B"].mean(),
+                "qcom_pAwin": (np.sum(p["qcom_B"] - p["qcom_A"] > DECIDE) + 0.5) / (np.sum(np.abs(p["qcom_B"] - p["qcom_A"]) > DECIDE) + 1.0),
+                "qcom_crpsA": crps_ensemble(p["qcom_A"], f["yA"]), "qcom_crpsB": crps_ensemble(p["qcom_B"], f["yB"]),
+                "qwd_A": p["qwd_A"].mean(), "qwd_B": p["qwd_B"].mean(),
+                "qwd_pAwin": (np.sum(p["qwd_B"] - p["qwd_A"] > DECIDE) + 0.5) / (np.sum(np.abs(p["qwd_B"] - p["qwd_A"]) > DECIDE) + 1.0),
+                "qwd_crpsA": crps_ensemble(p["qwd_A"], f["yA"]), "qwd_crpsB": crps_ensemble(p["qwd_B"], f["yB"]),
+            })
         if "dstop_A" in p:
             rows[-1].update({
                 "dstop_A": p["dstop_A"], "dstop_B": p["dstop_B"],
@@ -521,6 +566,11 @@ def evaluate(pdir, workers=4, rollouts=64):
         "dps_sim": (logit(np.clip(df["dps_A"], 0.005, 0.995)), logit(np.clip(df["dps_B"], 0.005, 0.995)), df["dps_B"].values - df["dps_A"].values),
         "rolled_sim": (logit(np.clip(df["roll_A"], 0.005, 0.995)), logit(np.clip(df["roll_B"], 0.005, 0.995)), df["roll_B"].values - df["roll_A"].values),
     }
+    if "robs_A" in df.columns:
+        ok = df["robs_A"].notna()
+        for name, c in (("rolled_obs", "robs"), ("q_commit", "qcom"), ("q_withdraw", "qwd")):
+            a = logit(np.clip(df[f"{c}_A"].fillna(0.5), 0.005, 0.995)); b = logit(np.clip(df[f"{c}_B"].fillna(0.5), 0.005, 0.995))
+            feats[name] = (a, b, (df[f"{c}_B"].fillna(0.5) - df[f"{c}_A"].fillna(0.5)).values)
     if "dstop_A" in df.columns:
         feats["dps_stop"] = (logit(np.clip(df["dstop_A"], 0.005, 0.995)), logit(np.clip(df["dstop_B"], 0.005, 0.995)), df["dstop_B"].values - df["dstop_A"].values)
         feats["rolled_stop"] = (logit(np.clip(df["rstop_A"], 0.005, 0.995)), logit(np.clip(df["rstop_B"], 0.005, 0.995)), df["rstop_B"].values - df["rstop_A"].values)
@@ -538,7 +588,7 @@ def evaluate(pdir, workers=4, rollouts=64):
     return df
 
 
-RAW = {"rolled_sim": "roll", "rolled_stop": "rstop"}
+RAW = {"rolled_sim": "roll", "rolled_stop": "rstop", "rolled_obs": "robs", "q_commit": "qcom", "q_withdraw": "qwd"}
 
 
 def metric_arrays(d, mod):
@@ -586,6 +636,90 @@ def bootstrap(df, models, reps=1000, seed=7):
     return pd.DataFrame(rows)
 
 
+def score_round3(df, pdir):
+    """Posture-conditional models scored raw on test by observed posture; queries on matching fights."""
+    t = df[(df["split"] == "test") & df["robs_A"].notna()].copy()
+    lines = []
+    def raw_scores(d, c):
+        dd = d[d["win"] >= 0]
+        w = dd["win"].values; p = np.clip(dd[f"{c}_pAwin"].values, 1e-6, 1 - 1e-6)
+        return {"n": len(d), "n_dec": len(dd), "crps": float(((d[f"{c}_crpsA"] + d[f"{c}_crpsB"]) / 2).mean()),
+                "logloss": float(-(w * np.log(p) + (1 - w) * np.log(1 - p)).mean()) if len(dd) else float("nan"),
+                "brier": float(((p - w) ** 2).mean()) if len(dd) else float("nan")}
+    def boot_diff(d, c1, c2, reps=1000, seed=5):
+        rng = np.random.default_rng(seed)
+        games, gidx = np.unique(d["game"].values, return_inverse=True)
+        a1 = ((d[f"{c1}_crpsA"] + d[f"{c1}_crpsB"]) / 2).values; a2 = ((d[f"{c2}_crpsA"] + d[f"{c2}_crpsB"]) / 2).values
+        dec = d["win"].values >= 0; w = d["win"].values.astype(float)
+        def ll(c):
+            p = np.clip(d[f"{c}_pAwin"].values, 1e-6, 1 - 1e-6)
+            return np.where(dec, -(w * np.log(p) + (1 - w) * np.log(1 - p)), np.nan)
+        l1, l2 = ll(c1), ll(c2)
+        out = {}
+        for k, x1, x2 in (("crps", a1, a2), ("logloss", l1, l2)):
+            diffs = []
+            for _ in range(reps):
+                wts = np.bincount(rng.integers(0, len(games), len(games)), minlength=len(games))[gidx].astype(float)
+                ok = ~np.isnan(x1)
+                diffs.append((wts[ok] * (x1[ok] - x2[ok])).sum() / max(wts[ok].sum(), 1e-9))
+            out[k] = (float(np.nanmean(x1) - np.nanmean(x2)), float(np.percentile(diffs, 2.5)), float(np.percentile(diffs, 97.5)))
+        return out
+    rows = []
+    for pa in ("commit", "retreat-whole", "retreat-piece", "wiped"):
+        for pb in ("commit", "retreat-whole", "retreat-piece", "wiped", "any"):
+            d = t[(t["postureA"] == pa) & ((t["postureB"] == pb) if pb != "any" else True)]
+            if len(d) < 20:
+                continue
+            for c, name in (("rstop", "rolled_stop (uncond.)"), ("robs", "rolled_obs (posture)")):
+                r = raw_scores(d, c); r.update({"postureA": pa, "postureB": pb, "model": name}); rows.append(r)
+            b = boot_diff(d, "robs", "rstop")
+            rows.append({"postureA": pa, "postureB": pb, "model": "robs - rstop", "n": len(d), "n_dec": int((d["win"] >= 0).sum()),
+                         "crps": b["crps"][0], "logloss": b["logloss"][0], "brier": float("nan"),
+                         "crps_ci": f"[{b['crps'][1]:.3f}, {b['crps'][2]:.3f}]", "logloss_ci": f"[{b['logloss'][1]:.3f}, {b['logloss'][2]:.3f}]"})
+    bp = pd.DataFrame(rows)
+    bp.to_csv(os.path.join(pdir, "scores_by_posture.tsv"), sep="\t", index=False, float_format="%.4f")
+    lines.append("### rolled_obs vs rolled_stop, raw, by observed posture (test)\n")
+    lines.append(bp.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    # queries on matching fights
+    qrows = []
+    for qname, c, pa, excl in (("A commits", "qcom", "commit", None), ("A commits (B not wiped)", "qcom", "commit", "bwiped"),
+                               ("A withdraws now", "qwd", "retreat-whole", None)):
+        d = t[(t["postureA"] == pa) & (t["rawA"] == pa)]
+        if excl == "bwiped":
+            d = d[d["yB"] < 0.999]
+        for sub, m in (("all", np.ones(len(d), bool)), (">=3 engaged/side", ((d["nA"] >= 3) & (d["nB"] >= 3)).values)):
+            dd = d[m]
+            if len(dd) < 20:
+                continue
+            for cc, name in ((c, qname), ("rstop", "rolled_stop (uncond.)"), ("robs", "rolled_obs")):
+                r = raw_scores(dd, cc); r.update({"query": qname, "subset": sub, "model": name}); qrows.append(r)
+            b = boot_diff(dd, c, "rstop")
+            qrows.append({"query": qname, "subset": sub, "model": f"{qname} - rolled_stop", "n": len(dd), "n_dec": int((dd["win"] >= 0).sum()),
+                          "crps": b["crps"][0], "logloss": b["logloss"][0], "brier": float("nan"),
+                          "crps_ci": f"[{b['crps'][1]:.3f}, {b['crps'][2]:.3f}]", "logloss_ci": f"[{b['logloss'][1]:.3f}, {b['logloss'][2]:.3f}]"})
+    q = pd.DataFrame(qrows)
+    q.to_csv(os.path.join(pdir, "scores_queries.tsv"), sep="\t", index=False, float_format="%.4f")
+    lines.append("\n### Queries on matching observed-posture fights (test, raw)\n")
+    lines.append(q.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    # reliability by bin per posture, rolled_obs raw P(A wins) and calibrated
+    rel = []
+    for pa in ("commit", "retreat-whole", "retreat-piece"):
+        d = t[(t["postureA"] == pa) & (t["win"] >= 0)]
+        for col, lab in (("robs_pAwin", "raw"), ("rolled_obs_pAwin", "calibrated")):
+            if col not in d.columns:
+                continue
+            bins = pd.cut(d[col], [0, .2, .4, .6, .8, 1.0], include_lowest=True)
+            g = d.groupby(bins, observed=True).agg(n=("win", "size"), pred=(col, "mean"), obs=("win", "mean")).reset_index()
+            g.insert(0, "posture", pa); g.insert(1, "kind", lab); g["bin"] = g[col].astype(str); g = g.drop(columns=[col])
+            rel.append(g)
+    rel = pd.concat(rel)
+    rel.to_csv(os.path.join(pdir, "reliability_by_posture.tsv"), sep="\t", index=False, float_format="%.3f")
+    lines.append("\n### Reliability of P(A wins) by bin and posture (test)\n")
+    lines.append(rel.to_string(index=False, float_format=lambda v: f"{v:.3f}"))
+    open(os.path.join(pdir, "results_round3.md"), "w").write("\n".join(lines) + "\n")
+    print("\n".join(lines))
+
+
 def score(df, pdir):
     pdir = os.environ.get("PRED_OUT", pdir)
     models = ["climatology", "flat", "lanchester", "dps_sim", "rolled_sim"] + (["dps_stop", "rolled_stop"] if "dstop_A" in df.columns else [])
@@ -629,6 +763,8 @@ def score(df, pdir):
             fh.write(s.drop(columns=["split"]).to_string(index=False, float_format=lambda v: f"{v:.4f}"))
             fh.write("\n")
     print(sc[sc["split"] == "test"].to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if "robs_A" in df.columns:
+        score_round3(df, pdir)
     if os.environ.get("PRED_BOOT", "1") == "1":
         bs = []
         for sub in ("all", ">=3 armed/side", "mobile-only", "with static", ">=500 metal/side"):
