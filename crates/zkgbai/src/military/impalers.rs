@@ -858,7 +858,7 @@ impl Ai {
     }
 
     /// Known shields: where, how far they reach.
-    fn impalers_shields(&mut self) -> Vec<(Vec3, f32)> {
+    pub(crate) fn impalers_shields(&mut self) -> Vec<(Vec3, f32)> {
         self.impalers_shield_sources().into_iter().map(|s| (s.0, s.1)).collect()
     }
 

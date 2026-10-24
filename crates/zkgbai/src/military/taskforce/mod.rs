@@ -17,6 +17,7 @@
 
 pub mod doctrine;
 pub mod expr;
+pub mod marksman;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -114,6 +115,8 @@ pub struct Taskforces {
     pub classes: Classes,
     shapes: BTreeMap<String, Arc<Shape>>,
     loaded: bool,
+    /// Marksmen's marks: gun to target (see `marksman`).
+    pub marks: BTreeMap<i32, i32>,
 }
 
 /// Aims whose forces are squads of the squad handler (see

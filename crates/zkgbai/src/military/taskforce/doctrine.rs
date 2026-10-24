@@ -243,6 +243,10 @@ pub struct Doctrine {
     /// Members join it while engaged (the shield ball); else only while it
     /// is not, so none drives to a fight alone.
     pub reinforce_engaged: bool,
+    /// Its cores, firing at will, are each set on the most valuable target
+    /// in reach that one shot kills, of those whose place we know exactly
+    /// (Lances, Phantoms; see `marksman`).
+    pub marksman: bool,
 }
 
 impl Doctrine {
@@ -270,6 +274,7 @@ impl Doctrine {
             strays: false,
             regroup: false,
             reinforce_engaged: false,
+            marksman: false,
         }
     }
 
@@ -331,6 +336,7 @@ impl Doctrine {
             "strays": self.strays,
             "regroup": self.regroup,
             "reinforce_engaged": self.reinforce_engaged,
+            "marksman": self.marksman,
         })
     }
 
@@ -376,6 +382,7 @@ impl Doctrine {
                 "strays" => self.strays = flag(k, v)?,
                 "regroup" => self.regroup = flag(k, v)?,
                 "reinforce_engaged" => self.reinforce_engaged = flag(k, v)?,
+                "marksman" => self.marksman = flag(k, v)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -473,6 +480,7 @@ impl Doctrine {
             strays: self.strays,
             regroup: self.regroup,
             reinforce_engaged: self.reinforce_engaged,
+            marksman: self.marksman,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -518,6 +526,7 @@ pub struct Shape {
     pub strays: bool,
     pub regroup: bool,
     pub reinforce_engaged: bool,
+    pub marksman: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -548,6 +557,7 @@ impl Default for Shape {
             strays: false,
             regroup: false,
             reinforce_engaged: false,
+            marksman: false,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -609,37 +619,30 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.reinforce_engaged = true;
 
     let mut lance = Doctrine::new("lance");
-    lance.note = "Lances (980 range, 1000 hp) holding fire at radar dots, a Halberd to spot for them, a Mace \
-                  screen against raiders, Scalpels as the line, a Flail when one is about."
+    lance.note = "Lances (980 range, 3000 a shot) with a Mace, or two Bolas, against the raiders that pick \
+                  them off alone; firing at will, each set on the best target in reach one shot kills."
         .into();
     lance.enabled = false;
     lance.core = vec!["hoverarty".into()];
-    lance.fire_at_radar = Some(false);
     lance.roles = vec![
-        Role::escort("spotter", &["hoverassault"], "1", 300.0, 0.3),
-        Role::escort("screen", &["hoverriot"], "ceil(cores)", 130.0, 0.5),
-        Role::escort("line", &["hoverskirm"], "ceil(cores)", 170.0, 0.0),
-        Role::escort("aa", &["hoveraa"], "cores >= 2 ? 1 : 0", 80.0, 0.0),
+        Role::escort("mace", &["hoverriot"], "cores", 130.0, 0.5),
+        Role::escort("bolas", &["hoverheavyraid"], "2 * max(0, cores - mace)", 150.0, 0.0),
     ];
-    lance.engage_value = 1500.0;
-    lance.muster = 75.0;
+    lance.marksman = true;
+    lance.engage_value = 1400.0;
+    lance.muster = 0.0;
     lance.retreat_health = 0.7;
 
     let mut phantom = Doctrine::new("phantom");
-    phantom.note = "Phantoms (700 range, 560 hp) holding fire at radar dots, a Scythe to spot for them, \
-                    Reavers against raiders, Knights and Ronins as the line, a Gremlin when one is about."
+    phantom.note = "Phantoms (700 range, 1500 a shot) with a Scythe, cloaked as they are; firing at will, \
+                    each set on the best target in reach one shot kills."
         .into();
     phantom.enabled = false;
     phantom.core = vec!["cloaksnipe".into()];
-    phantom.fire_at_radar = Some(false);
-    phantom.roles = vec![
-        Role::escort("spotter", &["cloakheavyraid"], "1", 300.0, 0.3),
-        Role::escort("screen", &["cloakriot"], "ceil(cores)", 110.0, 0.5),
-        Role::escort("line", &["cloakassault", "cloakskirm"], "ceil(cores)", 160.0, 0.0),
-        Role::escort("aa", &["cloakaa"], "cores >= 2 ? 1 : 0", 70.0, 0.0),
-    ];
-    phantom.engage_value = 1100.0;
-    phantom.muster = 75.0;
+    phantom.roles = vec![Role::escort("scythe", &["cloakheavyraid"], "cores", 200.0, 0.5)];
+    phantom.marksman = true;
+    phantom.engage_value = 900.0;
+    phantom.muster = 0.0;
     phantom.retreat_health = 0.7;
 
     let mut tremor = Doctrine::new("tremor");
@@ -848,6 +851,21 @@ mod tests {
         assert!(shape.low_shields(false, 0.4));
         assert!(shape.low_shields(true, 0.7));
         assert!(!shape.low_shields(true, 0.85));
+    }
+
+    #[test]
+    fn a_mace_or_two_bolas_per_lance() {
+        let classes = Classes::default();
+        let lance = seeds().into_iter().find(|d| d.name == "lance").unwrap();
+        assert!(lance.marksman && !lance.enabled);
+        let force = |units: &[&'static str]| lance.force(units.iter().map(|u| (*u, 100.0)), &classes);
+        let (mace, bolas) = (&lance.roles[0], &lance.roles[1]);
+        let one = force(&["hoverarty"]);
+        assert_eq!((mace.want(&one), bolas.want(&one)), (Some(1), Some(2)));
+        let maced = force(&["hoverarty", "hoverriot"]);
+        assert_eq!((mace.want(&maced), bolas.want(&maced)), (Some(1), Some(0)));
+        let two = force(&["hoverarty", "hoverarty", "hoverriot"]);
+        assert_eq!((mace.want(&two), bolas.want(&two)), (Some(2), Some(2)));
     }
 
     #[test]

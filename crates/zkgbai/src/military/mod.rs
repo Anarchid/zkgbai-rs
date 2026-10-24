@@ -1124,6 +1124,7 @@ impl Ai {
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.impalers_enemy_destroyed(enemy, attacker);
+        self.taskforce_enemy_destroyed(enemy, attacker);
         self.raid_test_enemy_destroyed(enemy);
         self.firefighters_enemy_destroyed(enemy, attacker);
         let war = &mut self.war;

@@ -7,15 +7,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use springai::{Unit, Vec3};
+use springai::{Unit, UnitDef, Vec3};
 use zk_terrain::Tier;
 
 use crate::Ai;
-use crate::military::taskforce::Aim;
+use crate::military::taskforce::{self, Aim};
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
 use crate::terrain::tier_of;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, distance, kgb_rand};
 
 #[derive(Default)]
 pub struct SquadHandler {
@@ -362,6 +362,27 @@ impl Ai {
         let units = q.everyone().filter_map(|id| self.fighters.get(&id));
         let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
         r.want(&force).is_some_and(|w| force.roles.get(role).is_some_and(|x| x.1 < w))
+    }
+
+    /// A unit of `options` (what a factory builds) that a force is short of,
+    /// for a role with `produce`: rolled at its `produce` chance, the first
+    /// that comes up; with the doctrine and role, for the log.
+    pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
+        let tf = &self.taskforces;
+        for d in tf.doctrines.iter().filter(|d| d.enabled && taskforce::squad_aim(d.aim)) {
+            for (ri, r) in d.roles.iter().enumerate().filter(|(_, r)| r.produce > 0.0) {
+                let Some(&def) = options.iter().find(|o| r.units.iter().any(|u| u == self.defs.name(**o))) else {
+                    continue;
+                };
+                let short = (self.squad_handler.taskforces.iter())
+                    .filter(|&&sid| self.squads.get(sid).is_some_and(|q| q.shape.doctrine == d.name))
+                    .any(|&sid| self.squad_short_of(sid, ri));
+                if short && kgb_rand() < f64::from(r.produce) {
+                    return Some((def, d.name.clone(), r.name.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// Place a unit in a taskforce (see `military::taskforce`), by the
@@ -886,6 +907,9 @@ impl Ai {
     /// log when it starts (its make-up then) or stops (and why).
     fn squad_conducted(&mut self, sid: SquadId, engage_at: Option<Vec3>, why: &str) {
         let frame = self.frame;
+        if self.squads.get(sid).is_some_and(|s| s.shape.marksman) {
+            self.taskforce_mark(sid);
+        }
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
         s.keep_pace(&self.fighters);
