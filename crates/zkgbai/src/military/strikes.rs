@@ -120,8 +120,14 @@ const COOLDOWN_NEAR: f32 = 500.0;
 /// Kill chances by fix: seen, a radar dot, a crossing, a bearing.
 const P_SEEN: f32 = 0.8;
 const P_RADAR: f32 = 0.7;
-const P_CROSS: f32 = 0.6;
-const P_CONE: f32 = 0.45;
+/// Two bearings' crossing: 0 since ab2 (2026-10-24), where 10 such strikes
+/// killed 2 Phantoms, lost 4,270 metal and 5 waves, against the seen fix's
+/// 3 kills, 0 wiped, 105 lost; the fix is not considered.
+const P_CROSS: f32 = 0.0;
+/// A single bearing's comb walk: 0 since ab1 (2026-10-24), where 24 such
+/// strikes killed 4 Phantoms and lost 13,710 metal (11 wiped) against the
+/// seen fix's 6 of 9 for 170; a fix with no chance is not considered.
+const P_CONE: f32 = 0.0;
 
 /// Enemies within this far of the fix guard it (the target's own power
 /// does not count: it is what the wave is for).
@@ -405,6 +411,8 @@ pub struct Stats {
     pub killed: u32,
     pub lapsed: u32,
     pub wiped: u32,
+    /// Targets that died to someone other than the wave while struck.
+    pub taken: u32,
     pub refused: u32,
     pub lost: f32,
     pub won: f32,
@@ -435,6 +443,9 @@ pub struct Strikes {
     margin: f32,
     set: bool,
     last_refusal: i32,
+    /// When a strike was last refused for want of units in reach: the
+    /// Dirtbag order (see `strikes_production`) runs only after one.
+    short: i32,
     pub stats: Stats,
 }
 
@@ -462,6 +473,11 @@ impl Ai {
             return;
         }
         let Some(kind) = weapon.and_then(|w| sniper_kind(&w.name())) else { return };
+        // Our own sniper's shot (or an ally's) is no fix: ab1 hover-A/m1
+        // sent a 780-metal wave into our own army on a Phantom of ours.
+        if attacker.is_some_and(|a| a.ally_team() == self.ally_team_id) {
+            return;
+        }
         let frame = self.frame;
         if let Some(a) = attacker.filter(|a| a.pos() != NULLPOS) {
             let id = a.id();
@@ -546,6 +562,9 @@ impl Ai {
     /// Weigh a strike on `target` (or an unseen one of `kind`) fixed by
     /// `fix`, and launch it when the gate opens.
     fn strikes_consider(&mut self, target: Option<i32>, kind: &'static str, fix: Fix) {
+        if fix.p_kill() <= 0.0 {
+            return;
+        }
         self.strikes_setup();
         let frame = self.frame;
         let at = fix.pos();
@@ -610,6 +629,7 @@ impl Ai {
         };
         if wave.is_empty() {
             let power: f32 = cands.iter().map(|c| c.power).sum();
+            self.strikes.short = frame;
             log_refusal(self, format!("{n_cands} in reach bring {power:.0}/s, {need:.0}/s wanted (escorts {escort:.0}/s)"));
             return;
         }
@@ -676,18 +696,22 @@ impl Ai {
     /// than a wave's worth: the cheapest thing to take a sniper's shot
     /// or a riot's splash, and a hit from it decloaks.
     pub fn strikes_production(&self, factory: Unit, choice: &str) -> Option<&'static str> {
-        if !self.strikes_on() || choice == DIRTBAG || self.strikes.last_sniper_seen == 0 {
+        if !self.strikes_on() || choice == DIRTBAG || self.strikes.last_sniper_seen == 0 || self.strikes.short == 0 {
             return None;
         }
-        if self.frame - self.strikes.last_sniper_seen > SNIPERS_LATELY {
+        // Only while a sniper is about and a strike lately found nobody in reach.
+        if self.frame - self.strikes.last_sniper_seen > SNIPERS_LATELY || self.frame - self.strikes.short > SNIPERS_LATELY {
             return None;
         }
         let def = self.defs.get(DIRTBAG)?;
         if !factory.def()?.build_options().iter().any(|d| d.id() == def.id()) {
             return None;
         }
-        let have = (self.fighters.values().filter(|f| f.unit.def().is_some_and(|d| d.id() == def.id())).count())
-            + (self.strikes.members.values().filter(|m| m.1.def().is_some_and(|d| d.id() == def.id())).count());
+        // Count them by definition over everything we own (built or not):
+        // Dirtbags are claimed by the stakeouts or the raiders, not kept
+        // here, and a count over one owner let the ab1 shield games build
+        // 99-446 of them.
+        let have = (self.cb.team_units().iter()).filter(|u| u.def().is_some_and(|d| d.id() == def.id())).count();
         (have < DIRTBAGS).then_some(DIRTBAG)
     }
 
@@ -815,7 +839,7 @@ impl Ai {
     }
 
     /// An enemy died: a struck sniper settles its strike.
-    pub fn strikes_enemy_destroyed(&mut self, enemy: Unit, _attacker: Option<Unit>) {
+    pub fn strikes_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {
         let id = enemy.id();
         let name = self.war.targets.get(&id).map(|e| e.def_name.clone()).unwrap_or_default();
         let struck = self.strikes.strikes.iter().position(|s| s.target == Some(id));
@@ -831,11 +855,14 @@ impl Ai {
             self.log(&line);
         }
         if let Some(i) = struck {
-            self.strikes_settle(i, "killed");
+            // The kill is the wave's only when a member landed it; else the
+            // target is gone to someone else (ab1 credited a Felon's kill).
+            let ours = attacker.is_some_and(|a| self.strikes.strikes[i].members.contains(&a.id()));
+            self.strikes_settle(i, if ours { "killed" } else { "taken" });
         }
     }
 
-    /// End strike `i`: `why` is killed, lapsed, wiped or ran.
+    /// End strike `i`: `why` is killed, taken (dead, not by us), lapsed, wiped or ran.
     fn strikes_settle(&mut self, i: usize, why: &str) {
         let s = self.strikes.strikes.remove(i);
         let frame = self.frame;
@@ -846,9 +873,10 @@ impl Ai {
                 st.won += s.odds.value;
             }
             "wiped" => st.wiped += 1,
+            "taken" => st.taken += 1,
             _ => st.lapsed += 1,
         }
-        if why != "killed" {
+        if why != "killed" && why != "taken" {
             if let Some(t) = s.target {
                 self.strikes.cooldown.insert(t, frame + COOLDOWN);
             }
@@ -858,7 +886,7 @@ impl Ai {
             "strikes: #{} {why}: the {} {} after {} s; lost {:.0} metal ({} of {} units), {} back",
             s.id,
             s.kind,
-            if why == "killed" { "dead" } else { "not" },
+            if why == "killed" || why == "taken" { "dead" } else { "not" },
             (frame - s.started) / 30,
             s.lost,
             s.lost_n,
@@ -1008,9 +1036,13 @@ mod tests {
         // Two Glaives there: wiped before the kill.
         let two = odds(&six[..2], 560.0, 750.0, P_SEEN, 1, &[REAVER]);
         assert!(two.p_kill < 0.3 && !go(two, MARGIN), "{two:?}");
-        // Three Glaives at a lone Phantom: an easy go even on a bearing.
+        // Three Glaives at a lone Phantom on radar: an easy go; a bearing
+        // or a crossing is never considered (P_CONE 0 since ab1, P_CROSS 0
+        // since ab2).
         let glaives = [c(1, 65.0, 5.0, 100.0), c(2, 65.0, 6.0, 100.0), c(3, 65.0, 7.0, 100.0)];
-        assert!(go(odds(&glaives, 560.0, 750.0, P_CONE, 1, &[]), MARGIN));
+        assert!(go(odds(&glaives, 560.0, 750.0, P_RADAR, 1, &[]), MARGIN));
+        assert!(!go(odds(&glaives, 560.0, 750.0, P_CROSS, 1, &[]), MARGIN));
+        assert!(!go(odds(&glaives, 560.0, 750.0, P_CONE, 1, &[]), MARGIN));
         // A Blitz at a Lance: 800 up.
         assert!(go(odds(&[c(1, 300.0, 9.0, 200.0)], 1000.0, 1100.0, P_SEEN, 1, &[]), MARGIN));
     }
