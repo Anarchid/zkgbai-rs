@@ -149,6 +149,9 @@ pub struct MilitaryManager {
 
     /// Freshly finished mobile units, dispatched on their first idle.
     new_units: BTreeSet<i32>,
+    /// Whether the war has updated yet: units finished before (those
+    /// standing when a saved game is loaded) are dispatched at once.
+    updated: bool,
     unbuilt_porcs: BTreeSet<i32>,
 
     // unit and weapon def IDs for unitDamaged (-1 if missing).
@@ -213,6 +216,7 @@ impl MilitaryManager {
             last_value_redraw_frame: 0,
             has_nuke: false,
             new_units: BTreeSet::new(),
+            updated: false,
             unbuilt_porcs: BTreeSet::new(),
             wolv_mine_id: -1,
             wolv_mine_bomblet: -1,
@@ -490,6 +494,7 @@ impl Ai {
 
     pub fn war_update(&mut self, frame: i32) {
         self.war.frame = frame;
+        self.war.updated = true;
 
         // Each step is guarded separately: a fault in one handler must not
         // stop the others, and the profile then shows each step's cost.
@@ -691,6 +696,10 @@ impl Ai {
 
         if mobile_combat && !self.unit_classes.no_retreat.contains(name) {
             self.retreat_add_coward(unit);
+        }
+        // Standing at a load, they may keep orders and never idle.
+        if !self.war.updated {
+            self.war_unit_idle(unit);
         }
     }
 
