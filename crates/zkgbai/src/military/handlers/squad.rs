@@ -447,7 +447,10 @@ impl Ai {
             // A spotter is called from the standing units, never built, but
             // for one plane a game while the enemy shows no anti-air (see
             // `taskforce::spotter`).
-            if self.taskforces.spotters.ordered > 0 || self.taskforce_enemy_aa() {
+            if self.taskforces.spotters.ordered > 0
+                || !d.roles.iter().any(|r| r.spot.is_some())
+                || self.taskforce_enemy_aa()
+            {
                 continue;
             }
             for (ri, r) in d.roles.iter().enumerate().filter(|(_, r)| r.spot.is_some()) {
