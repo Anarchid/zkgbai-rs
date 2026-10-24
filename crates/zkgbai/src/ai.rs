@@ -50,7 +50,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
 /// `airtempo` (an air factory weighed up by the clock and the map's size)
 /// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
-const OFF_BY_DEFAULT: [&str; 5] = ["pairs", "currency", "permanence", "mexporc", "airtempo"];
+const OFF_BY_DEFAULT: [&str; 7] = ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
