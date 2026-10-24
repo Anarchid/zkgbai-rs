@@ -5,6 +5,7 @@ pub mod air_intel;
 pub mod arsenal;
 pub mod drops;
 pub mod enemy;
+pub mod fightsim;
 pub mod firefighters;
 pub mod handlers;
 pub mod impalers;
@@ -159,6 +160,9 @@ pub struct MilitaryManager {
     wolv_mine_bomblet: i32,
     sniper_bullet_id: i32,
     brawler_bullet_id: i32,
+
+    /// The fight predictor (see [`fightsim::live`]).
+    pub fightsim: fightsim::live::FightSim,
 }
 
 impl MilitaryManager {
@@ -222,6 +226,7 @@ impl MilitaryManager {
             wolv_mine_bomblet: -1,
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
+            fightsim: fightsim::live::FightSim::default(),
         }
     }
 
@@ -508,6 +513,8 @@ impl Ai {
             self.guard("war.idleSweep", |ai| ai.war_idle_sweep());
         }
 
+        // Before the squads decide: their fight predictions arrive here.
+        self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
         self.guard("raider.update", |ai| ai.raider_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));

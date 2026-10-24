@@ -839,10 +839,13 @@ impl Ai {
             }
             'a' => {
                 let view = self.war.view_dive(dive);
-                if view.get_effective_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
-                    && (!self.graph.is_ally_territory(pos)
-                        || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos)))
-                {
+                let friendly = view.get_total_friendly_threat(pos);
+                let flat = view.get_effective_threat(pos) / courage > tolerance(friendly);
+                let porc = view.get_porc_threat(pos) / courage > tolerance(friendly);
+                // The fight predictor's verdict where it is on and has a
+                // fresh answer (see `fightsim::live`); the threat map's else.
+                let danger = self.fight_verdict(sid, pos, courage, flat);
+                if danger && (!self.graph.is_ally_territory(pos) || porc) {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
                 }
