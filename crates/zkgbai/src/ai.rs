@@ -48,7 +48,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
 /// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
-const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "permanence", "mexporc"];
+/// `airtempo` (an air factory weighed up by the clock and the map's size)
+/// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
+const OFF_BY_DEFAULT: [&str; 5] = ["pairs", "currency", "permanence", "mexporc", "airtempo"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
