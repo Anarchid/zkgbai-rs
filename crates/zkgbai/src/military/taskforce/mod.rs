@@ -1,9 +1,11 @@
 //! Combined-arms taskforces: forces formed around a core unit by a
 //! doctrine (see `doctrine`), with wants written as expressions over what
-//! the force has (see `expr`). On by default: `felon` (the shield ball) and
-//! `impaler` (the escorts of Impaler batteries, see `military::impalers`);
-//! `ravager`, `lance` and `phantom` (marksmen, see `marksman`) are seeded
-//! off; the rest wait for conducts of their own.
+//! the force has (see `expr`). On by default: `felon` (the shield ball),
+//! `impaler` (the escorts of Impaler batteries, see `military::impalers`)
+//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`,
+//! `phantom` and `envoy` are seeded off; the rest wait for conducts of
+//! their own. The `disable` option switches off doctrines it names
+//! (`disable=lance`).
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -224,6 +226,14 @@ impl Ai {
             };
             for line in said {
                 self.cb.log(&line);
+            }
+        }
+        // The `disable` option switches off the doctrines it names, whatever
+        // the seeds and patches say.
+        for d in doctrines.iter_mut().filter(|d| d.enabled) {
+            if self.dev_off(&d.name) {
+                d.enabled = false;
+                self.cb.log(&format!("doctrines: {} switched off (disable)", d.name));
             }
         }
         let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base());

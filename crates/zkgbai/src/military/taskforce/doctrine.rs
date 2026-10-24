@@ -688,9 +688,10 @@ pub fn seeds() -> Vec<Doctrine> {
 
     let mut lance = Doctrine::new("lance");
     lance.note = "Lances (980 range, 3000 a shot) with a Mace, or two Bolas, against the raiders that pick \
-                  them off alone; firing at will, each set on the best target in reach one shot kills."
+                  them off alone; firing at will, each set on the best target in reach one shot kills. On \
+                  since the 2026-10-24 Circuit read (ab16: army@15 +1402, 15-3-2 against 12-7-1); \
+                  disable=lance switches it off."
         .into();
-    lance.enabled = false;
     lance.core = vec!["hoverarty".into()];
     lance.roles = vec![
         Role::escort("mace", &["hoverriot"], "cores", 130.0, 0.5),
@@ -938,7 +939,7 @@ mod tests {
     fn a_mace_or_two_bolas_per_lance() {
         let classes = Classes::default();
         let lance = seeds().into_iter().find(|d| d.name == "lance").unwrap();
-        assert!(lance.marksman && !lance.enabled);
+        assert!(lance.marksman && lance.enabled);
         let force = |units: &[&'static str]| lance.force(units.iter().map(|u| (*u, 100.0)), &classes);
         let (mace, bolas) = (&lance.roles[0], &lance.roles[1]);
         let one = force(&["hoverarty"]);
