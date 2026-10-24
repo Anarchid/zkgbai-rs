@@ -19,6 +19,8 @@
 --   env   engine damage (collision, fall, fire, crush: Game.envDamageTypes)
 --   kill  a unit died
 --   stun  EMP stun on (1) or off (0)
+--   (shot.tlos, v2: the aimed target's LOS state for the shooter's ally team
+--   at the fire frame: 2 in sight, 1 radar only, 0 neither, empty unknown)
 --   unit  state of a unit in combat, every UNIT_SAMPLE frames
 --   meta  game, map, teams
 -- Positions are elmos, speeds elmos per frame, frames at 30 per second.
@@ -37,7 +39,7 @@ function widget:GetInfo()
 	}
 end
 
-local VERSION = 1
+local VERSION = 2
 local UNIT_SAMPLE = 30     -- frames between unit rows
 local ACTIVE_FRAMES = 600  -- a unit stays in combat this long after its last shot or wound
 local SALVO_POLL = 6       -- longest poll period of a unit in combat (shorter for fast lasers)
@@ -56,6 +58,10 @@ local GetProjectileOwnerID = sp.GetProjectileOwnerID
 local GetProjectileVelocity = sp.GetProjectileVelocity
 local GetProjectileTarget = sp.GetProjectileTarget
 local GetUnitPosition = sp.GetUnitPosition
+local GetUnitAllyTeam = sp.GetUnitAllyTeam
+local GetUnitLosState = sp.GetUnitLosState
+local IsPosInLos = sp.IsPosInLos
+local GetGroundHeight = sp.GetGroundHeight
 local GetUnitVelocity = sp.GetUnitVelocity
 local GetUnitHealth = sp.GetUnitHealth
 local GetUnitIsStunned = sp.GetUnitIsStunned
@@ -157,7 +163,7 @@ end
 -- Columns of a shot row; src p/s/d as described above.
 local SHOT_HEADER = "#shot\tsrc\tn\tf0\tf1\tlag\tpid\twd\town\todef\toteam\tox\toz\tospd\tpspd" ..
 	"\ttt\ttid\ttdef\ttteam\ttx\ttz\ttdist\ttspd\tthp\tthpmax\ttpara\ttstun\ttslow\ttdis\ttsh\ttfire" ..
-	"\thits\tdmg\tdmgt\tnvict\tpara\ttdead\ttspd1\ttsh1"
+	"\thits\tdmg\tdmgt\tnvict\tpara\ttdead\ttspd1\ttsh1\ttlos"
 
 local function newShot(src, f, wdid, owner, f0)
 	local rec = {
@@ -177,8 +183,30 @@ local function newShot(src, f, wdid, owner, f0)
 	return rec
 end
 
+-- LOS state of the aimed target for the shooter's ally team at the fire
+-- frame: 2 in sight, 1 radar only, 0 neither, nil unknown (no owner, or a
+-- player client asking about another ally team).
+local function targetLos(rec, ttype, target)
+	if not rec.own then return nil end
+	local ally = GetUnitAllyTeam(rec.own)
+	if not ally then return nil end
+	if ttype == "u" then
+		local ok, st = pcall(GetUnitLosState, target, ally)
+		if not ok or st == nil then return nil end
+		if st.los then return 2 end
+		if st.radar then return 1 end
+		return 0
+	elseif ttype == "g" and target then
+		local ok, inlos = pcall(IsPosInLos, target[1], target[2] or GetGroundHeight(target[1], target[3]), target[3], ally)
+		if not ok or inlos == nil then return nil end
+		return inlos and 2 or 0
+	end
+	return nil
+end
+
 -- Record what a shot is aimed at: a unit (with its state now) or ground.
 local function aimAt(rec, f, ttype, target)
+	rec.tlos = targetLos(rec, ttype, target)
 	if ttype == "u" and target then
 		rec.tt = "u"
 		rec.tid = target
@@ -235,7 +263,7 @@ local function closeShot(rec, f)
 		num(rec.tdist), num(rec.tspd, 2), num(rec.thp), num(rec.thpmax), num(rec.tpara), num(rec.tstun),
 		num(rec.tslow, 3), num(rec.tdis), num(rec.tsh), num(rec.tfire),
 		num(rec.hits), num(rec.dmg, 1), num(rec.dmgt, 1), num(rec.nvict), num(rec.para),
-		num(tdead), num(tspd1, 2), num(tsh1),
+		num(tdead), num(tspd1, 2), num(tsh1), num(rec.tlos),
 	}, "\t"))
 end
 
