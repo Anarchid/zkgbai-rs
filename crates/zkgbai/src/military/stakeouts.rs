@@ -429,8 +429,14 @@ impl Ai {
                 let Some(c) = ours.or_else(entry) else { continue };
                 *covers.entry(c).or_default() += n;
             }
-            let mut chosen: Vec<(usize, usize)> = covers.into_iter().collect();
-            chosen.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
+            // Posts already manned stay while their gate still covers
+            // something: a picket is not walked from gate to gate as the
+            // analysis shifts. The rest by spots covered.
+            let kept: Vec<usize> = (self.stakeouts.posts.iter()).map(|p| p.choke).filter(|c| covers.contains_key(c)).collect();
+            let mut chosen: Vec<(usize, usize)> = kept.iter().map(|&c| (c, covers[&c])).collect();
+            let mut rest: Vec<(usize, usize)> = covers.iter().filter(|(c, _)| !kept.contains(c)).map(|(&c, &n)| (c, n)).collect();
+            rest.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
+            chosen.extend(rest);
             chosen.truncate(MAX_POSTS);
 
             let elevation = self.cb.map();
@@ -650,9 +656,11 @@ impl Ai {
         let (p, sight, speed, def, cloaks, moved) = (m.f.get_pos(), m.sight, m.speed, m.def, m.cloaks, m.moved);
         let d = distance(p, epos);
         let keep = keep_from(e, cloaks);
-        let back_to = (sight - BACK_TO).max(keep + 100.0);
-        let follow_to = (sight - FOLLOW_TO).max(keep + 60.0);
-        let follows = speed >= SPEED_PARITY * espeed && !e.is_static;
+        // Back off to the edge of our sight, or farther if its reach leaves
+        // no safe band inside it (then we lose it rather than die to it).
+        let back_to = (sight - BACK_TO).max(keep + 150.0);
+        let follow_to = sight - FOLLOW_TO;
+        let follows = speed >= SPEED_PARITY * espeed && !e.is_static && keep + 150.0 <= follow_to;
         let new = m.bogey != Some(eid);
         if new {
             self.stakeouts.stats.sightings += 1;
