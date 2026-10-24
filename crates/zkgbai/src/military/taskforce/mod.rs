@@ -1,8 +1,9 @@
 //! Combined-arms taskforces: forces formed around a core unit by a
 //! doctrine (see `doctrine`), with wants written as expressions over what
-//! the force has (see `expr`). The doctrines survived the Oct 23 crash; so
-//! far only the `impaler` one is in use, for the escorts of Impaler
-//! batteries (see `military::impalers`).
+//! the force has (see `expr`). On by default: `felon` (the shield ball) and
+//! `impaler` (the escorts of Impaler batteries, see `military::impalers`);
+//! `ravager`, `lance` and `phantom` (marksmen, see `marksman`) are seeded
+//! off; the rest wait for conducts of their own.
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
