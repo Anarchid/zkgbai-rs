@@ -223,6 +223,14 @@ pub struct Perch {
     /// when the ground is that high already). None: every perch is raised
     /// from the ground it stands on.
     pub natural: Option<Natural>,
+    /// No perch while the enemy is known to field what climbs a pillar
+    /// (spiders, jumpers: a factory of theirs seen) or what outranges it
+    /// (artillery, anti-heavy statics in reach of the site); the force then
+    /// stands flat. False: the raise goes up whatever they field.
+    pub refuse_climbers: bool,
+    /// A perched core below this share of its health leaves the pillar
+    /// while it can (the force breaks off hurt); 0: it never comes down.
+    pub leave_health: f32,
 }
 
 /// See [`Perch::natural`].
@@ -244,6 +252,8 @@ impl Perch {
             min_reach: 3,
             refuse_if_reached: true,
             natural: None,
+            refuse_climbers: false,
+            leave_health: 0.0,
         }
     }
 
@@ -258,6 +268,8 @@ impl Perch {
             "min_reach": self.min_reach,
             "refuse_if_reached": self.refuse_if_reached,
             "natural": self.natural.as_ref().map(|n| json!({"min_height": n.min_height, "weight": n.weight})),
+            "refuse_climbers": self.refuse_climbers,
+            "leave_health": self.leave_health,
         })
     }
 
@@ -278,6 +290,8 @@ impl Perch {
                 "range" => self.range = num(k, v, 0.0, 20000.0)?,
                 "min_reach" => self.min_reach = num(k, v, 0.0, 1000.0)? as u32,
                 "refuse_if_reached" => self.refuse_if_reached = flag(k, v)?,
+                "refuse_climbers" => self.refuse_climbers = flag(k, v)?,
+                "leave_health" => self.leave_health = num(k, v, 0.0, 1.0)?,
                 "natural" => {
                     self.natural = match v {
                         Value::Null => None,
@@ -1250,6 +1264,13 @@ mod tests {
         assert!(d.clone().apply(&bad).is_err());
         // The natural and claim dials, one change each: off in the seed, on by a patch.
         assert!(d.perch.as_ref().unwrap().natural.is_none() && !d.claim_with_site);
+        let p0 = d.perch.as_ref().unwrap();
+        assert!(!p0.refuse_climbers && p0.leave_health == 0.0);
+        let mut h = d.clone();
+        let Value::Object(patch) = json!({"perch": {"refuse_climbers": true, "leave_health": 0.4}}) else { panic!() };
+        h.apply(&patch).unwrap();
+        let ph = h.perch.as_ref().unwrap();
+        assert!(ph.refuse_climbers && ph.leave_health == 0.4);
         let mut c = d.clone();
         let Value::Object(patch) = json!({"claim_with_site": true}) else { panic!() };
         c.apply(&patch).unwrap();

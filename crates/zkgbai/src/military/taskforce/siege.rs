@@ -410,6 +410,37 @@ impl Ai {
         reach - RANGE_MARGIN
     }
 
+    /// Whether the enemy is known to field what climbs a pillar or outranges
+    /// it: a spider or jump factory of theirs seen, a Jumpjet, a Crab, a
+    /// Recluse or a Hermit seen lately, or artillery / anti-heavy statics.
+    fn siege_climbers_known(&self) -> bool {
+        (self.war.targets.values()).filter(|e| e.identified && !e.is_dead).any(|e| {
+            matches!(
+                e.def_name.as_str(),
+                "factoryspider"
+                    | "factoryjump"
+                    | "jumpassault"
+                    | "jumpraid"
+                    | "jumpblackhole"
+                    | "spidercrabe"
+                    | "spiderskirm"
+                    | "spiderassault"
+                    | "spiderriot"
+                    | "staticarty"
+                    | "staticheavyarty"
+                    | "turretantiheavy"
+            ) || (e.is_arty && e.is_static)
+        })
+    }
+
+    /// Whether the perched core of force `sid` is below the perch's
+    /// `leave_health`: it then comes down while it can (the force breaks
+    /// off hurt instead of staying).
+    pub(crate) fn siege_leaves_hurt(&self, sid: SquadId, health: f32) -> bool {
+        let floor = (self.squads.get(sid).and_then(|q| q.shape.perch.as_ref())).map_or(0.0, |p| p.leave_health);
+        floor > 0.0 && health < floor
+    }
+
     /// Whether force `sid` has its perch going up or up (it then stays
     /// where it is: a perched core cannot come down).
     pub(crate) fn siege_perched(&self, sid: SquadId) -> bool {
@@ -573,7 +604,23 @@ impl Ai {
         // statics' reach to the raised aim point, reaching enough from up
         // there; else the force stands flat (and says so).
         let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
-        if let (Some(perch), true) = (&perch, up > 0.0 && !statics.is_empty()) {
+        // What climbs a pillar or outranges it refuses the perch (the
+        // `refuse_climbers` dial): the enemy's spider or jump factories seen,
+        // or artillery and anti-heavy statics; the force stands flat then.
+        let climbers = perch.as_ref().is_some_and(|p| p.refuse_climbers) && self.siege_climbers_known();
+        if climbers && up > 0.0 {
+            let frame = self.frame;
+            let said = self.taskforces.siege.forces.get(&sid).is_some_and(|f| frame - f.refused_at < REPORT);
+            if !said {
+                self.taskforces.siege.forces.entry(sid).or_default().refused_at = frame;
+                self.op_emit("siege-perch", json!({"event": "refused", "squad": sid, "reason": "climbers"}));
+                self.log(&format!(
+                    "taskforce: a {} refuses a perch: the enemy fields what climbs or outranges a pillar; it stands flat",
+                    self.defs.name_of(leader)
+                ));
+            }
+        }
+        if let (Some(perch), true) = (&perch, up > 0.0 && !statics.is_empty() && !climbers) {
             // Natural perches: each candidate scored by the reach from its
             // own height (plus the raise that would complete it) over the
             // nearest defense, natural ones preferred.

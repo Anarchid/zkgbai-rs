@@ -1030,7 +1030,10 @@ impl Ai {
 
             // A perched siege force (see `taskforce::siege`) stays where it
             // is: its core cannot come down.
-            let perched = shape.aim == Aim::Siege && shape.perch.is_some() && self.siege_perched(sid);
+            let perched = shape.aim == Aim::Siege
+                && shape.perch.is_some()
+                && self.siege_perched(sid)
+                && !self.siege_leaves_hurt(sid, health);
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
             // A siege force falls back toward home: the haven nearest the
