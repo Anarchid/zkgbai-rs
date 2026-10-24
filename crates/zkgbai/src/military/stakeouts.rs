@@ -101,14 +101,17 @@ const FOLLOW_EVERY: i32 = 45;
 /// A spot a looker fled from is left alone this long (frames).
 const SHUN: i32 = 30 * 120;
 
-/// Enemies seen within this many frames are where we saw them.
+/// Enemies seen within this many frames are where we saw them...
 const RECENT: i32 = 45;
+/// ...and the enemy a picket shadows is followed for this long after it
+/// left our sight (toward where it was last seen).
+const BOGEY_RECENT: i32 = 120;
 /// Soft targets seen within this many frames are worth a sortie.
 const SORTIE_RECENT: i32 = 90;
 
-/// A cloaking stakeout follows an enemy at least this share of its speed
-/// (standing again, it vanishes)...
-const SPEED_PARITY: f32 = 0.95;
+/// A cloaking stakeout follows an enemy with this much speed in hand
+/// (standing again, it vanishes; a chase at equal speed is a death)...
+const SPEED_PARITY: f32 = 1.05;
 /// ...one that cannot cloak does not follow at all.
 /// Outside an enemy's sight by this much.
 const SIGHT_CLEAR: f32 = 50.0;
@@ -509,14 +512,16 @@ impl Ai {
             return;
         }
         let (unit, p, sight, speed, def, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.speed, m.def, m.duty);
-        let (cloaks, look) = (m.cloaks, m.look);
+        let (cloaks, look, bogey) = (m.cloaks, m.look, m.bogey);
 
         // The nearest armed enemy that could shoot us, else the nearest
-        // mobile one in or near our sight.
+        // mobile one in or near our sight (the one we shadow a while
+        // longer, to follow it where it went).
         let mut danger: Option<(i32, f32)> = None;
         let mut near: Option<(i32, f32)> = None;
         for e in self.war.targets.values() {
-            if !armed(e) || frame - e.last_seen > RECENT {
+            let recent = if bogey == Some(e.unit_id) { BOGEY_RECENT } else { RECENT };
+            if !armed(e) || frame - e.last_seen > recent {
                 continue;
             }
             let d = distance(p, e.position);
@@ -702,7 +707,7 @@ impl Ai {
                 get_directional_point(p, start, back_to - d)
             };
             Some((away, true))
-        } else if d > sight - BACK_TO + 40.0 && follows && frame - moved >= FOLLOW_EVERY {
+        } else if d > follow_to + 60.0 && follows && frame - moved >= FOLLOW_EVERY {
             Some((get_directional_point(p, epos, d - follow_to), false))
         } else {
             None
