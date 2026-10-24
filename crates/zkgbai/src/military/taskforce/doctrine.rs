@@ -202,6 +202,10 @@ pub struct Doctrine {
     /// [`Role::fire_state`]).
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
+    /// The chance a factory pick that could build a core builds it instead,
+    /// while the doctrine has a force with room for one (or none at all);
+    /// 0: cores come as the factory's own picks (Felons, Lances).
+    pub produce: f32,
     pub roles: Vec<Role>,
     /// Cores a force takes before a new core starts its own (0: no limit,
     /// a composition grown without end). Only a force that is not engaged
@@ -263,6 +267,7 @@ impl Doctrine {
             core: Vec::new(),
             fire_state: None,
             fire_at_radar: None,
+            produce: 0.0,
             roles: Vec::new(),
             cores_per_force: 1,
             pool_with_allies: false,
@@ -326,6 +331,7 @@ impl Doctrine {
             "core": self.core,
             "fire_state": self.fire_state,
             "fire_at_radar": self.fire_at_radar,
+            "produce": self.produce,
             "roles": self.roles.iter().map(Role::to_json).collect::<Vec<_>>(),
             "cores_per_force": self.cores_per_force,
             "pool_with_allies": self.pool_with_allies,
@@ -362,6 +368,7 @@ impl Doctrine {
                 "core" => self.core = names(k, v)?,
                 "fire_state" => self.fire_state = optional(v, |v| Ok(num(k, v, 0.0, 2.0)? as i32))?,
                 "fire_at_radar" => self.fire_at_radar = optional(v, |v| flag(k, v))?,
+                "produce" => self.produce = num(k, v, 0.0, 1.0)?,
                 "roles" => {
                     let Value::Array(list) = v else { return Err("'roles' must be a list of roles".into()) };
                     let mut roles = Vec::new();
@@ -669,11 +676,14 @@ pub fn seeds() -> Vec<Doctrine> {
     phantom.retreat_health = 0.7;
 
     let mut tremor = Doctrine::new("tremor");
-    tremor.note = "A siege detachment: Tremors stand where they reach the most and fire at everything, an \
-                   Ogre per two against raiders, Minotaurs as the line, an Ettin past 3000 metal."
+    tremor.note = "A siege detachment (see `siege`): Tremors park beyond the enemy statics' reach where they \
+                   reach the most and fire at everything, an Ogre per two against raiders, Minotaurs as the \
+                   line, an Ettin past 3000 metal. Tank factories build a Tremor on 6% of picks while a force \
+                   has room."
         .into();
     tremor.enabled = false;
     tremor.core = vec!["tankheavyarty".into()];
+    tremor.produce = 0.06;
     tremor.cores_per_force = 3;
     tremor.roles = vec![
         Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),
@@ -685,11 +695,13 @@ pub fn seeds() -> Vec<Doctrine> {
     tremor.muster = 90.0;
 
     let mut emissary = Doctrine::new("emissary");
-    emissary.note = "A siege detachment: Emissaries stand where they reach the most and fire at everything, \
-                     Ogres against raiders, an Ettin past 3000 metal."
+    emissary.note = "A siege detachment (see `siege`): Emissaries park beyond the enemy statics' reach where \
+                     they reach the most and fire at everything, Ogres against raiders, an Ettin past 3000 \
+                     metal. Tank factories build an Emissary on 12% of picks while a force has room."
         .into();
     emissary.enabled = false;
     emissary.core = vec!["tankarty".into()];
+    emissary.produce = 0.12;
     emissary.cores_per_force = 4;
     emissary.roles = vec![
         Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),

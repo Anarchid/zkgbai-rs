@@ -218,6 +218,7 @@ impl Ai {
     fn squad_delete_fighter(&mut self, id: i32) {
         self.fighters.remove(&id);
         self.squad_handler.fighters.remove(&id);
+        self.siege_remove(id);
     }
 
     /// Remove a fighter from whatever squad it is in.
@@ -243,6 +244,7 @@ impl Ai {
                 g.squad = None;
             }
         }
+        self.siege_forget(sid);
         self.squads.remove(sid);
     }
 
@@ -409,6 +411,23 @@ impl Ai {
     pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
         let tf = &self.taskforces;
         for d in tf.doctrines.iter().filter(|d| d.enabled && taskforce::squad_aim(d.aim)) {
+            // A core, while a force of the doctrine has room for one (or it
+            // has no force at all).
+            if d.produce > 0.0
+                && let Some(&def) = options.iter().find(|o| d.is_core(self.defs.name(**o), &tf.classes))
+            {
+                let forces: Vec<&crate::military::wrappers::squad::Squad> = (self.squad_handler.taskforces.iter())
+                    .filter_map(|&sid| self.squads.get(sid))
+                    .filter(|q| q.shape.doctrine == d.name)
+                    .collect();
+                let room = forces.is_empty()
+                    || forces.iter().any(|q| {
+                        !q.engaging && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
+                    });
+                if room && kgb_rand() < f64::from(d.produce) {
+                    return Some((def, d.name.clone(), "core".to_owned()));
+                }
+            }
             for (ri, r) in d.roles.iter().enumerate().filter(|(_, r)| r.produce > 0.0) {
                 let Some(&def) = options.iter().find(|o| r.units.iter().any(|u| u == self.defs.name(**o))) else {
                     continue;
@@ -422,6 +441,32 @@ impl Ai {
             }
         }
         None
+    }
+
+    /// The doctrine a unit of type `name` goes to: the first switched on
+    /// (of those the squad handler runs) taking it as a core; else, of
+    /// those taking it as a role, the first with a force that takes members
+    /// now and is short of the role (an Ogre goes to whichever of the
+    /// Tremor and Emissary forces lacks its screen), else the first.
+    fn squad_doctrine_for(&self, name: &str) -> Option<String> {
+        let tf = &self.taskforces;
+        let takers: Vec<&taskforce::Doctrine> =
+            (tf.doctrines.iter()).filter(|d| d.enabled && taskforce::squad_aim(d.aim)).collect();
+        if let Some(d) = takers.iter().find(|d| d.is_core(name, &tf.classes)) {
+            return Some(d.name.clone());
+        }
+        let roles: Vec<(&taskforce::Doctrine, usize)> =
+            takers.iter().filter_map(|d| d.role_of(name, &tf.classes).map(|r| (*d, r))).collect();
+        let short = roles.iter().find(|(d, r)| {
+            (self.squad_handler.taskforces.iter()).any(|&sid| {
+                self.squads.get(sid).is_some_and(|q| {
+                    q.shape.doctrine == d.name
+                        && (!q.engaging || q.shape.reinforce_engaged)
+                        && self.squad_short_of(sid, *r)
+                })
+            })
+        });
+        short.or(roles.first()).map(|(d, _)| d.name.clone())
     }
 
     /// Place a unit in a taskforce (see `military::taskforce`), by the
@@ -438,14 +483,15 @@ impl Ai {
     fn squad_assign_taskforce_member(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
+        let dname = self.squad_doctrine_for(&name);
         let tf = &self.taskforces;
-        let doctrine = tf.squad_doctrine(&name);
+        let doctrine = dname.as_deref().and_then(|d| tf.doctrine(d));
         let dname = doctrine.map(|d| d.name.clone());
         let is_core = doctrine.is_some_and(|d| d.is_core(&name, &tf.classes));
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));
         let to_strongest = doctrine.zip(role).is_some_and(|(d, r)| d.roles[r].to_strongest);
-        let (pool, reinforce, cores_per_force) =
-            doctrine.map_or((false, false, 1), |d| (d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize));
+        let (pool, reinforce, cores_per_force) = doctrine
+            .map_or((false, false, 1), |d| (d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize));
         // Forces of its doctrine (of those taking strays, for a unit none
         // takes) that go where it goes.
         let forces: Vec<SquadId> = (self.squad_handler.taskforces.iter().copied())
@@ -550,11 +596,14 @@ impl Ai {
             Some(l) => format!("{:.0} from its leader", distance(l.pos(), unit.pos())),
             None => "no leader".to_owned(),
         };
-        let line = format!(
+        let mut line = format!(
             "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth} ({far})",
             self.defs.name_of(unit),
             s.shape.doctrine
         );
+        if let Some(note) = self.siege_death_note(sid, unit.id()) {
+            line.push_str(&note);
+        }
         self.log(&line);
     }
 
@@ -595,7 +644,10 @@ impl Ai {
             if s.is_dead(&self.fighters) || s.cores(&self.fighters) == 0 {
                 let doctrine = s.shape.doctrine.clone();
                 let gone = s.disband(&mut self.fighters);
-                let line = format!("taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere", gone.len());
+                let line = format!(
+                    "taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere",
+                    gone.len()
+                );
                 self.log(&line);
                 fit.extend(gone);
                 self.squad_delete_squad(sid);
@@ -786,7 +838,8 @@ impl Ai {
             'f' => {
                 if view.get_threat(pos) / courage > 2.0 * view.get_total_friendly_threat(pos)
                     || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
-                    || (target != NULLPOS && view.get_porc_threat(target) / courage > tolerance(view.get_total_friendly_threat(pos)))
+                    || (target != NULLPOS
+                        && view.get_porc_threat(target) / courage > tolerance(view.get_total_friendly_threat(pos)))
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
@@ -807,7 +860,8 @@ impl Ai {
             'a' => {
                 let view = self.war.view_dive(dive);
                 if view.get_effective_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos))
-                    && (!self.graph.is_ally_territory(pos) || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos)))
+                    && (!self.graph.is_ally_territory(pos)
+                        || view.get_porc_threat(pos) / courage > tolerance(view.get_total_friendly_threat(pos)))
                 {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
@@ -936,15 +990,20 @@ impl Ai {
                     self.squad_retreat_to(sid, haven);
                     "threat"
                 } else {
-                    let target = match shape.aim {
-                        Aim::Artillery => self.war_get_arty_target(pos, false),
+                    // Siege forces park at a station (see `taskforce::siege`):
+                    // once there, no more orders move the guns.
+                    let (target, go) = match shape.aim {
+                        Aim::Artillery => (self.war_get_arty_target(pos, false), true),
                         Aim::Standoff => {
                             let at = self.war_get_arty_target(pos, false);
-                            self.graph_get_closest_haven(at)
+                            (self.graph_get_closest_haven(at), true)
                         }
-                        _ => self.war_get_target(leader, false),
+                        Aim::Siege => self.siege_conduct(sid, leader),
+                        _ => (self.war_get_target(leader, false), true),
                     };
-                    self.squad_set_target(sid, target);
+                    if go {
+                        self.squad_set_target(sid, target);
+                    }
                     engage_at = Some(target);
                     ""
                 }
@@ -979,6 +1038,9 @@ impl Ai {
         let frame = self.frame;
         if self.squads.get(sid).is_some_and(|s| s.shape.marksman) {
             self.taskforce_mark(sid);
+        }
+        if self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege) {
+            self.siege_tick(sid, engage_at.is_some(), why);
         }
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
@@ -1020,7 +1082,9 @@ impl Ai {
                 t.x,
                 t.z
             ),
-            None => format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}{}", engaged_for(ran)),
+            None => {
+                format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}{}", engaged_for(ran))
+            }
         };
         self.log(&line);
     }

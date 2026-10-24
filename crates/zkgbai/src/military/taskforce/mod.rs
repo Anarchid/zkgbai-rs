@@ -2,8 +2,9 @@
 //! doctrine (see `doctrine`), with wants written as expressions over what
 //! the force has (see `expr`). On by default: `felon` (the shield ball) and
 //! `impaler` (the escorts of Impaler batteries, see `military::impalers`);
-//! `ravager`, `lance` and `phantom` (marksmen, see `marksman`) are seeded
-//! off; the rest wait for conducts of their own.
+//! `ravager`, `lance` and `phantom` (marksmen, see `marksman`) and
+//! `tremor` and `emissary` (siege forces, see `siege`) are seeded off; the
+//! rest wait for conducts of their own.
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -19,6 +20,7 @@
 pub mod doctrine;
 pub mod expr;
 pub mod marksman;
+pub mod siege;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -116,14 +118,17 @@ pub struct Taskforces {
     pub classes: Classes,
     shapes: BTreeMap<String, Arc<Shape>>,
     loaded: bool,
-    /// Marksmen's marks: gun to target (see `marksman`).
+    /// Marksmen's marks: gun to target (see `marksman`; siege guns' targets
+    /// are kept here too).
     pub marks: BTreeMap<i32, i32>,
+    /// Siege forces' stations and how their guns stand (see `siege`).
+    pub siege: siege::Siege,
 }
 
 /// Aims whose forces are squads of the squad handler (see
 /// `handlers::squad`); the others have modules of their own.
 pub fn squad_aim(aim: Aim) -> bool {
-    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff)
+    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff | Aim::Siege)
 }
 
 impl Taskforces {
@@ -184,6 +189,13 @@ impl Ai {
         self.taskforces.loaded = true;
         let classes = Classes::build(&self.unit_classes, &self.defs);
         let mut doctrines = seeds();
+        // `enable=siege` (or ZKGBAI_ENABLE=siege) switches the siege seeds
+        // on, as a `doctrines` patch would (see `siege`).
+        if !self.dev_off("siege") {
+            for d in doctrines.iter_mut().filter(|d| d.aim == Aim::Siege) {
+                d.enabled = true;
+            }
+        }
         for d in &mut doctrines {
             if let Err(e) = d.check(&self.defs, &classes) {
                 self.cb.log(&format!("doctrines: seed {e}; switched off"));

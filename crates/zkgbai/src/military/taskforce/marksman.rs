@@ -89,19 +89,22 @@ impl Ai {
         }
     }
 
-    /// Log a kill by a gun some marksman doctrine takes for a core (on or
-    /// off, in a force or not, so the arms of an A/B count alike): whether
-    /// it was its mark.
+    /// Log a kill by a gun some marksman or siege doctrine takes for a core
+    /// (on or off, in a force or not, so the arms of an A/B count alike):
+    /// whether it was its mark (a siege gun's set target).
     pub fn taskforce_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {
         let Some(a) = attacker.filter(|a| a.team() == self.team_id) else { return };
         let name = self.defs.name_of(a).to_owned();
         let tf = &self.taskforces;
-        if !tf.doctrines.iter().any(|d| d.marksman && d.is_core(&name, &tf.classes)) {
+        let gun = |d: &super::Doctrine| (d.marksman || d.aim == super::Aim::Siege) && d.is_core(&name, &tf.classes);
+        if !tf.doctrines.iter().any(gun) {
             return;
         }
         let marked = tf.marks.get(&a.id()) == Some(&enemy.id());
         let in_force = self.fighters.get(&a.id()).and_then(|f| f.squad).is_some_and(|s| {
-            self.squads.get(s).is_some_and(|q| q.is_taskforce() && q.shape.marksman)
+            self.squads
+                .get(s)
+                .is_some_and(|q| q.is_taskforce() && (q.shape.marksman || q.shape.aim == super::Aim::Siege))
         });
         let e = self.war.targets.get(&enemy.id());
         let cost = e.and_then(|e| e.ud).map_or(0.0, |d| d.cost(self.metal));
