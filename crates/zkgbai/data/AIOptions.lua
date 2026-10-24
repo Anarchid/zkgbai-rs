@@ -13,7 +13,7 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), airfire (an air factory for the firefighters once raids cost us mexes no home defense team was near), airtempo (an air factory weighed up as the game runs long, sooner on large maps).',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), airfire (an air factory for the firefighters once raids cost us mexes no home defense team was near).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'enable',
 		name   = 'Experimental features',
-		desc   = 'Comma-separated features to switch on: mexporc (a turret by every mex and link, the old default: off since the home defense force stands in for it), pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
+		desc   = 'Comma-separated features to switch on: mexporc (a turret by every mex and link, the old default: off since the home defense force stands in for it), pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets), airtempo (an air factory weighed up as the game runs long, sooner on large maps).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,

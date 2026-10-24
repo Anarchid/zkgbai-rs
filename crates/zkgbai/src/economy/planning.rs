@@ -76,7 +76,7 @@ const DROP_PROSPECT: f32 = 5000.0;
 /// value times the dose, once that is worth the factory's cost. Planes
 /// rather than gunships where static anti-air worth `AIR_TEMPO_AA_PLANES`
 /// or an enemy air force worth `AIR_TEMPO_AIR_PLANES` was seen.
-/// `disable=airtempo` turns both off.
+/// Off by default (unverified): `enable=airtempo` turns both on.
 const AIR_TEMPO_SHARE: f32 = 0.15;
 const AIR_TEMPO_PICK: f32 = 3.0;
 const AIR_TEMPO_FROM_MIN: f32 = 10.0;
