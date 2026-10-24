@@ -13,7 +13,7 @@ local options = {
 	{
 		key    = 'disable',
 		name   = 'Disabled features',
-		desc   = 'Comma-separated features to switch off: porc, mexporc (turrets by mexes and links), reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters.',
+		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), strikes (assassination strikes on Phantoms and Lances).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'enable',
 		name   = 'Experimental features',
-		desc   = 'Comma-separated experimental features to switch on: pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
+		desc   = 'Comma-separated features to switch on: mexporc (a turret by every mex and link, the old default: off since the home defense force stands in for it), pairs (Constables pair up on builds), currency (issue crews weigh danger as their expected loss and hold where it pays), permanence (the interceptor remembers unseen enemy groups for 45 s, dead reckoned toward our assets).',
 		type   = 'string',
 		def    = '',
 		maxlen = 200,
@@ -131,6 +131,16 @@ local options = {
 		min    = -1,
 		max    = 1000,
 		step   = 1,
+	},
+	{
+		key    = 'strike_margin',
+		name   = 'Strike margin',
+		desc   = 'Assassination strikes go when the expected profit (on a sniper worth 1.5x its metal) is at least this many times the expected loss; 0 = break-even; negative: every wave goes (testing).',
+		type   = 'number',
+		def    = 0,
+		min    = -1,
+		max    = 10,
+		step   = 0.1,
 	},
 	{
 		key    = 'factory',

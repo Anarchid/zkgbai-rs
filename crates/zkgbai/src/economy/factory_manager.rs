@@ -521,13 +521,13 @@ impl Ai {
     /// Queue the next unit for factory (or strider hub) `fac_id`.
     fn fac_assign_factory_task(&mut self, fac_id: i32) {
         // A staged strike builds its Widows itself (see `strike_test`); the
-        // `hijack` test plays the economy as usual.
+        // `hijack` and `impalerwar` tests play the economy as usual.
         // The staged raid game builds only firefighters (see `raid_test`).
         if self.test.as_deref() == Some("qrf") {
             self.fac_build_firefighter(fac_id);
             return;
         }
-        if self.test.as_deref().is_some_and(|t| t != "hijack") {
+        if self.test.as_deref().is_some_and(|t| t != "hijack" && t != "impalerwar") {
             return;
         }
         let Some(f) = self.fac.factories.get_mut(&fac_id) else { return };
@@ -576,8 +576,11 @@ impl Ai {
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice);
+        // Dirtbags for the strikes while snipers are about (see `strikes`).
         let choice = match (ai_wants_builder || special, fac.unit) {
-            (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
+            (false, unit) => {
+                (self.strikes_production(unit, choice)).or_else(|| self.qrf_production(unit, choice)).unwrap_or(choice)
+            }
             _ => choice,
         };
         if !ai_wants_builder
@@ -1052,6 +1055,11 @@ impl Ai {
             return "vehcon";
         }
 
+        // Screens for Impaler batteries short of them (see `impalers`).
+        if kgb_rand() < f64::from(self.impalers_escort_produce("vehriot")) {
+            return "vehriot";
+        }
+
         let slasher_value = war.slasher_spam as f32 * 140.0;
         if slasher_value > fm.assault_value && slasher_value > war.enemy_porc_value {
             return "vehassault";
@@ -1088,7 +1096,9 @@ impl Ai {
             return "veharty";
         }
 
-        if (fm.num_aspis > 0 && !self.squad_handler.shield_squads.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
+        // Dominatrices for shield balls: with only the felon doctrine on (the
+        // seeds), a taskforce is a shield ball, as this read before doctrines.
+        if (fm.num_aspis > 0 && !self.squad_handler.taskforces.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
             return "vehcapture";
         }
 

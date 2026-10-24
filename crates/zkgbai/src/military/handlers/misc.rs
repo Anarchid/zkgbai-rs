@@ -8,7 +8,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 use crate::Ai;
 use crate::defs::cmd;
 use crate::kgbutil::kgb_move_to;
-use crate::military::{Fighter, SquadKind};
+use crate::military::Fighter;
 use crate::nav;
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point};
 
@@ -276,19 +276,10 @@ impl Ai {
         h.berthas.remove(&id);
     }
 
-    /// Delete a support's fighter, keeping the aspis count of the shield
-    /// squad it follows up to date.
+    /// Delete a support's fighter (a taskforce counts its members as they
+    /// are, see `Squad::census`).
     fn misc_forget_support(&mut self, id: i32) {
-        if let Some(f) = self.fighters.remove(&id)
-            && self.defs.name_of(f.unit) == "shieldshield"
-        {
-            // Decrement aspis count.
-            if let Some(sq) = f.squad.and_then(|s| self.squads.get_mut(s))
-                && sq.kind == SquadKind::Shield
-            {
-                sq.num_aspis -= 1;
-            }
-        }
+        self.fighters.remove(&id);
     }
 
     /// Remove dead/captured units because spring devs are stupid and call

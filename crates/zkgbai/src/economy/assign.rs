@@ -137,8 +137,10 @@ impl Ai {
         let Some(w) = self.eco.workers.get(&wid) else {
             return;
         };
-        // Busy terraforming, or flown to a colony: leave it to it.
-        if !w.is_chicken && (super::terraform::is_terraforming(unit) || self.eco_in_transit(wid)) {
+        // Busy terraforming (or just ordered to), or flown to a colony:
+        // leave it to it.
+        let held = self.eco.terraform_hold.get(&wid).is_some_and(|&until| frame < until);
+        if !w.is_chicken && (held || super::terraform::is_terraforming(unit) || self.eco_in_transit(wid)) {
             self.eco.assigned.push_back(wid);
             return;
         }

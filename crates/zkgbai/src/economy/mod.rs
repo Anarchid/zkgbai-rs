@@ -6,11 +6,13 @@ pub mod build_ids;
 mod colonize;
 pub mod factory;
 pub mod factory_manager;
+mod geo;
 pub mod grid;
 mod planning;
 pub mod tasks;
 pub mod terraform;
 mod watchtower;
+mod wind;
 pub mod worker;
 
 pub use build_ids::BuildIds;
@@ -97,6 +99,8 @@ pub struct EconomyManager {
     airpads: Vec<Unit>,
     solars: Vec<Unit>,
     windgens: Vec<Unit>,
+    /// Geothermal plants, plain and advanced (finished).
+    geos: Vec<Unit>,
     pylons: Vec<Unit>,
     aas: Vec<Unit>,
     screamers: Vec<Unit>,
@@ -111,6 +115,12 @@ pub struct EconomyManager {
 
     pub effective_income_energy: f32,
     raw_mex_income: f32,
+    /// The energy income the economy wants (stalled below it).
+    energy_target: f32,
+    /// Workers just ordered to terraform, until when they are left to it
+    /// (the order reaches the engine a frame later; meanwhile they look
+    /// free).
+    pub(super) terraform_hold: BTreeMap<i32, i32>,
     /// min(metal, energy) usage, refreshed every 15 frames.
     pub effective_expenditure: f32,
     reclaim_value: Cell<f32>,
@@ -160,6 +170,10 @@ pub struct EconomyManager {
     pub ditch_tries: Vec<(Vec3, i32)>,
     /// A watchtower for our strikes going up, and when to plan the next.
     watchtower: Option<watchtower::Watchtower>,
+    /// Geothermal plants: vents, the upgrade, the wall box.
+    geo: geo::Geothermal,
+    /// Wind turbines: the model, hill sites.
+    wind: wind::Wind,
     watchtower_after: i32,
     /// A colony being taken, and when to look for the next.
     colony: Option<colonize::Colony>,
@@ -292,6 +306,7 @@ impl EconomyManager {
             airpads: Vec::new(),
             solars: Vec::new(),
             windgens: Vec::new(),
+            geos: Vec::new(),
             pylons: Vec::new(),
             aas: Vec::new(),
             screamers: Vec::new(),
@@ -305,6 +320,8 @@ impl EconomyManager {
             reclaim_record: VecDeque::new(),
             effective_income_energy: 0.0,
             raw_mex_income: 0.0,
+            energy_target: 0.0,
+            terraform_hold: BTreeMap::new(),
             effective_expenditure: 0.0,
             reclaim_value: Cell::new(0.0),
             last_rc_value_frame: Cell::new(0),
@@ -342,6 +359,8 @@ impl EconomyManager {
             ditch_tries: Vec::new(),
             watchtower: None,
             watchtower_after: 0,
+            geo: geo::Geothermal::default(),
+            wind: wind::Wind::default(),
             colony: None,
             colony_after: 0,
             colony_wants_air: None,
@@ -615,6 +634,10 @@ impl Ai {
         if frame % 15 == self.offset % 15 {
             self.eco_update_income(frame);
         }
+        self.eco_energy_survey(frame);
+        if frame % 1800 == self.offset % 1800 && frame > 0 {
+            self.eco_energy_summary();
+        }
 
         self.eco_dig_ditches(frame);
         self.eco_plan_grid(frame);
@@ -662,6 +685,9 @@ impl Ai {
                 }
             }
 
+            self.eco_plan_geo(frame);
+            self.eco.terraform_hold.retain(|_, &mut until| until > frame);
+
             if self.eco.effective_income > 30.0 && self.eco.sparrow.is_none() && !self.eco.has_planes {
                 self.eco_morph_sparrow();
             }
@@ -697,7 +723,7 @@ impl Ai {
                 eco.effective_income_energy += w.unit.rules_param_float("current_energyIncome", 0.0);
             }
         }
-        for u in eco.solars.iter().chain(&eco.windgens).chain(&eco.fusions) {
+        for u in eco.solars.iter().chain(&eco.windgens).chain(&eco.fusions).chain(&eco.geos) {
             eco.effective_income_energy += u.rules_param_float("current_energyIncome", 0.0);
         }
 
@@ -758,6 +784,7 @@ impl Ai {
         // minute 10 against our 13; energy 1.9x mex income at minute 5 to
         // our 1.3, 2.9x to 2.1 at minute 15).
         let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + eco.fusions.len() as f32;
+        eco.energy_target = eco.raw_mex_income * eratio;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
         let tf = self.graph.territory_fraction;
         eco.hard_estalled = (eco.max_storage > 1.0
@@ -862,6 +889,11 @@ impl Ai {
 
         if def_name == "energysolar" || def_name == "energywind" {
             self.eco.new_energy.push(unit);
+        }
+
+        // An advanced plant from a morph comes finished.
+        if def_name == "energyheavygeo" && !unit.is_being_built() && !self.eco.geos.contains(&unit) {
+            self.eco.geos.push(unit);
         }
 
         if matches!(def_name, "factoryplane" | "striderhub" | "factorygunship") && self.eco.defended_fac {
@@ -984,6 +1016,10 @@ impl Ai {
 
         if def_name == "energywind" {
             self.eco.windgens.push(unit);
+        }
+
+        if matches!(def_name, "energygeo" | "energyheavygeo") && !self.eco.geos.contains(&unit) {
+            self.eco.geos.push(unit);
         }
 
         if def_name == "energysolar" || def_name == "energywind" {
@@ -1161,6 +1197,7 @@ impl Ai {
                 &mut eco.mexes,
                 &mut eco.solars,
                 &mut eco.windgens,
+                &mut eco.geos,
                 &mut eco.pylons,
                 &mut eco.aas,
                 &mut eco.super_weps,
@@ -1273,6 +1310,7 @@ impl Ai {
             "staticmex" => self.eco.mexes.push(unit),
             "energysolar" => self.eco.solars.push(unit),
             "energywind" => self.eco.windgens.push(unit),
+            "energygeo" | "energyheavygeo" if !unit.is_being_built() => self.eco.geos.push(unit),
             "energypylon" => self.eco.pylons.push(unit),
             "energyfusion" | "energysingu" => self.eco.fusions.push(unit),
             _ => {}

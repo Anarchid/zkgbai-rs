@@ -273,7 +273,7 @@ impl Ai {
                 || (merged > 0
                     && eco.big_map
                     && tf > 0.4
-                    && (!self.misc_handler.striders.is_empty() || !self.squad_handler.shield_squads.is_empty())
+                    && (!self.misc_handler.striders.is_empty() || !self.squad_handler.taskforces.is_empty())
                     && (!eco.has_planes || !eco.has_gunship)
                     && no_fac_tasks)
             {
@@ -299,7 +299,7 @@ impl Ai {
             && self.eco.estalled
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {
-            self.eco_create_energy_task(position);
+            self.eco_create_energy_task(wid, position);
         }
         self.eco_create_fusion_task();
 
@@ -1812,9 +1812,15 @@ impl Ai {
         best.execute_custom_command(cmd::MISC_PRIORITY, &[3.0], 0, NO_TIMEOUT); // low prio, cause sparrows are freaking expensive.
     }
 
-    fn eco_create_energy_task(&mut self, worker_pos: Vec3) {
+    fn eco_create_energy_task(&mut self, wid: i32, worker_pos: Vec3) {
         let mut position = worker_pos;
         if position == NULLPOS {
+            return;
+        }
+
+        // A geothermal plant on a free vent of ours beats anything else
+        // (see `geo`).
+        if self.eco_create_geo_task(wid) {
             return;
         }
 
@@ -1829,11 +1835,19 @@ impl Ai {
             })
         };
 
-        // for solars
-        if (((self.eco.solars.len() + self.eco.solar_tasks.len()) as f32) < (self.eco.raw_mex_income / 2.0).round()
-            || kgb_rand() > 0.25)
-            && self.cb.map().elevation_at(position.x, position.z) > 0.0
-        {
+        // Turbines: a batch up a hill of ours, if the better wind pays for
+        // the walk; by the grid instead of solars, where the ground is high
+        // enough (see `wind`).
+        let wind_spot = self.graph.get_overdrive_sweet_spot(position, "energywind");
+        if wind_spot != NULLPOS && self.eco_wind_hill(wid, wind_spot) {
+            return;
+        }
+        let windy = wind_spot != NULLPOS && self.eco_wind_beats_solar(wind_spot);
+
+        // for solars (a core of them anyway: they armor up under fire)
+        let core =
+            ((self.eco.solars.len() + self.eco.solar_tasks.len()) as f32) < (self.eco.raw_mex_income / 2.0).round();
+        if (core || (!windy && kgb_rand() > 0.25)) && self.cb.map().elevation_at(position.x, position.z) > 0.0 {
             let Some(solar) = self.defs.get("energysolar") else {
                 return;
             };
@@ -1897,7 +1911,10 @@ impl Ai {
             && !self.fac.factories.is_empty()
             && eco.fusion_tasks.is_empty()
         {
-            // for singus
+            // for singus; a geothermal plant is upgraded first
+            if self.eco_upgrade_geo(self.frame) {
+                return;
+            }
             "energysingu"
         } else {
             return;

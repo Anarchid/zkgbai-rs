@@ -23,6 +23,7 @@ use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
 use crate::military::scouts::Scouts;
+use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
@@ -41,7 +42,12 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
 /// frozen hover baseline, 20 games each, Oct 22: the memory frightens
 /// workers more than it positions squads.
-const OFF_BY_DEFAULT: [&str; 3] = ["pairs", "currency", "permanence"];
+/// `mexporc` (a turret by every mex and link) is off by default since
+/// Oct 24: with the home-defense force standing in for the turret it won
+/// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
+/// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
+/// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
+const OFF_BY_DEFAULT: [&str; 4] = ["pairs", "currency", "permanence", "mexporc"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
@@ -120,10 +126,14 @@ pub struct Ai {
     pub nukes: Nukes,
     pub missiles: Missiles,
     pub sweeps: Sweeps,
+    pub strikes: Strikes,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
+    /// Impaler batteries.
+    pub impalers: crate::military::impalers::Impalers,
+    pub taskforces: crate::military::taskforce::Taskforces,
     pub qrf: crate::military::qrf::Qrf,
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
@@ -227,8 +237,11 @@ impl SkirmishAi for Ai {
             nukes: Nukes::default(),
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
+            strikes: Strikes::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
+            impalers: Default::default(),
+            taskforces: Default::default(),
             qrf: Default::default(),
             firefighters: Default::default(),
             raid_test: Default::default(),
@@ -450,12 +463,6 @@ impl Ai {
             self.say("glhf!");
         }
         if self.resigned {
-            // Keep self-destructing whatever is left (or given to us).
-            if frame % 300 == 0 {
-                for u in self.cb.team_units() {
-                    u.self_destruct(0);
-                }
-            }
             return;
         }
         if !self.initialized {
@@ -483,7 +490,7 @@ impl Ai {
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),
-            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm")
+            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm" | "snipers" | "lances")
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
@@ -502,13 +509,14 @@ impl Ai {
         if self.test.is_some() {
             return;
         }
-        // With an ally the game is the alliance's to give up, and the AI
-        // interface has no resign: "gg" and a self-destruct beside an ally
-        // is a base blown up in a game that goes on (a 2v2 on The Cold
-        // Place, Oct 23: the enemy alliance's spots against this team's
-        // own, 28 to 18, and the base gone at 15:00 with the human ally
-        // still fighting). So with any ally, play on.
-        if !self.allies.is_empty() {
+        // With an ally the game is the alliance's to give up: "gg" and a
+        // resign beside an ally is a base gone in a game that goes on (a 2v2
+        // on The Cold Place, Oct 23: the enemy alliance's spots against this
+        // team's own, 28 to 18, and the base gone at 15:00 with the human
+        // ally still fighting). So with any ally but our own merged
+        // instances, play on. Those hand us all their units, so this
+        // judgement is already the whole alliance's.
+        if self.allies.iter().any(|a| !self.comrades.contains(a)) {
             return;
         }
         let espots = self.graph.get_enemy_spots().len() as f32;
@@ -517,13 +525,28 @@ impl Ai {
             && espots > 1.5 * ospots
             && (self.war.enemy_fighter_value > self.fac.army_value * 1.5 || self.fac.factories.is_empty())
         {
-            self.resigned = true;
-            self.say("gg!");
-            self.emote("resigned");
-            for u in self.cb.team_units() {
-                u.self_destruct(0);
-            }
+            self.resign();
         }
+    }
+
+    /// Give up the game by leaving it. Merged instances follow as our units
+    /// reach them (see `unit_given`). A self-destruct is no resign: Zero-K's
+    /// blocker (unit_self_destruct.lua) cancels one in any game but a 1v1 or
+    /// FFA.
+    fn resign(&mut self) {
+        self.say("gg!");
+        self.emote("resigned");
+        self.leave_game();
+        self.log("resign: left the game");
+    }
+
+    /// Leave the game as a crashed AI does: the hosting player kills this
+    /// AI (`/aikill`), and Zero-K hands the team's units to an AI ally
+    /// (game_lagmonitor.lua, never to a human one) and counts a team with
+    /// neither AI nor players out (game_over.lua).
+    fn leave_game(&mut self) {
+        self.cb.game().send_text_message(&format!("/aikill {}", self.team_id), 0);
+        self.resigned = true;
     }
 
     fn maybe_taunt(&mut self) {
@@ -617,8 +640,12 @@ impl Ai {
     fn unit_given(&mut self, unit: Unit, old_team: i32, new_team: i32) {
         if self.slave && new_team == self.team_id {
             if self.comrades.contains(&old_team) {
-                // Merged teams resign by self-destructing individually.
-                unit.self_destruct(0);
+                // A comrade's units come to us when it has left the game
+                // (Zero-K hands a gone AI's units to an AI ally): follow it
+                // out, the units passing on to the next of us.
+                if !self.resigned {
+                    self.leave_game();
+                }
             } else {
                 // Got the unit from someone else: pass it on to the leader.
                 self.cb.send_units(&[unit], self.merge_target);
@@ -653,6 +680,7 @@ impl Ai {
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
                 self.guard("airIntel.unitDamaged", |ai| ai.air_intel_unit_damaged(unit, attacker, dir, weapon));
+                self.guard("impalers.unitDamaged", |ai| ai.impalers_unit_damaged(unit, attacker, damage, weapon));
             }
             Event::UnitDestroyed { unit, attacker } => {
                 self.guard("graph.unitDestroyed", |ai| ai.graph_unit_destroyed(unit, attacker));
@@ -674,6 +702,9 @@ impl Ai {
             Event::EnemyLeaveLos { enemy } => self.guard("war.enemyLeaveLOS", |ai| ai.war_enemy_leave_los(enemy)),
             Event::EnemyEnterRadar { enemy } => self.guard("war.enemyEnterRadar", |ai| ai.war_enemy_enter_radar(enemy)),
             Event::EnemyLeaveRadar { enemy } => self.guard("war.enemyLeaveRadar", |ai| ai.war_enemy_leave_radar(enemy)),
+            Event::EnemyDamaged { enemy, attacker, damage, .. } => {
+                self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage))
+            }
             Event::EnemyDestroyed { enemy, attacker } => {
                 self.guard("war.enemyDestroyed", |ai| ai.war_enemy_destroyed(enemy, attacker))
             }
