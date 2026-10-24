@@ -141,14 +141,14 @@ def game(path):
         pa = list(side_posture(fi["A"], cb, uidx, fi["start"], fi["end"]))
         pb = list(side_posture(fi["B"], ca, uidx, fi["start"], fi["end"]))
         # rule 4: a side whose enemy was wiped, or left first, committed by definition
-        def enemy_gone(own, foe):
-            if foe[0] == "wiped":
+        def enemy_gone(own, foe, foe_y):
+            if foe[0] == "wiped" or foe_y >= 0.999:  # every armed enemy unit dead, statics included
                 return True
             return foe[0] in ("retreat-whole", "retreat-piece") and own[5] is not None and foe[5] is not None and foe[5] < own[5]
         oa, ob = pa[0], pb[0]
-        if oa in ("retreat-whole", "retreat-piece") and enemy_gone(pa, pb):
+        if oa in ("retreat-whole", "retreat-piece") and enemy_gone(pa, pb, fi["yB"]):
             pa[0] = "commit"
-        if ob in ("retreat-whole", "retreat-piece") and enemy_gone(pb, pa):
+        if ob in ("retreat-whole", "retreat-piece") and enemy_gone(pb, pa, fi["yA"]):
             pb[0] = "commit"
         def timing(p):
             lab, n, nd, nw, fl, tw = p
