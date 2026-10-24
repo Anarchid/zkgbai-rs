@@ -271,6 +271,19 @@ pub struct Doctrine {
     /// Marksmen: a mark is worth setting from this share of what a volley
     /// of the gun's type has killed so far (0: a tenth of the gun's cost).
     pub mark_share: f32,
+    /// Cores are produced on purpose (`produce`) only to fill a forming
+    /// force (never yet engaged) up to this many cores, and never to start
+    /// one; 0: up to `cores_per_force`, and to start a force when none is,
+    /// or when none that is not engaged has room (the first siege arm's
+    /// dose). Siege forces.
+    pub produce_cores: u32,
+    /// Siege forces: a force goes in only once our army's median depth has
+    /// reached its station's (less a tenth): it goes in beside the main
+    /// body, waiting at its haven else.
+    pub wait_army: bool,
+    /// Siege forces: a force goes in only with every role named `screen`
+    /// at its want.
+    pub engage_screen: bool,
 }
 
 impl Doctrine {
@@ -303,6 +316,9 @@ impl Doctrine {
             marksman: false,
             mark_hold: true,
             mark_share: 0.5,
+            produce_cores: 0,
+            wait_army: false,
+            engage_screen: false,
         }
     }
 
@@ -369,6 +385,9 @@ impl Doctrine {
             "marksman": self.marksman,
             "mark_hold": self.mark_hold,
             "mark_share": self.mark_share,
+            "produce_cores": self.produce_cores,
+            "wait_army": self.wait_army,
+            "engage_screen": self.engage_screen,
         })
     }
 
@@ -425,6 +444,9 @@ impl Doctrine {
                 "marksman" => self.marksman = flag(k, v)?,
                 "mark_hold" => self.mark_hold = flag(k, v)?,
                 "mark_share" => self.mark_share = num(k, v, 0.0, 10.0)?,
+                "produce_cores" => self.produce_cores = num(k, v, 0.0, 1000.0)? as u32,
+                "wait_army" => self.wait_army = flag(k, v)?,
+                "engage_screen" => self.engage_screen = flag(k, v)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -544,6 +566,8 @@ impl Doctrine {
             marksman: self.marksman,
             mark_hold: self.mark_hold,
             mark_share: self.mark_share,
+            wait_army: self.wait_army,
+            engage_screen: self.engage_screen,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -595,6 +619,9 @@ pub struct Shape {
     pub marksman: bool,
     pub mark_hold: bool,
     pub mark_share: f32,
+    /// Siege forces (see [`Doctrine`]).
+    pub wait_army: bool,
+    pub engage_screen: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -629,6 +656,8 @@ impl Default for Shape {
             marksman: false,
             mark_hold: true,
             mark_share: 0.5,
+            wait_army: false,
+            engage_screen: false,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -1007,6 +1036,20 @@ mod tests {
             assert!(e.eval(&one) > escort + 1600.0, "{name}: one gun goes in");
             assert_eq!(e.eval(&two), d.engage_value, "{name}");
         }
+    }
+
+    #[test]
+    fn siege_dials_default_to_the_first_arm() {
+        let mut d = seeds().into_iter().find(|d| d.name == "tremor").unwrap();
+        assert_eq!((d.produce_cores, d.wait_army, d.engage_screen), (0, false, false));
+        let Value::Object(p) = json!({"produce_cores": 2, "wait_army": true, "engage_screen": "on"}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.produce_cores, d.wait_army, d.engage_screen), (2, true, true));
+        let Value::Object(p) = d.to_json() else { panic!() };
+        let mut back = Doctrine::new("tremor");
+        back.apply(&p).unwrap();
+        assert_eq!(back, d);
+        assert!(!Shape::default().wait_army && !Shape::default().engage_screen);
     }
 
     #[test]

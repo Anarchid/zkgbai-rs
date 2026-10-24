@@ -388,6 +388,13 @@ impl Ai {
         r.want(&force).is_some_and(|w| force.roles.get(role).is_some_and(|x| x.1 < w))
     }
 
+    /// Whether every role of force `sid` named `screen` is at its want.
+    fn squad_screen_full(&self, sid: SquadId) -> bool {
+        let Some(q) = self.squads.get(sid) else { return true };
+        let Some(d) = self.taskforces.doctrine(&q.shape.doctrine) else { return true };
+        (d.roles.iter().enumerate()).filter(|(_, r)| r.name == "screen").all(|(i, _)| !self.squad_short_of(sid, i))
+    }
+
     /// The metal force `sid` must be worth to go in: its doctrine's `engage`
     /// over the force and our income (as assault squads count it), else
     /// its `engage_value`.
@@ -445,10 +452,17 @@ impl Ai {
                     .filter_map(|&sid| self.squads.get(sid))
                     .filter(|q| q.shape.doctrine == d.name)
                     .collect();
-                let room = forces.is_empty()
-                    || forces.iter().any(|q| {
-                        !q.engaging && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
-                    });
+                let room = if d.produce_cores > 0 {
+                    // Only to fill a forming force up to `produce_cores`.
+                    forces.iter().any(|q| {
+                        !q.engaging && q.engaged == 0 && q.cores(&self.fighters) < d.produce_cores as usize
+                    })
+                } else {
+                    forces.is_empty()
+                        || forces.iter().any(|q| {
+                            !q.engaging && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
+                        })
+                };
                 if room && kgb_rand() < f64::from(d.produce) {
                     return Some((def, d.name.clone(), "core".to_owned()));
                 }
@@ -1002,6 +1016,17 @@ impl Ai {
             // Being rallied lets it go in; engaged, only a doctrine that
             // regroups breaks off when its members scatter.
             let rallied = self.squad_is_rallied(sid) || (engaging && !shape.regroup);
+            // Siege dials (see `taskforce::siege`): with the screen at its
+            // want, and beside the main body (our army's median depth up to
+            // the station's, less a tenth), unless already in.
+            let screened = !shape.engage_screen || engaging || self.squad_screen_full(sid);
+            let beside = !shape.wait_army
+                || engaging
+                || match (self.siege_station(sid), self.squad_army_depth(sid)) {
+                    (Some(st), Some((army, _))) => self.taskforce_depth(st).is_none_or(|d| army >= d - 0.1),
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                };
 
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
@@ -1013,7 +1038,7 @@ impl Ai {
                 let haven = self.graph_get_closest_haven(pos);
                 self.squad_retreat_to(sid, haven);
                 "hurt"
-            } else if let Some(leader) = led.filter(|_| worth && rallied) {
+            } else if let Some(leader) = led.filter(|_| worth && rallied && screened && beside) {
                 let view = self.war.view(leader.def());
                 let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
                 if shape.flee_threat && view.get_effective_threat(pos) / courage > tolerance {
@@ -1043,8 +1068,12 @@ impl Ai {
                     "worth too little"
                 } else if led.is_none() {
                     "led by no core"
-                } else {
+                } else if !rallied {
                     "scattered"
+                } else if !screened {
+                    "no screen"
+                } else {
+                    "waits for the army"
                 };
                 if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
                     let haven = self.graph_get_closest_haven(pos);

@@ -585,6 +585,12 @@ impl Ai {
         }
     }
 
+    /// Where force `sid` would stand: its station as last picked (for the
+    /// `wait_army` dial).
+    pub(crate) fn siege_station(&self, sid: SquadId) -> Option<Vec3> {
+        self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos)
+    }
+
     /// Forget a gun that is gone.
     pub(crate) fn siege_remove(&mut self, id: i32) {
         self.taskforces.siege.guns.remove(&id);
