@@ -1047,6 +1047,7 @@ impl Ai {
                 && !self.siege_leaves_hurt(sid, health);
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
+            let raiser_wait: String;
             // A siege force falls back toward home: the haven nearest the
             // force itself may lie beside a far constructor on the flank or
             // the map edge (an Emissary force deep in the enemy's base went
@@ -1096,11 +1097,29 @@ impl Ai {
                         Aim::Siege => self.siege_conduct(sid, leader),
                         _ => (self.war_get_target(leader, false), true),
                     };
-                    if go {
-                        self.squad_set_target(sid, target);
+                    // A perching force walks with its raisers: borrowed when
+                    // the station is picked, it waits at a haven out of the
+                    // enemy's reach until they are with it (see
+                    // `siege_wait_raisers`).
+                    let wait = if shape.aim == Aim::Siege && shape.perch.is_some() && go {
+                        self.siege_wait_raisers(sid, leader, fallback)
+                    } else {
+                        None
+                    };
+                    match wait {
+                        Some((haven, why)) => {
+                            self.squad_retreat_to(sid, haven);
+                            raiser_wait = why;
+                            raiser_wait.as_str()
+                        }
+                        None => {
+                            if go {
+                                self.squad_set_target(sid, target);
+                            }
+                            engage_at = Some(target);
+                            ""
+                        }
                     }
-                    engage_at = Some(target);
-                    ""
                 }
             } else {
                 let short: &str = if !worth {

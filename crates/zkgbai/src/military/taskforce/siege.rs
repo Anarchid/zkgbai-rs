@@ -194,6 +194,13 @@ struct SiegeForce {
     pending_natural: f32,
     /// When the force last said it waits for the army.
     waited_at: i32,
+    /// Raisers borrowed when the station was picked, guarding the leader
+    /// (they walk with the force); since when; times borrowed; and when
+    /// the force last said it waits for them.
+    raisers: Vec<Unit>,
+    raisers_since: i32,
+    raisers_tries: u32,
+    raisers_said: i32,
 }
 
 /// What a gun was doing at the last conduct, since when (the frame of the
@@ -947,7 +954,12 @@ impl Ai {
                 // of it (crab arm (1): Crabs parked at their sites with the
                 // nearest Weaver a median 877 off, fought alone and were held
                 // there hurt).
-                let (raisers, want) = self.siege_borrow(sid, perch, site, &[]);
+                let walked: Vec<Unit> = (self.taskforces.siege.forces.get(&sid))
+                    .map_or(Vec::new(), |f| f.raisers.iter().copied().filter(|u| u.health() > 0.0).collect());
+                let (raisers, want) = if walked.is_empty() { self.siege_borrow(sid, perch, site, &[]) } else { (walked, 0) };
+                if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                    f.raisers.clear();
+                }
                 if raisers.is_empty() {
                     let ground = self.cb.map().elevation_at(site.x, site.z);
                     self.op_emit(
@@ -982,8 +994,13 @@ impl Ai {
                     return;
                 }
                 self.eco_hold_terraform(&raisers, (perch.borrow_s * 30.0) as i32);
+                let near_now = raisers.iter().filter(|u| distance(u.pos(), site) <= RAISE_NEAR).count();
                 let home = self.graph.get_start_pos();
-                let stage = if home != NULLPOS && distance(site, home) > STAGE_OFF { get_directional_point(site, home, STAGE_OFF) } else { site };
+                let stage = if near_now > 0 || home == NULLPOS || distance(site, home) <= STAGE_OFF {
+                    site
+                } else {
+                    get_directional_point(site, home, STAGE_OFF)
+                };
                 kgb_move_to_exact(leader, stage, 20.0, 0, frame);
                 let ids: Vec<String> = raisers.iter().map(|u| format!("{} {}", self.defs.name_of(*u), u.id())).collect();
                 self.op_emit(
@@ -1014,7 +1031,7 @@ impl Ai {
                         tries: 1,
                         square: [site; 4],
                         level: 0.0,
-                        staged: true,
+                        staged: near_now == 0,
                         started: false,
                     });
                 }
@@ -1555,6 +1572,106 @@ impl Ai {
         self.log(&format!("taskforce: the {doctrine} force (squad {sid}) {waits}"));
     }
 
+    /// A perching force's raisers walk with it (crab arm 2b: Weavers sent
+    /// after a Crab already at the front never arrived in time, and a Crab
+    /// staged 300 home-side of its site was in the fight). Called as the
+    /// force is about to go to a perch site: borrows the raisers once (held
+    /// for the borrow, told to guard the leader) and, while any live raiser
+    /// is farther than `RAISE_NEAR` from the leader, returns a haven out of
+    /// the enemy's armed reach to wait at and the reason (with the nearest
+    /// raiser's distance); `None` once they are with it (or none can be had
+    /// after three borrows: the force goes, and the perch borrows at the site).
+    pub(crate) fn siege_wait_raisers(&mut self, sid: SquadId, leader: Unit, fallback: Vec3) -> Option<(Vec3, String)> {
+        let frame = self.frame;
+        let is_site = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).is_some_and(|s| s.perch_site);
+        let perching = self.siege_perched(sid)
+            || (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned);
+        if !is_site || perching {
+            return None;
+        }
+        let Some(perch) = self.squads.get(sid).and_then(|q| q.shape.perch.clone()) else { return None };
+        let Some(site) = self.siege_station(sid) else { return None };
+        let f = self.taskforces.siege.forces.entry(sid).or_default();
+        f.raisers.retain(|u| u.health() > 0.0);
+        let tries = f.raisers_tries;
+        if f.raisers.is_empty() {
+            if tries >= RAISE_TRIES {
+                return None;
+            }
+            let (more, want) = self.siege_borrow(sid, &perch, site, &[]);
+            let f = self.taskforces.siege.forces.entry(sid).or_default();
+            f.raisers_tries = tries + 1;
+            if more.is_empty() {
+                return None;
+            }
+            for u in &more {
+                u.guard(leader, 0);
+            }
+            f.raisers = more.clone();
+            f.raisers_since = frame;
+            f.raisers_said = 0;
+            self.eco_hold_terraform(&more, (perch.borrow_s * 30.0) as i32 * 2);
+            let ids: Vec<String> = more.iter().map(|u| format!("{} {}", self.defs.name_of(*u), u.id())).collect();
+            self.op_emit(
+                "siege-perch",
+                json!({"event": "raisers borrowed", "squad": sid, "site": [site.x, site.z], "raisers": more.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want, "try": tries + 1}),
+            );
+            self.log(&format!(
+                "taskforce: the {} force (squad {sid}) borrows {} raisers ({}) to walk with it to its perch at ({:.0}, {:.0})",
+                self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone()),
+                more.len(),
+                ids.join(", "),
+                site.x,
+                site.z
+            ));
+        }
+        let lp = leader.pos();
+        let (raisers, since_frame, said) = {
+            let f = self.taskforces.siege.forces.entry(sid).or_default();
+            (f.raisers.clone(), f.raisers_since, f.raisers_said)
+        };
+        let doctrine = self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone());
+        let ids: Vec<String> = raisers.iter().map(|u| u.id().to_string()).collect();
+        let far: Vec<f32> = raisers.iter().map(|u| distance(u.pos(), lp)).filter(|&d| d > RAISE_NEAR).collect();
+        let since = (frame - since_frame) / 30;
+        if far.is_empty() {
+            if said != -1 {
+                if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                    f.raisers_said = -1;
+                }
+                self.op_emit("siege-perch", json!({"event": "raisers joined", "squad": sid, "seconds": since, "raisers": raisers.len()}));
+                self.log(&format!(
+                    "taskforce: the {doctrine} force (squad {sid})'s raisers (units {}) joined it after {since} s; it goes",
+                    ids.join(", ")
+                ));
+            }
+            return None;
+        }
+        // Wait at a haven the enemy's defenses do not reach (else the wait
+        // is the same exposure moved back).
+        let mut haven = fallback;
+        let threatened = {
+            let view = self.war.view(leader.def());
+            view.get_porc_threat(haven) > 0.0 || view.get_effective_threat(haven) > 0.0
+        };
+        if threatened {
+            let home = self.graph.get_start_pos();
+            if home != NULLPOS {
+                haven = self.graph_get_closest_haven(get_directional_point(haven, home, 1500.0));
+            }
+        }
+        let nearest = far.iter().copied().fold(f32::INFINITY, f32::min);
+        let why = format!("waits for its raisers (units {}; nearest {nearest:.0} away)", ids.join(", "));
+        if said == -1 || frame - said >= REPORT {
+            if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                f.raisers_said = frame;
+            }
+            self.op_emit("siege-perch", json!({"event": "raisers wait", "squad": sid, "nearest": nearest, "haven": [haven.x, haven.z], "seconds": since}));
+            self.log(&format!("taskforce: the {doctrine} force (squad {sid}) {why} at ({:.0}, {:.0})", haven.x, haven.z));
+        }
+        Some((haven, why))
+    }
+
     /// Where force `sid` would stand: its station as last picked (for the
     /// `wait_army` dial).
     pub(crate) fn siege_station(&self, sid: SquadId) -> Option<Vec3> {
@@ -1595,9 +1712,13 @@ impl Ai {
         }
     }
 
-    /// Forget a force that is gone.
+    /// Forget a force that is gone: raisers walking with it go back.
     pub(crate) fn siege_forget(&mut self, sid: SquadId) {
-        self.taskforces.siege.forces.remove(&sid);
+        if let Some(f) = self.taskforces.siege.forces.remove(&sid) {
+            for u in f.raisers.iter().filter(|u| u.health() > 0.0) {
+                u.stop(0);
+            }
+        }
     }
 }
 
