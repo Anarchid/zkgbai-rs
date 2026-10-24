@@ -5,6 +5,7 @@ usage: predict.py <predictor-dir> [workers] [rollouts]
 Reads fights.pkl, hitcells.pkl, unitdefs.tsv and the cache; writes
 fights_pred.tsv, scores.tsv and results.md in <predictor-dir>.
 """
+import hashlib
 import math
 import os
 import pickle
@@ -19,6 +20,7 @@ from scipy.special import betainc, expit, gammaln, logit
 from scipy.stats import beta as beta_dist
 
 import combatdata
+import disengage
 import split
 import units as unitmod
 from fit_hits import SPEED_EDGES, RBANDS, SHRINK
@@ -240,8 +242,10 @@ def lanchester(units):
     return 1.0, 1.0 - math.sqrt(max(0.0, 1.0 - S[0] / S[1]))
 
 
-def simulate(units, rng=None):
-    """1D a-move fight. rng None -> expected damage (deterministic); else rolled shots."""
+def simulate(units, rng=None, hazard=None):
+    """1D a-move fight. rng None -> expected damage (deterministic); else rolled shots.
+    hazard: disengagement hazard applied at the end of every second (expected over stopping
+    times when deterministic, sampled when rolled)."""
     hits = G["hits"]
     us = [SimUnit.__new__(SimUnit) for _ in units]
     for a, b in zip(us, units):
@@ -256,7 +260,20 @@ def simulate(units, rng=None):
     killed = [0.0, 0.0]
     quiet = 0
     f = 0
+    lr = math.log(max(cost0[0], 1.0) / max(cost0[1], 1.0))
+    surv = 1.0
+    exp_k = [0.0, 0.0]
+    def kfrac():
+        return (killed[0] / cost0[0] if cost0[0] > 0 else 0.0, killed[1] / cost0[1] if cost0[1] > 0 else 0.0)
     while f < HORIZON:
+        if hazard is not None and f > 0 and f % 30 == 0:
+            kA, kB = kfrac()
+            h = hazard.h(f // 30 - 1, kA, kB, lr)
+            if rng is None:
+                exp_k[0] += surv * h * kA; exp_k[1] += surv * h * kB
+                surv *= 1.0 - h
+            elif rng.random() < h:
+                return kA, kB
         alive = [u for u in us if u.alive]
         sides = [[u for u in alive if u.side == s] for s in (0, 1)]
         if not any(u.armed for u in sides[0]) or not any(u.armed for u in sides[1]):
@@ -320,7 +337,10 @@ def simulate(units, rng=None):
         if quiet > 300:
             break
         f += DT
-    return (killed[0] / cost0[0] if cost0[0] > 0 else 0.0, killed[1] / cost0[1] if cost0[1] > 0 else 0.0)
+    kA, kB = kfrac()
+    if hazard is not None and rng is None:
+        return exp_k[0] + surv * kA, exp_k[1] + surv * kB
+    return kA, kB
 
 
 def predict_fight(args):
@@ -329,10 +349,18 @@ def predict_fight(args):
     out = {"flat_r": flat_threat(fight)}
     out["lan_A"], out["lan_B"] = lanchester(units)
     out["dps_A"], out["dps_B"] = simulate(units)
-    rng = np.random.default_rng(abs(hash((fight["game"], fight["fid"]))) % (2 ** 32))
+    seed = int(hashlib.md5(f"{fight['game']}:{fight['fid']}".encode()).hexdigest(), 16) % (2 ** 32)
+    rng = np.random.default_rng(seed)
     ys = np.array([simulate(units, rng) for _ in range(rollouts)])
     out["roll_A"] = ys[:, 0]
     out["roll_B"] = ys[:, 1]
+    hz = G.get("hazard")
+    if hz is not None:
+        out["dstop_A"], out["dstop_B"] = simulate(units, None, hz)
+        rng = np.random.default_rng(seed + 1)
+        ys = np.array([simulate(units, rng, hz) for _ in range(rollouts)])
+        out["rstop_A"] = ys[:, 0]
+        out["rstop_B"] = ys[:, 1]
     out["n_armedA"] = sum(u.armed for u in units if u.side == 0)
     out["n_armedB"] = sum(u.armed for u in units if u.side == 1)
     return out
@@ -344,6 +372,13 @@ def _init(pdir, cache):
     G["hits"] = HitModel(cells, G["ud"])
     G["wtab"] = pickle.load(open(os.path.join(pdir, "wtab.pkl"), "rb"))
     G["commw"] = pickle.load(open(os.path.join(pdir, "commw.pkl"), "rb"))
+    hp = os.environ.get("PRED_HAZARD")
+    if hp:
+        hd = pickle.load(open(hp, "rb"))
+        disengage.T0 = hd["t0"]
+        G["hazard"] = disengage.Hazard(hd["w"])
+    else:
+        G["hazard"] = None
 
 
 # ----------------------------------------------------------------------------- calibration + scoring
@@ -457,6 +492,13 @@ def evaluate(pdir, workers=4, rollouts=64):
             "roll_pAwin": (np.sum(p["roll_B"] - p["roll_A"] > DECIDE) + 0.5) / (np.sum(np.abs(p["roll_B"] - p["roll_A"]) > DECIDE) + 1.0),
             "roll_crpsA": crps_ensemble(p["roll_A"], f["yA"]), "roll_crpsB": crps_ensemble(p["roll_B"], f["yB"]),
         })
+        if "dstop_A" in p:
+            rows[-1].update({
+                "dstop_A": p["dstop_A"], "dstop_B": p["dstop_B"],
+                "rstop_A": p["rstop_A"].mean(), "rstop_B": p["rstop_B"].mean(),
+                "rstop_pAwin": (np.sum(p["rstop_B"] - p["rstop_A"] > DECIDE) + 0.5) / (np.sum(np.abs(p["rstop_B"] - p["rstop_A"]) > DECIDE) + 1.0),
+                "rstop_crpsA": crps_ensemble(p["rstop_A"], f["yA"]), "rstop_crpsB": crps_ensemble(p["rstop_B"], f["yB"]),
+            })
     df = pd.DataFrame(rows)
     df["win"] = np.where(df["yB"] - df["yA"] > DECIDE, 1, np.where(df["yA"] - df["yB"] > DECIDE, 0, -1))
     train = df[df["split"] == "train"]
@@ -468,6 +510,9 @@ def evaluate(pdir, workers=4, rollouts=64):
         "dps_sim": (logit(np.clip(df["dps_A"], 0.005, 0.995)), logit(np.clip(df["dps_B"], 0.005, 0.995)), df["dps_B"].values - df["dps_A"].values),
         "rolled_sim": (logit(np.clip(df["roll_A"], 0.005, 0.995)), logit(np.clip(df["roll_B"], 0.005, 0.995)), df["roll_B"].values - df["roll_A"].values),
     }
+    if "dstop_A" in df.columns:
+        feats["dps_stop"] = (logit(np.clip(df["dstop_A"], 0.005, 0.995)), logit(np.clip(df["dstop_B"], 0.005, 0.995)), df["dstop_B"].values - df["dstop_A"].values)
+        feats["rolled_stop"] = (logit(np.clip(df["rstop_A"], 0.005, 0.995)), logit(np.clip(df["rstop_B"], 0.005, 0.995)), df["rstop_B"].values - df["rstop_A"].values)
     tr = (df["split"] == "train").values
     dec = (df["win"] >= 0).values
     for name, (zA, zB, zw) in feats.items():
@@ -482,9 +527,57 @@ def evaluate(pdir, workers=4, rollouts=64):
     return df
 
 
+RAW = {"rolled_sim": "roll", "rolled_stop": "rstop"}
+
+
+def metric_arrays(d, mod):
+    """Per-fight CRPS, log loss and Brier (nan where undecided) for a model, calibrated and raw."""
+    out = {}
+    w = d["win"].values.astype(float)
+    dec = d["win"].values >= 0
+    def ll_br(p):
+        p = np.clip(p, 1e-6, 1 - 1e-6)
+        ll = np.where(dec, -(w * np.log(p) + (1 - w) * np.log(1 - p)), np.nan)
+        br = np.where(dec, (p - w) ** 2, np.nan)
+        return ll, br
+    out["crps"] = ((d[f"{mod}_crpsA"] + d[f"{mod}_crpsB"]) / 2).values
+    out["logloss"], out["brier"] = ll_br(d[f"{mod}_pAwin"].values)
+    if mod in RAW:
+        r = RAW[mod]
+        out["crps_raw"] = ((d[f"{r}_crpsA"] + d[f"{r}_crpsB"]) / 2).values
+        out["logloss_raw"], out["brier_raw"] = ll_br(d[f"{r}_pAwin"].values)
+    return out
+
+
+def bootstrap(df, models, reps=1000, seed=7):
+    """Paired-by-game bootstrap of every pairwise model difference, per metric."""
+    rng = np.random.default_rng(seed)
+    games, gidx = np.unique(df["game"].values, return_inverse=True)
+    arrays = {m: metric_arrays(df, m) for m in models}
+    draws = rng.integers(0, len(games), size=(reps, len(games)))
+    weights = np.stack([np.bincount(dr, minlength=len(games)) for dr in draws]).astype(float)  # reps x games
+    wf = weights[:, gidx]  # reps x fights
+    rows = []
+    def wmean(a):
+        ok = ~np.isnan(a)
+        return (wf[:, ok] * a[ok]).sum(1) / wf[:, ok].sum(1)
+    cache = {(m, k): wmean(v) for m, arr in arrays.items() for k, v in arr.items()}
+    for i, m1 in enumerate(models):
+        for m2 in models[i + 1:]:
+            for k in arrays[m1]:
+                k2 = k if k in arrays[m2] else k.replace("_raw", "")
+                a1, a2 = arrays[m1][k], arrays[m2][k2]
+                point = np.nanmean(a1) - np.nanmean(a2)
+                diff = cache[(m1, k)] - cache[(m2, k2)]
+                lo, hi = np.percentile(diff, [2.5, 97.5])
+                rows.append({"a": m1, "b": m2, "metric": k if k == k2 else f"{k} vs {k2}", "diff": point, "lo": lo, "hi": hi,
+                             "resolved": int(lo > 0 or hi < 0)})
+    return pd.DataFrame(rows)
+
+
 def score(df, pdir):
     pdir = os.environ.get("PRED_OUT", pdir)
-    models = ["climatology", "flat", "lanchester", "dps_sim", "rolled_sim"]
+    models = ["climatology", "flat", "lanchester", "dps_sim", "rolled_sim"] + (["dps_stop", "rolled_stop"] if "dstop_A" in df.columns else [])
     subsets = {
         "all": np.ones(len(df), bool),
         "mobile-only": (df["static"] == 0) & (df["com"] == 0),
@@ -507,9 +600,10 @@ def score(df, pdir):
                 ll = float(-(w * np.log(p) + (1 - w) * np.log(1 - p)).mean()) if len(dd) else float("nan")
                 br = float(((p - w) ** 2).mean()) if len(dd) else float("nan")
                 row = {"split": sp, "subset": sub, "model": mod, "n": len(d), "n_decided": len(dd), "crps": crps, "logloss": ll, "brier": br}
-                if mod == "rolled_sim":
-                    row["crps_raw"] = float((d["roll_crpsA"] + d["roll_crpsB"]).mean() / 2)
-                    p = np.clip(dd["roll_pAwin"].values, 1e-6, 1 - 1e-6)
+                if mod in RAW:
+                    r = RAW[mod]
+                    row["crps_raw"] = float((d[f"{r}_crpsA"] + d[f"{r}_crpsB"]).mean() / 2)
+                    p = np.clip(dd[f"{r}_pAwin"].values, 1e-6, 1 - 1e-6)
                     row["logloss_raw"] = float(-(w * np.log(p) + (1 - w) * np.log(1 - p)).mean()) if len(dd) else float("nan")
                     row["brier_raw"] = float(((p - w) ** 2).mean()) if len(dd) else float("nan")
                 out.append(row)
@@ -524,6 +618,18 @@ def score(df, pdir):
             fh.write(s.drop(columns=["split"]).to_string(index=False, float_format=lambda v: f"{v:.4f}"))
             fh.write("\n")
     print(sc[sc["split"] == "test"].to_string(index=False, float_format=lambda v: f"{v:.4f}"))
+    if os.environ.get("PRED_BOOT", "1") == "1":
+        bs = []
+        for sub in ("all", ">=3 armed/side", "mobile-only", "with static", ">=500 metal/side"):
+            d = df[(df["split"] == "test").values & np.asarray(subsets[sub])]
+            if len(d) < 20:
+                continue
+            b = bootstrap(d, models)
+            b.insert(0, "subset", sub)
+            bs.append(b)
+        bs = pd.concat(bs)
+        bs.to_csv(os.path.join(pdir, "bootstrap.tsv"), sep="\t", index=False, float_format="%.4f")
+        print(bs[(bs["subset"] == ">=3 armed/side") & (bs["metric"].isin(["logloss", "brier", "crps"]))].to_string(index=False, float_format=lambda v: f"{v:.3f}"))
     return sc
 
 
