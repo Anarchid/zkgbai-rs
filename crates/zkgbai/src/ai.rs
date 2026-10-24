@@ -22,6 +22,7 @@ use crate::military::jumps::Jumps;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
+use crate::military::stakeouts::Stakeouts;
 use crate::military::scouts::Scouts;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
@@ -138,6 +139,7 @@ pub struct Ai {
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
+    pub stakeouts: Stakeouts,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -243,6 +245,7 @@ impl SkirmishAi for Ai {
             jumps: Jumps::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
+            stakeouts: Stakeouts::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,

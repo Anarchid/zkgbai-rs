@@ -16,6 +16,7 @@ pub mod missiles;
 pub mod nukes;
 pub mod precision;
 pub mod puppies;
+pub mod stakeouts;
 pub mod qrf;
 pub mod radar;
 pub mod raid_test;
@@ -513,6 +514,7 @@ impl Ai {
         self.guard("firefighters.update", |ai| ai.firefighters_update(frame));
         self.guard("jumps.update", |ai| ai.jumps_update(frame));
         self.guard("puppies.update", |ai| ai.puppies_update(frame));
+        self.guard("stakeouts.update", |ai| ai.stakeouts_update(frame));
         self.guard("airIntel.update", |ai| ai.air_intel_update(frame));
         self.guard("precision.update", |ai| ai.precision_update(frame));
         self.guard("water.update", |ai| ai.water_update(frame));
@@ -580,6 +582,11 @@ impl Ai {
         // Raids on our economy call for air (see `firefighters`).
         if self.firefighters_claims(name) {
             self.firefighters_add(unit);
+            return;
+        }
+        // Scouts picket the lanes to our economy (see `stakeouts`).
+        if self.stakeouts_claims(name) {
+            self.stakeouts_add(unit);
             return;
         }
 
@@ -934,6 +941,7 @@ impl Ai {
         self.impalers_remove_unit(unit);
         self.jumps_remove_unit(unit);
         self.puppies_remove_unit(unit);
+        self.stakeouts_remove_unit(unit, attacker);
 
         if is_nuke {
             self.war.has_nuke = false;
