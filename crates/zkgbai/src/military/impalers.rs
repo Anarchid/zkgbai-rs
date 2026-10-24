@@ -26,6 +26,13 @@
 //! missile). With nothing in reach, a battery goes to a station within
 //! range of the most it would kill, out of the enemy's reach.
 //!
+//! Batteries take escorts by the `impaler` doctrine (see
+//! `military::taskforce`): new Levelers screen them against the raiders
+//! that kill guns left alone, and Crashers against air, orbiting a gun.
+//! While a battery is short of its screen, Rover factories build Levelers
+//! more often. Escorts whose battery is gone join the next one short of
+//! them, or the army. `disable=escorts` keeps batteries alone.
+//!
 //! A gun's reload tells each shot. The engine reports our hits on what our
 //! radar or sight covers, so a missile due at a covered target that did
 //! not hit missed. One due at a building out of our sight is taken to have
@@ -33,13 +40,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
+use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
 use crate::Ai;
+use crate::defs::cmd;
+use crate::military::taskforce::Doctrine;
 use crate::military::{Enemy, Fighter};
 use crate::nav;
 use crate::terrain::reaches;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance, get_directional_point};
 
 pub const IMPALER: &str = "vehheavyarty";
 
@@ -102,6 +111,27 @@ const STATION_RADII: [f32; 2] = [1350.0, 1150.0];
 const STATION_DIRS: usize = 16;
 const SAFE_RING: f32 = 150.0;
 
+/// Stations trade worth for exposure on their Pareto front: of the
+/// stations worth at least `1 - EPS` of the most a safe one is worth, the
+/// battery takes the one that leaves it out of our forces' cover least
+/// over the next `HORIZON` seconds, walking there and standing there (the
+/// `impaler_eps` option sets it). Guns die to raiders that find them
+/// alone, on the way as much as at their stations: standing off farthest
+/// from the enemy's known reach instead lost more and killed less (eps
+/// 0.25/0.5/0.75 lost 2.3/2.5/3.0 guns per 10 gun-minutes against 1.9 at
+/// 0, and killed 174/136/137 metal a gun-minute against 186, vs CircuitAI).
+/// The way is looked at every `EXPOSURE_STEP` elmos.
+const EPS: f32 = 0.25;
+const HORIZON: f32 = 120.0;
+const EXPOSURE_STEP: f32 = 100.0;
+
+/// Places this far behind our squads (toward our base) are stations too.
+const BEHIND_SQUAD: f32 = 200.0;
+
+/// A battery leaves its station once our cover there is under this share
+/// of what it was when picked.
+const COVER_KEPT: f32 = 0.5;
+
 /// Stations are looked for among the targets worth most per shot, this
 /// many; a battery keeps its station this long at least, unless it is
 /// threatened or has nothing in reach.
@@ -137,6 +167,9 @@ const SHIELD_SEEN: i32 = 30 * 20;
 /// Frames between reports.
 const REPORT_FRAMES: i32 = 30 * 60;
 
+/// A lost gun's log tells the damage it took this long before.
+const HURT_MEMORY: i32 = 30 * 20;
+
 /// CMD_ATTACK: on a place, a gun fires at that place.
 const CMD_ATTACK: i32 = 20;
 
@@ -153,13 +186,28 @@ struct Gun {
     battery: u32,
     order: Option<Order>,
     last_move: i32,
+    /// When it was made and last fired, the damage it took lately (when,
+    /// how much, by what weapon) and what it was doing when that began.
+    born: i32,
+    fired: Option<i32>,
+    hurt: Vec<(i32, f32, String)>,
+    hurt_while: String,
+}
+
+/// An escort: its battery, its role in the doctrine, and the gun it was
+/// told to orbit (none since it retreated, or not told yet).
+struct Escort {
+    battery: u32,
+    role: usize,
+    orbits: Option<i32>,
 }
 
 struct Battery {
     guns: Vec<i32>,
-    /// Where it stands to fire, since when.
+    /// Where it stands to fire, since when, and our cover there then.
     station: Option<Vec3>,
     since: i32,
+    cover: f32,
 }
 
 /// A missile in flight: from which gun, at which enemy and where, when
@@ -188,6 +236,18 @@ struct Stats {
     /// the hits on what they were fired at.
     flight: i64,
     flight_error: i64,
+}
+
+/// A station picked: where, its worth, exposure and our cover there; the
+/// most worth a station had and the exposure there; and how many were
+/// worth enough.
+struct Station {
+    pos: Vec3,
+    value: f32,
+    exposure: f32,
+    cover: f32,
+    best: (f32, f32),
+    front: usize,
 }
 
 /// A target: an enemy, where, whether it moves, its health left once the
@@ -239,6 +299,10 @@ pub struct Impalers {
     last_hit: BTreeMap<i32, (i32, f32)>,
     /// Shield radius by enemy unit def id (0 without one).
     shield_radius: BTreeMap<i32, f32>,
+    /// Worth given up for safety (see [`EPS`]).
+    eps: Option<f32>,
+    /// The escorts batteries have (see [`Ai::impalers_doctrine`]).
+    escorts: BTreeMap<i32, Escort>,
     stats: Stats,
     last_report: i32,
 }
@@ -284,6 +348,11 @@ impl Ai {
         if self.dev_off("impalers") {
             return false;
         }
+        if self.impalers.eps.is_none() {
+            let eps = self.cb.option("impaler_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(EPS);
+            self.impalers.eps = Some(eps.clamp(0.0, 1.0));
+        }
+        self.taskforce_load();
         self.impalers_add(unit, cost);
         true
     }
@@ -305,20 +374,109 @@ impl Ai {
         let h = &mut self.impalers;
         let bid = near.unwrap_or_else(|| {
             h.next_battery += 1;
-            h.batteries.insert(h.next_battery, Battery { guns: Vec::new(), station: None, since: 0 });
+            h.batteries.insert(h.next_battery, Battery { guns: Vec::new(), station: None, since: 0, cover: 0.0 });
             h.next_battery
         });
         if let Some(b) = h.batteries.get_mut(&bid) {
             b.guns.push(unit.id());
         }
-        h.guns.insert(unit.id(), Gun { battery: bid, order: None, last_move: 0 });
+        let born = self.frame;
+        let g = Gun {
+            battery: bid,
+            order: None,
+            last_move: 0,
+            born,
+            fired: None,
+            hurt: Vec::new(),
+            hurt_while: String::new(),
+        };
+        h.guns.insert(unit.id(), g);
     }
 
+    /// One of our guns took damage: remember by what, for the log if it
+    /// dies.
+    pub fn impalers_unit_damaged(
+        &mut self,
+        unit: Unit,
+        attacker: Option<Unit>,
+        damage: f32,
+        weapon: Option<WeaponDef>,
+    ) {
+        let frame = self.frame;
+        let Some(state) = self.impalers_gun_state(unit) else { return };
+        let Some(g) = self.impalers.guns.get_mut(&unit.id()) else { return };
+        let by = weapon
+            .map(|w| w.name())
+            .or_else(|| attacker.and_then(|a| a.def()).map(|d| d.name()))
+            .unwrap_or_else(|| "?".to_owned());
+        g.hurt.retain(|x| frame - x.0 < HURT_MEMORY);
+        if g.hurt.is_empty() {
+            g.hurt_while = state;
+        }
+        g.hurt.push((frame, damage, by));
+    }
+
+    /// What one of our guns is doing: retreating, firing, walking to its
+    /// station or at it (and our cover where it is).
+    fn impalers_gun_state(&self, unit: Unit) -> Option<String> {
+        let id = unit.id();
+        let g = self.impalers.guns.get(&id)?;
+        let p = unit.pos();
+        let off = self.impalers.batteries.get(&g.battery).and_then(|b| b.station).map(|s| distance(s, p));
+        let state = if self.retreat_handler.is_retreating(id) {
+            "retreating".to_owned()
+        } else if g.order.is_some() {
+            "firing".to_owned()
+        } else {
+            match off {
+                Some(d) if d <= AT_STATION => "at its station".to_owned(),
+                Some(d) => format!("walking {d:.0} from its station"),
+                None => "without a station".to_owned(),
+            }
+        };
+        Some(format!("{state} (cover {:.0})", self.war.get_total_friendly_power(p)))
+    }
+
+    /// Before the retreat handler forgets it: a lost gun's log tells what
+    /// it was doing (retreating, walking to its station, at it), how long
+    /// it lived and since it fired, and what hit it lately.
     pub fn impalers_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
         if self.defs.name_of(unit) == IMPALER {
-            let p = unit.pos();
-            self.log(&format!("impalers: lost an Impaler at ({:.0}, {:.0})", p.x, p.z));
+            let (p, frame) = (unit.pos(), self.frame);
+            let state = self.impalers_gun_state(unit);
+            let line = match (self.impalers.guns.get(&id), state) {
+                (Some(g), Some(state)) => {
+                    let b = self.impalers.batteries.get(&g.battery);
+                    let mut by: BTreeMap<&str, f32> = BTreeMap::new();
+                    for (f, d, w) in &g.hurt {
+                        if frame - f < HURT_MEMORY {
+                            *by.entry(w.as_str()).or_default() += d;
+                        }
+                    }
+                    let mut by: Vec<(&str, f32)> = by.into_iter().collect();
+                    by.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    let by: Vec<String> = by.iter().map(|(w, d)| format!("{w} {d:.0}")).collect();
+                    let first = g.hurt.first().map_or(0, |x| frame - x.0) / 30;
+                    format!(
+                        ": {state}; first hit {first} s ago while {}; cover {:.0} when stationed; {} s old, fired {}; \
+                         hurt by {}",
+                        if g.hurt.is_empty() { "unhurt" } else { g.hurt_while.as_str() },
+                        b.map_or(0.0, |b| b.cover),
+                        (frame - g.born) / 30,
+                        g.fired.map_or("never".to_owned(), |f| format!("{} s ago", (frame - f) / 30)),
+                        if by.is_empty() { "nothing seen".to_owned() } else { by.join(", ") }
+                    )
+                }
+                _ => String::new(),
+            };
+            self.log(&format!("impalers: lost an Impaler at ({:.0}, {:.0}){line}", p.x, p.z));
+        }
+        if self.impalers.escorts.remove(&id).is_some() {
+            let cost = self.fighters.remove(&id).map_or(0.0, |f| f.metal_value);
+            let name = self.defs.name_of(unit).to_owned();
+            self.log(&format!("impalers: lost an escort, a {name} ({cost:.0} metal)"));
+            return;
         }
         let h = &mut self.impalers;
         let Some(gun) = h.guns.remove(&id) else { return };
@@ -356,6 +514,12 @@ impl Ai {
         self.impalers.last_hit.remove(&id);
         self.impalers.still.remove(&id);
         self.impalers.gone.remove(&id);
+        if attacker.is_some_and(|a| self.impalers.escorts.contains_key(&a.id())) {
+            let e = self.war.targets.get(&id);
+            let cost = e.and_then(|e| e.ud).map_or(0.0, |d| d.cost(self.metal));
+            let name = e.map_or("?", |e| e.def_name.as_str()).to_owned();
+            self.log(&format!("impalers: an escort killed a {name} ({cost:.0} metal)"));
+        }
         // (Any Impaler of ours, in a battery or not: see `disable=impalers`.)
         if attacker.is_some_and(|a| a.team() == self.team_id && self.defs.name_of(a) == IMPALER) {
             let e = self.war.targets.get(&id);
@@ -372,7 +536,7 @@ impl Ai {
         if (frame + self.offset + 7) % PERIOD != 0 {
             return;
         }
-        if self.impalers.guns.is_empty() && self.impalers.shots.is_empty() {
+        if self.impalers.guns.is_empty() && self.impalers.shots.is_empty() && self.impalers.escorts.is_empty() {
             return;
         }
         self.impalers_watch(frame);
@@ -384,7 +548,136 @@ impl Ai {
             self.impalers_volley(bid, &mut targets);
             self.impalers_station(bid, &targets, frame);
         }
+        self.impalers_escort();
         self.impalers_report(frame, &targets);
+    }
+
+    /// The doctrine batteries take escorts by: `impaler`, unless switched
+    /// off (or `disable=escorts`).
+    fn impalers_doctrine(&self) -> Option<&Doctrine> {
+        if self.dev_off("escorts") { None } else { self.taskforces.doctrine("impaler") }
+    }
+
+    /// How many escorts of role `role` battery `bid` lacks, by the role's
+    /// want of what the battery has.
+    fn impalers_short(&self, bid: u32, role: usize) -> usize {
+        let h = &self.impalers;
+        let Some(d) = self.impalers_doctrine() else { return 0 };
+        let Some((b, r)) = h.batteries.get(&bid).zip(d.roles.get(role)) else { return 0 };
+        let mine = h.escorts.iter().filter(|(_, e)| e.battery == bid).map(|(id, _)| id);
+        let units = b.guns.iter().chain(mine).filter_map(|id| self.fighters.get(id));
+        let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &self.taskforces.classes);
+        let have = force.roles.get(role).map_or(0, |x| x.1);
+        r.want(&force).map_or(1, |w| w.saturating_sub(have))
+    }
+
+    /// The battery most short of role `role`, the nearest to `p` of those.
+    fn impalers_short_battery(&self, role: usize, p: Vec3) -> Option<u32> {
+        (self.impalers.batteries.iter())
+            .map(|(&bid, b)| (bid, self.impalers_short(bid, role), distance(self.impalers_battery_pos(b), p)))
+            .filter(|x| x.1 > 0)
+            .max_by(|a, b| a.1.cmp(&b.1).then(b.2.total_cmp(&a.2)))
+            .map(|x| x.0)
+    }
+
+    /// A new unit: an escort of the battery most short of its role, if any
+    /// is. It retreats when hurt, as the army does.
+    pub fn impalers_claims_escort(&mut self, unit: Unit, name: &str, cost: f32) -> bool {
+        let classes = &self.taskforces.classes;
+        let Some((role, r)) = self.impalers_doctrine().and_then(|d| d.role_of(name, classes).map(|i| (i, &d.roles[i])))
+        else {
+            return false;
+        };
+        let (fire_state, radar) = (r.fire_state, r.fire_at_radar);
+        let Some(bid) = self.impalers_short_battery(role, unit.pos()) else { return false };
+        unit.set_move_state(1, 0);
+        if let Some(s) = fire_state {
+            unit.set_fire_state(s, 0);
+        }
+        if let Some(r) = radar {
+            unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[if r { 0.0 } else { 1.0 }], 0, NO_TIMEOUT);
+        }
+        let f = Fighter::new(unit, cost, self.team_id);
+        self.fighters.insert(f.id, f);
+        self.impalers.escorts.insert(unit.id(), Escort { battery: bid, role, orbits: None });
+        let n = self.impalers.batteries.get(&bid).map_or(0, |b| b.guns.len());
+        let r = self.impalers_doctrine().and_then(|d| d.roles.get(role)).map_or("?", |r| r.name.as_str());
+        let short = self.impalers_short(bid, role);
+        self.log(&format!("impalers: a {name} joins a battery of {n} as its {r} ({short} short now)"));
+        true
+    }
+
+    /// The chance a factory pick that could build `name` builds it: a
+    /// role's `produce` while some battery is short of it.
+    pub fn impalers_escort_produce(&self, name: &str) -> f32 {
+        let Some(d) = self.impalers_doctrine() else { return 0.0 };
+        let Some(role) = d.role_of(name, &self.taskforces.classes) else { return 0.0 };
+        let short = self.impalers.batteries.keys().any(|&bid| self.impalers_short(bid, role) > 0);
+        if short { d.roles[role].produce } else { 0.0 }
+    }
+
+    /// Keep the escorts orbiting a gun of their battery (one not
+    /// retreating, if any is), unless they retreat; those whose battery is
+    /// gone join the next short of them, or the army.
+    fn impalers_escort(&mut self) {
+        let ids: Vec<i32> = self.impalers.escorts.keys().copied().collect();
+        for id in ids {
+            let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else {
+                self.impalers.escorts.remove(&id);
+                continue;
+            };
+            if self.retreat_handler.is_retreating(id) {
+                if let Some(e) = self.impalers.escorts.get_mut(&id) {
+                    e.orbits = None;
+                }
+                continue;
+            }
+            let Some(&Escort { battery, role, orbits }) = self.impalers.escorts.get(&id) else { continue };
+            if !self.impalers.batteries.contains_key(&battery) {
+                match self.impalers_short_battery(role, unit.pos()) {
+                    Some(bid) => {
+                        if let Some(e) = self.impalers.escorts.get_mut(&id) {
+                            (e.battery, e.orbits) = (bid, None);
+                        }
+                    }
+                    None => {
+                        self.impalers_release_escort(id, unit);
+                        continue;
+                    }
+                }
+            }
+            let Some(b) = self.impalers.escorts.get(&id).and_then(|e| self.impalers.batteries.get(&e.battery)) else {
+                continue;
+            };
+            let calm = |g: &i32| !self.retreat_handler.is_retreating(*g);
+            let leader = match orbits {
+                Some(g) if b.guns.contains(&g) && calm(&g) => g,
+                _ => match b.guns.iter().find(|g| calm(g)).or(b.guns.first()) {
+                    Some(&g) => g,
+                    None => continue,
+                },
+            };
+            if orbits == Some(leader) {
+                continue;
+            }
+            let radius = self.impalers_doctrine().and_then(|d| d.roles.get(role)).map_or(120.0, |r| r.orbit);
+            unit.execute_custom_command(cmd::ORBIT, &[leader as f32, radius], 0, NO_TIMEOUT);
+            unit.execute_custom_command(cmd::ORBIT_DRAW, &[leader as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
+            if let Some(e) = self.impalers.escorts.get_mut(&id) {
+                e.orbits = Some(leader);
+            }
+        }
+    }
+
+    /// An escort no battery wants goes to the army, as a new unit does.
+    fn impalers_release_escort(&mut self, id: i32, unit: Unit) {
+        self.impalers.escorts.remove(&id);
+        self.fighters.remove(&id);
+        unit.stop(0);
+        let name = self.defs.name_of(unit).to_owned();
+        self.log(&format!("impalers: a {name} escort goes back to the army"));
+        self.war.new_units.insert(id);
+        self.war_unit_idle(unit);
     }
 
     /// Mean position of a battery's guns.
@@ -532,6 +825,9 @@ impl Ai {
                 let due = fired + flight_frames(distance(p, at), p.y - at.y);
                 self.impalers.shots.push(Shot { gun: id, target, at, fired, due, hit: false });
                 self.impalers.stats.shots += 1;
+                if let Some(g) = self.impalers.guns.get_mut(&id) {
+                    g.fired = Some(fired);
+                }
             } else {
                 let e = self.war.targets.get(&target).filter(|e| !e.is_dead);
                 let still = e.is_some_and(|e| {
@@ -757,10 +1053,11 @@ impl Ai {
     }
 
     /// Keep a battery where it can fire: at its station while that is
-    /// clear of the enemy and has targets in reach; else at a new one,
-    /// within range of the most it would kill for the way there; else by
-    /// the haven nearest to what it would shoot. Guns that are threatened
-    /// fall back to a haven.
+    /// clear of the enemy, covered by our forces about as when picked, and
+    /// has targets in reach; else at a new one (or where it stands), on the
+    /// front of worth and exposure (see [`EPS`]); else by the haven nearest
+    /// to what it would shoot. Guns that are threatened fall back to a
+    /// haven.
     fn impalers_station(&mut self, bid: u32, targets: &[Target], frame: i32) {
         let Some(b) = self.impalers.batteries.get(&bid) else { return };
         let pos = self.impalers_battery_pos(b);
@@ -768,37 +1065,54 @@ impl Ai {
             return;
         }
         let n = b.guns.len();
-        let (station, since) = (b.station, b.since);
+        let (station, since, cover) = (b.station, b.since, b.cover);
         let buildings: Vec<&Target> = targets.iter().filter(|t| !t.mobile && t.left > 0.0).collect();
         let keep = station.filter(|&s| {
-            self.impalers_safe(s) && (frame - since < RESTATION || buildings.iter().any(|t| in_range(s, t.pos)))
+            self.impalers_safe(s)
+                && (frame - since < RESTATION
+                    || (buildings.iter().any(|t| in_range(s, t.pos))
+                        && self.war.get_total_friendly_power(s) >= COVER_KEPT * cover))
         });
         let station = match keep {
             Some(s) => s,
             None => {
                 let new = self.impalers_pick_station(pos, n, &buildings);
-                let s = new.unwrap_or_else(|| {
-                    let toward = buildings.first().map_or(self.graph.get_enemy_center(), |t| t.pos);
-                    self.graph_get_closest_haven(toward)
-                });
+                let s = new.as_ref().map_or_else(
+                    || {
+                        let toward = buildings.first().map_or(self.graph.get_enemy_center(), |t| t.pos);
+                        self.graph_get_closest_haven(toward)
+                    },
+                    |c| c.pos,
+                );
                 if s == NULLPOS {
                     return;
                 }
-                if new.is_some() && station.is_none_or(|o| distance(o, s) > AT_STATION) {
+                let cover = new.as_ref().map_or_else(|| self.war.get_total_friendly_power(s), |c| c.cover);
+                if let Some(c) = &new
+                    && station.is_none_or(|o| distance(o, s) > AT_STATION)
+                {
                     let (k, v) = buildings
                         .iter()
                         .filter(|t| in_range(s, t.pos))
                         .fold((0, 0.0), |(k, v), t| (k + 1, v + t.worth));
                     self.log(&format!(
-                        "impalers: a battery of {n} goes to ({:.0}, {:.0}), {:.0} off, in range of {k} buildings worth {v:.0}",
+                        "impalers: a battery of {n} goes to ({:.0}, {:.0}), {:.0} off, in range of {k} buildings worth \
+                         {v:.0}; exposed {:.0} s (cover {:.0} there), {:.0}% of the best worth (exposed {:.0} s there), \
+                         least exposed of {} worth enough",
                         s.x,
                         s.z,
-                        distance(pos, s)
+                        distance(pos, s),
+                        c.exposure,
+                        c.cover,
+                        100.0 * c.value / c.best.0.max(1e-3),
+                        c.best.1,
+                        c.front
                     ));
                 }
                 if let Some(b) = self.impalers.batteries.get_mut(&bid) {
                     b.station = Some(s);
                     b.since = frame;
+                    b.cover = cover;
                 }
                 s
             }
@@ -842,36 +1156,76 @@ impl Ai {
         std::iter::once(p).chain(ring).all(|q| view.get_porc_threat(q) <= 0.0 && view.get_effective_threat(q) <= 0.0)
     }
 
-    /// A station for a battery of `n` guns at `from`: of the places at
-    /// range from the buildings worth most per missile, those on the map,
-    /// safe and reachable, the one in range of the most worth (outright
-    /// kills counted at their bonus) for the way there.
-    fn impalers_pick_station(&self, from: Vec3, n: usize, buildings: &[&Target]) -> Option<Vec3> {
+    /// Seconds a battery at `from` going to `to` would spend out of our
+    /// forces' cover over the next [`HORIZON`]: on the way (straight, at the
+    /// guns' `speed`) and then there.
+    fn impalers_exposure(&self, from: Vec3, to: Vec3, speed: f32) -> f32 {
+        let d = distance(from, to);
+        let steps = (d / EXPOSURE_STEP).ceil().max(1.0);
+        let uncovered = |q: Vec3| self.war.get_total_friendly_power(q) <= 0.0;
+        let out = (1..=steps as usize)
+            .map(|k| k as f32 / steps)
+            .filter(|f| uncovered(Vec3::xz(from.x + f * (to.x - from.x), from.z + f * (to.z - from.z))))
+            .count() as f32;
+        let walk = d / speed.max(1.0);
+        let stay = (HORIZON - walk).max(0.0);
+        (walk * out / steps).min(HORIZON) + if uncovered(to) { stay } else { 0.0 }
+    }
+
+    /// A station for a battery of `n` guns at `from`, among where it stands,
+    /// the places at range from the buildings worth most per missile and
+    /// those behind our squads, that are on the map, safe and reachable.
+    /// Each is worth what it reaches (outright kills at their bonus) for the
+    /// way there, and leaves the guns out of our cover so long (see
+    /// [`Ai::impalers_exposure`]): of those worth at least `1 - eps` of the
+    /// most, the one least exposed (and of those, the one worth most), so
+    /// that no other is both worth more and less exposed.
+    fn impalers_pick_station(&self, from: Vec3, n: usize, buildings: &[&Target]) -> Option<Station> {
         let def = self.defs.get(IMPALER)?;
         let map = self.cb.map();
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
-        let mut best: Option<(Vec3, f32)> = None;
+        let mut spots: Vec<(f32, f32)> = vec![(from.x, from.z)];
         for t in buildings.iter().take(STATION_TARGETS) {
             for r in STATION_RADII {
                 for d in 0..STATION_DIRS {
                     let a = d as f32 * std::f32::consts::TAU / STATION_DIRS as f32;
-                    let (x, z) = (t.pos.x + r * a.cos(), t.pos.z + r * a.sin());
-                    if x < 50.0 || z < 50.0 || x > w - 50.0 || z > h - 50.0 {
-                        continue;
-                    }
-                    let p = Vec3::new(x, map.elevation_at(x, z), z);
-                    let value: f32 = buildings.iter().filter(|o| in_range(p, o.pos)).map(|o| o.score(n)).sum();
-                    let score = value / (1.0 + distance(from, p) / 1000.0);
-                    if best.is_some_and(|b| b.1 >= score) {
-                        continue;
-                    }
-                    if self.impalers_safe(p) && reaches(self.reach_terrain(), def, from, p, AT_STATION) {
-                        best = Some((p, score));
-                    }
+                    spots.push((t.pos.x + r * a.cos(), t.pos.z + r * a.sin()));
                 }
             }
         }
-        best.map(|b| b.0)
+        let home = self.graph.get_ally_center();
+        let squads = self.squad_handler.squads.iter().chain(&self.squad_handler.taskforces);
+        for s in squads.filter_map(|&id| self.squads.get(id)).filter(|s| !s.is_dead(&self.fighters)) {
+            let at = s.get_pos(&self.fighters);
+            if at != NULLPOS && distance(at, home) > BEHIND_SQUAD {
+                let p = get_directional_point(at, home, BEHIND_SQUAD);
+                spots.push((p.x, p.z));
+            }
+        }
+        let mut places: Vec<(Vec3, f32)> = Vec::new();
+        for (x, z) in spots {
+            if x < 50.0 || z < 50.0 || x > w - 50.0 || z > h - 50.0 {
+                continue;
+            }
+            let p = Vec3::new(x, map.elevation_at(x, z), z);
+            let value: f32 = buildings.iter().filter(|o| in_range(p, o.pos)).map(|o| o.score(n)).sum();
+            if value > 0.0 {
+                places.push((p, value / (1.0 + distance(from, p) / 1000.0)));
+            }
+        }
+        places.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let fits = |p: Vec3| self.impalers_safe(p) && reaches(self.reach_terrain(), def, from, p, AT_STATION);
+        let &(top, most) = places.iter().find(|c| fits(c.0))?;
+        let floor = (1.0 - self.impalers.eps.unwrap_or(EPS)) * most;
+        let exposure = |p: Vec3| self.impalers_exposure(from, p, def.speed());
+        let mut front: Vec<(Vec3, f32, f32)> =
+            (places.iter()).take_while(|c| c.1 >= floor).map(|&(p, v)| (p, v, exposure(p))).collect();
+        front.sort_by(|a, b| a.2.total_cmp(&b.2).then(b.1.total_cmp(&a.1)));
+        let k = front.len();
+        let best = (most, exposure(top));
+        let (pos, value, exposure) = front.into_iter().find(|c| fits(c.0))?;
+        let cover = self.war.get_total_friendly_power(pos);
+        Some(Station { pos, value, exposure, cover, best, front: k })
     }
 
     /// Say now and then what the guns did.

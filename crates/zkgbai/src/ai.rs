@@ -24,6 +24,7 @@ use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
 use crate::military::stakeouts::Stakeouts;
 use crate::military::scouts::Scouts;
+use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
@@ -126,12 +127,14 @@ pub struct Ai {
     pub nukes: Nukes,
     pub missiles: Missiles,
     pub sweeps: Sweeps,
+    pub strikes: Strikes,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
     pub jaegers: Jaegers,
     /// Impaler batteries.
     pub impalers: crate::military::impalers::Impalers,
+    pub taskforces: crate::military::taskforce::Taskforces,
     pub qrf: crate::military::qrf::Qrf,
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
@@ -236,9 +239,11 @@ impl SkirmishAi for Ai {
             nukes: Nukes::default(),
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
+            strikes: Strikes::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),
+            taskforces: Default::default(),
             qrf: Default::default(),
             firefighters: Default::default(),
             raid_test: Default::default(),
@@ -488,7 +493,7 @@ impl Ai {
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),
-            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm")
+            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm" | "snipers" | "lances")
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
@@ -678,6 +683,7 @@ impl Ai {
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
                 self.guard("airIntel.unitDamaged", |ai| ai.air_intel_unit_damaged(unit, attacker, dir, weapon));
+                self.guard("impalers.unitDamaged", |ai| ai.impalers_unit_damaged(unit, attacker, damage, weapon));
             }
             Event::UnitDestroyed { unit, attacker } => {
                 self.guard("graph.unitDestroyed", |ai| ai.graph_unit_destroyed(unit, attacker));

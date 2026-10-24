@@ -35,7 +35,7 @@ use serde_json::json;
 use springai::{Unit, Vec3};
 
 use super::field::{Grid, Mobility};
-use super::{Member, PERIOD};
+use super::{Member, PERIOD, RaidGroup};
 use crate::Ai;
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::util::distance;
@@ -114,8 +114,8 @@ impl Sizing {
 
 /// Defaults: dedicated power per unit of a typical raid's; the
 /// ceiling, as a share of our mobile army.
-const GAIN: f32 = 1.5;
-const CAP: f32 = 0.3;
+pub const GAIN: f32 = 1.5;
+pub const CAP: f32 = 0.3;
 
 /// Teams are let go when the force is over budget by this share (plus a
 /// raider) for this long.
@@ -632,7 +632,28 @@ impl Ai {
         let teams = self.qrf_teams();
         let force: f32 = teams.values().map(|ids| self.qrf_team_power(ids)).sum();
         let army = ARMY_RATIO * force.max(150.0);
-        self.qrf.groups.retain(|g| g.power <= army);
+        // Raids too strong for the force are no targets, but they still
+        // raid: kept aside so a loss to them counts. (With no force the cap
+        // is 300; a human raiding in fours, or a Dagger beside a Dante,
+        // was deleted here before the loss was attributed, the budget
+        // stayed "quiet" through 12 losses, and the force never formed:
+        // Theta Crystals, Oct 23.)
+        let (groups, heavies): (Vec<RaidGroup>, Vec<RaidGroup>) =
+            std::mem::take(&mut self.qrf.groups).into_iter().partition(|g| g.power <= army);
+        self.qrf.groups = groups;
+        self.qrf.heavies = heavies;
+    }
+
+    /// The raiding part of a group's power: its members that go raider
+    /// speed or are light. A loss beside a strider is sized to the raiders
+    /// with it, not to the strider; a lone strider's kill is no raid.
+    fn qrf_raiders_power(&self, g: &RaidGroup) -> f32 {
+        let metal = self.metal;
+        (g.members.iter().filter_map(|id| self.qrf.tracks.get(id)))
+            .map(|t| (t.max_speed(), t.power(metal)))
+            .filter(|&(speed, power)| speed >= RAID_SPEED || power <= RAID_WEAK)
+            .map(|(_, power)| power)
+            .sum()
     }
 
     /// Our mobile army, the force, the want; teams let go when over.
@@ -1003,39 +1024,41 @@ impl Ai {
         let pos = unit.pos();
         let cost = def.cost(self.metal);
         let frame = self.frame;
-        // The attacker's raid group; the nearest group only when the
-        // attacker is unknown (a static, say, or one not seen).
+        // The attacker's raid group (the heavies too); the nearest group
+        // only when the attacker is unknown (a static, say, or one not
+        // seen).
+        let all: Vec<&RaidGroup> = self.qrf.groups.iter().chain(self.qrf.heavies.iter()).collect();
         let by_attacker = attacker.and_then(|a| {
             let id = a.id();
-            (self.qrf.groups.iter().enumerate()).find(|(_, g)| g.members.contains(&id)).map(|(i, g)| (i, distance(g.center, pos)))
+            (all.iter().enumerate()).find(|(_, g)| g.members.contains(&id)).map(|(i, g)| (i, distance(g.center, pos)))
         });
         let raid = by_attacker.or_else(|| {
-            (self.qrf.groups.iter().enumerate())
+            (all.iter().enumerate())
                 .map(|(i, g)| (i, distance(g.center, pos)))
                 .filter(|&(_, d)| d < 700.0)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
         });
+        // What the budget hears: the raiders in the group.
+        let raid = raid.map(|(i, _)| (all[i].center, all[i].members.len(), all[i].power, self.qrf_raiders_power(all[i])));
+        drop(all);
         let teams = self.qrf_teams();
         let nearest = (teams.iter())
             .map(|(&t, ids)| (t, distance(self.qrf_team_pos(ids).0, pos)))
             .min_by(|a, b| a.1.total_cmp(&b.1));
-        let marked = raid.is_some_and(|(i, _)| {
-            let c = self.qrf.groups[i].center;
+        let marked = raid.is_some_and(|(c, ..)| {
             (self.qrf.doing.values()).any(|d| d.raid > 0.0 && frame - d.frame < 60 && distance(d.at, c) < 1200.0)
         });
         let s = &mut self.qrf.live_stats;
         s.losses += 1;
         s.losses_marked += marked as u32;
         s.losses_metal += cost;
-        if let Some((i, _)) = raid {
-            let power = self.qrf.groups[i].power;
-            self.qrf.budget.lost_to(frame, power, cost);
+        if let Some((_, _, _, raiders)) = raid
+            && raiders > 0.0
+        {
+            self.qrf.budget.lost_to(frame, raiders, cost);
         }
         let name = self.defs.name(def).to_owned();
-        let raid_s = raid.map_or("none".to_owned(), |(i, _)| {
-            let g = &self.qrf.groups[i];
-            format!("{}x{:.0}", g.members.len(), g.power)
-        });
+        let raid_s = raid.map_or("none".to_owned(), |(_, n, power, raiders)| format!("{n}x{power:.0} raiders={raiders:.0}"));
         let near_s = nearest.map_or("none".to_owned(), |(t, d)| {
             format!("{}{}@{:.0}", if t >= MOON { "m" } else { "t" }, if t >= MOON { t - MOON } else { t }, d)
         });

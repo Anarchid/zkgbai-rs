@@ -4,15 +4,18 @@
 //! classes are flattened into one type with a [`SquadKind`] tag. Members are
 //! fighter-store ids; methods take the store explicitly.
 //!
-//! Shield squads keep their leader *outside* `fighters` (the other members
-//! orbit it); all other kinds keep the leader among `fighters`.
+//! Taskforces (see `military::taskforce`; the shield ball is one) keep
+//! their leader *outside* `fighters` (the other members orbit it); all
+//! other kinds keep the leader among `fighters`.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use springai::{NO_TIMEOUT, Unit, Vec3, Weapon};
 
-use crate::defs::{Defs, cmd};
+use crate::defs::cmd;
 use crate::kgbutil::{Nav, kgb_move_to};
+use crate::military::taskforce::Shape;
 use crate::military::wrappers::fighter::next_waypoint;
 use crate::military::{FighterStore, ScoutTasks};
 use crate::util::{
@@ -26,7 +29,9 @@ pub type SquadId = u32;
 pub enum SquadKind {
     Assault,
     Raider,
-    Shield,
+    /// A combined-arms force around a core unit, by a doctrine (see
+    /// `military::taskforce`).
+    Taskforce,
     Hover,
     /// Anti-heavy hunters (see `military::jaeger`): they sneak, holding
     /// their fire, until they strike.
@@ -51,27 +56,34 @@ pub struct Squad {
     /// The operator's courage dial: the threat the squad perceives is
     /// divided by it, and its members retreat at `retreat_level / courage`.
     pub courage: f32,
-    /// Shield squads.
-    pub num_felons: i32,
-    /// Shield squads.
-    pub num_aspis: i32,
-    /// Shield squads.
+    /// Taskforces: what their doctrine makes of each unit type, and the
+    /// frame they formed (for mustering).
+    pub shape: Arc<Shape>,
+    pub formed: i32,
+    /// Taskforces: falling back to recharge shields.
     pub low_shields: bool,
+    /// Taskforces: sent at a target by their conduct now, and the frame
+    /// they first were (0: never).
+    pub engaging: bool,
+    pub engaged: i32,
+    /// Taskforces: the path the leader made while engaged, since when, and
+    /// who led where at the last conduct (its measured speed).
+    engaged_path: f32,
+    engaged_since: i32,
+    engaged_last: Option<(i32, Vec3)>,
     team: i32,
+    /// Taskforces: the speed limit last given the leader by its slowest
+    /// member (0: none).
+    paced: f32,
     /// Join counter; members get increasing indices.
     index: i32,
     first_rally_frame: i32,
-    /// Shield squads: weight of the current leader (felons lead first).
+    /// Taskforces: weight of the current leader (cores lead first).
     leader_weight: i32,
-    /// Shield squads: total capacity of members' shields.
+    /// Taskforces: total capacity of members' gauged shields.
     max_shield_power: f32,
-    /// Shield squads: each shielded member's shield weapon and its capacity.
+    /// Taskforces: each gauged member's shield weapon and its capacity.
     shields: BTreeMap<i32, (Weapon, f32)>,
-    felon_id: i32,
-    aspis_id: i32,
-    domi_id: i32,
-    thug_id: i32,
-    law_id: i32,
 }
 
 /// Remaining health fraction, counting paralysis and capture as damage.
@@ -88,7 +100,7 @@ fn def_id(u: Unit) -> Option<i32> {
 }
 
 impl Squad {
-    pub fn new(id: SquadId, kind: SquadKind, team: i32, defs: &Defs) -> Self {
+    pub fn new(id: SquadId, kind: SquadKind, team: i32) -> Self {
         Squad {
             id,
             kind,
@@ -102,24 +114,25 @@ impl Squad {
             last_assignment_frame: 0,
             raider_type: '\0',
             courage: 1.0,
-            num_felons: 0,
-            num_aspis: 0,
+            shape: Arc::default(),
+            formed: 0,
             low_shields: false,
+            engaging: false,
+            engaged: 0,
+            engaged_path: 0.0,
+            engaged_since: 0,
+            engaged_last: None,
             team,
+            paced: 0.0,
             index: 0,
             first_rally_frame: 0,
             leader_weight: 0,
             max_shield_power: 0.0,
             shields: BTreeMap::new(),
-            felon_id: defs.id("shieldfelon"),
-            aspis_id: defs.id("shieldshield"),
-            domi_id: defs.id("vehcapture"),
-            thug_id: defs.id("shieldassault"),
-            law_id: defs.id("shieldriot"),
         }
     }
 
-    /// Add a member. Shield squads cannot issue path-following orders from
+    /// Add a member. Taskforces cannot issue path-following orders from
     /// here (a new leader resuming the attack, stragglers regrouping) and use
     /// direct orders instead; prefer [`Squad::add_unit_nav`] for them.
     pub fn add_unit(&mut self, fighter: i32, fighters: &mut FighterStore, frame: i32) {
@@ -157,7 +170,7 @@ impl Squad {
 
     pub fn set_target(&mut self, pos: Vec3, fighters: &mut FighterStore, nav: &mut Nav) {
         match self.kind {
-            SquadKind::Shield => self.shield_set_target(pos, fighters, nav),
+            SquadKind::Taskforce => self.taskforce_set_target(pos, fighters, nav),
             SquadKind::Hover => self.hover_set_target(pos, fighters, nav),
             SquadKind::Assault | SquadKind::Raider => self.base_set_target(pos, fighters, nav),
             SquadKind::Jaeger => self.raider_order(pos, fighters, nav, false),
@@ -166,7 +179,7 @@ impl Squad {
 
     pub fn retreat_to(&mut self, pos: Vec3, fighters: &mut FighterStore, nav: &mut Nav) {
         self.target = pos;
-        if self.kind == SquadKind::Shield {
+        if self.kind == SquadKind::Taskforce {
             let leader_alive = self.leader_fighter(fighters).is_some_and(|l| l.unit.health() > 0.0);
             if leader_alive {
                 self.collect_stragglers(fighters, nav.frame, Some(&mut *nav));
@@ -187,7 +200,7 @@ impl Squad {
     pub fn get_pos(&self, fighters: &FighterStore) -> Vec3 {
         match self.kind {
             SquadKind::Raider | SquadKind::Jaeger => self.leader_fighter(fighters).map_or(self.target, |l| l.get_pos()),
-            SquadKind::Shield => match self.leader_fighter(fighters) {
+            SquadKind::Taskforce => match self.leader_fighter(fighters) {
                 Some(l) if l.unit.health() > 0.0 && l.unit.team() == self.team => l.get_pos(),
                 // Otherwise if the squad has no units, return its target.
                 _ => self.target,
@@ -217,16 +230,22 @@ impl Squad {
         }
     }
 
+    /// Taskforces: the share of members within 350 of the leader (none
+    /// without a leader or members).
+    pub fn rally_fraction(&self, fighters: &FighterStore) -> Option<f32> {
+        let lpos = self.leader_fighter(fighters)?.get_pos();
+        if self.fighters.is_empty() {
+            return None;
+        }
+        let rallied = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter(|f| distance(f.get_pos(), lpos) < 350.0)
+            .count() as f32;
+        Some(rallied / self.fighters.len() as f32)
+    }
+
     pub fn is_rallied(&mut self, fighters: &mut FighterStore, nav: &mut Nav) -> bool {
-        if self.kind == SquadKind::Shield {
-            let Some(lpos) = self.leader_fighter(fighters).map(|l| l.get_pos()) else { return false };
-            let rallied = self
-                .fighters
-                .iter()
-                .filter_map(|id| fighters.get(id))
-                .filter(|f| distance(f.get_pos(), lpos) < 350.0)
-                .count() as f32;
-            return rallied / self.fighters.len() as f32 > 0.75;
+        if self.kind == SquadKind::Taskforce {
+            return self.rally_fraction(fighters).is_some_and(|r| r > self.shape.rallied);
         }
         let frame = nav.frame;
         if self.first_rally_frame == 0 {
@@ -242,24 +261,68 @@ impl Squad {
         !self.fighters.iter().filter_map(|id| fighters.get(id)).any(|f| f.out_of_range)
     }
 
-    /// Whether the squad has no members left (shield squads: nor a leader).
+    /// Whether the squad has no members left (taskforces: nor a leader).
     /// Ids missing from the store do not count as members.
     pub fn is_dead(&self, fighters: &FighterStore) -> bool {
         let no_members = !self.fighters.iter().any(|id| fighters.contains_key(id));
         match self.kind {
-            SquadKind::Shield => no_members && self.leader_fighter(fighters).is_none(),
+            SquadKind::Taskforce => no_members && self.leader_fighter(fighters).is_none(),
             _ => no_members,
         }
     }
 
-    pub fn is_shield_squad(&self) -> bool {
-        self.kind == SquadKind::Shield
+    pub fn is_taskforce(&self) -> bool {
+        self.kind == SquadKind::Taskforce
+    }
+
+    /// Taskforces: the leader and the members.
+    pub fn everyone(&self) -> impl Iterator<Item = i32> + '_ {
+        self.leader.into_iter().chain(self.fighters.iter().copied().filter(move |&f| Some(f) != self.leader))
+    }
+
+    /// Taskforces: how many cores they have.
+    pub fn cores(&self, fighters: &FighterStore) -> usize {
+        (self.everyone().filter_map(|id| fighters.get(&id))).filter(|f| self.shape.is_core(def_id(f.unit))).count()
+    }
+
+    /// Taskforces: how many members each role of their doctrine has.
+    pub fn census(&self, fighters: &FighterStore) -> Vec<usize> {
+        let mut counts = vec![0; self.shape.roles.len()];
+        for f in self.everyone().filter_map(|id| fighters.get(&id)) {
+            if let Some(&i) = def_id(f.unit).and_then(|d| self.shape.by_def.get(&d)) {
+                counts[i] += 1;
+            }
+        }
+        counts
+    }
+
+    /// Taskforces: take up a changed doctrine: the leader's pace, the
+    /// members' orbits and the shield gauge.
+    pub fn reshape(&mut self, shape: Arc<Shape>, fighters: &mut FighterStore) {
+        self.shape = shape;
+        self.paced = 0.0;
+        let Some(lid) = self.leader else { return };
+        if let Some(l) = fighters.get(&lid) {
+            l.unit.execute_custom_command(cmd::WANTED_SPEED, &[self.pace(l.unit)], 0, NO_TIMEOUT);
+        }
+        self.shields.clear();
+        self.max_shield_power = 0.0;
+        for id in self.everyone().collect::<Vec<_>>() {
+            let Some(f) = fighters.get(&id) else { continue };
+            let unit = f.unit;
+            self.gauge(id, unit);
+            if id != lid {
+                let radius = self.shape.orbit(def_id(unit));
+                unit.execute_custom_command(cmd::ORBIT, &[lid as f32, radius], 0, NO_TIMEOUT);
+                unit.execute_custom_command(cmd::ORBIT_DRAW, &[lid as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
+            }
+        }
     }
 
     pub fn get_threat(&self, fighters: &FighterStore) -> i32 {
         let mut threat: f32 =
             self.fighters.iter().filter_map(|id| fighters.get(id)).map(|f| f.power + f.unit.max_health()).sum();
-        if self.kind == SquadKind::Shield {
+        if self.kind == SquadKind::Taskforce {
             if let Some(l) = self.leader_fighter(fighters) {
                 threat += l.unit.power() + l.unit.max_health();
             }
@@ -294,9 +357,9 @@ impl Squad {
     /// Assault and air squads: replace a dead leader, then let the slowest
     /// unit near the leader lead so the squad stays together (the Java
     /// original's `getBestLeader`, run whenever it checked the squad).
-    /// Shield squads keep their own leader choice.
+    /// Taskforces keep their own leader choice.
     pub fn select_leader(&mut self, fighters: &FighterStore) {
-        if self.kind != SquadKind::Shield {
+        if self.kind != SquadKind::Taskforce {
             self.leader = self.get_best_leader(fighters);
         }
     }
@@ -311,7 +374,7 @@ impl Squad {
         self.raider_order(pos, fighters, nav, true);
     }
 
-    // ── Shield squads ───────────────────────────────────────────────────
+    // ── Taskforces ──────────────────────────────────────────────────────
 
     pub fn get_health(&self, fighters: &FighterStore) -> f32 {
         let Some(leader) = self.leader_fighter(fighters) else { return 0.0 };
@@ -337,8 +400,9 @@ impl Squad {
     pub fn disband(&mut self, fighters: &mut FighterStore) -> Vec<i32> {
         let mut disbanded = self.fighters.clone();
         if let Some(lid) = self.leader.take() {
+            self.paced = 0.0;
             if let Some(l) = fighters.get_mut(&lid) {
-                if self.kind == SquadKind::Shield {
+                if self.kind == SquadKind::Taskforce && self.paces() {
                     // Lift the leader's speed limit.
                     let speed = l.unit.max_speed() * 30.0;
                     l.unit.execute_custom_command(cmd::WANTED_SPEED, &[speed], 0, NO_TIMEOUT);
@@ -370,7 +434,7 @@ impl Squad {
 
     fn add_unit_inner(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, nav: Option<&mut Nav>) {
         match self.kind {
-            SquadKind::Shield => self.shield_add_unit(id, fighters, frame, nav),
+            SquadKind::Taskforce => self.taskforce_add_unit(id, fighters, frame, nav),
             SquadKind::Raider | SquadKind::Jaeger => {
                 let Some(f) = fighters.get_mut(&id) else { return };
                 self.fighters.push(id);
@@ -409,14 +473,14 @@ impl Squad {
         if !self.fighters.contains(&id) && self.leader != Some(id) {
             if let Some(f) = fighters.get_mut(&id)
                 && f.squad == Some(self.id)
-                && self.kind != SquadKind::Shield
+                && self.kind != SquadKind::Taskforce
             {
                 f.squad = None;
             }
             return;
         }
         match self.kind {
-            SquadKind::Shield => self.shield_remove_unit(id, fighters, frame, nav),
+            SquadKind::Taskforce => self.taskforce_remove_unit(id, fighters, frame, nav),
             SquadKind::Raider | SquadKind::Jaeger => {
                 if let Some(f) = fighters.get_mut(&id) {
                     f.squad = None;
@@ -577,7 +641,7 @@ impl Squad {
         }
     }
 
-    fn shield_add_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, mut nav: Option<&mut Nav>) {
+    fn taskforce_add_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, mut nav: Option<&mut Nav>) {
         let Some(f) = fighters.get_mut(&id) else { return };
         f.squad = Some(self.id);
         f.index = self.index;
@@ -587,24 +651,18 @@ impl Squad {
         let def = def_id(unit);
         let weight = self.unit_weight(def, f.index);
 
-        if def == Some(self.felon_id) {
-            self.num_felons += 1;
-        }
-        if def == Some(self.law_id) {
+        if self.shape.role(def).is_some_and(|r| r.switch_on) {
             unit.execute_custom_command(cmd::WANT_ONOFF, &[1.0], 0, NO_TIMEOUT);
         }
-        if def != Some(self.aspis_id) {
-            for w in unit.weapons() {
-                let power = w.def().map_or(0.0, |d| d.shield_power());
-                if power > 0.0 {
-                    self.max_shield_power += power;
-                    self.shields.insert(id, (w, power));
-                    break;
-                }
-            }
-        } else {
-            self.num_aspis += 1;
+        // Fire orders by its doctrine (Lances holding fire at radar dots).
+        let (fire_state, radar) = self.shape.fire_orders(def);
+        if let Some(state) = fire_state {
+            unit.set_fire_state(state, 0);
         }
+        if let Some(radar) = radar {
+            unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[if radar { 0.0 } else { 1.0 }], 0, NO_TIMEOUT);
+        }
+        self.gauge(id, unit);
 
         let old_leader = self.leader.and_then(|l| fighters.get(&l)).map(|l| (l.id, l.unit));
         match old_leader {
@@ -612,15 +670,22 @@ impl Squad {
                 unit.set_move_state(1, 0);
                 self.leader = Some(id);
                 self.leader_weight = weight;
-                unit.execute_custom_command(cmd::WANTED_SPEED, &[45.0], 0, NO_TIMEOUT);
+                if self.shape.pace > 0.0 {
+                    unit.execute_custom_command(cmd::WANTED_SPEED, &[self.shape.pace], 0, NO_TIMEOUT);
+                }
             }
             Some((old_id, old_unit)) if weight < self.leader_weight => {
                 unit.set_move_state(1, 0);
                 old_unit.set_move_state(0, 0);
                 // Set the wanted max speed for the new leader and remove the speed limit from the old leader.
-                unit.execute_custom_command(cmd::WANTED_SPEED, &[45.0], 0, NO_TIMEOUT);
-                // CMD_WANTED_SPEED uses elmos/sec while the game returns elmos/frame, thus MaxSpeed*30.
-                old_unit.execute_custom_command(cmd::WANTED_SPEED, &[old_unit.max_speed() * 30.0], 0, NO_TIMEOUT);
+                if self.shape.pace > 0.0 {
+                    unit.execute_custom_command(cmd::WANTED_SPEED, &[self.shape.pace], 0, NO_TIMEOUT);
+                }
+                if self.paces() {
+                    // CMD_WANTED_SPEED uses elmos/sec while the game returns elmos/frame, thus MaxSpeed*30.
+                    old_unit.execute_custom_command(cmd::WANTED_SPEED, &[old_unit.max_speed() * 30.0], 0, NO_TIMEOUT);
+                }
+                self.paced = 0.0;
                 self.fighters.push(old_id);
                 self.leader = Some(id);
                 self.leader_weight = weight;
@@ -642,23 +707,89 @@ impl Squad {
             Some((leader_id, _)) => {
                 unit.set_move_state(0, 0);
                 self.fighters.push(id);
-                let radius = self.orbit_radius(def);
+                let radius = self.shape.orbit(def);
                 unit.execute_custom_command(cmd::ORBIT, &[leader_id as f32, radius], 0, NO_TIMEOUT);
                 unit.execute_custom_command(cmd::ORBIT_DRAW, &[leader_id as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
             }
         }
     }
 
-    fn shield_remove_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, nav: Option<&mut Nav>) {
-        let def = fighters.get(&id).and_then(|f| def_id(f.unit));
-        if def == Some(self.felon_id) {
-            self.num_felons -= 1;
+    /// Count a member's shield toward the gauge, if its role is gauged.
+    fn gauge(&mut self, id: i32, unit: Unit) {
+        if self.shape.role(def_id(unit)).is_some_and(|r| !r.gauge) {
+            return;
         }
-        // port: the C++ stopped recounting aspis when it dropped the Java
-        // `isDead()` bookkeeping; decrement here like felons.
-        if def == Some(self.aspis_id) {
-            self.num_aspis -= 1;
+        for w in unit.weapons() {
+            let power = w.def().map_or(0.0, |d| d.shield_power());
+            if power > 0.0 {
+                self.max_shield_power += power;
+                self.shields.insert(id, (w, power));
+                break;
+            }
         }
+    }
+
+    /// The leader's speed limit, or its own top speed without one.
+    fn pace(&self, leader: Unit) -> f32 {
+        if self.shape.pace > 0.0 { self.shape.pace } else { leader.max_speed() * 30.0 }
+    }
+
+    /// Whether the doctrine limits the leader's speed at all.
+    fn paces(&self) -> bool {
+        self.shape.pace > 0.0 || self.shape.pace_slowest > 0.0
+    }
+
+    /// Taskforces kept to their slowest member: give the leader that
+    /// limit whenever it changes (none while it is the slowest, or alone).
+    pub fn keep_pace(&mut self, fighters: &FighterStore) {
+        if self.shape.pace_slowest <= 0.0 {
+            return;
+        }
+        let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        let slowest = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter_map(|f| f.unit.def())
+            .map(|d| d.speed())
+            .fold(f32::INFINITY, f32::min);
+        let limit = (self.shape.pace_slowest * slowest).min(self.pace(leader));
+        if (limit - self.paced).abs() > 0.5 {
+            leader.execute_custom_command(cmd::WANTED_SPEED, &[limit], 0, NO_TIMEOUT);
+            self.paced = limit;
+        }
+    }
+
+    /// Taskforces: the speed limit last given the leader by its slowest
+    /// member (0: none).
+    pub fn paced(&self) -> f32 {
+        self.paced
+    }
+
+    /// Taskforces: follow the leader's path while engaged (once a
+    /// conduct, after `engaging` is set); a new leader's jump is not path.
+    pub fn track_engaged(&mut self, fighters: &FighterStore, frame: i32) {
+        if !self.engaging {
+            self.engaged_last = None;
+            return;
+        }
+        let now = self.leader_fighter(fighters).map(|l| (l.id, l.get_pos()));
+        match (self.engaged_last, now) {
+            (None, _) => {
+                self.engaged_path = 0.0;
+                self.engaged_since = frame;
+            }
+            (Some((was, last)), Some((id, pos))) if was == id => self.engaged_path += distance(last, pos),
+            _ => {}
+        }
+        self.engaged_last = now.or(self.engaged_last);
+    }
+
+    /// Taskforces: seconds engaged so far and the leader's mean speed over
+    /// them, elmos/s (none under a second, or not engaged).
+    pub fn engaged_speed(&self, frame: i32) -> Option<(f32, f32)> {
+        let secs = (frame - self.engaged_since) as f32 / 30.0;
+        (self.engaged_last.is_some() && secs >= 1.0).then(|| (secs, self.engaged_path / secs))
+    }
+
+    fn taskforce_remove_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, nav: Option<&mut Nav>) {
         if let Some((_, power)) = self.shields.remove(&id) {
             self.max_shield_power -= power;
         }
@@ -673,10 +804,13 @@ impl Squad {
                 return;
             };
             self.fighters.retain(|&f| f != lid);
+            self.paced = 0.0;
             if let Some(l) = fighters.get(&lid) {
                 self.leader_weight = self.unit_weight(def_id(l.unit), l.index);
                 l.unit.set_move_state(1, 0);
-                l.unit.execute_custom_command(cmd::WANTED_SPEED, &[45.0], 0, NO_TIMEOUT);
+                if self.shape.pace > 0.0 {
+                    l.unit.execute_custom_command(cmd::WANTED_SPEED, &[self.shape.pace], 0, NO_TIMEOUT);
+                }
             }
             self.target = NULLPOS;
             self.collect_stragglers(fighters, frame, nav);
@@ -685,7 +819,7 @@ impl Squad {
         }
     }
 
-    fn shield_set_target(&mut self, pos: Vec3, fighters: &mut FighterStore, nav: &mut Nav) {
+    fn taskforce_set_target(&mut self, pos: Vec3, fighters: &mut FighterStore, nav: &mut Nav) {
         // Set a target for the squad to attack.
         self.target = pos;
         if self.leader_fighter(fighters).is_none() {
@@ -696,10 +830,20 @@ impl Squad {
         let Some(leader) = self.leader_fighter(fighters) else { return };
         let mut path = leader.get_fight_path(get_directional_point(self.target, leader.get_pos(), 135.0), nav);
         let Some(wp) = next_waypoint(&mut path, 1) else { return };
-        kgb_move_to(leader.unit, wp, 0, frame);
+        // Artillery advances under fight orders, stopping where it reaches.
+        let fight = self.shape.fight;
+        if fight {
+            leader.unit.fight(wp, 0);
+        } else {
+            kgb_move_to(leader.unit, wp, 0, frame);
+        }
         // Add one extra waypoint, skipping every other one since they're close together.
         if let Some(wp) = next_waypoint(&mut path, 1) {
-            kgb_move_to(leader.unit, wp, OPTION_SHIFT_KEY, frame);
+            if fight {
+                leader.unit.fight(wp, OPTION_SHIFT_KEY);
+            } else {
+                kgb_move_to(leader.unit, wp, OPTION_SHIFT_KEY, frame);
+            }
         }
     }
 
@@ -720,31 +864,21 @@ impl Squad {
                 Some(nav) => f.move_to(regroup, nav),
                 None => kgb_move_to(f.unit, regroup, 0, frame),
             }
-            let radius = self.orbit_radius(def_id(f.unit));
+            let radius = self.shape.orbit(def_id(f.unit));
             f.unit.execute_custom_command(cmd::ORBIT, &[lid as f32, radius], OPTION_SHIFT_KEY, NO_TIMEOUT);
             f.unit.execute_custom_command(cmd::ORBIT_DRAW, &[lid as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
         }
     }
 
-    /// Orbit distance around the shield squad leader by unit type.
-    fn orbit_radius(&self, def: Option<i32>) -> f32 {
-        match def {
-            Some(d) if d == self.domi_id => 250.0,
-            Some(d) if d == self.aspis_id => 40.0,
-            Some(d) if d == self.thug_id => 125.0,
-            _ => 90.0,
-        }
-    }
-
-    /// Shield squads: felons lead first, then the earliest member.
+    /// Taskforces: cores lead first, then the earliest member.
     fn unit_weight(&self, def: Option<i32>, index: i32) -> i32 {
-        if def == Some(self.felon_id) { index } else { self.index + index }
+        if self.shape.is_core(def) { index } else { self.index + index }
     }
 
     fn get_new_leader(&self, fighters: &FighterStore) -> Option<i32> {
         let members = self.fighters.iter().filter_map(|id| fighters.get(id));
         match self.kind {
-            SquadKind::Shield => {
+            SquadKind::Taskforce => {
                 let mut best: Option<(i32, i32)> = None;
                 for f in members {
                     let score = self.unit_weight(def_id(f.unit), f.index);
@@ -818,10 +952,10 @@ impl Squads {
     }
 
     /// Create an empty squad and return its id.
-    pub fn create(&mut self, kind: SquadKind, team: i32, defs: &Defs) -> SquadId {
+    pub fn create(&mut self, kind: SquadKind, team: i32) -> SquadId {
         self.next_id += 1;
         let id = self.next_id;
-        self.map.insert(id, Squad::new(id, kind, team, defs));
+        self.map.insert(id, Squad::new(id, kind, team));
         id
     }
 
@@ -986,6 +1120,8 @@ pub(crate) mod fake_engine {
 mod tests {
     use super::fake_engine::{self, TEAM, spawn, take_orders};
     use super::*;
+    use crate::defs::Defs;
+    use crate::military::taskforce::seeds;
     use crate::military::{Fighter, ScoutTask};
     use springai::ffi::CommandTopic;
 
@@ -1007,8 +1143,8 @@ mod tests {
 
     #[test]
     fn assault_squad_bookkeeping() {
-        let (cb, defs, mut fighters) = setup();
-        let mut s = Squad::new(1, SquadKind::Assault, TEAM, &defs);
+        let (cb, _defs, mut fighters) = setup();
+        let mut s = Squad::new(1, SquadKind::Assault, TEAM);
         for (id, metal) in [(10, 300.0), (11, 400.0), (12, 500.0)] {
             add(cb, &mut fighters, id, ZEUS, metal);
             s.add_unit(id, &mut fighters, 0);
@@ -1037,8 +1173,8 @@ mod tests {
 
     #[test]
     fn best_leader_prefers_slow_units_near_the_leader() {
-        let (cb, defs, mut fighters) = setup();
-        let mut s = Squad::new(1, SquadKind::Assault, TEAM, &defs);
+        let (cb, _defs, mut fighters) = setup();
+        let mut s = Squad::new(1, SquadKind::Assault, TEAM);
         for id in [20, 21] {
             add(cb, &mut fighters, id, ZEUS, 100.0);
             s.add_unit(id, &mut fighters, 0);
@@ -1058,9 +1194,13 @@ mod tests {
     }
 
     #[test]
-    fn shield_squad_leadership() {
+    fn shield_ball_leadership() {
         let (cb, defs, mut fighters) = setup();
-        let mut s = Squad::new(1, SquadKind::Shield, TEAM, &defs);
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        let felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        let classes = crate::military::taskforce::Classes::default();
+        s.shape = Arc::new(felon.shape(&defs, &classes));
+        let aspis = felon.role_of("shieldshield", &classes).unwrap();
         add(cb, &mut fighters, 30, FELON, 600.0);
         add(cb, &mut fighters, 31, THUG, 300.0);
         add(cb, &mut fighters, 32, ASPIS, 600.0);
@@ -1070,7 +1210,7 @@ mod tests {
         // The felon leads and is not among the orbiting members.
         assert_eq!(s.leader, Some(30));
         assert_eq!(s.fighters, vec![31, 32]);
-        assert_eq!((s.num_felons, s.num_aspis), (1, 1));
+        assert_eq!((s.cores(&fighters), s.census(&fighters)[aspis]), (1, 1));
         assert_eq!(s.metal_value, 1500.0);
         let orbits = take_orders().iter().filter(|o| o.2 == cmd::ORBIT).count();
         assert_eq!(orbits, 2);
@@ -1080,7 +1220,7 @@ mod tests {
         s.remove_unit(30, &mut fighters, 0);
         assert_eq!(s.leader, Some(31));
         assert_eq!(s.fighters, vec![32]);
-        assert_eq!(s.num_felons, 0);
+        assert_eq!(s.cores(&fighters), 0);
         assert_eq!(s.target, NULLPOS);
 
         // A new felon outweighs the promoted thug and takes over.
@@ -1088,10 +1228,10 @@ mod tests {
         s.add_unit(33, &mut fighters, 0);
         assert_eq!(s.leader, Some(33));
         assert_eq!(s.fighters, vec![32, 31]);
-        assert_eq!(s.num_felons, 1);
+        assert_eq!(s.cores(&fighters), 1);
 
         s.remove_unit(32, &mut fighters, 0);
-        assert_eq!(s.num_aspis, 0);
+        assert_eq!(s.census(&fighters)[aspis], 0);
         assert!(!s.is_dead(&fighters));
 
         let members = s.disband(&mut fighters);
@@ -1130,10 +1270,10 @@ mod tests {
 
     #[test]
     fn raider_squad_leaders() {
-        let (cb, defs, mut fighters) = setup();
+        let (cb, _defs, mut fighters) = setup();
         let mut tasks = ScoutTasks::new();
         tasks.insert(1, ScoutTask::new(1, Vec3::ZERO, 0));
-        let mut s = Squad::new(1, SquadKind::Raider, TEAM, &defs);
+        let mut s = Squad::new(1, SquadKind::Raider, TEAM);
         for (id, def) in [(50, GLAIVE), (51, IMP), (52, GLAIVE)] {
             fighters.insert(id, Fighter::new_raider(spawn(cb, id, def), 65.0, TEAM));
             s.add_unit(id, &mut fighters, 0);
