@@ -166,7 +166,14 @@ struct Gun {
 pub struct Siege {
     forces: BTreeMap<SquadId, SiegeForce>,
     guns: BTreeMap<i32, Gun>,
+    /// Pillars raised (or begun): the site and the ground there before, so
+    /// a raise taken up again at the same place does not stack another
+    /// height on the first.
+    pillars: Vec<(Vec3, f32)>,
 }
+
+/// A pillar begun within this of a site is the same pillar.
+const SAME_PILLAR: f32 = 40.0;
 
 /// A known enemy static: where, how far its ground-firing weapons reach a
 /// target at the aim height asked (0 for one unarmed, or anti-air only:
@@ -337,6 +344,12 @@ impl Ai {
         let arms = arms_of(def);
         let reach = if arms.is_empty() { def.max_weapon_range() } else { reach_of(&arms, -up) };
         reach - RANGE_MARGIN
+    }
+
+    /// Whether force `sid` has its perch going up or up (it then stays
+    /// where it is: a perched core cannot come down).
+    pub(crate) fn siege_perched(&self, sid: SquadId) -> bool {
+        (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned)
     }
 
     /// How high the perch of force `sid` raises its leading core's aim
@@ -546,9 +559,27 @@ impl Ai {
         // choosing stations.
         let range = reach + RANGE_MARGIN;
         let shields = self.impalers_shields();
-        // The perch under the leading core (see `siege_perch`).
+        // The perch under the leading core (see `siege_perch`); its escorts
+        // stand on the home side of the pillar, each at its role's orbit
+        // from it (orbiting the core would carry them into the statics'
+        // reach the core stands off by 40 only).
         if let (Some(perch), true, Some(l), Some(st)) = (shape.perch.clone(), parked_force, leader, station) {
             self.siege_perch(sid, &perch, l, st, frame);
+            let home = self.graph.get_start_pos();
+            for &(id, unit, core) in &members {
+                if core || unit.id() == l.id() {
+                    continue;
+                }
+                let orbit = shape.orbit(unit.def().map(|d| d.id()));
+                let foot = get_directional_point(st, home, orbit.max(60.0));
+                let sent = self.taskforces.siege.forces.get(&sid).and_then(|f| f.sent.get(&id)).copied();
+                if distance(unit.pos(), foot) > AT_STATION && sent.is_none_or(|t| frame - t >= RESEND) {
+                    kgb_move_to_exact(unit, foot, 20.0, 0, frame);
+                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                        f.sent.insert(id, frame);
+                    }
+                }
+            }
         } else if !parked_force && let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
             f.on_site_sent = 0;
         }
@@ -683,7 +714,32 @@ impl Ai {
                     }
                 }
                 let map = self.cb.map();
-                let ground = map.elevation_at(site.x, site.z);
+                let now = map.elevation_at(site.x, site.z);
+                // The ground before any pillar here (a raise taken up again
+                // does not stack on the first).
+                let known = self.taskforces.siege.pillars.iter().find(|(p, _)| distance(*p, site) <= SAME_PILLAR).map(|x| x.1);
+                let ground = known.unwrap_or(now);
+                if known.is_none() {
+                    self.taskforces.siege.pillars.push((site, ground));
+                }
+                if now - ground >= perch.height - UP_SLACK {
+                    // The pillar stands already (raised before and left).
+                    for u in &raisers {
+                        u.stop(0);
+                    }
+                    self.op_emit(
+                        "siege-perch",
+                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": now - ground, "seconds": 0, "raisers": 0, "standing": true}),
+                    );
+                    self.log(&format!(
+                        "taskforce: a {} is perched {:.0} up at ({:.0}, {:.0}) on a pillar that stood",
+                        self.defs.name_of(leader), now - ground, site.x, site.z
+                    ));
+                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                        f.perch = Some(PerchState { site, ground, since: frame, raisers: Vec::new(), up: true, abandoned: false, ground_target: None });
+                    }
+                    return;
+                }
                 if raisers.is_empty() {
                     self.op_emit(
                         "siege-perch",
@@ -831,6 +887,16 @@ impl Ai {
             .filter(|f| shape.is_core(f.unit.def().map(|d| d.id())))
             .map(|f| (f.id, f.unit))
             .collect();
+        // Escorts that stood at a perch's foot orbit the leader again.
+        if shape.perch.is_some() && let Some(l) = leader {
+            let sent: Vec<i32> = self.taskforces.siege.forces.get(&sid).map_or(Vec::new(), |f| f.sent.keys().copied().collect());
+            for id in sent {
+                if let Some(f) = self.fighters.get(&id).filter(|f| !shape.is_core(f.unit.def().map(|d| d.id()))) {
+                    let radius = shape.orbit(f.unit.def().map(|d| d.id()));
+                    f.unit.execute_custom_command(cmd::ORBIT, &[l as f32, radius], 0, NO_TIMEOUT);
+                }
+            }
+        }
         for (id, unit) in cores {
             let Some(g) = self.taskforces.siege.guns.get_mut(&id) else { continue };
             if g.held {
@@ -867,8 +933,14 @@ impl Ai {
             if let Some(st) = f.station.as_mut() {
                 st.deployed = false;
             }
-            // A perch left is a perch lost (the pillar stays).
-            if f.perch.take().is_some_and(|p| !p.abandoned) {
+            // A perch left is a perch lost (the pillar stays); its raisers
+            // go back to the economy.
+            if let Some(p) = f.perch.take().filter(|p| !p.abandoned) {
+                for u in &p.raisers {
+                    if u.health() > 0.0 && is_terraforming(*u) {
+                        u.stop(0);
+                    }
+                }
                 self.op_emit("siege-perch", json!({"event": "left", "squad": sid, "reason": why}));
             }
         }

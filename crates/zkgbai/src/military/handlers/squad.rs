@@ -1028,9 +1028,19 @@ impl Ai {
                     (None, _) => true,
                 };
 
+            // A perched siege force (see `taskforce::siege`) stays where it
+            // is: its core cannot come down.
+            let perched = shape.aim == Aim::Siege && shape.perch.is_some() && self.siege_perched(sid);
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
-            let why = if low_shields {
+            let why = if perched && let Some(leader) = led {
+                let (target, go) = self.siege_conduct(sid, leader);
+                if go {
+                    self.squad_set_target(sid, target);
+                }
+                engage_at = Some(target);
+                ""
+            } else if low_shields {
                 let haven = self.graph_get_closest_raider_haven(pos);
                 self.squad_retreat_to(sid, haven);
                 "low shields"
