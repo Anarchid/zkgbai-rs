@@ -7,7 +7,8 @@ For each ZKGBAI side with stakeout records: posts planned and the share of
 summaries with each manned, pickets claimed and lost (by duty, with the
 attacker's unit type), sightings (by enemy type, and whether followed),
 lead time from the first picket sighting of an armed mobile enemy to the
-first asset loss to a raid (`qrf-loss` records), and the drain in metal.
+first asset loss to a raid (`qrf-loss` records), the drain in metal, and
+scouts finished per type (`unit+`; Dirtbags = shieldscout on shield rosters).
 """
 import collections
 import glob
@@ -59,6 +60,11 @@ def summarise(path):
     out["manned_share"] = {c: round(n / len(summaries), 2) for c, n in manned.items()} if summaries else {}
     last = summaries[-1] if summaries else {}
     out["claimed"] = last.get("claimed")
+    # Scouts finished per game by type (`unit+` records), the production the
+    # stakeouts' drain bound caps: on shield rosters this is the Dirtbag count
+    # the strike module's production hook cannot see (stakeouts claim first).
+    born = collections.Counter(r["def"] for r in recs if r.get("k") == "unit+" and r.get("def") in SCOUT_COST)
+    out["scouts_finished"] = dict(born)
     out["lost"] = len(lost)
     out["lost_by_duty"] = dict(collections.Counter(r["duty"] for r in lost))
     out["killed_by"] = dict(collections.Counter((r.get("attacker") or {}).get("def", "?") for r in lost))
