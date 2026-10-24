@@ -1024,13 +1024,20 @@ impl Ai {
             // want, and beside the main body (our army's median depth up to
             // the station's, less a tenth), unless already in.
             let screened = !shape.engage_screen || engaging || self.squad_screen_full(sid);
+            let army_depth = self.squad_army_depth(sid).map(|(d, _)| d);
+            let station_depth = self.siege_station(sid).and_then(|st| self.taskforce_depth(st));
             let beside = !shape.wait_army
                 || engaging
-                || match (self.siege_station(sid), self.squad_army_depth(sid)) {
-                    (Some(st), Some((army, _))) => self.taskforce_depth(st).is_none_or(|d| army >= d - 0.1),
+                || match (self.siege_station(sid), army_depth) {
+                    (Some(st), Some(army)) => self.taskforce_depth(st).is_none_or(|d| army >= d - 0.1),
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
+            let waits = format!(
+                "waits for the army (army depth {}, station depth {})",
+                army_depth.map_or("-".to_owned(), |d| format!("{d:.2}")),
+                station_depth.map_or("-".to_owned(), |d| format!("{d:.2}"))
+            );
 
             // A perched siege force (see `taskforce::siege`) stays where it
             // is: its core cannot come down.
@@ -1096,7 +1103,7 @@ impl Ai {
                     ""
                 }
             } else {
-                let short = if !worth {
+                let short: &str = if !worth {
                     "worth too little"
                 } else if led.is_none() {
                     "led by no core"
@@ -1105,7 +1112,10 @@ impl Ai {
                 } else if !screened {
                     "no screen"
                 } else {
-                    "waits for the army"
+                    // Countable: a force held back by the army's depth says
+                    // so once a minute (a break-off carries it as its reason).
+                    self.siege_note_wait(sid, &waits);
+                    &waits
                 };
                 if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
                     let haven = self.graph_get_closest_haven(pos);
@@ -1178,8 +1188,9 @@ impl Ai {
         let line = match engage_at {
             Some(t) => format!(
                 "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {pace}; to go {threshold:.0}; \
-                 depth {depth}, our army {army}; target ({:.0}, {:.0})",
+                 depth {depth}, our army {army}, target depth {}; target ({:.0}, {:.0})",
                 if first { " first" } else { " again" },
+                self.taskforce_depth(t).map_or("-".to_owned(), |d| format!("{d:.2}")),
                 t.x,
                 t.z
             ),

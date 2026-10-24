@@ -183,6 +183,8 @@ struct SiegeForce {
     /// The natural height of the site the last pick chose (see
     /// [`Perch::natural`]); taken into the station as it is set.
     pending_natural: f32,
+    /// When the force last said it waits for the army.
+    waited_at: i32,
 }
 
 /// What a gun was doing at the last conduct, since when (the frame of the
@@ -1465,6 +1467,19 @@ impl Ai {
             ));
         }
         known
+    }
+
+    /// A force held back by the army's depth (`wait_army`) says so once a
+    /// minute: `waits` carries both depths.
+    pub(crate) fn siege_note_wait(&mut self, sid: SquadId, waits: &str) {
+        let frame = self.frame;
+        let f = self.taskforces.siege.forces.entry(sid).or_default();
+        if frame - f.waited_at < REPORT {
+            return;
+        }
+        f.waited_at = frame;
+        let doctrine = self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone());
+        self.log(&format!("taskforce: the {doctrine} force (squad {sid}) {waits}"));
     }
 
     /// Where force `sid` would stand: its station as last picked (for the
