@@ -91,11 +91,14 @@ const RESEND: i32 = 30 * 8;
 /// A force says how it stood every so often.
 const REPORT: i32 = 30 * 60;
 
-/// A perched force (see [`Perch`]) stands off the statics' reach to its
-/// raised aim point by this much only (the window between a Stinger's 587
-/// at 200 up and a Crab's 738 is 150 wide), and looks for its site on
-/// tighter rings about the targets.
-const PERCH_STANDOFF: f32 = 40.0;
+/// A perched force (see [`Perch`]) stands off the statics by this much
+/// beyond their reach (the Crab's body is 60 across, and a Stinger hit a
+/// Crab 632 off at its nominal 620), and looks for its site on tighter
+/// rings about the targets. The reach stood off is the greater of the
+/// static's reach to the raised aim point and its reach on the ground: the
+/// core stands on the ground for the minute of the raise (crab1/g2 lost a
+/// Crab so, before its pillar was up).
+const PERCH_STANDOFF: f32 = 80.0;
 const PERCH_SHARES: [f32; 2] = [0.97, 0.90];
 /// Aim points stand about this far above the ground (mid + aimposoffset).
 const AIM_ABOVE: f32 = 40.0;
@@ -187,14 +190,16 @@ pub struct Siege {
 /// A pillar begun within this of a site is the same pillar.
 const SAME_PILLAR: f32 = 40.0;
 
-/// A known enemy static: where, how far its ground-firing weapons reach a
-/// target at the aim height asked (0 for one unarmed, or anti-air only:
-/// neither fences the ground; on the ground this is the nominal range,
-/// `nominal`), its worth to the guns, and whether it is in sight.
+/// A known enemy static: where, how far its ground-firing weapons reach
+/// (`range`: the greater of the nominal range and the reach to a target at
+/// the aim height asked; 0 for one unarmed, or anti-air only: neither
+/// fences the ground), that reach to the raised aim point (`raised`), the
+/// nominal range, its worth to the guns, and whether it is in sight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Static {
     pub pos: Vec3,
     pub range: f32,
+    pub raised: f32,
     pub nominal: f32,
     pub worth: f32,
     pub visible: bool,
@@ -333,13 +338,14 @@ impl Ai {
             .map(|e| {
                 let armed = e.can_attack() && !e.is_aa;
                 let nominal = if armed { e.def_max_weapon_range() } else { 0.0 };
-                let range = match (armed, up > 0.0, e.ud) {
+                let raised = match (armed, up > 0.0, e.ud) {
                     (true, true, Some(d)) => reach_of(&arms_of(d), up),
                     _ => nominal,
                 };
                 Static {
                     pos: e.position,
-                    range,
+                    range: nominal.max(raised),
+                    raised,
                     nominal,
                     worth: worth(e, e.ud.map_or(e.value, |d| d.cost(self.metal))),
                     visible: e.visible,
@@ -449,7 +455,7 @@ impl Ai {
                         match near {
                             Some((d, n)) if up > 0.0 => format!(
                                 "is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {margin:.0})",
-                                n.nominal, n.range
+                                n.nominal, n.raised
                             ),
                             Some((d, n)) => format!("is {d:.0} away (range {:.0}, standoff {margin:.0})", n.range),
                             None => "is unknown".to_owned(),
@@ -820,7 +826,7 @@ impl Ai {
                     json!({"event": "start", "squad": sid, "site": [site.x, site.z], "ground": ground, "height": perch.height,
                            "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want,
                            "reach_up": reach, "statics_in_reach": k, "worth_in_reach": v,
-                           "nearest": near.map(|(d, n)| json!({"distance": d, "range": n.nominal, "reach_up": n.range, "standoff": d - n.range}))}),
+                           "nearest": near.map(|(d, n)| json!({"distance": d, "range": n.nominal, "reach_up": n.raised, "standoff": d - n.range}))}),
                 );
                 self.log(&format!(
                     "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0} ({}); {k} statics worth {v:.0} in reach from {up:.0} up (reach {reach:.0}); the nearest armed static {}",
@@ -831,7 +837,7 @@ impl Ai {
                     perch.height,
                     names.join(", "),
                     match near {
-                        Some((d, n)) => format!("is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {:.0})", n.nominal, n.range, d - n.range),
+                        Some((d, n)) => format!("is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {:.0})", n.nominal, n.raised, d - n.range),
                         None => "is unknown".to_owned(),
                     }
                 ));
@@ -1174,7 +1180,7 @@ mod tests {
     use super::*;
 
     fn s(x: f32, z: f32, range: f32, worth: f32) -> Static {
-        Static { pos: Vec3::xz(x, z), range, nominal: range, worth, visible: true }
+        Static { pos: Vec3::xz(x, z), range, raised: range, nominal: range, worth, visible: true }
     }
 
     #[test]
