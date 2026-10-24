@@ -1024,20 +1024,11 @@ impl Ai {
             // want, and beside the main body (our army's median depth up to
             // the station's, less a tenth), unless already in.
             let screened = !shape.engage_screen || engaging || self.squad_screen_full(sid);
+            // The army's depth against the station's (`wait_army`) is tested
+            // once the station is picked, inside the engage branch below: a
+            // force's first sortie picks its station on the way, so a test
+            // before it never gated one (the first re-run: 7 forces waited).
             let army_depth = self.squad_army_depth(sid).map(|(d, _)| d);
-            let station_depth = self.siege_station(sid).and_then(|st| self.taskforce_depth(st));
-            let beside = !shape.wait_army
-                || engaging
-                || match (self.siege_station(sid), army_depth) {
-                    (Some(st), Some(army)) => self.taskforce_depth(st).is_none_or(|d| army >= d - 0.1),
-                    (Some(_), None) => false,
-                    (None, _) => true,
-                };
-            let waits = format!(
-                "waits for the army (army depth {}, station depth {})",
-                army_depth.map_or("-".to_owned(), |d| format!("{d:.2}")),
-                station_depth.map_or("-".to_owned(), |d| format!("{d:.2}"))
-            );
 
             // A perched siege force (see `taskforce::siege`) stays where it
             // is: its core cannot come down.
@@ -1079,7 +1070,7 @@ impl Ai {
             } else if health < shape.retreat_health {
                 self.squad_retreat_to(sid, fallback);
                 "hurt"
-            } else if let Some(leader) = led.filter(|_| worth && rallied && screened && beside) {
+            } else if let Some(leader) = led.filter(|_| worth && rallied && screened) {
                 let view = self.war.view(leader.def());
                 let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
                 if shape.flee_threat && view.get_effective_threat(pos) / courage > tolerance {
@@ -1097,11 +1088,28 @@ impl Ai {
                         Aim::Siege => self.siege_conduct(sid, leader),
                         _ => (self.war_get_target(leader, false), true),
                     };
+                    // Beside the main body (`wait_army`): with the station
+                    // picked, a force not yet engaged holds at its haven until
+                    // the army's median depth reaches the station's, less a
+                    // tenth (unknown depths do not hold it).
+                    let station_depth = if shape.aim == Aim::Siege { self.taskforce_depth(target) } else { None };
+                    let army_wait = shape.aim == Aim::Siege
+                        && shape.wait_army
+                        && !engaging
+                        && matches!((army_depth, station_depth), (Some(a), Some(s)) if a < s - 0.1);
+                    let waits = format!(
+                        "waits for the army (army depth {}, station depth {})",
+                        army_depth.map_or("-".to_owned(), |d| format!("{d:.2}")),
+                        station_depth.map_or("-".to_owned(), |d| format!("{d:.2}"))
+                    );
                     // A perching force walks with its raisers: borrowed when
                     // the station is picked, it waits at a haven out of the
                     // enemy's reach until they are with it (see
                     // `siege_wait_raisers`).
-                    let wait = if shape.aim == Aim::Siege && shape.perch.is_some() && go {
+                    let wait = if army_wait {
+                        self.siege_note_wait(sid, &waits);
+                        Some((fallback, waits.clone()))
+                    } else if shape.aim == Aim::Siege && shape.perch.is_some() && go {
                         self.siege_wait_raisers(sid, leader, fallback)
                     } else {
                         None
@@ -1131,10 +1139,7 @@ impl Ai {
                 } else if !screened {
                     "no screen"
                 } else {
-                    // Countable: a force held back by the army's depth says
-                    // so once a minute (a break-off carries it as its reason).
-                    self.siege_note_wait(sid, &waits);
-                    &waits
+                    "scattered"
                 };
                 if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
                     let haven = self.graph_get_closest_haven(pos);
