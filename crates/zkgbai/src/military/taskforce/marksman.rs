@@ -33,9 +33,10 @@
 //! best in reach, makes the gun hold its fire on it (Set Target) until it
 //! fires or the time is up. Worth then counts what the target makes or
 //! enables over `STREAM_SECONDS` (commanders, factories, constructors,
-//! mexes). Logged: `a G holds for a X (W metal, k R, H s) over a Y (V
-//! metal)`, `a G moves M for a X`, `a G fires at a X after S s`, `a G hold
-//! abandoned (why)`.
+//! mexes). Logged, each with the gun's `(unit U)`: `a G holds for a X (W
+//! metal, k R, H s) over a Y (V metal)` (`over a nothing (F metal)`:
+//! nothing markable in reach, F the floor), `a G moves M for a X`, `a G
+//! fires at a X after S s`, `a G hold abandoned (why) on a X`.
 //!
 //! Every volley of a force's core is logged as it is fired (the gun's
 //! reload frame moves on, polled each frame): `taskforce: a G fires at a X
@@ -236,7 +237,7 @@ impl Ai {
             if let Some(h) = self.taskforces.volleys.holds.remove(&id) {
                 let e = self.war.targets.get(&h.target);
                 lines.push(format!(
-                    "taskforce: a {gun} fires at a {} after {:.1} s",
+                    "taskforce: a {gun} fires at a {} after {:.1} s (unit {id})",
                     e.map_or("?", |e| e.def_name.as_str()),
                     (frame - h.start) as f32 / 30.0
                 ));
@@ -303,7 +304,7 @@ impl Ai {
                 let reserve = self.taskforces.volleys.reserve.get(&id).copied().unwrap_or(false);
                 unit.set_fire_state(if reserve { 0 } else { 2 }, 0);
                 lines.push(format!(
-                    "taskforce: a {gun} hold abandoned ({why}) on a {}",
+                    "taskforce: a {gun} hold abandoned ({why}) on a {} (unit {id})",
                     e.map_or("?", |e| e.def_name.as_str())
                 ));
                 return false;
@@ -379,7 +380,7 @@ impl Ai {
         let e = &self.war.targets[&t];
         let yielded = now.and_then(|n| self.war.targets.get(&n.0)).map_or("nothing".to_owned(), |y| y.def_name.clone());
         lines.push(format!(
-            "taskforce: a {gun} holds for a {} ({v:.0} metal, k {:.1}, {hold_for:.0} s) over a {yielded} ({over:.0} metal)",
+            "taskforce: a {gun} holds for a {} ({v:.0} metal, k {:.1}, {hold_for:.0} s) over a {yielded} ({over:.0} metal) (unit {id})",
             e.def_name,
             v / over.max(1.0)
         ));
@@ -387,7 +388,7 @@ impl Ai {
             let d = distance(pos, e.position);
             let by = (d - range + 30.0).min(max_move);
             kgb_move_to(unit, get_directional_point(pos, e.position, by), 0, frame);
-            lines.push(format!("taskforce: a {gun} moves {by:.0} for a {}", e.def_name));
+            lines.push(format!("taskforce: a {gun} moves {by:.0} for a {} (unit {id})", e.def_name));
         }
         true
     }
