@@ -39,7 +39,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 use crate::Ai;
 use crate::defs::cmd;
 use crate::kgbutil::kgb_move_to_exact;
-use crate::military::taskforce::{Aim, doctrine::ORBIT};
+use crate::military::taskforce::{Aim, doctrine::ORBIT, marksman::Mark};
 use crate::military::{Enemy, SquadId};
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance, get_directional_point};
@@ -415,7 +415,7 @@ impl Ai {
     /// be. Marks are kept with the marksmen's, so kills log alike.
     fn siege_aim(&mut self, id: i32, unit: Unit, reach: f32, shields: &[(Vec3, f32)]) {
         let p = unit.pos();
-        let mine = self.taskforces.marks.get(&id).copied();
+        let mine = self.taskforces.marks.get(&id).map(|m| m.target);
         let best = (self.war.targets.values())
             .filter(|e| e.identified && !e.is_dead && !e.can_fly() && e.position != NULLPOS)
             .filter(|e| (e.visible || e.is_static) && e.def_name != "wolverine_mine")
@@ -426,7 +426,7 @@ impl Ai {
         match best {
             Some((target, _)) if Some(target) != mine => {
                 unit.execute_custom_command(cmd::UNIT_SET_TARGET, &[target as f32], 0, NO_TIMEOUT);
-                self.taskforces.marks.insert(id, target);
+                self.taskforces.marks.insert(id, Mark::plain(target, self.frame));
             }
             Some(_) => {}
             None => {

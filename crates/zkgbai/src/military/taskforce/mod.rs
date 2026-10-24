@@ -21,6 +21,7 @@ pub mod doctrine;
 pub mod expr;
 pub mod marksman;
 pub mod siege;
+pub mod spotter;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -118,9 +119,12 @@ pub struct Taskforces {
     pub classes: Classes,
     shapes: BTreeMap<String, Arc<Shape>>,
     loaded: bool,
-    /// Marksmen's marks: gun to target (see `marksman`; siege guns' targets
-    /// are kept here too).
-    pub marks: BTreeMap<i32, i32>,
+    /// Marksmen's marks by gun (siege guns' targets are kept here too), and
+    /// what their volleys kill by gun type (see `marksman`).
+    pub marks: BTreeMap<i32, marksman::Mark>,
+    pub volleys: marksman::Volleys,
+    /// Spotters (see `spotter`).
+    pub spotters: spotter::Spotters,
     /// Siege forces' stations and how their guns stand (see `siege`).
     pub siege: siege::Siege,
 }
@@ -147,6 +151,15 @@ impl Taskforces {
         (self.doctrines.iter())
             .filter(|d| d.enabled && squad_aim(d.aim))
             .find(|d| d.is_core(unit, &self.classes) || d.role_of(unit, &self.classes).is_some())
+    }
+
+    /// Whether a new unit of type `unit` goes to the squad handler's
+    /// taskforces: some doctrine there takes it as a core or in a role
+    /// other than spotting (spotters are claimed, see `spotter`).
+    pub fn routes(&self, unit: &str) -> bool {
+        (self.doctrines.iter()).filter(|d| d.enabled && squad_aim(d.aim)).any(|d| {
+            d.is_core(unit, &self.classes) || d.role_of(unit, &self.classes).is_some_and(|r| d.roles[r].spot.is_none())
+        })
     }
 
     pub fn shape(&self, doctrine: &str) -> Arc<Shape> {
@@ -185,6 +198,12 @@ pub fn patch(doctrines: &mut Vec<Doctrine>, patches: &Value, defs: &Defs, classe
 }
 
 impl Ai {
+    /// The map's density, openness and reach for doctrine expressions (see
+    /// [`Force`]): reserved, 0 until intel measures them.
+    pub fn taskforce_map(&self) -> (f32, f32, f32) {
+        (0.0, 0.0, 0.0)
+    }
+
     /// The doctrines, once: the seeds, patched by the `doctrines` option.
     pub fn taskforce_load(&mut self) {
         if self.taskforces.loaded {

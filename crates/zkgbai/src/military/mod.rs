@@ -149,6 +149,9 @@ pub struct MilitaryManager {
 
     /// Freshly finished mobile units, dispatched on their first idle.
     new_units: BTreeSet<i32>,
+    /// Whether the war has updated yet: units finished before (those
+    /// standing when a saved game is loaded) are dispatched at once.
+    updated: bool,
     unbuilt_porcs: BTreeSet<i32>,
 
     // unit and weapon def IDs for unitDamaged (-1 if missing).
@@ -213,6 +216,7 @@ impl MilitaryManager {
             last_value_redraw_frame: 0,
             has_nuke: false,
             new_units: BTreeSet::new(),
+            updated: false,
             unbuilt_porcs: BTreeSet::new(),
             wolv_mine_id: -1,
             wolv_mine_bomblet: -1,
@@ -490,6 +494,7 @@ impl Ai {
 
     pub fn war_update(&mut self, frame: i32) {
         self.war.frame = frame;
+        self.war.updated = true;
 
         // Each step is guarded separately: a fault in one handler must not
         // stop the others, and the profile then shows each step's cost.
@@ -498,6 +503,9 @@ impl Ai {
         }
         if frame % 7 == (self.offset + 2) % 7 {
             self.guard("war.paintThreatMap", |ai| ai.war_paint_threat_map());
+        }
+        if frame % 150 == (self.offset + 5) % 150 {
+            self.guard("war.idleSweep", |ai| ai.war_idle_sweep());
         }
 
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
@@ -582,6 +590,10 @@ impl Ai {
         let name = def_name.as_str();
         let cost = ud.cost(self.metal);
         let team = self.team_id;
+        // Forces short of a spotter take one first (see `taskforce::spotter`).
+        if self.taskforce_spotter_claims(unit, name, cost) {
+            return;
+        }
         // Raids on our economy call for air (see `firefighters`).
         if self.firefighters_claims(name) {
             self.firefighters_add(unit);
@@ -685,6 +697,23 @@ impl Ai {
         if mobile_combat && !self.unit_classes.no_retreat.contains(name) {
             self.retreat_add_coward(unit);
         }
+        // Standing at a load, they may keep orders and never idle.
+        if !self.war.updated {
+            self.war_unit_idle(unit);
+        }
+    }
+
+    /// Route new units that stand idle without having said so: those
+    /// standing when a saved game is loaded (finished again, but idle
+    /// already), or whose idle event was missed.
+    fn war_idle_sweep(&mut self) {
+        let idle: Vec<Unit> = (self.war.new_units.iter())
+            .filter_map(|&id| Unit::from_id(self.cb, id))
+            .filter(|u| u.health() > 0.0 && u.team() == self.team_id && u.num_current_commands() == 0)
+            .collect();
+        for unit in idle {
+            self.war_unit_idle(unit);
+        }
     }
 
     pub fn war_unit_idle(&mut self, unit: Unit) {
@@ -777,7 +806,7 @@ impl Ai {
         // Units a doctrine takes form taskforces (see `taskforce`): the
         // shield ball, and the forces other doctrines make.
         self.taskforce_load();
-        if self.taskforces.squad_doctrine(name).is_some() {
+        if self.taskforces.routes(name) {
             let mut f = Fighter::new(unit, cost, team);
             f.shield_mob = true;
             self.squad_add_taskforce_member(f);
@@ -963,6 +992,7 @@ impl Ai {
         self.retreat_remove_unit(unit);
         self.raider_remove_unit(unit);
         self.squad_log_death(unit, attacker);
+        self.taskforce_spotter_lost(unit, attacker);
         self.squad_remove_unit(unit);
         self.bomber_remove_unit(unit);
         self.misc_remove_unit(unit);

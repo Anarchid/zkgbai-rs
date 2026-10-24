@@ -101,6 +101,11 @@ impl SquadHandler {
     }
 }
 
+/// Whether role `role` of doctrine `doctrine` spots (see `taskforce::spotter`).
+fn doctrine_role_spots(tf: &taskforce::Taskforces, doctrine: Option<&str>, role: Option<usize>) -> bool {
+    doctrine.and_then(|d| tf.doctrine(d)).zip(role).is_some_and(|(d, r)| d.roles[r].spot.is_some())
+}
+
 /// Whether units of movement tiers `a` and `b` go the same ways (as far as
 /// following a leader of either goes: amphibious bots with bots).
 fn same_ways(a: Option<Tier>, b: Option<Tier>) -> bool {
@@ -161,7 +166,10 @@ impl Ai {
         let mut mixed = Vec::new();
         for sid in self.squads.ids() {
             let Some(s) = self.squads.get(sid) else { continue };
-            let tiers: BTreeSet<Option<Tier>> = s.fighters.iter().map(|&m| self.squad_tier(m)).collect();
+            let spots =
+                |m: &i32| self.fighters.get(m).is_some_and(|f| s.shape.spot(f.unit.def().map(|d| d.id())).is_some());
+            let tiers: BTreeSet<Option<Tier>> =
+                s.fighters.iter().filter(|m| !spots(m)).map(|&m| self.squad_tier(m)).collect();
             if tiers.iter().any(|&a| tiers.iter().any(|&b| !same_ways(a, b))) {
                 mixed.push(format!("squad {sid}: {tiers:?}"));
             }
@@ -221,6 +229,13 @@ impl Ai {
         self.siege_remove(id);
     }
 
+    /// Let go of fighter `id` altogether (out of its squad and the store),
+    /// for another handler to take.
+    pub(crate) fn squad_forget_fighter(&mut self, id: i32) {
+        self.squad_leave_squad(id);
+        self.squad_delete_fighter(id);
+    }
+
     /// Remove a fighter from whatever squad it is in.
     fn squad_leave_squad(&mut self, id: i32) {
         let Some(sid) = self.fighters.get(&id).and_then(|f| f.squad) else { return };
@@ -256,8 +271,15 @@ impl Ai {
     /// Whether fighter `id` goes the same ways as every member of squad
     /// `sid`.
     fn squad_fits(&self, sid: SquadId, id: i32) -> bool {
+        let Some(s) = self.squads.get(sid) else { return false };
+        // Spotters go their own ways.
+        let spots =
+            |m: i32| self.fighters.get(&m).is_some_and(|f| s.shape.spot(f.unit.def().map(|d| d.id())).is_some());
+        if spots(id) {
+            return true;
+        }
         let tier = self.squad_tier(id);
-        self.squads.get(sid).is_some_and(|s| s.fighters.iter().all(|&m| same_ways(self.squad_tier(m), tier)))
+        s.fighters.iter().filter(|&&m| !spots(m)).all(|&m| same_ways(self.squad_tier(m), tier))
     }
 
     fn squad_assign_assault(&mut self, id: i32) {
@@ -353,7 +375,7 @@ impl Ai {
 
     /// Whether taskforce `sid` is short of role `role` of its doctrine
     /// (a role that takes all that come always is).
-    fn squad_short_of(&self, sid: SquadId, role: usize) -> bool {
+    pub(crate) fn squad_short_of(&self, sid: SquadId, role: usize) -> bool {
         let Some(q) = self.squads.get(sid) else { return false };
         let tf = &self.taskforces;
         let Some(d) = tf.doctrine(&q.shape.doctrine) else { return false };
@@ -378,6 +400,7 @@ impl Ai {
         let mut force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
         let terr = self.graph.territory_fraction;
         force.income = self.eco.effective_income / (1.0 + self.merged_allies as f32 * terr * terr);
+        (force.density, force.openness, force.reach) = self.taskforce_map();
         e.eval(&force)
     }
 
@@ -548,6 +571,11 @@ impl Ai {
                 None => forces.iter().copied().filter(|&sid| open(sid)).collect(),
             };
             if short.is_empty() {
+                // A spotter no force wants goes back where it came from.
+                if doctrine_role_spots(&self.taskforces, dname.as_deref(), role) {
+                    self.taskforce_spotter_release(id);
+                    return;
+                }
                 // No force to join: fight as an assault.
                 self.retreat_add_coward(unit);
                 self.squad_assign_assault(id);
@@ -598,8 +626,9 @@ impl Ai {
             Some(l) => format!("{:.0} from its leader", distance(l.pos(), unit.pos())),
             None => "no leader".to_owned(),
         };
+        let spotter = self.taskforce_spotter_doing(unit.id()).map_or(String::new(), |j| format!(", spotter {j}"));
         let mut line = format!(
-            "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth} ({far})",
+            "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth} ({far}){spotter}",
             self.defs.name_of(unit),
             s.shape.doctrine
         );
@@ -1043,6 +1072,9 @@ impl Ai {
         }
         if self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege) {
             self.siege_tick(sid, engage_at.is_some(), why);
+        }
+        if self.squads.get(sid).is_some_and(|s| s.shape.roles.iter().any(|r| r.spot.is_some())) {
+            self.taskforce_spot(sid);
         }
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
