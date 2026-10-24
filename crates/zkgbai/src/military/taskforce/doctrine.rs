@@ -203,7 +203,8 @@ pub struct Doctrine {
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
     /// The chance a factory pick that could build a core builds it instead,
-    /// while the doctrine has a force with room for one (or none at all);
+    /// while the doctrine has a force with room for one (or none at all)
+    /// and our income carries it (see `taskforce::CORE_PRODUCE_INCOME`);
     /// 0: cores come as the factory's own picks (Felons, Lances).
     pub produce: f32,
     pub roles: Vec<Role>,

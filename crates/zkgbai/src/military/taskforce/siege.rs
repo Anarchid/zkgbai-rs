@@ -113,8 +113,9 @@ pub struct Siege {
     guns: BTreeMap<i32, Gun>,
 }
 
-/// A known enemy static: where, its weapon range (0 unarmed), its worth to
-/// the guns, and whether it is in sight.
+/// A known enemy static: where, its ground-firing weapon range (0 for one
+/// unarmed, or anti-air only: neither fences the ground), its worth to the
+/// guns, and whether it is in sight.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Static {
     pub pos: Vec3,
@@ -128,9 +129,10 @@ pub fn stands_off(spot: Vec3, statics: &[Static], standoff: f32) -> bool {
     statics.iter().filter(|s| s.range > 0.0).all(|s| distance(spot, s.pos) >= s.range + standoff)
 }
 
-/// The nearest static to `p`: how far, and which.
+/// The nearest armed static to `p` (one that fires at the ground): how far,
+/// and which.
 pub fn nearest(p: Vec3, statics: &[Static]) -> Option<(f32, Static)> {
-    statics.iter().map(|&s| (distance(p, s.pos), s)).min_by(|a, b| a.0.total_cmp(&b.0))
+    (statics.iter().filter(|s| s.range > 0.0)).map(|&s| (distance(p, s.pos), s)).min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
 /// What statics a gun at `spot` with `reach` has: how many, their worth.
@@ -199,7 +201,7 @@ impl Ai {
             .filter(|e| e.identified && e.is_static && !e.is_dead && e.position != NULLPOS)
             .map(|e| Static {
                 pos: e.position,
-                range: if e.can_attack() { e.def_max_weapon_range() } else { 0.0 },
+                range: if e.can_attack() && !e.is_aa { e.def_max_weapon_range() } else { 0.0 },
                 worth: worth(e, e.ud.map_or(e.value, |d| d.cost(self.metal))),
                 visible: e.visible,
             })
@@ -249,12 +251,12 @@ impl Ai {
                     let doctrine = self.squads.get(sid).map_or(String::new(), |q| q.shape.doctrine.clone());
                     self.log(&format!(
                         "taskforce: the {doctrine} force (squad {sid}) stations at ({:.0}, {:.0}), {:.0} off, in reach of \
-                         {k} statics worth {v:.0}; {how}; the nearest static {}",
+                         {k} statics worth {v:.0}; {how}; the nearest armed static {}",
                         s.x,
                         s.z,
                         distance(pos, s),
                         match near {
-                            Some((d, n)) => format!("is a {:.0} away (range {:.0}, standoff {margin:.0})", d, n.range),
+                            Some((d, n)) => format!("is {d:.0} away (range {:.0}, standoff {margin:.0})", n.range),
                             None => "is unknown".to_owned(),
                         }
                     ));
@@ -381,7 +383,7 @@ impl Ai {
                                     s.range,
                                     if s.visible { "in sight" } else { "a ghost" }
                                 ),
-                                None => "no static known".to_owned(),
+                                None => "no armed static known".to_owned(),
                             }
                         ));
                     }
@@ -608,9 +610,11 @@ mod tests {
 
     #[test]
     fn the_nearest_static_gives_the_standoff() {
-        let statics = [s(0.0, 0.0, 500.0, 1.0), s(2000.0, 0.0, 300.0, 1.0)];
+        let statics = [s(0.0, 0.0, 500.0, 1.0), s(2000.0, 0.0, 300.0, 1.0), s(1250.0, 0.0, 0.0, 1.0)];
+        // The mex next door is unarmed and does not count.
         let (d, n) = nearest(Vec3::xz(1200.0, 0.0), &statics).unwrap();
         assert_eq!((d, n.range), (800.0, 300.0));
         assert!(nearest(Vec3::xz(0.0, 0.0), &[]).is_none());
+        assert!(nearest(Vec3::xz(0.0, 0.0), &[statics[2]]).is_none());
     }
 }

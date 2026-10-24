@@ -125,6 +125,10 @@ pub struct Taskforces {
     pub siege: siege::Siege,
 }
 
+/// A doctrine's cores are produced on purpose (its `produce`) only from
+/// this adjusted income on: before, the factory's own picks stand.
+pub const CORE_PRODUCE_INCOME: f32 = 25.0;
+
 /// Aims whose forces are squads of the squad handler (see
 /// `handlers::squad`); the others have modules of their own.
 pub fn squad_aim(aim: Aim) -> bool {

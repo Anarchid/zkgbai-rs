@@ -412,8 +412,10 @@ impl Ai {
         let tf = &self.taskforces;
         for d in tf.doctrines.iter().filter(|d| d.enabled && taskforce::squad_aim(d.aim)) {
             // A core, while a force of the doctrine has room for one (or it
-            // has no force at all).
+            // has no force at all), once the economy carries it: a 700-metal
+            // gun as a factory's second unit lost the opening.
             if d.produce > 0.0
+                && self.eco.adjusted_income >= taskforce::CORE_PRODUCE_INCOME
                 && let Some(&def) = options.iter().find(|o| d.is_core(self.defs.name(**o), &tf.classes))
             {
                 let forces: Vec<&crate::military::wrappers::squad::Squad> = (self.squad_handler.taskforces.iter())
