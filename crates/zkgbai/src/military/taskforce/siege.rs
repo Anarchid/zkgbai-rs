@@ -47,6 +47,13 @@ use crate::util::{NULLPOS, distance, get_directional_point};
 /// A gun is at its spot within this.
 pub const AT_STATION: f32 = 60.0;
 
+/// The force is at its station once the leader is within this (the wrapper
+/// sends the leader to a point 135 short of its target, see
+/// `Squad::taskforce_set_target`), and parked it leaves only when the
+/// leader is farther than `PARK_LEAVE` (a nudge is not a move).
+const PARK: f32 = 200.0;
+const PARK_LEAVE: f32 = 320.0;
+
 /// A station lies this far beyond the reach of every enemy static we know
 /// of (the Analyst's gate asks for 100).
 const STANDOFF: f32 = 120.0;
@@ -59,10 +66,6 @@ const RANGE_MARGIN: f32 = 60.0;
 const STATION_TARGETS: usize = 16;
 const STATION_SHARES: [f32; 2] = [0.92, 0.78];
 const STATION_DIRS: usize = 16;
-
-/// A force keeps its station this long at least while something is in
-/// reach (unless it is no longer safe).
-const RESTATION: i32 = 30 * 20;
 
 /// The guns spread this far about the station, each at its own spot.
 const SPREAD: f32 = 70.0;
@@ -79,11 +82,10 @@ const ECONOMY: f32 = 2.0;
 /// A mobile in sight is worth this share of its cost as a gun's target.
 const MOBILE: f32 = 0.7;
 
-/// Where a force stands to fire: picked when, and whether it is parked
-/// there (its leader at the station while engaging).
+/// Where a force stands to fire, and whether it is parked there (its
+/// leader at the station while engaging).
 struct Station {
     pos: Vec3,
-    since: i32,
     /// Enemy statics in reach of it when picked, and their worth.
     reach: (usize, f32),
     deployed: bool,
@@ -229,19 +231,18 @@ impl Ai {
     /// The station of force `sid` led by `leader`, and whether the force
     /// has yet to get there (so the wrapper moves it) or stands parked.
     pub(crate) fn siege_conduct(&mut self, sid: SquadId, leader: Unit) -> (Vec3, bool) {
-        let frame = self.frame;
         let pos = leader.pos();
         let statics = self.siege_statics();
         let reach = Self::siege_reach(leader);
+        // A station is kept while it is safe and reaches something: the
+        // guns stay until they have shot what they reach (every move costs
+        // them their aim).
         let kept = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()))
             .filter(|s| self.siege_safe(s.pos, leader, &statics))
-            .filter(|s| {
-                let (k, _) = in_reach(s.pos, reach, &statics);
-                k > 0 && (frame - s.since < RESTATION || distance(pos, s.pos) > AT_STATION)
-            })
-            .map(|s| s.pos);
+            .filter(|s| in_reach(s.pos, reach, &statics).0 > 0)
+            .map(|s| (s.pos, s.deployed));
         let station = match kept {
-            Some(s) => s,
+            Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
             None => {
                 let (s, k, v, how) = self.siege_pick(sid, leader, reach, &statics);
                 let old = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos);
@@ -265,11 +266,11 @@ impl Ai {
                     }
                 }
                 let f = self.taskforces.siege.forces.entry(sid).or_default();
-                f.station = Some(Station { pos: s, since: frame, reach: (k, v), deployed: false });
+                f.station = Some(Station { pos: s, reach: (k, v), deployed: false });
                 s
             }
         };
-        (station, distance(pos, station) > AT_STATION)
+        (station, distance(pos, station) > PARK)
     }
 
     /// A station for force `sid`: the best candidate the guns can reach
@@ -322,11 +323,11 @@ impl Ai {
             .map(|f| (f.id, f.unit, shape.is_core(f.unit.def().map(|d| d.id()))))
             .collect();
         let station = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref())).map(|s| s.pos);
+        let was = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).is_some_and(|s| s.deployed);
         let parked_force = match (engaging, leader, station) {
-            (true, Some(l), Some(st)) => distance(l.pos(), st) <= AT_STATION,
+            (true, Some(l), Some(st)) => distance(l.pos(), st) <= if was { PARK_LEAVE } else { PARK },
             _ => false,
         };
-        let was = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).is_some_and(|s| s.deployed);
         if was && !parked_force {
             self.siege_release(sid, if engaging { "moving off" } else { why });
         }
@@ -357,7 +358,7 @@ impl Ai {
                     let a = k as f32 * 2.4;
                     Vec3::xz(st.x + SPREAD * a.cos(), st.z + SPREAD * a.sin())
                 };
-                let parked = distance(p, spot) <= AT_STATION;
+                let parked = distance(p, spot) <= if is_leader { PARK_LEAVE } else { AT_STATION };
                 if parked {
                     let has = (self.war.targets.values()).any(|e| {
                         e.identified && !e.is_dead && (e.visible || e.is_static) && distance(p, e.position) <= reach
@@ -440,7 +441,6 @@ impl Ai {
     /// The guns of force `sid` leave their spots (`why`): each parked one
     /// logs it, and those not leading orbit the leader again.
     fn siege_release(&mut self, sid: SquadId, why: &str) {
-        let frame = self.frame;
         let Some(s) = self.squads.get(sid) else { return };
         let shape = s.shape.clone();
         let leader = s.leader;
@@ -480,7 +480,6 @@ impl Ai {
                 st.deployed = false;
             }
         }
-        let _ = frame;
     }
 
     /// How the guns of force `sid` have stood, now and then.

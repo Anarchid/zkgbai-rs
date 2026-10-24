@@ -750,8 +750,11 @@ pub fn seeds() -> Vec<Doctrine> {
         Role::escort("aa", &["tankaa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
     ];
     tremor.aim = Aim::Siege;
+    // Two guns at least go in (one Tremor with an Ogre clears 2000 alone),
+    // and never on time alone.
     tremor.engage_value = 2000.0;
-    tremor.muster = 90.0;
+    tremor.engage = Some(Expr::parse("cores >= 2 ? 2000 : 1000000").expect("seed engage"));
+    tremor.muster = 0.0;
 
     let mut emissary = Doctrine::new("emissary");
     emissary.note = "A siege detachment (see `siege`): Emissaries park beyond the enemy statics' reach where \
@@ -768,7 +771,8 @@ pub fn seeds() -> Vec<Doctrine> {
     ];
     emissary.aim = Aim::Siege;
     emissary.engage_value = 1500.0;
-    emissary.muster = 90.0;
+    emissary.engage = Some(Expr::parse("cores >= 2 ? 1500 : 1000000").expect("seed engage"));
+    emissary.muster = 0.0;
 
     let mut impaler = Doctrine::new("impaler");
     impaler.note = "Impaler batteries (see `military::impalers`): a Leveler per two guns against raiders, a \
@@ -988,6 +992,21 @@ mod tests {
         assert_eq!((d.cores_per_force, d.pace_slowest), (0, 0.5));
         let Value::Object(p) = json!({"pace_slowest": 2}) else { panic!() };
         assert!(d.apply(&p).is_err());
+    }
+
+    #[test]
+    fn siege_forces_go_in_with_two_guns() {
+        let classes = Classes::default();
+        for (name, gun, escort) in [("tremor", "tankheavyarty", 2100.0), ("emissary", "tankarty", 1500.0)] {
+            let d = seeds().into_iter().find(|d| d.name == name).unwrap();
+            assert_eq!((d.aim, d.muster), (Aim::Siege, 0.0));
+            assert!(d.produce > 0.0 && !d.enabled);
+            let e = d.engage.as_ref().unwrap();
+            let one = d.force([(gun, 1600.0), ("tankriot", 500.0)], &classes);
+            let two = d.force([(gun, 1600.0), (gun, 1600.0), ("tankriot", 500.0)], &classes);
+            assert!(e.eval(&one) > escort + 1600.0, "{name}: one gun goes in");
+            assert_eq!(e.eval(&two), d.engage_value, "{name}");
+        }
     }
 
     #[test]

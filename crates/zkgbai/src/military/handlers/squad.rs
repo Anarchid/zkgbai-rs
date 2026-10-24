@@ -1053,7 +1053,13 @@ impl Ai {
                     self.squad_handler.taskforces.push_back(sid);
                     return;
                 }
-                let rally = self.war_get_rally_point(pos);
+                // Siege forces form at a haven, not the army's forward
+                // rally point, where a slow gun forming alone dies.
+                let rally = if shape.aim == Aim::Siege {
+                    self.graph_get_closest_haven(pos)
+                } else {
+                    self.war_get_rally_point(pos)
+                };
                 self.squad_set_target(sid, rally);
                 short
             };
