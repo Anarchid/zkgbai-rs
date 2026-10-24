@@ -1106,7 +1106,11 @@ impl Ai {
                     } else {
                         ps.raisers = more.clone();
                         ps.tries = tries + 1;
-                        let left = ((perch.borrow_s - since as f32) * 30.0) as i32;
+                        // The borrow's clock starts again with the new
+                        // raisers (the smoke's second pair ran out 11 elmos
+                        // short on the first pair's clock).
+                        ps.since = frame;
+                        let left = (perch.borrow_s * 30.0) as i32;
                         self.terraform_level(&more, &square, level, false);
                         self.eco_hold_terraform(&more, left.max(60));
                         self.op_emit(

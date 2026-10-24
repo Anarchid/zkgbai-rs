@@ -247,7 +247,7 @@ impl Perch {
             top: 48.0,
             raisers: Vec::new(),
             count: Expr::parse("2").expect("perch count"),
-            borrow_s: 120.0,
+            borrow_s: 150.0,
             range: 4000.0,
             min_reach: 3,
             refuse_if_reached: true,
