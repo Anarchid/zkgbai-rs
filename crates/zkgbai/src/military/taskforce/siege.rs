@@ -71,7 +71,7 @@ const RANGE_MARGIN: f32 = 60.0;
 /// stops up to 135 short of its station, see `Squad::taskforce_set_target`,
 /// so the rings leave that much reach to spare).
 const STATION_TARGETS: usize = 16;
-const STATION_SHARES: [f32; 2] = [0.85, 0.72];
+const STATION_SHARES: [f32; 2] = [0.80, 0.68];
 const STATION_DIRS: usize = 16;
 
 /// The guns spread this far about the station, each at its own spot.
@@ -365,6 +365,9 @@ impl Ai {
         }
         let statics = self.siege_statics();
         let reach = leader.map_or(1100.0, Self::siege_reach);
+        // A gun fires out to its range; the reach (less a margin) is for
+        // choosing stations.
+        let range = reach + RANGE_MARGIN;
         let shields = self.impalers_shields();
         let mut k = 0usize;
         for &(id, unit, core) in &members {
@@ -390,7 +393,7 @@ impl Ai {
                 let parked = distance(p, spot) <= if is_leader { PARK_LEAVE } else { AT_STATION };
                 if parked {
                     let has = (self.war.targets.values()).any(|e| {
-                        e.identified && !e.is_dead && (e.visible || e.is_static) && distance(p, e.position) <= reach
+                        e.identified && !e.is_dead && (e.visible || e.is_static) && distance(p, e.position) <= range
                     });
                     state = if has { "deployed in range" } else { "deployed idle" };
                     let first = !self.taskforces.siege.guns.get(&id).is_some_and(|g| g.parked);
@@ -417,7 +420,7 @@ impl Ai {
                             }
                         ));
                     }
-                    self.siege_aim(id, unit, reach, &shields);
+                    self.siege_aim(id, unit, range, &shields);
                 } else if !is_leader {
                     let sent = self.taskforces.siege.forces.get(&sid).and_then(|f| f.sent.get(&id)).copied();
                     if sent.is_none_or(|t| frame - t >= RESEND) {
