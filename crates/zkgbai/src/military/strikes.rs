@@ -408,6 +408,8 @@ pub struct Stats {
     pub killed: u32,
     pub lapsed: u32,
     pub wiped: u32,
+    /// Targets that died to someone other than the wave while struck.
+    pub taken: u32,
     pub refused: u32,
     pub lost: f32,
     pub won: f32,
@@ -468,6 +470,11 @@ impl Ai {
             return;
         }
         let Some(kind) = weapon.and_then(|w| sniper_kind(&w.name())) else { return };
+        // Our own sniper's shot (or an ally's) is no fix: ab1 hover-A/m1
+        // sent a 780-metal wave into our own army on a Phantom of ours.
+        if attacker.is_some_and(|a| a.ally_team() == self.ally_team_id) {
+            return;
+        }
         let frame = self.frame;
         if let Some(a) = attacker.filter(|a| a.pos() != NULLPOS) {
             let id = a.id();
@@ -829,7 +836,7 @@ impl Ai {
     }
 
     /// An enemy died: a struck sniper settles its strike.
-    pub fn strikes_enemy_destroyed(&mut self, enemy: Unit, _attacker: Option<Unit>) {
+    pub fn strikes_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {
         let id = enemy.id();
         let name = self.war.targets.get(&id).map(|e| e.def_name.clone()).unwrap_or_default();
         let struck = self.strikes.strikes.iter().position(|s| s.target == Some(id));
@@ -845,11 +852,14 @@ impl Ai {
             self.log(&line);
         }
         if let Some(i) = struck {
-            self.strikes_settle(i, "killed");
+            // The kill is the wave's only when a member landed it; else the
+            // target is gone to someone else (ab1 credited a Felon's kill).
+            let ours = attacker.is_some_and(|a| self.strikes.strikes[i].members.contains(&a.id()));
+            self.strikes_settle(i, if ours { "killed" } else { "taken" });
         }
     }
 
-    /// End strike `i`: `why` is killed, lapsed, wiped or ran.
+    /// End strike `i`: `why` is killed, taken (dead, not by us), lapsed, wiped or ran.
     fn strikes_settle(&mut self, i: usize, why: &str) {
         let s = self.strikes.strikes.remove(i);
         let frame = self.frame;
@@ -860,9 +870,10 @@ impl Ai {
                 st.won += s.odds.value;
             }
             "wiped" => st.wiped += 1,
+            "taken" => st.taken += 1,
             _ => st.lapsed += 1,
         }
-        if why != "killed" {
+        if why != "killed" && why != "taken" {
             if let Some(t) = s.target {
                 self.strikes.cooldown.insert(t, frame + COOLDOWN);
             }
@@ -872,7 +883,7 @@ impl Ai {
             "strikes: #{} {why}: the {} {} after {} s; lost {:.0} metal ({} of {} units), {} back",
             s.id,
             s.kind,
-            if why == "killed" { "dead" } else { "not" },
+            if why == "killed" || why == "taken" { "dead" } else { "not" },
             (frame - s.started) / 30,
             s.lost,
             s.lost_n,

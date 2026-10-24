@@ -4,7 +4,7 @@
 usage: strikes.py [-v] <infolog or match dir>...
 
 Per game and pooled: strikes started by fix kind, outcomes (killed, lapsed,
-wiped, ran), metal lost in strikes per sniper killed, refusals, our units
+wiped, ran, taken = the target died to someone else while struck), metal lost in strikes per sniper killed, refusals, our units
 lost to snipers outside strikes (count, metal), and enemy snipers that died
 unstruck. Run with python3 -I.
 """
@@ -13,7 +13,7 @@ import re
 import sys
 
 START = re.compile(r"strikes: #(\d+) on a (\w+) (seen|on radar|crossed|a bearing) at \((-?\d+), (-?\d+)\): (\d+) units \(([\d.]+) metal, ([\d.]+)/s\) go, the slowest in ([\d.]+) s; expected loss ([\d.]+), profit (-?[\d.]+) \(([\d.]+) x ([\d.]+)(?:, averted (-?[\d.]+))?\)(, escorts)?")
-END = re.compile(r"strikes: #(\d+) (killed|lapsed|wiped|ran): the (\w+) (dead|not) after (\d+) s; lost ([\d.]+) metal \((\d+) of (\d+) units\), (\d+) back")
+END = re.compile(r"strikes: #(\d+) (killed|taken|lapsed|wiped|ran): the (\w+) (dead|not) after (\d+) s; lost ([\d.]+) metal \((\d+) of (\d+) units\), (\d+) back")
 SEES = re.compile(r"strikes: #(\d+) sees its")
 REFUSED = re.compile(r"strikes: no strike on the (\w+) (seen|on radar|crossed|a bearing) at \((-?\d+), (-?\d+)\): (.*)")
 SNIPED = re.compile(r"strikes: a (\w+) \(([\d.]+)\) lost to a (\w+)")
@@ -33,7 +33,7 @@ def infologs(args):
 
 
 def score(path, verbose):
-    g = dict(started=0, killed=0, lapsed=0, wiped=0, ran=0, lost=0.0, refused=0, sniped=0, sniped_metal=0.0,
+    g = dict(started=0, killed=0, taken=0, lapsed=0, wiped=0, ran=0, lost=0.0, refused=0, sniped=0, sniped_metal=0.0,
              unstruck=0, struck=0, seen={}, died={}, averted=0.0, worth=0.0, escorted_go=0,
              by_fix={}, kills_by_fix={}, refusals={}, lines=[])
     starts = {}
@@ -93,7 +93,7 @@ def show(name, g):
     share = g["averted"] / g["worth"] if g["worth"] else 0.0
     fmt = lambda d: ", ".join(f"{k} {v}" for k, v in d.items()) or "-"
     print(f"{name}: strikes {g['started']} ({fmt(g['by_fix'])}; escorted {g['escorted_go']}; averted share of worth {share:.2f}); "
-          f"killed {g['killed']} ({fmt(g['kills_by_fix'])}), lapsed {g['lapsed']}, wiped {g['wiped']}, ran {g['ran']}; "
+          f"killed {g['killed']} ({fmt(g['kills_by_fix'])}), taken {g['taken']}, lapsed {g['lapsed']}, wiped {g['wiped']}, ran {g['ran']}; "
           f"metal lost in strikes {g['lost']:.0f} ({per_kill:.0f}/kill); refused {g['refused']} ({fmt(g['refusals'])}); "
           f"sniped outside strikes {g['sniped']} ({g['sniped_metal']:.0f} metal); "
           f"snipers seen {fmt(g['seen'])}, died {fmt(g['died'])} (struck {g['struck']}, unstruck {g['unstruck']})")
