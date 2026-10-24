@@ -1096,6 +1096,8 @@ impl Ai {
             return "veharty";
         }
 
+        // Dominatrices for shield balls: with only the felon doctrine on (the
+        // seeds), a taskforce is a shield ball, as this read before doctrines.
         if (fm.num_aspis > 0 && !self.squad_handler.taskforces.is_empty()) && fm.num_domis < 8 && kgb_rand() > 0.5 {
             return "vehcapture";
         }

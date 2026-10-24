@@ -34,6 +34,8 @@
 #                (e.g. 8G) runs each engine in a systemd scope with that
 #                MemoryMax and no swap; a killed engine prints ARENA_KILLED
 #   ARENA_WIDGETS  more LuaUI widget files to install for the match
+#   ARENA_BONUS_WIDGETS  widgets every match gets, set by arena.conf (the
+#                combat log); export it empty for a match without them
 #
 # Prints a final line: RESULT winner=<A|B|allyN|draw|frames|timeout|crash> ...
 #   (A/B = allyteam 0/1)
@@ -93,10 +95,16 @@ if [ ! -d "$CACHE" ]; then
     cp "$HOME"/.spring/cache/ArchiveCache*.lua "$CACHE"/ 2>/dev/null || true
 fi
 ln -s "$CACHE" "$WD/cache"
+# The machine's own settings, outside the repo: engine limits (below) and
+# the widgets every match gets.
+ARENA_CONF=${ARENA_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/zkgbai/arena.conf}
+# shellcheck source=/dev/null
+[ -f "$ARENA_CONF" ] && . "$ARENA_CONF"
 mkdir -p "$WD/LuaUI/Widgets"
 sed "s/@MAX_FRAMES@/$MAX_FRAMES/" "$(dirname "$0")/arena_widget.lua" > "$WD/LuaUI/Widgets/arena_widget.lua"
-# ARENA_WIDGETS: more LuaUI widget files to install for the match.
-for w in ${ARENA_WIDGETS:-}; do cp "$w" "$WD/LuaUI/Widgets/"; done
+# ARENA_WIDGETS: more LuaUI widget files to install for the match;
+# ARENA_BONUS_WIDGETS: the ones arena.conf gives every match.
+for w in ${ARENA_WIDGETS:-} ${ARENA_BONUS_WIDGETS:-}; do cp "$w" "$WD/LuaUI/Widgets/"; done
 
 # parse "Short[:Ver][@lib][?opts]" -> sets SHORT VER LIB OPTS
 parse_ai() {
@@ -214,10 +222,8 @@ LOG="$WD/infolog.txt"
 # lock makes the check and the launch one step across all match.sh runs.
 # The machine's own limits live outside the repo, so they bind every
 # branch's series whatever it exports: ARENA_ENGINE_CEILING caps
-# ARENA_MAX_ENGINES, ARENA_ENGINE_MEMORY caps each engine.
-ARENA_CONF=${ARENA_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/zkgbai/arena.conf}
-# shellcheck source=/dev/null
-[ -f "$ARENA_CONF" ] && . "$ARENA_CONF"
+# ARENA_MAX_ENGINES, ARENA_ENGINE_MEMORY caps each engine. (Sourced above,
+# before the widgets are installed.)
 ARENA_MAX_ENGINES=${ARENA_MAX_ENGINES:-${ARENA_ENGINE_CEILING:-6}}
 if [ -n "${ARENA_ENGINE_CEILING:-}" ] && [ "$ARENA_MAX_ENGINES" -gt "$ARENA_ENGINE_CEILING" ]; then
     ARENA_MAX_ENGINES=$ARENA_ENGINE_CEILING
@@ -283,6 +289,8 @@ else
 fi
 
 cp "$LOG" "$OUT/infolog.txt" 2>/dev/null
+# The combat log widget's rows, when it ran (tools/arena/combatlog_widget.lua).
+for c in "$WD"/combatlog/*.tsv; do [ -f "$c" ] && gzip -c "$c" > "$OUT/combatlog.tsv.gz"; done
 [ "$KEEP" -eq 1 ] || rm -rf "$WD"
 stats=$(grep -oE "ARENA_(FINAL|STATS f=[0-9]+) .*" "$OUT/infolog.txt" 2>/dev/null | tail -1)
 panics=$(grep -c "panicked" "$OUT/infolog.txt" 2>/dev/null)

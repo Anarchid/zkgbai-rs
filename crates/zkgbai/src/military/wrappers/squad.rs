@@ -62,7 +62,19 @@ pub struct Squad {
     pub formed: i32,
     /// Taskforces: falling back to recharge shields.
     pub low_shields: bool,
+    /// Taskforces: sent at a target by their conduct now, and the frame
+    /// they first were (0: never).
+    pub engaging: bool,
+    pub engaged: i32,
+    /// Taskforces: the path the leader made while engaged, since when, and
+    /// who led where at the last conduct (its measured speed).
+    engaged_path: f32,
+    engaged_since: i32,
+    engaged_last: Option<(i32, Vec3)>,
     team: i32,
+    /// Taskforces: the speed limit last given the leader by its slowest
+    /// member (0: none).
+    paced: f32,
     /// Join counter; members get increasing indices.
     index: i32,
     first_rally_frame: i32,
@@ -105,7 +117,13 @@ impl Squad {
             shape: Arc::default(),
             formed: 0,
             low_shields: false,
+            engaging: false,
+            engaged: 0,
+            engaged_path: 0.0,
+            engaged_since: 0,
+            engaged_last: None,
             team,
+            paced: 0.0,
             index: 0,
             first_rally_frame: 0,
             leader_weight: 0,
@@ -212,16 +230,22 @@ impl Squad {
         }
     }
 
+    /// Taskforces: the share of members within 350 of the leader (none
+    /// without a leader or members).
+    pub fn rally_fraction(&self, fighters: &FighterStore) -> Option<f32> {
+        let lpos = self.leader_fighter(fighters)?.get_pos();
+        if self.fighters.is_empty() {
+            return None;
+        }
+        let rallied = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter(|f| distance(f.get_pos(), lpos) < 350.0)
+            .count() as f32;
+        Some(rallied / self.fighters.len() as f32)
+    }
+
     pub fn is_rallied(&mut self, fighters: &mut FighterStore, nav: &mut Nav) -> bool {
         if self.kind == SquadKind::Taskforce {
-            let Some(lpos) = self.leader_fighter(fighters).map(|l| l.get_pos()) else { return false };
-            let rallied = self
-                .fighters
-                .iter()
-                .filter_map(|id| fighters.get(id))
-                .filter(|f| distance(f.get_pos(), lpos) < 350.0)
-                .count() as f32;
-            return rallied / self.fighters.len() as f32 > self.shape.rallied;
+            return self.rally_fraction(fighters).is_some_and(|r| r > self.shape.rallied);
         }
         let frame = nav.frame;
         if self.first_rally_frame == 0 {
@@ -276,6 +300,7 @@ impl Squad {
     /// members' orbits and the shield gauge.
     pub fn reshape(&mut self, shape: Arc<Shape>, fighters: &mut FighterStore) {
         self.shape = shape;
+        self.paced = 0.0;
         let Some(lid) = self.leader else { return };
         if let Some(l) = fighters.get(&lid) {
             l.unit.execute_custom_command(cmd::WANTED_SPEED, &[self.pace(l.unit)], 0, NO_TIMEOUT);
@@ -375,8 +400,9 @@ impl Squad {
     pub fn disband(&mut self, fighters: &mut FighterStore) -> Vec<i32> {
         let mut disbanded = self.fighters.clone();
         if let Some(lid) = self.leader.take() {
+            self.paced = 0.0;
             if let Some(l) = fighters.get_mut(&lid) {
-                if self.kind == SquadKind::Taskforce && self.shape.pace > 0.0 {
+                if self.kind == SquadKind::Taskforce && self.paces() {
                     // Lift the leader's speed limit.
                     let speed = l.unit.max_speed() * 30.0;
                     l.unit.execute_custom_command(cmd::WANTED_SPEED, &[speed], 0, NO_TIMEOUT);
@@ -654,9 +680,12 @@ impl Squad {
                 // Set the wanted max speed for the new leader and remove the speed limit from the old leader.
                 if self.shape.pace > 0.0 {
                     unit.execute_custom_command(cmd::WANTED_SPEED, &[self.shape.pace], 0, NO_TIMEOUT);
+                }
+                if self.paces() {
                     // CMD_WANTED_SPEED uses elmos/sec while the game returns elmos/frame, thus MaxSpeed*30.
                     old_unit.execute_custom_command(cmd::WANTED_SPEED, &[old_unit.max_speed() * 30.0], 0, NO_TIMEOUT);
                 }
+                self.paced = 0.0;
                 self.fighters.push(old_id);
                 self.leader = Some(id);
                 self.leader_weight = weight;
@@ -705,6 +734,61 @@ impl Squad {
         if self.shape.pace > 0.0 { self.shape.pace } else { leader.max_speed() * 30.0 }
     }
 
+    /// Whether the doctrine limits the leader's speed at all.
+    fn paces(&self) -> bool {
+        self.shape.pace > 0.0 || self.shape.pace_slowest > 0.0
+    }
+
+    /// Taskforces kept to their slowest member: give the leader that
+    /// limit whenever it changes (none while it is the slowest, or alone).
+    pub fn keep_pace(&mut self, fighters: &FighterStore) {
+        if self.shape.pace_slowest <= 0.0 {
+            return;
+        }
+        let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        let slowest = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter_map(|f| f.unit.def())
+            .map(|d| d.speed())
+            .fold(f32::INFINITY, f32::min);
+        let limit = (self.shape.pace_slowest * slowest).min(self.pace(leader));
+        if (limit - self.paced).abs() > 0.5 {
+            leader.execute_custom_command(cmd::WANTED_SPEED, &[limit], 0, NO_TIMEOUT);
+            self.paced = limit;
+        }
+    }
+
+    /// Taskforces: the speed limit last given the leader by its slowest
+    /// member (0: none).
+    pub fn paced(&self) -> f32 {
+        self.paced
+    }
+
+    /// Taskforces: follow the leader's path while engaged (once a
+    /// conduct, after `engaging` is set); a new leader's jump is not path.
+    pub fn track_engaged(&mut self, fighters: &FighterStore, frame: i32) {
+        if !self.engaging {
+            self.engaged_last = None;
+            return;
+        }
+        let now = self.leader_fighter(fighters).map(|l| (l.id, l.get_pos()));
+        match (self.engaged_last, now) {
+            (None, _) => {
+                self.engaged_path = 0.0;
+                self.engaged_since = frame;
+            }
+            (Some((was, last)), Some((id, pos))) if was == id => self.engaged_path += distance(last, pos),
+            _ => {}
+        }
+        self.engaged_last = now.or(self.engaged_last);
+    }
+
+    /// Taskforces: seconds engaged so far and the leader's mean speed over
+    /// them, elmos/s (none under a second, or not engaged).
+    pub fn engaged_speed(&self, frame: i32) -> Option<(f32, f32)> {
+        let secs = (frame - self.engaged_since) as f32 / 30.0;
+        (self.engaged_last.is_some() && secs >= 1.0).then(|| (secs, self.engaged_path / secs))
+    }
+
     fn taskforce_remove_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, nav: Option<&mut Nav>) {
         if let Some((_, power)) = self.shields.remove(&id) {
             self.max_shield_power -= power;
@@ -720,6 +804,7 @@ impl Squad {
                 return;
             };
             self.fighters.retain(|&f| f != lid);
+            self.paced = 0.0;
             if let Some(l) = fighters.get(&lid) {
                 self.leader_weight = self.unit_weight(def_id(l.unit), l.index);
                 l.unit.set_move_state(1, 0);

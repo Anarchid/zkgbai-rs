@@ -203,12 +203,17 @@ pub struct Doctrine {
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
     pub roles: Vec<Role>,
-    /// Cores a force takes before a new core starts its own.
+    /// Cores a force takes before a new core starts its own (0: no limit,
+    /// a composition grown without end). Only a force that is not engaged
+    /// takes cores, so new ones never trickle to a fight alone.
     pub cores_per_force: u32,
     /// With allies, every core joins one force (one giant death ball).
     pub pool_with_allies: bool,
     /// The leader's speed limit, elmos/s (0: none).
     pub pace: f32,
+    /// The leader also keeps to this share of its slowest member's speed
+    /// (0: no), so a slower screen keeps up (Levelers with Ravagers).
+    pub pace_slowest: f32,
     pub aim: Aim,
     /// A force engages once worth this much metal (and rallied)...
     pub engage_value: f32,
@@ -228,6 +233,16 @@ pub struct Doctrine {
     /// Engaged, it falls back from enemy threat where it stands (beyond
     /// what the operator's courage tolerates), as assault squads do.
     pub flee_threat: bool,
+    /// Units no doctrine takes, left without a squad, join its least
+    /// valuable force (the shield ball's old habit with stray Pyros).
+    pub strays: bool,
+    /// Engaged, it breaks off to regroup whenever its members scatter (the
+    /// shield ball, whose shields must overlap); else being rallied only
+    /// lets it go in, as with assault squads.
+    pub regroup: bool,
+    /// Members join it while engaged (the shield ball); else only while it
+    /// is not, so none drives to a fight alone.
+    pub reinforce_engaged: bool,
 }
 
 impl Doctrine {
@@ -243,6 +258,7 @@ impl Doctrine {
             cores_per_force: 1,
             pool_with_allies: false,
             pace: 0.0,
+            pace_slowest: 0.0,
             aim: Aim::Artillery,
             engage_value: 0.0,
             muster: 60.0,
@@ -251,6 +267,9 @@ impl Doctrine {
             shields_ok: 0.8,
             rallied: 0.75,
             flee_threat: true,
+            strays: false,
+            regroup: false,
+            reinforce_engaged: false,
         }
     }
 
@@ -300,6 +319,7 @@ impl Doctrine {
             "cores_per_force": self.cores_per_force,
             "pool_with_allies": self.pool_with_allies,
             "pace": self.pace,
+            "pace_slowest": self.pace_slowest,
             "aim": self.aim.name(),
             "engage_value": self.engage_value,
             "muster": self.muster,
@@ -308,6 +328,9 @@ impl Doctrine {
             "shields_ok": self.shields_ok,
             "rallied": self.rallied,
             "flee_threat": self.flee_threat,
+            "strays": self.strays,
+            "regroup": self.regroup,
+            "reinforce_engaged": self.reinforce_engaged,
         })
     }
 
@@ -338,9 +361,10 @@ impl Doctrine {
                     }
                     self.roles = roles;
                 }
-                "cores_per_force" => self.cores_per_force = num(k, v, 1.0, 20.0)? as u32,
+                "cores_per_force" => self.cores_per_force = num(k, v, 0.0, 1000.0)? as u32,
                 "pool_with_allies" => self.pool_with_allies = flag(k, v)?,
                 "pace" => self.pace = num(k, v, 0.0, 500.0)?,
+                "pace_slowest" => self.pace_slowest = num(k, v, 0.0, 1.0)?,
                 "aim" => self.aim = Aim::parse(&string(k, v)?)?,
                 "engage_value" => self.engage_value = num(k, v, 0.0, 1e6)?,
                 "muster" => self.muster = num(k, v, 0.0, 3600.0)?,
@@ -349,6 +373,9 @@ impl Doctrine {
                 "shields_ok" => self.shields_ok = num(k, v, 0.0, 1.0)?,
                 "rallied" => self.rallied = num(k, v, 0.0, 1.0)?,
                 "flee_threat" => self.flee_threat = flag(k, v)?,
+                "strays" => self.strays = flag(k, v)?,
+                "regroup" => self.regroup = flag(k, v)?,
+                "reinforce_engaged" => self.reinforce_engaged = flag(k, v)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -431,6 +458,7 @@ impl Doctrine {
                 .collect(),
             by_def,
             pace: self.pace,
+            pace_slowest: self.pace_slowest,
             fight: self.aim == Aim::Artillery,
             rallied: self.rallied,
             aim: self.aim,
@@ -442,6 +470,9 @@ impl Doctrine {
             shields_low: self.shields_low,
             shields_ok: self.shields_ok,
             flee_threat: self.flee_threat,
+            strays: self.strays,
+            regroup: self.regroup,
+            reinforce_engaged: self.reinforce_engaged,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
         }
@@ -468,6 +499,8 @@ pub struct Shape {
     pub by_def: BTreeMap<i32, usize>,
     /// The leader's speed limit, elmos/s (0: none).
     pub pace: f32,
+    /// Share of the slowest member's speed the leader keeps to (0: none).
+    pub pace_slowest: f32,
     /// The leader advances under fight orders (stopping where it reaches)
     /// rather than move orders.
     pub fight: bool,
@@ -482,6 +515,9 @@ pub struct Shape {
     pub shields_low: f32,
     pub shields_ok: f32,
     pub flee_threat: bool,
+    pub strays: bool,
+    pub regroup: bool,
+    pub reinforce_engaged: bool,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
 }
@@ -497,6 +533,7 @@ impl Default for Shape {
             roles: Vec::new(),
             by_def: BTreeMap::new(),
             pace: 0.0,
+            pace_slowest: 0.0,
             fight: false,
             rallied: 0.75,
             aim: Aim::Assault,
@@ -508,6 +545,9 @@ impl Default for Shape {
             shields_low: 0.5,
             shields_ok: 0.8,
             flee_threat: true,
+            strays: false,
+            regroup: false,
+            reinforce_engaged: false,
             fire_state: None,
             fire_at_radar: None,
         }
@@ -564,6 +604,9 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.muster = 0.0;
     felon.retreat_health = 0.85;
     felon.flee_threat = false;
+    felon.strays = true;
+    felon.regroup = true;
+    felon.reinforce_engaged = true;
 
     let mut lance = Doctrine::new("lance");
     lance.note = "Lances (980 range, 1000 hp) holding fire at radar dots, a Halberd to spot for them, a Mace \
@@ -643,13 +686,17 @@ pub fn seeds() -> Vec<Doctrine> {
     impaler.engage_value = 900.0;
 
     let mut ravager = Doctrine::new("ravager");
-    ravager.note = "Rover assault squads: five Ravagers and a Leveler.".into();
+    ravager.note = "Rover assault: Ravagers with a Leveler per five against raiders, a composition grown \
+                    without end; kept to the Levelers' pace, it goes in once worth 1200 and rallied."
+        .into();
     ravager.enabled = false;
     ravager.core = vec!["vehassault".into()];
-    ravager.cores_per_force = 5;
+    ravager.cores_per_force = 0;
     ravager.roles = vec![Role::escort("screen", &["vehriot"], "ceil(cores / 5)", 100.0, 0.5)];
+    ravager.pace_slowest = 0.85;
     ravager.aim = Aim::Assault;
     ravager.engage_value = 1200.0;
+    ravager.muster = 0.0;
 
     let mut ghostbombs = Doctrine::new("ghostbombs");
     ghostbombs.note = "An Iris cloaking bombs (orbiting within its 350 cloak, holding fire) unseen to a \
@@ -738,7 +785,8 @@ mod tests {
         assert_eq!(felon.aim, Aim::Assault);
         assert_eq!((felon.pace, felon.engage_value, felon.muster), (45.0, 1300.0, 0.0));
         assert_eq!((felon.retreat_health, felon.shields_low, felon.shields_ok), (0.85, 0.5, 0.8));
-        assert!(felon.pool_with_allies && !felon.flee_threat);
+        assert!(felon.pool_with_allies && !felon.flee_threat && felon.strays);
+        assert!(felon.regroup && felon.reinforce_engaged);
         // Every role takes all that come; Aspis go to the strongest ball
         // and their area shields are not gauged.
         assert!(felon.roles.iter().all(|r| r.want.is_none() && r.produce == 0.0));
@@ -800,6 +848,20 @@ mod tests {
         assert!(shape.low_shields(false, 0.4));
         assert!(shape.low_shields(true, 0.7));
         assert!(!shape.low_shields(true, 0.85));
+    }
+
+    #[test]
+    fn ravagers_are_a_composition() {
+        // A Leveler per five Ravagers, grown without end, at the Levelers'
+        // pace, going in on value alone (no muster clock).
+        let mut d = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
+        assert_eq!((d.cores_per_force, d.muster, d.pace_slowest), (0, 0.0, 0.85));
+        assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
+        let Value::Object(p) = json!({"cores_per_force": 0, "pace_slowest": 0.5}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.cores_per_force, d.pace_slowest), (0, 0.5));
+        let Value::Object(p) = json!({"pace_slowest": 2}) else { panic!() };
+        assert!(d.apply(&p).is_err());
     }
 
     #[test]

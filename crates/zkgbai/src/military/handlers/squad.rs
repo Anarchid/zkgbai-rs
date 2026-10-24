@@ -107,8 +107,36 @@ fn same_ways(a: Option<Tier>, b: Option<Tier>) -> bool {
     a == b || matches!((a, b), (Some(Tier::Bot), Some(Tier::Amphib)) | (Some(Tier::Amphib), Some(Tier::Bot)))
 }
 
-/// Low-shield hysteresis for shield balls: retreat below half shields and
-/// come back once they are mostly recharged.
+/// A force of a core's doctrine, as the core sees it.
+struct Opening {
+    id: SquadId,
+    cores: usize,
+    engaging: bool,
+    formed: i32,
+    value: f32,
+}
+
+/// The force a new core joins: pooled with allies, the least valuable;
+/// with room for it (`cores_per_force` 0: no limit), for a doctrine that
+/// reinforces engaged forces the least valuable (the shield ball, as
+/// always), else the newest not engaged, so cores never trickle to a fight
+/// alone. None: it starts one.
+fn core_room(forces: &[Opening], pooled: bool, reinforce: bool, cores_per_force: usize) -> Option<SquadId> {
+    let room = |f: &&Opening| cores_per_force == 0 || f.cores < cores_per_force;
+    if pooled {
+        return forces.iter().min_by(|a, b| a.value.total_cmp(&b.value)).map(|f| f.id);
+    }
+    if reinforce {
+        return forces.iter().filter(room).min_by(|a, b| a.value.total_cmp(&b.value)).map(|f| f.id);
+    }
+    forces.iter().filter(room).filter(|f| !f.engaging).max_by_key(|f| f.formed).map(|f| f.id)
+}
+
+/// "; engaged N s, its leader averaging V" for a force's log line.
+fn engaged_for(ran: Option<(f32, f32)>) -> String {
+    ran.map_or(String::new(), |(secs, speed)| format!("; engaged {secs:.0} s, its leader averaging {speed:.0}"))
+}
+
 impl Ai {
     pub fn squad_update(&mut self, frame: i32) {
         if frame % 30 == (self.offset + 7) % 30 {
@@ -338,13 +366,15 @@ impl Ai {
 
     /// Place a unit in a taskforce (see `military::taskforce`), by the
     /// doctrine that takes its type. A core starts a force of its own
-    /// unless one has room for more cores (or, merged with allies, the
-    /// doctrine pools them all in one). A role member joins the force of
+    /// unless one not engaged has room for more cores (see `core_room`;
+    /// merged with allies, the doctrine may pool them all in one). A role
+    /// member joins the force of
     /// its doctrine short of the role: with `to_strongest` the one with
     /// fewest of the role (the most valuable of those, where it does most
     /// good, as Aspis do), else the least valuable. With no force to join
     /// it fights as an assault. A unit no doctrine takes (a squadless Pyro)
-    /// joins the least valuable taskforce, as with the shield ball always.
+    /// joins the least valuable force of a doctrine taking `strays` (the
+    /// shield ball, as always), else fights as an assault too.
     fn squad_assign_taskforce_member(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
@@ -354,20 +384,28 @@ impl Ai {
         let is_core = doctrine.is_some_and(|d| d.is_core(&name, &tf.classes));
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));
         let to_strongest = doctrine.zip(role).is_some_and(|(d, r)| d.roles[r].to_strongest);
-        let (pool, cores_per_force) = doctrine.map_or((false, 1), |d| (d.pool_with_allies, d.cores_per_force as usize));
-        // Forces of its doctrine (of any, for a unit none takes) that go
-        // where it goes.
+        let (pool, reinforce, cores_per_force) =
+            doctrine.map_or((false, false, 1), |d| (d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize));
+        // Forces of its doctrine (of those taking strays, for a unit none
+        // takes) that go where it goes.
         let forces: Vec<SquadId> = (self.squad_handler.taskforces.iter().copied())
-            .filter(|&sid| self.squads.get(sid).is_some_and(|q| dname.as_ref().is_none_or(|d| &q.shape.doctrine == d)))
+            .filter(|&sid| {
+                self.squads.get(sid).is_some_and(|q| dname.as_ref().map_or(q.shape.strays, |d| &q.shape.doctrine == d))
+            })
             .filter(|&sid| is_core || self.squad_fits(sid, id))
             .collect();
         let needed = if is_core {
             let pooled = pool && self.merged_allies > 0;
-            let room = (forces.iter().filter_map(|&sid| self.squads.get(sid)))
-                .filter(|q| pooled || q.cores(&self.fighters) < cores_per_force)
-                .min_by(|a, b| a.metal_value.total_cmp(&b.metal_value))
-                .map(|q| q.id);
-            match room {
+            let open: Vec<Opening> = (forces.iter().filter_map(|&sid| self.squads.get(sid)))
+                .map(|q| Opening {
+                    id: q.id,
+                    cores: q.cores(&self.fighters),
+                    engaging: q.engaging,
+                    formed: q.formed,
+                    value: q.metal_value,
+                })
+                .collect();
+            match core_room(&open, pooled, reinforce, cores_per_force) {
                 Some(sid) => {
                     self.retreat_remove_unit(unit);
                     Some(sid)
@@ -394,9 +432,12 @@ impl Ai {
                 }
             }
         } else {
+            // Forces that take members now (engaged ones only if their
+            // doctrine reinforces them), short of its role.
+            let open = |sid: SquadId| self.squads.get(sid).is_some_and(|q| !q.engaging || q.shape.reinforce_engaged);
             let short: Vec<SquadId> = match role {
-                Some(r) => forces.iter().copied().filter(|&sid| self.squad_short_of(sid, r)).collect(),
-                None => forces.clone(),
+                Some(r) => forces.iter().copied().filter(|&sid| open(sid) && self.squad_short_of(sid, r)).collect(),
+                None => forces.iter().copied().filter(|&sid| open(sid)).collect(),
             };
             if short.is_empty() {
                 // No force to join: fight as an assault.
@@ -422,10 +463,31 @@ impl Ai {
             }
         };
 
+        let Some(sid) = needed else { return };
+        self.squad_log_join(sid, id, "joins");
         let mut nav = nav!(self);
-        if let Some(s) = needed.and_then(|sid| self.squads.get_mut(sid)) {
+        if let Some(s) = self.squads.get_mut(sid) {
             s.add_unit_nav(id, &mut self.fighters, &mut nav);
         }
+    }
+
+    /// Log a unit about to join force `sid`: the force's state and how far
+    /// the unit has to go to its leader.
+    fn squad_log_join(&mut self, sid: SquadId, id: i32, how: &str) {
+        let Some(s) = self.squads.get(sid) else { return };
+        let Some(f) = self.fighters.get(&id) else { return };
+        let state = match (s.engaging, s.engaged) {
+            (true, _) => "engaged",
+            (false, 0) => "forming",
+            _ => "rallying",
+        };
+        let far = s.get_leader(&self.fighters).map_or(0.0, |l| distance(l.pos(), f.get_pos()));
+        let line = format!(
+            "taskforce: a {} {how} the {} force (squad {sid}, {state}), {far:.0} from its leader",
+            self.defs.name_of(f.unit),
+            s.shape.doctrine
+        );
+        self.log(&line);
     }
 
     /// A unit some doctrine takes: drop forces that lost their cores
@@ -444,7 +506,11 @@ impl Ai {
         for sid in std::mem::take(&mut self.squad_handler.taskforces) {
             let Some(s) = self.squads.get_mut(sid) else { continue };
             if s.is_dead(&self.fighters) || s.cores(&self.fighters) == 0 {
-                fit.extend(s.disband(&mut self.fighters));
+                let doctrine = s.shape.doctrine.clone();
+                let gone = s.disband(&mut self.fighters);
+                let line = format!("taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere", gone.len());
+                self.log(&line);
+                fit.extend(gone);
                 self.squad_delete_squad(sid);
             } else {
                 self.squad_handler.taskforces.push_back(sid);
@@ -494,6 +560,7 @@ impl Ai {
                 }
             }
             self.retreat_remove_unit(unit);
+            self.squad_log_join(sid, id, "is called to");
             let mut nav = nav!(self);
             if let Some(s) = self.squads.get_mut(sid) {
                 s.add_unit_nav(id, &mut self.fighters, &mut nav);
@@ -715,7 +782,8 @@ impl Ai {
 
     /// Process up to one taskforce at a time, four per second, by its
     /// doctrine's conduct: fall back on low shields or health; engage once
-    /// worth enough (or mustered long enough), rallied and led by a core,
+    /// worth enough (or mustered long enough), rallied and led by a core
+    /// (once engaged, it stays in though scattered unless it regroups),
     /// at what its aim says (falling back from threat it cannot take if
     /// the doctrine says to); else keep out of threat, at the rally point.
     fn squad_assign_taskforces(&mut self) {
@@ -725,8 +793,13 @@ impl Ai {
                 // Disband coreless forces: their members join other forces
                 // if there are, else fight as assaults.
                 let doctrine = s.shape.doctrine.clone();
+                let ran = if s.engaging { s.engaged_speed(self.frame) } else { None };
                 let fit = s.disband(&mut self.fighters);
-                self.log(&format!("taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere", fit.len()));
+                self.log(&format!(
+                    "taskforce: the {doctrine} force (squad {sid}) lost its cores; {} go elsewhere{}",
+                    fit.len(),
+                    engaged_for(ran)
+                ));
                 for fi in fit {
                     self.squad_assign_taskforce_member(fi);
                 }
@@ -747,23 +820,30 @@ impl Ai {
             let courage = s.courage;
             let mustered = shape.muster > 0.0 && (self.frame - s.formed) as f32 >= shape.muster * 30.0;
             let leader = s.get_leader(&self.fighters);
+            let engaging = s.engaging;
+            let worth = metal_value > shape.engage_value || mustered;
+            let led = leader.filter(|l| shape.is_core(l.def().map(|d| d.id())));
+            // Being rallied lets it go in; engaged, only a doctrine that
+            // regroups breaks off when its members scatter.
+            let rallied = self.squad_is_rallied(sid) || (engaging && !shape.regroup);
 
-            if low_shields {
+            // Where it engages, if it does; else why not.
+            let mut engage_at = None;
+            let why = if low_shields {
                 let haven = self.graph_get_closest_raider_haven(pos);
                 self.squad_retreat_to(sid, haven);
+                "low shields"
             } else if health < shape.retreat_health {
                 let haven = self.graph_get_closest_haven(pos);
                 self.squad_retreat_to(sid, haven);
-            } else if let Some(leader) = leader.filter(|&l| {
-                (metal_value > shape.engage_value || mustered)
-                    && shape.is_core(l.def().map(|d| d.id()))
-                    && self.squad_is_rallied(sid)
-            }) {
+                "hurt"
+            } else if let Some(leader) = led.filter(|_| worth && rallied) {
                 let view = self.war.view(leader.def());
                 let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
                 if shape.flee_threat && view.get_effective_threat(pos) / courage > tolerance {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
+                    "threat"
                 } else {
                     let target = match shape.aim {
                         Aim::Artillery => self.war_get_arty_target(pos, false),
@@ -774,26 +854,102 @@ impl Ai {
                         _ => self.war_get_target(leader, false),
                     };
                     self.squad_set_target(sid, target);
+                    engage_at = Some(target);
+                    ""
                 }
-            } else if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
-                let haven = self.graph_get_closest_haven(pos);
-                self.squad_retreat_to(sid, haven);
             } else {
+                let short = if !worth {
+                    "worth too little"
+                } else if led.is_none() {
+                    "led by no core"
+                } else {
+                    "scattered"
+                };
+                if self.war.get_effective_threat(pos) > 0.0 || self.war.get_porc_threat(pos) > 0.0 {
+                    let haven = self.graph_get_closest_haven(pos);
+                    self.squad_retreat_to(sid, haven);
+                    self.squad_conducted(sid, None, &format!("{short}, under threat"));
+                    self.squad_handler.taskforces.push_back(sid);
+                    return;
+                }
                 let rally = self.war_get_rally_point(pos);
                 self.squad_set_target(sid, rally);
-            }
-            if let Some(s) = self.squads.get_mut(sid) {
-                s.last_assignment_frame = self.frame;
-            }
+                short
+            };
+            self.squad_conducted(sid, engage_at, why);
             self.squad_handler.taskforces.push_back(sid);
             return;
         }
+    }
+
+    /// After a force's conduct: keep its pace, note whether it engages, and
+    /// log when it starts (its make-up then) or stops (and why).
+    fn squad_conducted(&mut self, sid: SquadId, engage_at: Option<Vec3>, why: &str) {
+        let frame = self.frame;
+        let Some(s) = self.squads.get_mut(sid) else { return };
+        s.last_assignment_frame = frame;
+        s.keep_pace(&self.fighters);
+        let was = s.engaging;
+        s.engaging = engage_at.is_some();
+        let ran = if was { s.engaged_speed(frame) } else { None };
+        s.track_engaged(&self.fighters, frame);
+        if was == s.engaging {
+            return;
+        }
+        let first = s.engaged == 0;
+        if s.engaging && first {
+            s.engaged = frame;
+        }
+        let s = &*s;
+        let doctrine = s.shape.doctrine.clone();
+        let roles = self.taskforces.doctrine(&doctrine).map(|d| d.roles.clone()).unwrap_or_default();
+        let census = s.census(&self.fighters);
+        let make_up: Vec<String> = roles.iter().zip(&census).map(|(r, n)| format!("{} {n}", r.name)).collect();
+        let line = format!(
+            "{} cores, {} members ({}), {:.0} metal, rallied {}",
+            s.cores(&self.fighters),
+            s.fighters.len(),
+            make_up.join(", "),
+            s.metal_value,
+            s.rally_fraction(&self.fighters).map_or("-".to_owned(), |r| format!("{:.0}%", 100.0 * r))
+        );
+        let line = match engage_at {
+            Some(t) => format!(
+                "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {}; target ({:.0}, {:.0})",
+                if first { " first" } else { " again" },
+                if s.paced() > 0.0 { format!("{:.0}", s.paced()) } else { "free".to_owned() },
+                t.x,
+                t.z
+            ),
+            None => format!("taskforce: the {doctrine} force (squad {sid}) breaks off ({why}): {line}{}", engaged_for(ran)),
+        };
+        self.log(&line);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cores_join_the_newest_force_not_engaged() {
+        let f = |id, cores, engaging, formed, value| Opening { id, cores, engaging, formed, value };
+        let forces = [f(1, 3, false, 100, 900.0), f(2, 1, true, 300, 200.0), f(3, 2, false, 200, 500.0)];
+        // Not the engaged force, though it is the newest and least valuable.
+        assert_eq!(core_room(&forces, false, false, 0), Some(3));
+        // Full forces take no more; with none open, a new force forms.
+        assert_eq!(core_room(&forces, false, false, 2), None);
+        assert_eq!(core_room(&forces, false, false, 3), Some(3));
+        assert_eq!(core_room(&[f(1, 1, true, 100, 250.0)], false, false, 0), None);
+        // Pooled with allies, the least valuable takes it, engaged or not.
+        assert_eq!(core_room(&forces, true, false, 1), Some(2));
+        // A doctrine reinforcing engaged forces (the shield ball): the least
+        // valuable with room, engaged or not, as before doctrines.
+        assert_eq!(core_room(&forces, false, true, 0), Some(2));
+        assert_eq!(core_room(&forces, false, true, 3), Some(2));
+        assert_eq!(core_room(&forces, false, true, 2), Some(2));
+        assert_eq!(core_room(&forces, false, true, 1), None);
+    }
 
     #[test]
     fn slots_follow_name_prefixes() {
