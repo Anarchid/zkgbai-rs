@@ -159,7 +159,16 @@ struct PerchState {
     /// The top square and the height it is levelled to, for a re-borrow.
     square: [Vec3; 4],
     level: f32,
+    /// Waiting on the home side for a raiser to come within `RAISE_NEAR`
+    /// of the site; and whether the raise has begun.
+    staged: bool,
+    started: bool,
 }
+
+/// A raiser this close to the site lets the core go onto it; the core
+/// waits this far from the site toward home until then.
+const RAISE_NEAR: f32 = 400.0;
+const STAGE_OFF: f32 = 300.0;
 
 /// Raisers called away are replaced this many times within the borrow.
 const RAISE_TRIES: u32 = 3;
@@ -448,7 +457,10 @@ impl Ai {
     /// Whether force `sid` has its perch going up or up (it then stays
     /// where it is: a perched core cannot come down).
     pub(crate) fn siege_perched(&self, sid: SquadId) -> bool {
-        (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned)
+        // Up only: a core staging or raising at ground level falls back like
+        // any hurt core (crab arm (1): Crabs held hurt at ground level with
+        // their raisers far off).
+        (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| p.up && !p.abandoned)
     }
 
     /// How high the perch of force `sid` raises its leading core's aim
@@ -896,17 +908,9 @@ impl Ai {
         let f = self.taskforces.siege.forces.entry(sid).or_default();
         match f.perch.as_mut() {
             None => {
-                if distance(p, site) > ON_SITE {
-                    if frame - f.on_site_sent >= RESEND {
-                        kgb_move_to_exact(leader, site, 8.0, 0, frame);
-                        f.on_site_sent = frame;
-                    }
-                    return;
-                }
-                // On the site: hold, borrow the raisers, raise; not at a flat
-                // stand, and not where the raised point reaches nothing (a
-                // borrow there buys nothing: the lib-v17 smoke's second perch).
-                leader.set_move_state(0, 0);
+                // Not at a flat stand, and not where the raised point reaches
+                // nothing (a borrow there buys nothing: the lib-v17 smoke's
+                // second perch).
                 let is_site = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).is_some_and(|s| s.perch_site);
                 let reach_k = {
                     let up = perch.height + AIM_ABOVE;
@@ -926,51 +930,14 @@ impl Ai {
                     }
                     return;
                 }
+                // Raisers first: borrowed now and held; the core waits on the
+                // home side of the site until one of them is within a raise
+                // of it (crab arm (1): Crabs parked at their sites with the
+                // nearest Weaver a median 877 off, fought alone and were held
+                // there hurt).
                 let (raisers, want) = self.siege_borrow(sid, perch, site, &[]);
-                let map = self.cb.map();
-                let now = map.elevation_at(site.x, site.z);
-                // The ground before any pillar here (a raise taken up again
-                // does not stack on the first).
-                let known = self.taskforces.siege.pillars.iter().find(|(p, _)| distance(*p, site) <= SAME_PILLAR).map(|x| x.1);
-                let ground = known.unwrap_or(now);
-                if known.is_none() {
-                    self.taskforces.siege.pillars.push((site, ground));
-                }
-                if now - ground >= perch.height - UP_SLACK {
-                    // The pillar stands already (raised before and left).
-                    for u in &raisers {
-                        u.stop(0);
-                    }
-                    self.op_emit(
-                        "siege-perch",
-                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": now - ground, "seconds": 0, "raisers": 0, "standing": true}),
-                    );
-                    self.log(&format!(
-                        "taskforce: a {} is perched {:.0} up at ({:.0}, {:.0}) on a pillar that stood",
-                        self.defs.name_of(leader), now - ground, site.x, site.z
-                    ));
-                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
-                        f.perch = Some(PerchState {
-                            site,
-                            ground,
-                            since: frame,
-                            raisers: Vec::new(),
-                            up: true,
-                            abandoned: false,
-                            ground_target: None,
-                            foot_frames: 0,
-                            foot_last: frame,
-                            returned: Some(frame),
-                            stranded: None,
-                            raise: perch.height,
-                            tries: 0,
-                            square: [site; 4],
-                            level: 0.0,
-                        });
-                    }
-                    return;
-                }
                 if raisers.is_empty() {
+                    let ground = self.cb.map().elevation_at(site.x, site.z);
                     self.op_emit(
                         "siege-perch",
                         json!({"event": "refused", "squad": sid, "reason": "no raisers", "site": [site.x, site.z], "wanted": want}),
@@ -992,6 +959,8 @@ impl Ai {
                             tries: 0,
                             square: [site; 4],
                             level: 0.0,
+                            staged: false,
+                            started: false,
                         });
                     }
                     self.log(&format!(
@@ -1000,82 +969,23 @@ impl Ai {
                     ));
                     return;
                 }
-                let h = perch.top / 2.0;
-                let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
-                let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
-                let names: Vec<String> = raisers.iter().map(|u| format!("{} {}", self.defs.name_of(*u), u.id())).collect();
-                let hold = (perch.borrow_s * 30.0) as i32;
-                // On a natural shoulder the raise asks the remainder only.
-                let natural = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map_or(0.0, |s| s.natural);
-                let raise = (perch.height - natural).max(0.0);
-                if raise < UP_SLACK {
-                    for u in &raisers {
-                        u.stop(0);
-                    }
-                    self.op_emit(
-                        "siege-perch",
-                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": 0.0, "natural": natural, "seconds": 0, "raisers": 0, "standing": true}),
-                    );
-                    self.log(&format!(
-                        "taskforce: a {} is perched at once at ({:.0}, {:.0}), {natural:.0} up by nature",
-                        self.defs.name_of(leader), site.x, site.z
-                    ));
-                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
-                        f.perch = Some(PerchState {
-                            site,
-                            ground,
-                            since: frame,
-                            raisers: Vec::new(),
-                            up: true,
-                            abandoned: false,
-                            ground_target: None,
-                            foot_frames: 0,
-                            foot_last: frame,
-                            returned: Some(frame),
-                            stranded: None,
-                            raise: 0.0,
-                            tries: 0,
-                            square,
-                            level: top,
-                        });
-                    }
-                    return;
-                }
-                self.terraform_level(&raisers, &square, top + raise, false);
-                // Held for the borrow: the economy's assignment leaves them
-                // to the raise (crab save arms: 46 of 49 raises given up for
-                // raisers called away).
-                self.eco_hold_terraform(&raisers, hold);
-                // What the raised point reaches, and the nearest armed
-                // static's reach to it (the standoff the gates read).
-                let up = perch.height.max(natural) + AIM_ABOVE;
-                let statics = self.siege_statics(up);
-                let reach = Self::siege_reach(leader, up);
-                let (k, v) = in_reach(site, reach, &statics);
-                let near = nearest(site, &statics);
+                self.eco_hold_terraform(&raisers, (perch.borrow_s * 30.0) as i32);
+                let home = self.graph.get_start_pos();
+                let stage = if home != NULLPOS && distance(site, home) > STAGE_OFF { get_directional_point(site, home, STAGE_OFF) } else { site };
+                kgb_move_to_exact(leader, stage, 20.0, 0, frame);
+                let ids: Vec<String> = raisers.iter().map(|u| format!("{} {}", self.defs.name_of(*u), u.id())).collect();
                 self.op_emit(
                     "siege-perch",
-                    json!({"event": "start", "squad": sid, "site": [site.x, site.z], "ground": ground, "height": perch.height,
-                           "natural": natural, "raise": raise,
-                           "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want,
-                           "reach_up": reach, "statics_in_reach": k, "worth_in_reach": v,
-                           "nearest": near.map(|(d, n)| json!({"distance": d, "range": n.nominal, "reach_up": n.raised, "standoff": d - n.range}))}),
+                    json!({"event": "staging", "squad": sid, "site": [site.x, site.z], "stage": [stage.x, stage.z],
+                           "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want}),
                 );
                 self.log(&format!(
-                    "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0}{} ({}); {k} statics worth {v:.0} in reach from {up:.0} up (reach {reach:.0}); the nearest armed static {}",
-                    self.defs.name_of(leader),
-                    site.x,
-                    site.z,
-                    raisers.len(),
-                    raise,
-                    if natural > 0.0 { format!(" on a natural {natural:.0}") } else { String::new() },
-                    names.join(", "),
-                    match near {
-                        Some((d, n)) => format!("is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {:.0})", n.nominal, n.raised, d - n.range),
-                        None => "is unknown".to_owned(),
-                    }
+                    "taskforce: a {} waits at ({:.0}, {:.0}) for its raisers ({}) before its perch at ({:.0}, {:.0})",
+                    self.defs.name_of(leader), stage.x, stage.z, ids.join(", "), site.x, site.z
                 ));
+                let ground = self.cb.map().elevation_at(site.x, site.z);
                 if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                    f.on_site_sent = frame;
                     f.perch = Some(PerchState {
                         site,
                         ground,
@@ -1088,14 +998,76 @@ impl Ai {
                         foot_last: frame,
                         returned: None,
                         stranded: None,
-                        raise,
+                        raise: perch.height,
                         tries: 1,
-                        square,
-                        level: top + raise,
+                        square: [site; 4],
+                        level: 0.0,
+                        staged: true,
+                        started: false,
                     });
                 }
             }
-            Some(ps) if !ps.up && !ps.abandoned => {
+            Some(ps) if !ps.started && !ps.abandoned => {
+                // Staging: a raiser within a raise of the site brings the core
+                // onto it; none within the borrow gives the perch up.
+                let near = ps.raisers.iter().filter(|u| u.health() > 0.0 && distance(u.pos(), site) <= RAISE_NEAR).count();
+                let since = (frame - ps.since) / 30;
+                if ps.staged {
+                    if near == 0 {
+                        if since as f32 >= perch.borrow_s {
+                            ps.abandoned = true;
+                            ps.returned = Some(frame);
+                            let raisers = ps.raisers.clone();
+                            for u in &raisers {
+                                if u.health() > 0.0 {
+                                    u.stop(0);
+                                }
+                            }
+                            self.op_emit(
+                                "siege-perch",
+                                json!({"event": "given up", "squad": sid, "site": [site.x, site.z], "raised": 0.0, "seconds": since, "reason": "the raisers never came",
+                                       "weaver_seconds": since as usize * raisers.len()}),
+                            );
+                            let ids: Vec<String> = raisers.iter().map(|u| u.id().to_string()).collect();
+                            self.log(&format!(
+                                "taskforce: a {} gives up its perch at ({:.0}, {:.0}) after {since} s staging: the raisers never came; it fights flat and returns {} constructors (units {})",
+                                self.defs.name_of(leader), site.x, site.z, raisers.len(), ids.join(", ")
+                            ));
+                        } else {
+                            let home = self.graph.get_start_pos();
+                            let stage = if home != NULLPOS && distance(site, home) > STAGE_OFF { get_directional_point(site, home, STAGE_OFF) } else { site };
+                            let sent = self.taskforces.siege.forces.get(&sid).map_or(0, |f| f.on_site_sent);
+                            if distance(p, stage) > AT_STATION && frame - sent >= RESEND {
+                                kgb_move_to_exact(leader, stage, 20.0, 0, frame);
+                                if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                                    f.on_site_sent = frame;
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    ps.staged = false;
+                    let ids: Vec<String> = ps.raisers.iter().map(|u| u.id().to_string()).collect();
+                    self.op_emit("siege-perch", json!({"event": "raisers near", "squad": sid, "site": [site.x, site.z], "seconds": since, "near": near}));
+                    self.log(&format!(
+                        "taskforce: a {}'s raisers (units {}) are within {RAISE_NEAR:.0} of ({:.0}, {:.0}) after {since} s staging ({near} near); it goes onto the site",
+                        self.defs.name_of(leader), ids.join(", "), site.x, site.z
+                    ));
+                }
+                if distance(p, site) > ON_SITE {
+                    let sent = self.taskforces.siege.forces.get(&sid).map_or(0, |f| f.on_site_sent);
+                    if frame - sent >= RESEND {
+                        kgb_move_to_exact(leader, site, 8.0, 0, frame);
+                        if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                            f.on_site_sent = frame;
+                        }
+                    }
+                    return;
+                }
+                leader.set_move_state(0, 0);
+                self.siege_raise_start(sid, perch, leader, site, frame, near);
+            }
+            Some(ps) if ps.started && !ps.up && !ps.abandoned => {
                 let raised = self.cb.map().elevation_at(ps.site.x, ps.site.z) - ps.ground;
                 let working = ps.raisers.iter().filter(|u| u.health() > 0.0 && is_terraforming(**u)).count();
                 let since = (frame - ps.since) / 30;
@@ -1181,6 +1153,95 @@ impl Ai {
                 }
             }
             Some(_) => {}
+        }
+    }
+
+    /// The core stands on its site with raisers near: the raise begins.
+    /// The ground before any pillar here is remembered (a raise taken up
+    /// again does not stack on the first); a pillar found standing, or a
+    /// natural shoulder high enough, is perched at once.
+    fn siege_raise_start(&mut self, sid: SquadId, perch: &Perch, leader: Unit, site: Vec3, frame: i32, near: usize) {
+        let map = self.cb.map();
+        let now = map.elevation_at(site.x, site.z);
+        let known = self.taskforces.siege.pillars.iter().find(|(p, _)| distance(*p, site) <= SAME_PILLAR).map(|x| x.1);
+        let ground = known.unwrap_or(now);
+        if known.is_none() {
+            self.taskforces.siege.pillars.push((site, ground));
+        }
+        let natural = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map_or(0.0, |s| s.natural);
+        let raise = (perch.height - natural).max(0.0);
+        let raisers: Vec<Unit> = self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref()).map_or(Vec::new(), |p| p.raisers.clone());
+        let h = perch.top / 2.0;
+        let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
+        let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
+        let standing = now - ground >= perch.height - UP_SLACK;
+        if standing || raise < UP_SLACK {
+            for u in &raisers {
+                u.stop(0);
+            }
+            self.op_emit(
+                "siege-perch",
+                json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": now - ground, "natural": natural, "seconds": 0, "raisers": 0, "standing": true}),
+            );
+            self.log(&format!(
+                "taskforce: a {} is perched at once at ({:.0}, {:.0}), {:.0} up ({})",
+                self.defs.name_of(leader),
+                site.x,
+                site.z,
+                (now - ground).max(natural),
+                if standing { "a pillar that stood" } else { "by nature" }
+            ));
+            if let Some(ps) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.perch.as_mut()) {
+                ps.ground = ground;
+                ps.up = true;
+                ps.started = true;
+                ps.returned = Some(frame);
+                ps.raisers.clear();
+                ps.raise = 0.0;
+                ps.square = square;
+                ps.level = top;
+            }
+            return;
+        }
+        let names: Vec<String> = raisers.iter().map(|u| format!("{} {}", self.defs.name_of(*u), u.id())).collect();
+        let hold = (perch.borrow_s * 30.0) as i32;
+        self.terraform_level(&raisers, &square, top + raise, false);
+        self.eco_hold_terraform(&raisers, hold);
+        let up = perch.height.max(natural) + AIM_ABOVE;
+        let statics = self.siege_statics(up);
+        let reach = Self::siege_reach(leader, up);
+        let (k, v) = in_reach(site, reach, &statics);
+        let nearest_s = nearest(site, &statics);
+        self.op_emit(
+            "siege-perch",
+            json!({"event": "start", "squad": sid, "site": [site.x, site.z], "ground": ground, "height": perch.height,
+                   "natural": natural, "raise": raise, "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(),
+                   "near": near, "reach_up": reach, "statics_in_reach": k, "worth_in_reach": v,
+                   "nearest": nearest_s.map(|(d, n)| json!({"distance": d, "range": n.nominal, "reach_up": n.raised, "standoff": d - n.range}))}),
+        );
+        self.log(&format!(
+            "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0}{} ({}; raisers within {RAISE_NEAR:.0}: {near}); {k} statics worth {v:.0} in reach from {up:.0} up (reach {reach:.0}); the nearest armed static {}",
+            self.defs.name_of(leader),
+            site.x,
+            site.z,
+            raisers.len(),
+            raise,
+            if natural > 0.0 { format!(" on a natural {natural:.0}") } else { String::new() },
+            names.join(", "),
+            match nearest_s {
+                Some((d, n)) => format!("is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {:.0})", n.nominal, n.raised, d - n.range),
+                None => "is unknown".to_owned(),
+            }
+        ));
+        if let Some(ps) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.perch.as_mut()) {
+            ps.ground = ground;
+            ps.since = frame;
+            ps.started = true;
+            ps.raise = raise;
+            ps.square = square;
+            ps.level = top + raise;
+            ps.tries = 1;
+            ps.foot_last = frame;
         }
     }
 
