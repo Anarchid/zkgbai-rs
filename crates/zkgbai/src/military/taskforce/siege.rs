@@ -136,7 +136,19 @@ struct PerchState {
     abandoned: bool,
     /// Attack-ground target (enemy id) the core was last set on.
     ground_target: Option<i32>,
+    /// Frames of the raise with an enemy at the foot (within `FOOT` of the
+    /// site), the last conduct frame that counted, and when the raisers
+    /// went back (none while they work).
+    foot_frames: i32,
+    foot_last: i32,
+    returned: Option<i32>,
+    /// Why the perched core would have left, said once (it cannot come down).
+    stranded: Option<String>,
 }
+
+/// An enemy this close to the site slows the raise 20x (the gadget's
+/// nearby-enemy check: half the top, 100, and 36 more).
+const FOOT: f32 = 170.0;
 
 #[derive(Default)]
 struct SiegeForce {
@@ -498,6 +510,12 @@ impl Ai {
                 json!({"event": "refused", "squad": sid, "reason": "no site", "candidates": picks.len(), "armed_statics": near,
                        "min_reach": perch.min_reach, "reach_up": reach}),
             );
+            self.log(&format!(
+                "taskforce: a {} finds no perch site: {} candidates about {near} armed statics reach fewer than {} or stand in reach; it stands flat",
+                self.defs.name_of(leader),
+                picks.len(),
+                perch.min_reach
+            ));
             // Flat it is, then: the flat statics and reach.
             let flat = self.siege_statics(0.0);
             let reach0 = Self::siege_reach(leader, 0.0);
@@ -610,6 +628,13 @@ impl Ai {
                         e.identified && !e.is_dead && (e.visible || e.is_static) && distance(p, e.position) <= range
                     });
                     state = if has { "deployed in range" } else { "deployed idle" };
+                    if is_leader && let Some(ps) = self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref()) {
+                        if ps.up {
+                            state = "perched";
+                        } else if !ps.abandoned {
+                            state = "raising";
+                        }
+                    }
                     let first = !self.taskforces.siege.guns.get(&id).is_some_and(|g| g.parked);
                     if first {
                         let near = nearest(p, &statics);
@@ -736,7 +761,19 @@ impl Ai {
                         self.defs.name_of(leader), now - ground, site.x, site.z
                     ));
                     if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
-                        f.perch = Some(PerchState { site, ground, since: frame, raisers: Vec::new(), up: true, abandoned: false, ground_target: None });
+                        f.perch = Some(PerchState {
+                            site,
+                            ground,
+                            since: frame,
+                            raisers: Vec::new(),
+                            up: true,
+                            abandoned: false,
+                            ground_target: None,
+                            foot_frames: 0,
+                            foot_last: frame,
+                            returned: Some(frame),
+                            stranded: None,
+                        });
                     }
                     return;
                 }
@@ -746,10 +783,22 @@ impl Ai {
                         json!({"event": "refused", "squad": sid, "reason": "no raisers", "site": [site.x, site.z], "wanted": want}),
                     );
                     if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
-                        f.perch = Some(PerchState { site, ground, since: frame, raisers: Vec::new(), up: false, abandoned: true, ground_target: None });
+                        f.perch = Some(PerchState {
+                            site,
+                            ground,
+                            since: frame,
+                            raisers: Vec::new(),
+                            up: false,
+                            abandoned: true,
+                            ground_target: None,
+                            foot_frames: 0,
+                            foot_last: frame,
+                            returned: Some(frame),
+                            stranded: None,
+                        });
                     }
                     self.log(&format!(
-                        "taskforce: a {} stands flat at ({:.0}, {:.0}): no constructor to raise its perch",
+                        "taskforce: a {} refuses its perch at ({:.0}, {:.0}): no constructor to raise it; it stands flat",
                         self.defs.name_of(leader), site.x, site.z
                     ));
                     return;
@@ -759,46 +808,100 @@ impl Ai {
                 let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
                 let names: Vec<String> = raisers.iter().map(|u| self.defs.name_of(*u).to_owned()).collect();
                 self.terraform_level(&raisers, &square, top + perch.height, false);
+                // What the raised point reaches, and the nearest armed
+                // static's reach to it (the standoff the gates read).
+                let up = perch.height + AIM_ABOVE;
+                let statics = self.siege_statics(up);
+                let reach = Self::siege_reach(leader, up);
+                let (k, v) = in_reach(site, reach, &statics);
+                let near = nearest(site, &statics);
                 self.op_emit(
                     "siege-perch",
                     json!({"event": "start", "squad": sid, "site": [site.x, site.z], "ground": ground, "height": perch.height,
-                           "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want}),
+                           "top": perch.top, "raisers": raisers.iter().map(|u| u.id()).collect::<Vec<_>>(), "wanted": want,
+                           "reach_up": reach, "statics_in_reach": k, "worth_in_reach": v,
+                           "nearest": near.map(|(d, n)| json!({"distance": d, "range": n.nominal, "reach_up": n.range, "standoff": d - n.range}))}),
                 );
                 self.log(&format!(
-                    "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0} ({})",
-                    self.defs.name_of(leader), site.x, site.z, raisers.len(), perch.height, names.join(", ")
+                    "taskforce: a {} perches at ({:.0}, {:.0}): {} raise it {:.0} ({}); {k} statics worth {v:.0} in reach from {up:.0} up (reach {reach:.0}); the nearest armed static {}",
+                    self.defs.name_of(leader),
+                    site.x,
+                    site.z,
+                    raisers.len(),
+                    perch.height,
+                    names.join(", "),
+                    match near {
+                        Some((d, n)) => format!("is {d:.0} away (range {:.0}, {:.0} to {up:.0} up, standoff {:.0})", n.nominal, n.range, d - n.range),
+                        None => "is unknown".to_owned(),
+                    }
                 ));
                 if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
-                    f.perch = Some(PerchState { site, ground, since: frame, raisers, up: false, abandoned: false, ground_target: None });
+                    f.perch = Some(PerchState {
+                        site,
+                        ground,
+                        since: frame,
+                        raisers,
+                        up: false,
+                        abandoned: false,
+                        ground_target: None,
+                        foot_frames: 0,
+                        foot_last: frame,
+                        returned: None,
+                        stranded: None,
+                    });
                 }
             }
             Some(ps) if !ps.up && !ps.abandoned => {
                 let raised = self.cb.map().elevation_at(ps.site.x, ps.site.z) - ps.ground;
                 let working = ps.raisers.iter().filter(|u| u.health() > 0.0 && is_terraforming(**u)).count();
                 let since = (frame - ps.since) / 30;
+                // An enemy at the foot slows the gadget 20x: count the time.
+                let site = ps.site;
+                let foot = (self.war.targets.values()).any(|e| !e.is_dead && e.visible && distance(e.position, site) <= FOOT);
+                if foot {
+                    ps.foot_frames += frame - ps.foot_last;
+                }
+                ps.foot_last = frame;
+                let foot_s = ps.foot_frames / 30;
                 if raised >= perch.height - UP_SLACK {
                     ps.up = true;
-                    let (site, n) = (ps.site, ps.raisers.len());
+                    ps.returned = Some(frame);
+                    let n = ps.raisers.len();
+                    let raisers = ps.raisers.clone();
                     self.op_emit(
                         "siege-perch",
-                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "raisers": n}),
+                        json!({"event": "up", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "raisers": n,
+                               "foot_seconds": foot_s, "weaver_seconds": since as usize * n}),
                     );
                     self.log(&format!(
-                        "taskforce: a {} is perched {raised:.0} up at ({:.0}, {:.0}) after {since} s",
+                        "taskforce: a {} is perched {raised:.0} up at ({:.0}, {:.0}) after {since} s ({n} raisers; an enemy at the foot {foot_s} s); it returns {n} constructors after {since} s each",
                         self.defs.name_of(leader), site.x, site.z
                     ));
+                    for u in &raisers {
+                        if u.health() > 0.0 {
+                            u.stop(0);
+                        }
+                    }
                 } else if since as f32 >= perch.borrow_s || (working == 0 && since >= 20) {
                     ps.abandoned = true;
-                    let site = ps.site;
+                    ps.returned = Some(frame);
+                    let n = ps.raisers.len();
+                    let raisers = ps.raisers.clone();
                     let why = if working == 0 { "the raisers were called away" } else { "time ran out" };
                     self.op_emit(
                         "siege-perch",
-                        json!({"event": "given up", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "reason": why}),
+                        json!({"event": "given up", "squad": sid, "site": [site.x, site.z], "raised": raised, "seconds": since, "reason": why,
+                               "foot_seconds": foot_s, "weaver_seconds": since as usize * n}),
                     );
                     self.log(&format!(
-                        "taskforce: a {} gives up its perch at ({:.0}, {:.0}), {raised:.0} up after {since} s: {why}; it fights flat",
+                        "taskforce: a {} gives up its perch at ({:.0}, {:.0}), {raised:.0} up after {since} s: {why} (an enemy at the foot {foot_s} s); it fights flat and returns {n} constructors after {since} s each",
                         self.defs.name_of(leader), site.x, site.z
                     ));
+                    for u in &raisers {
+                        if u.health() > 0.0 && is_terraforming(*u) {
+                            u.stop(0);
+                        }
+                    }
                 }
             }
             Some(_) => {}
@@ -941,7 +1044,20 @@ impl Ai {
                         u.stop(0);
                     }
                 }
-                self.op_emit("siege-perch", json!({"event": "left", "squad": sid, "reason": why}));
+                let borrowed = (p.returned.unwrap_or(self.frame) - p.since) / 30;
+                self.op_emit(
+                    "siege-perch",
+                    json!({"event": "left", "squad": sid, "reason": why, "site": [p.site.x, p.site.z], "was_up": p.up,
+                           "perched_seconds": if p.up { (self.frame - p.returned.unwrap_or(p.since)) / 30 } else { 0 },
+                           "weaver_seconds": borrowed as usize * p.raisers.len()}),
+                );
+                self.log(&format!(
+                    "taskforce: the pillar at ({:.0}, {:.0}) is left ({why}){}; {} constructors were borrowed {borrowed} s each",
+                    p.site.x,
+                    p.site.z,
+                    if p.up { format!(", perched {} s", (self.frame - p.returned.unwrap_or(p.since)) / 30) } else { String::new() },
+                    p.raisers.len()
+                ));
             }
         }
     }
@@ -1011,6 +1127,32 @@ impl Ai {
     /// `wait_army` dial).
     pub(crate) fn siege_station(&self, sid: SquadId) -> Option<Vec3> {
         self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos)
+    }
+
+    /// A perched force the wrapper would have called off (`why`): its core
+    /// cannot come down, said once per reason.
+    pub(crate) fn siege_stranded(&mut self, sid: SquadId, why: &str) {
+        let frame = self.frame;
+        let Some(ps) = self.taskforces.siege.forces.get_mut(&sid).and_then(|f| f.perch.as_mut()) else { return };
+        if ps.stranded.as_deref() == Some(why) {
+            return;
+        }
+        ps.stranded = Some(why.to_owned());
+        let (site, up, since) = (ps.site, ps.up, ps.returned.unwrap_or(ps.since));
+        let core = (self.squads.get(sid).and_then(|q| q.get_leader(&self.fighters))).map(|l| (self.defs.name_of(l).to_owned(), l.id()));
+        self.op_emit(
+            "siege-perch",
+            json!({"event": "cannot come down", "squad": sid, "site": [site.x, site.z], "reason": why, "up": up, "perched_seconds": (frame - since) / 30}),
+        );
+        if let Some((name, id)) = core {
+            self.log(&format!(
+                "taskforce: a {name} cannot come down ({why}) after {} s {} at ({:.0}, {:.0}) (unit {id})",
+                (frame - since) / 30,
+                if up { "perched" } else { "raising" },
+                site.x,
+                site.z
+            ));
+        }
     }
 
     /// Forget a gun that is gone.

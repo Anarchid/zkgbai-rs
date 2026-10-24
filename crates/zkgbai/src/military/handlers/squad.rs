@@ -1034,6 +1034,12 @@ impl Ai {
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
             let why = if perched && let Some(leader) = led {
+                // What would have called it off, for the record.
+                if low_shields {
+                    self.siege_stranded(sid, "low shields");
+                } else if health < shape.retreat_health {
+                    self.siege_stranded(sid, "hurt");
+                }
                 let (target, go) = self.siege_conduct(sid, leader);
                 if go {
                     self.squad_set_target(sid, target);
