@@ -30,6 +30,7 @@
 mod borders;
 mod build;
 mod graph;
+pub mod lanes;
 pub mod occupancy;
 pub mod paths;
 pub mod strategy;

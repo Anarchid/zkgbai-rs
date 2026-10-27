@@ -1,0 +1,12 @@
+[package]
+name = "openness"
+version = "0.1.0"
+description = "Structural openness of maps per movement tier: defensible fronts, gate cover, detours (development aid)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+zk-terrain.workspace = true
+serde_json = "1"

@@ -1227,26 +1227,26 @@ pub fn modules(ai: &mut Ai, _: &Args) -> Out {
     let list: Vec<Value> = MODULES
         .iter()
         .map(|(name, what)| {
-            let (issued, dropped) = stats
+            let (issued, dropped, foreign) = stats
                 .iter()
                 .filter(|(h, _)| *h == *name || h.starts_with(&format!("{name}.")))
-                .fold((0, 0), |(i, d), (_, s)| (i + s.issued, d + s.dropped));
+                .fold((0, 0, 0), |(i, d, f), (_, s)| (i + s.issued, d + s.dropped, f + s.foreign));
             let handlers: Vec<Value> = stats
                 .iter()
                 .filter(|(h, _)| *h == *name || h.starts_with(&format!("{name}.")))
-                .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped}))
+                .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped, "foreign": s.foreign}))
                 .collect();
             json!({"module": name, "does": what, "muted": reserved::is_muted(ai.cb, name),
-                   "orders_issued": issued, "orders_dropped": dropped, "handlers": handlers})
+                   "orders_issued": issued, "orders_dropped": dropped, "orders_foreign": foreign, "handlers": handlers})
         })
         .collect();
     let other: Vec<Value> = stats
         .iter()
         .filter(|(h, _)| !MODULES.iter().any(|(m, _)| h == m || h.starts_with(&format!("{m}."))))
-        .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped}))
+        .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped, "foreign": s.foreign}))
         .collect();
     Ok(json!({"modules": list, "other_handlers": other, "muted": muted,
-              "note": "muted modules keep their bookkeeping; only their orders to units are dropped (orders_dropped counts them, and orders to reserved units)"}))
+              "note": "muted modules keep their bookkeeping; only their orders to units are dropped (orders_dropped counts them, orders to reserved units, and orders_foreign: to units another module owns, see military::roles)"}))
 }
 
 /// The `n` most expensive handlers, and panics.

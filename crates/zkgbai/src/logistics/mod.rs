@@ -156,6 +156,9 @@ impl Worth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Defense,
+    /// A turret the posture ordered (see `posture`): crewed like a defense,
+    /// but never urgent enough to hold back the rest (no pause).
+    Posture,
     Grid,
     Factory,
     Antinuke,
@@ -167,6 +170,7 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Defense => "defense",
+            Kind::Posture => "posture",
             Kind::Grid => "grid",
             Kind::Factory => "factory",
             Kind::Antinuke => "antinuke",

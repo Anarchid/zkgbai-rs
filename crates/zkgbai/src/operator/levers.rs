@@ -121,6 +121,33 @@ fn via(ai: &mut Ai, run: fn(&mut Ai, &Args) -> Result<Value, String>, args: Valu
     run(ai, &Args(&args)).map(|_| ())
 }
 
+/// A posture lever: its value (the AI's own when unset) and what the
+/// budget comes to now.
+fn posture_reading(ai: &Ai, over: Option<f32>, default: f32) -> Reading {
+    let p = &ai.posture;
+    let note = if ai.dev_off("posture") {
+        "posture is off in this game (feature posture)".to_string()
+    } else {
+        format!(
+            "share now {:.0}% (laneness {:.2}, density {:.0}): {:.0} of {:.0} metal in fixed defenses",
+            p.share * 100.0,
+            p.laneness(),
+            p.density,
+            p.defense,
+            p.share * p.standing
+        )
+    };
+    Reading { value: r2(over.unwrap_or(default)), auto: over.is_none(), note: Some(note) }
+}
+
+fn posture_set(ai: &mut Ai, name: &str, v: Option<&Value>) -> Result<(), String> {
+    let value = match v {
+        None => -1.0,
+        Some(v) => num(v)?,
+    };
+    via(ai, actions::dial, json!({"name": name, "value": value}))
+}
+
 fn qrf_note(ai: &Ai) -> Option<String> {
     (!ai.qrf.on).then(|| "the QRF is off in this game (feature qrf)".into())
 }
@@ -325,6 +352,59 @@ pub static LEVERS: &[Lever] = &[
             Reading { value: json!(a), auto: a == "mark", note: None }
         },
         set: |ai, v| via(ai, qrf_ops::set, json!({"algo": v.map_or(Ok("mark"), word)?})),
+    },
+    Lever {
+        name: "defense_floor",
+        group: "Defense posture",
+        label: "Defense floor",
+        help: "Share of our standing metal kept in fixed defenses on any map, before lanes and density add theirs.",
+        kind: Kind::Range { min: 0.0, max: 0.5, step: 0.01, log: false, format: Format::Percent },
+        ends: ("none", "half"),
+        read: |ai| posture_reading(ai, ai.op.over.defense_floor, crate::posture::FLOOR),
+        set: |ai, v| posture_set(ai, "defense_floor", v),
+    },
+    Lever {
+        name: "defense_lane",
+        group: "Defense posture",
+        label: "Lane defense",
+        help: "Share added on a map whose terrain closes our metal off behind narrow fronts, against the enemy \
+               army's movement type (bots: fully at openness 0.35 and below, none from 0.85; vehicles and hovers: \
+               0.30 and 0.65), tempered by the map's own metal density.",
+        kind: Kind::Range { min: 0.0, max: 0.6, step: 0.01, log: false, format: Format::Percent },
+        ends: ("ignore lanes", "fortify lanes"),
+        read: |ai| posture_reading(ai, ai.op.over.defense_lane, crate::posture::LANE_WEIGHT),
+        set: |ai, v| posture_set(ai, "defense_lane", v),
+    },
+    Lever {
+        name: "defense_density",
+        group: "Defense posture",
+        label: "Density defense",
+        help: "Share added as standing metal per square kilo-elmo (ours and the enemy's known) rises to the density \
+               reference.",
+        kind: Kind::Range { min: 0.0, max: 0.6, step: 0.01, log: false, format: Format::Percent },
+        ends: ("ignore density", "dig in"),
+        read: |ai| posture_reading(ai, ai.op.over.defense_density, crate::posture::DENSITY_WEIGHT),
+        set: |ai, v| posture_set(ai, "defense_density", v),
+    },
+    Lever {
+        name: "defense_cap",
+        group: "Defense posture",
+        label: "Defense cap",
+        help: "Most of our standing metal fixed defenses may hold.",
+        kind: Kind::Range { min: 0.0, max: 0.9, step: 0.01, log: false, format: Format::Percent },
+        ends: ("none", "turtle"),
+        read: |ai| posture_reading(ai, ai.op.over.defense_cap, crate::posture::CAP),
+        set: |ai, v| posture_set(ai, "defense_cap", v),
+    },
+    Lever {
+        name: "density_ref",
+        group: "Defense posture",
+        label: "Density reference",
+        help: "Standing metal per square kilo-elmo at which density counts fully (the F12 regime label is 1500).",
+        kind: Kind::Range { min: 300.0, max: 6000.0, step: 50.0, log: true, format: Format::Count },
+        ends: ("early", "late"),
+        read: |ai| posture_reading(ai, ai.op.over.density_ref, crate::posture::DENSITY_REF),
+        set: |ai, v| posture_set(ai, "density_ref", v),
     },
 ];
 

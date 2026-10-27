@@ -247,7 +247,21 @@ pub fn dial(ai: &mut Ai, a: &Args) -> Out {
                 ai.op.over.buildpower = v.clamp(0.5, 3.0);
             }
         }
-        other => return Err(format!("unknown dial '{other}': greed, line, buildpower")),
+        key if super::POSTURE_SETTINGS.iter().any(|(k, _, _)| *k == key) => {
+            let slot = super::POSTURE_SETTINGS.iter().find(|(k, _, _)| *k == key).map(|s| s.2);
+            if let Some(slot) = slot {
+                // A negative value puts the lever back to the AI's own.
+                *slot(&mut ai.op.over) = match a.opt_f32("value")? {
+                    Some(v) if v >= 0.0 => Some(super::posture_clamp(key, v)),
+                    _ => None,
+                };
+            }
+        }
+        other => {
+            return Err(format!(
+                "unknown dial '{other}': greed, line, buildpower, defense_floor, defense_lane, defense_density, defense_cap, density_ref"
+            ));
+        }
     }
     Ok(json!({"dials": {"greed": ai.op_greed(), "line": ai.op.over.line, "buildpower": ai.op_buildpower(),
                         "line_point": ai.op_line_point().map(xz)}}))

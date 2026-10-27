@@ -8,7 +8,9 @@ use crate::Ai;
 use crate::economy::Factory;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
-use crate::military::{Fighter, scouts};
+use crate::military::roles::Role;
+use crate::military::scouts;
+use crate::military::stakeouts::stakeout_unit;
 use crate::util::kgb_rand;
 
 /// Firewalker and Jugglenaut metal, and from how much enemy light
@@ -24,6 +26,13 @@ const EARLY_CONS_FRAMES: i32 = 30 * 60 * 12;
 const EARLY_CONS_MIN: usize = 2;
 const EARLY_CONS_INCOME: f32 = 5.5;
 const EARLY_CONS_MAX: usize = 14;
+
+/// From when the spider factory raids with Venoms rather than Fleas
+/// (frames: minute 2).
+const VENOM_RAIDERS_FROM: i32 = 30 * 120;
+/// Glaive-sized raiders a Venom counts as in a factory's raider budget
+/// (about its cost over a Glaive's).
+const VENOM_RAIDER_SLOTS: f32 = 3.0;
 
 pub struct FactoryManager {
     cb: Callback,
@@ -103,6 +112,9 @@ pub struct FactoryManager {
     /// Per-order state, recomputed in `fac_assign_factory_task`.
     has_fusion: bool,
     scout_budget: i32,
+    /// What a scout ordered now is for: a stakeout while they are short of
+    /// one this factory can build, else a solo raider.
+    scout_role: Role,
     /// Unit id of our strider hub, if any.
     strider_hub: Option<i32>,
     /// Unit defs found missing (each logged once).
@@ -179,6 +191,7 @@ impl FactoryManager {
             big_map,
             has_fusion: false,
             scout_budget: 0,
+            scout_role: Role::SoloRaider,
             strider_hub: None,
             missing_defs: BTreeSet::new(),
         }
@@ -337,7 +350,7 @@ impl Ai {
             fm.army_value += cost / 2.0;
         }
 
-        let is_scout = builder.and_then(|b| fm.factories.get(&b.id())).is_some_and(|f| f.creating_scout);
+        let role = builder.and_then(|b| fm.factories.get(&b.id())).and_then(|f| f.building_for);
         if name == crate::military::puppies::PUPPY {
             if builder.is_some() {
                 fm.num_puppies += 1;
@@ -361,10 +374,9 @@ impl Ai {
             fm.strider_target = Some(unit);
         }
 
-        if is_scout {
-            unit.set_move_state(1, 0);
-            let raider = Fighter::new_raider(unit, cost, self.team_id);
-            self.raider_add_solo_raider(raider);
+        // It joins its role's handler when finished (`war_unit_finished`).
+        if let Some(role) = role {
+            self.role_declare(unit.id(), role);
         }
     }
 
@@ -531,8 +543,9 @@ impl Ai {
             return;
         }
         let Some(f) = self.fac.factories.get_mut(&fac_id) else { return };
-        if f.creating_scout {
-            f.creating_scout = false;
+        // (Stakeouts are built for what the stakeouts are short of, not out
+        // of the factory's scout allowance.)
+        if f.building_for.take() == Some(Role::SoloRaider) {
             f.scout_allowance -= 1;
         }
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
@@ -547,12 +560,16 @@ impl Ai {
         }
         // Where the scout is a lane picket (Fleas, Darts; see `stakeouts`),
         // the stakeouts say how many: a post unmanned is a raid unseen, and
-        // a picket more than they want is metal idle.
-        self.fac.scout_budget = if self.stakeouts_own(fac.kind()) {
-            self.stakeouts_short(fac.kind())
+        // a picket more than they want is metal idle. Other factories build
+        // their cheapest fast unit for the stakeouts while they are short
+        // (feature `anyscout`), then scouts for raiding alone as before.
+        let short = self.stakeouts_short(fac.kind());
+        self.fac.scout_budget = if self.stakeouts_own(fac.kind()) || short > 0 {
+            short
         } else {
             scouts_needed.min(fac.scout_allowance).max(0)
         };
+        self.fac.scout_role = if short > 0 { Role::Stakeout } else { Role::SoloRaider };
 
         self.fac.has_fusion = self.eco.fusions.first().is_some_and(|fusion| {
             !fusion.is_being_built() || fusion.def().is_some_and(|d| fusion.health() > d.health() / 2.0)
@@ -585,15 +602,21 @@ impl Ai {
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice);
         // Dirtbags for the strikes while snipers are about (see `strikes`).
+        let picked = choice;
         let choice = match (ai_wants_builder || special, fac.unit) {
             (false, unit) => {
                 (self.strikes_production(unit, choice)).or_else(|| self.qrf_production(unit, choice)).unwrap_or(choice)
             }
             _ => choice,
         };
+        // A unit other than the one picked is not for the pick's role.
+        if choice != picked {
+            fac.building_for = None;
+        }
         if !ai_wants_builder
             && let Some(def) = self.op_factory_order(fac_id, false)
         {
+            fac.building_for = None;
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);
             return;
@@ -608,6 +631,7 @@ impl Ai {
             let name = self.defs.name(def).to_owned();
             self.log(&format!("taskforce: a {name} for a {doctrine} force short of its {role}"));
             self.taskforce_note_produced(&doctrine, &role);
+            fac.building_for = None;
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);
             return;
@@ -766,7 +790,7 @@ impl Ai {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
-                fac.creating_scout = true;
+                fac.building_for = Some(fm.scout_role);
             }
             return "cloakraid";
         }
@@ -844,7 +868,7 @@ impl Ai {
         }
 
         if fm.scout_budget > 0 {
-            fac.creating_scout = true;
+            fac.building_for = Some(fm.scout_role);
             return "shiptorpraider";
         }
 
@@ -922,7 +946,13 @@ impl Ai {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
-                fac.creating_scout = true;
+                fac.building_for = Some(fm.scout_role);
+                // The shield factory's picket is its scout, the Dirtbag.
+                if fm.scout_role == Role::Stakeout
+                    && let Some(scout) = stakeout_unit(FacKind::Shield)
+                {
+                    return scout;
+                }
             }
             if fac.small_raider_spam && fm.scout_budget == 0 {
                 return "shieldassault";
@@ -1020,7 +1050,7 @@ impl Ai {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
-                fac.creating_scout = true;
+                fac.building_for = Some(fm.scout_role);
             }
             return "amphraid";
         }
@@ -1088,7 +1118,7 @@ impl Ai {
         }
 
         if fm.scout_budget > 0 {
-            fac.creating_scout = true;
+            fac.building_for = Some(fm.scout_role);
             return "vehscout";
         }
 
@@ -1171,7 +1201,7 @@ impl Ai {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
-                fac.creating_scout = true;
+                fac.building_for = Some(fm.scout_role);
             }
             return "hoverraid";
         }
@@ -1240,7 +1270,7 @@ impl Ai {
         }
 
         if fm.scout_budget > 0 {
-            fac.creating_scout = true;
+            fac.building_for = Some(fm.scout_role);
             return "tankraid";
         }
 
@@ -1317,8 +1347,15 @@ impl Ai {
         }
 
         if fm.scout_budget > 0 {
-            fac.creating_scout = true;
+            fac.building_for = Some(fm.scout_role);
             return "spiderscout";
+        }
+
+        // Raiders (feature `venomraid`): Fleas in the opening, Venoms after
+        // it; the Fleas then are the stakeouts' alone (the scout detachment).
+        let venom_raid = !self.dev_off("venomraid");
+        if venom_raid && fac.raider_spam < 0.0 {
+            return self.fac_spider_raider(fac);
         }
 
         if self.fac_aa_roll() {
@@ -1332,26 +1369,49 @@ impl Ai {
             return "spidercrabe";
         }
 
+        // Now and then a wave of raiders, as the cloak factory sends Glaives.
+        if venom_raid && !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
+            fac.raider_spam -= (((self.eco.adjusted_income / 5.0).floor() as i32).clamp(6, 12) - 1) as f32;
+            return self.fac_spider_raider(fac);
+        }
+
         fac.add_scout_allowance(3);
-        if fm.num_redbacks < fm.num_venoms {
+        // The Venoms of the army: those raiding are not.
+        let venoms = fm.num_venoms - self.roles_count_named(Role::SquadRaider, "spideremp");
+        if fm.num_redbacks < venoms {
             return "spiderriot";
         }
 
-        if fm.num_recluses < (fm.num_venoms + fm.num_redbacks) {
+        if fm.num_recluses < (venoms + fm.num_redbacks) {
             return "spiderskirm";
         }
 
-        if fm.num_hermits < (fm.num_venoms + fm.num_redbacks) {
+        if fm.num_hermits < (venoms + fm.num_redbacks) {
             return "spiderassault";
         }
 
         let rnd = kgb_rand();
-        if rnd > 0.9 || fm.num_venoms == 0 {
+        if rnd > 0.9 || venoms == 0 {
             "spideremp"
         } else if kgb_rand() > 0.5 {
             "spiderskirm"
         } else {
             "spiderassault"
+        }
+    }
+
+    /// A spider raider: a Flea in the opening, a Venom after it. The
+    /// raider budget counts Glaive-sized raiders; a Venom costs as much as
+    /// [`VENOM_RAIDER_SLOTS`] of them.
+    fn fac_spider_raider(&self, fac: &mut Factory) -> &'static str {
+        if self.frame < VENOM_RAIDERS_FROM {
+            fac.raider_spam += 1.0;
+            fac.building_for = Some(Role::SoloRaider);
+            "spiderscout"
+        } else {
+            fac.raider_spam = (fac.raider_spam + VENOM_RAIDER_SLOTS).min(0.0);
+            fac.building_for = Some(Role::SquadRaider);
+            "spideremp"
         }
     }
 
@@ -1390,7 +1450,7 @@ impl Ai {
         }
 
         if fm.scout_budget > 0 {
-            fac.creating_scout = true;
+            fac.building_for = Some(fm.scout_role);
             return "jumpraid";
         }
 

@@ -68,6 +68,9 @@ const BREACH: f32 = 12.0;
 
 /// A raid this much stronger than its team gets a second team.
 const DOUBLE_RATIO: f32 = 0.8;
+/// A team sent at a raid keeps this many times the raid's power, the rest
+/// split off (see `qrf_mark_split`).
+const JUST_ENOUGH: f32 = 2.0;
 
 /// Entry points remembered.
 const ENTRIES: usize = 48;
@@ -140,6 +143,8 @@ pub struct Mark {
 struct Stats {
     marks: u32,
     strikes: u32,
+    /// Members split off a team sent at a raid weaker than it needs.
+    splits: u32,
     screens: u32,
 }
 
@@ -252,13 +257,13 @@ impl Ai {
     pub(super) fn qrf_mark_update(&mut self, frame: i32) {
         let tune = self.qrf_mark_tune();
         self.qrf_mark_merge_teams();
-        let all_teams = self.qrf_teams();
+        let mut all_teams = self.qrf_teams();
         if all_teams.is_empty() {
             return;
         }
         self.qrf_mark_entries();
         // Teams holding a place are not matched to raids.
-        let teams: BTreeMap<usize, Vec<i32>> = (all_teams.iter())
+        let mut teams: BTreeMap<usize, Vec<i32>> = (all_teams.iter())
             .filter(|(t, _)| self.qrf.roles.get(t).is_none_or(|r| r.kind != RoleKind::Hold))
             .map(|(&t, ids)| (t, ids.clone()))
             .collect();
@@ -427,6 +432,36 @@ impl Ai {
             plan.push((team, ti));
         }
 
+        // Just enough for each raid: a team keeps its members nearest the
+        // raid up to [`JUST_ENOUGH`] times its power (one at least); the
+        // rest split off, free for the next raid or the screen (user,
+        // 2026-10-26: four Pyros chased one Flea, and the next Flea found
+        // the whole force deciding where to go).
+        if !self.dev_off("justenough") {
+            for &(team, ti) in &plan {
+                if team >= MOON || self.qrf.roles.contains_key(&team) {
+                    continue;
+                }
+                let Some(ids) = teams.get(&team).cloned() else { continue };
+                let (keep, rest) = self.qrf_mark_split(&ids, targets[ti].center, targets[ti].power);
+                if rest.is_empty() {
+                    continue;
+                }
+                let new = self.qrf.next_team;
+                self.qrf.next_team += 1;
+                for id in &rest {
+                    if let Some(m) = self.qrf.members.get_mut(id) {
+                        m.team = new;
+                    }
+                }
+                self.qrf.mark.stats.splits += rest.len() as u32;
+                teams.insert(team, keep.clone());
+                all_teams.insert(team, keep);
+                all_teams.insert(new, rest);
+                free.insert(new);
+            }
+        }
+
         let mut marks = BTreeMap::new();
         for &(team, ti) in &plan {
             let tune = self.qrf_mark_team_tune(team, tune);
@@ -576,16 +611,38 @@ impl Ai {
         if frame % (30 * 30) < super::PERIOD {
             let s = &self.qrf.mark.stats;
             let line = format!(
-                "qrfmark: t={} marks={} strikes={} screens={} entries={} posts={}",
+                "qrfmark: t={} marks={} strikes={} splits={} screens={} entries={} posts={}",
                 frame / 30,
                 s.marks,
                 s.strikes,
+                s.splits,
                 s.screens,
                 self.qrf.mark.entries.len(),
                 self.qrf.mark.posts.iter().map(|p| format!("{:.0},{:.0}", p.x, p.z)).collect::<Vec<_>>().join(" ")
             );
             self.log(&line);
         }
+    }
+
+    /// A team's members split for a raid of `power` at `at`: those to keep
+    /// (nearest first, until [`JUST_ENOUGH`] times the raid's power, one at
+    /// least) and the rest.
+    fn qrf_mark_split(&self, ids: &[i32], at: Vec3, power: f32) -> (Vec<i32>, Vec<i32>) {
+        let mut by: Vec<(f32, f32, i32)> = (ids.iter())
+            .filter_map(|id| self.qrf.members.get(id).map(|m| (distance(m.pos(), at), m.power(), *id)))
+            .collect();
+        by.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let need = JUST_ENOUGH * power;
+        let (mut keep, mut rest, mut have) = (Vec::new(), Vec::new(), 0.0);
+        for (_, p, id) in by {
+            if keep.is_empty() || have < need {
+                keep.push(id);
+                have += p;
+            } else {
+                rest.push(id);
+            }
+        }
+        (keep, rest)
     }
 
     /// Where a team marks a target from: see the module doc.
@@ -785,6 +842,11 @@ impl Ai {
     fn qrf_mark_merge_teams(&mut self) {
         let teams = self.qrf_teams();
         if teams.len() < 2 {
+            return;
+        }
+        // Not while raids are about: a team split down to just enough for a
+        // raid (see `qrf_mark_split`) would merge straight back.
+        if !self.dev_off("justenough") && !self.qrf.groups.is_empty() {
             return;
         }
         // In normal play only into a team with room: recruits come one by

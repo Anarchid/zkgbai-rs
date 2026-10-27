@@ -291,7 +291,7 @@ impl Ai {
             enough
                 .or(strongest)
                 .map(|o| (o.2, format!("{} needing {needs:.0} energy (has {:.0})", members[s].what, capacity[g])))
-        } else if self.eco.fusions.len() >= 2 && nodes.len() > 1 {
+        } else if self.eco_overdrive_phase() && nodes.len() > 1 {
             // Late game: the cheapest link of a minimum spanning tree over
             // the grids (Kruskal; the tree's other links come later).
             let mut edges = Vec::new();

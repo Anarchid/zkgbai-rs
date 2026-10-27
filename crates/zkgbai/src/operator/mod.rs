@@ -98,6 +98,13 @@ pub struct Overrides {
     /// Mobile build power the factories keep, as a multiple of metal
     /// income (0 = the AI's own rule, one to one).
     pub buildpower: f32,
+    /// The fixed-defense budget's levers (see `posture`; `None`: the AI's
+    /// own).
+    pub defense_floor: Option<f32>,
+    pub defense_lane: Option<f32>,
+    pub defense_density: Option<f32>,
+    pub defense_cap: Option<f32>,
+    pub density_ref: Option<f32>,
 }
 
 pub struct PorcZone {
@@ -198,6 +205,26 @@ pub struct Operator {
 
 /// A setting from the AI option `key`, else the environment; `None` if
 /// unset or off.
+/// The posture's levers as start options (and environment variables), with
+/// where each goes.
+type Slot = fn(&mut Overrides) -> &mut Option<f32>;
+pub(crate) const POSTURE_SETTINGS: [(&str, &str, Slot); 5] = [
+    ("defense_floor", "ZKGBAI_DEFENSE_FLOOR", |o| &mut o.defense_floor),
+    ("defense_lane", "ZKGBAI_DEFENSE_LANE", |o| &mut o.defense_lane),
+    ("defense_density", "ZKGBAI_DEFENSE_DENSITY", |o| &mut o.defense_density),
+    ("defense_cap", "ZKGBAI_DEFENSE_CAP", |o| &mut o.defense_cap),
+    ("density_ref", "ZKGBAI_DENSITY_REF", |o| &mut o.density_ref),
+];
+
+/// A posture lever's value within its range.
+pub(crate) fn posture_clamp(key: &str, v: f32) -> f32 {
+    match key {
+        "density_ref" => v.clamp(100.0, 10000.0),
+        "defense_cap" => v.clamp(0.0, 0.9),
+        _ => v.clamp(0.0, 0.9),
+    }
+}
+
 fn setting(cb: Callback, key: &str, env: &str) -> Option<String> {
     let raw = cb.option(key).filter(|v| !v.trim().is_empty()).or_else(|| std::env::var(env).ok())?;
     let v = raw.trim().to_owned();
@@ -336,6 +363,12 @@ impl Ai {
         if let Some(b) = setting(self.cb, "buildpower", "ZKGBAI_BUILDPOWER").and_then(|v| v.parse::<f32>().ok()) {
             self.op.over.buildpower = b.clamp(0.5, 3.0);
             self.log(&format!("operator: buildpower {:.2}", self.op.over.buildpower));
+        }
+        for (key, env, slot) in POSTURE_SETTINGS {
+            if let Some(v) = setting(self.cb, key, env).and_then(|v| v.parse::<f32>().ok()) {
+                *slot(&mut self.op.over) = Some(posture_clamp(key, v));
+                self.log(&format!("operator: {key} {v:.2}"));
+            }
         }
         let listen = self.op.listen.clone();
         let journal_dir = self.op.journal_dir.clone();
@@ -737,7 +770,8 @@ impl Ai {
         self.op_emit(
             "end",
             json!({"reason": reason, "time": views::game_time(self.frame), "state": self.state(),
-                   "served": {"read": self.op.served.0, "acting": self.op.served.1}, "profile": profile}),
+                   "served": {"read": self.op.served.0, "acting": self.op.served.1}, "profile": profile,
+                   "roles": self.roles_summary()}),
         );
         self.op.stop();
     }

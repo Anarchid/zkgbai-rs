@@ -6,7 +6,10 @@
 //! 9500 at the middle).
 //!
 //! A free vent on safe ground of ours (our territory, off the front, no
-//! threat) is the first energy built once the income can carry it. The
+//! threat) is built once the income can carry it, if its energy (at the
+//! solars' price) pays for the plant, the Lotus that will guard it, and the
+//! constructor's walk there (early on, a walk across Eye of Horus is mexes
+//! not taken). Standing, it gets the Lotus: a fusion-lite. The
 //! upgrade is for the overdrive phase only: it takes the place of the next
 //! singularity reactor the fusion planner orders (a third of its metal for
 //! a third of its energy), if a plant stands on safe ground with little of
@@ -25,7 +28,7 @@ use super::List;
 use crate::Ai;
 use crate::defs::cmd;
 use crate::economy::terraform::is_terraforming;
-use crate::util::distance;
+use crate::util::{distance, get_directional_point};
 
 const PLANT: &str = "energygeo";
 const ADVANCED: &str = "energyheavygeo";
@@ -38,6 +41,17 @@ const GEO_MIN_INCOME: f32 = 15.0;
 
 /// A plant's site is this close to its vent, elmos.
 const VENT_SNAP: f32 = 48.0;
+
+/// A constructor's walk to a vent costs its build power (metal a second)
+/// times this for every second of it: three times at an income of 10, once
+/// from [`WALK_INCOME`] on (the walk matters less as the economy grows).
+fn walk_worth(income: f32) -> f32 {
+    (WALK_INCOME / income.max(1.0)).clamp(1.0, 3.0)
+}
+const WALK_INCOME: f32 = 30.0;
+/// What guards a plant once it stands (a fusion-lite: a fusion gets a
+/// Stinger and a Faraday).
+pub(super) const GEO_GUARD: &str = "turretlaser";
 
 /// The advanced plant's blast reaches this far, elmos; it is not upgraded
 /// while more than this much metal of ours stands within it.
@@ -168,24 +182,35 @@ impl Ai {
         }
         let map = self.cb.map();
         let range = wdef.build_distance() + 32.0;
-        let site = (vents.into_iter())
-            .filter(|&v| self.eco_safe_ground(v))
-            .map(|v| (v, map.find_closest_build_site(plant, v, VENT_SNAP, 0, 0)))
-            .filter(|&(v, s)| s.x >= 0.0 && distance(s, v) <= VENT_SNAP)
-            .filter(|&(_, s)| self.terrain_reaches(wdef, wpos, s, range))
-            .min_by(|a, b| distance(a.1, wpos).total_cmp(&distance(b.1, wpos)));
-        let Some((vent, site)) = site else { return false };
-        let Some(task) = self.eco_add_simple(plant, site, List::Construction, None) else { return false };
         // Worth what its energy would cost in solars (see `logistics`).
         let value = self.defs.get("energysolar").map_or(0.0, |s| {
             let e = super::wind::energy_make(s);
             if e > 0.0 { super::wind::energy_make(plant) * s.cost(self.metal) / e } else { 0.0 }
         });
+        // What taking a vent costs: the plant, the Lotus that will guard it
+        // (see `eco_defend_geo`) and the constructor's walk there, at its
+        // build power a second times [`walk_worth`]: early on that walk is
+        // mexes not taken (Eye of Horus: the vent is far, and the plant was
+        // the first energy built).
+        let lotus = self.defs.get(GEO_GUARD).map_or(0.0, |d| d.cost(self.metal));
+        let (speed, power) = (wdef.speed().max(30.0), wdef.build_speed());
+        let walk = walk_worth(self.eco.static_income);
+        let cost = |s: Vec3| plant.cost(self.metal) + lotus + walk * power * distance(s, wpos) / speed;
+        let site = (vents.into_iter())
+            .filter(|&v| self.eco_safe_ground(v))
+            .map(|v| (v, map.find_closest_build_site(plant, v, VENT_SNAP, 0, 0)))
+            .filter(|&(v, s)| s.x >= 0.0 && distance(s, v) <= VENT_SNAP)
+            .filter(|&(_, s)| self.terrain_reaches(wdef, wpos, s, range))
+            .map(|(v, s)| (v, s, cost(s)))
+            .filter(|&(_, _, c)| c <= value)
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        let Some((vent, site, price)) = site else { return false };
+        let Some(task) = self.eco_add_simple(plant, site, List::Construction, None) else { return false };
         let why = format!("a geothermal plant on the vent at ({:.0}, {:.0})", vent.x, vent.z);
         self.logistics_energy(task, value, &why);
         self.log(&format!(
             "geo: a plant on the vent at ({:.0}, {:.0}) (income {:.1}, energy {:.1} of {:.1} wanted, {:.0} elmos from \
-             the constructor)",
+             the constructor; costs {price:.0} with guard and walk, worth {value:.0})",
             vent.x,
             vent.z,
             self.eco.static_income,
@@ -194,6 +219,17 @@ impl Ai {
             distance(site, wpos)
         ));
         true
+    }
+
+    /// A Lotus beside a finished plant (see [`GEO_GUARD`]).
+    pub(super) fn eco_defend_geo(&mut self, position: Vec3) {
+        let Some(guard) = self.defs.get(GEO_GUARD) else { return };
+        let ally_base = self.graph.get_ally_base();
+        let pos = get_directional_point(ally_base, position, distance(ally_base, position) + 90.0);
+        let pos = self.eco_build_site(guard, pos, 0);
+        if pos.x >= 0.0 {
+            self.eco_add_simple(guard, pos, List::Porc, Some(List::Porc));
+        }
     }
 
     /// See the upgrade and the wall box through.

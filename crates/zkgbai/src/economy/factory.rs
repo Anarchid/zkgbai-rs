@@ -2,6 +2,8 @@
 
 use springai::{Unit, Vec3};
 
+use crate::military::roles::Role;
+
 /// Which production logic a factory (or strider hub) follows, derived from
 /// its unit-def name once at construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,7 +50,8 @@ pub struct Factory {
     pub unit: Unit,
     pub raider_spam: f32,
     pub expensive_raider_spam: f32,
-    pub creating_scout: bool,
+    /// The role the unit being built is for (see `military::roles`).
+    pub building_for: Option<Role>,
     pub small_raider_spam: bool,
     pub scout_allowance: i32,
     pub max_scout_allowance: i32,
@@ -69,7 +72,7 @@ impl Factory {
             unit,
             raider_spam: 0.0,
             expensive_raider_spam: 0.0,
-            creating_scout: false,
+            building_for: None,
             small_raider_spam: false,
             scout_allowance: 0,
             max_scout_allowance: 0,

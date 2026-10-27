@@ -193,6 +193,54 @@ fn factory_tier(name: &str) -> Option<Tier> {
     }
 }
 
+/// Metal income from which fusions may be built, and energy income from
+/// which singularities may (also with two fusions standing); see
+/// `eco_create_fusion_task`.
+const FUSION_INCOME: f32 = 30.0;
+const SINGU_ENERGY: f32 = 150.0;
+
+/// A turret this near a mex covers it (point defense), elmos.
+const POINT_COVER: f32 = 350.0;
+/// Distance from the enemy at which a spot counts as plainly exposed: nearer
+/// counts more (up to 4x), farther less.
+const EXPOSURE_REF: f32 = 2000.0;
+/// A spot on our side not yet taken, against an owned mex.
+const FUTURE_WORTH: f32 = 0.25;
+/// What a posture turret is worth to the project tracker, in multiples of
+/// its cost.
+const POSTURE_WORTH: f32 = 2.0;
+/// Turret kinds a posture zone mixes, in order, with the income (metal/s)
+/// each wants: Lotus, Picket, Stardust, Stinger, Faraday, Gauss, Desolator.
+/// At most [`SAME_KIND`] of a kind per zone (user, 2026-10-26: no more
+/// stacks of Lotuses).
+const ZONE_MIX: [(&str, f32); 7] = [
+    ("turretlaser", 0.0),
+    ("turretmissile", 0.0),
+    ("turretriot", 10.0),
+    ("turretheavylaser", 15.0),
+    ("turretemp", 25.0),
+    ("turretgauss", 40.0),
+    ("turretheavy", 80.0),
+];
+const SAME_KIND: usize = 2;
+/// Posture turrets keep this far from every turret of ours (splash), elmos.
+const TURRET_SPACING: f32 = 150.0;
+/// A posture turret goes only where fewer than this many turrets of ours
+/// reach within a Lotus's range: nowhere under more than two Lotus circles
+/// (the posture keeps us from being naked, no more; Circuit overporcs, we
+/// should not).
+const MAX_OVERLAP: usize = 2;
+const LOTUS_REACH: f32 = 460.0;
+/// A turret must take at least this much spot-exposure off (a well covered
+/// mex far from the enemy is not worth another).
+const MIN_GAIN: f32 = 0.06;
+/// Point defense stands this far from its mex towards the enemy, elmos,
+/// and at most [`POINT_SHIFT`] from there.
+const POINT_FORWARD: f32 = 110.0;
+const POINT_SHIFT: f32 = 200.0;
+/// Candidates tried per call, best first, before giving up for now.
+const PLACE_TRIES: usize = 4;
+
 /// Turrets within this distance of a chokepoint's defense position count as
 /// its defenses.
 const CHOKE_PORC_RADIUS: f32 = 300.0;
@@ -421,17 +469,26 @@ impl Ai {
             self.eco_create_radar_task(wid);
         }
 
+        // The posture's budget and sites (see `posture`): its own queue, not
+        // the rest's (its orders would crowd out theirs, and theirs its).
+        if self.posture_on() && self.eco.defended_fac {
+            self.eco_defend_posture();
+        }
         // porc push against nearby enemy porc and defend the front line
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
-            self.eco_defend_chokes();
+            // Without the posture, the terrain analysis's chokepoints.
+            if !self.posture_on() {
+                self.eco_defend_chokes();
+            }
             self.eco_porc_push(position);
             if self.graph.eminent_territory {
                 self.eco_defend_front(position);
             }
         }
 
-        // do we need pylons?
-        if self.eco.fusions.len() > 1 {
+        // do we need pylons? (in the overdrive phase, see
+        // `eco_overdrive_phase`; it was two fusions)
+        if self.eco_overdrive_phase() {
             // (the C++ port lowered this from > 3, since grid requirements exist)
             self.eco_create_grid_task(position);
         }
@@ -1794,6 +1851,213 @@ impl Ai {
         }
     }
 
+    /// Metal in our fixed defenses: built, and under way or planned.
+    pub(crate) fn eco_defense_value(&self) -> f32 {
+        let built: f32 = self.eco.porcs.iter().filter_map(|u| u.def()).map(|d| d.cost(self.metal)).sum();
+        let planned: f32 = (self.eco.porc_tasks.iter())
+            .filter_map(|&id| self.eco.tasks.get(id).and_then(|t| t.as_construction()))
+            .filter(|c| c.target.is_none_or(|u| !self.eco.porcs.iter().any(|p| p.id() == u.id())))
+            .map(|c| c.build_type.cost(self.metal))
+            .sum();
+        built + planned
+    }
+
+    /// Spend the posture's budget (see `posture`): one turret per call while
+    /// the posture's own turrets hold less than their share, where it takes
+    /// the most raid exposure off our metal per metal.
+    ///
+    /// A spot's exposure is its worth (an owned mex 1, a spot on our side
+    /// not yet taken a quarter) by how near the enemy it is, halved by every
+    /// turret covering it (any turret, the rest of the AI's too): one within
+    /// [`POINT_COVER`] of it, or one at the front site its raid route crosses
+    /// (see `zk_terrain::lanes`). A front site takes half the exposure of
+    /// every spot routed through it, a point site half of its mex's and its
+    /// neighbours': chokepoints win where many routes cross, point defense
+    /// for a mex no front guards.
+    fn eco_defend_posture(&mut self) {
+        if self.eco.adjusted_income < 6.0 || self.posture_deficit() <= 0.0 {
+            return;
+        }
+        // At most so many orders waiting for a crew.
+        if self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize {
+            return;
+        }
+        let enemy = self.graph.get_enemy_center();
+        if enemy.is_zero() {
+            return;
+        }
+        let spots: Vec<(Vec3, bool)> = self.graph.metal_spots.iter().map(|s| (s.position, s.owned)).collect();
+        let metal: Vec<f32> = self.graph.metal_spots.iter().map(|s| s.value).collect();
+        let mean_metal = (metal.iter().sum::<f32>() / metal.len().max(1) as f32).max(0.01);
+        let decisive = self.posture.decisive();
+        let lanes = decisive.filter(|_| self.posture.laneness() > 0.0);
+        let ours = |i: usize| lanes.is_some_and(|l| l.ours.get(i).copied().unwrap_or(false));
+        // How far a raid has to come: by ground from the enemy's start where
+        // the lanes measured it (a maze corner is far by any route), else
+        // as the crow flies from their center.
+        let reach = |i: usize| {
+            decisive
+                .and_then(|l| l.enemy_ground.get(i).copied())
+                .filter(|d| d.is_finite())
+                .unwrap_or_else(|| distance(spots[i].0, enemy))
+        };
+        let worth: Vec<f32> = (0..spots.len())
+            .map(|i| {
+                let near = (EXPOSURE_REF / reach(i).max(EXPOSURE_REF * 0.25)).min(4.0);
+                let w = if spots[i].1 { 1.0 } else if ours(i) { FUTURE_WORTH } else { 0.0 };
+                w * near * metal[i] / mean_metal
+            })
+            .collect();
+        // Front sites: (site, width per site, spots routed through it).
+        let fronts: Vec<(Vec3, f32, Vec<usize>)> = lanes
+            .map(|l| {
+                (l.perimeter.fronts.iter())
+                    .flat_map(|f| {
+                        let width = f.span / f.sites.len().max(1) as f32;
+                        (f.sites.iter().zip(&f.routes)).map(move |(s, r)| (Vec3::xz(s.x, s.z), width, r.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Turrets covering each spot.
+        let mut cover: Vec<u32> =
+            spots.iter().map(|&(p, _)| self.eco_porc_count(p, POINT_COVER) as u32).collect();
+        for (site, _, routed) in &fronts {
+            let n = self.eco_porc_count(*site, CHOKE_PORC_RADIUS) as u32;
+            for &i in routed {
+                if let Some(c) = cover.get_mut(i) {
+                    *c += n;
+                }
+            }
+        }
+        let left = |i: usize| worth[i] * 0.5f32.powi(cover[i].min(16) as i32);
+        // Not naked, not much more (user, 2026-10-26): no site where two of
+        // our turrets' Lotus circles already meet.
+        let safe = |ai: &Ai, p: Vec3| {
+            ai.war.get_porc_threat(p) <= 0.0
+                && ai.war.get_effective_threat(p) <= ai.war.get_total_friendly_threat(p)
+                && !ai.posture_shuns(p)
+                && ai.eco_porc_count(p, LOTUS_REACH) < MAX_OVERLAP
+        };
+        let budget = self.posture_deficit();
+        // Candidates: (gain per metal, gain, site, zone radius, front width
+        // or none for a point, how far the turret may stand from the site).
+        let mut candidates: Vec<(f32, f32, Vec3, f32, Option<f32>, f32)> = Vec::new();
+        for (site, width, routed) in &fronts {
+            let gain: f32 = routed.iter().map(|&i| 0.5 * left(i)).sum();
+            if gain >= MIN_GAIN && safe(self, *site) {
+                candidates.push((0.0, gain, *site, CHOKE_PORC_RADIUS, Some(*width), CHOKE_PORC_RADIUS * 0.6));
+            }
+        }
+        for (i, &(p, owned)) in spots.iter().enumerate() {
+            if !owned || worth[i] <= 0.0 {
+                continue;
+            }
+            let gain: f32 = (0..spots.len())
+                .filter(|&j| spots[j].1 && distance(spots[j].0, p) < POINT_COVER)
+                .map(|j| 0.5 * left(j))
+                .sum();
+            // From the value towards the enemy: between the mex and where
+            // a raid on it comes from.
+            let site = get_directional_point(p, enemy, POINT_FORWARD);
+            if gain >= MIN_GAIN && safe(self, site) {
+                // Within [`POINT_SHIFT`] of the site, so well inside the
+                // cover that counts it (a turret pushed out of it was never
+                // counted, and the spot drew turret after turret: fourteen
+                // Lotuses in a Hide and Seek corner).
+                candidates.push((0.0, gain, site, POINT_COVER, None, POINT_SHIFT));
+            }
+        }
+        // Each candidate's turret: the zone's next kind (see `ZONE_MIX`).
+        let mut priced: Vec<(f32, f32, Vec3, UnitDef, bool, f32)> = (candidates.into_iter())
+            .filter_map(|(_, gain, site, radius, width, shift)| {
+                let turret = self.eco_zone_turret(site, radius, width, budget)?;
+                Some((gain / turret.cost(self.metal).max(1.0), gain, site, turret, width.is_some(), shift))
+            })
+            .collect();
+        priced.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, gain, site, turret, front, shift) in priced.into_iter().take(PLACE_TRIES) {
+            // Spread out: no turret of ours within [`TURRET_SPACING`].
+            let Some(at) = self.eco_spaced_site(turret, site, shift) else { continue };
+            // Unstamped (`frame_issued` 0): stamped porc nobody took up is
+            // dropped after 20 s (`eco_clean_orders`), before a crew from
+            // far away can get there; the posture's ledger keeps its own
+            // time.
+            let Some(task) = self.eco_add_simple(turret, at, List::Porc, Some(List::Porc)) else { continue };
+            let cost = turret.cost(self.metal);
+            if front {
+                self.posture.stats.front_orders += 1;
+            } else {
+                self.posture.stats.point_orders += 1;
+            }
+            let why = format!(
+                "posture: {} {} takes {:.2} spot-exposure off ({:.0}% share)",
+                if front { "front" } else { "point" },
+                turret.name(),
+                gain,
+                self.posture.share * 100.0
+            );
+            self.posture_ordered(task, at, cost, cost * POSTURE_WORTH, &why);
+            return;
+        }
+    }
+
+    /// The next turret for a posture zone (within `radius` of `at`): the
+    /// first kind of [`ZONE_MIX`] the income allows, the zone has fewer
+    /// than [`SAME_KIND`] of (built or planned), and `budget` covers (a
+    /// Lotus always fits). A narrow front (`width` under 250) starts with
+    /// the riot turret.
+    fn eco_zone_turret(&self, at: Vec3, radius: f32, width: Option<f32>, budget: f32) -> Option<UnitDef> {
+        let income = self.eco.adjusted_income;
+        let mut kinds: Vec<&(&str, f32)> = ZONE_MIX.iter().collect();
+        if width.is_some_and(|w| w < 250.0) {
+            kinds.sort_by_key(|(name, _)| *name != "turretriot");
+        }
+        let count = |id: i32| {
+            let built = (self.eco.porcs.iter())
+                .filter(|u| distance(u.pos(), at) < radius && u.def().is_some_and(|d| d.id() == id))
+                .count();
+            let planned = (self.eco.porc_tasks.iter())
+                .filter(|&&t| distance(self.eco.task_pos(t), at) < radius)
+                .filter(|&&t| self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == id))
+                .count();
+            built + planned
+        };
+        let lotus = self.defs.get("turretlaser").map_or(90.0, |d| d.cost(self.metal));
+        (kinds.into_iter())
+            .filter(|(_, wants)| income >= *wants)
+            .filter_map(|(name, _)| self.defs.get(name))
+            .find(|d| count(d.id()) < SAME_KIND && d.cost(self.metal) <= budget.max(lotus))
+    }
+
+    /// A legal site for `def` within `shift` of `near` with no turret of
+    /// ours (built or planned) within [`TURRET_SPACING`]: splash then hits
+    /// one at a time. Tries rings round `near`, nearest first.
+    fn eco_spaced_site(&self, def: UnitDef, near: Vec3, shift: f32) -> Option<Vec3> {
+        let others: Vec<Vec3> = (self.eco.porcs.iter().map(|u| u.pos()))
+            .chain(self.eco.porc_tasks.iter().map(|&t| self.eco.task_pos(t)))
+            .collect();
+        let map = self.cb.map();
+        let mut r = 0.0;
+        while r <= shift {
+            let steps = if r == 0.0 { 1 } else { 8 };
+            for k in 0..steps {
+                let a = k as f32 * std::f32::consts::TAU / steps as f32;
+                let p = Vec3::new(near.x + r * a.cos(), near.y, near.z + r * a.sin());
+                let site = map.find_closest_build_site(def, p, 48.0, 3, 0);
+                if site.x < 0.0 || distance(site, near) > shift {
+                    continue;
+                }
+                let overlap = others.iter().filter(|&&o| distance(o, site) < LOTUS_REACH).count();
+                if overlap < MAX_OVERLAP && others.iter().all(|&o| distance(o, site) >= TURRET_SPACING) {
+                    return Some(site);
+                }
+            }
+            r += 70.0;
+        }
+        None
+    }
+
     /// The `nth` turret for a chokepoint `width` elmos wide: a riot turret
     /// for narrow gates or an LLT first, then an HLT, then heavier porc.
     fn eco_choke_turret(&self, width: f32, nth: usize) -> Option<UnitDef> {
@@ -2116,20 +2380,40 @@ impl Ai {
             .filter(|&&ft| eco.tasks.get(ft).and_then(|t| t.as_construction()).is_some_and(|c| c.target.is_some()))
             .count() as i32;
         let (nft, nfus) = (eco.fusion_tasks.len() as i32, eco.fusions.len() as i32);
-        let eminent = self.graph.eminent_territory;
+        // Which plants the economy may build. The old ladder wanted eminent
+        // territory (40% of the spots owned, rare on a contested map) and 35
+        // energy for a fusion, three fusions for a singularity; geothermal
+        // and wind counted for nothing. The plants are for overdrive (a
+        // surplus), so they open with the economy instead (user,
+        // 2026-10-26): fusions from [`FUSION_INCOME`], singularities from
+        // [`SINGU_ENERGY`] energy income or two fusions, or either from the
+        // map's density. `disable=ecoladder` keeps the old ladder.
+        // Density opens them too, on any income (a 16v16 on a small map):
+        // standing metal per usable area (see `posture`), one fusion per
+        // density reference, a singularity from twice it.
+        let dense = self.posture.density / self.posture_levers().density_ref.max(1.0);
+        let (fusion_open, singu_open, allowed) = if self.dev_off("ecoladder") {
+            let eminent = self.graph.eminent_territory;
+            (eco.effective_income > 35.0 && eminent, nfus > 2 && eminent, (eco.static_income / 27.5).floor())
+        } else {
+            let fusions = (eco.fusions.iter()).filter(|u| self.defs.name_of(**u) == "energyfusion").count();
+            (
+                eco.static_income > FUSION_INCOME || dense >= 1.0,
+                eco.effective_income_energy >= SINGU_ENERGY || fusions >= 2 || dense >= 2.0,
+                (eco.static_income / 27.5).floor().max(dense.floor()),
+            )
+        };
 
-        let name = if eco.effective_income > 35.0
-            && eminent
-            && (eco.static_income / 27.5).floor() > nfus as f32
+        let name = if fusion_open
+            && allowed > nfus as f32
             && !self.fac.factories.is_empty()
             && nft + nfus - started < 3
             && nft < 1 + self.merged_allies
         {
             // for fusions
             "energyfusion"
-        } else if nfus > 2
+        } else if singu_open
             && nfus < 5 + i32::from(self.merged_allies > 1)
-            && eminent
             && !self.fac.factories.is_empty()
             && eco.fusion_tasks.is_empty()
         {
