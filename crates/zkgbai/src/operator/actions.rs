@@ -35,6 +35,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("requisition", "Economy", "modules ask for the factories they need"),
     ("colonize", "Economy", "colonists sent to far free metal"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
+    ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
     ("odphase", "Energy", "the overdrive phase by energy, free spots and fusions (off: two fusions)"),
     ("ecoladder", "Energy", "fusions and singularities opened by income or the map's density"),

@@ -488,8 +488,9 @@ impl Ai {
         }
 
         // do we need pylons? (in the overdrive phase, see
-        // `eco_overdrive_phase`; it was two fusions)
-        if self.eco_overdrive_phase() {
+        // `eco_overdrive_phase`; it was two fusions). With `gridmex` the
+        // grid planner links the mexes instead (see `grid`).
+        if self.eco_overdrive_phase() && self.dev_off("gridmex") {
             // (the C++ port lowered this from > 3, since grid requirements exist)
             self.eco_create_grid_task(position);
         }

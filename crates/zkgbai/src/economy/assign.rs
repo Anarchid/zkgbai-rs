@@ -614,13 +614,32 @@ impl Ai {
                 if def_id == ids.pylon_id {
                     // for pylons: first of all while a superweapon waits
                     // for its site to have power (see `grid`)
-                    let (nfus, npyl) = (eco.fusions.len(), eco.pylons.len());
+                    let gridmex = !self.dev_off("gridmex");
+                    let nfus = eco.fusions.len();
+                    // With `gridmex`, pylons count once they stand: frames
+                    // counted as pylons dropped their own job down the
+                    // ladder, and one sat at 1% for 16 minutes (Folsom,
+                    // 2026-10-27).
+                    let npyl = if gridmex {
+                        eco.pylons.iter().filter(|u| !u.is_being_built()).count()
+                    } else {
+                        eco.pylons.len()
+                    };
                     if eco.pending_power.is_some() {
                         return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));
+                    }
+                    // A frame already up is finished first.
+                    if gridmex && ctask.target.is_some() {
+                        return (dist / 4.0) - 1000.0 + (500.0 * (cost_mod - 1.0));
                     }
                     if worker.is_greedy {
                         if nfus > npyl {
                             return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));
+                        }
+                        // The grid planner queues only pylons that pay
+                        // (`gridmex`): linking a mex is a mex's worth.
+                        if gridmex {
+                            return (dist / 4.0) - 100.0 + (600.0 * (cost_mod - 1.0)).max(0.0);
                         }
                         return dist + (10000.0 * cost_mod);
                     }
