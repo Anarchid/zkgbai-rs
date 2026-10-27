@@ -1,6 +1,6 @@
 //! Raiders: scouting tasks, raider squads, solo raiders and sparrows.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use springai::{Unit, Vec3};
 
@@ -26,7 +26,8 @@ const HALBERD: usize = 7;
 const PANTHER: usize = 8;
 const SUB: usize = 9;
 const PYRO: usize = 10;
-const NUM_SQUAD_SLOTS: usize = 11;
+const VENOM: usize = 11;
+const NUM_SQUAD_SLOTS: usize = 12;
 
 #[derive(Default)]
 pub struct RaiderHandler {
@@ -50,7 +51,46 @@ pub struct RaiderHandler {
     /// `scout_task_ids` (as in the original).
     solo_scout_task_ids: Vec<ScoutTaskId>,
     next_task_id: ScoutTaskId,
+    /// What each raider squad decided last (see `raider_assign_raider_squad`).
+    pub(crate) memo: BTreeMap<SquadId, SquadMemo>,
 }
+
+/// A raider squad's memory between decisions, so it does not flip-flop
+/// (user, 2026-10-26; traced in `squad_trace`: rally points two choices
+/// apart swapped every second as the squad walked between them, and squads
+/// bounced haven-target-haven at a threat disc's rim). `disable=squadhyst`
+/// forgets.
+#[derive(Default, Clone)]
+pub(crate) struct SquadMemo {
+    /// The rally point, and since when.
+    rally: Option<(Vec3, i32)>,
+    /// The enemy target last chosen.
+    target: Option<Vec3>,
+    /// When the squad last fell back, from which target.
+    bailed: Option<(i32, Vec3)>,
+    /// Targets avoided until a frame.
+    shun: Vec<(Vec3, i32)>,
+}
+
+/// Solo raiders going within this of the same point share it (see
+/// `raider_handled`), elmos; a point counts as handled once they carry
+/// [`JUST_ENOUGH`] times the metal of the mobile enemies there.
+pub const CLAIM_RADIUS: f32 = 300.0;
+const JUST_ENOUGH: f32 = 2.0;
+
+/// A squad keeps its rally point this long (frames).
+const RALLY_COMMIT: i32 = 30 * 10;
+/// A squad keeps its target while it costs no more than the new best plus
+/// this.
+const TARGET_MARGIN: f32 = 600.0;
+/// Mobile enemies count as able to shoot a squad if seen this recently
+/// (frames).
+const IN_RANGE_SEEN: i32 = 30 * 10;
+/// After falling back a squad holds the haven this long (frames), and the
+/// target it left is shunned for [`BAIL_SHUN`] within [`SHUN_RADIUS`].
+const BAIL_HOLD: i32 = 30 * 4;
+const BAIL_SHUN: i32 = 30 * 20;
+const SHUN_RADIUS: f32 = 300.0;
 
 impl RaiderHandler {
     pub fn new() -> Self {
@@ -219,6 +259,7 @@ impl Ai {
 
     pub fn raider_remove_unit(&mut self, u: Unit) {
         let id = u.id();
+        self.role_left_raiders(id);
         let h = &mut self.raider_handler;
         if let Some(i) = h.solo_raiders.iter().position(|&r| r == id) {
             h.solo_raiders.remove(i);
@@ -260,6 +301,7 @@ impl Ai {
 
     pub fn raider_update(&mut self, frame: i32) {
         let offset = self.offset;
+        self.squad_trace_update(frame);
 
         if frame % 15 == (offset + 4) % 15 {
             let small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
@@ -292,6 +334,7 @@ impl Ai {
                     self.raider_handler.solo_raiders.retain(|&r| r != id);
                     self.raider_clear_task(id);
                     self.raider_drop_fighter(id);
+                    self.role_left_raiders(id);
                 }
             }
 
@@ -301,6 +344,7 @@ impl Ai {
                     self.raider_handler.kodachis.retain(|&r| r != id);
                     self.raider_clear_task(id);
                     self.raider_drop_fighter(id);
+                    self.role_left_raiders(id);
                 }
             }
 
@@ -518,6 +562,8 @@ impl Ai {
             "tankheavyraid" => (PANTHER, 8.min(4.max((income / 5.0).floor() as i32))),
             "subraider" => (SUB, 8.min(4.max((income / 5.0).floor() as i32))),
             "jumpraid" => (PYRO, 6.min(3.max((income / 10.0).floor() as i32))),
+            // (A raid wave of Venoms is two to four: see `fac_spider_raider`.)
+            "spideremp" => (VENOM, 4.min(2.max((income / 10.0).floor() as i32))),
             _ => return,
         };
         self.raider_join_next_squad(slot, id, 'm', size);
@@ -721,6 +767,7 @@ impl Ai {
                     return;
                 }
                 self.squads.remove(sid);
+                self.raider_handler.memo.remove(&sid);
                 for slot in self.raider_handler.next_squads.iter_mut() {
                     if *slot == Some(sid) {
                         *slot = None;
@@ -767,6 +814,45 @@ impl Ai {
         }
     }
 
+    /// Points other solo raiders (than `except`) are already going to with
+    /// enough for what is there: twice the metal of the mobile enemies near
+    /// (one raider where none is seen), not where enemy defenses stand (a
+    /// gang is wanted there). The next raider looks elsewhere (user,
+    /// 2026-10-26: four Pyros went for one Flea; in self-play two of three
+    /// solo Pyros sat on one).
+    fn raider_handled(&self, except: i32) -> Vec<Vec3> {
+        if self.dev_off("justenough") {
+            return Vec::new();
+        }
+        let frame = self.frame;
+        let h = &self.raider_handler;
+        let claims: Vec<(Vec3, f32)> = (h.solo_raiders.iter().chain(h.kodachis.iter()))
+            .filter(|&&r| r != except)
+            .filter_map(|r| self.fighters.get(r))
+            .filter(|f| f.target != NULLPOS && !f.is_dead())
+            .map(|f| (f.target, f.metal_value))
+            .collect();
+        let mut handled: Vec<Vec3> = Vec::new();
+        for &(t, _) in &claims {
+            if handled.iter().any(|&p| distance(p, t) < CLAIM_RADIUS) {
+                continue;
+            }
+            let near = |e: &&crate::military::Enemy| !e.is_dead && distance(e.position, t) < CLAIM_RADIUS * 1.5;
+            if self.war.targets.values().filter(near).any(|e| e.is_porc) {
+                continue;
+            }
+            let enemy: f32 = (self.war.targets.values().filter(near))
+                .filter(|e| !e.is_static && frame - e.last_seen < 30 * 10)
+                .map(|e| e.value)
+                .sum();
+            let claimed: f32 = claims.iter().filter(|(p, _)| distance(*p, t) < CLAIM_RADIUS).map(|c| c.1).sum();
+            if claimed >= JUST_ENOUGH * enemy {
+                handled.push(t);
+            }
+        }
+        handled
+    }
+
     fn raider_assign_solo_raider(&mut self, id: i32) {
         if self.precision_step(id) {
             return;
@@ -799,12 +885,13 @@ impl Ai {
         let mut cost = f32::MAX;
         let mut porc = true;
 
+        let handled = self.raider_handled(id);
         if self.raider_handler.raider_squads.is_empty()
             && self.squad_handler.fighters.is_empty()
             && self.fac.early_worker
             && !is_spider
         {
-            best_target = self.war_get_raider_rally(pos);
+            best_target = self.war_get_raider_rally_skipping(pos, &handled);
             if distance(best_target, pos) > 500.0 {
                 self.raider_sneak(id, best_target);
             } else {
@@ -850,6 +937,9 @@ impl Ai {
 
         if !is_blastwing {
             for e in war.targets.values() {
+                if handled.iter().any(|&h| distance(h, e.position) < CLAIM_RADIUS) {
+                    continue;
+                }
                 if e.is_riot
                     || view.get_riot_threat(e.position) > 0.0
                     || view.get_effective_threat(e.position) > friendly_threat
@@ -877,10 +967,10 @@ impl Ai {
         } else {
             SoloOrder::Rally
         };
-        self.raider_apply_solo_order(id, order);
+        self.raider_apply_solo_order(id, order, &handled);
     }
 
-    fn raider_apply_solo_order(&mut self, id: i32, order: SoloOrder) {
+    fn raider_apply_solo_order(&mut self, id: i32, order: SoloOrder, handled: &[Vec3]) {
         let Some(pos) = self.fighters.get(&id).map(|f| f.get_pos()) else {
             return;
         };
@@ -906,7 +996,7 @@ impl Ai {
             }
             SoloOrder::Rally => {
                 self.raider_clear_task(id);
-                let rally = self.war_get_raider_rally(pos);
+                let rally = self.war_get_raider_rally_skipping(pos, handled);
                 self.raider_sneak(id, rally);
             }
         }
@@ -1065,18 +1155,54 @@ impl Ai {
             } else {
                 SoloOrder::Rally
             };
-            self.raider_apply_solo_order(id, order);
+            let handled = self.raider_handled(id);
+            self.raider_apply_solo_order(id, order, &handled);
+        }
+    }
+
+    /// What can shoot a ground unit at `p` now, on the threat maps' scale:
+    /// identified, armed enemies (not anti-air) whose true range covers it,
+    /// statics always and mobiles seen in the last [`IN_RANGE_SEEN`] frames.
+    fn squad_in_range_danger(&self, p: Vec3) -> f32 {
+        let frame = self.frame;
+        (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.identified && !e.can_fly() && e.can_attack() && !e.is_aa && !e.is_flex_aa)
+            .filter(|e| e.is_static || frame - e.last_seen <= IN_RANGE_SEEN)
+            .filter(|e| e.threat_radius > 0.0 && distance(e.position, p) <= e.threat_radius)
+            .filter(|e| !e.unit.is_being_built() && !e.unit.is_paralyzed())
+            .map(|e| e.surface_danger(e.is_submerged()) / 500.0)
+            .sum()
+    }
+
+    /// The rally point squad `sid` goes to: the one it has, for
+    /// [`RALLY_COMMIT`], else `fresh` (see [`SquadMemo`]).
+    fn raider_squad_rally(&mut self, sid: SquadId, fresh: Vec3) -> Vec3 {
+        if self.dev_off("squadhyst") || fresh == NULLPOS {
+            return fresh;
+        }
+        let frame = self.frame;
+        let m = self.raider_handler.memo.entry(sid).or_default();
+        match m.rally {
+            Some((p, since)) if frame - since < RALLY_COMMIT => p,
+            _ => {
+                m.rally = Some((fresh, frame));
+                fresh
+            }
         }
     }
 
     fn raider_assign_raider_squad(&mut self, sid: SquadId) {
+        use super::squad_trace::{Bail, Branch};
+        let here = self.squads.get(sid).map_or(NULLPOS, |rs| rs.get_pos(&self.fighters));
         // Moonlighting at home against a raid (see `qrf::live`).
         if self.qrf_drafted(sid) {
+            self.squad_note(sid, Branch::Drafted, here, here, None);
             return;
         }
         // Sent somewhere by the operator.
         if let Some(target) = self.op_squad_target(sid) {
             self.raider_squad_raid(sid, target);
+            self.squad_note(sid, Branch::Operator, target, here, None);
             return;
         }
         let Some(rs) = self.squads.get(sid) else {
@@ -1110,11 +1236,15 @@ impl Ai {
                 });
             if !over_threat {
                 // Rallying squads may be sent to block an incursion's way.
-                let rally = self.incursion_block(sid).unwrap_or_else(|| self.war_get_raider_rally(pos));
+                let block = self.incursion_block(sid);
+                let rally = block.unwrap_or_else(|| self.war_get_raider_rally(pos));
+                let rally = if block.is_some() { rally } else { self.raider_squad_rally(sid, rally) };
                 self.raider_squad_raid(sid, rally);
+                self.squad_note(sid, if block.is_some() { Branch::Block } else { Branch::Rally }, rally, pos, None);
             } else {
                 let haven = self.graph_get_closest_haven(pos);
                 self.raider_squad_sneak(sid, haven);
+                self.squad_note(sid, Branch::HavenForming, haven, pos, None);
             }
             if status == 'r' {
                 // Rally rallying squads.
@@ -1138,20 +1268,63 @@ impl Ai {
 
         // Get targets for actively raiding squads.
         let threat = view.get_friendly_raider_threat(pos);
-        let over_threat = view.get_threat(rs_target) * (1.0 + view.get_riot_threat(rs_target)) > threat
-            || members.iter().any(|&(rpos, cloaked)| {
-                !cloaked && view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) > threat
-            });
+        let danger = |p: Vec3| view.get_threat(p) * (1.0 + view.get_riot_threat(p));
+        let hyst = !self.dev_off("squadhyst");
+        let over_threat = if hyst {
+            // The target, the squad's middle, or half its members in danger:
+            // one straggler's cell does not pull the squad back.
+            // What can shoot a member now, not the painted disc round it
+            // (true range plus padding: squads walking its rim bounced to
+            // the haven and back, as solo raiders did, PYRO-REPLICATION.md
+            // §6): bail if the target is covered or the worst-placed member
+            // is in range of more than the squad.
+            let in_range = (members.iter())
+                .filter(|m| !m.1)
+                .map(|&(rpos, _)| self.squad_in_range_danger(rpos))
+                .fold(0.0, f32::max);
+            let fresh = danger(rs_target) > threat || in_range > threat;
+            // Having fallen back, hold a moment; the target it left stays
+            // shunned (see `SquadMemo`), so it then looks elsewhere rather
+            // than sit out the danger at the haven.
+            let holding = (self.raider_handler.memo.get(&sid).and_then(|m| m.bailed))
+                .is_some_and(|(f, _)| self.frame - f < BAIL_HOLD);
+            fresh || holding
+        } else {
+            danger(rs_target) > threat || members.iter().any(|&(rpos, cloaked)| !cloaked && danger(rpos) > threat)
+        };
         if over_threat {
+            // What tripped it (see `squad_trace`).
+            let worst = (members.iter())
+                .filter(|m| !m.1)
+                .map(|&(rpos, _)| (danger(rpos), distance(rpos, pos)))
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .unwrap_or((0.0, 0.0));
+            let bail = Bail { at_target: danger(rs_target), at_member: worst.0, own: threat, straggle: worst.1 };
+            if hyst {
+                let frame = self.frame;
+                let m = self.raider_handler.memo.entry(sid).or_default();
+                if m.bailed.is_none() && rs_target != NULLPOS {
+                    m.bailed = Some((frame, rs_target));
+                    m.shun.push((rs_target, frame + BAIL_SHUN));
+                }
+            }
             // Try to keep raider squads from suiciding.
             let haven = self.graph_get_closest_raider_haven(pos);
             self.raider_squad_sneak(sid, haven);
+            self.squad_note(sid, Branch::Haven, haven, pos, Some(bail));
             return;
         }
 
+        // The danger has gone: no longer holding; shunned targets expire.
+        let frame = self.frame;
+        if let Some(m) = self.raider_handler.memo.get_mut(&sid) {
+            m.bailed = None;
+            m.shun.retain(|&(_, until)| until > frame);
+        }
         // Sent to block an incursion's way.
         if let Some(block) = self.incursion_block(sid) {
             self.raider_squad_raid(sid, block);
+            self.squad_note(sid, Branch::Block, block, pos, None);
             return;
         }
         let war = &self.war;
@@ -1209,8 +1382,14 @@ impl Ai {
         // TODO: also defend against enemy raiders?
 
         let mut porc = false;
+        let memo = if self.dev_off("squadhyst") { None } else { self.raider_handler.memo.get(&sid).cloned() };
+        let shunned =
+            |p: Vec3| memo.as_ref().is_some_and(|m| m.shun.iter().any(|&(s, _)| distance(s, p) < SHUN_RADIUS));
+        let last = memo.as_ref().and_then(|m| m.target);
+        // The last target, if still a candidate: (cost, position, porc).
+        let mut kept: Option<(f32, Vec3, bool)> = None;
         for e in war.targets.values() {
-            if !e.identified {
+            if !e.identified || shunned(e.position) {
                 continue;
             }
             let ethreat = view.get_threat(e.position) * (1.0 + view.get_riot_threat(e.position));
@@ -1222,11 +1401,22 @@ impl Ai {
                 continue;
             }
             let tmpcost = raid_cost(war, &self.defs, e, pos, ethreat);
+            if last.is_some_and(|l| distance(l, e.position) < 150.0) && kept.is_none_or(|k| tmpcost < k.0) {
+                kept = Some((tmpcost, e.position, e.is_static));
+            }
             if tmpcost < cost {
                 cost = tmpcost;
                 best_target = e.position;
                 porc = e.is_static;
             }
+        }
+        // Keep the last target unless the new one is clearly better.
+        if let Some((kc, kp, kporc)) = kept
+            && best_target != NULLPOS
+            && kc <= cost + TARGET_MARGIN
+        {
+            best_target = kp;
+            porc = kporc;
         }
 
         drop(engage);
@@ -1240,13 +1430,18 @@ impl Ai {
             } else {
                 self.raider_squad_raid(sid, best_target);
             }
+            self.raider_handler.memo.entry(sid).or_default().target = Some(best_target);
+            self.squad_note(sid, Branch::Target, best_target, pos, None);
         } else if let Some((tid, target)) = best_task {
             self.raider_take_task(leader, tid);
             self.raider_squad_sneak(sid, target);
+            self.squad_note(sid, Branch::Task, target, pos, None);
         } else {
             self.raider_clear_task(leader);
             let rally = self.war_get_raider_rally(pos);
+            let rally = self.raider_squad_rally(sid, rally);
             self.raider_squad_sneak(sid, rally);
+            self.squad_note(sid, Branch::Idle, rally, pos, None);
         }
     }
 }

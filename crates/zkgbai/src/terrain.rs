@@ -505,7 +505,7 @@ impl Ai {
     /// Our base and the enemy's for strategic purposes: the enemy's is the
     /// center of their seen mexes, or of their presumed territory before
     /// any are seen. `None` while the enemy's whereabouts are unknown.
-    fn strategy_bases(&self) -> Option<(Vec3, Vec3)> {
+    pub(crate) fn strategy_bases(&self) -> Option<(Vec3, Vec3)> {
         let ally =
             if self.graph.get_start_pos().is_zero() { self.graph.get_ally_base() } else { self.graph.get_start_pos() };
         let mut enemy = self.graph.get_enemy_center();
@@ -521,7 +521,7 @@ impl Ai {
 
     /// The movement tiers of the enemy's seen ground army, with what it
     /// cost, most first; bots until we know better.
-    fn enemy_ground_tiers(&self) -> Vec<Tier> {
+    pub(crate) fn enemy_ground_tiers(&self) -> Vec<Tier> {
         let mut cost: Vec<(Tier, f32)> = Vec::new();
         for e in self.war.targets.values().filter(|e| !e.is_static) {
             let Some((ud, tier)) = e.ud.and_then(|ud| Some((ud, tier_of(ud)?))) else { continue };

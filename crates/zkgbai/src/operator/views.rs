@@ -450,6 +450,69 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
     }))
 }
 
+/// The map's regime as the posture reads it: structural openness per
+/// movement tier (lanes), the deciding tier, density, and the fixed-defense
+/// budget they set (see `crate::posture`).
+pub fn regime(ai: &mut Ai, _: &Args) -> Out {
+    use crate::posture;
+    let p = &ai.posture;
+    let levers = ai.posture_levers();
+    let decisive = p.decisive().map(|l| l.tier);
+    let lanes: Vec<Value> = p
+        .lanes
+        .iter()
+        .map(|l| {
+            let (lane, open) = posture::thresholds(l.tier);
+            let fronts: Vec<Value> = (l.perimeter.fronts.iter())
+                .map(|f| {
+                    json!({"pos": [f.center.x.round(), f.center.z.round()], "span": f.span.round(),
+                           "width": f.width.round(),
+                           "sites": f.sites.iter().map(|s| [s.x.round(), s.z.round()]).collect::<Vec<_>>()})
+                })
+                .collect();
+            json!({
+                "tier": l.tier.name(), "decides": decisive == Some(l.tier),
+                "openness": r2(l.openness), "perimeter": r2(l.perimeter.openness), "closure": r2(l.closure),
+                "laneness": r2(posture::laneness(l.tier, l.openness)), "thresholds": [lane, open],
+                "usable_km2": r1(l.usable_km2),
+                "spots_ours": l.ours.iter().filter(|&&o| o).count(),
+                "spots_kept": l.perimeter.kept.iter().filter(|&&k| k).count(),
+                "fronts": fronts,
+            })
+        })
+        .collect();
+    let on = ai.posture_on();
+    Ok(json!({
+        "posture": on,
+        "measured": !p.lanes.is_empty(),
+        "tier": decisive.map(|t| t.name()),
+        "enemy_tiers": ai.enemy_ground_tiers().iter().map(|t| t.name()).collect::<Vec<_>>(),
+        "laneness": r2(p.laneness()),
+        "density": p.density.round(),
+        "density_ref": levers.density_ref.round(),
+        "richness": r2(p.richness),
+        "share": r2(p.share),
+        "cap": r2(levers.cap),
+        "standing": p.standing.round(),
+        "budget": (p.share * p.standing).round(),
+        "defense": p.defense.round(),
+        "all_defense": p.all_defense.round(),
+        "orders_held": p.orders.len(),
+        "front_orders": p.stats.front_orders,
+        "point_orders": p.stats.point_orders,
+        "stale": p.stats.stale,
+        "lanes": lanes,
+        "note": if on {
+            "openness: 0 closed off by narrow fronts for free, 1 no lane worth holding (perimeter and closure \
+             averaged); laneness: how much the deciding tier's openness counts as lanes; density: standing metal \
+             (ours and the enemy's as known) per square kilo-elmo of usable ground (F12 label 1500); share: of our \
+             standing metal the posture keeps in its fixed defenses"
+        } else {
+            "posture is off in this game (feature posture): lanes and density are not measured"
+        },
+    }))
+}
+
 pub fn squads(ai: &mut Ai, _: &Args) -> Out {
     let list: Vec<Value> = ai
         .squads
@@ -734,7 +797,24 @@ pub fn spots(ai: &mut Ai, _: &Args) -> Out {
     Ok(json!({"spots": list}))
 }
 
-/// Map size, spots, bases and (optionally) a coarse height grid.
+/// The metal-spot graph's Delaunay links: `[spot, spot, ground]`, ground 1
+/// where ground forces travel the link directly (territory shadows, the
+/// inference of who holds a spot unseen, spread along these only), 0 where
+/// not, null before the terrain model has classified them.
+pub fn links_value(ai: &Ai) -> Value {
+    let g = &ai.graph;
+    let known = g.ground_links.len() == g.links.len();
+    Value::Array(
+        g.links
+            .iter()
+            .enumerate()
+            .map(|(i, l)| json!([l.v0, l.v1, if known { json!(u8::from(g.ground_links[i])) } else { Value::Null }]))
+            .collect(),
+    )
+}
+
+/// Map size, spots, Delaunay links, bases and (optionally) a coarse height
+/// grid.
 pub fn map_info_value(ai: &Ai, heights: bool) -> Value {
     let map = ai.cb.map();
     let (hw, hh) = (map.width(), map.height());
@@ -742,6 +822,7 @@ pub fn map_info_value(ai: &Ai, heights: bool) -> Value {
         "name": map.name(),
         "size": [hw * 8, hh * 8],
         "spots": ai.graph.metal_spots.iter().map(|s| json!([s.position.x.round() as i32, s.position.z.round() as i32, r2(s.value)])).collect::<Vec<_>>(),
+        "links": links_value(ai),
         "start": opt_xz(ai.graph.get_start_pos()),
         "ally_center": opt_xz(ai.graph.get_ally_center()),
         "enemy_center": opt_xz(ai.graph.get_enemy_center()),
@@ -1157,6 +1238,11 @@ pub fn tick_value(ai: &Ai) -> Value {
         "squads": ai.squads.ids().len(),
         "territory": r2(ai.graph.territory_fraction),
         "spots": [ai.graph.get_owned_spots().len(), ai.graph.get_enemy_spots().len()],
+        "produced": ai.intel.produced.round() as i64,
+        "unaccounted": ai.intel.unaccounted().round() as i64,
+        "density": ai.posture.density.round() as i64,
+        "laneness": r2(ai.posture.laneness()),
+        "share": r2(ai.posture.share),
     })
 }
 
@@ -1230,26 +1316,26 @@ pub fn modules(ai: &mut Ai, _: &Args) -> Out {
     let list: Vec<Value> = MODULES
         .iter()
         .map(|(name, what)| {
-            let (issued, dropped) = stats
+            let (issued, dropped, foreign) = stats
                 .iter()
                 .filter(|(h, _)| *h == *name || h.starts_with(&format!("{name}.")))
-                .fold((0, 0), |(i, d), (_, s)| (i + s.issued, d + s.dropped));
+                .fold((0, 0, 0), |(i, d, f), (_, s)| (i + s.issued, d + s.dropped, f + s.foreign));
             let handlers: Vec<Value> = stats
                 .iter()
                 .filter(|(h, _)| *h == *name || h.starts_with(&format!("{name}.")))
-                .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped}))
+                .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped, "foreign": s.foreign}))
                 .collect();
             json!({"module": name, "does": what, "muted": reserved::is_muted(ai.cb, name),
-                   "orders_issued": issued, "orders_dropped": dropped, "handlers": handlers})
+                   "orders_issued": issued, "orders_dropped": dropped, "orders_foreign": foreign, "handlers": handlers})
         })
         .collect();
     let other: Vec<Value> = stats
         .iter()
         .filter(|(h, _)| !MODULES.iter().any(|(m, _)| h == m || h.starts_with(&format!("{m}."))))
-        .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped}))
+        .map(|(h, s)| json!({"handler": h, "issued": s.issued, "dropped": s.dropped, "foreign": s.foreign}))
         .collect();
     Ok(json!({"modules": list, "other_handlers": other, "muted": muted,
-              "note": "muted modules keep their bookkeeping; only their orders to units are dropped (orders_dropped counts them, and orders to reserved units)"}))
+              "note": "muted modules keep their bookkeeping; only their orders to units are dropped (orders_dropped counts them, orders to reserved units, and orders_foreign: to units another module owns, see military::roles)"}))
 }
 
 /// The `n` most expensive handlers, and panics.

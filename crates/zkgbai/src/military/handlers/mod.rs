@@ -9,6 +9,7 @@ pub mod precision;
 pub mod raider;
 pub mod retreat;
 pub mod squad;
+pub mod squad_trace;
 
 pub use bomber::BomberHandler;
 pub use misc::MiscHandler;

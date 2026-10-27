@@ -24,8 +24,12 @@ pub struct Coward {
 
     /// Health fraction below which the unit retreats.
     retreat_level: f32,
-    /// The squad's courage (see `Squad::courage`); 1 outside a squad.
+    /// The squad's courage (see `Squad::courage`); `base_courage` outside
+    /// a squad.
     pub courage: f32,
+    /// Courage outside a squad: 1, less for units that should run at the
+    /// first scratch (pickets that cannot cloak, see `stakeouts`).
+    pub base_courage: f32,
     team: i32,
 }
 
@@ -62,6 +66,7 @@ impl Coward {
                 || def_name == "tankheavyassault",
             retreat_level,
             courage: 1.0,
+            base_courage: 1.0,
             team,
         }
     }

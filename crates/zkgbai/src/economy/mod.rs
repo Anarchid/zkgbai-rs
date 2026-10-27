@@ -65,6 +65,8 @@ pub struct EconomyManager {
     /// Caretakers by unit id.
     pub nanos: BTreeMap<i32, Nanotower>,
     pub fusions: Vec<Unit>,
+    /// When the overdrive phase began (see `eco_overdrive_phase`).
+    pub od_phase: Option<i32>,
     pub mexes: Vec<Unit>,
 
     /// All worker tasks; the lists below hold ids into it.
@@ -282,6 +284,7 @@ impl EconomyManager {
             dporcs: BTreeMap::new(),
             nanos: BTreeMap::new(),
             fusions: Vec::new(),
+            od_phase: None,
             mexes: Vec::new(),
             tasks: TaskStore::default(),
             commanders: Vec::new(),
@@ -523,8 +526,51 @@ const OD_ENERGY_RATIO: f32 = 2.6;
 const OD_STORAGE_FROM: i32 = 30 * 60 * 5;
 const OD_STORAGE_FILL: f32 = 0.5;
 
+/// The overdrive phase (pylons, joined grids, energy wanted as with two
+/// fusions) starts at two fusions, or at this much energy income from any
+/// source (geothermal and wind plants made two fusions rare: user,
+/// 2026-10-26), or once no more than [`OD_FREE_SHARE`] of the metal spots
+/// are known to be unclaimed and uncontested (expansion is done) at an
+/// income of [`OD_FREE_INCOME`] or more.
+const OD_PHASE_ENERGY: f32 = 100.0;
+const OD_FREE_SHARE: f32 = 0.15;
+const OD_FREE_INCOME: f32 = 20.0;
+
 /// Cross-module economy logic and module events.
 impl Ai {
+    /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
+    /// begun it stays. `disable=odphase` keeps the old rule: two fusions.
+    pub(crate) fn eco_overdrive_phase(&self) -> bool {
+        if self.dev_off("odphase") {
+            return self.eco.fusions.len() >= 2;
+        }
+        self.eco.od_phase.is_some()
+    }
+
+    /// Start the overdrive phase when its time has come, saying why.
+    fn eco_check_overdrive_phase(&mut self) {
+        if self.eco.od_phase.is_some() {
+            return;
+        }
+        let spots = &self.graph.metal_spots;
+        let free = (spots.iter()).filter(|s| !s.owned && !s.hostile && self.war.get_threat(s.position) <= 0.0).count();
+        let free_share = free as f32 / spots.len().max(1) as f32;
+        let why = if self.eco.fusions.len() >= 2 {
+            Some(format!("{} fusions", self.eco.fusions.len()))
+        } else if self.eco.effective_income_energy >= OD_PHASE_ENERGY {
+            Some(format!("energy income {:.0}", self.eco.effective_income_energy))
+        } else if free_share <= OD_FREE_SHARE && self.eco.static_income >= OD_FREE_INCOME {
+            Some(format!("{free} of {} metal spots free and uncontested", spots.len()))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.eco.od_phase = Some(self.frame);
+            self.log(&format!("economy: overdrive phase from now ({why})"));
+            self.op_emit("economy", serde_json::json!({"event": "overdrive phase", "why": why, "t": self.frame / 30}));
+        }
+    }
+
     pub fn eco_init(&mut self) {
         let terrain = crate::kgbutil::TerrainAnalyzer::new(self);
         self.eco.initial_fac_list = terrain.get_initial_fac_list().clone();
@@ -707,8 +753,10 @@ impl Ai {
 
     /// The 15-frame income/stall bookkeeping block of `update`.
     fn eco_update_income(&mut self, frame: i32) {
+        self.eco_check_overdrive_phase();
         let merged = self.merged_allies as f32;
         let odreserve = !self.dev_off("odreserve");
+        let odphase_off = self.dev_off("odphase");
         let (m, e) = (self.metal, self.energy);
         let team = self.team_id;
         let eco = &mut self.eco;
@@ -787,7 +835,8 @@ impl Ai {
         // when stalled leaves almost none (CircuitAI: 37 E/s on overdrive at
         // minute 10 against our 13; energy 1.9x mex income at minute 5 to
         // our 1.3, 2.9x to 2.1 at minute 15).
-        let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + eco.fusions.len() as f32;
+        let fusions = eco.fusions.len().max(if eco.od_phase.is_some() && !odphase_off { 2 } else { 0 });
+        let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + fusions as f32;
         eco.energy_target = eco.raw_mex_income * eratio;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
         let tf = self.graph.territory_fraction;
@@ -935,6 +984,10 @@ impl Ai {
 
         if matches!(def_name, "energyfusion" | "energysingu" | "staticheavyarty" | "turretaaheavy" | "turretaafar") {
             self.eco_defend_fusion(unit.pos(), false);
+        }
+        // A geothermal plant is a fusion-lite: a Lotus guards it.
+        if def_name == "energygeo" && !self.dev_off("geo") {
+            self.eco_defend_geo(unit.pos());
         }
 
         if def_name == "energyfusion" || def_name == "energysingu" {

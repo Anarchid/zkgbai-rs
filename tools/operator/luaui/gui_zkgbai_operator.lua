@@ -10,7 +10,10 @@
 -- focus <team>): its squads and where they go, places it defends, where its
 -- other units mean to go and why, its memory of the enemy (where it last saw
 -- them, how long ago, and the reach of remembered defenses), its view of the
--- metal spots, and its log. On the ground, by shaders (screen-space over the
+-- metal spots and the Delaunay links between them along which it infers who
+-- holds a spot unseen (dimmed where ground forces do not walk the link, so
+-- nothing is inferred along it), the defense posture's lane fronts, and its
+-- log. On the ground, by shaders (screen-space over the
 -- map's deferred depth when AllowDeferredMapRendering is on, else a mesh
 -- draped on the terrain): one of its threat or value maps, smooth with
 -- contour lines, and the terrain's segmentation for a movement tier (regions
@@ -23,16 +26,21 @@
 -- Units ordered so are held by the operator (the AI leaves them alone) until
 -- released (panel button, or /luaui zkop release).
 --
--- Levers: the panel's "levers" button swaps the log for the AI's settings an
--- operator may turn while it plays (greed, build power, the army's line, the
--- home defense's budget and tactics), as sliders, choices and switches drawn
--- from the AI's own list of them.
+-- Controls: the panel's "controls" button opens a window of the AI's settings
+-- an operator may turn while it plays (greed, build power, the army's line,
+-- the home defense, the defense posture), as sliders, choices and switches
+-- drawn from the AI's own list of them, and its features (the dev switches).
+--
+-- Intel: the panel's "intel" button opens a window of the AI's readouts: the
+-- map's regime (structural openness per movement tier, the deciding tier,
+-- density, the fixed-defense budget they set) and what it knows and guesses
+-- of the enemy (values seen, flags, the production estimate, incursions).
 --
 -- Text commands (/luaui zkop ...): focus <team>, layer <name|none>,
 -- terrain <off|regions|holders> [tier], render <auto|screen|mesh>, release,
 -- build <unitdef> (at the mouse), fac <unitdef> [count], defend (at the
 -- mouse), say <text>, note <text>, feature <name> on|off, toggle <what>,
--- lever <name> <value|auto>.
+-- lever <name> <value|auto>, controls, intel.
 --
 -- The panel is a Chili window in Zero-K; without Chili it is drawn by hand,
 -- and without GL4 shaders the value map falls back to plain quads.
@@ -41,7 +49,7 @@
 function widget:GetInfo()
 	return {
 		name    = "ZKGBAI Operator",
-		desc    = "Shows what ZKGBAI AIs think (squads, intents, memory of the enemy, threat maps, terrain segmentation, log) and lets you steer them. Needs the AI's operator API (operator=on).",
+		desc    = "Shows what ZKGBAI AIs think (squads, intents, memory of the enemy, metal-spot links, lane fronts, threat maps, terrain segmentation, log; the map's regime and the enemy intel in a window) and lets you steer them and turn their levers and features. Needs the AI's operator API (operator=on).",
 		author  = "ZKGBAI",
 		date    = "2026-10-20",
 		license = "GNU GPL, v2 or later",
@@ -206,15 +214,16 @@ end
 --------------------------------------------------------------------------------
 
 -- By port: {port, team, allyTeam, version, fails, busy = {}, due = {}, snap,
--- byId, status, spots, feed, nextSeq, overlay, terrain}
+-- byId, status, spots, links, feed, nextSeq, overlay, terrain, levers,
+-- features, regime, military}
 local instances = {}
 local probing = {}
 local nextProbe = 0
 local focus -- port of the AI shown
 local focusChosen = false -- picked by hand
 
-local show = {squads = true, intents = true, memory = true, spots = true, roles = true, defend = true, chokes = true, feed = true}
-local SHOW_ORDER = {"squads", "intents", "memory", "spots", "roles", "defend", "chokes", "feed"}
+local show = {squads = true, intents = true, memory = true, spots = true, links = true, fronts = true, roles = true, defend = true, chokes = true, feed = true}
+local SHOW_ORDER = {"squads", "intents", "memory", "spots", "links", "fronts", "roles", "defend", "chokes", "feed"}
 local LAYERS = {"none", "threat", "enemy_porc", "aa_threat", "sub_threat", "value", "ally_threat", "riot"}
 local layer = "none"
 local SEGMENTATIONS = {"off", "regions", "holders"}
@@ -226,7 +235,8 @@ local flashes = {}  -- feedback marks on the ground: {x, z, t, color}
 local message, messageTime, messageBad
 
 local panel -- the Chili panel, if any (see below)
-local leversShown = false -- the panel shows the levers instead of the log
+local controlsShown = false -- the controls window (levers, features) is open
+local intelShown = false -- the intel window (regime, enemy) is open
 
 local function say(text, bad)
 	message, messageTime, messageBad = text, clock(), bad
@@ -790,7 +800,11 @@ local function forgetMaps(inst)
 	if inst.quadList then
 		gl.DeleteList(inst.quadList)
 	end
+	if inst.linkList then
+		gl.DeleteList(inst.linkList)
+	end
 	inst.overlayGl, inst.terrain, inst.quadList, inst.overlay = nil, nil, nil, nil
+	inst.linkList, inst.linkSig = nil, nil
 end
 
 --------------------------------------------------------------------------------
@@ -907,9 +921,12 @@ local function pollInstances()
 				end
 			end)
 			if port == focus then
-				if not inst.spots then
-					poll(inst, "map", 10, "/call/map_info?heights=false", function(v)
+				-- The links' ground flags change after terrain re-analyses.
+				if not inst.spots or show.links then
+					poll(inst, "map", inst.spots and 30 or 10, "/call/map_info?heights=false", function(v)
 						inst.spots = v.spots
+						inst.links = v.links
+						inst.linksDirty = true
 					end)
 				end
 				poll(inst, "status", 3, "/call/status", function(v)
@@ -936,12 +953,27 @@ local function pollInstances()
 						inst.overlayDirty = true
 					end)
 				end
-				if leversShown and panel then
+				if controlsShown and panel then
 					-- Before the AI's modules run, the levers are an error.
 					poll(inst, "levers", 2, "/call/levers", function(v)
-						inst.levers, inst.leverError, inst.leversChanged = v.levers, nil, true
+						inst.levers, inst.features, inst.leverError, inst.leversChanged = v.levers, v.features, nil, true
 					end, function(err)
 						inst.leverError = err
+					end)
+				end
+				-- An AI built before the regime tool answers with an error.
+				if (intelShown and panel) or show.fronts then
+					poll(inst, "regime", 3, "/call/regime", function(v)
+						inst.regime, inst.regimeError = v, nil
+					end, function(err)
+						inst.regimeError = err
+					end)
+				end
+				if intelShown and panel then
+					poll(inst, "military", 3, "/call/military", function(v)
+						inst.military, inst.militaryError = v, nil
+					end, function(err)
+						inst.militaryError = err
 					end)
 				end
 				if segmentation ~= "off" or show.chokes then
@@ -1175,11 +1207,40 @@ local function turnLever(inst, name, value)
 	end)
 end
 
-local function showLevers(on)
-	leversShown = on
+local function turnFeature(inst, name, off)
+	inst.featureSending = inst.featureSending or {}
+	inst.featureSending[name] = true
+	httpRequest(inst.port, "POST", "/call/feature", json.encode({name = name, off = off}), function(v, err)
+		inst.featureSending[name] = nil
+		inst.leversChanged = true
+		if err then
+			say(name .. ": " .. tostring(err), true)
+			return
+		end
+		local now = {}
+		for _, f in ipairs(v.features_off or {}) do
+			now[f] = true
+		end
+		for _, f in ipairs(inst.features or {}) do
+			f.off = now[f.name] or false
+		end
+		say(name .. ": " .. (now[name] and "off" or "on") .. (v.warning and (" · " .. v.warning) or ""), v.warning ~= nil)
+	end)
+end
+
+local function showControls(on)
+	controlsShown = on
 	local inst = focused()
 	if inst then
 		inst.due.levers = 0
+	end
+end
+
+local function showIntel(on)
+	intelShown = on
+	local inst = focused()
+	if inst then
+		inst.due.regime, inst.due.military = 0, 0
 	end
 end
 
@@ -1210,8 +1271,10 @@ function widget:TextCommand(command)
 		show[words[3]] = not show[words[3]]
 	elseif cmd == "release" then
 		releaseSelected()
-	elseif cmd == "levers" then
-		showLevers(not leversShown)
+	elseif cmd == "levers" or cmd == "controls" then
+		showControls(not controlsShown)
+	elseif cmd == "intel" then
+		showIntel(not intelShown)
 	elseif not inst then
 		say("no ZKGBAI with the operator on found", true)
 	elseif cmd == "build" and words[3] then
@@ -1233,11 +1296,11 @@ function widget:TextCommand(command)
 	elseif cmd == "note" then
 		act(inst, "note", {text = rest, tag = "widget"}, "note")
 	elseif cmd == "feature" and words[3] then
-		act(inst, "feature", {name = words[3], off = words[4] ~= "on"}, "feature " .. words[3])
+		turnFeature(inst, words[3], words[4] ~= "on")
 	elseif cmd == "lever" and words[3] then
 		turnLever(inst, words[3], tonumber(words[4]) or words[4] or "auto")
 	else
-		say("zkop: focus <team> | layer <name> | terrain <off|regions|holders> [tier] | render <auto|screen|mesh> | toggle <what> | release | build <def> | defend | fac <def> [n] | say | note | feature <name> on|off | levers | lever <name> <value|auto>", true)
+		say("zkop: focus <team> | layer <name> | terrain <off|regions|holders> [tier] | render <auto|screen|mesh> | toggle <what> | release | build <def> | defend | fac <def> [n] | say | note | feature <name> on|off | controls | intel | lever <name> <value|auto>", true)
 	end
 	if panel then
 		panel.sync()
@@ -1334,6 +1397,68 @@ local function drawChokes(inst)
 	end
 end
 
+-- Above the ground or the water, whichever is higher (spots float).
+local function surfaceY(x, z)
+	return max(spGetGroundHeight(x, z), 0) + 8
+end
+
+-- Which side holds a spot (snapshot code): 1 ours, 2 theirs, 0 nobody.
+local function spotSide(code)
+	if code == 1 or code == 4 then
+		return 1
+	elseif code == 2 or code == 3 then
+		return 2
+	end
+	return 0
+end
+
+-- The metal-spot graph's Delaunay links, coloured by who holds their ends
+-- (ours, theirs, orange across the front), faint where ground forces do not
+-- walk the link (territory is not inferred along it). A display list, built
+-- again when the owners or the links change.
+local function drawLinks(inst, s)
+	local spots, links = inst.spots, inst.links
+	if inst.linkSnap ~= s or inst.linksDirty then
+		inst.linkSnap, inst.linksDirty = s, false
+		local parts = {table.concat(s.spots, "")}
+		for i = 1, #links do
+			parts[#parts + 1] = tostring(links[i][3])
+		end
+		local sig = table.concat(parts, ",")
+		if sig ~= inst.linkSig then
+			inst.linkSig = sig
+			if inst.linkList then
+				gl.DeleteList(inst.linkList)
+			end
+			inst.linkList = gl.CreateList(function()
+				for i = 1, #links do
+					local l = links[i]
+					local a, b = spots[l[1] + 1], spots[l[2] + 1]
+					if a and b then
+						local sa, sb = spotSide(s.spots[l[1] + 1]), spotSide(s.spots[l[2] + 1])
+						local ours, theirs = sa == 1 or sb == 1, sa == 2 or sb == 2
+						local c = (ours and theirs) and HEAT or ours and OURS or theirs and ENEMY or INK
+						local walked = l[3] ~= 0
+						glLineWidth(walked and 2 or 1)
+						glColor(c[1], c[2], c[3], walked and ((ours or theirs) and 0.55 or 0.25) or 0.15)
+						local len = sqrt((b[1] - a[1]) ^ 2 + (b[2] - a[2]) ^ 2)
+						local n = max(1, floor(len / 48))
+						glBeginEnd(GL_LINE_STRIP, function()
+							for k = 0, n do
+								local x, z = a[1] + (b[1] - a[1]) * k / n, a[2] + (b[2] - a[2]) * k / n
+								glVertex(x, surfaceY(x, z), z)
+							end
+						end)
+					end
+				end
+			end)
+		end
+	end
+	if inst.linkList then
+		gl.CallList(inst.linkList)
+	end
+end
+
 local function drawGround(inst)
 	local s = inst.snap
 	if (inst.overlayDirty or (inst.terrain and (inst.terrain.gridDirty or inst.terrain.metaDirty))) then
@@ -1363,6 +1488,9 @@ local function drawGround(inst)
 	if not s then
 		return
 	end
+	if show.links and inst.links and inst.spots and s.spots then
+		drawLinks(inst, s)
+	end
 	if show.spots and inst.spots and s.spots then
 		glLineWidth(2)
 		for i = 1, #inst.spots do
@@ -1388,10 +1516,37 @@ local function drawGround(inst)
 	end
 end
 
+-- The defense posture's lane fronts for the deciding movement tier: a ring
+-- as wide as the front, a diamond at each of its defense sites.
+local function drawFronts(inst)
+	local r = inst.regime
+	for _, l in ipairs(r and r.lanes or {}) do
+		if l.decides then
+			for _, f in ipairs(l.fronts or {}) do
+				local x, z = f.pos[1], f.pos[2]
+				glLineWidth(3)
+				glColor(ACCENT[1], ACCENT[2], ACCENT[3], 0.8)
+				glDrawGroundCircle(x, 0, z, max(40, (f.span or 0) / 2), 48)
+				glLineWidth(2)
+				for _, site in ipairs(f.sites or {}) do
+					glDrawGroundCircle(site[1], 0, site[2], 30, 4)
+				end
+				if cameraNear(x, z, 4000) then
+					worldText(format("%s lane front · %d across · %d sites", l.tier, f.span or 0, #(f.sites or {})),
+						x, groundY(x, z) + 40, z, 16, ACCENT)
+				end
+			end
+		end
+	end
+end
+
 local function drawWorld(inst)
 	local s = inst.snap
 	if show.chokes then
 		drawChokes(inst)
+	end
+	if show.fronts then
+		drawFronts(inst)
 	end
 	if not s then
 		return
@@ -1553,6 +1708,29 @@ end
 
 local config = {} -- saved between games: window place, what is shown
 
+local GREY, WHITE, GREEN, RED = "\255\140\140\140", "\255\235\235\230", "\255\30\200\140", "\255\230\100\100"
+
+local function n0(v)
+	return type(v) == "number" and format("%d", floor(v + 0.5)) or "-"
+end
+
+local function n2(v)
+	return type(v) == "number" and format("%.2f", v) or "-"
+end
+
+local function pct(v)
+	return type(v) == "number" and format("%d%%", floor(v * 100 + 0.5)) or "-"
+end
+
+-- The deciding tier's lanes, if measured.
+local function decidingLanes(r)
+	for _, l in ipairs(r and r.lanes or {}) do
+		if l.decides then
+			return l
+		end
+	end
+end
+
 local function statusLines(inst)
 	local s, st = inst.snap, inst.status
 	if not s then
@@ -1562,131 +1740,87 @@ local function statusLines(inst)
 	local army = st and st.army
 	local terr = st and st.territory
 	local held = #(st and st.operator and st.operator.reserved or {})
-	return format("metal %.1f/s (%d)   energy %.1f/s (%d)\narmy %s vs enemy seen %s   squads %d\nspots %s:%s   held by operator %d   %s",
+	local text = format("metal %.1f/s (%d)   energy %.1f/s (%d)\narmy %s vs enemy seen %s   squads %d\nspots %s:%s   held by operator %d   %s",
 		m[2] or 0, m[1] or 0, e[2] or 0, e[1] or 0,
 		army and floor(army.value) or "?", army and floor(army.enemy_fighter_value) or "?", #s.squads,
 		terr and terr.spots_ours or "?", terr and terr.spots_enemy or "?", held, timeText(s.frame or 0))
+	local r = inst.regime
+	if r and r.posture ~= false then
+		local l = decidingLanes(r)
+		text = text .. format("\n%s openness %s · density %s/%s · defense %s",
+			r.tier or "no tier yet", l and n2(l.openness) or "-", n0(r.density), n0(r.density_ref), pct(r.share))
+	end
+	return text
 end
 
-function makeChiliPanel()
-	local Chili = WG.Chili
-	if not Chili then
-		return nil
-	end
+-- A window of its own beside the panel, closed by its button (the close
+-- happens on the next update, not inside Chili's click handler).
+local function sideWindow(Chili, key, caption, default, onClose)
 	local vsx, vsy = Spring.GetViewGeometry()
-	local w = config.win or {x = 8, y = 140, width = 360, height = 470}
-	local p = {}
-	local font = WG.GetFont and WG.GetFont() or nil
+	local w = config[key] or default
 	local window = Chili.Window:New{
 		parent = Chili.Screen0,
-		caption = "ZKGBAI Operator",
+		caption = caption,
 		x = min(w.x, vsx - 120), y = min(w.y, vsy - 120), width = w.width, height = w.height,
-		minWidth = 280, minHeight = 260,
+		minWidth = 260, minHeight = 200,
 		draggable = true, resizable = true,
 	}
-	p.window = window
-	p.header = Chili.Label:New{parent = window, x = 4, y = 18, right = 4, height = 18, caption = "looking for ZKGBAI on ports 7460-7467…", objectOverrideFont = font}
-	p.stats = Chili.TextBox:New{parent = window, x = 4, y = 40, right = 4, height = 46, text = "", fontsize = 12}
-	p.checks = {}
-	for i, key in ipairs(SHOW_ORDER) do
-		local col, row = (i - 1) % 4, floor((i - 1) / 4)
-		p.checks[key] = Chili.Checkbox:New{
-			parent = window,
-			x = tostring(col * 25) .. "%", y = 90 + row * 22, width = "24%", height = 20,
-			caption = key, checked = show[key], objectOverrideFont = font,
-			OnChange = {function(_, value)
-				show[key] = value
-				config.show = show
-			end},
-		}
-	end
-	local function combo(y, label, items, current, onSelect, x0, width)
-		if label then
-			Chili.Label:New{parent = window, x = 4, y = y + 4, width = 60, height = 20, caption = label, objectOverrideFont = font}
-		end
-		local index = 1
-		for i = 1, #items do
-			if items[i] == current then
-				index = i
-			end
-		end
-		local box = Chili.ComboBox:New{
-			parent = window, x = x0 or 64, y = y, width = width, right = width and nil or 4, height = 24,
-			items = items, selected = index, objectOverrideFont = font,
-			OnSelect = {function(_, i)
-				onSelect(items[i])
-			end},
-		}
-		return box
-	end
-	p.layer = combo(138, "map", LAYERS, layer, function(v)
-		setLayer(v)
-		config.layer = v
-	end)
-	p.seg = combo(166, "terrain", SEGMENTATIONS, segmentation, function(v)
-		setSegmentation(v)
-		config.segmentation = v
-	end, 64, "38%")
-	p.tier = combo(166, nil, TIERS, segTier, function(v)
-		setSegmentation(segmentation, v)
-		config.tier = v
-	end, "62%", "36%")
-	p.focusButton = Chili.Button:New{
-		parent = window, x = 4, y = 196, width = "32%", height = 24, caption = "AI: -", objectOverrideFont = font,
-		OnClick = {function() cycleFocus() end},
-	}
-	Chili.Button:New{
-		parent = window, x = "34%", y = 196, width = "32%", height = 24, caption = "release held", objectOverrideFont = font,
-		OnClick = {releaseSelected},
-	}
-	p.viewButton = Chili.Button:New{
-		parent = window, x = "67%", y = 196, right = 4, height = 24, caption = "levers", objectOverrideFont = font,
-		tooltip = "The AI's settings you may turn while it plays, or back to its log",
-		OnClick = {function()
-			showLevers(not leversShown)
-			p.sync()
-		end},
-	}
-	p.message = Chili.Label:New{parent = window, x = 4, y = 224, right = 4, height = 16, caption = "", objectOverrideFont = font}
-	local scroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 244, right = 4, bottom = 4, horizontalScrollbar = false}
-	p.feed = Chili.TextBox:New{parent = scroll, x = 0, y = 0, right = 0, text = "", fontsize = 11}
-	p.scroll = scroll
+	Chili.Button:New{parent = window, y = 0, right = 0, width = 24, height = 20, caption = "x", tooltip = "Close", OnClick = {onClose}}
+	return window
+end
 
-	-- The levers, in place of the log: a row per lever, built from the AI's
-	-- list of them (rebuilt when that changes shape). Chili's setters call
-	-- the change listeners too, so values shown from the AI are set under
-	-- `syncing`; a slider moved by hand is sent once the mouse lets go.
-	local leverScroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 244, right = 4, bottom = 4, horizontalScrollbar = false}
-	local leverRows, leverShape, leverPort = {}, nil, nil
+-- The controls: the AI's levers (a row each, built from its list of them,
+-- rebuilt when that changes shape), then its features (a switch each).
+-- Chili's setters call the change listeners too, so values shown from the
+-- AI are set under `syncing`; a slider moved by hand is sent once the
+-- mouse lets go.
+local function makeControls(Chili, font)
+	local c = {}
+	local window = sideWindow(Chili, "controlsWin", "ZKGBAI controls", {x = 376, y = 140, width = 340, height = 560}, function()
+		controlsShown = false
+	end)
+	c.header = Chili.Label:New{parent = window, x = 4, y = 18, right = 28, height = 18, caption = "", objectOverrideFont = font}
+	local leverScroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 40, right = 4, bottom = 4, horizontalScrollbar = false}
+	local leverRows, featureRows, leverShape, leverPort = {}, {}, nil, nil
 	local syncing = false
 	local moved = {} -- name -> {pos, t}: slid by hand, not sent yet
-	local GREY, WHITE = "\255\140\140\140", "\255\235\235\230"
 
 	local function caption(l, v, auto)
 		local text = leverText(l, v)
 		if auto and v ~= nil then
 			text = text .. " auto"
 		end
-		return WHITE .. l.label .. "  " .. (auto and GREY or "\255\30\200\140") .. text
+		return WHITE .. l.label .. "  " .. (auto and GREY or GREEN) .. text
 	end
 
-	local function shapeOf(levers)
+	local function featureCaption(f)
+		local color = f.off and GREY or WHITE
+		if (f.off and true or false) ~= (f.default_off and true or false) then
+			color = GREEN
+		end
+		return color .. f.name .. (f.off and " (off)" or "")
+	end
+
+	local function shapeOf(levers, features)
 		local parts = {}
 		for i, l in ipairs(levers) do
 			parts[i] = l.name .. ":" .. l.kind .. (l.note and "+" or "")
+		end
+		for _, f in ipairs(features or {}) do
+			parts[#parts + 1] = f.name
 		end
 		return table.concat(parts, ",")
 	end
 
 	local function placeholder(text)
 		leverScroll:ClearChildren()
-		leverRows = {}
+		leverRows, featureRows = {}, {}
 		Chili.Label:New{parent = leverScroll, x = 0, y = 4, right = 0, height = 18, caption = GREY .. text, objectOverrideFont = font}
 	end
 
-	local function buildLevers(levers)
+	local function build(levers, features)
 		leverScroll:ClearChildren()
-		leverRows = {}
+		leverRows, featureRows = {}, {}
 		syncing = true
 		local y, group = 0, nil
 		for _, l in ipairs(levers) do
@@ -1755,10 +1889,52 @@ function makeChiliPanel()
 			end
 			leverRows[l.name] = row
 		end
+		if features and #features > 0 then
+			Chili.Label:New{parent = leverScroll, x = 0, y = y + 8, right = 0, height = 18, caption = WHITE .. "Features", objectOverrideFont = font}
+			Chili.TextBox:New{parent = leverScroll, x = 0, y = y + 28, right = 0, fontsize = 11,
+				text = GREY .. "The AI's switches, on when ticked; hover for what each does. Green: not its default."}
+			y = y + 58
+			group = nil
+			local col = 0
+			for _, f in ipairs(features) do
+				if f.group ~= group then
+					group = f.group
+					if col == 1 then
+						y = y + 22
+					end
+					col = 0
+					Chili.Label:New{parent = leverScroll, x = 0, y = y + 4, right = 0, height = 16, caption = GREY .. group, fontsize = 11}
+					y = y + 20
+				end
+				local x = col == 0 and 0 or "50%"
+				local row = {feature = f}
+				local tip = (f.does ~= "" and f.does or f.name) .. (f.default_off and " (off by default)" or "")
+				row.check = Chili.Checkbox:New{
+					parent = leverScroll, x = x, y = y + 1, width = 20, height = 20, caption = "", checked = not f.off,
+					tooltip = tip,
+					OnChange = {function(_, on)
+						local inst = focused()
+						if not syncing and inst then
+							turnFeature(inst, f.name, not on)
+						end
+					end},
+				}
+				row.label = Chili.Label:New{
+					parent = leverScroll, x = col == 0 and 22 or "57%", y = y + 3, width = "42%", height = 18,
+					caption = featureCaption(f), tooltip = tip, objectOverrideFont = font,
+				}
+				featureRows[f.name] = row
+				if col == 0 then
+					col = 1
+				else
+					col, y = 0, y + 22
+				end
+			end
+		end
 		syncing = false
 	end
 
-	local function syncLevers(inst)
+	local function sync(inst)
 		syncing = true
 		local sending = inst.leverSending or {}
 		for _, l in ipairs(inst.levers) do
@@ -1786,11 +1962,21 @@ function makeChiliPanel()
 				end
 			end
 		end
+		local fsending = inst.featureSending or {}
+		for _, f in ipairs(inst.features or {}) do
+			local row = featureRows[f.name]
+			if row and not fsending[f.name] then
+				if row.check.checked == (f.off and true or false) then
+					row.check:Toggle()
+				end
+				row.label:SetCaption(featureCaption(f))
+			end
+		end
 		syncing = false
 	end
 
 	-- Every frame: send what was slid by hand once the mouse let go.
-	function p.flushLevers()
+	function c.flush()
 		local inst = focused()
 		if not inst or next(moved) == nil then
 			return
@@ -1810,7 +1996,8 @@ function makeChiliPanel()
 		end
 	end
 
-	local function updateLevers(inst)
+	function c.update(inst)
+		c.header:SetCaption(format("team %d · port %d", inst.team, inst.port))
 		if not inst.levers then
 			local text = inst.leverError and ("levers: " .. inst.leverError) or "asking the AI for its levers…"
 			if leverShape ~= text then
@@ -1819,15 +2006,277 @@ function makeChiliPanel()
 			end
 			return
 		end
-		local shape = shapeOf(inst.levers)
+		local shape = shapeOf(inst.levers, inst.features)
 		if shape ~= leverShape and next(moved) == nil then
 			leverShape = shape
-			buildLevers(inst.levers)
+			build(inst.levers, inst.features)
 			inst.leversChanged = true
 		end
 		if inst.leversChanged or leverPort ~= inst.port then
 			inst.leversChanged, leverPort = false, inst.port
-			syncLevers(inst)
+			sync(inst)
+		end
+	end
+
+	function c.save()
+		config.controlsWin = {x = window.x, y = window.y, width = window.width, height = window.height}
+	end
+	function c.dispose()
+		c.save()
+		window:Dispose()
+	end
+	return c
+end
+
+-- The readouts: the map's regime (`regime`) and what the AI knows and
+-- guesses of the enemy (`military`), as text under two bars.
+local function regimeLines(inst, add)
+	local r = inst.regime
+	add(WHITE .. "Regime")
+	if not r then
+		add(GREY .. (inst.regimeError and ("this AI has no regime readout: " .. inst.regimeError) or "asking the AI…"))
+		return
+	elseif r.posture == false then
+		add(GREY .. (r.note or "the posture is off in this game: lanes and density are not measured"))
+		return
+	end
+	local enemy = (r.enemy_tiers and #r.enemy_tiers > 0) and (GREY .. "  (enemy army: " .. table.concat(r.enemy_tiers, ", ") .. ")") or ""
+	add(GREY .. "deciding tier " .. WHITE .. tostring(r.tier or "none yet") .. enemy)
+	if #(r.lanes or {}) == 0 then
+		add(GREY .. "lanes not measured yet (they wait for both starts and the terrain)")
+	end
+	for _, l in ipairs(r.lanes or {}) do
+		add((l.decides and GREEN or WHITE) .. l.tier .. GREY .. format(": openness %s (perimeter %s, closure %s) · lanes %s · %d fronts keep %d of %d spots",
+			n2(l.openness), n2(l.perimeter), n2(l.closure), n2(l.laneness), #(l.fronts or {}), l.spots_kept or 0, l.spots_ours or 0))
+	end
+	add(GREY .. "density " .. WHITE .. n0(r.density) .. GREY .. " of " .. n0(r.density_ref) .. " metal per sq km (both sides' standing metal over usable ground) · map richness " .. n2(r.richness))
+	add(GREY .. "defense share " .. WHITE .. pct(r.share) .. GREY .. " of " .. n0(r.standing) .. " standing (cap " .. pct(r.cap) .. "): posture turrets "
+		.. WHITE .. n0(r.defense) .. GREY .. " of a " .. n0(r.budget) .. " budget · all fixed defenses " .. n0(r.all_defense))
+	add(GREY .. format("posture orders: %d front, %d point, %d stale", r.front_orders or 0, r.point_orders or 0, r.stale or 0))
+end
+
+local function intelLines(inst, add)
+	local m = inst.military
+	add(WHITE .. "Intel")
+	if not m then
+		add(GREY .. (inst.militaryError and ("military: " .. inst.militaryError) or "asking the AI…"))
+		return
+	end
+	local e, i, o = m.enemy or {}, m.intel or {}, m.ours or {}
+	local flags = {}
+	for _, f in ipairs({{"nuke", e.has_nuke}, {"anti-nuke", e.has_anti_nuke}, {"troll commander", e.troll_commander}, {"slasher spam", e.slasher_spam}}) do
+		flags[#flags + 1] = (f[2] and RED or GREY) .. f[1]
+	end
+	add(table.concat(flags, GREY .. " · "))
+	add(GREY .. "army seen " .. WHITE .. n0(e.fighter_value) .. GREY .. " · heavies " .. n0(e.heavy_value) .. " · air " .. n0(e.max_air_value)
+		.. format(" · %d%% outranges our light raiders", floor((e.outranging_share or 0) * 100 + 0.5)))
+	add(GREY .. "defenses seen " .. WHITE .. n0(e.defense_value) .. GREY .. " (light " .. n0(e.light_defense_value) .. ", heavy "
+		.. n0(e.heavy_defense_value) .. ") · " .. tostring(e.defenses or 0) .. " of " .. tostring(e.known or 0) .. " known")
+	add(GREY .. "produced (estimate) " .. WHITE .. n0(i.enemy_produced) .. GREY .. format(" at %.1f metal/s · killed ", i.enemy_income or 0) .. n0(i.killed))
+	add(GREY .. "unaccounted for " .. WHITE .. n0(i.unaccounted) .. GREY .. " (in the fog) · suspicious " .. n0(i.suspicious))
+	add(GREY .. "ours: army " .. WHITE .. n0(o.army_value) .. GREY .. " · mobile threat " .. n0(o.available_mobile_threat) .. " · raiders " .. n0(o.available_raider_threat))
+	local inc = m.incursions or {}
+	if #inc == 0 then
+		add(GREY .. "incursions: none")
+	else
+		local parts = {}
+		for _, x in ipairs(inc) do
+			parts[#parts + 1] = format("%s x%d (exposed %s)", string.lower(tostring(x.tier)), x.units or 0, n0(x.exposed))
+		end
+		add(GREY .. format("incursions %d, %d blocked: ", #inc, #(m.blocks or {})) .. WHITE .. table.concat(parts, GREY .. " · " .. WHITE))
+	end
+	add(GREY .. format("places defended: %d", #(m.defend or {})))
+end
+
+local function makeIntel(Chili, font)
+	local c = {}
+	local window = sideWindow(Chili, "intelWin", "ZKGBAI intel", {x = 376, y = 140, width = 380, height = 470}, function()
+		intelShown = false
+	end)
+	c.header = Chili.Label:New{parent = window, x = 4, y = 18, right = 28, height = 18, caption = "", objectOverrideFont = font}
+	c.density = Chili.Progressbar:New{parent = window, x = 4, y = 40, right = 4, height = 18, min = 0, max = 3000, value = 0, caption = "density", color = {0.85, 0.35, 0.15, 1}}
+	c.share = Chili.Progressbar:New{parent = window, x = 4, y = 62, right = 4, height = 18, min = 0, max = 1, value = 0, caption = "defense share", color = {0.10, 0.62, 0.44, 1}}
+	local scroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 86, right = 4, bottom = 4, horizontalScrollbar = false}
+	c.text = Chili.TextBox:New{parent = scroll, x = 0, y = 0, right = 0, text = "", fontsize = 12}
+	local shown
+
+	function c.update(inst)
+		c.header:SetCaption(format("team %d · port %d", inst.team, inst.port))
+		local r = inst.regime
+		if r and r.posture ~= false then
+			local ref = r.density_ref or 1500
+			local top = max(ref * 2, (r.density or 0) * 1.1)
+			c.density:SetMinMax(0, top)
+			c.density:SetValue(r.density or 0)
+			c.density:SetCaption(format("density %s of %s (the bar runs to twice it)", n0(r.density), n0(ref)))
+			local cap = (r.cap and r.cap > 0) and r.cap or 0.25
+			c.share:SetMinMax(0, cap)
+			c.share:SetValue(min(cap, r.share or 0))
+			c.share:SetCaption(format("defense share %s of a %s cap", pct(r.share), pct(cap)))
+		else
+			c.density:SetValue(0)
+			c.density:SetCaption("density: no readout")
+			c.share:SetValue(0)
+			c.share:SetCaption("defense share: no readout")
+		end
+		local lines = {}
+		local function add(text)
+			lines[#lines + 1] = text
+		end
+		regimeLines(inst, add)
+		add("")
+		intelLines(inst, add)
+		local text = table.concat(lines, "\n")
+		if text ~= shown then
+			shown = text
+			c.text:SetText(text)
+		end
+	end
+
+	function c.save()
+		config.intelWin = {x = window.x, y = window.y, width = window.width, height = window.height}
+	end
+	function c.dispose()
+		c.save()
+		window:Dispose()
+	end
+	return c
+end
+
+function makeChiliPanel()
+	local Chili = WG.Chili
+	if not Chili then
+		return nil
+	end
+	local vsx, vsy = Spring.GetViewGeometry()
+	local w = config.win or {x = 8, y = 140, width = 360, height = 500}
+	local p = {}
+	local font = WG.GetFont and WG.GetFont() or nil
+	local window = Chili.Window:New{
+		parent = Chili.Screen0,
+		caption = "ZKGBAI Operator",
+		x = min(w.x, vsx - 120), y = min(w.y, vsy - 120), width = w.width, height = w.height,
+		minWidth = 280, minHeight = 300,
+		draggable = true, resizable = true,
+	}
+	p.window = window
+	p.header = Chili.Label:New{parent = window, x = 4, y = 18, right = 4, height = 18, caption = "looking for ZKGBAI on ports 7460-7467…", objectOverrideFont = font}
+	p.stats = Chili.TextBox:New{parent = window, x = 4, y = 40, right = 4, height = 60, text = "", fontsize = 12}
+	p.checks = {}
+	local rows = floor((#SHOW_ORDER + 3) / 4)
+	for i, key in ipairs(SHOW_ORDER) do
+		local col, row = (i - 1) % 4, floor((i - 1) / 4)
+		p.checks[key] = Chili.Checkbox:New{
+			parent = window,
+			x = tostring(col * 25) .. "%", y = 104 + row * 22, width = "24%", height = 20,
+			caption = key, checked = show[key], objectOverrideFont = font,
+			OnChange = {function(_, value)
+				show[key] = value
+				config.show = show
+			end},
+		}
+	end
+	local y = 106 + rows * 22
+	local function combo(y, label, items, current, onSelect, x0, width)
+		if label then
+			Chili.Label:New{parent = window, x = 4, y = y + 4, width = 60, height = 20, caption = label, objectOverrideFont = font}
+		end
+		local index = 1
+		for i = 1, #items do
+			if items[i] == current then
+				index = i
+			end
+		end
+		local box = Chili.ComboBox:New{
+			parent = window, x = x0 or 64, y = y, width = width, right = width and nil or 4, height = 24,
+			items = items, selected = index, objectOverrideFont = font,
+			OnSelect = {function(_, i)
+				onSelect(items[i])
+			end},
+		}
+		return box
+	end
+	p.layer = combo(y, "map", LAYERS, layer, function(v)
+		setLayer(v)
+		config.layer = v
+	end)
+	p.seg = combo(y + 28, "terrain", SEGMENTATIONS, segmentation, function(v)
+		setSegmentation(v)
+		config.segmentation = v
+	end, 64, "38%")
+	p.tier = combo(y + 28, nil, TIERS, segTier, function(v)
+		setSegmentation(segmentation, v)
+		config.tier = v
+	end, "62%", "36%")
+	y = y + 58
+	p.focusButton = Chili.Button:New{
+		parent = window, x = 4, y = y, width = "24%", height = 24, caption = "AI: -", objectOverrideFont = font,
+		tooltip = "The AI shown (cycles when there are several)",
+		OnClick = {function() cycleFocus() end},
+	}
+	Chili.Button:New{
+		parent = window, x = "25%", y = y, width = "25%", height = 24, caption = "release", objectOverrideFont = font,
+		tooltip = "Hand the selected units (or all held ones) back to the AI",
+		OnClick = {releaseSelected},
+	}
+	p.controlsButton = Chili.Button:New{
+		parent = window, x = "51%", y = y, width = "24%", height = 24, caption = "controls", objectOverrideFont = font,
+		tooltip = "The AI's settings and features you may turn while it plays",
+		OnClick = {function()
+			showControls(not controlsShown)
+		end},
+	}
+	p.intelButton = Chili.Button:New{
+		parent = window, x = "76%", y = y, right = 4, height = 24, caption = "intel", objectOverrideFont = font,
+		tooltip = "The map's regime (openness, density, the defense budget) and what the AI knows of the enemy",
+		OnClick = {function()
+			showIntel(not intelShown)
+		end},
+	}
+	p.message = Chili.Label:New{parent = window, x = 4, y = y + 28, right = 4, height = 16, caption = "", objectOverrideFont = font}
+	local scroll = Chili.ScrollPanel:New{parent = window, x = 4, y = y + 48, right = 4, bottom = 4, horizontalScrollbar = false}
+	p.feed = Chili.TextBox:New{parent = scroll, x = 0, y = 0, right = 0, text = "", fontsize = 11}
+	p.scroll = scroll
+
+	-- The side windows follow the flags (buttons, text commands, their own
+	-- close buttons); a window that fails to build says why and stays shut.
+	local controls, intel
+	function p.syncWindows()
+		if controlsShown and not controls then
+			local ok, err = pcall(function()
+				controls = makeControls(Chili, font)
+			end)
+			if not ok then
+				controlsShown = false
+				say("no controls window: " .. tostring(err), true)
+			end
+		elseif not controlsShown and controls then
+			controls.dispose()
+			controls = nil
+		end
+		if intelShown and not intel then
+			local ok, err = pcall(function()
+				intel = makeIntel(Chili, font)
+			end)
+			if not ok then
+				intelShown = false
+				say("no intel window: " .. tostring(err), true)
+			end
+		elseif not intelShown and intel then
+			intel.dispose()
+			intel = nil
+		end
+		local state = tostring(controlsShown) .. tostring(intelShown)
+		if state ~= p.windowState then
+			p.windowState = state
+			p.controlsButton:SetCaption(controlsShown and (GREEN .. "controls") or "controls")
+			p.intelButton:SetCaption(intelShown and (GREEN .. "intel") or "intel")
+		end
+	end
+
+	function p.flushLevers()
+		if controls then
+			controls.flush()
 		end
 	end
 
@@ -1842,10 +2291,20 @@ function makeChiliPanel()
 		p.header:SetCaption(format("team %d · port %d · %s", inst.team, inst.port, st and st.state or "…"))
 		p.stats:SetText(statusLines(inst))
 		p.focusButton:SetCaption("AI: team " .. inst.team)
-		if leversShown then
-			updateLevers(inst)
-			shownFeed = nil
-			return
+		-- A side window that fails to update says why and closes.
+		if controls then
+			local ok, err = pcall(controls.update, inst)
+			if not ok then
+				say("controls: " .. tostring(err), true)
+				controlsShown = false
+			end
+		end
+		if intel then
+			local ok, err = pcall(intel.update, inst)
+			if not ok then
+				say("intel: " .. tostring(err), true)
+				intelShown = false
+			end
 		end
 		local feed = inst.feed
 		local last = feed[#feed]
@@ -1854,7 +2313,7 @@ function makeChiliPanel()
 			shownFeed, shownPort = key, inst.port
 			local lines = {}
 			for i = max(1, #feed - 40), #feed do
-				lines[#lines + 1] = "\255\140\140\140" .. timeText(feed[i].f or 0) .. "  \255\235\235\230" .. feed[i].text
+				lines[#lines + 1] = GREY .. timeText(feed[i].f or 0) .. "  " .. WHITE .. feed[i].text
 			end
 			p.feed:SetText(table.concat(lines, "\n"))
 			-- To the bottom; Chili clamps only once laid out (an unclamped
@@ -1874,10 +2333,6 @@ function makeChiliPanel()
 		p.message:SetCaption((bad and "\255\230\100\100" or "\255\30\200\140") .. text)
 	end
 	function p.sync()
-		scroll:SetVisibility(not leversShown)
-		leverScroll:SetVisibility(leversShown)
-		p.viewButton:SetCaption(leversShown and "log" or "levers")
-		config.levers = leversShown
 		for key, box in pairs(p.checks) do
 			if box.checked ~= show[key] then
 				box:Toggle()
@@ -1891,12 +2346,25 @@ function makeChiliPanel()
 				end
 			end
 		end
+		p.syncWindows()
 	end
 	function p.save()
 		config.win = {x = window.x, y = window.y, width = window.width, height = window.height}
+		if controls then
+			controls.save()
+		end
+		if intel then
+			intel.save()
+		end
 	end
 	function p.dispose()
 		p.save()
+		if controls then
+			controls.dispose()
+		end
+		if intel then
+			intel.dispose()
+		end
 		window:Dispose()
 	end
 	p.sync()
@@ -2032,7 +2500,7 @@ function widget:GetConfigData()
 		panel.save()
 	end
 	config.show, config.layer, config.segmentation, config.tier = show, layer, segmentation, segTier
-	config.levers = leversShown
+	config.controls, config.intel = controlsShown, intelShown
 	return config
 end
 
@@ -2046,7 +2514,8 @@ function widget:SetConfigData(data)
 	layer = config.layer or layer
 	segmentation = config.segmentation or segmentation
 	segTier = config.tier or segTier
-	leversShown = config.levers and true or false
+	controlsShown = (config.controls or config.levers) and true or false
+	intelShown = config.intel and true or false
 end
 
 function widget:Initialize()
@@ -2089,6 +2558,7 @@ local function tick()
 	pollInstances()
 	pumpRequests()
 	if panel then
+		panel.syncWindows()
 		panel.flushLevers()
 		if clock() > nextPanelUpdate then
 			nextPanelUpdate = clock() + 0.5

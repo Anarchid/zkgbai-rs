@@ -103,8 +103,8 @@ impl Ai {
     fn retreat_sync_courage(&mut self) {
         let (fighters, squads) = (&self.fighters, &self.squads);
         for (id, c) in self.retreat_handler.cowards.iter_mut() {
-            c.courage =
-                fighters.get(id).and_then(|f| f.squad).and_then(|sid| squads.get(sid)).map_or(1.0, |s| s.courage);
+            c.courage = (fighters.get(id).and_then(|f| f.squad).and_then(|sid| squads.get(sid)))
+                .map_or(c.base_courage, |s| s.courage);
         }
     }
 
@@ -137,6 +137,14 @@ impl Ai {
             h.shields.insert(c.id);
         }
         h.cowards.insert(c.id, c);
+    }
+
+    /// Courage of a coward outside a squad: below 1, it runs at the first
+    /// scratch (see `Coward::base_courage`).
+    pub fn retreat_set_base_courage(&mut self, id: i32, courage: f32) {
+        if let Some(c) = self.retreat_handler.cowards.get_mut(&id) {
+            c.base_courage = courage;
+        }
     }
 
     /// Whether `unit` is retreating; uncloaked scythes out of danger are not

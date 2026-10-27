@@ -29,6 +29,7 @@ use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::operator::Operator;
+use crate::posture::Posture;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
@@ -54,7 +55,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
 /// `airtempo` (an air factory weighed up by the clock and the map's size)
 /// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
-const OFF_BY_DEFAULT: [&str; 8] =
+pub(crate) const OFF_BY_DEFAULT: [&str; 8] =
     ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes", "fightsim"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
@@ -128,6 +129,8 @@ pub struct Ai {
     pub incursions: Incursions,
     /// The project tracker (see `logistics`).
     pub logistics: Logistics,
+    /// Fixed defenses' share and sites (see `posture`).
+    pub posture: Posture,
     /// Our teleport bridge and the squads going through it.
     pub teleports: Teleports,
     /// Our air transports and the drop under way.
@@ -154,6 +157,8 @@ pub struct Ai {
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
     pub stakeouts: Stakeouts,
+    /// Which handler each unit belongs to (see `military::roles`).
+    pub roles: crate::military::roles::Roles,
     pub air_intel: crate::military::air_intel::AirIntel,
     /// Fire shadows of enemy defenses, for precision raids.
     pub precision: crate::military::precision::Precision,
@@ -163,6 +168,10 @@ pub struct Ai {
     pub squads: Squads,
     pub retreat_handler: RetreatHandler,
     pub raider_handler: RaiderHandler,
+    /// Raider squads' decisions (see `squad_trace`); every one journaled
+    /// with `ZKGBAI_SQUAD_TRACE` set.
+    pub squad_trace: crate::military::handlers::squad_trace::SquadTrace,
+    pub squad_trace_detail: bool,
     pub squad_handler: SquadHandler,
     pub misc_handler: MiscHandler,
     pub bomber_handler: BomberHandler,
@@ -244,6 +253,7 @@ impl SkirmishAi for Ai {
             strategy: None,
             incursions: Incursions::default(),
             logistics: Logistics::default(),
+            posture: Posture::default(),
             teleports: Teleports::default(),
             drops: Drops::default(),
             intel: Intel::default(),
@@ -262,6 +272,7 @@ impl SkirmishAi for Ai {
             iq: Default::default(),
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
+            roles: Default::default(),
             air_intel: Default::default(),
             precision: Default::default(),
             defs,
@@ -269,6 +280,8 @@ impl SkirmishAi for Ai {
             squads: Squads::new(),
             retreat_handler: RetreatHandler::new(),
             raider_handler: RaiderHandler::new(),
+            squad_trace: Default::default(),
+            squad_trace_detail: std::env::var_os("ZKGBAI_SQUAD_TRACE").is_some(),
             squad_handler: SquadHandler::new(),
             misc_handler: MiscHandler::new(),
             bomber_handler: BomberHandler::new(),
@@ -389,6 +402,9 @@ impl Ai {
                 t.max.as_secs_f64() * 1e3
             ));
         }
+        // Units per role, and orders dropped because another module owned
+        // the unit (see `military::roles`).
+        self.log(&format!("roles: {}", self.roles_summary()));
     }
 
     /// `saved_game`: the engine resumed a save; the game is on, the
@@ -503,6 +519,7 @@ impl Ai {
         self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
         self.guard("war.incursions", |ai| ai.incursions_update(frame));
         self.guard("logistics.update", |ai| ai.logistics_update(frame));
+        self.guard("posture.update", |ai| ai.posture_update(frame));
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }

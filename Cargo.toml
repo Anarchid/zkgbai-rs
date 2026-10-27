@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/springai-sys", "crates/springai", "crates/terrain", "crates/zkgbai", "tools/terrain-view"]
+members = ["crates/springai-sys", "crates/springai", "crates/terrain", "crates/zkgbai", "tools/terrain-view", "tools/openness"]
 
 [workspace.package]
 edition = "2024"

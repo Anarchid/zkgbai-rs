@@ -20,6 +20,7 @@ pub mod puppies;
 pub mod qrf;
 pub mod radar;
 pub mod raid_test;
+pub mod roles;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod stakeouts;
@@ -47,6 +48,7 @@ use springai::{Callback, NO_TIMEOUT, Unit, Vec3, WeaponDef};
 use crate::Ai;
 use crate::defs::cmd;
 use crate::kgbutil::{ArrayGraphics, ByteArrayGraphics};
+use crate::military::roles::Role;
 use crate::nav;
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
 use radar::RadarIdentifier;
@@ -597,6 +599,24 @@ impl Ai {
         let name = def_name.as_str();
         let cost = ud.cost(self.metal);
         let team = self.team_id;
+        // A unit built for a role joins its handler before anyone else
+        // claims it (see `roles`).
+        if let Some(role) = self.role_take_declared(unit.id()) {
+            self.assign_role(unit, role);
+            if role == Role::Stakeout {
+                return;
+            }
+            // Raiders run home to be repaired, and are set up when first
+            // idle (where no other handler takes them).
+            self.war.new_units.insert(unit.id());
+            if !self.unit_classes.no_retreat.contains(name) {
+                self.retreat_add_coward(unit);
+            }
+            if !self.war.updated {
+                self.war_unit_idle(unit);
+            }
+            return;
+        }
         // Forces short of a spotter take one first (see `taskforce::spotter`).
         if self.taskforce_spotter_claims(unit, name, cost) {
             return;
@@ -608,7 +628,7 @@ impl Ai {
         }
         // Scouts picket the lanes to our economy (see `stakeouts`).
         if self.stakeouts_claims(name) {
-            self.stakeouts_add(unit);
+            self.assign_role(unit, Role::Stakeout);
             return;
         }
 
@@ -787,6 +807,10 @@ impl Ai {
         if name == "jumpraid" {
             unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[1.0], 0, NO_TIMEOUT);
         }
+        // Units with a role are their handler's already (see `roles`).
+        if self.role_of(unit.id()).is_some() {
+            return;
+        }
         // Raiders for home defense, while its budget wants more (see `qrf`).
         if self.qrf_recruit(unit) {
             return;
@@ -804,8 +828,7 @@ impl Ai {
                 .filter(|id| self.fighters.get(id).is_some_and(|f| self.defs.name_of(f.unit) == "jumpraid"))
                 .count();
             if solo < (3 + (self.eco.adjusted_income / 30.0) as usize).min(6) {
-                unit.set_move_state(1, 0);
-                self.raider_add_solo_raider(Fighter::new_raider(unit, cost, team));
+                self.assign_role(unit, Role::SoloRaider);
                 return;
             }
         }
@@ -822,8 +845,7 @@ impl Ai {
         // Dirtbags the strikes ordered (see `strikes_production`) that no
         // stakeout took raid solo until a strike conscripts them.
         if name == strikes::DIRTBAG {
-            unit.set_move_state(1, 0);
-            self.raider_add_solo_raider(Fighter::new_raider(unit, cost, team));
+            self.assign_role(unit, Role::SoloRaider);
             return;
         }
         let classes = &self.unit_classes;
@@ -1008,6 +1030,7 @@ impl Ai {
         self.jumps_remove_unit(unit);
         self.puppies_remove_unit(unit);
         self.stakeouts_remove_unit(unit, attacker);
+        self.roles_unit_destroyed(id);
 
         if is_nuke {
             self.war.has_nuke = false;
@@ -2452,6 +2475,14 @@ impl Ai {
     }
 
     pub fn war_get_raider_rally(&mut self, pos: Vec3) -> Vec3 {
+        self.war_get_raider_rally_skipping(pos, &[])
+    }
+
+    /// [`Ai::war_get_raider_rally`], passing over defense targets and
+    /// enemies within `CLAIM_RADIUS` of `handled` (where other raiders are
+    /// going with enough for what is there, see `raider_handled`).
+    pub fn war_get_raider_rally_skipping(&mut self, pos: Vec3, handled: &[Vec3]) -> Vec3 {
+        let skip = |p: Vec3| handled.iter().any(|&h| distance(h, p) < handlers::raider::CLAIM_RADIUS);
         let Some(pos) = self.war_rally_origin(pos) else { return NULLPOS };
         let war = &self.war;
         let fthreat = war.get_friendly_threat(pos);
@@ -2462,6 +2493,9 @@ impl Ai {
 
         // check for defense targets first
         for d in war.all_defense_targets() {
+            if skip(d.position) {
+                continue;
+            }
             if ((war.get_effective_threat(d.position) > fthreat
                 || war.get_porc_threat(d.position) > 0.0
                 || war.get_riot_threat(d.position) > 0.0)
@@ -2480,6 +2514,9 @@ impl Ai {
 
         // then check for nearby enemies
         for e in war.targets.values() {
+            if skip(e.position) {
+                continue;
+            }
             let ethreat = (war.get_threat(e.position) * (1.0 + war.get_riot_threat(e.position)))
                 - war.get_total_friendly_threat(e.position);
             if ((ethreat > fthreat || (e.identified && e.can_fly())) && !no_assaults)
