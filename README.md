@@ -41,6 +41,21 @@ Release package for Linux and Windows (cross-built; the Linux library targets gl
 
 `tools/package.sh --native` skips cross-building and only produces the `.so` for this machine.
 
+CI (`.github/workflows/rust.yml`) builds that package on every push to `main` and keeps it as a
+run artifact (`ZKGBAI-<version>-g<commit>`, unpacking to `AI/Skirmish/ZKGBAI/<version>/`), after
+the tests and a contract test of each library outside the engine (the `.dll` on Windows). Formatting
+and clippy run beside it; they do not hold back the package, but a release needs them green.
+
+Releasing: set `version` in `crates/zkgbai/Cargo.toml`, let cargo update `Cargo.lock`, commit, then
+tag and push the tag:
+
+    git tag v0.3.0 && git push origin main v0.3.0
+
+The tag must match the crate version. CI then publishes a GitHub release with
+`ZKGBAI-<version>.zip` (the whole `AI/Skirmish/ZKGBAI/<version>/` folder, both platforms),
+`SHA256SUMS`, and build provenance attestations for the zip and both libraries. A version with a
+pre-release suffix (`v0.3.0-rc1`) is published as a pre-release.
+
 Inside a Recoil engine checkout, this repository can live at `AI/Skirmish/ZKGBAI`: the root
 `CMakeLists.txt` builds it with cargo as part of the engine's AI build and installs it like the C++
 AIs (version from `VERSION`).
@@ -48,8 +63,10 @@ AIs (version from `VERSION`).
 Installing
 ----------
 
-Copy `dist-rs/AI/Skirmish/ZKGBAI/<version>` to `<spring data dir>/AI/Skirmish/ZKGBAI/<version>`,
-e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.2.0`. Lobbies listing local AIs will then offer it.
+Unzip a release's `ZKGBAI-<version>.zip` into the spring data directory (the one holding `games/`
+and `maps/`), or copy a local build's `dist-rs/AI/Skirmish/ZKGBAI/<version>` to
+`<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.2.0`.
+Lobbies listing local AIs will then offer it.
 
 Testing against other AIs
 -------------------------
