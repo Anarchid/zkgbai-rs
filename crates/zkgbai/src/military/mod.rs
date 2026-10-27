@@ -807,8 +807,14 @@ impl Ai {
         if name == "jumpraid" {
             unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[1.0], 0, NO_TIMEOUT);
         }
-        // Units with a role are their handler's already (see `roles`).
-        if self.role_of(unit.id()).is_some() {
+        // Units with a role are their handler's already (see `roles`), but
+        // for raiding Venoms: the spider raider phase makes them to be the
+        // home defense, so the QRF's floor may post one (see `qrf::floor`).
+        if let Some(role) = self.role_of(unit.id()) {
+            if role == Role::SquadRaider && name == "spideremp" && self.qrf_floor_can_take(unit) {
+                self.raider_remove_unit(unit);
+                self.qrf_floor_take(unit);
+            }
             return;
         }
         // Raiders for home defense, while its budget wants more (see `qrf`).

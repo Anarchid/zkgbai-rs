@@ -789,7 +789,7 @@ impl Ai {
     }
 
     /// Where raids come from: the entries seen, else the enemy's side.
-    fn qrf_mark_sources(&self) -> Vec<Vec3> {
+    pub(super) fn qrf_mark_sources(&self) -> Vec<Vec3> {
         if self.qrf.mark.entries.len() >= 4 {
             return self.qrf.mark.entries.clone();
         }
