@@ -3,6 +3,7 @@
 
 use springai::{UnitDef, Vec3};
 
+use super::worker::Approach;
 use super::{SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
 use crate::military::DefenseTarget;
@@ -44,6 +45,30 @@ const STRANDED_BONUS: f32 = 3000.0;
 /// this many before more of them cost extra.
 const SQUAD: f32 = 4.0;
 const SQUAD_PULL: f32 = 3000.0;
+
+/// A worker on its way to its own task out of build range was re-sent its
+/// move + build every time it was serviced (every 10 frames or so), and a
+/// fresh raw move never reaches ZK's own stuck handling (cmd_raw_move steps
+/// a stuck unit aside after 6-10 s), nor does the unstick test below fire on
+/// a unit re-ordered that often: on Horus a recon commander (build distance
+/// 144) stood 2-7 minutes behind our own solar, ordered 658 times, while
+/// metal floated. With `approach` a worker that has not got APPROACH_GAIN
+/// nearer, nor travelled APPROACH_TRAVEL (a detour), in APPROACH_SLOW is
+/// left to its order up to APPROACH_RESEND (one making headway is re-sent
+/// it every time, as before: holding every order 10 s cost income on every
+/// factory in horus/fix ab1), and one that has not in APPROACH_STALL drops
+/// the task and shuns the site for APPROACH_SHUN (within
+/// APPROACH_SHUN_RADIUS). On by default since Oct 27 (`disable=approach`).
+const APPROACH_SLOW: i32 = 4 * 30;
+const APPROACH_RESEND: i32 = 10 * 30;
+const APPROACH_GAIN: f32 = 32.0;
+const APPROACH_TRAVEL: f32 = 128.0;
+const APPROACH_STALL: i32 = 20 * 30;
+const APPROACH_SHUN: i32 = 60 * 30;
+const APPROACH_SHUN_RADIUS: f32 = 64.0;
+/// Spring's repair and reclaim command ids (a build's is minus the def id).
+const CMD_REPAIR: i32 = 40;
+const CMD_RECLAIM: i32 = 90;
 
 /// A metal spot with free ones near it is worth a little more than a lone
 /// one: whoever takes it goes straight on to the next. Every free spot
@@ -206,6 +231,14 @@ impl Ai {
         let task_pos = self.eco.task_pos(task_id);
 
         if wtask == Some(task_id) && distance(wpos, task_pos) <= build_dist * 1.5 {
+            // (In range is headway: see `eco_approach_holds`.)
+            if let Some(a) = self.eco.workers.get_mut(&wid).and_then(|w| w.approach.as_mut()) {
+                (a.best, a.gained, a.anchor) = (distance(wpos, task_pos), frame, wpos);
+            }
+            return;
+        }
+        let approach = !self.dev_off("approach");
+        if approach && wtask == Some(task_id) && self.eco_approach_holds(wid, task_id, task_pos) {
             return;
         }
 
@@ -271,6 +304,20 @@ impl Ai {
                 let mut nav = crate::nav!(self);
                 w.move_to(task_pos, &mut nav);
             }
+            if approach && let Some(w) = self.eco.workers.get_mut(&wid) {
+                let cmd = match order {
+                    Order::Build(def, ..) => -def.id(),
+                    Order::Repair(_) => CMD_REPAIR,
+                    Order::ReclaimFeature(_) | Order::ReclaimUnit(_) => CMD_RECLAIM,
+                };
+                let dist = distance(wpos, task_pos);
+                // Progress counts across re-sends of the same task's order.
+                let (best, gained, anchor) = match w.approach {
+                    Some(a) if a.task == task_id => (a.best, a.gained, a.anchor),
+                    _ => (dist, frame, wpos),
+                };
+                w.approach = Some(Approach { task: task_id, cmd, sent: frame, best, gained, anchor });
+            }
             OPTION_SHIFT_KEY
         } else {
             0
@@ -281,6 +328,65 @@ impl Ai {
             Order::ReclaimFeature(f) => unit.reclaim_feature(f, opts),
             Order::ReclaimUnit(t) => unit.reclaim_unit(t, opts),
         };
+    }
+
+    /// `approach` (see [`APPROACH_RESEND`]): whether worker `wid`, out of
+    /// build range of its own task `task_id` at `task_pos`, is left to the
+    /// order it has, or has stalled and just dropped the task.
+    fn eco_approach_holds(&mut self, wid: i32, task_id: TaskId, task_pos: Vec3) -> bool {
+        let frame = self.frame;
+        let Some(w) = self.eco.workers.get_mut(&wid) else {
+            return false;
+        };
+        let Some(mut a) = w.approach.filter(|a| a.task == task_id) else {
+            return false;
+        };
+        let pos = w.get_pos();
+        let dist = distance(pos, task_pos);
+        // A retreat since the order (the worker ran from danger) restarts
+        // the clock, as headway does.
+        if dist < a.best - APPROACH_GAIN || distance(pos, a.anchor) >= APPROACH_TRAVEL || w.last_retreat_frame >= a.sent
+        {
+            a.best = a.best.min(dist);
+            a.gained = frame;
+            a.anchor = pos;
+        }
+        w.approach = Some(a);
+        if frame - a.gained >= APPROACH_STALL {
+            w.shunned.retain(|&(_, until)| until > frame);
+            w.shunned.push((task_pos, frame + APPROACH_SHUN));
+            w.approach = None;
+            w.clear_task(&mut self.eco.tasks);
+            let name = self.defs.name_of(w.unit);
+            self.log(&format!(
+                "economy: approach: {} #{} got no nearer than {:.0} to its job at ({:.0}, {:.0}) in {} s (at ({:.0}, \
+                 {:.0})): dropped, site shunned",
+                name,
+                wid,
+                a.best,
+                task_pos.x,
+                task_pos.z,
+                (frame - a.gained) / 30,
+                pos.x,
+                pos.z
+            ));
+            return true;
+        }
+        // Slowed, and still on the order sent (not retreated since, its queue
+        // ending in a command of that order's kind: a build of the same
+        // unit, a repair, a reclaim; the target is not compared): leave it
+        // be a while, for ZK's stuck handling to step it aside.
+        let queued = w.unit.current_commands().last().map(|c| c.id());
+        frame - a.gained >= APPROACH_SLOW
+            && queued == Some(a.cmd)
+            && w.last_retreat_frame < a.sent
+            && frame - a.sent < APPROACH_RESEND
+    }
+
+    /// Whether worker `w` shuns a site at `p` (see [`APPROACH_SHUN`]).
+    fn eco_worker_shuns(&self, w: &Worker, p: Vec3) -> bool {
+        let frame = self.frame;
+        w.shunned.iter().any(|&(s, until)| until > frame && distance(s, p) < APPROACH_SHUN_RADIUS)
     }
 
     fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
@@ -311,7 +417,10 @@ impl Ai {
         // Only jobs the worker can get to (bots cannot build out at sea).
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
-        let reaches = |t: &WorkerTask| def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range));
+        let reaches = |t: &WorkerTask| {
+            def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
+                && !self.eco_worker_shuns(worker, t.get_pos())
+        };
         // Metal only this type of constructor gets to goes first.
         let others = match def {
             Some(d) if !worker.is_com => self.eco_other_builders(d),
@@ -514,9 +623,12 @@ impl Ai {
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
+                    // (Greedy workers build it while metal floats for want
+                    // of it: `energycrew`.)
+                    let greedy = worker.is_greedy && !self.eco_floating_on_energy();
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
-                        if worker.is_greedy {
+                        if greedy {
                             return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
                         }
                         if worker.is_com {
@@ -527,7 +639,7 @@ impl Ai {
                         }
                         return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     } else {
-                        if worker.is_greedy {
+                        if greedy {
                             return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
                         }
                         if worker.is_com {

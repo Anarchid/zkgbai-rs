@@ -413,8 +413,9 @@ impl Ai {
             self.eco_create_aa_task(position);
         }
 
-        // is there sufficient energy to cover metal income?
-        if !is_greedy
+        // is there sufficient energy to cover metal income? (Greedy workers
+        // too while metal floats for want of it: `energycrew`.)
+        if (!is_greedy || self.eco_floating_on_energy())
             && self.eco.estalled
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {

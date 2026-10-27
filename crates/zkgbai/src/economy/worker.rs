@@ -7,6 +7,20 @@ use crate::economy::tasks::{TaskKind, TaskStore};
 use crate::kgbutil::{Nav, PathCost, kgb_move_to};
 use crate::util::{OPTION_SHIFT_KEY, distance, get_angular_point, get_directional_point, get_speed};
 
+/// A worker's way to its own task out of build range (see `approach` in
+/// `assign`): the order sent, the nearest it has got, and when it last got
+/// nearer or travelled (from `anchor`, where it stood then).
+#[derive(Clone, Copy, Debug)]
+pub struct Approach {
+    pub task: TaskId,
+    /// The command the order's queue ends in (a build: minus the def id).
+    pub cmd: i32,
+    pub sent: i32,
+    pub best: f32,
+    pub gained: i32,
+    pub anchor: Vec3,
+}
+
 pub struct Worker {
     pub id: i32,
     pub unit: Unit,
@@ -21,6 +35,9 @@ pub struct Worker {
     pub chicken_frame: i32,
     pub last_retreat_frame: i32,
     pub task: Option<TaskId>,
+    pub approach: Option<Approach>,
+    /// Sites this worker could not get to, shunned until a frame.
+    pub shunned: Vec<(Vec3, i32)>,
     shield: Option<Weapon>,
     last_task_frame: i32,
     last_stuck_frame: i32,
@@ -91,6 +108,8 @@ impl Worker {
             chicken_frame: 0,
             last_retreat_frame: 0,
             task: None,
+            approach: None,
+            shunned: Vec::new(),
             shield,
             last_task_frame: 0,
             last_stuck_frame: -32768,
