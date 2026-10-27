@@ -542,10 +542,8 @@ const OD_FREE_INCOME: f32 = 20.0;
 
 /// Cross-module economy logic and module events.
 impl Ai {
-    /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
-    /// begun it stays. `disable=odphase` keeps the old rule: two fusions.
-    /// `energycrew` (`disable=energycrew` stops it): metal floats for want of energy, so
-    /// greedy constructors build energy too. Energy jobs are made only by
+    /// `energycrew` (`disable=energycrew` stops it): metal floats for want of
+    /// energy, so greedy constructors build energy too. Energy jobs are made only by
     /// non-greedy workers and greedy ones pay 10000 for them; early on
     /// nearly every constructor is greedy, so the commander alone builds
     /// energy, and on Horus a commander on a Fusion at 17 energy (horus/fix
@@ -556,6 +554,8 @@ impl Ai {
         !self.dev_off("energycrew") && eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage
     }
 
+    /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
+    /// begun it stays. `disable=odphase` keeps the old rule: two fusions.
     pub(crate) fn eco_overdrive_phase(&self) -> bool {
         if self.dev_off("odphase") {
             return self.eco.fusions.len() >= 2;
