@@ -54,7 +54,6 @@ const ORDER_FRAMES: i32 = 90;
 /// How far behind its chokepoint a blocking squad stands, elmos.
 const BLOCK_SETBACK: f32 = 150.0;
 
-
 /// Squads this close to a raid fight it rather than block its way.
 const ENGAGE_RANGE: f32 = 800.0;
 
@@ -177,7 +176,13 @@ impl Ai {
         let mut groups: BTreeMap<(Tier, usize), Vec<Member>> = BTreeMap::new();
         for e in self.war.targets.values() {
             let unseen = frame - e.last_seen;
-            if !e.identified || e.is_dead || e.is_static || e.can_fly() || (e.is_worker && !e.is_com) || unseen > horizon {
+            if !e.identified
+                || e.is_dead
+                || e.is_static
+                || e.can_fly()
+                || (e.is_worker && !e.is_com)
+                || unseen > horizon
+            {
                 continue;
             }
             // What it can do to what is above water from where it is (a
@@ -186,9 +191,11 @@ impl Ai {
             let mut position = e.position;
             if unseen > RECENT {
                 let age = unseen as f32 / 30.0;
-                if let Some(target) = ally_assets.iter().copied().min_by(|a, b| {
-                    distance(*a, e.position).total_cmp(&distance(*b, e.position))
-                }) {
+                if let Some(target) = ally_assets
+                    .iter()
+                    .copied()
+                    .min_by(|a, b| distance(*a, e.position).total_cmp(&distance(*b, e.position)))
+                {
                     let reach = distance(e.position, target);
                     let step = (e.def_speed() * age).min((reach - 100.0).max(0.0));
                     position = get_directional_point(e.position, target, step);

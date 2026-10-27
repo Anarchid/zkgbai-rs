@@ -1083,7 +1083,8 @@ impl Ai {
             return;
         };
         let pos = rs.get_pos(&self.fighters);
-        let (status, rs_target, raider_type, leader, courage) = (rs.status, rs.target, rs.raider_type, rs.leader, rs.courage);
+        let (status, rs_target, raider_type, leader, courage) =
+            (rs.status, rs.target, rs.raider_type, rs.leader, rs.courage);
         // The operator's courage (see `Squad::courage`).
         let tolerance = |friendly: f32| (courage - 1.0).max(0.0) * friendly;
         let members: Vec<(Vec3, bool)> = rs
@@ -1103,7 +1104,8 @@ impl Ai {
                 && (view.get_porc_threat(rs_target) / courage > tolerance(war.available_mobile_threat)
                     || view.get_tactical_threat(rs_target) / courage > war.available_mobile_threat))
                 || members.iter().any(|&(rpos, _)| {
-                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) / courage > view.get_total_friendly_threat(rpos)
+                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) / courage
+                        > view.get_total_friendly_threat(rpos)
                         || view.get_porc_threat(rpos) / courage > tolerance(view.get_total_friendly_threat(rpos))
                 });
             if !over_threat {

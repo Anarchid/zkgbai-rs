@@ -536,7 +536,14 @@ impl Ai {
         // A/B's "seen vs killed".
         if self.strikes.seen.insert(id) {
             self.strikes.stats.snipers_seen += 1;
-            let line = format!("strikes: a {} first seen at ({:.0}, {:.0}) at {}:{:02}", kind.0, p.x, p.z, frame / 1800, frame / 30 % 60);
+            let line = format!(
+                "strikes: a {} first seen at ({:.0}, {:.0}) at {}:{:02}",
+                kind.0,
+                p.x,
+                p.z,
+                frame / 1800,
+                frame / 30 % 60
+            );
             self.log(&line);
         }
         if !self.strikes_on() {
@@ -612,7 +619,8 @@ impl Ai {
         // ours lately (which would go on dying).
         self.strikes.sniped.retain(|s| frame - s.2 < AVERTED_MEMORY);
         let averted: f32 =
-            (self.strikes.sniped.iter()).filter(|s| distance(s.0, at) < AVERTED_RADIUS).map(|s| s.1).sum::<f32>() * AVERTED_SHARE;
+            (self.strikes.sniped.iter()).filter(|s| distance(s.0, at) < AVERTED_RADIUS).map(|s| s.1).sum::<f32>()
+                * AVERTED_SHARE;
         let value = value * SNIPER_WORTH + averted;
         // Turrets at the fix: the wave is as good as lost.
         if self.war.get_porc_threat(at) > 0.0 {
@@ -633,7 +641,10 @@ impl Ai {
         if wave.is_empty() {
             let power: f32 = cands.iter().map(|c| c.power).sum();
             self.strikes.short = frame;
-            log_refusal(self, format!("{n_cands} in reach bring {power:.0}/s, {need:.0}/s wanted (escorts {escort:.0}/s)"));
+            log_refusal(
+                self,
+                format!("{n_cands} in reach bring {power:.0}/s, {need:.0}/s wanted (escorts {escort:.0}/s)"),
+            );
             return;
         }
         let wave_power: f32 = wave.iter().map(|c| c.power).sum();
@@ -704,7 +715,9 @@ impl Ai {
             return None;
         }
         // Only while a sniper is about and a strike lately found nobody in reach.
-        if self.frame - self.strikes.last_sniper_seen > SNIPERS_LATELY || self.frame - self.strikes.short > SNIPERS_LATELY {
+        if self.frame - self.strikes.last_sniper_seen > SNIPERS_LATELY
+            || self.frame - self.strikes.short > SNIPERS_LATELY
+        {
             return None;
         }
         let def = self.defs.get(DIRTBAG)?;
@@ -780,11 +793,11 @@ impl Ai {
     /// Take `ids` out of their handlers into strike `strike`.
     fn strikes_conscript(&mut self, strike: u32, ids: &[i32]) {
         for &id in ids {
-            let unit = match self.fighters.get(&id).map(|f| f.unit).or_else(|| self.qrf.members.get(&id).map(|m| m.unit))
-            {
-                Some(u) => u,
-                None => continue,
-            };
+            let unit =
+                match self.fighters.get(&id).map(|f| f.unit).or_else(|| self.qrf.members.get(&id).map(|m| m.unit)) {
+                    Some(u) => u,
+                    None => continue,
+                };
             let cost = unit.def().map_or(0.0, |d| d.cost(self.metal));
             if self.qrf.members.contains_key(&id) {
                 self.qrf_remove_unit(id);
@@ -831,13 +844,19 @@ impl Ai {
             return;
         }
         // Sniped outside a strike: what the strikes are to stop.
-        let sniper = attacker.and_then(|a| a.def()).map(|d| self.defs.name(d).to_owned()).filter(|n| sniper_kind(n).is_some());
+        let sniper =
+            attacker.and_then(|a| a.def()).map(|d| self.defs.name(d).to_owned()).filter(|n| sniper_kind(n).is_some());
         if let Some(n) = sniper {
             let cost = unit.def().map_or(0.0, |d| d.cost(self.metal));
             self.strikes.stats.sniped += 1;
             self.strikes.stats.sniped_metal += cost;
             self.strikes.sniped.push((unit.pos(), cost, frame));
-            let line = format!("strikes: a {} ({cost:.0}) lost to a {n} at {}:{:02}", self.defs.name_of(unit), frame / 1800, frame / 30 % 60);
+            let line = format!(
+                "strikes: a {} ({cost:.0}) lost to a {n} at {}:{:02}",
+                self.defs.name_of(unit),
+                frame / 1800,
+                frame / 30 % 60
+            );
             self.log(&line);
         }
     }
@@ -980,9 +999,10 @@ impl Ai {
         let mut i = 0;
         while i < self.strikes.strikes.len() {
             let s = &self.strikes.strikes[i];
-            let ran = s.target.and_then(|t| self.war.targets.get(&t)).is_some_and(|e| {
-                e.visible && distance(e.unit.pos(), s.fix.pos()) > RAN
-            });
+            let ran = s
+                .target
+                .and_then(|t| self.war.targets.get(&t))
+                .is_some_and(|e| e.visible && distance(e.unit.pos(), s.fix.pos()) > RAN);
             // (A kill is heard of as the enemy dies. A target forgotten is
             // not settled on: a decloaked Phantom recloaks within seconds,
             // and in ab2/ab3 most seen waves were released 1-5 s after
@@ -1075,7 +1095,8 @@ mod tests {
         assert!(!go(o, MARGIN), "{o:?}");
         // Five Halberds (210 each, armoured 1450 hp) for the Lance and the
         // Mace: the Lance dies, and they take the Mace too: a go.
-        let halberds: Vec<Cand> = (1..=5).map(|k| Cand { id: k, cost: 210.0, arrive: 6.0, power: 250.0, health: 1450.0 }).collect();
+        let halberds: Vec<Cand> =
+            (1..=5).map(|k| Cand { id: k, cost: 210.0, arrive: 6.0, power: 250.0, health: 1450.0 }).collect();
         let o = odds(&halberds, 1000.0, 1100.0 * SNIPER_WORTH, P_SEEN, 1, &[MACE]);
         assert!(o.bonus > 0.0 && go(o, MARGIN), "{o:?}");
         // Five Halberds for a Phantom alone: one shot, one Halberd.
@@ -1083,7 +1104,8 @@ mod tests {
         assert!(go(o, MARGIN) && o.loss == 210.0, "{o:?}");
         // Six Blitzes at a Phantom with a Reaver: on paper shy, in
         // practice they take both; the escort credit says go.
-        let blitzes: Vec<Cand> = (1..=6).map(|k| Cand { id: k, cost: 300.0, arrive: 6.0, power: 250.0, health: 1300.0 }).collect();
+        let blitzes: Vec<Cand> =
+            (1..=6).map(|k| Cand { id: k, cost: 300.0, arrive: 6.0, power: 250.0, health: 1300.0 }).collect();
         let o = odds(&blitzes, 560.0, 750.0 * SNIPER_WORTH, P_SEEN, 1, &[REAVER]);
         assert!(o.bonus > 0.0 && o.p_kill == P_SEEN && go(o, MARGIN), "{o:?}");
     }

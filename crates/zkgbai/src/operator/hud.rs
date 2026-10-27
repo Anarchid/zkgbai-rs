@@ -26,8 +26,14 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("squads", "each squad: kind, status, position, target, size"),
     ("threats", "enemy incursions and the squads blocking them, places defended"),
     ("qrf", "the quick-reaction force: budget, teams and what each does, raids near our value"),
-    ("overrides", "what the operator has set: reserved units, requisition, defense points, muted modules, features off"),
-    ("board", "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta, home-defense (QRF) teams as gold lines to where they stand (ring: marking a raid, square: striking)"),
+    (
+        "overrides",
+        "what the operator has set: reserved units, requisition, defense points, muted modules, features off",
+    ),
+    (
+        "board",
+        "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta, home-defense (QRF) teams as gold lines to where they stand (ring: marking a raid, square: striking)",
+    ),
 ];
 
 /// A read tool the HUD runs on every render, with its arguments.
@@ -80,11 +86,7 @@ pub struct FeedConfig {
 
 impl Default for FeedConfig {
     fn default() -> Self {
-        FeedConfig {
-            kinds: DEFAULT_FEED_KINDS.iter().map(|k| (*k).to_owned()).collect(),
-            batch_ms: 3000,
-            sitrep_s: 30,
-        }
+        FeedConfig { kinds: DEFAULT_FEED_KINDS.iter().map(|k| (*k).to_owned()).collect(), batch_ms: 3000, sitrep_s: 30 }
     }
 }
 
@@ -209,13 +211,8 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                         queue.join(",")
                     );
                 }
-                let orders: Vec<String> = ai
-                    .op
-                    .over
-                    .fac_orders
-                    .iter()
-                    .map(|o| format!("{}x{}", o.left, o.unit))
-                    .collect();
+                let orders: Vec<String> =
+                    ai.op.over.fac_orders.iter().map(|o| format!("{}x{}", o.left, o.unit)).collect();
                 if !orders.is_empty() {
                     let _ = write!(s, " | operator orders: {}", orders.join(" "));
                 }
@@ -260,7 +257,11 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                                 Some(i) => format!(" [{}]", i.kind.name()),
                                 None if ai.op_squad_target(sq.id).is_some() => " [sent]".to_owned(),
                                 None => String::new(),
-                            } + &if (sq.courage - 1.0).abs() > 0.01 { format!(" courage {:.1}", sq.courage) } else { String::new() }
+                            } + &if (sq.courage - 1.0).abs() > 0.01 {
+                                format!(" courage {:.1}", sq.courage)
+                            } else {
+                                String::new()
+                            }
                         );
                     }
                     line(&mut out, s);
@@ -270,7 +271,14 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                 let inc = &ai.incursions;
                 let mut s = format!("incursions {}", inc.list.len());
                 for i in &inc.list {
-                    let _ = write!(s, " [{:?} x{} exposes {} protected {}]", i.tier, i.units, n0(i.exposed), n0(i.protected));
+                    let _ = write!(
+                        s,
+                        " [{:?} x{} exposes {} protected {}]",
+                        i.tier,
+                        i.units,
+                        n0(i.exposed),
+                        n0(i.protected)
+                    );
                 }
                 if !inc.orders.is_empty() {
                     let blocks: Vec<String> =
@@ -281,7 +289,12 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                     .war
                     .defense_targets()
                     .map(|(d, predicted)| {
-                        format!("{} dmg {}{}", xz(ai, d.position), n0(d.damage), if predicted { " (predicted)" } else { "" })
+                        format!(
+                            "{} dmg {}{}",
+                            xz(ai, d.position),
+                            n0(d.damage),
+                            if predicted { " (predicted)" } else { "" }
+                        )
                     })
                     .take(4)
                     .collect();
@@ -305,12 +318,16 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                         t.to_string()
                     };
                     let doing = q.doing.get(t).map_or("-", |d| d.what);
-                    let role = q.roles.get(t).map_or(String::new(), |r| format!(" [{} {}]", r.kind.name(), r.tactic.name()));
+                    let role =
+                        q.roles.get(t).map_or(String::new(), |r| format!(" [{} {}]", r.kind.name(), r.tactic.name()));
                     let _ = write!(s, " | {name} x{n} {doing}{role}");
                 }
                 if !q.groups.is_empty() {
-                    let raids: Vec<String> =
-                        q.groups.iter().map(|g| format!("{}x{} at {}", g.members.len(), n0(g.power), xz(ai, g.center))).collect();
+                    let raids: Vec<String> = q
+                        .groups
+                        .iter()
+                        .map(|g| format!("{}x{} at {}", g.members.len(), n0(g.power), xz(ai, g.center)))
+                        .collect();
                     let _ = write!(s, " | raids: {}", raids.join(", "));
                 }
                 line(&mut out, s);
@@ -351,7 +368,10 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                 if !off.is_empty() {
                     parts.push(format!("features off: {}", off.join(",")));
                 }
-                line(&mut out, format!("overrides: {}", if parts.is_empty() { "none".into() } else { parts.join(" | ") }));
+                line(
+                    &mut out,
+                    format!("overrides: {}", if parts.is_empty() { "none".into() } else { parts.join(" | ") }),
+                );
             }
             _ => {}
         }
@@ -374,7 +394,8 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
             body.truncate(cut);
             body.push_str("...(truncated)");
         }
-        let args = if pin.args.as_object().is_some_and(|m| m.is_empty()) { String::new() } else { format!(" {}", pin.args) };
+        let args =
+            if pin.args.as_object().is_some_and(|m| m.is_empty()) { String::new() } else { format!(" {}", pin.args) };
         line(&mut out, format!("{}{}: {}", pin.tool, args, body));
     }
     out
@@ -418,7 +439,12 @@ pub fn line(r: &Record) -> String {
         }
         "kill" => {
             let by = s(&v, "by");
-            format!("{t} killed {} at {}{}", unit(&v), pos(&v), if by.is_empty() { String::new() } else { format!(" with {by}") })
+            format!(
+                "{t} killed {} at {}{}",
+                unit(&v),
+                pos(&v),
+                if by.is_empty() { String::new() } else { format!(" with {by}") }
+            )
         }
         "enemy+" => format!("{t} enemy seen {} at {}", unit(&v), pos(&v)),
         "idle" => format!("{t} idle {} at {} (reserved: give it an order or release it)", unit(&v), pos(&v)),
@@ -429,7 +455,9 @@ pub fn line(r: &Record) -> String {
             v.get("from").and_then(Value::as_i64).unwrap_or(-1),
             v.get("to").and_then(Value::as_i64).unwrap_or(-1)
         ),
-        "chat" => format!("{t} chat from player {}: {}", v.get("player").and_then(Value::as_i64).unwrap_or(-1), s(&v, "text")),
+        "chat" => {
+            format!("{t} chat from player {}: {}", v.get("player").and_then(Value::as_i64).unwrap_or(-1), s(&v, "text"))
+        }
         "specchat" => String::new(),
         "say" => format!("{t} we said: {}", s(&v, "text")),
         "log" => format!("{t} log {}", s(&v, "msg")),
@@ -454,7 +482,11 @@ pub fn line(r: &Record) -> String {
             v.get("allies").map(Value::to_string).unwrap_or_default(),
             v.get("seed").and_then(Value::as_u64).unwrap_or(0)
         ),
-        "end" => format!("{t} GAME OVER: state {}, reason {}", s(&v, "state"), v.get("reason").and_then(Value::as_i64).unwrap_or(-1)),
+        "end" => format!(
+            "{t} GAME OVER: state {}, reason {}",
+            s(&v, "state"),
+            v.get("reason").and_then(Value::as_i64).unwrap_or(-1)
+        ),
         "map" => format!("{t} map {}", s(&v, "name")),
         kind => {
             let mut body = r.line.clone();
@@ -522,7 +554,12 @@ mod tests {
 
     #[test]
     fn lines_read_as_sentences() {
-        let r = rec(1, 4500, "unit-", serde_json::json!({"id": 12, "def": "cloakraid", "pos": [100, 200], "by": "tankraid"}));
+        let r = rec(
+            1,
+            4500,
+            "unit-",
+            serde_json::json!({"id": 12, "def": "cloakraid", "pos": [100, 200], "by": "tankraid"}),
+        );
         assert_eq!(line(&r), "2:30 LOST cloakraid#12 at (100,200) to tankraid");
         let r = rec(2, 60, "chat", serde_json::json!({"player": 1, "text": "glhf"}));
         assert_eq!(line(&r), "0:02 chat from player 1: glhf");

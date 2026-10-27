@@ -382,7 +382,8 @@ impl Ai {
         // mexes, and sinks triggered by free spots or by the metal float
         // never fired in time; by 15:00 this rule plus the second factory
         // already spend what buildpower 1.6 brings in.
-        let built = self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
+        let built =
+            self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
         let want = (self.eco.static_income / 10.0).floor();
         if !self.fac.factories.is_empty()
             && (built as f32) < want

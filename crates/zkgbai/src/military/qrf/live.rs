@@ -282,12 +282,8 @@ impl Budget {
         let typical = self.recent().1;
         match self.size {
             Sizing::Typical => typical,
-            Sizing::Largest => {
-                (self.sightings.iter().flat_map(|s| s.1.iter().copied())).fold(typical, f32::max)
-            }
-            Sizing::Lossy => {
-                weighted_p75(self.loss_raids.iter().map(|l| (l.1, l.2)).collect()).max(typical)
-            }
+            Sizing::Largest => (self.sightings.iter().flat_map(|s| s.1.iter().copied())).fold(typical, f32::max),
+            Sizing::Lossy => weighted_p75(self.loss_raids.iter().map(|l| (l.1, l.2)).collect()).max(typical),
         }
     }
 
@@ -960,7 +956,9 @@ impl Ai {
                     self.qrf.draft_unmatched.remove(&sid);
                     self.qrf.draft_raid.remove(&sid);
                     self.qrf.draft_released.insert(sid, frame);
-                    self.qrf.draft_left.insert(sid, (frame, format!("released (unmatched {} s)", (frame - since) / 30)));
+                    self.qrf
+                        .draft_left
+                        .insert(sid, (frame, format!("released (unmatched {} s)", (frame - since) / 30)));
                 }
             }
         }
@@ -1039,7 +1037,8 @@ impl Ai {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
         });
         // What the budget hears: the raiders in the group.
-        let raid = raid.map(|(i, _)| (all[i].center, all[i].members.len(), all[i].power, self.qrf_raiders_power(all[i])));
+        let raid =
+            raid.map(|(i, _)| (all[i].center, all[i].members.len(), all[i].power, self.qrf_raiders_power(all[i])));
         drop(all);
         let teams = self.qrf_teams();
         let nearest = (teams.iter())
@@ -1058,7 +1057,8 @@ impl Ai {
             self.qrf.budget.lost_to(frame, raiders, cost);
         }
         let name = self.defs.name(def).to_owned();
-        let raid_s = raid.map_or("none".to_owned(), |(_, n, power, raiders)| format!("{n}x{power:.0} raiders={raiders:.0}"));
+        let raid_s =
+            raid.map_or("none".to_owned(), |(_, n, power, raiders)| format!("{n}x{power:.0} raiders={raiders:.0}"));
         let near_s = nearest.map_or("none".to_owned(), |(t, d)| {
             format!("{}{}@{:.0}", if t >= MOON { "m" } else { "t" }, if t >= MOON { t - MOON } else { t }, d)
         });

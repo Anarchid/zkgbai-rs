@@ -169,7 +169,9 @@ pub fn hud(ai: &mut Ai, a: &Args) -> Out {
             return Err(format!("'{name}' cannot be pinned: only read tools"));
         }
         let args: Value = match a.opt_str("args")? {
-            Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(|e| format!("'args' is not JSON: {e}"))?,
+            Some(s) if !s.trim().is_empty() => {
+                serde_json::from_str(s).map_err(|e| format!("'args' is not JSON: {e}"))?
+            }
             _ => json!({}),
         };
         if !args.is_object() {
@@ -264,7 +266,10 @@ pub fn fac_queue(ai: &mut Ai, a: &Args) -> Out {
     let count = a.opt_i32("count")?.unwrap_or(1).clamp(1, 200) as u32;
     if ai.op_posture() {
         if ai.frame < 3600 {
-            return Err("posture profile: no production orders before 2:00 (the factory's own opening builds the constructors)".into());
+            return Err(
+                "posture profile: no production orders before 2:00 (the factory's own opening builds the constructors)"
+                    .into(),
+            );
         }
         let queued: u32 = ai.op.over.fac_orders.iter().map(|o| o.left).sum();
         if queued + count > 2 {
@@ -304,7 +309,10 @@ pub fn requisition(ai: &mut Ai, a: &Args) -> Out {
         return Err(format!("'{name}' is not a factory"));
     }
     if ai.op_posture() && ai.eco.effective_income < 30.0 {
-        return Err(format!("posture profile: a second factory only once income is past 30 (now {:.1})", ai.eco.effective_income));
+        return Err(format!(
+            "posture profile: a second factory only once income is past 30 (now {:.1})",
+            ai.eco.effective_income
+        ));
     }
     ai.op.over.requisition = Some(name.clone());
     let now = ai.op_requisition();
@@ -433,7 +441,9 @@ pub fn squad_intent(ai: &mut Ai, a: &Args) -> Out {
         ai.squad_set_target(sid, pos);
     }
     let courage = ai.squads.get(sid).map_or(1.0, |s| s.courage);
-    Ok(json!({"squad": sid, "intent": kind.name(), "pos": xz(pos), "radius": radius, "seconds": seconds, "courage": courage}))
+    Ok(
+        json!({"squad": sid, "intent": kind.name(), "pos": xz(pos), "radius": radius, "seconds": seconds, "courage": courage}),
+    )
 }
 
 pub fn squad_form(ai: &mut Ai, a: &Args) -> Out {
