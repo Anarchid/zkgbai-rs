@@ -22,6 +22,7 @@
 
 pub mod cover;
 pub mod field;
+pub mod floor;
 pub mod intent;
 pub mod live;
 pub mod mark;
@@ -182,8 +183,9 @@ pub struct Qrf {
     /// Normal play (else the staged game).
     pub live: bool,
     pub budget: live::Budget,
-    /// The operator's roles for teams.
+    /// The operator's roles for teams (and the floor's zones, see `floor`).
     pub roles: BTreeMap<usize, live::Role>,
+    pub floor: floor::Floor,
     /// Moonlighting squads sent at a raid, with the frame last sent;
     /// periods each has gone unmatched since; and every squad ever drafted
     /// (a second draft is a redraft, counted apart).
@@ -321,6 +323,7 @@ impl Ai {
                 ai.qrf_live_filter(frame);
                 ai.qrf_live_budget(frame);
             });
+            self.guard("qrf.floor", |ai| ai.qrf_floor_update(frame));
         }
         self.guard("qrf.algo", |ai| match ai.qrf.algo.as_str() {
             "station" => ai.qrf_station_update(frame),

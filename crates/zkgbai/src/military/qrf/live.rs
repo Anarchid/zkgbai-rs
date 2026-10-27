@@ -475,6 +475,7 @@ impl Ai {
             q.budget.size.name()
         );
         self.log(&line);
+        self.qrf_floor_start();
     }
 
     /// Whether the dedicated picks are made now (past the early game).
@@ -673,6 +674,10 @@ impl Ai {
             .sum();
         let (mut have, mut moon) = (0.0, 0.0);
         for m in self.qrf.members.values() {
+            // The floor's guards are on top of the budget.
+            if self.qrf.floor.guards.contains_key(&m.team) {
+                continue;
+            }
             if m.squad.is_some() {
                 moon += m.power();
             } else {
@@ -737,6 +742,9 @@ impl Ai {
     /// Take a raider leaving the factory into a dedicated team, if the
     /// budget wants more.
     pub fn qrf_recruit(&mut self, unit: Unit) -> bool {
+        if self.qrf.on && self.qrf.live && !self.qrf.releasing && self.qrf_floor_take(unit) {
+            return true;
+        }
         let q = &self.qrf;
         if !q.on || !q.live || q.releasing {
             return false;
@@ -795,8 +803,14 @@ impl Ai {
     /// their way do not make it up). Never in place of anti-air or a
     /// special unit (`choice` is a plain fighter).
     pub fn qrf_production(&mut self, factory: Unit, choice: &str) -> Option<&'static str> {
+        if !self.qrf.on || !self.qrf.live {
+            return None;
+        }
+        if let Some(name) = self.qrf_floor_production(factory, choice) {
+            return Some(name);
+        }
         let b = &self.qrf.budget;
-        if !self.qrf.on || !self.qrf.live || !b.production {
+        if !b.production {
             return None;
         }
         let frame = self.frame;
@@ -807,13 +821,7 @@ impl Ai {
         if self.unit_classes.aas.contains(choice) || def.is_able_to_fly() || def.speed() <= 0.0 {
             return None;
         }
-        let options = factory.def()?.build_options();
-        let picks: Vec<&'static str> = if self.qrf_late() {
-            ANTI_RAIDERS.iter().chain(&RAIDERS).copied().collect()
-        } else {
-            RAIDERS.iter().chain(&ANTI_RAIDERS).copied().collect()
-        };
-        let name = picks.into_iter().find(|n| options.iter().any(|d| self.defs.name(*d) == *n))?;
+        let name = self.qrf_pick(factory)?;
         let cost = self.defs.get(name)?.cost(self.metal);
         let pending: f32 = b.pending.iter().map(|p| p.1).sum();
         if b.wanted - b.have - pending < 0.5 * cost {
@@ -822,6 +830,17 @@ impl Ai {
         self.qrf.budget.pending.push((frame, cost));
         self.qrf.live_stats.ordered += 1;
         Some(name)
+    }
+
+    /// The phase's first pick `factory` can build (see [`ANTI_RAIDERS`]).
+    pub(super) fn qrf_pick(&self, factory: Unit) -> Option<&'static str> {
+        let options = factory.def()?.build_options();
+        let picks: Vec<&'static str> = if self.qrf_late() {
+            ANTI_RAIDERS.iter().chain(&RAIDERS).copied().collect()
+        } else {
+            RAIDERS.iter().chain(&ANTI_RAIDERS).copied().collect()
+        };
+        picks.into_iter().find(|n| options.iter().any(|d| self.defs.name(*d) == *n))
     }
 
     /// Take units into a new team of the operator's (whatever handler had
@@ -1017,6 +1036,7 @@ impl Ai {
             "drafted": self.qrf.drafted.len(), "raids": self.qrf.groups.len(),
             "ordered": s.ordered, "recruited": s.recruited, "released": s.released, "drafts": s.drafts, "redrafts": s.redrafts,
             "losses": s.losses, "losses_marked": s.losses_marked, "losses_metal": s.losses_metal.round(),
+            "floor": self.qrf_floor_json(),
         });
         self.op_emit("qrf", v);
     }

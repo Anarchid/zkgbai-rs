@@ -67,6 +67,14 @@ local options = {
 		maxlen = 4,
 	},
 	{
+		key    = 'qrf_floor',
+		name   = 'Home defense floor',
+		desc   = 'With feature garrison on: naked mexes per standing guard, each posted ahead of its sector of mexes. Empty: 4.',
+		type   = 'string',
+		def    = '',
+		maxlen = 3,
+	},
+	{
 		key    = 'qrf_moonlight',
 		name   = 'Moonlighting squads',
 		desc   = 'Raider squads still forming answer raids at home while they fill: on or off. Empty: on.',
