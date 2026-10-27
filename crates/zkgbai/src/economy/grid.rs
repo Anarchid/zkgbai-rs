@@ -11,6 +11,18 @@
 //! chains. Chains are laid a pylon at a time and checked against the grid
 //! as built, so a misplaced pylon is made up for next time.
 //!
+//! Overdrive (feature `gridmex`, on by default): late in the game the
+//! economy's own linking stops short. Its small energy goes up only while
+//! energy stalls, which the plants end early, and its pylons stay within
+//! 1500 of a plant, all in the base: on Folsom 20 of 33 mexes stood on no
+//! grid next to three singularities (2026-10-27). So in the overdrive
+//! phase this planner links grids by what they gain instead. The gadget
+//! gives a mex of base income `b` and energy `e` an extra
+//! `b * 0.25 * sqrt(e)`, the energy shared in proportion to `b²`, so a grid
+//! spending `c` on mexes with `S = sum b²` overdrives `0.25 * sqrt(c * S)`.
+//! The link gaining most per pylon goes first, unless its pylons pay back
+//! slower than [`MEX_PAYBACK`].
+//!
 //! A building that needs power (a Bertha, a superweapon) is not started
 //! until its site is on a grid making enough: the pylons go first, so 6000
 //! metal does not stand idle for minutes waiting to be linked (see
@@ -47,6 +59,14 @@ const PYLON_SAME: f32 = 250.0;
 /// Frames a building waits for its site to have power before it is started
 /// anyway.
 const POWER_WAIT: i32 = 30 * 180;
+
+/// Seconds a link's pylons may take to pay for themselves in overdrive
+/// metal (`gridmex`).
+const MEX_PAYBACK: f32 = 600.0;
+
+/// Share of the energy made that overdrive gets at least, whatever the
+/// spending of the moment (`gridmex`).
+const MIN_SPARE: f32 = 0.25;
 
 /// A building that needs power, waiting for its site to be linked.
 pub struct PendingPower {
@@ -99,6 +119,8 @@ struct Member {
     range: f32,
     energy: f32,
     needs: f32,
+    /// A mex's base income (its spot's metal), 0 for the rest.
+    metal: f32,
 }
 
 /// Disjoint sets over members.
@@ -170,20 +192,28 @@ impl Ai {
         if pr <= 0.0 {
             return;
         }
+        let mex = self.eco.build_ids.mex_id;
         let mut members: Vec<Member> = self
             .cb
             .team_units()
             .into_iter()
             .filter(|u| u.health() > 0.0)
             .filter_map(|u| {
-                let &(range, needs) = gd.by_def.get(&u.def()?.id())?;
+                let id = u.def()?.id();
+                let &(range, needs) = gd.by_def.get(&id)?;
                 // Unfinished buildings are no grid members yet, but those
                 // that will need power are planned for already.
                 if u.is_being_built() && needs <= 0.0 {
                     return None;
                 }
                 let energy = u.rules_param_float("current_energyIncome", 0.0);
-                Some(Member { what: self.defs.name_of(u).to_owned(), pos: u.pos(), range, energy, needs })
+                let pos = u.pos();
+                let metal = if id == mex {
+                    self.graph.get_closest_spot_index(pos).map_or(0.0, |s| self.graph.metal_spots[s].value)
+                } else {
+                    0.0
+                };
+                Some(Member { what: self.defs.name_of(u).to_owned(), pos, range, energy, needs, metal })
             })
             .collect();
         // The site of a building waiting for power, as if it stood there.
@@ -195,6 +225,7 @@ impl Ai {
                 range,
                 energy: 0.0,
                 needs,
+                metal: 0.0,
             });
             Some(members.len() - 1)
         });
@@ -214,6 +245,22 @@ impl Ai {
         let mut capacity = vec![0.0f32; n];
         for (i, m) in members.iter().enumerate() {
             capacity[grid[i]] += m.energy;
+        }
+        // Once a minute, what overdrive makes (the gadget's own figures)
+        // and how many mexes stand on a grid making energy.
+        if (frame + self.offset + 13) % (6 * GRID_PERIOD) == 0 && frame > 0 {
+            let game = self.cb.game();
+            let param = |name: &str| game.team_rules_param_float(self.team_id, name, 0.0);
+            let mexes = (0..n).filter(|&i| members[i].metal > 0.0);
+            let on = mexes.clone().filter(|&i| capacity[grid[i]] >= MIN_GRID_ENERGY).count();
+            self.log(&format!(
+                "grid: overdrive +{:.1} metal on {:.1} base, {:.0} energy spent, {:.0} wasted; {on} of {} mexes on a grid making energy",
+                param("OD_metalOverdrive"),
+                param("OD_metalBase"),
+                -param("OD_energyOverdrive"),
+                param("OD_team_energyWaste"),
+                mexes.count()
+            ));
         }
         // A waiting building starts once its site has power (or has waited
         // long enough).
@@ -243,28 +290,15 @@ impl Ai {
         }
 
         // Grids worth linking: those making energy, and those needing it.
-        let mut of: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut all: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, &g) in grid.iter().enumerate() {
-            of.entry(g).or_default().push(i);
+            all.entry(g).or_default().push(i);
         }
+        let mut of = all.clone();
         of.retain(|&g, list| capacity[g] >= MIN_GRID_ENERGY || list.iter().any(|&i| members[i].needs > 0.0));
         let mut nodes: Vec<usize> = of.keys().copied().collect();
         nodes.sort_unstable();
-        // The shortest link between two grids: (pylons needed, members).
-        let link = |a: usize, b: usize| {
-            let (mut best, mut ends) = (f32::INFINITY, (0, 0));
-            for &i in &of[&a] {
-                for &j in &of[&b] {
-                    let gap = distance(members[i].pos, members[j].pos)
-                        - CHAIN_SLACK * (members[i].range + members[j].range + 2.0 * pr);
-                    if gap < best {
-                        best = gap;
-                        ends = (i, j);
-                    }
-                }
-            }
-            (1.0 + (best.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil(), ends)
-        };
+        let link = |a: usize, b: usize| shortest_link(&members, &of[&a], &of[&b], pr);
 
         // First the starved: the building needing the most power, linked to
         // the grid that makes up its shortfall the cheapest (or else the
@@ -291,6 +325,8 @@ impl Ai {
             enough
                 .or(strongest)
                 .map(|o| (o.2, format!("{} needing {needs:.0} energy (has {:.0})", members[s].what, capacity[g])))
+        } else if self.eco_overdrive_phase() && !self.dev_off("gridmex") {
+            self.eco_overdrive_link(&members, &all, &capacity, pr)
         } else if self.eco_overdrive_phase() && nodes.len() > 1 {
             // Late game: the cheapest link of a minimum spanning tree over
             // the grids (Kruskal; the tree's other links come later).
@@ -310,6 +346,81 @@ impl Ai {
         drop(of);
         let (a, b) = (&members[i], &members[j]);
         self.eco_lay_pylons(a.pos, a.range, b.pos, b.range, &why);
+    }
+
+    /// The overdrive link (`gridmex`): of the links between a grid making
+    /// energy and another grid with mexes (or energy), the one gaining the
+    /// most overdrive metal per pylon, if it pays back in [`MEX_PAYBACK`];
+    /// none under enemy porc, none already being laid.
+    fn eco_overdrive_link(
+        &self,
+        members: &[Member],
+        grids: &HashMap<usize, Vec<usize>>,
+        capacity: &[f32],
+        pr: f32,
+    ) -> Option<((usize, usize), String)> {
+        let pylon_cost = self.defs.get("energypylon")?.cost(self.metal);
+        // What overdrive gets: the energy made less what is spent.
+        let made: f32 = grids.keys().map(|&g| capacity[g]).sum();
+        if made <= 0.0 {
+            return None;
+        }
+        let spent = self.cb.economy().usage(self.energy);
+        let spare = ((made - spent) / made).clamp(MIN_SPARE, 1.0);
+        let od = |c: f32, s: f32| 0.25 * (spare * c * s).max(0.0).sqrt();
+        let metal_sq = |g: usize| grids[&g].iter().map(|&i| members[i].metal * members[i].metal).sum::<f32>();
+
+        let mut keys: Vec<usize> = grids.keys().copied().collect();
+        keys.sort_unstable();
+        // (gain, pylons, members joined, grids joined)
+        struct Pick(f32, f32, (usize, usize), (usize, usize));
+        let mut best: Option<Pick> = None;
+        for &a in keys.iter().filter(|&&g| capacity[g] >= MIN_GRID_ENERGY) {
+            let (ca, sa) = (capacity[a], metal_sq(a));
+            for &b in &keys {
+                let (cb, sb) = (capacity[b], metal_sq(b));
+                // Each pair once: an energy grid with one making less, or
+                // with a stronger one listed after it.
+                if b == a || (cb >= MIN_GRID_ENERGY && b < a) || sa + sb <= 0.0 {
+                    continue;
+                }
+                let gain = od(ca + cb, sa + sb) - od(ca, sa) - od(cb, sb);
+                if gain <= 0.0 {
+                    continue;
+                }
+                let (pylons, ends) = shortest_link(members, &grids[&a], &grids[&b], pr);
+                if gain * MEX_PAYBACK < pylons * pylon_cost || best.as_ref().is_some_and(|x| gain / pylons <= x.0 / x.1)
+                {
+                    continue;
+                }
+                let (m, n) = (&members[ends.0], &members[ends.1]);
+                let points = chain(m.pos, m.range, n.pos, n.range, pr);
+                if points.iter().all(|&p| self.eco_pylon_near(p))
+                    || points.iter().any(|&p| self.war.get_porc_threat(p) > 0.0)
+                {
+                    continue;
+                }
+                best = Some(Pick(gain, pylons, ends, (a, b)));
+            }
+        }
+        let Pick(gain, pylons, ends, (a, b)) = best?;
+        let mexes = |g: usize| grids[&g].iter().filter(|&&i| members[i].metal > 0.0).count();
+        Some((
+            ends,
+            format!(
+                "grids making {:.0} and {:.0} energy, with {} and {} mexes: +{gain:.1} metal overdrive for {pylons:.0} pylons",
+                capacity[a],
+                capacity[b],
+                mexes(a),
+                mexes(b)
+            ),
+        ))
+    }
+
+    /// Whether a pylon stands (or is queued) where one is planned.
+    fn eco_pylon_near(&self, p: Vec3) -> bool {
+        self.eco.pylons.iter().any(|u| distance(u.pos(), p) < PYLON_SAME)
+            || self.eco.pylon_tasks.iter().any(|&t| distance(self.eco.task_pos(t), p) < PYLON_SAME)
     }
 
     fn eco_max_pylon_tasks(&self) -> usize {
@@ -361,9 +472,7 @@ impl Ai {
             if self.eco.pylon_tasks.len() >= self.eco_max_pylon_tasks() {
                 break;
             }
-            let there = self.eco.pylons.iter().any(|u| distance(u.pos(), p) < PYLON_SAME)
-                || self.eco.pylon_tasks.iter().any(|&t| distance(self.eco.task_pos(t), p) < PYLON_SAME);
-            if !there {
+            if !self.eco_pylon_near(p) {
                 let site = self.eco_build_site(pylon, p, 0);
                 if self.eco_add_simple(pylon, site, List::Pylon, Some(List::Pylon)).is_some() {
                     queued += 1;
@@ -374,6 +483,23 @@ impl Ai {
             self.log(&format!("grid: {queued} pylons to link {why}"));
         }
     }
+}
+
+/// The shortest link between two grids (lists of members): pylons needed,
+/// and the members it joins.
+fn shortest_link(members: &[Member], a: &[usize], b: &[usize], pr: f32) -> (f32, (usize, usize)) {
+    let (mut best, mut ends) = (f32::INFINITY, (0, 0));
+    for &i in a {
+        for &j in b {
+            let gap = distance(members[i].pos, members[j].pos)
+                - CHAIN_SLACK * (members[i].range + members[j].range + 2.0 * pr);
+            if gap < best {
+                best = gap;
+                ends = (i, j);
+            }
+        }
+    }
+    (1.0 + (best.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil(), ends)
 }
 
 /// Where the pylons (of range `pr`) of a chain from `a` (range `ra`) to `b`
