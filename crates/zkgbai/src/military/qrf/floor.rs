@@ -15,10 +15,12 @@
 //! lone raider and buys time against two.
 //!
 //! Guards are the floor's own: the first recruit-class units out of the
-//! factories while a sector is unguarded, and, unguarded a while, ordered
-//! in place of a plain fighter (whatever `qrf_production` says). They are
-//! not counted in the autopilot's budget, which runs as before. Feature
-//! `garrison` (off by default).
+//! factories while a sector is unguarded, raiding Venoms included (the
+//! spider factory's raider phase makes them for home defense, see
+//! `fac_spider_raider`), and, unguarded a while, ordered in place of a
+//! plain fighter (whatever `qrf_production` says). They are not counted in
+//! the autopilot's budget, which runs as before. Feature `garrison` (off by
+//! default).
 
 use std::collections::BTreeMap;
 
@@ -228,9 +230,19 @@ impl Ai {
         self.qrf.floor.guards = guards;
     }
 
+    /// Whether the floor would take `unit` now (see [`Ai::qrf_floor_take`]).
+    pub(crate) fn qrf_floor_can_take(&self, unit: Unit) -> bool {
+        let q = &self.qrf;
+        q.on && q.live
+            && !q.releasing
+            && q.floor.on
+            && q.floor.unguarded() > 0
+            && unit.def().is_some_and(|d| is_recruit(self.defs.name(d)) && Mobility::of(d).is_some())
+    }
+
     /// Take a recruit-class unit out of the factory as the guard of an
     /// unguarded sector (the one nearest it).
-    pub(super) fn qrf_floor_take(&mut self, unit: Unit) -> bool {
+    pub(crate) fn qrf_floor_take(&mut self, unit: Unit) -> bool {
         let f = &self.qrf.floor;
         if !f.on || f.unguarded() == 0 {
             return false;
