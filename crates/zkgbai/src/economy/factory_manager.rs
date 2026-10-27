@@ -613,9 +613,7 @@ impl Ai {
         if choice != picked {
             fac.building_for = None;
         }
-        if !ai_wants_builder
-            && let Some(def) = self.op_factory_order(fac_id, false)
-        {
+        if !ai_wants_builder && let Some(def) = self.op_factory_order(fac_id, false) {
             fac.building_for = None;
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);

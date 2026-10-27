@@ -160,9 +160,8 @@ pub fn analyse(map: &TierMap, ours: Pos, theirs: Pos, spots: &[Pos], p: &LanePar
     let d_o = g.distances(oc);
     let d_e = g.distances(ec);
     let cells: Vec<Option<usize>> = spots.iter().map(|&s| g.cell_near(s)).collect();
-    let ours_flags: Vec<bool> = (cells.iter())
-        .map(|c| c.is_some_and(|c| d_o[c].is_finite() && d_o[c] <= OURS * d_e[c]))
-        .collect();
+    let ours_flags: Vec<bool> =
+        (cells.iter()).map(|c| c.is_some_and(|c| d_o[c].is_finite() && d_o[c] <= OURS * d_e[c])).collect();
     let mine: Vec<usize> = (cells.iter().zip(&ours_flags)).filter(|(_, o)| **o).filter_map(|(c, _)| *c).collect();
     let mut perimeter = g.perimeter(ec, &mine, p, &d_o, &d_e);
     // Back from our spots to the input's.
@@ -244,14 +243,14 @@ impl LaneGrid {
         let n = self.w * self.h;
         let mut d = vec![f32::INFINITY; n];
         let mut heap = BinaryHeap::new();
-        for c in 0..n {
+        for (c, dc) in d.iter_mut().enumerate() {
             let (x, z) = (c % self.w, c / self.w);
             let edge = x == 0 || z == 0 || x == self.w - 1 || z == self.h - 1;
             if !self.pass[c] {
-                d[c] = 0.0;
+                *dc = 0.0;
                 heap.push(Node(0.0, c));
             } else if edge {
-                d[c] = self.cell / 2.0;
+                *dc = self.cell / 2.0;
                 heap.push(Node(self.cell / 2.0, c));
             }
         }
@@ -411,13 +410,15 @@ impl LaneGrid {
                 if let Some(&i) = front_of.get(&c) {
                     let at = self.center(c);
                     let f = &mut fronts[i];
-                    let near = (0..f.sites.len()).min_by(|&a, &b| f.sites[a].distance(at).total_cmp(&f.sites[b].distance(at)));
+                    let near =
+                        (0..f.sites.len()).min_by(|&a, &b| f.sites[a].distance(at).total_cmp(&f.sites[b].distance(at)));
                     if let Some(site) = near {
                         f.routes[site].push(spot);
                     }
                     break;
                 }
-                let next = self.neighbours(c).filter(|&(v, _)| d_e[v] < d_e[c]).min_by(|a, b| d_e[a.0].total_cmp(&d_e[b.0]));
+                let next =
+                    self.neighbours(c).filter(|&(v, _)| d_e[v] < d_e[c]).min_by(|a, b| d_e[a.0].total_cmp(&d_e[b.0]));
                 match next {
                     Some((v, _)) => c = v,
                     None => break,
@@ -429,11 +430,26 @@ impl LaneGrid {
     /// The narrowest full closure near each depth (see the module docs).
     /// Only the band's cells are in each cut's graph: ground nearer us
     /// than the band is the sink, ground farther the source.
-    pub fn profile(&self, enemy: usize, ours: usize, d_o: &[f32], d_e: &[f32], depths: &[f32], band: f32) -> Vec<Closure> {
+    pub fn profile(
+        &self,
+        enemy: usize,
+        ours: usize,
+        d_o: &[f32],
+        d_e: &[f32],
+        depths: &[f32],
+        band: f32,
+    ) -> Vec<Closure> {
         let n = self.w * self.h;
-        let rel: Vec<f32> = (0..n)
-            .map(|c| if d_o[c].is_finite() && d_e[c].is_finite() { d_o[c] / (d_o[c] + d_e[c]).max(1.0) } else { f32::NAN })
-            .collect();
+        let rel: Vec<f32> =
+            (0..n)
+                .map(|c| {
+                    if d_o[c].is_finite() && d_e[c].is_finite() {
+                        d_o[c] / (d_o[c] + d_e[c]).max(1.0)
+                    } else {
+                        f32::NAN
+                    }
+                })
+                .collect();
         let thick = 2.0 * band * d_o[enemy].max(1.0);
         let _ = ours;
         depths
@@ -578,7 +594,8 @@ const STEPS: [(i64, i64, f32); 8] = [
 /// Straight-line extent of a set of points (double sweep), plus a cell.
 fn span(pos: &[Pos], cell: f32) -> f32 {
     let Some(&first) = pos.first() else { return 0.0 };
-    let far = |from: Pos| pos.iter().copied().max_by(|a, b| a.distance(from).total_cmp(&b.distance(from))).unwrap_or(from);
+    let far =
+        |from: Pos| pos.iter().copied().max_by(|a, b| a.distance(from).total_cmp(&b.distance(from))).unwrap_or(from);
     let a = far(first);
     a.distance(far(a)) + cell
 }

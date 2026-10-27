@@ -163,7 +163,7 @@ impl Ai {
         t.last.retain(|sid, _| alive.contains(sid));
         let s = std::mem::take(&mut t.stats);
         let mut worst: Vec<(SquadId, u32)> = std::mem::take(&mut t.flips).into_iter().collect();
-        worst.sort_by(|a, b| b.1.cmp(&a.1));
+        worst.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
         worst.truncate(3);
         if s.decisions == 0 {
             return;

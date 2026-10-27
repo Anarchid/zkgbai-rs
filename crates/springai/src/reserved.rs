@@ -144,9 +144,7 @@ pub fn current_module() -> &'static str {
 fn covers(prefix: &str, module: &str) -> bool {
     !prefix.is_empty()
         && (module == prefix
-            || (module.len() > prefix.len()
-                && module.starts_with(prefix)
-                && module.as_bytes()[prefix.len()] == b'.'))
+            || (module.len() > prefix.len() && module.starts_with(prefix) && module.as_bytes()[prefix.len()] == b'.'))
 }
 
 /// Mute module `prefix` of AI `cb`; `false` if it already was.
@@ -191,9 +189,8 @@ fn gate(ai: i32, unit_id: i32, module: &'static str) -> bool {
     let reserved = RESERVED.with_borrow(|r| !r.is_empty() && r.contains(&(ai, unit_id)));
     let muted =
         !reserved && MUTED.with_borrow(|m| !m.is_empty() && m.iter().any(|(a, p)| *a == ai && covers(p, module)));
-    let foreign = !reserved
-        && !muted
-        && OWNED.with_borrow(|o| o.get(&(ai, unit_id)).is_some_and(|owner| !owner.admits(module)));
+    let foreign =
+        !reserved && !muted && OWNED.with_borrow(|o| o.get(&(ai, unit_id)).is_some_and(|owner| !owner.admits(module)));
     let dropped = reserved || muted || foreign;
     ORDERS.with_borrow_mut(|o| {
         let s = o.entry((ai, module)).or_default();

@@ -1209,7 +1209,8 @@ impl Ai {
             return;
         };
         let pos = rs.get_pos(&self.fighters);
-        let (status, rs_target, raider_type, leader, courage) = (rs.status, rs.target, rs.raider_type, rs.leader, rs.courage);
+        let (status, rs_target, raider_type, leader, courage) =
+            (rs.status, rs.target, rs.raider_type, rs.leader, rs.courage);
         // The operator's courage (see `Squad::courage`).
         let tolerance = |friendly: f32| (courage - 1.0).max(0.0) * friendly;
         let members: Vec<(Vec3, bool)> = rs
@@ -1229,7 +1230,8 @@ impl Ai {
                 && (view.get_porc_threat(rs_target) / courage > tolerance(war.available_mobile_threat)
                     || view.get_tactical_threat(rs_target) / courage > war.available_mobile_threat))
                 || members.iter().any(|&(rpos, _)| {
-                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) / courage > view.get_total_friendly_threat(rpos)
+                    view.get_threat(rpos) * (1.0 + view.get_riot_threat(rpos)) / courage
+                        > view.get_total_friendly_threat(rpos)
                         || view.get_porc_threat(rpos) / courage > tolerance(view.get_total_friendly_threat(rpos))
                 });
             if !over_threat {
@@ -1288,8 +1290,7 @@ impl Ai {
                 .is_some_and(|(f, _)| self.frame - f < BAIL_HOLD);
             fresh || holding
         } else {
-            danger(rs_target) > threat
-                || members.iter().any(|&(rpos, cloaked)| !cloaked && danger(rpos) > threat)
+            danger(rs_target) > threat || members.iter().any(|&(rpos, cloaked)| !cloaked && danger(rpos) > threat)
         };
         if over_threat {
             // What tripped it (see `squad_trace`).
@@ -1382,7 +1383,8 @@ impl Ai {
 
         let mut porc = false;
         let memo = if self.dev_off("squadhyst") { None } else { self.raider_handler.memo.get(&sid).cloned() };
-        let shunned = |p: Vec3| memo.as_ref().is_some_and(|m| m.shun.iter().any(|&(s, _)| distance(s, p) < SHUN_RADIUS));
+        let shunned =
+            |p: Vec3| memo.as_ref().is_some_and(|m| m.shun.iter().any(|&(s, _)| distance(s, p) < SHUN_RADIUS));
         let last = memo.as_ref().and_then(|m| m.target);
         // The last target, if still a candidate: (cost, position, porc).
         let mut kept: Option<(f32, Vec3, bool)> = None;

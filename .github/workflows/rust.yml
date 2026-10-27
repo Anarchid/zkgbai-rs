@@ -6,36 +6,139 @@ on:
     tags: ["v*"]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  # The stable toolchain on the dev machine, so CI lints what a local
+  # `cargo clippy` lints and builds with the compiler the arena libraries
+  # come from. Bump it together with the local one.
+  RUST_TOOLCHAIN: "1.92.0"
 
 jobs:
-  check:
+  # Formatting and lints report on every push but do not hold back the
+  # package; a release needs them green.
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-  package:
-    needs: check
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      artifact: ${{ steps.version.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Version (a tag must match the crate's)
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/zkgbai/Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$version" ] || {
+              echo "::error::tag $GITHUB_REF_NAME does not match crates/zkgbai/Cargo.toml version $version"
+              exit 1
+            }
+            artifact="ZKGBAI-$version"
+          else
+            artifact="ZKGBAI-$version-g${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-pc-windows-gnu
       - uses: Swatinem/rust-cache@v2
       - run: tools/setup-toolchain.sh
-      - run: tools/package.sh
+      - run: tools/package.sh -v "${{ steps.version.outputs.version }}"
       - name: Contract test (Linux library outside the engine)
-        run: cargo run --manifest-path tools/dll-smoke/Cargo.toml -- dist-rs/AI/Skirmish/ZKGBAI/*/libSkirmishAI.so
-      - uses: actions/upload-artifact@v4
+        run: cargo run --locked --manifest-path tools/dll-smoke/Cargo.toml -- dist-rs/AI/Skirmish/ZKGBAI/*/libSkirmishAI.so
+      # The artifact unpacks into a Spring data directory: AI/Skirmish/ZKGBAI/<version>/.
+      - uses: actions/upload-artifact@v7
         with:
-          name: ZKGBAI
-          path: dist-rs/AI/Skirmish/ZKGBAI/
+          name: ${{ steps.version.outputs.artifact }}
+          path: dist-rs/
+          if-no-files-found: error
+
+  smoke-windows:
+    needs: package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/dll-smoke
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.package.outputs.artifact }}
+          path: dist
+      - name: Contract test (Windows library outside the engine)
+        shell: bash
+        run: cargo run --locked --manifest-path tools/dll-smoke/Cargo.toml -- dist/AI/Skirmish/ZKGBAI/*/SkirmishAI.dll
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [lint, test, package, smoke-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.package.outputs.artifact }}
+          path: dist
+      - name: Archive
+        run: |
+          (cd dist && zip -qr "../ZKGBAI-$VERSION.zip" AI)
+          cp dist/AI/Skirmish/ZKGBAI/"$VERSION"/{libSkirmishAI.so,SkirmishAI.dll} .
+          sha256sum "ZKGBAI-$VERSION.zip" libSkirmishAI.so SkirmishAI.dll > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest@v4
+        with:
+          subject-path: |
+            ZKGBAI-${{ env.VERSION }}.zip
+            libSkirmishAI.so
+            SkirmishAI.dll
+      - name: Publish
+        run: |
+          cat > notes.md <<EOF
+          Unzip \`ZKGBAI-$VERSION.zip\` into the engine's data directory (the one holding \`games/\` and
+          \`maps/\`, e.g. \`~/.spring\`): it holds \`AI/Skirmish/ZKGBAI/$VERSION/\` with the Linux and
+          Windows libraries, and lobbies then offer ZKGBAI $VERSION.
+
+          The libraries were built by this repository's CI; check one with
+          \`gh attestation verify libSkirmishAI.so -R $GITHUB_REPOSITORY\`.
+          EOF
+          prerelease=()
+          [[ $VERSION == *-* ]] && prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag \
+            --title "ZKGBAI $VERSION" --notes-file notes.md --generate-notes "${prerelease[@]}" \
+            "ZKGBAI-$VERSION.zip" SHA256SUMS

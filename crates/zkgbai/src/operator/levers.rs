@@ -16,7 +16,13 @@ use crate::military::qrf::ops as qrf_ops;
 pub enum Kind {
     /// A number from `min` to `max` in steps of `step`; `log`: the slider
     /// is spaced by ratio.
-    Range { min: f32, max: f32, step: f32, log: bool, format: Format },
+    Range {
+        min: f32,
+        max: f32,
+        step: f32,
+        log: bool,
+        format: Format,
+    },
     Choice(&'static [&'static str]),
     Switch,
 }
@@ -210,7 +216,8 @@ pub static LEVERS: &[Lever] = &[
             Reading {
                 value: if l > 0.0 { r2(l) } else { Value::Null },
                 auto: l <= 0.0,
-                note: (l > 0.0 && ai.op_line_point().is_none()).then(|| "no line yet: the enemy's center is unknown".into()),
+                note: (l > 0.0 && ai.op_line_point().is_none())
+                    .then(|| "no line yet: the enemy's center is unknown".into()),
             }
         },
         set: |ai, v| {

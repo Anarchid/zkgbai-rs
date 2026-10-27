@@ -29,9 +29,9 @@ pub fn weapon_power(wd: WeaponDef, paralyzer_bonus: bool) -> f32 {
     for (k, v) in params {
         let v: f32 = v.parse().unwrap_or(0.0);
         match k.as_str() {
-            "extra_damage" => shot += v,                                   // emp
-            "impulse" => shot += v / 10.0,                                 // impulse
-            "timeslow_damagefactor" => shot *= 1.0 + slow_bonus(v),        // slow
+            "extra_damage" => shot += v,                            // emp
+            "impulse" => shot += v / 10.0,                          // impulse
+            "timeslow_damagefactor" => shot *= 1.0 + slow_bonus(v), // slow
             "disarmDamageOnly" => shot /= 10.0,
             "setunitsonfire" => shot *= 2.0,
             _ => {}

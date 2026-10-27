@@ -553,9 +553,7 @@ impl Ai {
             return;
         }
         let spots = &self.graph.metal_spots;
-        let free = (spots.iter())
-            .filter(|s| !s.owned && !s.hostile && self.war.get_threat(s.position) <= 0.0)
-            .count();
+        let free = (spots.iter()).filter(|s| !s.owned && !s.hostile && self.war.get_threat(s.position) <= 0.0).count();
         let free_share = free as f32 / spots.len().max(1) as f32;
         let why = if self.eco.fusions.len() >= 2 {
             Some(format!("{} fusions", self.eco.fusions.len()))

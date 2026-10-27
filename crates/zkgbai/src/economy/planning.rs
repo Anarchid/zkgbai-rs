@@ -430,7 +430,8 @@ impl Ai {
         // mexes, and sinks triggered by free spots or by the metal float
         // never fired in time; by 15:00 this rule plus the second factory
         // already spend what buildpower 1.6 brings in.
-        let built = self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
+        let built =
+            self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
         let want = (self.eco.static_income / 10.0).floor();
         if !self.fac.factories.is_empty()
             && (built as f32) < want
@@ -1904,7 +1905,13 @@ impl Ai {
         let worth: Vec<f32> = (0..spots.len())
             .map(|i| {
                 let near = (EXPOSURE_REF / reach(i).max(EXPOSURE_REF * 0.25)).min(4.0);
-                let w = if spots[i].1 { 1.0 } else if ours(i) { FUTURE_WORTH } else { 0.0 };
+                let w = if spots[i].1 {
+                    1.0
+                } else if ours(i) {
+                    FUTURE_WORTH
+                } else {
+                    0.0
+                };
                 w * near * metal[i] / mean_metal
             })
             .collect();
@@ -1920,8 +1927,7 @@ impl Ai {
             })
             .unwrap_or_default();
         // Turrets covering each spot.
-        let mut cover: Vec<u32> =
-            spots.iter().map(|&(p, _)| self.eco_porc_count(p, POINT_COVER) as u32).collect();
+        let mut cover: Vec<u32> = spots.iter().map(|&(p, _)| self.eco_porc_count(p, POINT_COVER) as u32).collect();
         for (site, _, routed) in &fronts {
             let n = self.eco_porc_count(*site, CHOKE_PORC_RADIUS) as u32;
             for &i in routed {
@@ -2019,7 +2025,9 @@ impl Ai {
                 .count();
             let planned = (self.eco.porc_tasks.iter())
                 .filter(|&&t| distance(self.eco.task_pos(t), at) < radius)
-                .filter(|&&t| self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == id))
+                .filter(|&&t| {
+                    self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == id)
+                })
                 .count();
             built + planned
         };

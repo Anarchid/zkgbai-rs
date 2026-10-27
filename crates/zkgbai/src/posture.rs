@@ -330,7 +330,9 @@ impl Ai {
     pub(crate) fn posture_waiting(&self) -> usize {
         (self.posture.orders.iter())
             .filter(|o| o.unit.is_none())
-            .filter(|o| self.eco.tasks.get(o.task).and_then(|t| t.as_construction()).is_some_and(|c| c.target.is_none()))
+            .filter(|o| {
+                self.eco.tasks.get(o.task).and_then(|t| t.as_construction()).is_some_and(|c| c.target.is_none())
+            })
             .count()
     }
 
@@ -338,7 +340,14 @@ impl Ai {
     /// tracker (see `logistics`) so a crew goes for it: far sites lose to
     /// nearer jobs otherwise. Worth `value` metal, less a payback share of
     /// it for every second it is late.
-    pub(crate) fn posture_ordered(&mut self, task: crate::economy::TaskId, site: springai::Vec3, cost: f32, value: f32, why: &str) {
+    pub(crate) fn posture_ordered(
+        &mut self,
+        task: crate::economy::TaskId,
+        site: springai::Vec3,
+        cost: f32,
+        value: f32,
+        why: &str,
+    ) {
         self.posture.orders.push(PostureOrder { task, site, cost, issued: self.frame, unit: None });
         if !self.dev_off("logistics") && !self.dev_off("clients") {
             let now = self.frame as f32 / 30.0;

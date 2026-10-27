@@ -400,10 +400,8 @@ impl Ai {
                 }
             }
         }
-        let mut plan: Vec<(usize, usize)> = (best_match(&cost).into_iter())
-            .filter(|&(a, b)| allowed[a][b])
-            .map(|(a, b)| (team_ids[a], b))
-            .collect();
+        let mut plan: Vec<(usize, usize)> =
+            (best_match(&cost).into_iter()).filter(|&(a, b)| allowed[a][b]).map(|(a, b)| (team_ids[a], b)).collect();
         let mut free: BTreeSet<usize> = all_teams.keys().copied().collect();
         for (team, _) in &plan {
             free.remove(team);
@@ -414,17 +412,16 @@ impl Ai {
                 continue;
             }
             let cooling = |f: usize, ai: &Ai| {
-                f >= MOON && (ai.qrf.draft_released.get(&((f - MOON) as SquadId))).is_some_and(|r| frame - r < DRAFT_COOLDOWN)
+                f >= MOON
+                    && (ai.qrf.draft_released.get(&((f - MOON) as SquadId))).is_some_and(|r| frame - r < DRAFT_COOLDOWN)
             };
             let Some(team) = (free.iter().copied())
                 .filter(|&f| teams.contains_key(&f) && self.qrf_mark_allows(f, t) && (f < MOON || !cooling(f, self)))
-                .min_by(
-                    |&a, &b| {
-                        let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
-                        let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);
-                        da.total_cmp(&db)
-                    },
-                )
+                .min_by(|&a, &b| {
+                    let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
+                    let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);
+                    da.total_cmp(&db)
+                })
             else {
                 break;
             };
@@ -819,9 +816,8 @@ impl Ai {
             return Vec::new();
         }
         let sources = self.qrf_mark_sources();
-        let nearest_source = |p: Vec3| {
-            (sources.iter().copied()).min_by(|a, b| distance(*a, p).total_cmp(&distance(*b, p))).unwrap_or(p)
-        };
+        let nearest_source =
+            |p: Vec3| (sources.iter().copied()).min_by(|a, b| distance(*a, p).total_cmp(&distance(*b, p))).unwrap_or(p);
         let points: Vec<(Vec3, f32)> = (self.qrf.assets.iter())
             .filter(|a| !self.qrf.live || self.war.get_porc_threat(a.pos) <= 0.0)
             .map(|a| {

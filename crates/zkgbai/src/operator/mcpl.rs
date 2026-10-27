@@ -267,9 +267,10 @@ impl Session {
                     return None;
                 }
                 let caps = list("effectiveCapabilities");
-                let enabled = params.get("enabled").and_then(Value::as_array).map(|a| {
-                    a.iter().filter_map(Value::as_str).map(str::to_owned).collect::<BTreeSet<String>>()
-                });
+                let enabled = params
+                    .get("enabled")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect::<BTreeSet<String>>());
                 let mut unavailable = Vec::new();
                 let mut on = BTreeSet::new();
                 for (name, decl) in &declared {
@@ -283,7 +284,8 @@ impl Session {
                     if missing.is_empty() {
                         on.insert(name.clone());
                     } else {
-                        unavailable.push(json!({"featureSet": name, "missingCapabilities": missing, "effect": "disabled"}));
+                        unavailable
+                            .push(json!({"featureSet": name, "missingCapabilities": missing, "effect": "disabled"}));
                     }
                 }
                 p.enabled = on;
@@ -307,14 +309,18 @@ impl Session {
                 if register {
                     self.send(&json!({"jsonrpc": "2.0", "id": "zk-register", "method": "channels/register",
                         "params": {"channels": [chat_descriptor(shared)]}}));
-                    let hello = format!("Game on, team {}: the match is running. What you say here goes to the spectator chat: the opponent does not hear it (use the say tool to address it), and you cannot read what spectators say, as no player can.", shared.team);
+                    let hello = format!(
+                        "Game on, team {}: the match is running. What you say here goes to the spectator chat: the opponent does not hear it (use the say tool to address it), and you cannot read what spectators say, as no player can.",
+                        shared.team
+                    );
                     self.send(&incoming(shared, "game", "the game", &hello, "zk-hello"));
                 }
                 None
             }
             "channels/list" => ok(json!({"channels": [chat_descriptor(shared)]})),
             "channels/publish" => {
-                let allowed = self.policy.lock().unwrap_or_else(|e| e.into_inner()).allows("zkgbai.chat", "channels.publish");
+                let allowed =
+                    self.policy.lock().unwrap_or_else(|e| e.into_inner()).allows("zkgbai.chat", "channels.publish");
                 if !allowed {
                     return err(-32001, "feature set zkgbai.chat not enabled".into());
                 }
@@ -333,7 +339,8 @@ impl Session {
                 };
                 let mut said = 0;
                 for line in text.lines().map(str::trim).filter(|l| !l.is_empty()).take(SAY_LINES) {
-                    if call_internal(shared, "say", json!({"text": line, "spec": true}), Duration::from_secs(5)).is_ok() {
+                    if call_internal(shared, "say", json!({"text": line, "spec": true}), Duration::from_secs(5)).is_ok()
+                    {
                         said += 1;
                     }
                 }
@@ -385,9 +392,10 @@ impl Session {
             "tools/list" | "tools/call" | "ping" | "resources/list" | "prompts/list" => {
                 if method == "tools/call" {
                     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-                    let writes = shared.tools.iter().any(|t| {
-                        t["name"] == name && t["annotations"]["readOnlyHint"] == json!(false)
-                    });
+                    let writes = shared
+                        .tools
+                        .iter()
+                        .any(|t| t["name"] == name && t["annotations"]["readOnlyHint"] == json!(false));
                     let feature = if writes { "zkgbai.act" } else { "zkgbai.read" };
                     let p = self.policy.lock().unwrap_or_else(|e| e.into_inner());
                     if p.ready && !p.enabled.contains(feature) {
@@ -426,7 +434,15 @@ fn unavailable_is_empty(receipt: &Value) -> bool {
 fn iso_now() -> String {
     let secs = unix_ms() / 1000;
     let stamp = super::utc_stamp(secs);
-    format!("{}-{}-{}T{}:{}:{}Z", &stamp[0..4], &stamp[4..6], &stamp[6..8], &stamp[9..11], &stamp[11..13], &stamp[13..15])
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &stamp[0..4],
+        &stamp[4..6],
+        &stamp[6..8],
+        &stamp[9..11],
+        &stamp[11..13],
+        &stamp[13..15]
+    )
 }
 
 /// Push the feed: records of the configured kinds as they come, batched,

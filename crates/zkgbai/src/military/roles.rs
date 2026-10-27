@@ -193,9 +193,7 @@ impl Ai {
     /// Units with `role`, built or being built, of def `name`.
     pub fn roles_count_named(&self, role: Role, name: &str) -> i32 {
         let named = |id: i32| Unit::from_id(self.cb, id).is_some_and(|u| self.defs.name_of(u) == name);
-        (self.roles.of.iter().chain(&self.roles.declared))
-            .filter(|&(&id, &r)| r == role && named(id))
-            .count() as i32
+        (self.roles.of.iter().chain(&self.roles.declared)).filter(|&(&id, &r)| r == role && named(id)).count() as i32
     }
 
     /// Units per role now and all game, and the orders dropped because

@@ -7,8 +7,8 @@
 use serde_json::{Value, json};
 
 use super::{actions, levers, views};
-use crate::military::qrf::ops as qrf_ops;
 use crate::Ai;
+use crate::military::qrf::ops as qrf_ops;
 
 #[derive(Clone, Copy)]
 pub enum Ty {
@@ -500,7 +500,12 @@ pub static TOOLS: &[Tool] = &[
                        are batched, and how often a situation report (the HUD plus a tally of everything since \
                        the last) is pushed. Without arguments, shows the settings.",
         params: &[
-            P("kinds", Str, false, "comma list of record kinds to push live (default: run,end,chat,kill,unit-,enemy+,idle,given,alert)"),
+            P(
+                "kinds",
+                Str,
+                false,
+                "comma list of record kinds to push live (default: run,end,chat,kill,unit-,enemy+,idle,given,alert)",
+            ),
             P("batch_ms", Int, false, "records this close together go in one push (default 3000)"),
             P("sitrep_s", Int, false, "seconds between situation reports, 0 for none (default 30)"),
         ],
@@ -673,10 +678,20 @@ pub static TOOLS: &[Tool] = &[
         params: &[
             P("squad", Int, true, "squad id (see squads, or squad_form)"),
             P("intent", Str, false, "hold, raid, escort, attack or clear (omit to only set courage)"),
-            P("courage", Num, false, "0.25-4 (default 1): the threat the squad perceives is divided by it and its units retreat at a health level divided by it; 3 is suicidal, 0.5 cowardly. Sticks to the squad."),
+            P(
+                "courage",
+                Num,
+                false,
+                "0.25-4 (default 1): the threat the squad perceives is divided by it and its units retreat at a health level divided by it; 3 is suicidal, 0.5 cowardly. Sticks to the squad.",
+            ),
             P("x", Num, false, "map x"),
             P("z", Num, false, "map z"),
-            P("radius", Num, false, "raid: how far around x,z to hunt (default 1500); attack: arrival distance (default 300)"),
+            P(
+                "radius",
+                Num,
+                false,
+                "raid: how far around x,z to hunt (default 1500); attack: arrival distance (default 300)",
+            ),
             P("unit", Int, false, "escort: the unit to follow"),
             P("seconds", Num, false, "how long the intent stands (default 600)"),
         ],
@@ -704,12 +719,27 @@ pub static TOOLS: &[Tool] = &[
                        share like '30%'. Raise it when raids under 400 power go unanswered (qrf-unanswered); set off \
                        when the raids seen are escorted groups the force cannot take. Moonlighting on or off.",
         params: &[
-            P("defense", Str, false, "auto (default), off, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)"),
+            P(
+                "defense",
+                Str,
+                false,
+                "auto (default), off, a metal value (e.g. 600), or a share of the mobile army (e.g. 30%)",
+            ),
             P("cap", Num, false, "auto: at most this share of the mobile army (default 0.3)"),
             P("gain", Num, false, "auto: power per team, times the strongest recent raid's (default 1.5)"),
-            P("size", Str, false, "auto: the raid a team is sized against: lossy (default: the raids that cost us, and nothing until something was lost to one), typical, or largest"),
+            P(
+                "size",
+                Str,
+                false,
+                "auto: the raid a team is sized against: lossy (default: the raids that cost us, and nothing until something was lost to one), typical, or largest",
+            ),
             P("moonlight", Bool, false, "forming raider squads answer raids at home while they fill (default true)"),
-            P("production", Bool, false, "factories build raiders for the force while it is short of the budget (default false: it costs the factory its own picks)"),
+            P(
+                "production",
+                Bool,
+                false,
+                "factories build raiders for the force while it is short of the budget (default false: it costs the factory its own picks)",
+            ),
             P("team_size", Int, false, "raiders per dedicated team (default 3)"),
             P("algo", Str, false, "mark (default), cover, station or intent"),
         ],

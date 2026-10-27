@@ -393,7 +393,8 @@ fn route(stream: &TcpStream, req: &Request, shared: &Arc<Shared>, keep: bool) ->
             false
         }
         ("GET", "/mcpl") => {
-            respond(stream, 400, "text/plain", b"MCPL is served over a WebSocket: upgrade this request", &cors, keep).is_ok()
+            respond(stream, 400, "text/plain", b"MCPL is served over a WebSocket: upgrade this request", &cors, keep)
+                .is_ok()
         }
         ("GET", "/board") => {
             // The board as a page that redraws itself (the PNG travels as a
@@ -658,7 +659,7 @@ fn list_journals(shared: &Shared) -> Value {
             Some((modified, json!({"name": e.file_name().to_string_lossy(), "size": meta.len(), "modified": modified})))
         })
         .collect();
-    list.sort_by(|a, b| b.0.cmp(&a.0));
+    list.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
     json!({"dir": dir.to_string_lossy(), "journals": list.into_iter().map(|(_, v)| v).collect::<Vec<_>>()})
 }
 

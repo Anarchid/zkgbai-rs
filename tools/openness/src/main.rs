@@ -30,7 +30,6 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-
 use serde_json::{Value, json};
 use zk_terrain::lanes;
 use zk_terrain::paths::Paths;
@@ -401,7 +400,12 @@ fn print_row(name: &str, map: &TierMap, side: usize, r: &Value) {
     }
     let cut = |i: usize| {
         let c = &r["cuts"][i]["ours"];
-        format!("{:>3.0}% {:>5.0}w {:>2}c", c["kept"].as_f64().unwrap_or(0.0) * 100.0, c["front"].as_f64().unwrap_or(0.0), c["chokes"].as_array().map_or(0, Vec::len))
+        format!(
+            "{:>3.0}% {:>5.0}w {:>2}c",
+            c["kept"].as_f64().unwrap_or(0.0) * 100.0,
+            c["front"].as_f64().unwrap_or(0.0),
+            c["chokes"].as_array().map_or(0, Vec::len)
+        )
     };
     eprintln!(
         "{short:<26} {:<7} {side:>4} {:>4} {:>4} {:>4} | {:>2} {:>6.0}w {:>5.0}% {:>3} | {:>19} {:>19} {:>19} | {:>3.0}% {:>3.0}% | {:>6.2}",
