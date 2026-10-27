@@ -55,8 +55,24 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
 /// `airtempo` (an air factory weighed up by the clock and the map's size)
 /// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
-pub(crate) const OFF_BY_DEFAULT: [&str; 8] =
-    ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes", "fightsim"];
+/// `posture` (a fixed-defense budget from lanes and density) and
+/// `ecoladder` (fusions from 30 metal income) are off since Oct 27: in the
+/// Eye of Horus cloak mirror (zkgbai-runs/horus/mirror2, 10 games an arm)
+/// both off went 9-0-1 against 3-3-4 with both on, with the old economy at
+/// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
+/// better than both, each taking up the metal the other left.
+pub(crate) const OFF_BY_DEFAULT: [&str; 10] = [
+    "pairs",
+    "currency",
+    "permanence",
+    "mexporc",
+    "airtempo",
+    "airfire",
+    "strikes",
+    "fightsim",
+    "posture",
+    "ecoladder",
+];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.

@@ -2425,7 +2425,8 @@ impl Ai {
         // surplus), so they open with the economy instead (user,
         // 2026-10-26): fusions from [`FUSION_INCOME`], singularities from
         // [`SINGU_ENERGY`] energy income or two fusions, or either from the
-        // map's density. `disable=ecoladder` keeps the old ladder.
+        // map's density. Off by default since 2026-10-27 (`enable=ecoladder`,
+        // see `ai::OFF_BY_DEFAULT`): the old ladder.
         // Density opens them too, on any income (a 16v16 on a small map):
         // standing metal per usable area (see `posture`), one fusion per
         // density reference, a singularity from twice it.

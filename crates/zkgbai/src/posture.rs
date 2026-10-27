@@ -20,7 +20,8 @@
 //! of what the rest of the AI builds (see `eco_defend_posture`): each turret
 //! where it takes the most raid exposure off our metal per metal, a front
 //! site for the spots whose raid routes cross it, a point site for a mex
-//! and its neighbours. `disable=posture` returns to the terrain analysis's
+//! and its neighbours. Off by default since 2026-10-27 (`enable=posture`,
+//! see `ai::OFF_BY_DEFAULT`); off, the economy keeps the terrain analysis's
 //! chokepoint fortification and no budget.
 
 use std::sync::mpsc;
