@@ -227,6 +227,25 @@ impl Analysis {
         (0..n).map(|r| r != base && (walls[r] || paths.to_region(r).is_infinite())).collect()
     }
 
+    /// What closing chokepoint `gate`, besides those `closed` already, is
+    /// worth against ground forces coming from `enemy`: for each region of
+    /// our value they still reach, the share by which their way there gets
+    /// longer, `1 - before / after` (cut off, 1; a tenth longer, 0.09),
+    /// times that value. A gate beside an open lane is worth little, the
+    /// one closing the last way in the region's full value (user,
+    /// 2026-10-28: "100% slow = never, good; 10% slower = 0.1 good").
+    pub fn slowdown_worth(&self, map: &TierMap, enemy: Pos, closed: impl Fn(usize) -> bool, gate: usize) -> f32 {
+        let before = Paths::new(map, enemy, &closed);
+        let after = Paths::new(map, enemy, |c| c == gate || closed(c));
+        (0..map.regions.len().min(self.values.len()))
+            .filter(|&r| self.values[r].ally > 0.0)
+            .map(|r| {
+                let (b, a) = (before.to_region(r), after.to_region(r));
+                if !b.is_finite() || b <= 0.0 { 0.0 } else { self.values[r].ally * (1.0 - b / a).max(0.0) }
+            })
+            .sum()
+    }
+
     /// The region next to a chokepoint on our side of it.
     pub fn home_side(&self, map: &TierMap, choke: usize) -> Option<usize> {
         map.chokes[choke]
@@ -617,7 +636,7 @@ fn bridge_candidates(map: &TierMap) -> Vec<BridgeCandidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testmaps::{at, rooms};
+    use crate::testmaps::{at, ring, rooms};
 
     #[test]
     fn ground_distance_follows_chokepoints() {
@@ -648,6 +667,25 @@ mod tests {
         assert_eq!(a.sheltered(&map, enemy, |c| c == bc, |_| false), vec![false, true, false, true, false]);
         // So does covering room b itself with defenses.
         assert_eq!(a.sheltered(&map, enemy, |_| false, |r| r == 1), vec![false, true, false, true, false]);
+    }
+
+    #[test]
+    fn slowdown_worth_of_closing_a_gate() {
+        // Enemy in room b, our value in room a; the door ab is the short
+        // way, the corridor c round the ring the long one.
+        let map = ring();
+        let assets = [Asset { pos: at(4.0, 1.0), value: 10.0, side: Side::Ally }];
+        let enemy = at(20.0, 1.0);
+        let a = Analysis::run(&Scenario { map: &map, ally_base: at(2.0, 1.0), enemy_base: enemy, assets: &assets });
+        let (ab, ac, bc) = (0, 1, 2);
+        // Closing the door sends them round: worth a share of the value.
+        let door = a.slowdown_worth(&map, enemy, |_| false, ab);
+        assert!(door > 1.0 && door < 10.0, "door: {door}");
+        // Closing a corridor end they do not use is worth nothing...
+        assert_eq!(a.slowdown_worth(&map, enemy, |_| false, ac), 0.0);
+        // ...until the door is shut too; then the way round is all they
+        // have, and closing it cuts room a off.
+        assert_eq!(a.slowdown_worth(&map, enemy, |c| c == ab, bc), 10.0);
     }
 
     #[test]
