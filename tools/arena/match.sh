@@ -36,6 +36,9 @@
 #   ARENA_WIDGETS  more LuaUI widget files to install for the match
 #   ARENA_BONUS_WIDGETS  widgets every match gets, set by arena.conf (the
 #                combat log); export it empty for a match without them
+#   ZKGBAI_HIVEMIND  set to on for layouts with allies (allied ZKGBAIs merge,
+#                as before Oct 27) unless already set; export it off to
+#                keep them apart
 #
 # Prints a final line: RESULT winner=<A|B|allyN|draw|frames|timeout|crash> ...
 #   (A/B = allyteam 0/1)
@@ -71,6 +74,12 @@ IFS=v read -r -a ALLY_SIZES <<< "$LAYOUT"
 NUM_TEAMS=0
 for n in "${ALLY_SIZES[@]}"; do NUM_TEAMS=$((NUM_TEAMS + n)); done
 [ $# -eq "$NUM_TEAMS" ] || { echo "layout $LAYOUT needs $NUM_TEAMS AI specs, got $#" >&2; sed -n '2,34p' "$0"; exit 2; }
+# Team games merge allied ZKGBAIs into one, as every team game did before
+# the AI made that opt-in (Oct 27), so results compare with earlier data.
+# Export ZKGBAI_HIVEMIND=off (or give an AI ?hivemind=off) to keep them apart.
+for n in "${ALLY_SIZES[@]}"; do
+    if [ "$n" -gt 1 ]; then export ZKGBAI_HIVEMIND=${ZKGBAI_HIVEMIND-on}; fi
+done
 
 if [ -z "$ENGINE_DIR" ]; then
     ENGINE_DIR=$(ls -d "$HOME"/.spring/engine/linux64/20*/ 2>/dev/null | sort | tail -1)

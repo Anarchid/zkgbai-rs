@@ -1,6 +1,15 @@
-//! Initial queues shared with allied players: what an allied human queued
-//! in the pregame (Zero-K's `unit_initial_queue` widget, relayed by a game
+//! Initial queues shared with allies, human or AI: what an ally queued in
+//! the pregame (Zero-K's `unit_initial_queue` widget, relayed by a game
 //! gadget as a Lua message) and our own opening sent back the same way.
+//!
+//! Like a player, we announce ours in the pregame: the opening factory where
+//! the commander will build it, then the mexes nearest it. That goes out
+//! from `init` (the engine creates AIs while the game loads, before the
+//! pregame) and again whenever an ally's queue changes which spots are ours.
+//! We give way to humans and to AIs of lower team numbers, never to the
+//! rest, so two AIs settle instead of yielding to each other in turn. Once
+//! the game is on, the opening as actually planned goes out once more, for
+//! AI allies (the widget stops drawing queues at the start).
 //!
 //! Received, from the gadget: `IQ|<team>|<type>|<unitDefID>|<x>|<y>|<z>|<face>`
 //! for an order (type 1 inserts at the front of the queue, 3 appends, 4
@@ -12,7 +21,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::json;
-use springai::Vec3;
+use springai::{UnitDef, Vec3};
 
 use crate::Ai;
 use crate::economy::TaskId;
@@ -53,19 +62,56 @@ pub struct AllyPlans {
     pub changed: i32,
     /// Whether the pilot has been told of the allies' plans.
     alerted: bool,
-    /// Whether our opening went out.
+    /// Whether our opening as planned went out (once the game is on).
     pub sent: bool,
     /// Spots (x, z) already logged as left to an ally.
     skipped_logged: BTreeSet<(i32, i32)>,
+    /// The allies played by AIs; the others are humans.
+    pub ai_allies: BTreeSet<i32>,
+    /// Whether the game is on (the pregame is over).
+    pub started: bool,
+    /// Our orders as last sent, one message each.
+    announced: Vec<String>,
 }
 
 impl AllyPlans {
     /// The team with a mex queued within [`MEX_CLAIM`] of `pos`, if any.
     pub fn mex_claim(&self, pos: Vec3) -> Option<i32> {
-        self.teams.iter().find_map(|(&team, plans)| {
+        self.mex_claim_among(pos, |_| true)
+    }
+
+    /// [`Self::mex_claim`] among the teams `among` accepts.
+    pub fn mex_claim_among(&self, pos: Vec3, among: impl Fn(i32) -> bool) -> Option<i32> {
+        self.teams.iter().filter(|&(&team, _)| among(team)).find_map(|(&team, plans)| {
             plans.iter().any(|p| p.def_name == "staticmex" && distance(p.pos, pos) <= MEX_CLAIM).then_some(team)
         })
     }
+}
+
+/// The teams the setup script gives to Skirmish AIs.
+pub fn ai_teams(script: &str) -> BTreeSet<i32> {
+    let mut teams = BTreeSet::new();
+    let mut depth = 0;
+    let mut in_ai = false;
+    for raw in script.lines() {
+        let line: String = raw.trim().to_ascii_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+        if line.starts_with("[ai") {
+            in_ai = true;
+        }
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        if in_ai {
+            for kv in line.split([';', '{', '}']) {
+                if let Some(team) = kv.strip_prefix("team=").and_then(|t| t.parse().ok()) {
+                    teams.insert(team);
+                }
+            }
+            if line.contains('}') && depth <= 1 {
+                in_ai = false;
+            }
+        }
+    }
+    teams
 }
 
 /// A parsed `IQ|...` message from an ally.
@@ -152,6 +198,86 @@ impl Ai {
                 self.op_emit("iq", json!({"team": team, "def": def_name, "pos": [pos.x, pos.z], "face": face}));
             }
         }
+        if !self.iq.started {
+            self.iq_announce();
+        }
+    }
+
+    /// From `init`, once our start position is chosen: where the opening
+    /// factory goes, then our pregame announcement. Nothing without an ally.
+    pub fn iq_init(&mut self, opening: Option<&str>) {
+        if self.allies.is_empty() {
+            return;
+        }
+        let script = self.cb.game().setup_script();
+        self.iq.ai_allies = ai_teams(&script).into_iter().filter(|t| self.allies.contains(t)).collect();
+        if self.cb.game().current_frame() > 0 {
+            // Created mid-game: there is no pregame to announce in.
+            self.iq.started = true;
+            return;
+        }
+        let start = self.graph.get_start_pos();
+        if start.is_zero() {
+            return;
+        }
+        if let Some(def) = opening.and_then(|f| self.defs.get(f)) {
+            self.eco.opening_site = self.eco_first_factory_site(def, start).map(|(pos, face)| (def, pos, face));
+        }
+        self.iq_announce();
+    }
+
+    /// Whether we give way to `team`'s queue: a human's, or a lower-numbered
+    /// AI's.
+    fn iq_gives_way(&self, team: i32) -> bool {
+        !self.iq.ai_allies.contains(&team) || team < self.team_id
+    }
+
+    /// Announce our pregame orders: the opening factory, then the mexes
+    /// nearest it (nearest the start without one) that no ally we give way
+    /// to has queued.
+    fn iq_announce(&mut self) {
+        let mut orders: Vec<(UnitDef, Vec3, i32)> = self.eco.opening_site.into_iter().collect();
+        let anchor = orders.first().map_or(self.graph.get_start_pos(), |o| o.1);
+        if anchor.is_zero() {
+            return; // no start position chosen
+        }
+        if let Some(mex) = self.defs.get("staticmex") {
+            let mut spots: Vec<Vec3> = (self.graph.metal_spots.iter())
+                .map(|s| s.position)
+                .filter(|&p| self.iq.mex_claim_among(p, |t| self.iq_gives_way(t)).is_none())
+                .collect();
+            spots.sort_by(|a, b| distance(*a, anchor).total_cmp(&distance(*b, anchor)));
+            orders.extend(spots.into_iter().take(SENT_MEXES).map(|p| (mex, p, 0)));
+        }
+        self.iq_send(&orders, "pregame");
+    }
+
+    /// Send `orders` the way one widget tells another (`IQ|5`, then an
+    /// append each), unless they are what we last sent.
+    fn iq_send(&mut self, orders: &[(UnitDef, Vec3, i32)], what: &str) {
+        let map = self.cb.map();
+        let msgs: Vec<String> = (orders.iter())
+            .map(|(def, pos, face)| {
+                let (x, z) = (pos.x.round() as i32, pos.z.round() as i32);
+                let y = map.elevation_at(pos.x, pos.z).max(0.0).round() as i32;
+                format!("IQ|{APPEND}|{}|{x}|{y}|{z}|{face}", def.id())
+            })
+            .collect();
+        if msgs == self.iq.announced {
+            return;
+        }
+        self.cb.call_lua_rules("IQ|5");
+        for msg in &msgs {
+            self.cb.call_lua_rules(msg);
+        }
+        let sent: Vec<_> = (orders.iter())
+            .map(|(def, pos, face)| {
+                json!({"def": self.defs.name(*def), "pos": [pos.x.round() as i32, pos.z.round() as i32], "face": face})
+            })
+            .collect();
+        self.log(&format!("iq: sent {} {what} items", orders.len()));
+        self.op_emit("iq", json!({"sent": sent, "what": what}));
+        self.iq.announced = msgs;
     }
 
     /// The team whose queued mex claims the spot at `pos`, while the claim
@@ -169,8 +295,8 @@ impl Ai {
     }
 
     /// Each economy tick: report the allies' plans to the pilot once they
-    /// settle, and send our opening once it is known. Nothing without an
-    /// ally.
+    /// settle, and send our opening as planned once it is known. Nothing
+    /// without an ally.
     pub fn iq_tick(&mut self) {
         if self.allies.is_empty() {
             return;
@@ -214,7 +340,7 @@ impl Ai {
             let c = t.as_construction()?;
             (c.target.is_none()).then(|| (c.build_type, t.position, c.facing, ai.defs.name(c.build_type).to_owned()))
         };
-        let mut items: Vec<(springai::UnitDef, Vec3, i32)> =
+        let mut items: Vec<(UnitDef, Vec3, i32)> =
             (self.eco.factory_tasks.iter()).filter_map(|&id| task(self, id)).map(|(d, p, f, _)| (d, p, f)).collect();
         let anchor = items.first().map_or(com, |i| i.1);
         let mut mexes: Vec<_> = (self.eco.construction_tasks.iter())
@@ -231,17 +357,7 @@ impl Ai {
                 .map(|(d, p, f, _)| (d, p, f)),
         );
         items.truncate(MAX_SENT);
-        let map = self.cb.map();
-        self.cb.call_lua_rules("IQ|5");
-        let mut sent = Vec::new();
-        for (def, pos, face) in &items {
-            let (x, z) = (pos.x.round() as i32, pos.z.round() as i32);
-            let y = map.elevation_at(pos.x, pos.z).max(0.0).round() as i32;
-            self.cb.call_lua_rules(&format!("IQ|{APPEND}|{}|{x}|{y}|{z}|{face}", def.id()));
-            sent.push(json!({"def": self.defs.name(*def), "pos": [x, z], "face": face}));
-        }
-        self.log(&format!("iq: sent {} opening items", items.len()));
-        self.op_emit("iq", json!({"sent": sent}));
+        self.iq_send(&items, "opening");
     }
 }
 
@@ -299,5 +415,25 @@ mod tests {
         assert_eq!(plans.mex_claim(Vec3::xz(1100.0, 0.0)), Some(2));
         assert_eq!(plans.mex_claim(Vec3::xz(1200.0, 0.0)), None);
         assert_eq!(plans.mex_claim(Vec3::xz(2000.0, 0.0)), None);
+    }
+
+    #[test]
+    fn mex_claims_among_some_teams() {
+        let plan = |x: f32| Plan { def_name: "staticmex".into(), def_id: 1, pos: Vec3::xz(x, 0.0), face: 0, frame: 0 };
+        let mut plans = AllyPlans::default();
+        plans.teams.insert(1, vec![plan(1000.0)]);
+        plans.teams.insert(3, vec![plan(1000.0), plan(3000.0)]);
+        assert_eq!(plans.mex_claim_among(Vec3::xz(1000.0, 0.0), |t| t != 1), Some(3));
+        assert_eq!(plans.mex_claim_among(Vec3::xz(3000.0, 0.0), |t| t < 2), None);
+    }
+
+    #[test]
+    fn ai_teams_from_the_setup_script() {
+        let script = "[GAME]\n{\n\t[TEAM0]\n\t{\n\t\tTeamLeader=0;\n\t\tAllyTeam=0;\n\t}\n\
+                      \t[AI0]\n\t{\n\t\tName=Bot;\n\t\tShortName=ZKGBAI;\n\t\tTeam=1;\n\t\tHost=0;\n\
+                      \t\t[Options]\n\t\t{\n\t\t\tmute=eco;\n\t\t}\n\t}\n\
+                      \t[ai1] { team = 3; shortname = CircuitAI; }\n\
+                      \t[PLAYER0]\n\t{\n\t\tTeam=0;\n\t}\n}\n";
+        assert_eq!(ai_teams(script), BTreeSet::from([1, 3]));
     }
 }
