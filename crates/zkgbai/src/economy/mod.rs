@@ -544,6 +544,18 @@ const OD_FREE_INCOME: f32 = 20.0;
 impl Ai {
     /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
     /// begun it stays. `disable=odphase` keeps the old rule: two fusions.
+    /// `energycrew` (`disable=energycrew` stops it): metal floats for want of energy, so
+    /// greedy constructors build energy too. Energy jobs are made only by
+    /// non-greedy workers and greedy ones pay 10000 for them; early on
+    /// nearly every constructor is greedy, so the commander alone builds
+    /// energy, and on Horus a commander on a Fusion at 17 energy (horus/fix
+    /// ab1, jump m1: metal at its 510 storage 3-7 min, 81% of 2-10 min
+    /// floating) stalled the whole economy.
+    pub(crate) fn eco_floating_on_energy(&self) -> bool {
+        let eco = &self.eco;
+        !self.dev_off("energycrew") && eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage
+    }
+
     pub(crate) fn eco_overdrive_phase(&self) -> bool {
         if self.dev_off("odphase") {
             return self.eco.fusions.len() >= 2;
