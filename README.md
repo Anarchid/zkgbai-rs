@@ -1,4 +1,5 @@
-![zkgbai](https://cloud.githubusercontent.com/assets/3822768/11410309/23799b46-93cf-11e5-8761-e92bacbf0763.png)
+<img width="1106" height="753" alt="Screenshot From 2026-10-27 14-54-01" src="https://github.com/user-attachments/assets/be16d3da-fc48-4778-bf22-3661d2cfec78" />
+<img width="1911" height="966" alt="image" src="https://github.com/user-attachments/assets/76a7c004-719b-4891-914e-47e182f98be1" />
 
 zkgbai-rs
 =========
