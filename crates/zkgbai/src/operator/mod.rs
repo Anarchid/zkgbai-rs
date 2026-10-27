@@ -390,7 +390,10 @@ impl Ai {
             match Server::start(&spec, shared.clone()) {
                 Ok(server) => {
                     let url = format!("http://{}", server.addr);
-                    self.log(&format!("operator: listening on {url} (dashboard {url}/, MCP {url}/mcp, MCPL ws://{}/mcpl)", server.addr));
+                    self.log(&format!(
+                        "operator: listening on {url} (dashboard {url}/, MCP {url}/mcp, MCPL ws://{}/mcpl)",
+                        server.addr
+                    ));
                     self.op.discovery = write_discovery(&url, self.team_id, &map, self.op.journal_path.as_ref());
                     self.op.url = Some(url);
                     self.op.server = Some(server);
@@ -711,7 +714,12 @@ impl Ai {
                 self.op_emit(kind, json!({"player": player, "text": text}));
             }
             Event::UnitDamaged { unit, attacker, .. } if reserved::is_reserved(self.cb, unit.id()) => {
-                let (id, def, p, hp) = (unit.id(), self.defs.name_of(*unit).to_owned(), unit.pos(), unit.health() / unit.max_health().max(1.0));
+                let (id, def, p, hp) = (
+                    unit.id(),
+                    self.defs.name_of(*unit).to_owned(),
+                    unit.pos(),
+                    unit.health() / unit.max_health().max(1.0),
+                );
                 let by = attacker.map(|a| self.defs.name_of(a).to_owned()).unwrap_or_else(|| "unseen".into());
                 self.op_alert(
                     &format!("hit-{id}"),
@@ -754,11 +762,12 @@ impl Ai {
         }
         let fac = self.fac.factories.get(&fac_id)?.unit;
         let options: Vec<String> = fac.def()?.build_options().iter().map(|d| self.defs.name(*d).to_owned()).collect();
-        let builder = |name: &str| self.defs.get(name).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
+        let builder =
+            |name: &str| self.defs.get(name).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
         let orders = &mut self.op.over.fac_orders;
-        let i = orders
-            .iter()
-            .position(|o| o.factory.is_none_or(|f| f == fac_id) && options.contains(&o.unit) && (!workers_first || builder(&o.unit)))?;
+        let i = orders.iter().position(|o| {
+            o.factory.is_none_or(|f| f == fac_id) && options.contains(&o.unit) && (!workers_first || builder(&o.unit))
+        })?;
         orders[i].left = orders[i].left.saturating_sub(1);
         let unit = orders[i].unit.clone();
         if orders[i].left == 0 {
@@ -789,7 +798,8 @@ impl Ai {
     /// Where the operator sent squad `sid`, while that holds: an explicit
     /// target first, else its standing intent.
     pub(crate) fn op_squad_target(&self, sid: SquadId) -> Option<Vec3> {
-        if let Some(p) = self.op.over.squad_targets.get(&sid).filter(|(_, until)| *until > self.frame).map(|(p, _)| *p) {
+        if let Some(p) = self.op.over.squad_targets.get(&sid).filter(|(_, until)| *until > self.frame).map(|(p, _)| *p)
+        {
             return Some(p);
         }
         self.op.over.squad_intents.get(&sid).filter(|i| i.resolved != NULLPOS).map(|i| i.resolved)
@@ -839,7 +849,10 @@ impl Ai {
             };
             if done {
                 self.op.over.squad_intents.remove(&sid);
-                self.op_emit("op", json!({"event": "intent_done", "squad": sid, "intent": intent.kind.name(), "frame": frame}));
+                self.op_emit(
+                    "op",
+                    json!({"event": "intent_done", "squad": sid, "intent": intent.kind.name(), "frame": frame}),
+                );
             } else {
                 self.op.over.squad_intents.insert(sid, intent);
             }
@@ -849,7 +862,8 @@ impl Ai {
     /// Whether a turret by a mex or link may go at `pos`: always with the
     /// `mexporc` feature on, else only inside an operator's porc zone.
     pub(crate) fn op_porc_allowed(&self, pos: Vec3) -> bool {
-        !self.dev_off("mexporc") || self.op.over.porc_zones.iter().any(|z| z.until > self.frame && distance(z.pos, pos) <= z.radius)
+        !self.dev_off("mexporc")
+            || self.op.over.porc_zones.iter().any(|z| z.until > self.frame && distance(z.pos, pos) <= z.radius)
     }
 
     /// The army's line, if the operator set one: the point that far along

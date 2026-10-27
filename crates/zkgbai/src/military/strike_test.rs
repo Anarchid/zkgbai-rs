@@ -156,7 +156,8 @@ impl Ai {
         let Some(test) = self.test.clone() else { return };
         // Our base: the commander's place (the ally center is unreliable
         // on a passive side, and at the first frames).
-        let com = (self.cb.team_units().into_iter()).find(|u| self.defs.name_of(*u).starts_with("dyn")).map(|u| u.pos());
+        let com =
+            (self.cb.team_units().into_iter()).find(|u| self.defs.name_of(*u).starts_with("dyn")).map(|u| u.pos());
         let base = com.filter(|p| p.x > 0.0 || p.z > 0.0).unwrap_or_else(|| self.graph.get_ally_center());
         let map = self.cb.map();
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
@@ -346,7 +347,11 @@ impl Ai {
             ("hunt", f) if f == 60 || (f > 0 && f % HUNT_ROUND == 0) => {
                 let mut units = vec![("cloakraid", ahead(-100.0)); 6];
                 units.extend([("tankraid", ahead(-150.0)); 2]);
-                units.extend([("tankheavyraid", ahead(-200.0)), ("vehraid", ahead(-250.0)), ("planelightscout", ahead(-300.0))]);
+                units.extend([
+                    ("tankheavyraid", ahead(-200.0)),
+                    ("vehraid", ahead(-250.0)),
+                    ("planelightscout", ahead(-300.0)),
+                ]);
                 if f == 60 {
                     units.push(("staticradar", get_directional_point(enemy, base, 1800.0)));
                 }
@@ -395,7 +400,12 @@ impl Ai {
             }
             // (A cheated unit's own position reads (0, 0) this frame.)
             let p = if site.x >= 0.0 { site } else { at };
-            self.log(&format!("strike-test: {name} at ({:.0}, {:.0}){}", p.x, p.z, if unit.is_none() { ": refused" } else { "" }));
+            self.log(&format!(
+                "strike-test: {name} at ({:.0}, {:.0}){}",
+                p.x,
+                p.z,
+                if unit.is_none() { ": refused" } else { "" }
+            ));
         }
         if topped {
             for res in [self.metal, self.energy] {

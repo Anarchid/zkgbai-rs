@@ -591,9 +591,7 @@ impl Ai {
             }
             _ => choice,
         };
-        if !ai_wants_builder
-            && let Some(def) = self.op_factory_order(fac_id, false)
-        {
+        if !ai_wants_builder && let Some(def) = self.op_factory_order(fac_id, false) {
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);
             return;

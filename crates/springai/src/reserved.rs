@@ -103,9 +103,7 @@ pub fn current_module() -> &'static str {
 fn covers(prefix: &str, module: &str) -> bool {
     !prefix.is_empty()
         && (module == prefix
-            || (module.len() > prefix.len()
-                && module.starts_with(prefix)
-                && module.as_bytes()[prefix.len()] == b'.'))
+            || (module.len() > prefix.len() && module.starts_with(prefix) && module.as_bytes()[prefix.len()] == b'.'))
 }
 
 /// Mute module `prefix` of AI `cb`; `false` if it already was.

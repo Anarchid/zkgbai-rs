@@ -1194,7 +1194,10 @@ pub fn board(ai: &mut Ai, _: &Args) -> Out {
 
 /// The AI's modules, as the `mute` tool names them, with what each decides.
 pub const MODULES: &[(&str, &str)] = &[
-    ("eco", "the economy: workers and their construction, reclaim and repair jobs, mexes, energy, turrets by mexes and links, terraforming"),
+    (
+        "eco",
+        "the economy: workers and their construction, reclaim and repair jobs, mexes, energy, turrets by mexes and links, terraforming",
+    ),
     ("fac", "the factories: what each builds next, and which factory the economy wants"),
     ("logistics", "the project tracker: crews for valued construction jobs (no orders of its own)"),
     ("war", "military bookkeeping: enemy tracking, threat maps, targets, mobile anti-air"),

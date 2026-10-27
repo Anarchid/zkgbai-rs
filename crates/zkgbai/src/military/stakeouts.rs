@@ -439,9 +439,8 @@ impl Ai {
                 let ch = &map.chokes[c];
                 ch.width <= MAX_HOLD_WIDTH && ch.regions.len() == 2
             };
-            let from_enemy = |x: &usize, y: &usize| {
-                a.choke_distance(map, *x, false).total_cmp(&a.choke_distance(map, *y, false))
-            };
+            let from_enemy =
+                |x: &usize, y: &usize| a.choke_distance(map, *x, false).total_cmp(&a.choke_distance(map, *y, false));
             let mut covers: BTreeMap<usize, usize> = BTreeMap::new();
             for (&r, &n) in &spots {
                 if r == theirs {
@@ -460,9 +459,11 @@ impl Ai {
             // Posts already manned stay while their gate still covers
             // something: a picket is not walked from gate to gate as the
             // analysis shifts. The rest by spots covered.
-            let kept: Vec<usize> = (self.stakeouts.posts.iter()).map(|p| p.choke).filter(|c| covers.contains_key(c)).collect();
+            let kept: Vec<usize> =
+                (self.stakeouts.posts.iter()).map(|p| p.choke).filter(|c| covers.contains_key(c)).collect();
             let mut chosen: Vec<(usize, usize)> = kept.iter().map(|&c| (c, covers[&c])).collect();
-            let mut rest: Vec<(usize, usize)> = covers.iter().filter(|(c, _)| !kept.contains(c)).map(|(&c, &n)| (c, n)).collect();
+            let mut rest: Vec<(usize, usize)> =
+                covers.iter().filter(|(c, _)| !kept.contains(c)).map(|(&c, &n)| (c, n)).collect();
             rest.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
             chosen.extend(rest);
             chosen.truncate(MAX_POSTS);
@@ -506,7 +507,10 @@ impl Ai {
         if changed {
             let list: Vec<String> = (self.stakeouts.posts.iter())
                 .map(|p| {
-                    format!("gate {} ({:.0} wide, {} spots) at {:.0},{:.0}", p.choke, p.width, p.covers, p.pos.x, p.pos.z)
+                    format!(
+                        "gate {} ({:.0} wide, {} spots) at {:.0},{:.0}",
+                        p.choke, p.width, p.covers, p.pos.x, p.pos.z
+                    )
                 })
                 .collect();
             self.log(&format!("stakeouts: {} posts: {}", list.len(), list.join("; ")));
@@ -563,7 +567,9 @@ impl Ai {
         }
 
         // Nothing about: back from shadowing to the duty we had.
-        if duty == Duty::Shadow && let Some(m) = self.stakeouts.members.get_mut(&id) {
+        if duty == Duty::Shadow
+            && let Some(m) = self.stakeouts.members.get_mut(&id)
+        {
             m.duty = if m.post.is_some() { Duty::Post } else { Duty::Look };
             m.bogey = None;
             m.standing = false;
@@ -598,7 +604,8 @@ impl Ai {
 
         self.stakeouts_assign(id, frame);
         let Some(m) = self.stakeouts.members.get(&id) else { return };
-        let (duty, standing, post) = (m.duty, m.standing, m.post.and_then(|i| self.stakeouts.posts.get(i)).map(|p| p.pos));
+        let (duty, standing, post) =
+            (m.duty, m.standing, m.post.and_then(|i| self.stakeouts.posts.get(i)).map(|p| p.pos));
         match duty {
             Duty::Post => {
                 let Some(target) = post else { return };
@@ -637,7 +644,9 @@ impl Ai {
     /// others look, else looking.
     fn stakeouts_assign(&mut self, id: i32, frame: i32) {
         let Some(m) = self.stakeouts.members.get(&id) else { return };
-        if m.duty == Duty::Post && m.post.is_some_and(|i| self.stakeouts.posts.get(i).is_some_and(|p| p.manned == Some(id))) {
+        if m.duty == Duty::Post
+            && m.post.is_some_and(|i| self.stakeouts.posts.get(i).is_some_and(|p| p.manned == Some(id)))
+        {
             return;
         }
         let lookers = self.stakeouts.lookers() - usize::from(m.duty == Duty::Look);
@@ -673,7 +682,10 @@ impl Ai {
         }
         let (duty, post) = (m.duty, m.post);
         if duty != before {
-            self.op_emit("stakeout", json!({"event": "duty", "t": frame / 30, "unit": id, "duty": duty.name(), "post": post}));
+            self.op_emit(
+                "stakeout",
+                json!({"event": "duty", "t": frame / 30, "unit": id, "duty": duty.name(), "post": post}),
+            );
         }
     }
 
@@ -776,13 +788,14 @@ impl Ai {
             return None;
         }
         let n = pool.len() as f32;
-        let centre = pool.iter().fold(Vec3::ZERO, |c, &i| {
-            Vec3::new(c.x + spots[i].position.x / n, 0.0, c.z + spots[i].position.z / n)
-        });
+        let centre = pool
+            .iter()
+            .fold(Vec3::ZERO, |c, &i| Vec3::new(c.x + spots[i].position.x / n, 0.0, c.z + spots[i].position.z / n));
         // Keep the spot we are going to until it is fresh.
         let current = self.stakeouts.members.get(&id).and_then(|m| m.look);
         let shunned_now = |i: usize| self.stakeouts.shunned.get(&i).is_some_and(|&until| until > frame);
-        if let Some(i) = current.filter(|&i| pool.contains(&i) && frame - spots[i].last_seen > FRESH && !shunned_now(i)) {
+        if let Some(i) = current.filter(|&i| pool.contains(&i) && frame - spots[i].last_seen > FRESH && !shunned_now(i))
+        {
             return Some(i);
         }
         let taken: Vec<usize> =
@@ -847,9 +860,10 @@ impl Ai {
         let members: Vec<_> = (s.members.iter())
             .map(|(&id, m)| {
                 let p = m.f.get_pos();
-                let look = m.look.and_then(|i| self.graph.metal_spots.get(i)).map(|sp| {
-                    json!({"spot": m.look, "x": sp.position.x.round(), "z": sp.position.z.round()})
-                });
+                let look = m
+                    .look
+                    .and_then(|i| self.graph.metal_spots.get(i))
+                    .map(|sp| json!({"spot": m.look, "x": sp.position.x.round(), "z": sp.position.z.round()}));
                 json!({"unit": id, "def": self.defs.name(m.def), "duty": m.duty.name(), "post": m.post, "look": look,
                        "bogey": m.bogey, "sortie": m.sortie, "standing": m.standing, "cloaked": m.f.unit.is_cloaked(),
                        "x": p.x.round(), "z": p.z.round()})
