@@ -176,6 +176,10 @@ pub struct EconomyManager {
     pub ditch: Option<terraform::Ditch>,
     pub ditched: Vec<Vec3>,
     pub ditch_tries: Vec<(Vec3, i32)>,
+    /// When a ditch none was worth digging was last journaled (`detour`).
+    pub ditch_noted: i32,
+    /// Turrets ordered for the chokepoints we fortify (see `detour`).
+    pub fortify_tasks: BTreeSet<TaskId>,
     /// A watchtower for our strikes going up, and when to plan the next.
     watchtower: Option<watchtower::Watchtower>,
     /// Geothermal plants: vents, the upgrade, the wall box.
@@ -368,6 +372,8 @@ impl EconomyManager {
             ditch: None,
             ditched: Vec::new(),
             ditch_tries: Vec::new(),
+            ditch_noted: 0,
+            fortify_tasks: BTreeSet::new(),
             watchtower: None,
             watchtower_after: 0,
             geo: geo::Geothermal::default(),

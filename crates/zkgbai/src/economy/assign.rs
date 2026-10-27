@@ -568,6 +568,20 @@ impl Ai {
         if partner { cost - PAIR_BONUS } else { cost }
     }
 
+    /// What worker `w`'s present job costs it on the ladder (lower is
+    /// better; `NEVER` without one), as `eco_assign_worker` weighs keeping
+    /// it: for jobs handed out otherwise (a ditch, see `terraform`).
+    pub(super) fn eco_current_job_cost(&self, w: &Worker) -> f32 {
+        let Some(t) = w.task.and_then(|id| self.eco.tasks.get(id)) else { return NEVER };
+        let mex = t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id);
+        let mut cost = self.eco_cost_of_job(w, w.get_pos(), t) - self.eco_colony_bonus(w.id, t.get_pos(), mex);
+        if let Some(target) = t.as_construction().and_then(|c| c.target) {
+            let p = target.build_progress();
+            cost -= 1000.0 * (p * p);
+        }
+        cost
+    }
+
     fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
@@ -685,7 +699,11 @@ impl Ai {
                     return -1000.0;
                 }
 
-                if ids.expensive_ids.contains(&def_id) {
+                // A chokepoint's turret, with `detour`, is priced as light
+                // porc: its metal cost is no pull of its own (a Stinger
+                // outbid a mex at the same distance out to 1400 elmos).
+                let gate_turret = eco.fortify_tasks.contains(&task.id) && !self.dev_off("detour");
+                if ids.expensive_ids.contains(&def_id) && !gate_turret {
                     // for expensive porc.
                     if eco.hard_estalled {
                         return dist + (250.0 * cost_mod);

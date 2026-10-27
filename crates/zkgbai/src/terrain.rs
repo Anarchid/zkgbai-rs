@@ -485,7 +485,7 @@ pub struct Strategy {
     pub occupancy: Occupancy,
     /// The enemy's base, and the other movement tiers its ground forces
     /// have shown.
-    enemy_base: Pos,
+    pub(crate) enemy_base: Pos,
     other_tiers: Vec<Tier>,
 }
 
@@ -656,7 +656,13 @@ impl Ai {
         let tiers = self.enemy_ground_tiers();
         let tier = tiers[0];
         let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
-        let assets = self.strategy_assets();
+        let mut assets = self.strategy_assets();
+        // With `detour`, chokepoints are held (and walled) for our own metal
+        // only, not half of every free spot behind them: on Otago three
+        // mexes of ours had gates fortified at 1:29.
+        if !self.dev_off("detour") {
+            assets.retain(|a| a.side != Side::Neutral);
+        }
         let analysis = Analysis::run(&Scenario { map, ally_base: pos(ally), enemy_base: pos(enemy), assets: &assets });
         let elevation = self.cb.map();
         // Spiders climb around any chokepoint.

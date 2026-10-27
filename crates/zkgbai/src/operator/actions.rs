@@ -50,6 +50,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("porc", "Defense", "no ground defenses in regions the enemy's ground army cannot reach"),
     ("mexporc", "Defense", "a turret by every mex and link"),
     ("ditch", "Defense", "ditches across chokepoints we fortify"),
+    (
+        "detour",
+        "Defense",
+        "ditches by how much longer the enemy's way to our metal gets, priced against workers' jobs; gate turrets priced as light porc; chokepoints held for our own metal only",
+    ),
     ("refuge", "Defense", "workers flee raids to refuges ahead of them"),
     ("qrf", "Defense", "the home defense force answering raids"),
     (

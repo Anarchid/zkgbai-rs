@@ -1855,6 +1855,8 @@ impl Ai {
             return;
         }
         let wanted = 1 + usize::from(income > 25.0) + usize::from(income > 45.0);
+        let eco = &mut self.eco;
+        eco.fortify_tasks.retain(|&id| eco.tasks.get(id).is_some());
         let Some(strategy) = &self.strategy else {
             return;
         };
@@ -1876,7 +1878,8 @@ impl Ai {
                 }
                 continue;
             }
-            if self.eco_add_simple(turret, site, List::Porc, Some(List::Porc)).is_some() {
+            if let Some(id) = self.eco_add_simple(turret, site, List::Porc, Some(List::Porc)) {
+                self.eco.fortify_tasks.insert(id);
                 let choke = self.strategy.as_ref().and_then(|s| s.fortify.get(i)).map_or(0, |f| f.choke);
                 self.log(&format!("terrain: fortifying chokepoint C{choke} with {}", turret.name()));
                 return;
