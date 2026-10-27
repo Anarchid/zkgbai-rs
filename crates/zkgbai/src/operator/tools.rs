@@ -219,6 +219,17 @@ pub static TOOLS: &[Tool] = &[
         run: views::military,
     },
     Tool {
+        name: "regime",
+        description: "The map's regime as the defense posture reads it: structural openness per movement tier \
+                       (lanes: perimeter and closure, the fronts that would close our metal off and their defense \
+                       sites), the deciding tier (the enemy ground army's), density (standing metal per square \
+                       kilo-elmo, ours and the enemy's known) and the fixed-defense budget they set.",
+        params: &[],
+        writes: false,
+        needs_modules: true,
+        run: views::regime,
+    },
+    Tool {
         name: "squads",
         description: "Our squads: id, kind (assault, raider, shield, hover; air), status (forming, rallying, \
                        attacking), position, target, members and value.",
@@ -529,9 +540,11 @@ pub static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "levers",
-        description: "The AI's levers, the settings an operator may turn while it plays (the dials and the home \
-                       defense budget), with their values, ranges and what each does now, for drawing as sliders \
-                       (range), choices or switches. auto: the AI's own setting is in effect.",
+        description: "The AI's levers, the settings an operator may turn while it plays (the dials, the home \
+                       defense, the defense posture), with their values, ranges and what each does now, for drawing \
+                       as sliders (range), choices or switches; auto: the AI's own setting is in effect. Also its \
+                       features (the dev switches the `feature` tool turns): each with its group, what it does, \
+                       whether it is off now and whether it is off by default.",
         params: &[],
         writes: false,
         needs_modules: true,
@@ -551,10 +564,10 @@ pub static TOOLS: &[Tool] = &[
     },
     Tool {
         name: "feature",
-        description: "Switch an AI feature off or back on (the dev switches): porc, mexporc (turrets by mexes \
-                       and links), reach, refuge, teleport, drops, ditch, reanalysis, intel, grid, precision, \
-                       nukes, missiles, scouts, radar, requisition, colonize, aaintel, logistics, clients, jumps, \
-                       puppies, earlycons, raidmem, odreserve, pairs, currency.",
+        description: "Switch an AI feature off or back on (the dev switches; `levers` lists them all with what \
+                       each does), e.g. posture, qrf, stakeouts, mexporc (turrets by mexes and links), logistics, \
+                       grid, precision, reach, intel, strikes, fightsim. Those off by default (mexporc, strikes, \
+                       fightsim, ...) turn on with off=false.",
         params: &[
             P("name", Str, true, "feature name"),
             P("off", Bool, true, "true to switch it off, false to switch it back on"),

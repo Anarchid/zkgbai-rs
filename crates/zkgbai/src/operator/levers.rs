@@ -409,7 +409,8 @@ pub static LEVERS: &[Lever] = &[
 ];
 
 pub fn list(ai: &mut Ai, _: &Args) -> Result<Value, String> {
-    Ok(json!({"levers": LEVERS.iter().map(|l| l.listing(ai)).collect::<Vec<_>>()}))
+    Ok(json!({"levers": LEVERS.iter().map(|l| l.listing(ai)).collect::<Vec<_>>(),
+              "features": actions::features_value(ai)}))
 }
 
 pub fn set(ai: &mut Ai, a: &Args) -> Result<Value, String> {

@@ -18,38 +18,67 @@ use crate::logistics::{Kind, Worth};
 use crate::military::{DefenseTarget, Fighter, SquadKind};
 use crate::util::NULLPOS;
 
-/// Features the `disable` switch knows (see `Ai::dev_off`).
-const FEATURES: [&str; 30] = [
-    "porc",
-    "mexporc",
-    "logistics",
-    "pause",
-    "clients",
-    "jumps",
-    "puppies",
-    "earlycons",
-    "raidmem",
-    "odreserve",
-    "pairs",
-    "currency",
-    "reach",
-    "refuge",
-    "teleport",
-    "drops",
-    "ditch",
-    "reanalysis",
-    "intel",
-    "grid",
-    "precision",
-    "nukes",
-    "missiles",
-    "scouts",
-    "radar",
-    "requisition",
-    "colonize",
-    "aaintel",
-    "qrf",
-    "firefighters",
+/// Features the `disable` switch knows (see `Ai::dev_off`): name, the group
+/// a UI files it under, and what it does. Those off by default (`enable`
+/// turns them on) are in `crate::ai::OFF_BY_DEFAULT`. Most act on the AI's
+/// next decision; a few only where it decides once (the lanes, the doctrine
+/// set).
+pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
+    ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
+    ("clients", "Economy", "pylons, requisitioned factories and anti-nukes tracked as valued issues"),
+    ("pause", "Economy", "an urgent issue holds back the metal of other construction"),
+    ("currency", "Economy", "a job's raid danger priced in metal against its crew's bonus"),
+    ("pairs", "Economy", "Constables pair up on builds"),
+    ("earlycons", "Economy", "an early second Constable in the opening"),
+    ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
+    ("greedcap", "Economy", "greed held at x1 while energy stalls"),
+    ("requisition", "Economy", "modules ask for the factories they need"),
+    ("colonize", "Economy", "colonists sent to far free metal"),
+    ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
+    ("odreserve", "Energy", "energy kept above mex income for overdrive"),
+    ("odphase", "Energy", "the overdrive phase by energy, free spots and fusions (off: two fusions)"),
+    ("ecoladder", "Energy", "fusions and singularities opened by income or the map's density"),
+    ("stallgate", "Energy", "no storage or superweapon while energy stalls"),
+    ("storagegate", "Energy", "storages wait for energy first"),
+    ("wind", "Energy", "turbines where they beat solars locally"),
+    ("geo", "Energy", "geothermal plants on our vents"),
+    ("advgeo", "Energy", "advanced geothermal in place of a singularity"),
+    ("geobox", "Energy", "a guard box around an advanced geothermal"),
+    ("posture", "Defense", "the defense posture: a fixed-defense budget from lanes and density"),
+    ("turretcredit", "Defense", "the home defense counts the posture's turrets against raids"),
+    ("porc", "Defense", "no ground defenses in regions the enemy's ground army cannot reach"),
+    ("mexporc", "Defense", "a turret by every mex and link"),
+    ("ditch", "Defense", "ditches across chokepoints we fortify"),
+    ("refuge", "Defense", "workers flee raids to refuges ahead of them"),
+    ("qrf", "Defense", "the home defense force answering raids"),
+    ("stakeouts", "Defense", "scout pickets on the raid lanes"),
+    ("anyscout", "Defense", "stakeouts take any factory's scout"),
+    ("firefighters", "Defense", "airborne quick-reaction squads against raids on our eco"),
+    ("airfire", "Defense", "an air factory for the firefighters"),
+    ("airtempo", "Army", "an air factory weighed up by the clock and the map's size"),
+    ("permanence", "Army", "unseen enemy fighters kept on their likely way in"),
+    ("reach", "Army", "reachability checks by the terrain model"),
+    ("precision", "Army", "raiders shoot from where defenses cannot shoot back"),
+    ("squadhyst", "Army", "raider squads keep their rally point a while"),
+    ("justenough", "Army", "one raider claim per target; QRF teams sized to the raid"),
+    ("venomraid", "Army", "Venoms raid after the opening, Fleas left to the stakeouts"),
+    ("jumps", "Army", "jumpjets jump"),
+    ("puppies", "Army", "Puppies herded onto wreck fields"),
+    ("impalers", "Army", "Impaler batteries against what stands still"),
+    ("escorts", "Army", "escorts for Impaler batteries (the impaler doctrine)"),
+    ("jaeger", "Army", "anti-heavy hunters once enemy heavies show"),
+    ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
+    ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
+    ("fightsim", "Army", "the fight predictor drives squads"),
+    ("drops", "Army", "Charon drops"),
+    ("teleport", "Army", "Djinn teleports"),
+    ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),
+    ("aaintel", "Intel", "unseen anti-air placed from hits on our aircraft"),
+    ("scouts", "Intel", "deep scouting with cloaked Widows"),
+    ("radar", "Intel", "watchtowers: advanced radar on raised ground"),
+    ("reanalysis", "Intel", "the terrain re-analysed now and then (walls, ditches)"),
+    ("nukes", "Superweapons", "nuke silos and strikes"),
+    ("missiles", "Superweapons", "tactical missile silos"),
 ];
 
 /// A ground point at (x, z).
@@ -113,10 +142,28 @@ pub fn feature(ai: &mut Ai, a: &Args) -> Out {
     }
     ai.set_feature_off(&name, off);
     let mut v = json!({"features_off": ai.features_off()});
-    if !FEATURES.contains(&name.as_str()) {
-        v["warning"] = json!(format!("'{name}' is not a known feature: {}", FEATURES.join(", ")));
+    if !FEATURES.iter().any(|(n, _, _)| *n == name) {
+        let names: Vec<&str> = FEATURES.iter().map(|(n, _, _)| *n).collect();
+        v["warning"] = json!(format!("'{name}' is not a known feature: {}", names.join(", ")));
     }
     Ok(v)
+}
+
+/// Every known feature with its group, what it does, and whether it is off
+/// now and by default; then any other name switched off.
+pub(crate) fn features_value(ai: &Ai) -> Value {
+    let off = ai.features_off();
+    let mut list: Vec<Value> = FEATURES
+        .iter()
+        .map(|(name, group, does)| {
+            json!({"name": name, "group": group, "does": does, "off": ai.dev_off(name),
+                   "default_off": crate::ai::OFF_BY_DEFAULT.contains(name)})
+        })
+        .collect();
+    for name in off.iter().filter(|n| !FEATURES.iter().any(|(f, _, _)| f == n)) {
+        list.push(json!({"name": name, "group": "Other", "does": "", "off": true, "default_off": false}));
+    }
+    Value::Array(list)
 }
 
 pub fn mute(ai: &mut Ai, a: &Args) -> Out {

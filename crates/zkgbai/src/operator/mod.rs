@@ -201,6 +201,8 @@ pub struct Operator {
     terrain: RefCell<Option<board::Terrain>>,
     /// The terrain analysis has been written to the journal (once).
     terrain_journaled: bool,
+    /// The metal-spot links' ground classification as last journaled.
+    links_journaled: Vec<bool>,
 }
 
 /// A setting from the AI option `key`, else the environment; `None` if
@@ -294,6 +296,7 @@ impl Operator {
             feed: Arc::new(Mutex::new(hud::FeedConfig::default())),
             terrain: RefCell::new(None),
             terrain_journaled: false,
+            links_journaled: Vec::new(),
         }
     }
 
@@ -523,6 +526,15 @@ impl Ai {
                 if let Some(v) = v {
                     self.op_emit("terrain", v);
                 }
+            }
+            // Which Delaunay links territory shadows spread along, once the
+            // terrain model classifies them and after each re-analysis.
+            let g = &self.graph;
+            let classified = g.ground_links.len() == g.links.len() && !g.links.is_empty();
+            if classified && g.ground_links != self.op.links_journaled {
+                self.op.links_journaled = g.ground_links.clone();
+                let ground: Vec<u8> = g.ground_links.iter().map(|&b| u8::from(b)).collect();
+                self.op_emit("links", json!({"ground": ground}));
             }
         }
         if frame % TICK == 0 {
