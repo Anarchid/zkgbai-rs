@@ -150,6 +150,14 @@ local options = {
 		def    = '',
 		maxlen = 200,
 	},
+	{
+		key    = 'hivemind',
+		name   = 'Hivemind',
+		desc   = 'Allied instances of this AI merge into one: the lowest team leads, the others hand it their units and stop playing. Only when every allied instance has it on: on or off. Empty: off, each instance plays its own team (or the ZKGBAI_HIVEMIND environment variable).',
+		type   = 'string',
+		def    = '',
+		maxlen = 4,
+	},
 }
 
 return options

@@ -810,10 +810,28 @@ impl Ai {
         }
     }
 
+    /// Allied instances of this AI merge into one (a hivemind) only when
+    /// each has the `hivemind` option on (or ZKGBAI_HIVEMIND): the lowest
+    /// team leads, the others hand it their units and stop playing. Off by
+    /// default: each instance plays its own team, as beside any other ally.
     fn check_teams_merging(&mut self) {
         let script = self.cb.game().setup_script();
+        let env = std::env::var("ZKGBAI_HIVEMIND").unwrap_or_default();
+        // An instance's option, or the environment's when it is empty.
+        let on = |v: &str| {
+            let v = if v.trim().is_empty() { env.as_str() } else { v };
+            matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "1" | "true" | "yes")
+        };
+        let hivemind = on(&self.cb.option("hivemind").unwrap_or_default());
         for t in self.allies.clone() {
-            let in_group = is_ingroup(&script, t);
+            let in_group = match ingroup(&script, t, "hivemind") {
+                Some(theirs) if hivemind && on(&theirs) => true,
+                Some(_) => {
+                    self.log(&format!("Allied {AI_SHORT_NAME} on team {t} plays on its own (hivemind off)."));
+                    false
+                }
+                None => false,
+            };
             if in_group {
                 self.comrades.insert(t);
             }
@@ -987,18 +1005,22 @@ impl Ai {
 }
 
 /// Whether team `team` is controlled by another instance of this AI,
-/// according to the start script's `[AI*]` sections.
-fn is_ingroup(script: &str, team: i32) -> bool {
+/// according to the start script's `[AI*]` sections, and if so its option
+/// `key` (lowercased, empty when unset).
+fn ingroup(script: &str, team: i32, key: &str) -> Option<String> {
     let team_key = format!("team={team}");
     let name_key = format!("shortname={}", AI_SHORT_NAME.to_ascii_lowercase());
+    let option_key = format!("{}=", key.to_ascii_lowercase());
     let mut depth = 0;
     let mut in_ai = false;
     let (mut right_id, mut right_ai) = (false, false);
+    let mut value = String::new();
     for raw in script.lines() {
         let line: String = raw.trim().to_ascii_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
         if line.starts_with("[ai") {
             in_ai = true;
             (right_id, right_ai) = (false, false);
+            value.clear();
         }
         depth += line.matches('{').count() as i32;
         depth -= line.matches('}').count() as i32;
@@ -1006,27 +1028,32 @@ fn is_ingroup(script: &str, team: i32) -> bool {
             let kv = line.trim_end_matches(';');
             right_id |= kv == team_key;
             right_ai |= kv == name_key;
-            if right_id && right_ai {
-                return true;
+            if let Some(v) = kv.strip_prefix(&option_key) {
+                value = v.to_owned();
             }
+            // The options may follow the team, so read the whole section.
             if line.contains('}') && depth <= 1 {
+                if right_id && right_ai {
+                    return Some(value);
+                }
                 in_ai = false;
             }
         }
     }
-    false
+    (in_ai && right_id && right_ai).then_some(value)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_ingroup;
+    use super::ingroup;
 
-    const SCRIPT: &str = "[GAME]\n{\n  [AI0]\n  {\n    Name=a;\n    ShortName=ZKGBAI;\n    Team=1;\n  }\n  [AI1]\n  {\n    ShortName=CircuitAI;\n    Team=2;\n  }\n  [TEAM1]\n  {\n    TeamLeader=0;\n  }\n}\n";
+    const SCRIPT: &str = "[GAME]\n{\n  [AI0]\n  {\n    Name=a;\n    ShortName=ZKGBAI;\n    Team=1;\n  }\n  [AI1]\n  {\n    ShortName=CircuitAI;\n    Team=2;\n  }\n  [AI2]\n  {\n    ShortName=ZKGBAI;\n    [Options]\n    {\n      Hivemind=On;\n    }\n    Team=3;\n  }\n  [TEAM1]\n  {\n    TeamLeader=0;\n  }\n}\n";
 
     #[test]
     fn finds_teams_run_by_this_ai() {
-        assert!(is_ingroup(SCRIPT, 1));
-        assert!(!is_ingroup(SCRIPT, 2));
-        assert!(!is_ingroup(SCRIPT, 3));
+        assert_eq!(ingroup(SCRIPT, 1, "hivemind").as_deref(), Some(""));
+        assert_eq!(ingroup(SCRIPT, 2, "hivemind"), None);
+        assert_eq!(ingroup(SCRIPT, 3, "hivemind").as_deref(), Some("on"));
+        assert_eq!(ingroup(SCRIPT, 4, "hivemind"), None);
     }
 }

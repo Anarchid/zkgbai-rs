@@ -96,6 +96,8 @@ targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
 that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are
 worth.
+Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
+on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.
 `ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
 The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?test=bite` against
 `ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
