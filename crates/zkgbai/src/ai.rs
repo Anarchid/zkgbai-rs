@@ -830,10 +830,6 @@ impl Ai {
         }
     }
 
-    /// The start position goes to the engine with the AI marked ready, so
-    /// it shows in the pregame like a player's (Zero-K's start gadget takes
-    /// an AI's engine position as given; sent not-ready it was placed at
-    /// the zeroth frame, unseen by allies until then).
     fn choose_start_pos(&mut self) {
         let map_center = self.graph.get_map_center();
         let mut spots: Vec<Vec3> = self.graph.get_ally_territory().iter().map(|s| s.get_pos()).collect();
@@ -866,9 +862,7 @@ impl Ai {
         if self.allies.is_empty() || (self.allies.len() > 1 && priority_starts == 0) {
             // Starting solo (or first of a team): pick a spot near map center.
             let best = central_spot(&spots);
-            let startpos = get_directional_point(best, map_center, 75.0);
-            self.cb.game().send_start_position(true, startpos);
-            self.graph.set_start_pos(startpos);
+            self.send_start_pos(best, map_center);
             self.log("Solo Mode: Start Position Selected!");
             return;
         }
@@ -906,10 +900,25 @@ impl Ai {
             }
         }
 
-        let startpos = get_directional_point(best, map_center, 75.0);
-        self.cb.game().send_start_position(true, startpos);
-        self.graph.set_start_pos(startpos);
+        self.send_start_pos(best, map_center);
         self.log("Teams Mode: Start Position Selected!");
+    }
+
+    /// Start a little toward the map center from the chosen spot, unless
+    /// that leaves the start box (Zero-K then drops the position and the
+    /// commander lands at a point of its own choosing). The position goes
+    /// out at ground height, since Zero-K's pregame marker skips y = 0, and
+    /// not-ready: the engine stamps an AI's start-pos packet with its host's
+    /// player number and applies the ready flag to that player, so sending
+    /// it ready readied the human hosting a local skirmish and started the
+    /// game with no pregame. An AI team has no readiness of its own.
+    fn send_start_pos(&mut self, spot: Vec3, map_center: Vec3) {
+        let shifted = get_directional_point(spot, map_center, 75.0);
+        let check = format!("ai_is_valid_startpos:{:.6}/{:.6}", shifted.x, shifted.z);
+        let p = if self.cb.call_lua_rules(&check).as_deref() == Some("1") { shifted } else { spot };
+        let startpos = Vec3::new(p.x, self.cb.map().elevation_at(p.x, p.z), p.z);
+        self.cb.game().send_start_position(false, startpos);
+        self.graph.set_start_pos(startpos);
     }
 
     pub fn get_enemy_ally_team_ids(&self) -> &BTreeSet<i32> {
