@@ -1508,7 +1508,13 @@ impl Ai {
         if self.frame >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
             return false;
         }
-        let cons = self.eco.workers.values().filter(|w| !w.is_com).count();
+        // Constables begun or rolling out count too (`new_workers`, until
+        // their first idle): the factory picks its next unit as the last
+        // one leaves the yard, and missing that one made every opening
+        // three Constables.
+        let eco = &self.eco;
+        let cons = eco.workers.values().filter(|w| !w.is_com).count()
+            + eco.new_workers.iter().filter(|id| !eco.workers.contains_key(id)).count();
         cons < EARLY_CONS_MIN.max((self.eco.adjusted_income / EARLY_CONS_INCOME) as usize).min(EARLY_CONS_MAX)
     }
 
