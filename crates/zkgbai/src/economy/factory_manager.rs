@@ -601,11 +601,13 @@ impl Ai {
         // must not move the economy off its builder curve.
         let ai_wants_builder = self.defs.get(choice).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
         // Raiders for home defense while its budget is short (see `qrf`),
-        // in place of a plain fighter.
+        // in place of a plain fighter. (Not of a jump opening's Puppy
+        // scouts: the QRF floor took the second for a Pyro guard.)
         let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy")
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
-            || self.firefighters_order(kind) == Some(choice);
+            || self.firefighters_order(kind) == Some(choice)
+            || (choice == crate::military::puppies::PUPPY && fac.building_for == Some(Role::Stakeout));
         // Dirtbags for the strikes while snipers are about (see `strikes`).
         let picked = choice;
         let choice = match (ai_wants_builder || special, fac.unit) {
