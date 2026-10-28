@@ -8,7 +8,9 @@ usage: mech_eval.py <pdir> <fights.pkl> <mech.pkl> <out-dir> <variants> [workers
   scored as split "fresh" (live human logs among them as "fresh-human").
   <variants>: "single" = base + each component alone (with the declared grids), or
   "combo:air,burn,rate=0.2,..." = that full set, plus the set minus each component;
-  "pair:..." = base and the full set only.
+  "pair:..." = base and the full set only; "base=a,b:c,d" = that set as the base, plus it with each
+  of c, d alone and with all of them (mechanics round 2).
+  MECH_TACAI: tacai.json for the tacai switch; MECH_HAZARD_MOB: the hazard used by hazmob variants.
 Each variant gets its own calibration (ZOIBeta per side, Logit1 on decided fights) fitted on a
 sample of train fights; scored on all dev fights. Writes scores.tsv, bootstrap.tsv,
 owner_bias.tsv and RESULTS.md into <out-dir>.
@@ -50,6 +52,24 @@ RELEVANT = {"fire": "burn", "kamikaze": "death", "outlaw": "pulse", "emp": "emp"
 def parse_variants(spec):
     if spec == "single":
         return SINGLE
+    if spec.startswith("base="):
+        def comps_of(s):
+            out = {}
+            for item in s.split(","):
+                k, _, v = item.partition("=")
+                if k:
+                    out[k] = float(v) if v else 1
+            return out
+        base_s, _, add_s = spec[5:].partition(":")
+        base, add = comps_of(base_s), comps_of(add_s)
+        out = [("base", {}), ("R1", dict(base))]
+        for k, v in add.items():
+            out.append((f"R1 + {k}", dict(base, **{k: v})))
+        if len(add) > 1:
+            out.append(("R1 + all", dict(base, **add)))
+            for k in add:
+                out.append((f"R1 + all - {k}", dict(base, **{kk: vv for kk, vv in add.items() if kk != k})))
+        return out
     comps = {}
     for item in spec.split(":", 1)[1].split(","):
         k, _, v = item.partition("=")
@@ -66,13 +86,20 @@ def init(pdir, mech_path, variants):
     predict._init(pdir, os.path.join(pdir, "cache"))
     mech.load(mech_path)
     G["variants"] = variants
+    if os.environ.get("MECH_TACAI"):
+        mech.load_tacai(os.environ["MECH_TACAI"])
+    if os.environ.get("MECH_HAZARD_MOB"):  # mechanics round 2: variants with hazmob use this hazard
+        import disengage
+        hd = pickle.load(open(os.environ["MECH_HAZARD_MOB"], "rb"))
+        predict.G["hazard_mob"] = disengage.Hazard(hd["w"], mob=hd.get("mob", False))
 
 
 def run(fight):
-    hz = predict.G["hazard"]
     out = {}
     for name, opts in G["variants"]:
+        hz = predict.G["hazard_mob"] if opts.get("hazmob") else predict.G["hazard"]
         out[name] = mech.simulate_mech(fight, opts, hz)
+    hz = predict.G["hazard"]
     units = predict.build_units(fight)
     na = sum(u.armed for u in units if u.side == 0); nb = sum(u.armed for u in units if u.side == 1)
     chk = predict.simulate(units, None, hz) if G.get("check", True) else None
@@ -151,6 +178,7 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
         lw = predict.Logit1().fit(zw[trm & dec], df["win"].values[trm & dec])
         dv = ~trm
         df[f"{name}_pAwin"] = lw.prob(zw)
+        df[f"{name}_mA"] = cA.mean(zA); df[f"{name}_mB"] = cB.mean(zB)
         cr = np.full(len(df), np.nan)
         cr[dv] = (cA.crps(zA[dv], df["yA"].values[dv]) + cB.crps(zB[dv], df["yB"].values[dv])) / 2
         df[f"{name}_crpsA"] = cr; df[f"{name}_crpsB"] = cr  # metric_arrays averages the two
@@ -175,7 +203,7 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
         if d[m]["game"].nunique() < 10:
             continue
         b = predict.bootstrap(d[m], names)
-        b = b[(b["a"] == "base") | (b["a"] == "all") | (b["b"] == "all")]
+        b = b[b["a"].isin(["base", "all", "R1", "R1 + all"]) | b["b"].isin(["all", "R1 + all"])]
         b.insert(0, "set", sub)
         boots.append(b)
     bs = pd.concat(boots)
@@ -194,6 +222,27 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
         for n in names:
             ob.append({"tag": tag, "variant": n, **owner_bias(d, f"{n}_pAwin", tA, tB, rng)})
     ob = pd.DataFrame(ob)
+    # mechanics round 2 checks: calibrated predicted own-loss share vs actual, by side kind
+    SKIRM = {"hoverskirm", "cloakskirm", "shieldskirm", "spiderskirm", "jumpskirm", "amphfloater"}
+    udd = predict.G.get("ud") or __import__("units").load(os.path.join(pdir, "unitdefs.tsv"))
+    def static_side(defs):
+        ds = [udd.get(n) for n in defs.split()]
+        armed = [x for x in ds if x is not None and x.weapons]
+        return bool(armed) and all(not x.canmove for x in armed)
+    mc = []
+    for tag, fa, fb in (("skirmisher side", lambda r: bool(SKIRM & set(r.defsA.split())), lambda r: bool(SKIRM & set(r.defsB.split()))),
+                        ("all-static side", lambda r: static_side(r.defsA), lambda r: static_side(r.defsB))):
+        tA = d.apply(fa, axis=1).values; tB = d.apply(fb, axis=1).values
+        one = tA ^ tB
+        for n in names:
+            own_p = np.where(tA[one], d[f"{n}_mA"].values[one], d[f"{n}_mB"].values[one])
+            own_y = np.where(tA[one], d["yA"].values[one], d["yB"].values[one])
+            opp_p = np.where(tA[one], d[f"{n}_mB"].values[one], d[f"{n}_mA"].values[one])
+            opp_y = np.where(tA[one], d["yB"].values[one], d["yA"].values[one])
+            mc.append({"side": tag, "variant": n, "n": int(one.sum()), "own_pred": own_p.mean(), "own_actual": own_y.mean(),
+                       "opp_pred": opp_p.mean(), "opp_actual": opp_y.mean()})
+    mc = pd.DataFrame(mc)
+    mc.to_csv(os.path.join(out, "loss_checks.tsv"), sep="\t", index=False, float_format="%.4f")
     sc.to_csv(os.path.join(out, "scores.tsv"), sep="\t", index=False, float_format="%.4f")
     bs.to_csv(os.path.join(out, "bootstrap.tsv"), sep="\t", index=False, float_format="%.4f")
     ob.to_csv(os.path.join(out, "owner_bias.tsv"), sep="\t", index=False, float_format="%.4f")
@@ -202,6 +251,7 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
         fh.write(f"# mech_eval {spec}\n\ncalibration {len(cal)} train fights; scored {dict(Counter(d['split']))}; base check max |diff| {worst:.2e}\n\n")
         fh.write("## Scores\n\n```\n" + sc.to_string(index=False, float_format=f3) + "\n```\n\n")
         fh.write("## Bootstrap (a - b, positive = b better)\n\n```\n" + bs[bs["metric"].isin(["logloss", "brier", "crps"])].to_string(index=False, float_format=f3) + "\n```\n\n")
+        fh.write("## Loss checks (calibrated predicted vs actual loss shares; side = the one with the feature)\n\n```\n" + mc.to_string(index=False, float_format=f3) + "\n```\n\n")
         fh.write("## Owner bias, scored splits pooled (+ = sim under-rates the side with the feature)\n\n```\n" + ob.to_string(index=False, float_format=f3) + "\n```\n")
     print(open(os.path.join(out, "RESULTS.md")).read())
 

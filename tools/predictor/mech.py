@@ -11,6 +11,7 @@ import pickle
 
 import numpy as np
 
+import disengage
 import predict
 from predict import DT, HORIZON, RBANDS, sband
 
@@ -27,6 +28,12 @@ ENGAGE_BANDS = (0.5, 1.0, 1.5, 2.5, 5.0)
 def load(path):
     M.clear()
     M.update(pickle.load(open(path, "rb")))
+
+
+def load_tacai(path):
+    """ZK's Tactical Unit AI, resolved by tacai_dump.py: per unit def, whom it skirms and flees."""
+    import json
+    M["tacai"] = {n: dict(b, skirms=set(b["skirms"]), flees=set(b["flees"])) for n, b in json.load(open(path)).items()}
 
 
 # ----------------------------------------------------------------------------- per-unit snapshot features
@@ -147,11 +154,14 @@ def _weapon_info(w):
     return r
 
 
-def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
+def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=None):
     """trace: a dict to fill with per-unit fates in build_units order (A's records, then B's):
     pdead = probability the unit is dead when the fight stops, ehp = expected HP then (with a hazard;
     without one, the end state). withdraw: the "A withdraws now" query (predict.simulate's): every mobile
-    A unit reverses away from B at full speed."""
+    A unit reverses away from B at full speed. posture: (A's, B's) each "push" (base movement), "hold"
+    (no advancing; skirming still backs off) or "withdraw" (reverse at own speed; statics cannot); an
+    arm runs without the stopping rule and ends 10 s after the last shot or approach (5 s with a
+    withdrawal). Hazards fitted with mobility features (hazmob) get disengage.mob_feats(fight)."""
     hits = predict.G["hits"]
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
@@ -220,10 +230,12 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
 
     if trace is not None:
         trace["pdead"] = [0.0] * len(us); trace["ehp"] = [0.0] * len(us)
+    mobf = disengage.mob_feats(fight) if hazard is not None and getattr(hazard, "mob", False) else None
+    tac = M.get("tacai", {}) if opts.get("tacai") else {}
     while f < HORIZON:
         if hazard is not None and f > 0 and f % 30 == 0:
             kA, kB = kfrac()
-            h = hazard.h(f // 30 - 1, kA, kB, lr, None)
+            h = hazard.h(f // 30 - 1, kA, kB, lr, None, mobf)
             exp_k[0] += surv * h * kA; exp_k[1] += surv * h * kB
             if trace is not None:
                 for i, u in enumerate(us):
@@ -236,6 +248,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
             break
         shot_fired = False
         moved = False
+        approached = False
         # status: burn ticks, EMP decay, slow decay
         if opts.get("burn") or opts.get("emp") or opts.get("slow"):
             for u in alive:
@@ -265,6 +278,12 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
             dist = abs(nearest.x - u.x)
             speed = u.speed * (1.0 - slowf(u)) if opts.get("slow") else u.speed
             x = xof[id(u)]
+            pa = posture[u.side] if posture else None
+            if pa == "withdraw":
+                u.x -= speed * DT if nearest.x > u.x else -speed * DT
+                u.moving = True
+                moved = True
+                continue
             if withdraw and u.side == 0:
                 u.x -= speed * DT if nearest.x > u.x else -speed * DT
                 u.moving = True
@@ -278,14 +297,42 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
                 u.x += step if nearest.x > u.x else -step
                 u.moving = True
                 moved = True
+                approached = True
                 continue
             if not u.armed:
+                continue
+            b = tac.get(u.def_)
+            if b is not None:
+                # ZK tactical AI: only the closest enemy decides; skirm it at range (more while
+                # reloading) or flee it beyond its range
+                if (nearest.def_ in b["skirms"] or b["skirmEverything"]) and b["skirmRange"] and u.weapons:
+                    w0 = max(u.weapons, key=lambda w: w.range)
+                    want = b["skirmRange"] - (b["skirmLeeway"] or 0.0) + (b["reloadSkirmLeeway"] or 0.0) * max(0, w0.next - f)
+                elif nearest.def_ in b["flees"] or b["fleeEverything"]:
+                    want = max(dist, nearest.max_range + (b["fleeLeeway"] or 100.0))
+                else:
+                    want = None
+                if want is not None:
+                    if dist < want - 1.0:
+                        step = min(speed * DT, want - dist)
+                        u.x -= step if nearest.x > u.x else -step
+                        u.moving = True
+                        moved = True
+                    elif dist > want + 1.0 and pa != "hold":
+                        step = min(speed * DT, dist - want)
+                        u.x += step if nearest.x > u.x else -step
+                        u.moving = True
+                        moved = True
+                        approached = True
+                    continue
+            if pa == "hold":
                 continue
             if dist > u.max_range * 0.95:
                 step = min(speed * DT, dist - u.max_range * 0.9)
                 u.x += step if nearest.x > u.x else -step
                 u.moving = True
                 moved = True
+                approached = True
             elif (opts.get("kite") and nearest.armed and nearest.mobile and u.max_range - nearest.max_range >= KITE_MARGIN
                   and u.speed >= nearest.speed and dist < u.max_range * 0.9):
                 step = min(speed * DT, u.max_range * 0.9 - dist)
@@ -348,8 +395,13 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
                     xt.slow_last = f
                 if dmg > 0:
                     hurt(tgt, dmg)
-        quiet = 0 if (shot_fired or (moved and not withdraw)) else quiet + DT
-        if quiet > (150 if withdraw else 300):
+        if posture:
+            quiet = 0 if (shot_fired or approached) else quiet + DT
+            limit = 150 if "withdraw" in posture else 300
+        else:
+            quiet = 0 if (shot_fired or (moved and not withdraw)) else quiet + DT
+            limit = 150 if withdraw else 300
+        if quiet > limit:
             break
         f += DT
     kA, kB = kfrac()

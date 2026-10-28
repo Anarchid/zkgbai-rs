@@ -412,7 +412,7 @@ def _init(pdir, cache):
     if hp:
         hd = pickle.load(open(hp, "rb"))
         disengage.T0 = hd["t0"]
-        G["hazard"] = disengage.Hazard(hd["w"])
+        G["hazard"] = disengage.Hazard(hd["w"], mob=hd.get("mob", False))
     else:
         G["hazard"] = None
     hpp = os.environ.get("PRED_HAZARD_POST")
