@@ -154,6 +154,9 @@ impl Ai {
             self.squad_assign_taskforces();
         }
         self.taskforce_watch_volleys();
+        if frame % 300 == (self.offset + 13) % 300 {
+            self.taskforce_wake();
+        }
         if frame % 14 == (self.offset + 9) % 14 {
             self.squad_assign_air_squads();
         }
@@ -237,7 +240,7 @@ impl Ai {
     }
 
     /// Remove a fighter from whatever squad it is in.
-    fn squad_leave_squad(&mut self, id: i32) {
+    pub(crate) fn squad_leave_squad(&mut self, id: i32) {
         let Some(sid) = self.fighters.get(&id).and_then(|f| f.squad) else { return };
         let mut nav = nav!(self);
         match self.squads.get_mut(sid) {
@@ -479,7 +482,7 @@ impl Ai {
     /// it fights as an assault. A unit no doctrine takes (a squadless Pyro)
     /// joins the least valuable force of a doctrine taking `strays` (the
     /// shield ball, as always), else fights as an assault too.
-    fn squad_assign_taskforce_member(&mut self, id: i32) {
+    pub(crate) fn squad_assign_taskforce_member(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
         let tf = &self.taskforces;

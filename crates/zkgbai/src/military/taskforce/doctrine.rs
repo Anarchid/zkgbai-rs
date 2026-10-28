@@ -422,6 +422,10 @@ pub struct Doctrine {
     /// much metal its expected kills must beat its expected losses.
     pub judge: Judge,
     pub judge_margin: f32,
+    /// It sleeps (its units fight as they would without it) until more than
+    /// this share of the armed ground units on the map are not raiders: the
+    /// game's middle (0: awake from the start; see `taskforce_wake`).
+    pub wake_share: f32,
 }
 
 impl Doctrine {
@@ -470,6 +474,7 @@ impl Doctrine {
             shun_porc: true,
             judge: Judge::Map,
             judge_margin: 0.0,
+            wake_share: 0.0,
         }
     }
 
@@ -555,6 +560,7 @@ impl Doctrine {
             "shun_porc": self.shun_porc,
             "judge": self.judge.name(),
             "judge_margin": self.judge_margin,
+            "wake_share": self.wake_share,
         });
         if let (Value::Object(m), Value::Object(p)) = (&mut v, pack) {
             m.extend(p);
@@ -631,6 +637,7 @@ impl Doctrine {
                 "shun_porc" => self.shun_porc = flag(k, v)?,
                 "judge" => self.judge = Judge::parse(&string(k, v)?)?,
                 "judge_margin" => self.judge_margin = num(k, v, -1e5, 1e5)?,
+                "wake_share" => self.wake_share = num(k, v, 0.0, 1.0)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -1083,6 +1090,9 @@ pub fn seeds() -> Vec<Doctrine> {
     ravager.cores_to_go = 5;
     ravager.cores_to_stay = 3;
     ravager.rip_value = 400.0;
+    // The middle game: once most armed ground units are not raiders (user,
+    // 2026-10-28, for the full-play test).
+    ravager.wake_share = 0.5;
 
     let mut ghostbombs = Doctrine::new("ghostbombs");
     ghostbombs.note = "An Iris cloaking bombs (orbiting within its 350 cloak, holding fire) unseen to a \
@@ -1276,6 +1286,7 @@ mod tests {
         let mut d = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
         assert_eq!((d.aim, d.core_keep, d.cores_per_force, d.pace_slowest), (Aim::Pack, Keep::Formation, 0, 0.0));
         assert_eq!((d.cores_to_go, d.cores_to_stay, d.retreat_health, d.heal_to), (5, 3, 0.5, 0.9));
+        assert_eq!(d.wake_share, 0.5);
         assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
         assert_eq!(d.role("screen").unwrap().keep, Keep::Trail);
         let Value::Object(p) = json!({"core_keep": "orbit", "pass_reach": 0.5, "pace_slowest": 0.85}) else { panic!() };
