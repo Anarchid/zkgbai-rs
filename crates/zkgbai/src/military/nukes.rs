@@ -31,11 +31,15 @@
 //! in our sight since with no anti there. A line is suspect while it passes
 //! within coverage of such a place. Scouts look (see `scouts`); a Widow
 //! that finds the anti can stun it for a missile's flight.
+//!
+//! While a missile of ours flies, our units keep clear of its blast (see
+//! `blasts`).
 
 use springai::{NO_TIMEOUT, Unit, Vec3};
 
 use crate::Ai;
-use crate::util::distance;
+use crate::military::blasts::Blast;
+use crate::util::{distance, get_directional_point};
 
 /// Blast radius of a nuke (`staticnuke`'s `areaOfEffect` 1920, a diameter).
 const BLAST: f32 = 960.0;
@@ -124,6 +128,8 @@ pub struct Nukes {
     /// Widows biting the anti-nukes in the way to a target, to fire at it
     /// once they are stunned.
     bite: Option<Bite>,
+    /// Development aid: the staged blast-clearing test, when on.
+    clear_test: Option<ClearTest>,
 }
 
 /// An intercepted flight: an anti-nuke is within its coverage of some of
@@ -418,6 +424,22 @@ impl Ai {
         self.nukes.launch.as_ref().map(|l| (l.target, BLAST))
     }
 
+    /// The missile of ours on its way: when it was fired, where to, and
+    /// its blast radius.
+    pub fn nukes_flight(&self) -> Option<(i32, Vec3, f32)> {
+        self.nukes.launch.as_ref().map(|l| (l.fired, l.target, BLAST))
+    }
+
+    /// Our own mobile units within the blast at `at`, and their value.
+    fn nukes_ours_in_blast(&self, at: Vec3) -> (usize, f32) {
+        let metal = self.metal;
+        (self.cb.friendly_units_in_cylinder(at, BLAST).into_iter())
+            .filter(|u| u.team() == self.team_id && u.health() > 0.0)
+            .filter_map(|u| u.def())
+            .filter(|d| d.speed() > 0.0)
+            .fold((0, 0.0), |(n, v), d| (n + 1, v + d.cost(metal)))
+    }
+
     /// Whether to build a silo: a strike would pay and we can afford one.
     pub fn nukes_wanted(&self) -> bool {
         !self.dev_off("nukes")
@@ -475,7 +497,8 @@ impl Ai {
             .filter(|e| e.identified && e.is_static && !e.is_dead && distance(e.position, target) <= BLAST)
             .map(|e| (e.unit_id, e.value))
             .collect();
-        self.nukes.launch = Some(Launch { silo, stock, fired: self.frame, from, target, buildings, due });
+        let fired = self.frame;
+        self.nukes.launch = Some(Launch { silo, stock, fired, from, target, buildings, due });
         self.log(&format!("nukes: missile away at ({:.0}, {:.0}), {value:.0} metal in the blast", target.x, target.z));
     }
 
@@ -511,6 +534,13 @@ impl Ai {
         if self.nukes.test.is_some() {
             self.nukes_test_update(frame);
         }
+        if frame == 60 && matches!(self.test.as_deref(), Some("nukeclear" | "nukeclearally")) {
+            let ally = self.test.as_deref() == Some("nukeclearally");
+            self.nukes.clear_test = Some(ClearTest { ally, ..ClearTest::default() });
+        }
+        if self.nukes.clear_test.is_some() {
+            self.nukes_clear_test_update(frame);
+        }
         self.nukes_bite_update();
         if (frame + self.offset) % 30 == 0 {
             self.nukes_update_interceptions();
@@ -519,6 +549,10 @@ impl Ai {
             self.nukes_value_antis();
         }
         if let Some(l) = self.nukes.launch.take_if(|l| frame >= l.due) {
+            let report = self.blasts_report(Blast::Ours(l.fired));
+            if !report.is_empty() {
+                self.log(&format!("nukes: missile at ({:.0}, {:.0}) due{report}", l.target.x, l.target.z));
+            }
             if l.silo.health() > 0.0 && l.silo.stockpile() < l.stock {
                 self.nukes.unverified.push(l);
             } else {
@@ -636,11 +670,12 @@ impl Ai {
             ));
             return;
         };
+        let report = self.blasts_report(Blast::Ours(l.fired));
         if airburst {
             self.nukes_intercepted(vec![at]);
             self.log(&format!(
                 "nukes: missile at ({:.0}, {:.0}) burst in the air at {place}: an anti-nuke must be within \
-                 {ANTI_COVERAGE:.0} of there",
+                 {ANTI_COVERAGE:.0} of there{report}",
                 l.target.x, l.target.z
             ));
             return;
@@ -658,8 +693,10 @@ impl Ai {
         for (u, _) in &dead {
             self.war_enemy_destroyed(*u, None);
         }
+        let (ours, ours_value) = self.nukes_ours_in_blast(at);
         self.log(&format!(
-            "nukes: missile hit {place}, {:.0} from its aim: {} buildings worth {value:.0} count as gone",
+            "nukes: missile hit {place}, {:.0} from its aim: {} buildings worth {value:.0} count as gone; \
+             {ours} of our units ({ours_value:.0} metal) in the blast{report}",
             distance(at, l.target),
             dead.len()
         ));
@@ -764,6 +801,215 @@ impl Ai {
             }
             None => {}
         }
+    }
+}
+
+/// Development aid (`test=nukeclear`, against a passive side such as
+/// NullAI): a silo by our base, and each time it has a missile, two groups
+/// of our own units out toward the enemy: one fighting where the missile
+/// will land (patrolling across it: an attack-move onto it ends at once,
+/// and idle units are the handlers'), one short of there told to
+/// attack-move through it. The
+/// missile goes at once, and the log tells how many of each the blast
+/// left; those left then blow themselves up (else the handlers take them
+/// on to win the game). With `disable=nukeclear` nobody is sent clear.
+/// With `test=nukeclearally` instead (allied to a `test=nukeclear` AI,
+/// hivemind off), no silo: the groups come each time Zero-K tells of an
+/// ally's nuke, at where it lands and short of there toward our base.
+#[derive(Default)]
+pub struct ClearTest {
+    /// Groups for an ally's nukes, not ours.
+    ally: bool,
+    /// The ally's missile of the round (see `blasts`).
+    missile: Option<i32>,
+    silo: Option<Unit>,
+    aim: Vec3,
+    /// Where the walkers start, and where they are told to go.
+    start: Vec3,
+    past: Vec3,
+    /// The group at the aim, and the one walking in.
+    standing: Vec<Unit>,
+    walking: Vec<Unit>,
+    /// When the round's missile went, and when it was over.
+    fired: Option<i32>,
+    over: Option<i32>,
+    /// Of each group, how many were in the blast at the last look before
+    /// it landed.
+    inside: (usize, usize),
+    rounds: u32,
+}
+
+/// Each test group: these, this many each, this far apart.
+const CLEAR_TEST_UNITS: [&str; 3] = ["cloakraid", "cloakriot", "cloakassault"];
+const CLEAR_TEST_EACH: usize = 4;
+const CLEAR_TEST_SPACING: f32 = 60.0;
+
+/// How far out toward the enemy the aim is, how far short of it the
+/// walkers start, and how far past it they are told to go.
+const CLEAR_TEST_AIM: f32 = 2600.0;
+const CLEAR_TEST_SHORT: f32 = 1700.0;
+const CLEAR_TEST_PAST: f32 = 1200.0;
+
+/// Frames from the end of a round's missile to the count.
+const CLEAR_TEST_COUNT: i32 = 90;
+
+/// An ally's nuke with less time than this to land starts no round, frames.
+const CLEAR_TEST_LEAD: i32 = 30 * 15;
+
+impl Ai {
+    fn nukes_clear_test_update(&mut self, frame: i32) {
+        if frame % 30 != 0 {
+            return;
+        }
+        // Storage is small: top it up often for the silo's drain.
+        if frame == 60 || frame % 300 == 0 {
+            self.cb.cheats_set_enabled(true);
+            for res in [self.metal, self.energy] {
+                self.cb.cheat_resource(res, 50000.0);
+            }
+        }
+        if frame == 60 {
+            if self.nukes.clear_test.as_ref().is_some_and(|t| !t.ally) {
+                self.nukes_clear_test_setup();
+            }
+            return;
+        }
+        let Some(t) = self.nukes.clear_test.as_ref() else { return };
+        let (team, ally, spawned, fired, over) = (self.team_id, t.ally, !t.standing.is_empty(), t.fired, t.over);
+        let silo = t.silo.filter(|s| s.health() > 0.0);
+        if let Some(silo) = silo.filter(|s| s.stockpile() + s.stockpile_queued() < 1) {
+            silo.queue_stockpile(0);
+        }
+        let in_air =
+            if ally { t.missile.is_some_and(|id| self.blasts_has_missile(id)) } else { self.nukes.launch.is_some() };
+        if !spawned {
+            if ally && let Some((id, aim)) = self.blasts_ally_nuke(CLEAR_TEST_LEAD) {
+                self.nukes_clear_test_place(id, aim);
+                self.nukes_clear_test_spawn();
+            } else if !ally && silo.is_some_and(|s| s.stockpile() > 0) {
+                self.nukes_clear_test_spawn();
+            }
+        } else if fired.is_none() {
+            let launch = silo.filter(|s| !ally && self.nukes.launch.is_none() && s.stockpile() > 0);
+            if !ally && launch.is_none() {
+                return;
+            }
+            let Some(t) = self.nukes.clear_test.as_mut() else { return };
+            let across = Vec3::new(t.aim.x + 2.0 * CLEAR_TEST_SPACING, t.aim.y, t.aim.z);
+            for u in &t.standing {
+                u.patrol_to(across, 0);
+            }
+            for u in &t.walking {
+                u.fight(t.past, 0);
+            }
+            t.fired = Some(frame);
+            let aim = t.aim;
+            if let Some(silo) = launch {
+                self.nukes_launch(silo, aim, 0.0);
+            }
+        } else if over.is_none() {
+            let Some(t) = self.nukes.clear_test.as_mut() else { return };
+            if in_air {
+                let aim = t.aim;
+                let inside =
+                    |g: &[Unit]| g.iter().filter(|u| u.health() > 0.0 && distance(u.pos(), aim) < BLAST).count();
+                t.inside = (inside(&t.standing), inside(&t.walking));
+            } else {
+                t.over = Some(frame);
+            }
+        } else if over.is_some_and(|o| frame - o >= CLEAR_TEST_COUNT) {
+            let Some(t) = self.nukes.clear_test.as_mut() else { return };
+            let alive = |g: &[Unit]| g.iter().filter(|u| u.health() > 0.0 && u.team() == team).count();
+            let (standing, walking) = (alive(&t.standing), alive(&t.walking));
+            for u in t.standing.iter().chain(&t.walking).filter(|u| u.health() > 0.0 && u.team() == team) {
+                u.self_destruct(0);
+            }
+            let (n, m, (si, wi)) = (t.standing.len(), t.walking.len(), t.inside);
+            t.rounds += 1;
+            let round = t.rounds;
+            (t.standing, t.walking, t.fired, t.over, t.inside, t.missile) =
+                (Vec::new(), Vec::new(), None, None, (0, 0), None);
+            let clear = if self.dev_off("nukeclear") { "off" } else { "on" };
+            let whose = if ally { "an ally's nuke, " } else { "" };
+            self.log(&format!(
+                "nuke-clear test: round {round} ({whose}nukeclear {clear}): {standing} of {n} fighting at the aim and \
+                 {walking} of {m} walking in alive; {si} and {wi} in the blast at the last look before it landed"
+            ));
+        }
+    }
+
+    /// The round's places for an ally's nuke `id` landing at `aim`: the
+    /// walkers start short of it toward our base, and go as far past it.
+    fn nukes_clear_test_place(&mut self, id: i32, aim: Vec3) {
+        let com =
+            (self.cb.team_units().into_iter()).find(|u| self.defs.name_of(*u).starts_with("dyn")).map(|u| u.pos());
+        let base = com.filter(|p| p.x > 0.0 || p.z > 0.0).unwrap_or_else(|| self.graph.get_ally_center());
+        let map = self.cb.map();
+        let ground = |p: Vec3| Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z);
+        let (start, past) = (
+            ground(get_directional_point(aim, base, CLEAR_TEST_SHORT)),
+            ground(get_directional_point(aim, base, -CLEAR_TEST_PAST)),
+        );
+        self.log(&format!(
+            "nuke-clear test: an ally's nuke {id} lands at ({:.0}, {:.0}); walkers from ({:.0}, {:.0})",
+            aim.x, aim.z, start.x, start.z
+        ));
+        if let Some(t) = self.nukes.clear_test.as_mut() {
+            (t.missile, t.aim, t.start, t.past) = (Some(id), aim, start, past);
+        }
+    }
+
+    /// A silo by our base, and where the test missiles go.
+    fn nukes_clear_test_setup(&mut self) {
+        let com =
+            (self.cb.team_units().into_iter()).find(|u| self.defs.name_of(*u).starts_with("dyn")).map(|u| u.pos());
+        let base = com.filter(|p| p.x > 0.0 || p.z > 0.0).unwrap_or_else(|| self.graph.get_ally_center());
+        let map = self.cb.map();
+        let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+        let enemy = Vec3::xz(w - base.x, h - base.z);
+        let ground = |p: Vec3| Vec3::new(p.x, map.elevation_at(p.x, p.z), p.z);
+        let ahead = |d: f32| ground(get_directional_point(base, enemy, d));
+        let Some(def) = self.defs.get("staticnuke") else { return };
+        let site = map.find_closest_build_site(def, ahead(-400.0), 1000.0, 4, 0);
+        let silo = self.cb.cheat_new_unit(def, site);
+        let (aim, start) = (ahead(CLEAR_TEST_AIM), ahead(CLEAR_TEST_AIM - CLEAR_TEST_SHORT));
+        let past = ahead(CLEAR_TEST_AIM + CLEAR_TEST_PAST);
+        self.log(&format!(
+            "nuke-clear test: silo {:?} at ({:.0}, {:.0}), aim ({:.0}, {:.0}), walkers from ({:.0}, {:.0})",
+            silo.map(|s| s.id()),
+            site.x,
+            site.z,
+            aim.x,
+            aim.z,
+            start.x,
+            start.z
+        ));
+        self.nukes.clear_test = Some(ClearTest { silo, aim, start, past, ..ClearTest::default() });
+    }
+
+    /// The round's two groups: at the aim, and short of it.
+    fn nukes_clear_test_spawn(&mut self) {
+        let Some(t) = self.nukes.clear_test.as_ref() else { return };
+        let (aim, start) = (t.aim, t.start);
+        let map = self.cb.map();
+        let group = |at: Vec3| -> Vec<Unit> {
+            let mut units = Vec::new();
+            for (i, name) in CLEAR_TEST_UNITS.iter().enumerate() {
+                let Some(def) = self.defs.get(name) else { continue };
+                for j in 0..CLEAR_TEST_EACH {
+                    let (x, z) =
+                        (at.x + (j as f32 - 1.5) * CLEAR_TEST_SPACING, at.z + (i as f32 - 1.0) * CLEAR_TEST_SPACING);
+                    units.extend(self.cb.cheat_new_unit(def, Vec3::new(x, map.elevation_at(x, z), z)));
+                }
+            }
+            units
+        };
+        let (standing, walking) = (group(aim), group(start));
+        let (n, m) = (standing.len(), walking.len());
+        if let Some(t) = self.nukes.clear_test.as_mut() {
+            (t.standing, t.walking) = (standing, walking);
+        }
+        self.log(&format!("nuke-clear test: {n} units at the aim, {m} to walk in"));
     }
 }
 

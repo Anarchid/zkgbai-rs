@@ -72,6 +72,11 @@ pub struct Pathfinder {
     /// Extra cost per cell of the current query's keep-out circles (empty
     /// without any).
     keepout: Vec<f32>,
+    /// Circles (centre, radius) every path keeps out of for now, ending at
+    /// their rim where it would end inside (see [`Pathfinder::no_go_exit`]):
+    /// the blasts of missiles of ours and our allies' in flight (see
+    /// `military::blasts`).
+    pub no_go: Vec<(Vec3, f32)>,
     scythe_id: i32,
     /// Spider movement class max slope; units sharing it path like spiders.
     spider_max_slope: Option<f32>,
@@ -132,6 +137,7 @@ impl Pathfinder {
             astar: AStar::new(0, 0),
             path_buf: Vec::with_capacity(256),
             keepout: Vec::new(),
+            no_go: Vec::new(),
             scythe_id: defs.id("cloakheavyraid"),
             spider_max_slope: defs.get("spidercon").and_then(|d| d.move_data()).map(|md| md.max_slope()),
             spider_scout_id: defs.id("spiderscout"),
@@ -194,10 +200,11 @@ impl Pathfinder {
     }
 
     /// [`find_path`](Self::find_path) giving a wide berth to `keepout`
-    /// (circles of centre and radius, elmos): a cell whose corner lies in
-    /// one costs [`KEEPOUT_COST`] more, so the path keeps out of them where
-    /// any way round exists, and leaves them by the shortest way where it
-    /// starts in one.
+    /// (circles of centre and radius, elmos) and to [`no_go`](Self::no_go):
+    /// a cell whose corner lies in one costs [`KEEPOUT_COST`] more, so the
+    /// path keeps out of them where any way round exists, and leaves them
+    /// by the shortest way where it starts in one. A target in a no-go
+    /// circle gives way to its rim, on the unit's side.
     pub fn find_path_keepout(
         &mut self,
         war: &MilitaryManager,
@@ -222,6 +229,7 @@ impl Pathfinder {
         let Some(def) = u.def() else {
             return result;
         };
+        let target = self.no_go_exit(target, start).unwrap_or(target);
         let mut cost = cost;
         let mut flyer = true;
         let mut flyheight = 0.0;
@@ -259,6 +267,13 @@ impl Pathfinder {
             return result;
         };
 
+        let circles: Vec<(Vec3, f32)>;
+        let keepout = if self.no_go.is_empty() {
+            keepout
+        } else {
+            circles = keepout.iter().chain(&self.no_go).copied().collect();
+            &circles
+        };
         paint_keepout(self.terrain.smwidth, self.terrain.slope_map.len(), keepout, &mut self.keepout);
         let (terrain, extra) = (&self.terrain, &self.keepout);
         let mut cell_cost = |c: usize| match terrain.cost(cost, war, c) {
@@ -277,6 +292,30 @@ impl Pathfinder {
             }
         }
         result
+    }
+
+    /// The no-go circle `p` is in, if any.
+    pub fn no_go_at(&self, p: Vec3) -> Option<(Vec3, f32)> {
+        self.no_go.iter().copied().find(|&(c, r)| distance(c, p) <= r)
+    }
+
+    /// Whether `p` is in a no-go circle or within `margin` of one.
+    pub fn no_go_near(&self, p: Vec3, margin: f32) -> bool {
+        self.no_go.iter().any(|&(c, r)| distance(c, p) <= r + margin)
+    }
+
+    /// Where to stand clear of the no-go circle `p` is in (`None` when in
+    /// none): just past its rim on `side`'s side of its centre, or as near
+    /// that as the map and the other circles allow.
+    pub fn no_go_exit(&self, p: Vec3, side: Vec3) -> Option<Vec3> {
+        let (c, r) = self.no_go_at(p)?;
+        let (w, h) = (self.terrain.mwidth, self.terrain.mheight);
+        let on_map = |q: Vec3| {
+            q.x >= MAP_RES as f32 && q.z >= MAP_RES as f32 && q.x <= w - MAP_RES as f32 && q.z <= h - MAP_RES as f32
+        };
+        let out = rim_points(c, r + MAP_RES as f32, side);
+        let q = (out.iter().copied()).find(|&q| on_map(q) && self.no_go_at(q).is_none()).unwrap_or(out[0]);
+        Some(Vec3::new(q.x, self.terrain.map.elevation_at(q.x, q.z), q.z))
     }
 
     pub fn is_assault_reachable(&mut self, war: &MilitaryManager, u: Unit, target: Vec3, max_threat: f32) -> bool {
@@ -670,6 +709,17 @@ fn cell_index(width: i32, len: usize, p: Vec3) -> Option<usize> {
     Some((row * width as i64 + col) as usize)
 }
 
+/// Points `r` from `c` on the ground plane: first toward `side`, then
+/// turning from it either way by sixteenths of a turn.
+fn rim_points(c: Vec3, r: f32, side: Vec3) -> [Vec3; 16] {
+    let toward = (side.z - c.z).atan2(side.x - c.x);
+    std::array::from_fn(|k| {
+        let turn = (k as i32 + 1) / 2 * if k % 2 == 1 { 1 } else { -1 };
+        let a = toward + turn as f32 * std::f32::consts::PI / 8.0;
+        Vec3::xz(c.x + r * a.cos(), c.z + r * a.sin())
+    })
+}
+
 /// Fill `out` (for a grid of `len` cells in rows of `width`) with
 /// [`KEEPOUT_COST`] for the cells whose corner lies in a circle of
 /// `keepout`, zero elsewhere; empty without circles.
@@ -731,5 +781,21 @@ mod tests {
         assert_eq!((0..12).filter(|&c| out[c] > 0.0).collect::<Vec<_>>(), vec![8]);
         paint_keepout(4, 12, &[], &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn rim_points_turn_from_the_side() {
+        let c = Vec3::xz(1000.0, 1000.0);
+        let near = |a: Vec3, b: Vec3| distance(a, b) < 0.5;
+        let at = |a: f32| Vec3::xz(c.x + 100.0 * a.cos(), c.z + 100.0 * a.sin());
+        let p = rim_points(c, 100.0, Vec3::xz(1500.0, 1000.0));
+        assert!(p.iter().all(|&q| (distance(q, c) - 100.0).abs() < 0.5));
+        // Toward the side first, then either way of it, ending opposite.
+        assert!(near(p[0], Vec3::xz(1100.0, 1000.0)));
+        assert!(near(p[1], at(std::f32::consts::PI / 8.0)));
+        assert!(near(p[2], at(-std::f32::consts::PI / 8.0)));
+        assert!(near(p[15], Vec3::xz(900.0, 1000.0)));
+        // A side on the centre itself still gives points.
+        assert!(rim_points(c, 100.0, c).iter().all(|q| q.x.is_finite() && q.z.is_finite()));
     }
 }

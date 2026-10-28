@@ -17,7 +17,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3, Weapon};
 use crate::defs::cmd;
 use crate::kgbutil::{Nav, kgb_move_to};
 use crate::military::taskforce::{Keep, Shape};
-use crate::military::wrappers::fighter::next_waypoint;
+use crate::military::wrappers::fighter::{fight_clear, next_waypoint};
 use crate::military::{FighterStore, ScoutTasks};
 use crate::util::{
     NULLPOS, OPTION_SHIFT_KEY, distance, get_angular_point, get_directional_point, get_formation_point,
@@ -540,7 +540,7 @@ impl Squad {
                 }
             } else {
                 f.out_of_range = false;
-                f.unit.fight(get_formation_point(fpos, leader_pos, waypoint), 0);
+                fight_clear(f.unit, get_formation_point(fpos, leader_pos, waypoint), 0, nav);
             }
         }
 
@@ -550,7 +550,7 @@ impl Squad {
             if f.unit.health() <= 0.0 || f.out_of_range {
                 continue;
             }
-            f.unit.fight(get_formation_point(f.get_pos(), leader_pos, waypoint), OPTION_SHIFT_KEY);
+            fight_clear(f.unit, get_formation_point(f.get_pos(), leader_pos, waypoint), OPTION_SHIFT_KEY, nav);
         }
     }
 
@@ -580,7 +580,7 @@ impl Squad {
                 if far_away {
                     kgb_move_to(f.unit, waypoint, 0, nav.frame);
                 } else {
-                    f.unit.fight(waypoint, 0);
+                    fight_clear(f.unit, waypoint, 0, nav);
                 }
             }
         }
@@ -636,7 +636,7 @@ impl Squad {
                 } else {
                     r.out_of_range = false;
                     if attack {
-                        r.unit.fight(waypoint, 0);
+                        fight_clear(r.unit, waypoint, 0, nav);
                     } else {
                         kgb_move_to(r.unit, waypoint, 0, nav.frame);
                     }
@@ -851,14 +851,14 @@ impl Squad {
         // Artillery advances under fight orders, stopping where it reaches.
         let fight = self.shape.fight;
         if fight {
-            leader.unit.fight(wp, 0);
+            fight_clear(leader.unit, wp, 0, nav);
         } else {
             kgb_move_to(leader.unit, wp, 0, frame);
         }
         // Add one extra waypoint, skipping every other one since they're close together.
         if let Some(wp) = next_waypoint(&mut path, 1) {
             if fight {
-                leader.unit.fight(wp, OPTION_SHIFT_KEY);
+                fight_clear(leader.unit, wp, OPTION_SHIFT_KEY, nav);
             } else {
                 kgb_move_to(leader.unit, wp, OPTION_SHIFT_KEY, frame);
             }

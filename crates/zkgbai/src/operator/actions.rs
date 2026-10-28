@@ -90,6 +90,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("radar", "Intel", "watchtowers: advanced radar on raised ground"),
     ("reanalysis", "Intel", "the terrain re-analysed now and then (walls, ditches)"),
     ("nukes", "Superweapons", "nuke silos and strikes"),
+    ("nukeclear", "Superweapons", "our units keep clear of the blast of our missile in flight"),
     ("missiles", "Superweapons", "tactical missile silos"),
 ];
 

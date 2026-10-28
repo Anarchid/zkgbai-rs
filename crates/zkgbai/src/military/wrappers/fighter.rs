@@ -59,6 +59,19 @@ pub(crate) fn next_waypoint(path: &mut VecDeque<Vec3>, skip: usize) -> Option<Ve
     path.pop_front()
 }
 
+/// An attack-move of `unit` to `pos`, or a plain move while either is in a
+/// no-go circle (a blast of ours coming; see `military::blasts`): out of one, as
+/// attacking it would stop there to shoot; into one, as far as its rim.
+pub(crate) fn fight_clear(unit: Unit, pos: Vec3, opts: i16, nav: &Nav) {
+    let at = unit.pos();
+    if nav.pathfinder.no_go_at(at).is_some() || nav.pathfinder.no_go_at(pos).is_some() {
+        let to = nav.pathfinder.no_go_exit(pos, at).unwrap_or(pos);
+        kgb_move_to(unit, to, opts, nav.frame);
+    } else {
+        unit.fight(pos, opts);
+    }
+}
+
 impl Fighter {
     /// A plain fighter. `metal` is its metal cost.
     pub fn new(unit: Unit, metal: f32, team: i32) -> Self {
@@ -140,10 +153,10 @@ impl Fighter {
                 // Skip every other waypoint since they're close together.
                 let skip = if self.is_able_to_fly() { 2 } else { 1 };
                 let Some(wp) = next_waypoint(&mut path, skip) else { return };
-                self.unit.fight(wp, 0);
+                fight_clear(self.unit, wp, 0, nav);
                 // Add one extra waypoint.
                 if let Some(wp) = next_waypoint(&mut path, skip) {
-                    self.unit.fight(wp, OPTION_SHIFT_KEY);
+                    fight_clear(self.unit, wp, OPTION_SHIFT_KEY, nav);
                 }
             }
         }
@@ -228,9 +241,9 @@ impl Fighter {
         let mut path = self.get_raid_path(get_radial_point(target, 100.0), nav);
         let flier = self.is_able_to_fly();
         let Some(wp) = next_waypoint(&mut path, if flier { 3 } else { 1 }) else { return };
-        self.unit.fight(wp, 0);
+        fight_clear(self.unit, wp, 0, nav);
         if let Some(wp) = next_waypoint(&mut path, if flier { 2 } else { 0 }) {
-            self.unit.fight(wp, OPTION_SHIFT_KEY);
+            fight_clear(self.unit, wp, OPTION_SHIFT_KEY, nav);
         }
     }
 

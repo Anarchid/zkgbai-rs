@@ -580,10 +580,17 @@ impl Ai {
     }
 
     /// Order a member to `to`; fighting what it meets on the way if
-    /// `fight`. Repeats nothing it was told lately.
+    /// `fight`. Repeats nothing it was told lately. Never into a blast of
+    /// ours coming (only as far as its rim), and only moving while in one
+    /// (see `blasts`).
     pub fn qrf_order(&mut self, id: i32, to: Vec3, fight: bool) {
         let frame = self.frame;
         let Some(m) = self.qrf.members.get_mut(&id) else { return };
+        let pos = m.unit.pos();
+        let (to, fight) = match self.pathfinder.no_go_exit(to, pos) {
+            Some(rim) => (rim, false),
+            None => (to, fight && self.pathfinder.no_go_at(pos).is_none()),
+        };
         if let Some((p, f, at)) = m.order
             && f == fight
             && distance(p, to) < REORDER_DIST
