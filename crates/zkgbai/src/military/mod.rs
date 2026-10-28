@@ -930,7 +930,8 @@ impl Ai {
         weapon: Option<WeaponDef>,
         paralyzer: bool,
     ) {
-        let _ = (damage, paralyzer);
+        let _ = damage;
+        self.raider_friendly_hit(unit, attacker, paralyzer);
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_damaged(unit, weapon);
         }
