@@ -445,13 +445,20 @@ impl Ai {
             if !hurt.is_empty() && self.pack_way_clear(leader, home) {
                 let healths: Vec<String> =
                     hurt.iter().map(|&u| format!("{:.0}%", 100.0 * health_fraction(u))).collect();
+                // (A pack formed of members hurt in another has no fight of
+                // its own yet.)
+                let last = st.last_hurt.max(st.last_hit);
+                let quiet = if last == 0 {
+                    "it has not fought".to_owned()
+                } else {
+                    format!("quiet {:.0} s", (self.frame - last) as f32 / 30.0)
+                };
                 self.log(&format!(
-                    "taskforce: the {doctrine} pack (squad {sid}) sends {} of {} cores for repairs ({}): quiet {:.0} s, \
-                     the way home clear",
+                    "taskforce: the {doctrine} pack (squad {sid}) sends {} of {} cores for repairs ({}): {quiet}, the \
+                     way home clear",
                     hurt.len(),
                     cores.len(),
-                    healths.join(" "),
-                    (self.frame - st.last_hurt.max(st.last_hit)) as f32 / 30.0
+                    healths.join(" ")
                 ));
                 self.taskforces.packs.insert(sid, st);
                 for u in hurt {
