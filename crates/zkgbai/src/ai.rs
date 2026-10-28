@@ -967,6 +967,11 @@ impl Ai {
         &self.enemy_teams
     }
 
+    /// Whether the game is one team against one: no allies, one enemy.
+    pub fn is_1v1(&self) -> bool {
+        self.allies.is_empty() && self.enemy_teams.len() == 1
+    }
+
     /// Whether a feature is switched off for testing (see `disabled`).
     pub fn dev_off(&self, feature: &str) -> bool {
         self.disabled.contains(feature)

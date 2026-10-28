@@ -45,9 +45,11 @@
 //! lane that eats pickets is not a lane to picket. Spider and vehicle
 //! factories build scouts only for the stakeouts; others build for them
 //! while they are short (feature `anyscout`), the opening scout included,
-//! which so looks for the enemy rather than waiting at home. A jump
-//! opening builds Puppies for them while the map is sparse (feature
-//! `puppyscout`). A unit built for the stakeouts is theirs alone (see
+//! which so looks for the enemy rather than waiting at home. The opening
+//! factory of a 1v1 builds scouts for them first while the map is sparse,
+//! then one for every two raiders (feature `openscouts`, see
+//! `fac_opening_scout`). Either way the unit comes from the factory's
+//! [`scout_roster`]. A unit built for the stakeouts is theirs alone (see
 //! `roles`). `disable=stakeouts` leaves the scouts to the factory's old
 //! scout budget.
 
@@ -61,29 +63,41 @@ use zk_terrain::{Pos, TierMap};
 
 use crate::Ai;
 use crate::economy::factory::FacKind;
+use crate::military::puppies;
 use crate::military::roles::Role;
 use crate::military::{Enemy, Fighter};
 use crate::nav;
 use crate::terrain::pos;
-use crate::util::{NULLPOS, distance, get_directional_point};
+use crate::util::{NULLPOS, distance, get_directional_point, kgb_rand};
 
 /// The units taken as stakeouts.
 pub const SCOUTS: [&str; 3] = ["spiderscout", "vehscout", "shieldscout"];
 
-/// The unit a factory of `kind` builds for the stakeouts: its scout where
-/// it has one, else its cheapest fast raider; none where nothing fits
-/// (tanks, ships, aircraft; the jumpjets' Puppies are built for them only
-/// in a jump opening, see `fac_wants_puppy_scout`).
-pub(crate) fn stakeout_unit(kind: FacKind) -> Option<&'static str> {
+/// The scout roster: what a factory of `kind` builds for the stakeouts,
+/// its specialist cheap scout where it has one, else its cheapest raider
+/// (the Kodachi, cheap or not); two where either will do. None for the
+/// air factories (we do not open with them) and the strider hub.
+pub(crate) fn scout_roster(kind: FacKind) -> &'static [&'static str] {
     match kind {
-        FacKind::Spider => Some("spiderscout"),
-        FacKind::Veh => Some("vehscout"),
-        FacKind::Shield => Some("shieldscout"),
-        FacKind::Cloak => Some("cloakraid"),
-        FacKind::Hover => Some("hoverraid"),
-        FacKind::Amph => Some("amphraid"),
-        _ => None,
+        FacKind::Cloak => &["cloakraid"],
+        FacKind::Shield => &["shieldscout", "shieldraid"],
+        FacKind::Veh => &["vehscout"],
+        FacKind::Hover => &["hoverraid"],
+        FacKind::Tank => &["tankraid"],
+        FacKind::Amph => &["amphraid"],
+        FacKind::Jump => &[puppies::PUPPY],
+        FacKind::Spider => &["spiderscout"],
+        FacKind::Ship => &["shipscout", "shiptorpraider"],
+        _ => &[],
     }
+}
+
+/// The unit a factory of `kind` builds for the stakeouts: from its scout
+/// roster, rolled where it has two.
+pub(crate) fn stakeout_unit(kind: FacKind) -> Option<&'static str> {
+    let roster = scout_roster(kind);
+    let i = (kgb_rand() * roster.len() as f64) as usize;
+    roster.get(i.min(roster.len().saturating_sub(1))).copied()
 }
 
 /// Frames between a stakeout's ticks.
@@ -444,7 +458,7 @@ impl Ai {
     /// scout is one of theirs or, with `anyscout`, it has a unit for them.
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
         let builds = self.stakeouts_own(kind)
-            || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && stakeout_unit(kind).is_some());
+            || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && !scout_roster(kind).is_empty());
         if !builds || self.stakeouts_hot() {
             return 0;
         }
@@ -1006,6 +1020,18 @@ mod tests {
             s.posts.push(Post { choke: c, pos: Vec3::ZERO, covers: 1, width: 300.0, manned: None });
         }
         assert_eq!(s.wanted(0), MAX_POSTS + LOOKERS_EARLY);
+    }
+
+    #[test]
+    fn every_opening_factory_has_a_scout() {
+        use FacKind::*;
+        for kind in [Cloak, Shield, Veh, Hover, Tank, Amph, Jump, Spider, Ship] {
+            let scout = stakeout_unit(kind).unwrap();
+            assert!(scout_roster(kind).contains(&scout));
+        }
+        for kind in [Gunship, Plane, StriderHub, Other] {
+            assert!(stakeout_unit(kind).is_none());
+        }
     }
 
     #[test]

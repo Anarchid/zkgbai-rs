@@ -27,10 +27,10 @@ const EARLY_CONS_MIN: usize = 2;
 const EARLY_CONS_INCOME: f32 = 5.5;
 const EARLY_CONS_MAX: usize = 14;
 
-/// Puppies for the stakeouts in a jump opening (see
-/// `fac_wants_puppy_scout`): this many first, then one per this many Pyros.
-const PUPPY_SCOUTS_FIRST: i32 = 2;
-const PYROS_PER_PUPPY_SCOUT: i32 = 2;
+/// Scouts for the stakeouts in a 1v1 opening (see `fac_opening_scout`):
+/// this many first, then one per this many raiders.
+const OPENING_SCOUTS_FIRST: usize = 2;
+const RAIDERS_PER_SCOUT: usize = 2;
 
 /// From when the spider factory raids with Venoms rather than Fleas
 /// (frames: minute 2).
@@ -581,33 +581,36 @@ impl Ai {
         });
 
         let kind = fac.kind();
-        let choice = match kind {
-            FacKind::Cloak => self.fac_get_cloaky(&mut fac),
-            FacKind::Ship => self.fac_get_boats(&mut fac),
-            FacKind::Shield => self.fac_get_shields(&mut fac),
-            FacKind::Gunship => self.fac_get_gunship(&mut fac),
-            FacKind::Plane => self.fac_get_planes(&mut fac),
-            FacKind::Amph => self.fac_get_amphs(&mut fac),
-            FacKind::Veh => self.fac_get_lv(&mut fac),
-            FacKind::Hover => self.fac_get_hovers(&mut fac),
-            FacKind::Tank => self.fac_get_tanks(&mut fac),
-            FacKind::Spider => self.fac_get_spiders(&mut fac),
-            FacKind::Jump => self.fac_get_jumps(&mut fac),
-            FacKind::StriderHub => self.fac_get_strider(),
-            FacKind::Other => return,
+        let choice = match self.fac_opening_scout(&mut fac) {
+            Some(scout) => scout,
+            None => match kind {
+                FacKind::Cloak => self.fac_get_cloaky(&mut fac),
+                FacKind::Ship => self.fac_get_boats(&mut fac),
+                FacKind::Shield => self.fac_get_shields(&mut fac),
+                FacKind::Gunship => self.fac_get_gunship(&mut fac),
+                FacKind::Plane => self.fac_get_planes(&mut fac),
+                FacKind::Amph => self.fac_get_amphs(&mut fac),
+                FacKind::Veh => self.fac_get_lv(&mut fac),
+                FacKind::Hover => self.fac_get_hovers(&mut fac),
+                FacKind::Tank => self.fac_get_tanks(&mut fac),
+                FacKind::Spider => self.fac_get_spiders(&mut fac),
+                FacKind::Jump => self.fac_get_jumps(&mut fac),
+                FacKind::StriderHub => self.fac_get_strider(),
+                FacKind::Other => return,
+            },
         };
         // The operator's production orders replace the AI's own pick, but
         // never a constructor it picked: an operator steering production
         // must not move the economy off its builder curve.
         let ai_wants_builder = self.defs.get(choice).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
         // Raiders for home defense while its budget is short (see `qrf`),
-        // in place of a plain fighter. (Not of a jump opening's Puppy
-        // scouts: the QRF floor took the second for a Pyro guard.)
+        // in place of a plain fighter. (Not of a scout for the stakeouts:
+        // the QRF floor took a jump opening's second Puppy for a Pyro guard.)
         let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy")
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice)
-            || (choice == crate::military::puppies::PUPPY && fac.building_for == Some(Role::Stakeout));
+            || fac.building_for == Some(Role::Stakeout);
         // Dirtbags for the strikes while snipers are about (see `strikes`).
         let picked = choice;
         let choice = match (ai_wants_builder || special, fac.unit) {
@@ -874,6 +877,12 @@ impl Ai {
 
         if fm.scout_budget > 0 {
             fac.building_for = Some(fm.scout_role);
+            // The stakeouts' scout is a Cutter or a Hunter.
+            if fm.scout_role == Role::Stakeout
+                && let Some(scout) = stakeout_unit(FacKind::Ship)
+            {
+                return scout;
+            }
             return "shiptorpraider";
         }
 
@@ -1420,9 +1429,8 @@ impl Ai {
         }
     }
 
-    /// Jumpjets. Puppies to look and picket for the opening (see
-    /// `fac_wants_puppy_scout`), Pyro pressure (the opening's solo raiders
-    /// run fire-shadow raids, see `precision`), then Moderator squads with a
+    /// Jumpjets. Pyro pressure first (the opening's solo raiders run
+    /// fire-shadow raids, see `precision`), then Moderator squads with a
     /// Placeholder per four Moderators to hold what they shoot, a Jack per
     /// two of those up front, and Pyros guarding them from swarms (see
     /// `war_unit_idle`); Firewalkers against masses of light skirmishers,
@@ -1436,11 +1444,6 @@ impl Ai {
 
         if self.fac_need_workers(fac) || self.fac_wants_early_constable() {
             return "jumpcon";
-        }
-
-        if self.fac_wants_puppy_scout(fac) {
-            fac.building_for = Some(Role::Stakeout);
-            return crate::military::puppies::PUPPY;
         }
 
         if self.fac_wants_firewalker() {
@@ -1462,6 +1465,12 @@ impl Ai {
 
         if fm.scout_budget > 0 {
             fac.building_for = Some(fm.scout_role);
+            // The stakeouts' scout is the Puppy.
+            if fm.scout_role == Role::Stakeout
+                && let Some(scout) = stakeout_unit(FacKind::Jump)
+            {
+                return scout;
+            }
             return "jumpraid";
         }
 
@@ -1531,22 +1540,37 @@ impl Ai {
         cons < EARLY_CONS_MIN.max((self.eco.adjusted_income / EARLY_CONS_INCOME) as usize).min(EARLY_CONS_MAX)
     }
 
-    /// Puppies for the stakeouts from the opening jump factory while the
-    /// map is sparse (density under the `density_ref` dial), feature
-    /// `puppyscout`: the first two units after the Constables, then one for
-    /// every two Pyros. At 45 metal and sight 640 they look and picket where
-    /// 220-metal Pyros scouted; none while the stakeouts' loss cap holds
-    /// (`stakeouts_capped`; not the delay after each loss: with a pick per
-    /// Pyro, 40-60 s apart, it kept one Puppy to six Pyros on Comet).
-    fn fac_wants_puppy_scout(&self, fac: &Factory) -> bool {
-        if !fac.opener || self.dev_off("puppyscout") || self.dev_off("stakeouts") || self.stakeouts_capped() {
-            return false;
+    /// A scout for the stakeouts from the opening factory of a 1v1 while
+    /// the map is sparse (density under the `density_ref` dial), feature
+    /// `openscouts`: the first two units after the constructors, then one
+    /// for every two raiders the raider handler runs, from the factory's
+    /// scout roster (see `stakeouts::scout_roster`). None while the
+    /// stakeouts' loss cap holds (`stakeouts_capped`; not the delay after
+    /// each loss: with a pick per Pyro, 40-60 s apart, it kept one Puppy to
+    /// six Pyros on Comet).
+    fn fac_opening_scout(&self, fac: &mut Factory) -> Option<&'static str> {
+        if !fac.opener
+            || !self.is_1v1()
+            || self.dev_off("openscouts")
+            || self.dev_off("stakeouts")
+            || self.stakeouts_capped()
+            || self.posture.density >= self.posture_levers().density_ref
+        {
+            return None;
         }
-        if self.posture.density >= self.posture_levers().density_ref {
-            return false;
+        let h = &self.raider_handler;
+        let raiders = h.solo_raiders.len() + h.kodachis.len() + h.small_raiders.len() + h.medium_raiders.len();
+        let scouts = self.roles.count(Role::Stakeout) + self.roles.declared_count(Role::Stakeout);
+        if scouts >= OPENING_SCOUTS_FIRST.max(raiders / RAIDERS_PER_SCOUT) {
+            return None;
         }
-        let have = self.roles_count_named(Role::Stakeout, crate::military::puppies::PUPPY);
-        have < PUPPY_SCOUTS_FIRST.max(self.fac.num_pyros / PYROS_PER_PUPPY_SCOUT)
+        // Constructors first (the jump factory's early Constables too).
+        if self.fac_need_workers(fac) || (fac.kind() == FacKind::Jump && self.fac_wants_early_constable()) {
+            return None;
+        }
+        let scout = stakeout_unit(fac.kind())?;
+        fac.building_for = Some(Role::Stakeout);
+        Some(scout)
     }
 
     /// Firewalkers while the enemy's light skirmishers (Ronins, Rogues,
