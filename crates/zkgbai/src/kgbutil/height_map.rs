@@ -3,6 +3,7 @@ use springai::{Callback, Vec3};
 /// Cached terrain heights (as at the start of the game) for "find high
 /// ground" queries, sight lines and shell paths (radar and artillery
 /// placement).
+#[derive(PartialEq)]
 pub struct HeightMap {
     data: Vec<f32>,
     width: i32,

@@ -516,17 +516,25 @@ impl Squad {
         }
     }
 
+    /// Whether the squad's way walks: not all of it can jump (Moderators
+    /// among Jacks, say), so its leader may not.
+    fn walks(&self, fighters: &FighterStore, nav: &mut Nav) -> bool {
+        (self.fighters.iter().filter_map(|id| fighters.get(id))).any(|f| !nav.pathfinder.can_jump(f.unit))
+    }
+
     fn base_set_target(&mut self, pos: Vec3, fighters: &mut FighterStore, nav: &mut Nav) {
         // Set a target for the squad to attack.
         self.target = pos;
         let (maxdist, waydist) = if self.is_air_squad { (300.0, 150.0) } else { (200.0, 100.0) };
         let Some(leader) = self.leader_fighter(fighters) else { return };
-        let leader_pos = leader.get_pos();
+        let (leader_pos, leader_unit) = (leader.get_pos(), leader.unit);
+        nav.pathfinder.walk_only = self.walks(fighters, nav);
         let mut path = leader.get_fight_path(pos, nav);
         let skip = if self.is_air_squad { 2 } else { 1 };
         let Some(waypoint) = next_waypoint(&mut path, skip) else { return };
         for id in &self.fighters {
             let Some(f) = fighters.get_mut(id) else { continue };
+            nav.pathfinder.share_jump(leader_unit, f.unit);
             f.target = self.target;
             let fpos = f.get_pos();
             let fdist = distance(fpos, leader_pos);
@@ -619,10 +627,13 @@ impl Squad {
             // Medium raiders are treated more like assaults. The group only gets one path that all units follow.
             // This keeps them mobbed up better so they can do maximum damage. Out of range units are still moved
             // to the leader to keep them dynamically rallied in case they get split up for whatever reason.
+            let leader_unit = leader.unit;
+            nav.pathfinder.walk_only = self.walks(fighters, nav);
             let mut path = leader.get_raid_path(pos, nav);
             let Some(waypoint) = next_waypoint(&mut path, 1) else { return };
             for id in &self.fighters {
                 let Some(r) = fighters.get_mut(id) else { continue };
+                nav.pathfinder.share_jump(leader_unit, r.unit);
                 let rpos = r.get_pos();
                 let fdist = distance(leader_pos, rpos);
                 if fdist > maxdist {
