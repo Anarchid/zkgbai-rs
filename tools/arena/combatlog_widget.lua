@@ -21,6 +21,14 @@
 --   stun  EMP stun on (1) or off (0)
 --   (shot.tlos, v2: the aimed target's LOS state for the shooter's ally team
 --   at the fire frame: 2 in sight, 1 radar only, 0 neither, empty unknown)
+--   (v3: shot.pdmg = the paralyze part of shot.dmg, which stays the total;
+--   src=x = a blast without a projectile, e.g. the Outlaw's pulse at its own
+--   feet: damage of a weapon in the attacker's own weapon list that matched
+--   no projectile and no hitscan salvo, one row per attacker, weapon, frame)
+--   (v4: hitscan salvos skip fake/bogus weapons (aiming and float checks)
+--   and reloadFrame jumps that imply a reload over MAX_RELOAD_FRAMES or a
+--   shot before frame 0: a weapon the game parks while disabled moved its
+--   reloadFrame without firing; unit.bp = build progress, 1 when finished)
 --   unit  state of a unit in combat, every UNIT_SAMPLE frames
 --   meta  game, map, teams
 -- Positions are elmos, speeds elmos per frame, frames at 30 per second.
@@ -39,11 +47,12 @@ function widget:GetInfo()
 	}
 end
 
-local VERSION = 2
+local VERSION = 4
 local UNIT_SAMPLE = 30     -- frames between unit rows
 local ACTIVE_FRAMES = 600  -- a unit stays in combat this long after its last shot or wound
 local SALVO_POLL = 6       -- longest poll period of a unit in combat (shorter for fast lasers)
 local IDLE_POLL = 30       -- ... and of those that have not shot or been shot lately
+local MAX_RELOAD_FRAMES = 3600  -- a longer reload means the game parked the weapon: no shot
 local PROJ_POLL = 1        -- frames between projectile polls
 local PENDING_FRAMES = 12  -- unmatched damage waits this long for its salvo
 local PROJ_MATCH_FRAMES = 300 -- player view: damage matches a projectile this old at most
@@ -83,6 +92,8 @@ local MAP_X, MAP_Z = Game.mapSizeX, Game.mapSizeZ
 local wdInfo = {}
 -- Per unit def: list of {weaponNum, weaponDefID} for its hitscan weapons.
 local udHitscan = {}
+-- Per unit def: set of its own weapon def ids (blasts without a projectile).
+local udWeapons = {}
 -- Engine damage ids -> names.
 local envName = {}
 
@@ -137,13 +148,13 @@ local function unitState(uid, f)
 		return nil
 	end
 	local vx, vy, vz = GetUnitVelocity(uid)
-	local hp, hpmax, para = GetUnitHealth(uid)
+	local hp, hpmax, para, _, bp = GetUnitHealth(uid)
 	local _, stunned = GetUnitIsStunned(uid)
 	local shEnabled, shPower = GetUnitShieldState(uid)
 	s = {
 		x = x, z = z,
 		spd = vx and sqrt(vx * vx + vz * vz) or 0,
-		hp = hp, hpmax = hpmax, para = para,
+		hp = hp, hpmax = hpmax, para = para, bp = bp,
 		stun = stunned and 1 or 0,
 		slow = GetUnitRulesParam(uid, "slowState") or 0,
 		dis = GetUnitRulesParam(uid, "disarmed") or 0,
@@ -163,12 +174,12 @@ end
 -- Columns of a shot row; src p/s/d as described above.
 local SHOT_HEADER = "#shot\tsrc\tn\tf0\tf1\tlag\tpid\twd\town\todef\toteam\tox\toz\tospd\tpspd" ..
 	"\ttt\ttid\ttdef\ttteam\ttx\ttz\ttdist\ttspd\tthp\tthpmax\ttpara\ttstun\ttslow\ttdis\ttsh\ttfire" ..
-	"\thits\tdmg\tdmgt\tnvict\tpara\ttdead\ttspd1\ttsh1\ttlos"
+	"\thits\tdmg\tdmgt\tnvict\tpara\ttdead\ttspd1\ttsh1\ttlos\tpdmg"
 
 local function newShot(src, f, wdid, owner, f0)
 	local rec = {
 		src = src, n = 1, f0 = f0 or f, fseen = f, wd = wdid, own = owner,
-		hits = 0, dmg = 0, dmgt = 0, nvict = 0, para = 0, victims = {},
+		hits = 0, dmg = 0, dmgt = 0, nvict = 0, para = 0, pdmg = 0, victims = {},
 	}
 	if owner then
 		local s = unitState(owner, f)
@@ -239,7 +250,10 @@ local function addDamage(rec, f, vid, vdef, vteam, damage, paralyzer)
 		rec.victims[vid] = true
 		rec.nvict = rec.nvict + 1
 	end
-	if paralyzer then rec.para = 1 end
+	if paralyzer then
+		rec.para = 1
+		rec.pdmg = rec.pdmg + damage
+	end
 	touch(vid, f)
 end
 
@@ -263,7 +277,7 @@ local function closeShot(rec, f)
 		num(rec.tdist), num(rec.tspd, 2), num(rec.thp), num(rec.thpmax), num(rec.tpara), num(rec.tstun),
 		num(rec.tslow, 3), num(rec.tdis), num(rec.tsh), num(rec.tfire),
 		num(rec.hits), num(rec.dmg, 1), num(rec.dmgt, 1), num(rec.nvict), num(rec.para),
-		num(tdead), num(tspd1, 2), num(tsh1), num(rec.tlos),
+		num(tdead), num(tspd1, 2), num(tsh1), num(rec.tlos), num(rec.pdmg, 1),
 	}, "\t"))
 end
 
@@ -437,11 +451,17 @@ local function pollSalvos(f)
 							if d then ttype, target = "u", d.vid end
 						end
 					end
+					local info, rframes, f0
 					if ttype then
-						local info = wdInfo[wdid]
+						info = wdInfo[wdid]
 						local reload = GetUnitWeaponState(uid, wnum, "reloadTime") or info.reload
-						local rframes = math.max(1, math.floor(reload * 30 + 0.5))
-						local f0 = rf - rframes
+						rframes = math.max(1, math.floor(reload * 30 + 0.5))
+						f0 = rf - rframes
+						if rframes > MAX_RELOAD_FRAMES or f0 < 0 then
+							ttype = nil  -- parked by the game (disabled), not fired
+						end
+					end
+					if ttype then
 						if f0 > f then f0 = f end
 						-- Shots this period: one if the weapon was idle at the last
 						-- poll (when it started is unknown), else the reload advance,
@@ -482,13 +502,29 @@ local function flushPending(f)
 	for aid, pa in pairs(pending) do
 		for wdid, list in pairs(pa) do
 			local keep = {}
+			local w = wdInfo[wdid]
+			local blasts  -- frame -> shot record, for a projectile-less weapon of the attacker's own
 			for i = 1, #list do
 				local d = list[i]
 				if f - d.f > PENDING_FRAMES then
-					emitDamage(d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para, wdid, aid, d.adef, d.ateam, d.pid)
+					local own = d.adef and udWeapons[d.adef]
+					if w and not w.hitscan and own and own[wdid] then
+						blasts = blasts or {}
+						local rec = blasts[d.f]
+						if not rec then
+							rec = newShot("x", d.f, wdid, aid)
+							blasts[d.f] = rec
+						end
+						addDamage(rec, d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para)
+					else
+						emitDamage(d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para, wdid, aid, d.adef, d.ateam, d.pid)
+					end
 				else
 					keep[#keep + 1] = d
 				end
+			end
+			if blasts then
+				for bf, rec in pairs(blasts) do closeShot(rec, bf) end
 			end
 			pa[wdid] = #keep > 0 and keep or nil
 		end
@@ -521,7 +557,7 @@ local function sampleUnits(f)
 				emit(table.concat({
 					"unit", num(f), num(uid), unitDefName(s.def), num(s.team), num(s.x), num(s.z),
 					num(s.hp), num(s.hpmax), num(s.para), num(s.stun), num(s.slow, 3), num(s.dis),
-					num(s.sh), num(s.fire), num(s.spd, 2),
+					num(s.sh), num(s.fire), num(s.spd, 2), num(s.bp, 3),
 				}, "\t"))
 			end
 		end
@@ -538,7 +574,7 @@ local HEADERS = {
 	"#env\tf\tvid\tvdef\tvteam\tdmg\tkind\taid\tadef\tateam",
 	"#kill\tf\tuid\tudef\tuteam\tx\tz\taid\tadef\tateam",
 	"#stun\tf\tuid\tudef\tuteam\ton",
-	"#unit\tf\tuid\tudef\tuteam\tx\tz\thp\thpmax\tpara\tstun\tslow\tdis\tsh\tfire\tspd",
+	"#unit\tf\tuid\tudef\tuteam\tx\tz\thp\thpmax\tpara\tstun\tslow\tdis\tsh\tfire\tspd\tbp",
 	"#meta\tkey\tvalue...",
 }
 
@@ -622,9 +658,13 @@ function widget:Initialize()
 	end
 	for udid, ud in pairs(UnitDefs) do
 		local list
+		local own = {}
+		udWeapons[udid] = own
 		for i, w in ipairs(ud.weapons) do
+			own[w.weaponDef] = true
 			local wi = wdInfo[w.weaponDef]
-			if wi and wi.hitscan then
+			local dummy = wi and (wi.name:find("fake") or wi.name:find("bogus"))
+			if wi and wi.hitscan and not dummy then
 				list = list or { period = SALVO_POLL }
 				list[#list + 1] = { i, w.weaponDef }
 				local rframes = math.max(1, math.floor(wi.reload * 30 + 0.5))

@@ -28,6 +28,7 @@ from fit_hits import SPEED_EDGES, RBANDS, SHRINK
 DT = 3              # frames per sim step
 SIMUL = os.environ.get("PRED_SIMUL") == "1"  # check: apply a step's damage after all units fired
 HORIZON = 2700      # frames (90 s)
+FIRST_SHOT = None   # experiment hook: callable(unit, weapon) -> frame a weapon may first fire (default 0)
 HITSCAN = {"BeamLaser", "LightningCannon", "Rifle"}
 MIN_COST = 100.0
 DECIDE = 0.1
@@ -256,7 +257,7 @@ def simulate(units, rng=None, hazard=None, post=None, withdraw=False):
         for wa, wb in zip(a.weapons, b.weapons):
             for k in SimWeapon.__slots__:
                 setattr(wa, k, getattr(wb, k))
-            wa.next = 0
+            wa.next = FIRST_SHOT(a, wa) if FIRST_SHOT is not None else 0
     cost0 = [sum(u.cost for u in us if u.side == s and u.armed) for s in (0, 1)]
     killed = [0.0, 0.0]
     quiet = 0
@@ -411,7 +412,7 @@ def _init(pdir, cache):
     if hp:
         hd = pickle.load(open(hp, "rb"))
         disengage.T0 = hd["t0"]
-        G["hazard"] = disengage.Hazard(hd["w"])
+        G["hazard"] = disengage.Hazard(hd["w"], mob=hd.get("mob", False))
     else:
         G["hazard"] = None
     hpp = os.environ.get("PRED_HAZARD_POST")
@@ -732,7 +733,7 @@ def score(df, pdir):
         ">=500 metal/side": (df["costA"] >= 500) & (df["costB"] >= 500),
     }
     out = []
-    for sp in ("test", "human", "train"):
+    for sp in ("test", "human", "replay", "train"):
         for sub, m in subsets.items():
             mask = (df["split"] == sp).values & np.asarray(m)
             d = df[mask]
@@ -755,7 +756,7 @@ def score(df, pdir):
     sc = pd.DataFrame(out)
     sc.to_csv(os.path.join(pdir, "scores.tsv"), sep="\t", index=False, float_format="%.4f")
     with open(os.path.join(pdir, "results.md"), "w") as fh:
-        for sp in ("test", "human", "train"):
+        for sp in ("test", "human", "replay", "train"):
             s = sc[sc["split"] == sp]
             if len(s) == 0:
                 continue

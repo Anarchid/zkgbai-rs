@@ -23,6 +23,7 @@ SPEED_EDGES = (0.5, 2.0, 4.0)  # elmos per frame -> bands 0..3
 SHRINK = 20.0
 
 UD = None
+NOSHIELD = os.environ.get("PRED_HITS_NOSHIELD") == "1"
 
 
 def sband(spd):
@@ -40,6 +41,8 @@ def game_counts(path):
     sp = split.split_of(meta.get("game", ""), series)
     s = d["shot"]
     s = s[(s["tt"] == "u") & (s["tid"] >= 0) & (s["tteam"] != s["oteam"])]
+    if NOSHIELD and "tsh" in s.columns:
+        s = s[~(s["tsh"] > 50)]  # body hits only: the target's own shield was down (mech.py shield switch)
     if not len(s):
         return sp, None
     w = meta["weapons"]
@@ -131,7 +134,7 @@ class HitModel:
 
 def main(cache, out, workers=4):
     paths = list(combatdata.cached(cache))
-    parts = {"train": [], "test": [], "human": []}
+    parts = {"train": [], "test": [], "human": [], "replay": [], "dev": []}
     with Pool(workers) as pool:
         for i, (sp, g) in enumerate(pool.imap_unordered(game_counts, paths, chunksize=4)):
             if g is not None:

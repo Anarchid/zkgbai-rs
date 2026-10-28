@@ -91,6 +91,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     ("fightsim", "Army", "the fight predictor drives squads"),
+    ("fightmech", "Army", "the fight predictor's mechanics model runs beside it, logged only"),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),

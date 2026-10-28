@@ -31,7 +31,8 @@ def export_hits(pdir, out):
     cells = pickle.load(open(os.path.join(pdir, "hitcells.pkl"), "rb"))["train"]
     c = cells.reset_index()[["wd", "tdef", "rb", "sb", "n", "hit_any", "hit_tgt", "dmg", "nominal"]]
     with open(out, "w") as fh:
-        header(fh, "hit cells", f"{len(c)} cells (weapon, target def, range band, speed band), {int(c['n'].sum())} shots, train games only")
+        src = os.path.join(os.path.basename(os.path.normpath(pdir)), "hitcells.pkl")
+        header(fh, "hit cells", f"{len(c)} cells (weapon, target def, range band, speed band), {int(c['n'].sum())} shots, train games only; from {src}")
         fh.write("wd\ttdef\trb\tsb\tn\thit_any\thit_tgt\tdmg\tnominal\n")
         for r in c.itertuples(index=False):
             fh.write(f"{r.wd}\t{r.tdef}\t{int(r.rb)}\t{int(r.sb)}\t{r.n:.10g}\t{r.hit_any:.10g}\t{r.hit_tgt:.10g}\t{r.dmg:.10g}\t{r.nominal:.10g}\n")

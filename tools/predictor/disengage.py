@@ -35,6 +35,32 @@ def features(t, kA, kB, logratio, post=None):
 
 
 NAMES = ["const", "log1p(t)", "t/10", "kmax", "kmin", "|kA-kB|", "log(costA/costB)"] + (["t==0"] if T0 else [])
+MOB_NAMES = ["mobile share A", "mobile share B", "log speed ratio A/B"]
+_UD = None
+
+
+def mob_feats(fight):
+    """Mechanics round 2 (hazmob): each side's mobile share of armed metal and the log ratio of the
+    sides' metal-weighted mean mobile speed (clipped to +-2; 0 when a side has no mobile armed unit)."""
+    global _UD
+    if _UD is None:
+        import units
+        _UD = units.load()
+    out = []
+    spd = []
+    for side in (fight["A"], fight["B"]):
+        tot = mob = ms = 0.0
+        for r in side:
+            if not r["armed"]:
+                continue
+            d = _UD.get(r["def"])
+            tot += r["cost"]
+            if d is not None and d.canmove:
+                mob += r["cost"]; ms += r["cost"] * d.speed
+        out.append(mob / tot if tot > 0 else 0.0)
+        spd.append(ms / mob if mob > 0 else 0.0)
+    lsr = max(-2.0, min(2.0, math.log(spd[0] / spd[1]))) if spd[0] > 0 and spd[1] > 0 else 0.0
+    return out[0], out[1], lsr
 POST_NAMES = [f"A={q}" for q in POSTURES] + [f"B={q}" for q in POSTURES]
 
 
@@ -46,7 +72,7 @@ def kill_curve(side, cost):
     return at
 
 
-def person_periods(fights, posture=None):
+def person_periods(fights, posture=None, mob=False):
     X, y = [], []
     for f in fights:
         if not (f["closed"] and f["costA"] >= MIN_COST and f["costB"] >= MIN_COST):
@@ -58,15 +84,18 @@ def person_periods(fights, posture=None):
         kA, kB = kill_curve(f["A"], f["costA"]), kill_curve(f["B"], f["costB"])
         lr = math.log(f["costA"] / f["costB"])
         wipe = f["yA"] >= 0.999 or f["yB"] >= 0.999
+        mf = np.array(mob_feats(f)) if mob else None
         for t in range(T + 1):
-            X.append(features(t, kA(t), kB(t), lr, post))
+            x = features(t, kA(t), kB(t), lr, post)
+            X.append(np.concatenate([x, mf]) if mob else x)
             y.append(1.0 if (t == T and not wipe) else 0.0)
     return np.array(X), np.array(y)
 
 
 class Hazard:
-    def __init__(self, w=None):
+    def __init__(self, w=None, mob=False):
         self.w = w
+        self.mob = mob  # features carry mob_feats(fight) at the end (mechanics round 2)
 
     def fit(self, X, y):
         def nll(w):
@@ -75,8 +104,11 @@ class Hazard:
         self.w = minimize(nll, np.zeros(X.shape[1]), method="L-BFGS-B").x
         return self
 
-    def h(self, t, kA, kB, logratio, post=None):
-        return float(expit(features(t, kA, kB, logratio, post) @ self.w))
+    def h(self, t, kA, kB, logratio, post=None, mob=None):
+        x = features(t, kA, kB, logratio, post)
+        if self.mob:
+            x = np.concatenate([x, mob if mob is not None else (1.0, 1.0, 0.0)])
+        return float(expit(x @ self.w))
 
 
 def load_posture(path):
@@ -93,10 +125,11 @@ def main(fights_path, out, posture_path=None):
     if posture_path:
         POST = True
         posture = load_posture(posture_path)
-    X, y = person_periods(train, posture)
-    hz = Hazard().fit(X, y)
+    mob = os.environ.get("HZ_MOB") == "1"
+    X, y = person_periods(train, posture, mob)
+    hz = Hazard(mob=mob).fit(X, y)
     print(f"{len(train)} train fights, {len(X)} fight-seconds, {int(y.sum())} disengagements")
-    for n, w in zip(NAMES + (POST_NAMES if POST else []), hz.w):
+    for n, w in zip(NAMES + (POST_NAMES if POST else []) + (MOB_NAMES if mob else []), hz.w):
         print(f"  {n:18} {w:+.3f}")
     # check: observed vs predicted end rate by elapsed second
     p = expit(X @ hz.w)
@@ -108,7 +141,8 @@ def main(fights_path, out, posture_path=None):
             print(f"  {tt:3d} {m.sum():6d} {y[m].mean():.3f} {p[m].mean():.3f}")
     for lab, m in (("no kills yet", (X[:, 3] == 0)), ("kmax>0.5", X[:, 3] > 0.5)):
         print(f"  {lab:14} n={m.sum()} obs {y[m].mean():.3f} pred {p[m].mean():.3f}")
-    pickle.dump({"w": hz.w, "t0": T0, "post": POST, "names": NAMES + (POST_NAMES if POST else [])}, open(out, "wb"))
+    pickle.dump({"w": hz.w, "t0": T0, "post": POST, "mob": mob, "names": NAMES + (POST_NAMES if POST else []) + (MOB_NAMES if mob else [])},
+                open(out, "wb"))
     print("->", out)
 
 
