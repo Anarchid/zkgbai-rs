@@ -1068,10 +1068,11 @@ pub fn seeds() -> Vec<Doctrine> {
     impaler.engage_value = 900.0;
 
     let mut ravager = Doctrine::new("ravager");
-    ravager.note = "A Ravager pack (see `pack`): five or more go in as one body, in a formation that slides \
-                    with the leader's moves (60 apart: their shells go over each other), always on the move \
-                    under move orders; passes over what they dive on the line that brings the most guns \
-                    within 70% of their reach, then swing round for the next; only at what the threat maps \
+    ravager.note = "A Ravager pack (see `pack`), from the middle game (once most armed ground units, and most \
+                    of the enemy's, are not raiders): five or more go in as one body, in a formation that slides \
+                    with the leader's moves (60 apart: their shells go over each other), always on the move under \
+                    move orders; they charge what moves and pass over what stands on the line that brings the \
+                    most guns within 70% of their reach, finishing a run once begun; only at what the threat maps \
                     say they survive. From raiders they fall back to their Ripper screen, which trails them \
                     home-side at its own pace; below half health they park for repairs until 90%. Off by \
                     default: enable=ravager (Ravagers otherwise fight in the vehicle assault squads)."
@@ -1090,6 +1091,11 @@ pub fn seeds() -> Vec<Doctrine> {
     ravager.cores_to_go = 5;
     ravager.cores_to_stay = 3;
     ravager.rip_value = 400.0;
+    // Charging what moves, passing what stands, committed: the best net of
+    // the scenario runs (zkgbai-runs/pack/scen: +117 (87), +127 (85) metal
+    // a scenario against uncommitted passes).
+    ravager.attack = Attack::Mixed;
+    ravager.commit = true;
     // The middle game: once most armed ground units are not raiders (user,
     // 2026-10-28, for the full-play test).
     ravager.wake_share = 0.5;
@@ -1294,7 +1300,7 @@ mod tests {
         assert_eq!((d.core_keep, d.pass_reach, d.pace_slowest), (Keep::Orbit, 0.5, 0.85));
         let Value::Object(p) = json!({"core_keep": "circle"}) else { panic!() };
         assert!(d.apply(&p).is_err());
-        assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Pass, false, true));
+        assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Mixed, true, true));
         let Value::Object(p) = json!({"attack": "charge", "commit": true, "shun_porc": false}) else { panic!() };
         d.apply(&p).unwrap();
         assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Charge, true, false));
