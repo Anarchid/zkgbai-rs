@@ -119,9 +119,15 @@ pub enum Judge {
     /// The same, by the predictor's mechanics model (air, burn, death
     /// blasts, EMP, slow, engagement odds; `fightsim::mech`).
     Mech,
+    /// Planned by who dies (`fightsim::mech` fates): a run as a chain of
+    /// short engagements along its way, each `fate_secs` long, worth the
+    /// expected value of the enemies killed (statics `lasting` times
+    /// theirs) less our own expected losses; the best of a few targets and
+    /// of ramming or passing each wins (user, 2026-10-28).
+    Fates,
 }
 
-const JUDGES: [Judge; 3] = [Judge::Map, Judge::Predictor, Judge::Mech];
+const JUDGES: [Judge; 4] = [Judge::Map, Judge::Predictor, Judge::Mech, Judge::Fates];
 
 impl Judge {
     pub fn name(self) -> &'static str {
@@ -129,6 +135,7 @@ impl Judge {
             Judge::Map => "map",
             Judge::Predictor => "predictor",
             Judge::Mech => "mech",
+            Judge::Fates => "fates",
         }
     }
 
@@ -434,6 +441,10 @@ pub struct Doctrine {
     /// much metal its expected kills must beat its expected losses.
     pub judge: Judge,
     pub judge_margin: f32,
+    /// Packs judged by fates: each engagement's length (s), and what a
+    /// static killed (economy, turrets) is worth over its metal.
+    pub fate_secs: f32,
+    pub lasting: f32,
     /// It sleeps (its units fight as they would without it) until more than
     /// this share of the armed ground units on the map are not raiders: the
     /// game's middle (0: awake from the start; see `taskforce_wake`).
@@ -489,6 +500,8 @@ impl Doctrine {
             repair_below: 0.0,
             judge: Judge::Map,
             judge_margin: 0.0,
+            fate_secs: 5.0,
+            lasting: 1.0,
             wake_share: 0.0,
         }
     }
@@ -578,6 +591,8 @@ impl Doctrine {
             "repair_below": self.repair_below,
             "judge": self.judge.name(),
             "judge_margin": self.judge_margin,
+            "fate_secs": self.fate_secs,
+            "lasting": self.lasting,
             "wake_share": self.wake_share,
         });
         if let (Value::Object(m), Value::Object(p)) = (&mut v, pack) {
@@ -658,6 +673,8 @@ impl Doctrine {
                 "repair_below" => self.repair_below = num(k, v, 0.0, 1.0)?,
                 "judge" => self.judge = Judge::parse(&string(k, v)?)?,
                 "judge_margin" => self.judge_margin = num(k, v, -1e5, 1e5)?,
+                "fate_secs" => self.fate_secs = num(k, v, 1.0, 30.0)?,
+                "lasting" => self.lasting = num(k, v, 0.0, 10.0)?,
                 "wake_share" => self.wake_share = num(k, v, 0.0, 1.0)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
@@ -806,6 +823,8 @@ impl Doctrine {
             repair_below: self.repair_below,
             judge: self.judge,
             judge_margin: self.judge_margin,
+            fate_secs: self.fate_secs,
+            lasting: self.lasting,
         }
     }
 }
@@ -878,6 +897,8 @@ pub struct Shape {
     pub repair_below: f32,
     pub judge: Judge,
     pub judge_margin: f32,
+    pub fate_secs: f32,
+    pub lasting: f32,
 }
 
 /// Orbit radius of members that are in no role (extra cores), unless the
@@ -933,6 +954,8 @@ impl Default for Shape {
             repair_below: 0.0,
             judge: Judge::Map,
             judge_margin: 0.0,
+            fate_secs: 5.0,
+            lasting: 1.0,
         }
     }
 }
@@ -1131,6 +1154,8 @@ pub fn seeds() -> Vec<Doctrine> {
     // fights.
     ravager.porc_share = 0.5;
     ravager.repair_below = 0.6;
+    // Judged by fates, a dead mex or turret counts half again its metal.
+    ravager.lasting = 1.5;
     // The middle game: once most armed ground units are not raiders (user,
     // 2026-10-28, for the full-play test).
     ravager.wake_share = 0.5;

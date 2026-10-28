@@ -60,7 +60,7 @@ use super::{Attack, Judge};
 use crate::Ai;
 use crate::kgbutil::PathCost;
 use crate::military::SquadId;
-use crate::military::fightsim::{FightSnapshot, Model, SnapUnit, UnitSpec};
+use crate::military::fightsim::{FateMode, FightSnapshot, Model, SnapUnit, UnitSpec};
 use crate::military::wrappers::squad::health_fraction;
 use crate::nav;
 use crate::util::{NULLPOS, distance, get_directional_point};
@@ -98,6 +98,9 @@ const JUDGE_MEET: f32 = 500.0;
 /// A run the predictor judges not worth it shuns its target this many
 /// frames (30 s).
 const JUDGE_SHUN: i32 = 900;
+/// Judged by fates, a new target is the best of this many candidates, each
+/// run ramming it or passing it at `pass_reach` of the leader's reach.
+const FATE_CANDIDATES: usize = 3;
 /// A pack is led from where most of its cores stand within this of one
 /// another...
 const BULK: f32 = 400.0;
@@ -166,6 +169,9 @@ pub struct Pack {
     pub passes: u32,
     /// Whether what it dives moves (`mixed` charges it).
     pub mobile: bool,
+    /// Judged by fates: ram the target (true) or pass it (false), as the
+    /// plan found worth more.
+    pub ram: Option<bool>,
     /// Targets it shuns, until when: no pass over them clear of porc.
     pub shun: Vec<(Vec3, i32)>,
     /// At a haven for repairs.
@@ -187,6 +193,7 @@ impl Default for Pack {
             pass: None,
             passes: 0,
             mobile: false,
+            ram: None,
             shun: Vec::new(),
             parked: false,
             back_until: 0,
@@ -485,8 +492,9 @@ impl Ai {
         // (Porc counts whatever the pack weighs: it outranges every gun.)
         // (Judged by the predictor, a run's fights are its business: porc only.)
         // Porc counts beyond `porc_share` of the pack's own threat.
-        let predictor = matches!(shape.judge, Judge::Predictor | Judge::Mech);
+        let predictor = matches!(shape.judge, Judge::Predictor | Judge::Mech | Judge::Fates);
         let mech = shape.judge == Judge::Mech;
+        let fates = shape.judge == Judge::Fates;
         let (outweighed, fthreat, porc_cap) = {
             let view = self.war.view(leader.def());
             let fthreat = view.get_friendly_threat(pos);
@@ -548,8 +556,15 @@ impl Ai {
         });
         st.shun.retain(|s| s.1 > self.frame);
         // Judged by the predictor, the rest of the run must stay worth it.
+        let rejudge = |ai: &mut Ai, t: Vec3| {
+            if fates {
+                ai.pack_fates(sid, &pack_route(pos, t), st.ram.unwrap_or(false))
+            } else {
+                ai.pack_judge(sid, &pack_route(pos, t), mech)
+            }
+        };
         if let Some((t, _)) = keep.filter(|_| predictor && !running)
-            && let Some((j, detail)) = self.pack_judge(sid, &pack_route(pos, t), mech)
+            && let Some((j, detail)) = rejudge(self, t)
             && j.worth() < shape.judge_margin
         {
             self.pack_log_judgement(sid, t, &j, "gives up on");
@@ -564,8 +579,58 @@ impl Ai {
             st.pass = None;
             st.passes = 0;
             let ahead = Vec3::xz(pos.x + head.0 * LOOK_AHEAD, pos.z + head.1 * LOOK_AHEAD);
-            let shun: Vec<Vec3> = st.shun.iter().map(|s| s.0).collect();
-            let (t, _) = self.war_best_target_shunning(leader, ahead, false, porc_cap, &shun);
+            let mut shun: Vec<Vec3> = st.shun.iter().map(|s| s.0).collect();
+            // Judged by fates: the best run of a few targets, each rammed or
+            // passed, by what it should kill less what it should lose.
+            if fates {
+                let mut best: Option<(Vec3, bool, Judgement, Vec<Value>)> = None;
+                let mut tried = Vec::new();
+                for _ in 0..FATE_CANDIDATES {
+                    let (t, _) = self.war_best_target_shunning(leader, ahead, false, porc_cap, &shun);
+                    if t == NULLPOS {
+                        break;
+                    }
+                    shun.push(t);
+                    tried.push(t);
+                    for ram in [true, false] {
+                        let Some((j, detail)) = self.pack_fates(sid, &pack_route(pos, t), ram) else { continue };
+                        if best.as_ref().is_none_or(|b| j.worth() > b.2.worth()) {
+                            best = Some((t, ram, j, detail));
+                        }
+                    }
+                }
+                match best {
+                    Some((t, ram, j, detail)) if j.worth() >= shape.judge_margin => {
+                        let verdict = if ram { "rams" } else { "passes" };
+                        self.pack_log_judgement(sid, t, &j, verdict);
+                        self.pack_emit_judgement(sid, t, &j, detail, verdict);
+                        st.ram = Some(ram);
+                        st.target = self.war_mark_target(t);
+                        st.since = self.frame;
+                        st.mobile = self.pack_target_left(t).is_some_and(|l| l.1);
+                    }
+                    best => {
+                        if let Some((t, _, j, detail)) = best {
+                            self.pack_log_judgement(sid, t, &j, "passes up");
+                            self.pack_emit_judgement(sid, t, &j, detail, "passes up");
+                        }
+                        for t in tried {
+                            st.shun.push((t, self.frame + JUDGE_SHUN));
+                        }
+                        st.target = NULLPOS;
+                        self.taskforces.packs.insert(sid, st);
+                        let at = self.pack_gather(pos);
+                        self.pack_go(sid, pos, head, at, false);
+                        self.pack_screen(sid, at, false);
+                        return (None, "no run worth it".into());
+                    }
+                }
+            }
+            let (t, _) = if fates {
+                (st.target, 0.0)
+            } else {
+                self.war_best_target_shunning(leader, ahead, false, porc_cap, &shun)
+            };
             if t == NULLPOS {
                 st.target = NULLPOS;
                 self.taskforces.packs.insert(sid, st);
@@ -577,7 +642,7 @@ impl Ai {
             // Judged by the predictor, a run not worth it is passed up.
             // (Every arm asks, for the journal: what the predictor expected
             // of the runs the threat maps took is the unselected sample.)
-            let judged = self.pack_judge(sid, &pack_route(pos, t), mech);
+            let judged = if fates { None } else { self.pack_judge(sid, &pack_route(pos, t), mech) };
             if let Some((j, detail)) = judged.clone().filter(|_| !predictor) {
                 self.pack_emit_judgement(sid, t, &j, detail, "map takes on");
             }
@@ -596,9 +661,11 @@ impl Ai {
                     return (None, "judged not worth it".into());
                 }
             }
-            st.target = self.war_mark_target(t);
-            st.since = self.frame;
-            st.mobile = self.pack_target_left(t).is_some_and(|l| l.1);
+            if !fates {
+                st.target = self.war_mark_target(t);
+                st.since = self.frame;
+                st.mobile = self.pack_target_left(t).is_some_and(|l| l.1);
+            }
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) dives ({:.0}, {:.0}), {:.0} away, {} cores at {:.0}%",
                 st.target.x,
@@ -614,10 +681,11 @@ impl Ai {
             st.pass = None;
             st.passes += 1;
         }
-        let charge = match shape.attack {
-            Attack::Pass => false,
-            Attack::Charge => true,
-            Attack::Mixed => st.mobile,
+        let charge = match (st.ram.filter(|_| fates), shape.attack) {
+            (Some(ram), _) => ram,
+            (None, Attack::Pass) => false,
+            (None, Attack::Charge) => true,
+            (None, Attack::Mixed) => st.mobile,
         };
         // A charge is aimed anew until it is close.
         let aim = charge && st.pass.is_some_and(|p| p.along(pos, target) < -CHARGE_LOCK);
@@ -694,14 +762,7 @@ impl Ai {
     /// (both models' answers, the units of both sides) is returned beside
     /// the judgement, for the journal.
     fn pack_judge(&mut self, sid: SquadId, route: &[Vec3], mech: bool) -> Option<(Judgement, Vec<Value>)> {
-        if self.taskforces.model.is_none() {
-            let m = Model::load().map(Arc::new);
-            if let Err(e) = &m {
-                self.log(&format!("taskforce: packs cannot load the fight predictor ({e}); they judge by threat"));
-            }
-            self.taskforces.model = Some(m.ok());
-        }
-        let model = self.taskforces.model.clone().flatten()?;
+        let model = self.pack_model()?;
         let target = *route.get(1)?;
         let s = self.squads.get(sid)?;
         let ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
@@ -787,6 +848,128 @@ impl Ai {
             j.prize = 0.0;
         }
         Some((j, detail))
+    }
+
+    /// What the mechanics model's fates expect of pack `sid` running along
+    /// `route` (from where it stands, by its target, `route[1]`, and on),
+    /// ramming the target or passing it at `pass_reach` of the leader's
+    /// reach: the enemies seen lately within reach of the way (armed ones
+    /// within their reach, mobiles a little more; unarmed ones within the
+    /// pack's) grouped into engagements along it, each a `fate_secs` pass
+    /// (`FateMode::Pass`, on the line the group's statics lie off the way,
+    /// the target's at the run's own) with the pack as the ones before
+    /// should leave it (the dead dropped, the rest at their expected health).
+    /// Worth = the expected value of the enemies killed, statics `lasting`
+    /// times their metal, less our expected losses (sum of p_dead x cost on
+    /// each side: units' deaths are not independent).
+    fn pack_fates(&mut self, sid: SquadId, route: &[Vec3], ram: bool) -> Option<(Judgement, Vec<Value>)> {
+        let model = self.pack_model()?;
+        let target = *route.get(1)?;
+        let s = self.squads.get(sid)?;
+        let (horizon, lasting) = ((s.shape.fate_secs * 30.0) as i32, s.shape.lasting);
+        let reach_share = s.shape.pass_reach;
+        let ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+            .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())) && f.unit.health() > 0.0)
+            .filter_map(|f| f.unit.def().map(|d| (f.unit.id(), d, f.unit.health(), f.get_pos())))
+            .collect();
+        let frame = self.frame;
+        let seen: Vec<(i32, UnitDef, f32, Vec3, bool)> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.identified && frame - e.last_seen <= JUDGE_SEEN)
+            .filter_map(|e| e.ud.map(|d| (e.unit_id, d, e.get_health() * e.def_health(), e.position, e.can_fly())))
+            .collect();
+        let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> =
+            ours.into_iter().map(|(id, d, hp, p)| (self.fight_spec(d), hp, p, id)).collect();
+        let reach = pack.iter().flat_map(|u| u.0.weapons.iter().map(|w| w.range)).fold(0.0, f32::max);
+        let pass_off = if ram { 0.0 } else { reach_share * reach };
+        let mut j = Judgement { cores: pack.len(), ..Judgement::default() };
+        // (id, spec, hp, where, along the way, off it)
+        let mut near: Vec<(i32, Arc<UnitSpec>, f32, Vec3, f32, f32)> = Vec::new();
+        for (eid, def, hp, p, flies) in seen {
+            let spec = self.fight_spec(def);
+            let (along, off) = route_project(route, p);
+            let within = if spec.weapons.is_empty() {
+                !flies && off <= reach
+            } else {
+                off <= spec.weapons.iter().map(|w| w.range).fold(0.0, f32::max)
+                    + if spec.mobile { JUDGE_CHASE } else { 0.0 }
+            };
+            if within {
+                near.push((eid, spec, hp, p, along, off));
+            }
+        }
+        let along: Vec<f32> = near.iter().map(|n| n.4).collect();
+        let mut detail = Vec::new();
+        for group in engagements(&along, JUDGE_GAP) {
+            if pack.is_empty() {
+                break;
+            }
+            j.engagements += 1;
+            let at = group.iter().map(|&i| along[i]).sum::<f32>() / group.len() as f32;
+            let n = pack.len() as f32;
+            let c = Vec3::xz(pack.iter().map(|u| u.2.x).sum::<f32>() / n, pack.iter().map(|u| u.2.z).sum::<f32>() / n);
+            let meet = if at > JUDGE_MEET { route_point(route, at - JUDGE_MEET) } else { c };
+            let (sx, sz) = (meet.x - c.x, meet.z - c.z);
+            for u in &mut pack {
+                (u.2.x, u.2.z) = (u.2.x + sx, u.2.z + sz);
+            }
+            // The run's own line at its target; elsewhere the way passes the
+            // group's statics as far off as they lie.
+            let at_target = group.iter().any(|&i| distance(near[i].3, target) < TARGET_LEFT);
+            let statics: Vec<f32> = group.iter().filter(|&&i| !near[i].1.mobile).map(|&i| near[i].5).collect();
+            let offset = if at_target {
+                pass_off
+            } else if statics.is_empty() {
+                0.0
+            } else {
+                statics.iter().sum::<f32>() / statics.len() as f32
+            };
+            let mut snap = FightSnapshot::default();
+            for (spec, hp, p, _) in &pack {
+                snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+            }
+            for &i in &group {
+                let (_, spec, hp, p, _, _) = &near[i];
+                snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+            }
+            let fates = model.fates(&snap, horizon, FateMode::Pass { offset });
+            let (ours_f, theirs_f) = fates.split_at(pack.len());
+            let loss: f32 = pack.iter().zip(ours_f).map(|(u, f)| f.p_dead * u.0.cost).sum();
+            let gain: f32 = (group.iter().zip(theirs_f))
+                .map(|(&i, f)| f.p_dead * near[i].1.cost * if near[i].1.mobile { 1.0 } else { lasting })
+                .sum();
+            j.loss += loss;
+            j.gain += gain;
+            detail.push(json!({
+                "i": j.engagements, "at": at.round(), "offset": offset.round(), "horizon": horizon,
+                "ids_a": pack.iter().map(|u| u.3).collect::<Vec<_>>(),
+                "ids_b": group.iter().map(|&i| near[i].0).collect::<Vec<_>>(),
+                "p_dead_a": ours_f.iter().map(|f| (f.p_dead * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+                "p_dead_b": theirs_f.iter().map(|f| (f.p_dead * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+                "metal_a": pack.iter().map(|u| u.0.cost).sum::<f32>().round(),
+                "metal_b": group.iter().map(|&i| near[i].1.cost).sum::<f32>().round(),
+                "loss": loss.round(), "gain": gain.round(),
+            }));
+            // The next engagement meets the survivors at their expected health.
+            pack = (pack.into_iter().zip(ours_f))
+                .filter(|(_, f)| !f.dead)
+                .map(|((spec, _, p, id), f)| (spec, f.hp_left, p, id))
+                .collect();
+        }
+        j.left = pack.len();
+        Some((j, detail))
+    }
+
+    /// The fight predictor's model, loaded at the first ask (none if it
+    /// would not load: packs then judge by threat).
+    fn pack_model(&mut self) -> Option<Arc<Model>> {
+        if self.taskforces.model.is_none() {
+            let m = Model::load().map(Arc::new);
+            if let Err(e) = &m {
+                self.log(&format!("taskforce: packs cannot load the fight predictor ({e}); they judge by threat"));
+            }
+            self.taskforces.model = Some(m.ok());
+        }
+        self.taskforces.model.clone().flatten()
     }
 
     /// A judgement's record for the journal (`k=packjudge`): the verdict, the
