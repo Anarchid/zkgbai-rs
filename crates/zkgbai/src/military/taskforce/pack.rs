@@ -945,6 +945,10 @@ impl Ai {
                 "ids_b": group.iter().map(|&i| near[i].0).collect::<Vec<_>>(),
                 "p_dead_a": ours_f.iter().map(|f| (f.p_dead * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
                 "p_dead_b": theirs_f.iter().map(|f| (f.p_dead * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+                // The sim's own death frame (from the query; -1: alive), for
+                // checking its timing apart from who dies.
+                "death_a": ours_f.iter().map(|f| f.death_frame.unwrap_or(-1)).collect::<Vec<_>>(),
+                "death_b": theirs_f.iter().map(|f| f.death_frame.unwrap_or(-1)).collect::<Vec<_>>(),
                 "metal_a": pack.iter().map(|u| u.0.cost).sum::<f32>().round(),
                 "metal_b": group.iter().map(|&i| near[i].1.cost).sum::<f32>().round(),
                 "loss": loss.round(), "gain": gain.round(),
