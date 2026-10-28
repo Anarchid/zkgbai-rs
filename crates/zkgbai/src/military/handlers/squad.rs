@@ -251,7 +251,7 @@ impl Ai {
     }
 
     /// Delete a squad, letting go of supports that were following it.
-    fn squad_delete_squad(&mut self, sid: SquadId) {
+    pub(crate) fn squad_delete_squad(&mut self, sid: SquadId) {
         for id in &self.misc_handler.supports {
             if let Some(g) = self.fighters.get_mut(id)
                 && g.squad == Some(sid)
@@ -260,6 +260,7 @@ impl Ai {
             }
         }
         self.squads.remove(sid);
+        self.taskforces.packs.remove(&sid);
     }
 
     /// The movement tier of fighter `id` (none for aircraft).
@@ -611,7 +612,7 @@ impl Ai {
 
     /// Log a unit about to join force `sid`: the force's state and how far
     /// the unit has to go to its leader.
-    fn squad_log_join(&mut self, sid: SquadId, id: i32, how: &str) {
+    pub(crate) fn squad_log_join(&mut self, sid: SquadId, id: i32, how: &str) {
         let Some(s) = self.squads.get(sid) else { return };
         let Some(f) = self.fighters.get(&id) else { return };
         let state = match (s.engaging, s.engaged) {
@@ -954,6 +955,13 @@ impl Ai {
             }
             if self.frame - s.last_assignment_frame < 30 {
                 self.squad_handler.taskforces.push_front(sid);
+                return;
+            }
+            // Packs fight on the move, by a conduct of their own.
+            if s.shape.aim == Aim::Pack {
+                let (engage_at, why) = self.taskforce_pack(sid);
+                self.squad_conducted(sid, engage_at, &why);
+                self.squad_handler.taskforces.push_back(sid);
                 return;
             }
 

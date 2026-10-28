@@ -1,0 +1,697 @@
+//! Packs: forces that fight on the move (the `pack` aim; the `ravager`
+//! doctrine, off by default: `enable=ravager`).
+//!
+//! A pack fights as a player drives Ravagers. Its cores move in formation
+//! with the leader (`Keep::Formation`: its moves shifted by each one's
+//! place, at its pace), so the pack slides as one body and none circles;
+//! its leader only ever has move orders, two or three waypoints deep, so
+//! none of it brakes at the end of an order or stops to engage (a fight
+//! order halts a unit at range), while its turrets shoot on the move. Once
+//! `cores_to_go` cores are rallied it dives the best target the threat maps
+//! say it survives (`war_best_target`, looked for from a point ahead of it,
+//! so what lies ahead wins), following the unit nearest where it was. Near
+//! it, the pack passes over it on the line that brings the most of its guns
+//! within `pass_reach` of their reach (the formation slides unturned, so a
+//! gun passes as far off as its place lies across the way: the plan reads
+//! the pack's shape and thickness; Ravagers shoot over each other, so it
+//! need not mind who is in front), runs on, and swings round for another,
+//! until nothing is left there (or for 45 s); then the next, staying out
+//! while it has `cores_to_stay`. A turn back of more than a right angle
+//! starts with an arc.
+//!
+//! It falls back as one: from threat that outweighs it where it is, home
+//! (10 s before it judges again); from raiders worth `rip_value` near it,
+//! all the way to its screen (roles that `Keep::Trail`, Rippers, following
+//! it home-side at their own pace, so that what chases the pack runs into
+//! them; the screen holds meanwhile); below `retreat_health`, to a haven,
+//! where it parks for repairs until its cores average `heal_to`. A screen
+//! member below `retreat_health` goes for repairs alone. Packs neither out
+//! nor parked merge, the smaller into the larger, and gather at the haven
+//! nearest the rally point, not at it.
+//!
+//! Log lines `taskforce: the ravager pack (squad N) ...`: dives (target),
+//! passes (the how manyth, guns within reach of how many), falls back to
+//! its screen, parks / is repaired, takes in (merges); engages and
+//! break-offs as other forces'.
+
+use springai::{Unit, Vec3};
+
+use crate::Ai;
+use crate::kgbutil::PathCost;
+use crate::military::SquadId;
+use crate::military::wrappers::squad::health_fraction;
+use crate::nav;
+use crate::util::{NULLPOS, distance, get_directional_point};
+
+/// Within this of its target a pack plans a pass; farther, it paths there.
+const PLAN_AT: f32 = 900.0;
+/// A pass's waypoints lie this far ahead of the leader along it, at least...
+const PASS_LEAD: f32 = 150.0;
+/// ...and the second this far beyond the first.
+const PASS_ON: f32 = 400.0;
+/// A pass is over this far beyond its pass point; the next is planned from
+/// there.
+const PASS_OUT: f32 = 300.0;
+/// Pass lines are tried this far apart across the way.
+const PASS_STEP: f32 = 10.0;
+/// A pass line must be clear of enemy porc from this far before its pass
+/// point to [`PASS_ON`] beyond it.
+const PASS_IN: f32 = 250.0;
+/// A target no pass line can clear of porc is shunned this many frames
+/// (60 s).
+const SHUN_FOR: i32 = 1800;
+/// Waypoints along a path lie at least this far apart.
+const SPACING: f32 = 250.0;
+/// The next target is looked for from this far ahead of the leader.
+const LOOK_AHEAD: f32 = 250.0;
+/// A target is kept while an enemy remains within this of it...
+const TARGET_LEFT: f32 = 300.0;
+/// ...for up to this many frames (45 s).
+const TARGET_FOR: i32 = 1350;
+/// Raiders within this of the leader count toward `rip_value`...
+const RIP_REACH: f32 = 600.0;
+/// ...if seen within this many frames.
+const RIP_SEEN: i32 = 150;
+/// Closer than this to its screen, a pack fights raiders where it is.
+const SCREEN_NEAR: f32 = 400.0;
+/// Within this of where it gathers or parks, a pack stands.
+const STAND_NEAR: f32 = 300.0;
+/// A turn back of more than a right angle starts this far along an arc.
+const TURN: f32 = 250.0;
+/// A screen member's place must move this far before it is sent anew.
+const SCREEN_REPATH: f32 = 250.0;
+/// Outweighed, a pack keeps going home this many frames (10 s) before it
+/// judges again, so it does not turn on the threat's edge.
+const BACK_FOR: i32 = 300;
+
+/// A pass over a target: the way it goes (a unit vector on the map's
+/// axes), and how far to the left of the target the leader's line runs
+/// (negative: to the right).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pass {
+    pub way: (f32, f32),
+    pub side: f32,
+}
+
+impl Pass {
+    fn left(&self) -> (f32, f32) {
+        (-self.way.1, self.way.0)
+    }
+
+    /// Where the leader goes by `target`.
+    fn point(&self, target: Vec3) -> Vec3 {
+        let l = self.left();
+        Vec3::xz(target.x + self.side * l.0, target.z + self.side * l.1)
+    }
+
+    /// How far `pos` is along the pass beyond its pass point (negative
+    /// before it).
+    fn along(&self, pos: Vec3, target: Vec3) -> f32 {
+        let q = self.point(target);
+        (pos.x - q.x) * self.way.0 + (pos.z - q.z) * self.way.1
+    }
+}
+
+/// A pack's state between conducts.
+#[derive(Clone, Debug)]
+pub struct Pack {
+    /// What it dives (`NULLPOS`: nothing), since which frame, the pass it
+    /// is on, and how many passes it made over it.
+    pub target: Vec3,
+    pub since: i32,
+    pub pass: Option<Pass>,
+    pub passes: u32,
+    /// Targets it shuns, until when: no pass over them clear of porc.
+    pub shun: Vec<(Vec3, i32)>,
+    /// At a haven for repairs.
+    pub parked: bool,
+    /// Falling back from threat until this frame.
+    pub back_until: i32,
+    /// Falling back to its screen (from raiders) until it gets there.
+    pub to_screen: bool,
+}
+
+impl Default for Pack {
+    fn default() -> Self {
+        Pack {
+            target: NULLPOS,
+            since: 0,
+            pass: None,
+            passes: 0,
+            shun: Vec::new(),
+            parked: false,
+            back_until: 0,
+            to_screen: false,
+        }
+    }
+}
+
+/// A unit's heading on the ground: where it is going, else toward `toward`
+/// (else along the x axis).
+pub fn heading(vel: Vec3, pos: Vec3, toward: Vec3) -> (f32, f32) {
+    let unit = |x: f32, z: f32| {
+        let l = (x * x + z * z).sqrt();
+        (l > 1e-3).then(|| (x / l, z / l))
+    };
+    (unit(vel.x, vel.z))
+        .or_else(|| (toward != NULLPOS).then(|| unit(toward.x - pos.x, toward.z - pos.z)).flatten())
+        .unwrap_or((1.0, 0.0))
+}
+
+/// The pass over `target` from `pos` (heading `heading`) that brings the
+/// most guns within reach of it, and how many: `guns` are the formation's
+/// places round the leader (the leader's (0, 0)) and each gun's reach. The
+/// pass runs from `pos` toward the target, the formation sliding along it
+/// unturned, so a gun passes the target as far off as its place lies
+/// across the way plus the leader's line; of the lines `clear` lets it take
+/// that bring the most guns in, it takes the one nearest where the heading
+/// already runs. None if `clear` lets it take no line at all.
+pub fn plan_pass(
+    pos: Vec3,
+    heading: (f32, f32),
+    target: Vec3,
+    guns: &[((f32, f32), f32)],
+    clear: impl Fn(&Pass) -> bool,
+) -> Option<(Pass, usize)> {
+    let (dx, dz) = (target.x - pos.x, target.z - pos.z);
+    let d = (dx * dx + dz * dz).sqrt();
+    let way = if d > 1.0 { (dx / d, dz / d) } else { heading };
+    let left = (-way.1, way.0);
+    // Where the heading's line runs by the target, across the way.
+    let ahead = (dx * heading.0 + dz * heading.1).max(0.0);
+    let natural = (pos.x + heading.0 * ahead - target.x) * left.0 + (pos.z + heading.1 * ahead - target.z) * left.1;
+    let across: Vec<(f32, f32)> = guns.iter().map(|&((ox, oz), reach)| (ox * left.0 + oz * left.1, reach)).collect();
+    let span = across.iter().map(|&(p, reach)| p.abs() + reach).fold(0.0, f32::max);
+    let mut best: Option<(usize, f32, Pass)> = None;
+    let mut side = -span;
+    while side <= span {
+        let pass = Pass { way, side };
+        let n = across.iter().filter(|&&(p, reach)| (side + p).abs() <= reach).count();
+        let off = (side - natural).abs();
+        if best.is_none_or(|(m, o, _)| n > m || (n == m && off < o)) && clear(&pass) {
+            best = Some((n, off, pass));
+        }
+        side += PASS_STEP;
+    }
+    best.map(|(n, _, pass)| (pass, n))
+}
+
+/// Two waypoints along `pass` over `target` for a leader at `pos`: the pass
+/// point while it is ahead, else points on along the line, so that the
+/// leader never brakes.
+pub fn pass_way(pos: Vec3, target: Vec3, pass: &Pass) -> [Vec3; 2] {
+    let q = pass.point(target);
+    let a = (pass.along(pos, target) + PASS_LEAD).max(0.0);
+    let on = |x: f32| Vec3::xz(q.x + pass.way.0 * x, q.z + pass.way.1 * x);
+    [on(a), on(a + PASS_ON)]
+}
+
+/// For a way to `dest` that lies more than a right angle off `heading` at
+/// `pos`: a first waypoint [`TURN`] along, turned a right angle toward its
+/// side, so that the force swings round instead of reversing.
+pub fn turn_point(pos: Vec3, heading: (f32, f32), dest: Vec3) -> Option<Vec3> {
+    let (tx, tz) = (dest.x - pos.x, dest.z - pos.z);
+    if heading.0 * tx + heading.1 * tz >= 0.0 || tx * tx + tz * tz < TURN * TURN {
+        return None;
+    }
+    let side = if heading.0 * tz - heading.1 * tx >= 0.0 { 1.0 } else { -1.0 };
+    // The heading turned a right angle: (-hz, hx) to the left.
+    let (ax, az) = (-heading.1 * side, heading.0 * side);
+    Some(Vec3::xz(pos.x + ax * TURN, pos.z + az * TURN))
+}
+
+/// Up to `n` points of `path`, each at least `spacing` from the one before
+/// (the first from `from`); the path's end if none is that far.
+pub fn spaced(path: impl IntoIterator<Item = Vec3>, from: Vec3, n: usize, spacing: f32) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    let (mut last, mut end) = (from, None);
+    for p in path {
+        end = Some(p);
+        if out.len() < n && distance(last, p) >= spacing {
+            out.push(p);
+            last = p;
+        }
+    }
+    if out.is_empty() {
+        out.extend(end);
+    }
+    out
+}
+
+fn ordinal(n: u32) -> String {
+    match n {
+        1 => "a first".into(),
+        2 => "a second".into(),
+        3 => "a third".into(),
+        _ => format!("a {n}th"),
+    }
+}
+
+impl Ai {
+    /// A pack's conduct (see the module): where it dives now, if it does;
+    /// else why not.
+    pub(crate) fn taskforce_pack(&mut self, sid: SquadId) -> (Option<Vec3>, String) {
+        self.pack_merge(sid);
+        let Some(s) = self.squads.get(sid) else { return (None, "gone".into()) };
+        let shape = s.shape.clone();
+        let Some(leader) = s.get_leader(&self.fighters) else { return (None, "no leader".into()) };
+        let (engaging, courage) = (s.engaging, s.courage);
+        let pos = leader.pos();
+        let cores: Vec<Unit> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+            .map(|f| f.unit)
+            .filter(|u| shape.is_core(u.def().map(|d| d.id())))
+            .collect();
+        let health = cores.iter().map(|&u| health_fraction(u)).sum::<f32>() / cores.len().max(1) as f32;
+        let rallied = s.rally_fraction(&self.fighters).is_none_or(|r| r > shape.rallied);
+        let trailers: Vec<Unit> =
+            (s.trailers(&self.fighters).iter().filter_map(|id| self.fighters.get(id))).map(|f| f.unit).collect();
+        let mut st = self.taskforces.packs.get(&sid).cloned().unwrap_or_default();
+        let doctrine = shape.doctrine.clone();
+
+        // A screen member that is hurt goes for repairs alone.
+        let mut screen = Vec::new();
+        for u in trailers {
+            if health_fraction(u) < shape.retreat_health {
+                self.retreat_send(u);
+            } else {
+                screen.push(u.pos());
+            }
+        }
+        let screen_at = (!screen.is_empty()).then(|| {
+            let n = screen.len() as f32;
+            Vec3::xz(screen.iter().map(|p| p.x).sum::<f32>() / n, screen.iter().map(|p| p.z).sum::<f32>() / n)
+        });
+        let head = heading(leader.vel(), pos, st.target);
+        let home = self.graph_get_closest_haven(pos);
+
+        // Parked for repairs until healed.
+        let healed = shape.heal_to.max(shape.retreat_health);
+        if st.parked && health >= healed {
+            st.parked = false;
+            self.log(&format!(
+                "taskforce: the {doctrine} pack (squad {sid}) is repaired ({:.0}%, {} cores)",
+                100.0 * health,
+                cores.len()
+            ));
+        } else if !st.parked && health < shape.retreat_health {
+            st.parked = true;
+            st.target = NULLPOS;
+            self.log(&format!(
+                "taskforce: the {doctrine} pack (squad {sid}) parks for repairs ({:.0}%, {} cores)",
+                100.0 * health,
+                cores.len()
+            ));
+        }
+        if st.parked {
+            self.pack_go(sid, pos, head, home, false);
+            self.pack_screen(sid, home, false);
+            self.taskforces.packs.insert(sid, st);
+            return (None, "parked for repairs".into());
+        }
+
+        // Enough cores, and together before it goes.
+        let need = if engaging { shape.cores_to_stay } else { shape.cores_to_go } as usize;
+        if cores.len() < need || (!engaging && !rallied) {
+            st.target = NULLPOS;
+            self.taskforces.packs.insert(sid, st);
+            let at = self.pack_gather(pos);
+            self.pack_go(sid, pos, head, at, false);
+            self.pack_screen(sid, at, false);
+            let why = if cores.len() < need { format!("{} cores of {need}", cores.len()) } else { "scattered".into() };
+            return (None, why);
+        }
+
+        // Outweighed where it is: home.
+        // (Porc counts whatever the pack weighs: it outranges every gun.)
+        let (outweighed, fthreat) = {
+            let view = self.war.view(leader.def());
+            let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
+            let threat = view.get_effective_threat(pos).max(view.get_porc_threat(pos));
+            (threat / courage > tolerance, view.get_friendly_threat(pos))
+        };
+        if shape.flee_threat && outweighed {
+            st.back_until = self.frame + BACK_FOR;
+        }
+        if self.frame < st.back_until {
+            st.target = NULLPOS;
+            st.to_screen = false;
+            self.taskforces.packs.insert(sid, st);
+            self.pack_go(sid, pos, head, home, false);
+            self.pack_screen(sid, home, false);
+            return (None, "threat".into());
+        }
+
+        // Raiders on it: back to the screen, through it, the screen holding,
+        // until it is there.
+        let far_screen = screen_at.filter(|&at| distance(pos, at) > SCREEN_NEAR);
+        if far_screen.is_none() {
+            st.to_screen = false;
+        }
+        if let Some(at) = far_screen.filter(|_| shape.rip_value > 0.0) {
+            let raiders = self.pack_raiders(pos);
+            if st.to_screen || raiders >= shape.rip_value {
+                if !st.to_screen {
+                    self.log(&format!(
+                        "taskforce: the {doctrine} pack (squad {sid}) falls back to its screen {:.0} away from \
+                         raiders worth {raiders:.0}",
+                        distance(pos, at)
+                    ));
+                }
+                st.to_screen = true;
+                st.target = NULLPOS;
+                self.taskforces.packs.insert(sid, st);
+                let past = if distance(at, home) > 1.0 { get_directional_point(at, home, 150.0) } else { at };
+                self.pack_go(sid, pos, head, past, false);
+                self.pack_screen(sid, home, true);
+                return (None, "raiders, to its screen".into());
+            }
+        }
+
+        // The target: kept, following what is there, while something is left
+        // that it survives.
+        let left = (st.target != NULLPOS && self.frame - st.since < TARGET_FOR)
+            .then(|| self.pack_target_left(st.target))
+            .flatten();
+        let keep = left.filter(|&t| {
+            let view = self.war.view(leader.def());
+            view.get_threat(t) <= fthreat && view.get_porc_threat(t) <= 0.0
+        });
+        st.shun.retain(|s| s.1 > self.frame);
+        if let Some(t) = keep {
+            st.target = t;
+        } else {
+            st.pass = None;
+            st.passes = 0;
+            let ahead = Vec3::xz(pos.x + head.0 * LOOK_AHEAD, pos.z + head.1 * LOOK_AHEAD);
+            let shun: Vec<Vec3> = st.shun.iter().map(|s| s.0).collect();
+            let (t, _) = self.war_best_target_shunning(leader, ahead, false, true, &shun);
+            if t == NULLPOS {
+                st.target = NULLPOS;
+                self.taskforces.packs.insert(sid, st);
+                let at = self.pack_gather(pos);
+                self.pack_go(sid, pos, head, at, false);
+                self.pack_screen(sid, at, false);
+                return (None, "no target".into());
+            }
+            st.target = self.war_mark_target(t);
+            st.since = self.frame;
+            self.log(&format!(
+                "taskforce: the {doctrine} pack (squad {sid}) dives ({:.0}, {:.0}), {:.0} away, {} cores at {:.0}%",
+                st.target.x,
+                st.target.z,
+                distance(pos, st.target),
+                cores.len(),
+                100.0 * health
+            ));
+        }
+        let target = st.target;
+        // A pass is over once it is well beyond its pass point.
+        if st.pass.is_some_and(|p| p.along(pos, target) > PASS_OUT) {
+            st.pass = None;
+            st.passes += 1;
+        }
+        if st.pass.is_none() && distance(pos, target) > PLAN_AT {
+            let way = self.pack_way(sid, pos, head, target, true);
+            self.pack_drive(sid, &way);
+        } else {
+            let pass = match st.pass {
+                Some(p) => p,
+                None => {
+                    let guns = self.pack_guns(sid, shape.pass_reach);
+                    let view = self.war.view(leader.def());
+                    let clear = |p: &Pass| {
+                        let q = p.point(target);
+                        let at = |x: f32| Vec3::xz(q.x + p.way.0 * x, q.z + p.way.1 * x);
+                        [-PASS_IN, -PASS_IN / 2.0, 0.0, PASS_ON / 2.0, PASS_ON]
+                            .iter()
+                            .all(|&x| view.get_porc_threat(at(x)) <= 0.0)
+                    };
+                    let planned = plan_pass(pos, head, target, &guns, clear);
+                    let Some((p, n)) = planned else {
+                        // No way over it clear of porc: another target.
+                        self.log(&format!(
+                            "taskforce: the {doctrine} pack (squad {sid}) shuns ({:.0}, {:.0}): no pass clear of porc",
+                            target.x, target.z
+                        ));
+                        st.shun.push((target, self.frame + SHUN_FOR));
+                        st.target = NULLPOS;
+                        self.taskforces.packs.insert(sid, st);
+                        let at = self.pack_gather(pos);
+                        self.pack_go(sid, pos, head, at, false);
+                        self.pack_screen(sid, home, false);
+                        return (None, "no pass clear of porc".into());
+                    };
+                    self.log(&format!(
+                        "taskforce: the {doctrine} pack (squad {sid}) passes ({:.0}, {:.0}) {} time, {n} of {} guns \
+                         within reach, its line {:.0} off",
+                        target.x,
+                        target.z,
+                        ordinal(st.passes + 1),
+                        guns.len(),
+                        p.side
+                    ));
+                    p
+                }
+            };
+            st.pass = Some(pass);
+            let [a, b] = pass_way(pos, target, &pass);
+            // Swinging round to come back over it.
+            let way: Vec<Vec3> = turn_point(pos, head, a).into_iter().chain([a, b]).collect();
+            self.pack_drive(sid, &way);
+        }
+        self.pack_screen(sid, home, false);
+        self.taskforces.packs.insert(sid, st);
+        (Some(target), String::new())
+    }
+
+    /// The pack's guns for a pass: each core's place in the formation (the
+    /// leader's (0, 0)) and `share` of its reach.
+    fn pack_guns(&mut self, sid: SquadId, share: f32) -> Vec<((f32, f32), f32)> {
+        let Some(s) = self.squads.get_mut(sid) else { return Vec::new() };
+        let reach = |u: Unit| share * u.def().map_or(0.0, |d| d.max_weapon_range());
+        let mut guns: Vec<_> = s.get_leader(&self.fighters).map(|l| ((0.0, 0.0), reach(l))).into_iter().collect();
+        for (id, place) in s.formation(&self.fighters) {
+            if let Some(f) = self.fighters.get(&id).filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id()))) {
+                guns.push((place, reach(f.unit)));
+            }
+        }
+        guns
+    }
+
+    /// Where a pack gathers: the haven nearest the rally point (where
+    /// forming forces were picked off), else the one nearest it.
+    fn pack_gather(&mut self, pos: Vec3) -> Vec3 {
+        let rally = self.war_get_rally_point(pos);
+        self.graph_get_closest_haven(if rally == NULLPOS { pos } else { rally })
+    }
+
+    /// Send pack `sid` from `pos` to `dest` unless it stands there already
+    /// (`assault`: by the attack path, else away from enemies).
+    fn pack_go(&mut self, sid: SquadId, pos: Vec3, head: (f32, f32), dest: Vec3, assault: bool) {
+        if distance(pos, dest) <= STAND_NEAR {
+            return;
+        }
+        let way = self.pack_way(sid, pos, head, dest, assault);
+        self.pack_drive(sid, &way);
+    }
+
+    /// Waypoints for pack `sid`'s leader from `pos` to `dest`: an arc
+    /// first if `dest` lies more than a right angle off its heading, then
+    /// its path, points [`SPACING`] apart, ending at `dest` when it is near.
+    fn pack_way(&mut self, sid: SquadId, pos: Vec3, head: (f32, f32), dest: Vec3, assault: bool) -> Vec<Vec3> {
+        let mut way: Vec<Vec3> = turn_point(pos, head, dest).into_iter().collect();
+        let from = way.last().copied().unwrap_or(pos);
+        let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return way };
+        let cost = if assault { PathCost::AssaultPath } else { PathCost::AvoidEnemies };
+        let path = self.pathfinder.find_path(&self.war, leader, dest, cost);
+        way.extend(spaced(path.into_iter().filter(|p| distance(*p, pos) > SPACING / 2.0), from, 2, SPACING));
+        if way.last().is_none_or(|&l| distance(l, dest) < 2.0 * SPACING && distance(l, dest) > 1.0) {
+            way.push(dest);
+        }
+        way
+    }
+
+    fn pack_drive(&mut self, sid: SquadId, way: &[Vec3]) {
+        let mut nav = nav!(self);
+        if let Some(s) = self.squads.get_mut(sid) {
+            s.drive(way, &mut self.fighters, &mut nav);
+        }
+    }
+
+    /// Send pack `sid`'s screen to its place: [`Keep::Trail`]'s `orbit`
+    /// behind the leader on the way to `home`, under fight orders (Rippers
+    /// shoot what they meet); `hold`: where they are.
+    fn pack_screen(&mut self, sid: SquadId, home: Vec3, hold: bool) {
+        let Some(s) = self.squads.get(sid) else { return };
+        let Some(lpos) = s.get_leader(&self.fighters).map(|l| l.pos()) else { return };
+        let ids = s.trailers(&self.fighters);
+        let shape = s.shape.clone();
+        let mut nav = nav!(self);
+        for id in ids {
+            let Some(f) = self.fighters.get_mut(&id) else { continue };
+            let pos = f.get_pos();
+            let place = if hold {
+                pos
+            } else {
+                let behind = shape.orbit(f.unit.def().map(|d| d.id()));
+                if distance(lpos, home) > behind { get_directional_point(lpos, home, behind) } else { home }
+            };
+            if f.target != NULLPOS && distance(f.target, place) < SCREEN_REPATH {
+                continue;
+            }
+            f.target = place;
+            if hold {
+                f.unit.fight(place, 0);
+            } else {
+                f.fight_to(place, &mut nav);
+            }
+        }
+    }
+
+    /// The metal of enemy raiders seen lately near `pos`.
+    fn pack_raiders(&self, pos: Vec3) -> f32 {
+        (self.war.targets.values())
+            .filter(|e| e.identified && e.is_raider && !e.is_dead && !e.can_fly())
+            .filter(|e| self.frame - e.last_seen <= RIP_SEEN && distance(e.position, pos) < RIP_REACH)
+            .map(|e| e.value)
+            .sum()
+    }
+
+    /// What of the enemy's is left at `t`: an enemy metal spot there, else
+    /// the nearest unit we know of near it (the target moves with it).
+    fn pack_target_left(&self, t: Vec3) -> Option<Vec3> {
+        if self.graph.get_enemy_spots().iter().any(|m| distance(m.get_pos(), t) < 100.0) {
+            return Some(t);
+        }
+        (self.war.targets.values())
+            .filter(|e| !e.is_dead && !e.can_fly())
+            .map(|e| (distance(e.position, t), e.position))
+            .filter(|&(d, _)| d < TARGET_LEFT)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, p)| p)
+    }
+
+    /// A pack neither out nor parked takes in the smaller ones of its
+    /// doctrine that are not either (ties: the newer goes).
+    fn pack_merge(&mut self, sid: SquadId) {
+        let parked = |me: &Ai, q: SquadId| me.taskforces.packs.get(&q).is_some_and(|p| p.parked);
+        let Some(s) = self.squads.get(sid) else { return };
+        if s.engaging || parked(self, sid) {
+            return;
+        }
+        let doctrine = s.shape.doctrine.clone();
+        let mine = s.cores(&self.fighters);
+        let smaller: Vec<SquadId> = (self.squad_handler.taskforces.iter().copied())
+            .filter(|&q| q != sid && !parked(self, q))
+            .filter(|&q| {
+                self.squads.get(q).is_some_and(|o| {
+                    let n = o.cores(&self.fighters);
+                    o.shape.doctrine == doctrine && !o.engaging && (n < mine || (n == mine && q > sid))
+                })
+            })
+            .collect();
+        for q in smaller {
+            let Some(o) = self.squads.get_mut(q) else { continue };
+            let members = o.disband(&mut self.fighters);
+            self.squad_handler.taskforces.retain(|&x| x != q);
+            self.squad_delete_squad(q);
+            self.log(&format!(
+                "taskforce: the {doctrine} pack (squad {sid}) takes in squad {q} ({} members)",
+                members.len()
+            ));
+            for id in members {
+                self.squad_log_join(sid, id, "merges into");
+                let mut nav = nav!(self);
+                if let Some(s) = self.squads.get_mut(sid) {
+                    s.add_unit_nav(id, &mut self.fighters, &mut nav);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        distance(a, b) < 0.5
+    }
+
+    #[test]
+    fn passes_bring_the_most_guns_in() {
+        let o = Vec3::xz(0.0, 0.0);
+        let t = Vec3::xz(1000.0, 0.0);
+        // A line abreast across the way (+z is left of +x): 5 guns 60
+        // apart, reach 200. The leader's line can be at most 80 right of
+        // the target (-80) to have the gun at +120 in, at most 80 left to
+        // have the one at -120; heading straight at it, it runs over it.
+        let abreast: Vec<((f32, f32), f32)> = [-120.0, -60.0, 0.0, 60.0, 120.0].map(|z| ((0.0, z), 200.0)).to_vec();
+        let (p, n) = plan_pass(o, (1.0, 0.0), t, &abreast, |_| true).unwrap();
+        assert_eq!((n, p.way), (5, (1.0, 0.0)));
+        assert!(p.side.abs() <= 10.0, "{}", p.side);
+        // Heading so as to pass well to the left: the line nearest that
+        // still bringing all five in.
+        let (p, n) = plan_pass(o, (0.95, 0.312), t, &abreast, |_| true).unwrap();
+        assert!(n == 5 && (p.side - 80.0).abs() <= 10.0, "{} {n}", p.side);
+        // Too wide for all (480 across, a window of 400): the most it can,
+        // four.
+        let wide: Vec<((f32, f32), f32)> = [-240.0, -120.0, 0.0, 120.0, 240.0].map(|z| ((0.0, z), 200.0)).to_vec();
+        assert_eq!(plan_pass(o, (1.0, 0.0), t, &wide, |_| true).unwrap().1, 4);
+        // A column along the way passes as one gun: thickness costs none.
+        let column: Vec<((f32, f32), f32)> = [0.0, 60.0, 120.0, -60.0].map(|x| ((x, 0.0), 200.0)).to_vec();
+        let (p, n) = plan_pass(o, (0.0, 1.0), t, &column, |_| true).unwrap();
+        assert_eq!(n, 4);
+        assert!(p.side.abs() <= 200.0);
+        // Porc to the left of the target: the line runs right of it, as
+        // close as clear lets it; with no clear line, none.
+        let (p, n) = plan_pass(o, (1.0, 0.0), t, &abreast, |p| p.side <= -40.0).unwrap();
+        assert!(n == 5 && (p.side + 40.0).abs() < 1.0, "{} {n}", p.side);
+        assert!(plan_pass(o, (1.0, 0.0), t, &abreast, |_| false).is_none());
+    }
+
+    #[test]
+    fn pass_waypoints_run_on_past_the_target() {
+        let t = Vec3::xz(1000.0, 0.0);
+        let pass = Pass { way: (1.0, 0.0), side: 100.0 };
+        // Before the pass point: there, then on.
+        let [a, b] = pass_way(Vec3::xz(0.0, 0.0), t, &pass);
+        assert!(close(a, Vec3::xz(1000.0, 100.0)) && close(b, Vec3::xz(1400.0, 100.0)));
+        // Past it: always ahead along the line.
+        let [a, _] = pass_way(Vec3::xz(1100.0, 100.0), t, &pass);
+        assert!(close(a, Vec3::xz(1250.0, 100.0)));
+        assert!(pass.along(Vec3::xz(1400.0, 0.0), t) > PASS_OUT);
+    }
+
+    #[test]
+    fn turning_back_starts_with_an_arc() {
+        let o = Vec3::xz(0.0, 0.0);
+        // Ahead, or near: no arc.
+        assert!(turn_point(o, (1.0, 0.0), Vec3::xz(500.0, 400.0)).is_none());
+        assert!(turn_point(o, (1.0, 0.0), Vec3::xz(-100.0, 0.0)).is_none());
+        // Behind and to the left: a right angle to the left first.
+        let p = turn_point(o, (1.0, 0.0), Vec3::xz(-800.0, 100.0)).unwrap();
+        assert!(close(p, Vec3::xz(0.0, TURN)));
+        let p = turn_point(o, (1.0, 0.0), Vec3::xz(-800.0, -100.0)).unwrap();
+        assert!(close(p, Vec3::xz(0.0, -TURN)));
+    }
+
+    #[test]
+    fn paths_thin_to_spaced_points() {
+        let path: Vec<Vec3> = (1..=20).map(|i| Vec3::xz(i as f32 * 50.0, 0.0)).collect();
+        let pts = spaced(path.clone(), Vec3::xz(0.0, 0.0), 2, 250.0);
+        assert_eq!(pts.len(), 2);
+        assert!(close(pts[0], Vec3::xz(250.0, 0.0)) && close(pts[1], Vec3::xz(500.0, 0.0)));
+        // A short path: its end.
+        let pts = spaced(path[..2].to_vec(), Vec3::xz(0.0, 0.0), 2, 250.0);
+        assert!(pts.len() == 1 && close(pts[0], Vec3::xz(100.0, 0.0)));
+    }
+
+    #[test]
+    fn heading_falls_back_on_the_target() {
+        let h = heading(Vec3::xz(0.0, 0.0), Vec3::xz(0.0, 0.0), Vec3::xz(0.0, 10.0));
+        assert!((h.0 - 0.0).abs() < 1e-6 && (h.1 - 1.0).abs() < 1e-6);
+        let h = heading(Vec3::xz(3.0, 4.0), Vec3::xz(0.0, 0.0), NULLPOS);
+        assert!((h.0 - 0.6).abs() < 1e-6 && (h.1 - 0.8).abs() < 1e-6);
+    }
+}

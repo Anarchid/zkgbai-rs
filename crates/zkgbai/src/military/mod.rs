@@ -1797,6 +1797,19 @@ impl Ai {
     /// The best attack target for `u` if it were at `origin`, and its cost
     /// (lower is better; `NULLPOS` if none).
     pub fn war_best_target(&mut self, u: Unit, origin: Vec3, defend: bool) -> (Vec3, f32) {
+        self.war_best_target_shunning(u, origin, defend, false, &[])
+    }
+
+    /// [`Ai::war_best_target`] of those not under enemy porc (`no_porc`) nor
+    /// within 300 of `shun` (Ravager packs, which outrange no turret).
+    pub fn war_best_target_shunning(
+        &mut self,
+        u: Unit,
+        origin: Vec3,
+        defend: bool,
+        no_porc: bool,
+        shun: &[Vec3],
+    ) -> (Vec3, f32) {
         let mut target = NULLPOS;
         // The threat maps as the unit sees them, under water too (see `water`).
         let war = &self.war;
@@ -1814,7 +1827,10 @@ impl Ai {
         let at_unit = distance(origin, u.pos()) < 1.0;
         // Where the terrain lets the unit get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
-        let engage = crate::terrain::engage_test_from(terrain, u.def(), origin);
+        let in_reach = crate::terrain::engage_test_from(terrain, u.def(), origin);
+        let engage = |p: Vec3| {
+            in_reach(p) && !(no_porc && view.get_porc_threat(p) > 0.0) && !shun.iter().any(|&s| distance(s, p) < 300.0)
+        };
 
         // first check defense targets
         if defend {

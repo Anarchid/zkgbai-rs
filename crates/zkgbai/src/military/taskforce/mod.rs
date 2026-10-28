@@ -2,10 +2,10 @@
 //! doctrine (see `doctrine`), with wants written as expressions over what
 //! the force has (see `expr`). On by default: `felon` (the shield ball),
 //! `impaler` (the escorts of Impaler batteries, see `military::impalers`)
-//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`,
-//! `phantom` and `envoy` are seeded off; the rest wait for conducts of
-//! their own. The `disable` option switches off doctrines it names
-//! (`disable=lance`).
+//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`
+//! (packs, see `pack`) is off by default (`enable=ravager`), `phantom` and
+//! `envoy` are seeded off; the rest wait for conducts of their own. The
+//! `disable` option switches off doctrines it names (`disable=lance`).
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -21,6 +21,7 @@
 pub mod doctrine;
 pub mod expr;
 pub mod marksman;
+pub mod pack;
 pub mod spotter;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,12 +126,14 @@ pub struct Taskforces {
     pub volleys: marksman::Volleys,
     /// Spotters (see `spotter`).
     pub spotters: spotter::Spotters,
+    /// Packs' targets and repairs, by force (see `pack`).
+    pub packs: BTreeMap<crate::military::SquadId, pack::Pack>,
 }
 
 /// Aims whose forces are squads of the squad handler (see
 /// `handlers::squad`); the others have modules of their own.
 pub fn squad_aim(aim: Aim) -> bool {
-    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff)
+    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff | Aim::Pack)
 }
 
 impl Taskforces {
