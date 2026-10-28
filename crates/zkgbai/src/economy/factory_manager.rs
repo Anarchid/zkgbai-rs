@@ -27,6 +27,11 @@ const EARLY_CONS_MIN: usize = 2;
 const EARLY_CONS_INCOME: f32 = 5.5;
 const EARLY_CONS_MAX: usize = 14;
 
+/// Puppies for the stakeouts in a jump opening (see
+/// `fac_wants_puppy_scout`): this many first, then one per this many Pyros.
+const PUPPY_SCOUTS_FIRST: i32 = 2;
+const PYROS_PER_PUPPY_SCOUT: i32 = 2;
+
 /// From when the spider factory raids with Venoms rather than Fleas
 /// (frames: minute 2).
 const VENOM_RAIDERS_FROM: i32 = 30 * 120;
@@ -1413,8 +1418,9 @@ impl Ai {
         }
     }
 
-    /// Jumpjets. Pyro pressure first (the opening's solo raiders run
-    /// fire-shadow raids, see `precision`), then Moderator squads with a
+    /// Jumpjets. Puppies to look and picket for the opening (see
+    /// `fac_wants_puppy_scout`), Pyro pressure (the opening's solo raiders
+    /// run fire-shadow raids, see `precision`), then Moderator squads with a
     /// Placeholder per four Moderators to hold what they shoot, a Jack per
     /// two of those up front, and Pyros guarding them from swarms (see
     /// `war_unit_idle`); Firewalkers against masses of light skirmishers,
@@ -1428,6 +1434,11 @@ impl Ai {
 
         if self.fac_need_workers(fac) || self.fac_wants_early_constable() {
             return "jumpcon";
+        }
+
+        if self.fac_wants_puppy_scout(fac) {
+            fac.building_for = Some(Role::Stakeout);
+            return crate::military::puppies::PUPPY;
         }
 
         if self.fac_wants_firewalker() {
@@ -1516,6 +1527,23 @@ impl Ai {
         let cons = eco.workers.values().filter(|w| !w.is_com).count()
             + eco.new_workers.iter().filter(|id| !eco.workers.contains_key(id)).count();
         cons < EARLY_CONS_MIN.max((self.eco.adjusted_income / EARLY_CONS_INCOME) as usize).min(EARLY_CONS_MAX)
+    }
+
+    /// Puppies for the stakeouts from the opening jump factory while the
+    /// map is sparse (density under the `density_ref` dial), feature
+    /// `puppyscout`: the first two units after the Constables, then one for
+    /// every two Pyros. At 45 metal and sight 640 they look and picket where
+    /// 220-metal Pyros scouted; none while pickets die fast (see
+    /// `stakeouts_hot`).
+    fn fac_wants_puppy_scout(&self, fac: &Factory) -> bool {
+        if !fac.opener || self.dev_off("puppyscout") || self.dev_off("stakeouts") || self.stakeouts_hot() {
+            return false;
+        }
+        if self.posture.density >= self.posture_levers().density_ref {
+            return false;
+        }
+        let have = self.roles_count_named(Role::Stakeout, crate::military::puppies::PUPPY);
+        have < PUPPY_SCOUTS_FIRST.max(self.fac.num_pyros / PYROS_PER_PUPPY_SCOUT)
     }
 
     /// Firewalkers while the enemy's light skirmishers (Ronins, Rogues,

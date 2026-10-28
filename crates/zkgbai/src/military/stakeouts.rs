@@ -45,9 +45,11 @@
 //! lane that eats pickets is not a lane to picket. Spider and vehicle
 //! factories build scouts only for the stakeouts; others build for them
 //! while they are short (feature `anyscout`), the opening scout included,
-//! which so looks for the enemy rather than waiting at home. A unit built
-//! for the stakeouts is theirs alone (see `roles`). `disable=stakeouts`
-//! leaves the scouts to the factory's old scout budget.
+//! which so looks for the enemy rather than waiting at home. A jump
+//! opening builds Puppies for them while the map is sparse (feature
+//! `puppyscout`). A unit built for the stakeouts is theirs alone (see
+//! `roles`). `disable=stakeouts` leaves the scouts to the factory's old
+//! scout budget.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -70,7 +72,8 @@ pub const SCOUTS: [&str; 3] = ["spiderscout", "vehscout", "shieldscout"];
 
 /// The unit a factory of `kind` builds for the stakeouts: its scout where
 /// it has one, else its cheapest fast raider; none where nothing fits
-/// (the jumpjets' Puppy is a walking bomb; tanks, ships, aircraft).
+/// (tanks, ships, aircraft; the jumpjets' Puppies are built for them only
+/// in a jump opening, see `fac_wants_puppy_scout`).
 pub(crate) fn stakeout_unit(kind: FacKind) -> Option<&'static str> {
     match kind {
         FacKind::Spider => Some("spiderscout"),
@@ -430,15 +433,18 @@ impl Ai {
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
         let builds = self.stakeouts_own(kind)
             || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && stakeout_unit(kind).is_some());
-        if !builds {
+        if !builds || self.stakeouts_hot() {
             return 0;
         }
         let s = &self.stakeouts;
-        if s.losses.len() >= LOSS_CAP || s.losses.back().is_some_and(|&l| self.frame - l < REPLACE_DELAY) {
-            return 0;
-        }
         let coming = self.roles.declared_count(Role::Stakeout);
         (s.wanted(self.frame) as i32 - (s.count() + coming) as i32).max(0)
+    }
+
+    /// Whether pickets have been dying fast lately: none is to be built.
+    pub(crate) fn stakeouts_hot(&self) -> bool {
+        let s = &self.stakeouts;
+        s.losses.len() >= LOSS_CAP || s.losses.back().is_some_and(|&l| self.frame - l < REPLACE_DELAY)
     }
 
     pub fn stakeouts_update(&mut self, frame: i32) {
