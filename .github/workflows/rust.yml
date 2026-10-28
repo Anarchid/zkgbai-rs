@@ -73,6 +73,19 @@ jobs:
       - run: tools/package.sh -v "${{ steps.version.outputs.version }}"
       - name: Contract test (Linux library outside the engine)
         run: cargo run --locked --manifest-path tools/dll-smoke/Cargo.toml -- dist-rs/AI/Skirmish/ZKGBAI/*/libSkirmishAI.so
+      # The springai test library for smoke-windows' unload test, built as the
+      # AI is; not part of the release.
+      - name: Unload probe (Windows test library)
+        run: |
+          export PATH="$PWD/.toolchains/venv/bin:$PWD/.toolchains/bin:$PATH"
+          cargo zigbuild --release --locked -p springai --example unload_probe --target x86_64-pc-windows-gnu
+          mkdir -p dist-probe
+          cp target/x86_64-pc-windows-gnu/release/examples/unload_probe.dll dist-probe/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: unload-probe
+          path: dist-probe/
+          if-no-files-found: error
       # The artifact unpacks into a Spring data directory: AI/Skirmish/ZKGBAI/<version>/.
       - uses: actions/upload-artifact@v7
         with:
@@ -95,9 +108,17 @@ jobs:
         with:
           name: ${{ needs.package.outputs.artifact }}
           path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: unload-probe
+          path: probe
       - name: Contract test (Windows library outside the engine)
         shell: bash
         run: cargo run --locked --manifest-path tools/dll-smoke/Cargo.toml -- dist/AI/Skirmish/ZKGBAI/*/SkirmishAI.dll
+      - name: Unload test (a thread still running when the library is freed)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo run --locked --manifest-path tools/dll-smoke/Cargo.toml -- --unload probe/unload_probe.dll
 
   release:
     if: github.ref_type == 'tag'
