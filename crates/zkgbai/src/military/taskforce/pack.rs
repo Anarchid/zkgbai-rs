@@ -395,9 +395,11 @@ impl Ai {
         let left = (st.target != NULLPOS && self.frame - st.since < TARGET_FOR)
             .then(|| self.pack_target_left(st.target))
             .flatten();
+        // (By the rule it was chosen by, the threat there less ours: a
+        // stricter one dropped it again a conduct later.)
         let keep = left.filter(|&(t, _)| {
             let view = self.war.view(leader.def());
-            running || (view.get_threat(t) <= fthreat && (!shape.shun_porc || view.get_porc_threat(t) <= 0.0))
+            running || (view.get_effective_threat(t) <= fthreat && (!shape.shun_porc || view.get_porc_threat(t) <= 0.0))
         });
         st.shun.retain(|s| s.1 > self.frame);
         if let Some((t, mobile)) = keep {
