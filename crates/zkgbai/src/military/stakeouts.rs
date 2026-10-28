@@ -274,6 +274,14 @@ impl Stakeouts {
     fn wanted(&self, frame: i32) -> usize {
         self.posts.len().min(MAX_POSTS) + Self::lookers_wanted(frame)
     }
+
+    /// Whether [`LOSS_CAP`] pickets died within [`LOSS_RECALL`], or one
+    /// within [`REPLACE_DELAY`]. (The losses are pruned only at the next
+    /// loss, which a cap that stops building pickets would never bring.)
+    fn hot(&self, frame: i32) -> bool {
+        let recent = self.losses.iter().filter(|&&l| frame - l <= LOSS_RECALL).count();
+        recent >= LOSS_CAP || self.losses.back().is_some_and(|&l| frame - l < REPLACE_DELAY)
+    }
 }
 
 /// Whether an enemy would shoot a stakeout.
@@ -443,8 +451,7 @@ impl Ai {
 
     /// Whether pickets have been dying fast lately: none is to be built.
     pub(crate) fn stakeouts_hot(&self) -> bool {
-        let s = &self.stakeouts;
-        s.losses.len() >= LOSS_CAP || s.losses.back().is_some_and(|&l| self.frame - l < REPLACE_DELAY)
+        self.stakeouts.hot(self.frame)
     }
 
     pub fn stakeouts_update(&mut self, frame: i32) {
@@ -989,6 +996,15 @@ mod tests {
             s.posts.push(Post { choke: c, pos: Vec3::ZERO, covers: 1, width: 300.0, manned: None });
         }
         assert_eq!(s.wanted(0), MAX_POSTS + LOOKERS_EARLY);
+    }
+
+    #[test]
+    fn losses_cool_off() {
+        let mut s = Stakeouts::default();
+        s.losses.extend([0, 30, 60, 90]);
+        assert!(s.hot(90 + REPLACE_DELAY));
+        assert!(s.hot(LOSS_RECALL));
+        assert!(!s.hot(LOSS_RECALL + 1));
     }
 
     #[test]
