@@ -5,7 +5,7 @@ usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity]
   <refit2-dir>  zkgbai-runs/predictor/refit2: mech.pkl (fitted mechanics), empcap/hitcells.pkl
                 (heatray damage by range band), fights.pkl (calibration fights)
   <crate-dir>   crates/zkgbai: writes data/fightsim_mech.tsv and the parity cases
-                src/military/fightsim/testdata/mech_parity_{units,cases}.tsv
+                src/military/fightsim/testdata/mech_parity_{units,cases}.tsv and mech_fates_cases.tsv
   parity        only rewrite the parity cases (no calibration fit, tables untouched)
 The sim runs on the crate's own base tables (refit-1 hit cells and hazard, the ones in
 data/fightsim_hits.tsv and fightsim_coef.tsv): predict._init on ~/.../refit1/empcap with
@@ -31,6 +31,7 @@ ROOT = os.path.expanduser("~/Programs/zkgbai-runs/predictor")
 BASE = os.path.join(ROOT, "refit1", "empcap")           # the crate's hit tables
 HAZARD = os.path.join(ROOT, "refit1", "hazard.pkl")     # the crate's hazard
 SHIELD = os.path.join(ROOT, "mech2", "shield.json")      # _dyn_weapons for heatray
+FATES_CAL = os.path.join(ROOT, "fates", "cal.tsv")       # score_fates.py: the p_dead recalibration
 OPTS = {"air": 1, "burn": 1, "death": 1, "emp": 1, "slow": 1, "engage": 1, "heatray": 1}
 G = {}
 
@@ -83,6 +84,9 @@ def export_tables(out, cal):
         fh.write(f"const\tstun_cap_s\t{M.get('stun_cap_s', 4.0):.10g}\n")
         for k, v in cal.items():
             fh.write(f"cal\t{k}\t{v:.10g}\n")
+        # per-unit fates: score_fates.py's recalibration of p_dead (logistic on logit p_dead, static, log(h / 150))
+        for i, v in enumerate(float(l.split("\t")[1]) for l in open(FATES_CAL).read().split("\n")[1:] if l):
+            fh.write(f"cal\tfate.t{i}\t{v:.10g}\n")
     return rows
 
 
@@ -132,6 +136,17 @@ CASES = {
                   [("shieldraid", 1.0)] * 4 + [("shieldriot", 1.0), ("shieldskirm", 0.7), ("shieldassault", 1.0), ("turretlaser", 1.0)], 550),
 }
 
+# Fates cases: (A, B, centroid distance, pass offset or None for the a-move, horizon in frames).
+FATE_CASES = {
+    "amove_mirror": (CASES["mirror_mixed"][0], CASES["mirror_mixed"][1], 303.7, None, 300),
+    "amove_eco": ([("cloakraid", 1.0)] * 2, [("staticmex", 1.0)] * 3, 260.3, None, 450),
+    "amove_imps": (CASES["imps_and_fire"][0], CASES["imps_and_fire"][1], 260, None, 2700),
+    "pass_ram": ([("vehassault", 1.0)] * 4, [("staticmex", 1.0)] * 3 + [("turretlaser", 1.0)], 420.3, 0, 150),
+    "pass_wide": ([("vehassault", 1.0)] * 4, [("staticmex", 1.0)] * 3 + [("turretlaser", 1.0)], 420.3, 220, 150),
+    "pass_raiders": ([("vehassault", 0.8)] * 3, [("shieldraid", 1.0)] * 4 + [("turretlaser", 1.0)], 380.9, 220, 300),
+    "pass_bolas": ([("hoverheavyraid", 1.0)] * 3, [("tankassault", 1.0), ("turretriot", 1.0)], 350.2, 120, 240),
+}
+
 
 def make_fight(ud, a, b, d0, layout):
     def recs(side, x0, dx):
@@ -153,7 +168,7 @@ def make_fight(ud, a, b, d0, layout):
 
 def export_parity(tdir):
     ud, wtab = predict.G["ud"], predict.G["wtab"]
-    defs = sorted({n for a, b, _ in CASES.values() for n, _ in a + b})
+    defs = sorted({n for a, b, *_ in list(CASES.values()) + list(FATE_CASES.values()) for n, _ in a + b})
     with open(os.path.join(tdir, "mech_parity_units.tsv"), "w") as fh:
         fh.write("# unit specs for the mechanics parity cases (speed elmos/frame); weapons name:type:range:reload:salvo:damage,"
                  " every weapon with a weapon-table row and range (EMP-only ones included)\n")
@@ -179,6 +194,19 @@ def export_parity(tdir):
             us = ";".join(f"{s}:{r['def']}:{r['hp']:.10g}:{r['x']:.10g}:{r['z']:.10g}" for s, side in ((0, f["A"]), (1, f["B"])) for r in side)
             fh.write(f"{name}\t{us}\t{dps[0]:.10g}\t{dps[1]:.10g}\t{stop[0]:.10g}\t{stop[1]:.10g}\t{wd[0]:.10g}\t{wd[1]:.10g}\n")
             print(f"{name:18} dps {dps[0]:.3f} {dps[1]:.3f}  stop {stop[0]:.3f} {stop[1]:.3f}  wd {wd[0]:.3f} {wd[1]:.3f}")
+    with open(os.path.join(tdir, "mech_fates_cases.tsv"), "w") as fh:
+        fh.write("# Python mech.simulate_mech fates (no hazard), opts six + heatray: units side:def:hp:x:z; pass = the pass line's"
+                 " offset from B's statics, empty for the a-move; fates per unit dead:death frame (-1 alive):hp left:pdead\n")
+        fh.write("case\tunits\tpass\thorizon\tfates\n")
+        for name, (a, b, d0, offset, horizon) in FATE_CASES.items():
+            f = make_fight(ud, a, b, d0, "crowd")
+            fa = {}
+            mech.simulate_mech(f, OPTS, None, fates=fa, horizon=horizon, passing=offset)
+            us = ";".join(f"{s}:{r['def']}:{r['hp']:.10g}:{r['x']:.10g}:{r['z']:.10g}" for s, side in ((0, f["A"]), (1, f["B"])) for r in side)
+            fs = ";".join(f"{int(d)}:{-1 if t is None else t}:{h:.10g}:{p:.10g}"
+                          for d, t, h, p in zip(fa["dead"], fa["death_f"], fa["hp"], fa["pdead"]))
+            fh.write(f"{name}\t{us}\t{'' if offset is None else offset}\t{horizon}\t{fs}\n")
+            print(f"{name:18} " + " ".join(f"{'X' if d else '.'}{p:.2f}" for d, p in zip(fa["dead"], fa["pdead"])))
 
 
 def main(rdir, crate, workers=2, what="all"):

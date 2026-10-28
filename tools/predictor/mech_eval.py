@@ -88,6 +88,8 @@ def init(pdir, mech_path, variants):
     G["variants"] = variants
     if os.environ.get("MECH_TACAI"):
         mech.load_tacai(os.environ["MECH_TACAI"])
+    if os.environ.get("MECH_WATER"):
+        mech.load_water(os.environ["MECH_WATER"])
     if os.environ.get("MECH_SHIELD"):  # shield variants: shield pools + hit tables of body hits
         mech.load_shield(os.environ["MECH_SHIELD"], os.path.join(pdir, "hitcells.pkl"))
         cells = pickle.load(open(os.environ["MECH_HITS_SHIELD"], "rb"))["train"]
@@ -103,7 +105,7 @@ def run(fight):
     hits = predict.G["hits"]
     for name, opts in G["variants"]:
         hz = predict.G["hazard_mob"] if opts.get("hazmob") else predict.G["hazard"]
-        predict.G["hits"] = predict.G["hits_shield"] if opts.get("shield") else hits
+        predict.G["hits"] = predict.G["hits_shield"] if (opts.get("shield") or opts.get("shield2")) else hits
         out[name] = mech.simulate_mech(fight, opts, hz)
     predict.G["hits"] = hits
     hz = predict.G["hazard"]
@@ -232,6 +234,9 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
     # mechanics round 2 checks: calibrated predicted own-loss share vs actual, by side kind
     SKIRM = {"hoverskirm", "cloakskirm", "shieldskirm", "spiderskirm", "jumpskirm", "amphfloater"}
     SHIELDS = {"shieldassault", "shieldfelon", "shieldshield", "staticshield", "shieldcon", "striderfunnelweb"}
+    SUBS = set()
+    if os.environ.get("MECH_WATER"):
+        SUBS = {k for k, v in pickle.load(open(os.environ["MECH_WATER"], "rb"))["moveclass"].items() if v.startswith("UBOAT")}
     udd = predict.G.get("ud") or __import__("units").load(os.path.join(pdir, "unitdefs.tsv"))
     def static_side(defs):
         ds = [udd.get(n) for n in defs.split()]
@@ -241,7 +246,8 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
     for tag, fa, fb in (("skirmisher side", lambda r: bool(SKIRM & set(r.defsA.split())), lambda r: bool(SKIRM & set(r.defsB.split()))),
                         ("all-static side", lambda r: static_side(r.defsA), lambda r: static_side(r.defsB)),
                         ("shield side", lambda r: bool(SHIELDS & set(r.defsA.split())), lambda r: bool(SHIELDS & set(r.defsB.split()))),
-                        ("Felon side", lambda r: "shieldfelon" in r.defsA.split(), lambda r: "shieldfelon" in r.defsB.split())):
+                        ("Felon side", lambda r: "shieldfelon" in r.defsA.split(), lambda r: "shieldfelon" in r.defsB.split()),
+                        ("sub side", lambda r: bool(SUBS & set(r.defsA.split())), lambda r: bool(SUBS & set(r.defsB.split())))):
         tA = d.apply(fa, axis=1).values; tB = d.apply(fb, axis=1).values
         one = tA ^ tB
         for n in names:

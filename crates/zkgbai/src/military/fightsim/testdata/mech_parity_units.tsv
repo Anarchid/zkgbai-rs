@@ -17,9 +17,12 @@ shieldraid	75	350	3.1	1	0	0	0	12	shieldraid_laser:LaserCannon:232:0.1:1:8.5
 shieldriot	250	1200	2	1	0	0	0	12	shieldriot_blast:Cannon:300:0.93:1:30
 shieldskirm	125	520	1.8	1	0	0	0	14	shieldskirm_storm_rocket:MissileLauncher:530:7:1:330
 spideremp	190	740	2.8	1	0	0	0	19	spideremp_spider:LightningCannon:240:1.2:1:65
+staticmex	85	560	0	0	0	0	0	20	
 tankassault	850	7200	2.45	1	0	0	0	25	tankassault_cor_reap:Cannon:360:4:2:320.1
 tankraid	170	660	3.55	1	0	0	0	17	tankraid_napalm_bomblet:Cannon:210:0.5:1:40
 tankriot	500	1950	2.3	1	0	0	0	16	tankriot_tawf_banisher:MissileLauncher:320:0.3:1:240.1
 turretemp	260	1600	0	0	0	0	0	16	turretemp_arm_det_weapon:LightningCannon:460:2.9:1:0
 turretlaser	90	785	0	0	0	0	0	15	turretlaser_laser:BeamLaser:460:0.1:1:7.5
+turretriot	220	1500	0	0	0	0	0	22.5	turretriot_turretriot_weapon:Cannon:410:0.1:1:45
+vehassault	250	2200	2.95	1	0	0	0	21	vehassault_plasma:Cannon:320:2:1:210
 vehraid	130	480	3.7	1	0	0	0	18	vehraid_heatray:LaserCannon:262:0.1:1:30

@@ -47,6 +47,87 @@ def load_shield(path, hitcells=None):
                 M["dynfrac"].setdefault(wd, {})[int(rb)] = float(r["dmg"] / r["hit_any"] / (r["nominal"] / r["n"]))
 
 
+def load_water(path):
+    """Water domain (water_dump.py): journal heightmaps, waterweapon flags, floaters, move classes,
+    target categories, engine heights and water depth limits per def."""
+    M["water"] = pickle.load(open(path, "rb"))
+    M["water"]["floaters"] = set(M["water"]["floaters"])
+
+
+
+
+def _water_setup(fight, us, recs):
+    """Per-unit 2-D anchor on the fight axis and water traits; None when the map has no heightmap."""
+    W = M.get("water")
+    if W is None:
+        return None
+    hm = W["heights"].get(str(fight.get("map", "")).strip().lower().replace(" ", "_"))
+    if hm is None:
+        return None
+    A, B = fight["A"], fight["B"]
+    def cent(side):
+        xs = [(r["x"], r["z"]) for r in side if not math.isnan(r["x"])]
+        return (sum(x for x, _ in xs) / len(xs), sum(z for _, z in xs) / len(xs)) if xs else None
+    ca, cb = cent(A), cent(B)
+    if ca is None or cb is None:
+        return None
+    dx, dz = cb[0] - ca[0], cb[1] - ca[1]
+    d0 = math.hypot(dx, dz)
+    ax, az = (dx / d0, dz / d0) if d0 > 1 else (1.0, 0.0)
+    ud = predict.G["ud"]
+    out = {}
+    for u, r in zip(us, recs):
+        if math.isnan(r["x"]):
+            continue
+        d = ud.get(r["def"])
+        mc = W["moveclass"].get(r["def"], "")
+        kind = ("air" if d is not None and d.canfly else "sub" if mc.startswith("UBOAT") else "ship" if mc.startswith("BOAT")
+                else "hover" if mc.startswith("HOVER") else "amph" if mc.startswith(("AKBOT", "ATKBOT")) else
+                "static" if r["static"] else "ground")
+        out[id(u)] = {"x0": u.x, "px": r["x"], "pz": r["z"], "kind": kind, "height": W.get("height", {}).get(r["def"]),
+                      "waterline": W.get("waterline", {}).get(r["def"], 0.0),
+                      "floater": r["def"] in W["floaters"] or r["def"] in W.get("float_on_water", ()), "minwd": W.get("min_water_depth", {}).get(r["def"]),
+                      "maxwd": W.get("max_water_depth", {}).get(r["def"])}
+    return {"cell": hm[0], "grid": hm[1], "ax": ax, "az": az, "units": out}
+
+
+def _height(wat, info, x):
+    gx = info["px"] + (x - info["x0"]) * wat["ax"]
+    gz = info["pz"] + (x - info["x0"]) * wat["az"]
+    g = wat["grid"]
+    r = min(max(int(gz / wat["cell"]), 0), g.shape[0] - 1)
+    c = min(max(int(gx / wat["cell"]), 0), g.shape[1] - 1)
+    return float(g[r, c])
+
+
+def _domain(wat, u):
+    """(in water, under water) for a unit at its current 1-D position; None when unknown."""
+    info = wat["units"].get(id(u)) if wat else None
+    if info is None or info["kind"] == "air":
+        return None if info is None else (False, False)
+    h = _height(wat, info, u.x)
+    depth = -h
+    # engine: under water iff pos.y + height < 0. A bottom walker or sunk static stands on the bottom: under
+    # iff the water is deeper than it is tall; no unit stands deeper than its maxWaterDepth, so a heightmap
+    # cell deeper than that is a shore the 64-elmo grid smeared. A sub rides at its waterline (Seawolf 45
+    # down, 30 tall), not on the bottom. Floaters surface to fire.
+    if info["kind"] == "sub":
+        depth = info["waterline"] if h < 0 else 0.0
+    elif info["maxwd"] is not None:
+        depth = min(depth, info["maxwd"])
+    under = info["kind"] not in ("air", "hover", "ship") and not info["floater"] and info["height"] is not None \
+        and depth > info["height"]
+    return h < 0, under
+
+
+def _cat_ok(weapon, target_def):
+    """Engine target categories: the weapon slot's onlyTargetCategory must share one with the target."""
+    W = M["water"]
+    only = W.get("only_target", {}).get(weapon)
+    cats = W.get("category", {}).get(target_def)
+    return only is None or cats is None or bool(only & cats)
+
+
 def load_tacai(path):
     """ZK's Tactical Unit AI, resolved by tacai_dump.py: per unit def, whom it skirms and flees."""
     import json
@@ -100,7 +181,7 @@ ENGAGE_NAMES = ["const", "ratio>0.5", "ratio>1", "ratio>1.5", "ratio>2.5", "rati
 class X:
     """Per-unit mechanics state riding on a SimUnit."""
     __slots__ = ("maxhp", "air", "kamikaze", "death", "engage", "blockers", "para", "slowdmg", "slow_last",
-                 "burns", "range_", "speed_", "sh", "shmax", "shregen", "shr", "drain")
+                 "burns", "range_", "speed_", "sh", "shmax", "shregen", "shr", "drain", "lat")
 
 
 def _setup(fight, opts):
@@ -116,13 +197,16 @@ def _setup(fight, opts):
         x.kamikaze = r["def"] in KAMIKAZE
         x.death = M.get("death", {}).get(r["def"]) if opts.get("death") else None
         x.engage = 1.0
+        x.lat = 0.0  # lateral coordinate (fates' pass mode only)
         x.blockers = 0
         x.para = 0.0
         x.slowdmg = 0.0
         x.slow_last = -10 ** 9
         x.burns = []
         sd = M.get("shield", {}).get(r["def"]) if opts.get("shield") else None
-        x.sh = sd["power"] if sd else None  # fights start with shields up (70% of shots at shield units find it up)
+        x.sh = sd["power"] if sd else None  # full at the start, or (shield_start) the charge logged at the unit's first row
+        if sd and opts.get("shield_start") and r.get("sh") is not None:
+            x.sh = max(0.0, min(sd["power"], float(r["sh"])))
         x.shmax = sd["power"] if sd else 0.0
         x.shregen = sd["regen"] if sd else 0.0
         x.shr = sd["radius"] if sd else 0.0
@@ -177,17 +261,53 @@ def _weapon_info(w):
     return r
 
 
-def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=None):
+def _pdead(hp0, hp, dead, death_f, var, horizon):
+    """P(dead by the horizon): the expected damage taken by then against the starting health, spread by
+    the hits' Bernoulli variance (normal). A unit dead earlier in the expected-damage fight has its damage
+    and variance carried on at their rate to the horizon; one killed without spread (its own blast, a
+    burn, a death explosion) is dead."""
+    taken, v = hp0 - hp, var
+    if dead:
+        scale = horizon / float(max(death_f + DT, DT))
+        taken, v = taken * scale, v * scale
+    if v <= 0:
+        return 1.0 if dead or taken >= hp0 else 0.0
+    return 0.5 * (1.0 + math.erf((taken - hp0) / math.sqrt(2.0 * v)))
+
+
+def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=None, fates=None, horizon=None, passing=None):
     """trace: a dict to fill with per-unit fates in build_units order (A's records, then B's):
     pdead = probability the unit is dead when the fight stops, ehp = expected HP then (with a hazard;
     without one, the end state). withdraw: the "A withdraws now" query (predict.simulate's): every mobile
     A unit reverses away from B at full speed. posture: (A's, B's) each "push" (base movement), "hold"
     (no advancing; skirming still backs off) or "withdraw" (reverse at own speed; statics cannot); an
     arm runs without the stopping rule and ends 10 s after the last shot or approach (5 s with a
-    withdrawal). Hazards fitted with mobility features (hazmob) get disengage.mob_feats(fight)."""
+    withdrawal). Hazards fitted with mobility features (hazmob) get disengage.mob_feats(fight).
+    fates: a dict to fill with each unit's fate at the horizon (frames, default HORIZON) in build_units
+    order: dead, death_f, hp, var (Bernoulli variance of the hits it took), pdead (_pdead). The fight then
+    runs to the horizon while one side has an armed unit and the other anything alive (unarmed eco
+    included), with no quiet stop; use it without a hazard. passing: A's mobile units drive along the axis
+    through B and out the far side at their speed instead of a-moving, on a line `passing` elmos from B's
+    statics (B's mobile units come to the line)."""
     hits = predict.G["hits"]
+    if opts.get("shield2"):  # mechanics round 4: shield pools starting from the logged charge
+        opts = dict(opts, shield=1, shield_start=1)
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
+    if passing is not None:
+        for u, x in zip(us, xs):
+            x.lat = 0.0 if u.side == 1 and not u.mobile else float(passing)
+
+    def apart(a, b):
+        dy = xof[id(a)].lat - xof[id(b)].lat
+        return abs(a.x - b.x) if dy == 0 else math.hypot(a.x - b.x, dy)
+    horizon = horizon or HORIZON
+    if fates is not None:
+        idx = {id(u): i for i, u in enumerate(us)}
+        hp0 = [u.hp for u in us]
+        var = [0.0] * len(us)
+        death_f = [None] * len(us)
+    wat = _water_setup(fight, us, list(fight["A"]) + list(fight["B"])) if opts.get("water") else None
     for u in us:
         for w in u.weapons:
             w.next = 0
@@ -224,7 +344,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             dmg, aoe, edge, para = x.death
             for o in us:
                 if o.alive:
-                    dd = abs(o.x - t.x)
+                    dd = apart(o, t)
                     if dd < aoe:
                         v = dmg * (1.0 - edge * dd / aoe)
                         if para:
@@ -255,7 +375,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
         trace["pdead"] = [0.0] * len(us); trace["ehp"] = [0.0] * len(us)
     mobf = disengage.mob_feats(fight) if hazard is not None and getattr(hazard, "mob", False) else None
     tac = M.get("tacai", {}) if opts.get("tacai") else {}
-    while f < HORIZON:
+    while f < horizon:
         if hazard is not None and f > 0 and f % 30 == 0:
             kA, kB = kfrac()
             h = hazard.h(f // 30 - 1, kA, kB, lr, None, mobf)
@@ -267,7 +387,10 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             surv *= 1.0 - h
         alive = [u for u in us if u.alive]
         sides = [[u for u in alive if u.side == s] for s in (0, 1)]
-        if not any(is_armed(u) for u in sides[0]) or not any(is_armed(u) for u in sides[1]):
+        if fates is not None:
+            if not any(any(is_armed(u) for u in sides[s]) and sides[1 - s] for s in (0, 1)):
+                break
+        elif not any(is_armed(u) for u in sides[0]) or not any(is_armed(u) for u in sides[1]):
             break
         shot_fired = False
         moved = False
@@ -293,6 +416,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     x.sh = min(x.shmax, x.sh + x.shregen * DT / 30.0)
             sides = [[u for u in alive if u.side == s] for s in (0, 1)]
         # movement: close until an enemy is within own range
+        prev_x = {id(u): u.x for u in alive} if wat else None
         for u in alive:
             u.moving = False
             if not u.mobile or u.speed <= 0:
@@ -302,10 +426,18 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             foes = sides[1 - u.side]
             if not foes:
                 continue
-            nearest = min(foes, key=lambda e: abs(e.x - u.x))
-            dist = abs(nearest.x - u.x)
+            nearest = min(foes, key=lambda e: apart(e, u))
+            dist = apart(nearest, u)
             speed = u.speed * (1.0 - slowf(u)) if opts.get("slow") else u.speed
             x = xof[id(u)]
+            if passing is not None and u.side == 0:
+                if death_on and x.kamikaze and dist <= 20.0:
+                    kill(u)
+                    continue
+                u.x += speed * DT
+                u.moving = True
+                moved = True
+                continue
             pa = posture[u.side] if posture else None
             if pa == "withdraw":
                 u.x -= speed * DT if nearest.x > u.x else -speed * DT
@@ -367,7 +499,17 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 u.x -= step if nearest.x > u.x else -step
                 u.moving = True
                 moved = True
+        if wat:
+            # undo moves out of a unit's domain (engine minWaterDepth / maxWaterDepth per def)
+            for u in alive:
+                info = wat["units"].get(id(u))
+                if info is None or u.x == prev_x[id(u)]:
+                    continue
+                depth = -_height(wat, info, u.x)
+                if (info["minwd"] is not None and depth < info["minwd"]) or (info["maxwd"] is not None and depth > info["maxwd"]):
+                    u.x = prev_x[id(u)]
         alive = [u for u in us if u.alive]
+        dom = {id(u): _domain(wat, u) for u in alive} if wat else {}
         # fire
         groups = {}
         if opts.get("shield"):
@@ -422,12 +564,20 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 if f < w.next:
                     continue
                 can_air, can_ground, burn, blen, emp, slow, pulse = _weapon_info(w)
+                if wat:
+                    wf = M["water"]["weapons"].get(w.name, {})
+                    water_w = wf.get("water", False) or wf.get("submersed", False)
+                    torpedo = M.setdefault("_wtype", {}).setdefault(w.name, str(predict.G["wtab"].loc[w.name, "type"])
+                                                                 if w.name in predict.G["wtab"].index else "") == "TorpedoLauncher"
+                    du = dom.get(id(u))
+                    if du is not None and du[1] and not water_w:
+                        continue  # under water: only water weapons fire
                 eff = ux.engage
                 if opts.get("rate") and w.range >= 300 and ux.blockers:
                     eff *= max(0.0, 1.0 - opts["rate"] * min(ux.blockers, 3))
                 if opts.get("pulse") and pulse is not None:
                     per_victim, radius = pulse
-                    vic = [e for e in foes if e.alive and abs(e.x - u.x) <= radius]
+                    vic = [e for e in foes if e.alive and apart(e, u) <= radius]
                     if not vic:
                         continue
                     w.next = f + (int(w.reload / (1.0 - sf)) if sf > 0 else w.reload)
@@ -438,8 +588,10 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                             xe.slowdmg += slow * per_victim * eff; xe.slow_last = f
                         hurt(e, per_victim * eff)
                     continue
-                inr = [(abs(e.x - u.x), e) for e in foes if abs(e.x - u.x) <= w.range and e.alive
-                       and (not opts.get("air") or (can_air if xof[id(e)].air else can_ground))]
+                inr = [(apart(e, u), e) for e in foes if apart(e, u) <= w.range and e.alive
+                       and (not opts.get("air") or (can_air if xof[id(e)].air else can_ground))
+                       and (not wat or (_cat_ok(w.name, e.def_) and (dom.get(id(e)) is None
+                            or ((water_w or not dom[id(e)][1]) and (not torpedo or dom[id(e)][0])))))]
                 if not inr:
                     continue
                 if opts.get("shield") and ux.drain > 0:
@@ -476,7 +628,16 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     xt.slowdmg += slow * w.nominal * frac * p_tgt * shots * eff
                     xt.slow_last = f
                 if dmg > 0:
+                    if fates is not None:
+                        p, d1 = p_tgt * eff, frac * w.nominal
+                        var[idx[id(tgt)]] += shots * p * (1.0 - p) * d1 * d1
                     hurt(tgt, dmg)
+        if fates is not None:
+            for i, u in enumerate(us):
+                if not u.alive and death_f[i] is None:
+                    death_f[i] = f
+            f += DT
+            continue
         if posture:
             quiet = 0 if (shot_fired or approached) else quiet + DT
             limit = 150 if "withdraw" in posture else 300
@@ -487,6 +648,12 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             break
         f += DT
     kA, kB = kfrac()
+    if fates is not None:
+        fates["dead"] = [not u.alive for u in us]
+        fates["death_f"] = death_f
+        fates["hp"] = [max(u.hp, 0.0) if u.alive else 0.0 for u in us]
+        fates["var"] = var
+        fates["pdead"] = [_pdead(hp0[i], u.hp, not u.alive, death_f[i], var[i], horizon) for i, u in enumerate(us)]
     if trace is not None:
         w = surv if hazard is not None else 1.0
         for i, u in enumerate(us):
