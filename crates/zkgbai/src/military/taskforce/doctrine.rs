@@ -116,15 +116,19 @@ pub enum Judge {
     /// The fight predictor (`military::fightsim`), asked about each
     /// engagement along the run in turn.
     Predictor,
+    /// The same, by the predictor's mechanics model (air, burn, death
+    /// blasts, EMP, slow, engagement odds; `fightsim::mech`).
+    Mech,
 }
 
-const JUDGES: [Judge; 2] = [Judge::Map, Judge::Predictor];
+const JUDGES: [Judge; 3] = [Judge::Map, Judge::Predictor, Judge::Mech];
 
 impl Judge {
     pub fn name(self) -> &'static str {
         match self {
             Judge::Map => "map",
             Judge::Predictor => "predictor",
+            Judge::Mech => "mech",
         }
     }
 

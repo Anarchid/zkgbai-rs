@@ -64,6 +64,7 @@ use crate::military::fightsim::{FightSnapshot, Model, SnapUnit, UnitSpec};
 use crate::military::wrappers::squad::health_fraction;
 use crate::nav;
 use crate::util::{NULLPOS, distance, get_directional_point};
+use serde_json::{Value, json};
 
 /// Within this of its target a pack plans a pass; farther, it paths there.
 const PLAN_AT: f32 = 900.0;
@@ -484,7 +485,8 @@ impl Ai {
         // (Porc counts whatever the pack weighs: it outranges every gun.)
         // (Judged by the predictor, a run's fights are its business: porc only.)
         // Porc counts beyond `porc_share` of the pack's own threat.
-        let predictor = shape.judge == Judge::Predictor;
+        let predictor = matches!(shape.judge, Judge::Predictor | Judge::Mech);
+        let mech = shape.judge == Judge::Mech;
         let (outweighed, fthreat, porc_cap) = {
             let view = self.war.view(leader.def());
             let fthreat = view.get_friendly_threat(pos);
@@ -547,10 +549,11 @@ impl Ai {
         st.shun.retain(|s| s.1 > self.frame);
         // Judged by the predictor, the rest of the run must stay worth it.
         if let Some((t, _)) = keep.filter(|_| predictor && !running)
-            && let Some(j) = self.pack_judge(sid, &pack_route(pos, t))
+            && let Some((j, detail)) = self.pack_judge(sid, &pack_route(pos, t), mech)
             && j.worth() < shape.judge_margin
         {
             self.pack_log_judgement(sid, t, &j, "gives up on");
+            self.pack_emit_judgement(sid, t, &j, detail, "gives up on");
             st.shun.push((t, self.frame + JUDGE_SHUN));
             keep = None;
         }
@@ -572,9 +575,17 @@ impl Ai {
                 return (None, "no target".into());
             }
             // Judged by the predictor, a run not worth it is passed up.
-            if predictor && let Some(j) = self.pack_judge(sid, &pack_route(pos, t)) {
+            // (Every arm asks, for the journal: what the predictor expected
+            // of the runs the threat maps took is the unselected sample.)
+            let judged = self.pack_judge(sid, &pack_route(pos, t), mech);
+            if let Some((j, detail)) = judged.clone().filter(|_| !predictor) {
+                self.pack_emit_judgement(sid, t, &j, detail, "map takes on");
+            }
+            if predictor && let Some((j, detail)) = judged {
                 let go = j.worth() >= shape.judge_margin;
-                self.pack_log_judgement(sid, t, &j, if go { "takes on" } else { "passes up" });
+                let verdict = if go { "takes on" } else { "passes up" };
+                self.pack_log_judgement(sid, t, &j, verdict);
+                self.pack_emit_judgement(sid, t, &j, detail, verdict);
                 if !go {
                     st.shun.push((t, self.frame + JUDGE_SHUN));
                     st.target = NULLPOS;
@@ -679,7 +690,10 @@ impl Ai {
     /// meet it, less the cores the fights before were expected to kill, the
     /// most hurt first); the unarmed enemy economy at the target is the prize
     /// if any core gets there. None without the model.
-    fn pack_judge(&mut self, sid: SquadId, route: &[Vec3]) -> Option<Judgement> {
+    /// With `mech`, by the mechanics model's means; each engagement's record
+    /// (both models' answers, the units of both sides) is returned beside
+    /// the judgement, for the journal.
+    fn pack_judge(&mut self, sid: SquadId, route: &[Vec3], mech: bool) -> Option<(Judgement, Vec<Value>)> {
         if self.taskforces.model.is_none() {
             let m = Model::load().map(Arc::new);
             if let Err(e) = &m {
@@ -690,21 +704,22 @@ impl Ai {
         let model = self.taskforces.model.clone().flatten()?;
         let target = *route.get(1)?;
         let s = self.squads.get(sid)?;
-        let ours: Vec<(UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+        let ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
             .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())) && f.unit.health() > 0.0)
-            .filter_map(|f| f.unit.def().map(|d| (d, f.unit.health(), f.get_pos())))
+            .filter_map(|f| f.unit.def().map(|d| (f.unit.id(), d, f.unit.health(), f.get_pos())))
             .collect();
         let frame = self.frame;
-        let seen: Vec<(UnitDef, f32, Vec3, bool)> = (self.war.targets.values())
+        let seen: Vec<(i32, UnitDef, f32, Vec3, bool)> = (self.war.targets.values())
             .filter(|e| !e.is_dead && e.identified && frame - e.last_seen <= JUDGE_SEEN)
-            .filter_map(|e| e.ud.map(|d| (d, e.get_health() * e.def_health(), e.position, e.can_fly())))
+            .filter_map(|e| e.ud.map(|d| (e.unit_id, d, e.get_health() * e.def_health(), e.position, e.can_fly())))
             .collect();
-        let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3)> =
-            ours.into_iter().map(|(d, hp, p)| (self.fight_spec(d), hp, p)).collect();
+        let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> =
+            ours.into_iter().map(|(id, d, hp, p)| (self.fight_spec(d), hp, p, id)).collect();
         let mut j = Judgement { cores: pack.len(), ..Judgement::default() };
-        let mut armed: Vec<(Arc<UnitSpec>, f32, Vec3)> = Vec::new();
+        let mut armed: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> = Vec::new();
         let mut along = Vec::new();
-        for (def, hp, p, flies) in seen {
+        let mut detail = Vec::new();
+        for (eid, def, hp, p, flies) in seen {
             let spec = self.fight_spec(def);
             if spec.weapons.is_empty() {
                 if !flies && distance(p, target) < TARGET_LEFT {
@@ -716,7 +731,7 @@ impl Ai {
                 spec.weapons.iter().map(|w| w.range).fold(0.0, f32::max) + if spec.mobile { JUDGE_CHASE } else { 0.0 };
             let (s, off) = route_project(route, p);
             if off <= reach {
-                armed.push((spec, hp, p));
+                armed.push((spec, hp, p, eid));
                 along.push(s);
             }
         }
@@ -733,22 +748,37 @@ impl Ai {
             let meet = if at > JUDGE_MEET { route_point(route, at - JUDGE_MEET) } else { c };
             let (sx, sz) = (meet.x - c.x, meet.z - c.z);
             let mut snap = FightSnapshot::default();
-            for (spec, hp, p) in &pack {
+            for (spec, hp, p, _) in &pack {
                 snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x + sx, z: p.z + sz });
             }
             for &i in &group {
-                let (spec, hp, p) = &armed[i];
+                let (spec, hp, p, _) = &armed[i];
                 snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
             }
-            let out = model.predict(&snap);
+            let out = model.predict_with(&snap, true);
             let cost_a: f32 = pack.iter().map(|u| u.0.cost).sum();
             let cost_b: f32 = group.iter().map(|&i| armed[i].0.cost).sum();
-            j.loss += out.mean_a * cost_a;
-            j.gain += out.mean_b * cost_b;
+            let statics: f32 = group.iter().filter(|&&i| !armed[i].0.mobile).map(|&i| armed[i].0.cost).sum();
+            let (mean_a, mean_b) = match out.mech.filter(|_| mech) {
+                Some(m) => (m.mean_a, m.mean_b),
+                None => (out.mean_a, out.mean_b),
+            };
+            detail.push(json!({
+                "i": j.engagements, "at": at.round(), "ids_a": pack.iter().map(|u| u.3).collect::<Vec<_>>(),
+                "ids_b": group.iter().map(|&i| armed[i].3).collect::<Vec<_>>(),
+                "metal_a": cost_a.round(), "metal_b": cost_b.round(),
+                "static_b": if cost_b > 0.0 { statics / cost_b } else { 0.0 },
+                "base": {"ka": out.killed_a, "kb": out.killed_b, "ma": out.mean_a, "mb": out.mean_b,
+                         "p": out.p_a_wins},
+                "mech": out.mech.map(|m| json!({"ka": m.killed_a, "kb": m.killed_b, "ma": m.mean_a,
+                                                "mb": m.mean_b, "p": m.p_a_wins})),
+            }));
+            j.loss += mean_a * cost_a;
+            j.gain += mean_b * cost_b;
             for u in &mut pack {
                 (u.2.x, u.2.z) = (u.2.x + sx, u.2.z + sz);
             }
-            let dead = (out.mean_a * n).round() as usize;
+            let dead = (mean_a * n).round() as usize;
             pack.sort_by(|a, b| a.1.total_cmp(&b.1));
             pack.drain(..dead.min(pack.len()));
         }
@@ -756,7 +786,24 @@ impl Ai {
         if pack.is_empty() {
             j.prize = 0.0;
         }
-        Some(j)
+        Some((j, detail))
+    }
+
+    /// A judgement's record for the journal (`k=packjudge`): the verdict, the
+    /// run's worth and each engagement's units and predictions (see
+    /// `pack_judge`), for fitting the predictor to these decisions.
+    fn pack_emit_judgement(&mut self, sid: SquadId, t: Vec3, j: &Judgement, detail: Vec<Value>, verdict: &str) {
+        let (doctrine, judge) =
+            self.squads.get(sid).map(|s| (s.shape.doctrine.clone(), s.shape.judge.name())).unwrap_or_default();
+        self.op_emit(
+            "packjudge",
+            json!({
+                "squad": sid, "doctrine": doctrine, "judge": judge, "verdict": verdict,
+                "x": t.x.round(), "z": t.z.round(), "worth": j.worth().round(), "gain": j.gain.round(),
+                "prize": j.prize.round(), "loss": j.loss.round(), "cores": j.cores, "left": j.left,
+                "engagements": detail,
+            }),
+        );
     }
 
     fn pack_log_judgement(&mut self, sid: SquadId, t: Vec3, j: &Judgement, verdict: &str) {
