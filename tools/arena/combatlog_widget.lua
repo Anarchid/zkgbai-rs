@@ -25,6 +25,10 @@
 --   src=x = a blast without a projectile, e.g. the Outlaw's pulse at its own
 --   feet: damage of a weapon in the attacker's own weapon list that matched
 --   no projectile and no hitscan salvo, one row per attacker, weapon, frame)
+--   (v4: hitscan salvos skip fake/bogus weapons (aiming and float checks)
+--   and reloadFrame jumps that imply a reload over MAX_RELOAD_FRAMES or a
+--   shot before frame 0: a weapon the game parks while disabled moved its
+--   reloadFrame without firing; unit.bp = build progress, 1 when finished)
 --   unit  state of a unit in combat, every UNIT_SAMPLE frames
 --   meta  game, map, teams
 -- Positions are elmos, speeds elmos per frame, frames at 30 per second.
@@ -43,11 +47,12 @@ function widget:GetInfo()
 	}
 end
 
-local VERSION = 3
+local VERSION = 4
 local UNIT_SAMPLE = 30     -- frames between unit rows
 local ACTIVE_FRAMES = 600  -- a unit stays in combat this long after its last shot or wound
 local SALVO_POLL = 6       -- longest poll period of a unit in combat (shorter for fast lasers)
 local IDLE_POLL = 30       -- ... and of those that have not shot or been shot lately
+local MAX_RELOAD_FRAMES = 3600  -- a longer reload means the game parked the weapon: no shot
 local PROJ_POLL = 1        -- frames between projectile polls
 local PENDING_FRAMES = 12  -- unmatched damage waits this long for its salvo
 local PROJ_MATCH_FRAMES = 300 -- player view: damage matches a projectile this old at most
@@ -143,13 +148,13 @@ local function unitState(uid, f)
 		return nil
 	end
 	local vx, vy, vz = GetUnitVelocity(uid)
-	local hp, hpmax, para = GetUnitHealth(uid)
+	local hp, hpmax, para, _, bp = GetUnitHealth(uid)
 	local _, stunned = GetUnitIsStunned(uid)
 	local shEnabled, shPower = GetUnitShieldState(uid)
 	s = {
 		x = x, z = z,
 		spd = vx and sqrt(vx * vx + vz * vz) or 0,
-		hp = hp, hpmax = hpmax, para = para,
+		hp = hp, hpmax = hpmax, para = para, bp = bp,
 		stun = stunned and 1 or 0,
 		slow = GetUnitRulesParam(uid, "slowState") or 0,
 		dis = GetUnitRulesParam(uid, "disarmed") or 0,
@@ -446,11 +451,17 @@ local function pollSalvos(f)
 							if d then ttype, target = "u", d.vid end
 						end
 					end
+					local info, rframes, f0
 					if ttype then
-						local info = wdInfo[wdid]
+						info = wdInfo[wdid]
 						local reload = GetUnitWeaponState(uid, wnum, "reloadTime") or info.reload
-						local rframes = math.max(1, math.floor(reload * 30 + 0.5))
-						local f0 = rf - rframes
+						rframes = math.max(1, math.floor(reload * 30 + 0.5))
+						f0 = rf - rframes
+						if rframes > MAX_RELOAD_FRAMES or f0 < 0 then
+							ttype = nil  -- parked by the game (disabled), not fired
+						end
+					end
+					if ttype then
 						if f0 > f then f0 = f end
 						-- Shots this period: one if the weapon was idle at the last
 						-- poll (when it started is unknown), else the reload advance,
@@ -546,7 +557,7 @@ local function sampleUnits(f)
 				emit(table.concat({
 					"unit", num(f), num(uid), unitDefName(s.def), num(s.team), num(s.x), num(s.z),
 					num(s.hp), num(s.hpmax), num(s.para), num(s.stun), num(s.slow, 3), num(s.dis),
-					num(s.sh), num(s.fire), num(s.spd, 2),
+					num(s.sh), num(s.fire), num(s.spd, 2), num(s.bp, 3),
 				}, "\t"))
 			end
 		end
@@ -563,7 +574,7 @@ local HEADERS = {
 	"#env\tf\tvid\tvdef\tvteam\tdmg\tkind\taid\tadef\tateam",
 	"#kill\tf\tuid\tudef\tuteam\tx\tz\taid\tadef\tateam",
 	"#stun\tf\tuid\tudef\tuteam\ton",
-	"#unit\tf\tuid\tudef\tuteam\tx\tz\thp\thpmax\tpara\tstun\tslow\tdis\tsh\tfire\tspd",
+	"#unit\tf\tuid\tudef\tuteam\tx\tz\thp\thpmax\tpara\tstun\tslow\tdis\tsh\tfire\tspd\tbp",
 	"#meta\tkey\tvalue...",
 }
 
@@ -652,7 +663,8 @@ function widget:Initialize()
 		for i, w in ipairs(ud.weapons) do
 			own[w.weaponDef] = true
 			local wi = wdInfo[w.weaponDef]
-			if wi and wi.hitscan then
+			local dummy = wi and (wi.name:find("fake") or wi.name:find("bogus"))
+			if wi and wi.hitscan and not dummy then
 				list = list or { period = SALVO_POLL }
 				list[#list + 1] = { i, w.weaponDef }
 				local rframes = math.max(1, math.floor(wi.reload * 30 + 0.5))
