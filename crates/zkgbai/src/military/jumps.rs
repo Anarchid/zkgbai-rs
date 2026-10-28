@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
+use super::water::is_fake;
 use crate::Ai;
 use crate::defs::cmd;
 use crate::kgbutil::{PathCost, kgb_move_to};
@@ -59,6 +60,11 @@ const SUMO_FRIENDS: f32 = 300.0;
 const PYRO_CLUMP: usize = 2;
 const PYRO_SPLASH: f32 = 160.0;
 const PYRO_EDGE: f32 = 0.8;
+/// Brawlers about the landing (shorter-ranged than the Pyro, together more
+/// damage per second than its own: two Glaives do 210 to its 69) only
+/// where we are four times the stronger: on foot the Pyro outranges and
+/// kites them, and a jump into their midst gives that away.
+const PYRO_EDGE_BRAWL: f32 = 0.25;
 
 /// A jump order still first in the queue after this many frames failed
 /// (the gadget leaves a jump it cannot make queued, and the unit stands).
@@ -90,6 +96,8 @@ struct Pending {
 #[derive(Default)]
 pub struct Jumps {
     defs: BTreeMap<i32, Option<JumpDef>>,
+    /// Each def's guns: damage per second and longest reach.
+    guns: BTreeMap<i32, (f32, f32)>,
     /// Frame of each unit's last jump order.
     last: BTreeMap<i32, i32>,
     /// Jump orders not yet seen taking off.
@@ -134,6 +142,29 @@ impl Ai {
         });
         self.jumps.defs.insert(ud.id(), d);
         d
+    }
+
+    /// What `ud`'s guns do to units on the ground, close up: damage per
+    /// second (bare, without the threat map's bonuses for fire, area or
+    /// slow) and their longest reach.
+    fn jumps_gun(&mut self, ud: UnitDef) -> (f32, f32) {
+        if let Some(&g) = self.jumps.guns.get(&ud.id()) {
+            return g;
+        }
+        let dps = (ud.weapon_mounts().iter())
+            .filter_map(|m| m.weapon_def())
+            .filter(|wd| !is_fake(&wd.name().to_lowercase()))
+            .filter(|wd| wd.weapon_type() != "TorpedoLauncher" || wd.is_sub_missile())
+            .map(|wd| {
+                let shot = wd.damage_types().get(1).copied().unwrap_or(0.0)
+                    * wd.projectiles_per_shot() as f32
+                    * wd.salvo_size() as f32;
+                if wd.reload() > 0.0 { shot / wd.reload() } else { shot }
+            })
+            .sum();
+        let g = (dps, ud.max_weapon_range());
+        self.jumps.guns.insert(ud.id(), g);
+        g
     }
 
     /// The jumps of `unit` if it can jump right now.
@@ -405,7 +436,7 @@ impl Ai {
             .values()
             .filter(|e| !e.is_dead && e.identified && !e.can_fly() && !e.is_static)
             .filter(|e| frame - e.last_seen <= FRESH && distance(e.position, p) <= r)
-            .map(|e| (e.unit_id, e.position, e.ud.map_or(e.value, |d| d.cost(self.metal)), e.get_health()))
+            .map(|e| (e.unit_id, e.position, e.ud.map_or(e.value, |d| d.cost(self.metal)), e.current_health()))
             .collect()
     }
 
@@ -464,9 +495,12 @@ impl Ai {
     }
 
     /// A Pyro jumps into a clump of light enemies (its flames go through
-    /// them all), away from defenses.
+    /// them all), away from defenses, and not into brawlers it would
+    /// rather kite.
     fn jumps_pyro(&mut self, unit: Unit) {
         let Some(jd) = self.jump_ready(unit) else { return };
+        let Some(def) = unit.def() else { return };
+        let (own_dps, own_range) = self.jumps_gun(def);
         let pos = unit.pos();
         let light: Vec<(i32, Vec3, f32, f32)> = self
             .jumps_enemies_near(pos, jd.range * REACH + PYRO_SPLASH)
@@ -494,10 +528,18 @@ impl Ai {
                 near.iter().map(|e| e.1.z).sum::<f32>() / n,
             );
             let metal: f32 = near.iter().map(|e| e.2).sum();
-            if distance(pos, c) > jd.range * REACH
-                || self.war.get_porc_threat(c) > 0.0
-                || self.war.get_enemy_power(c) > PYRO_EDGE * mine
-            {
+            if distance(pos, c) > jd.range * REACH || self.war.get_porc_threat(c) > 0.0 {
+                continue;
+            }
+            // Those that the Pyro outranges, within its reach of the landing.
+            let brawlers: Vec<UnitDef> = (self.war.targets.values())
+                .filter(|e| !e.is_dead && e.identified && !e.can_fly() && self.frame - e.last_seen <= FRESH)
+                .filter(|e| e.def_max_weapon_range() < own_range && distance(e.position, c) <= own_range)
+                .filter_map(|e| e.ud)
+                .collect();
+            let brawl: f32 = brawlers.into_iter().map(|d| self.jumps_gun(d).0).sum();
+            let edge = if brawl > own_dps { PYRO_EDGE_BRAWL } else { PYRO_EDGE };
+            if self.war.get_enemy_power(c) > edge * mine {
                 continue;
             }
             if best.is_none_or(|b| (near.len(), metal) > (b.0, b.1)) {
