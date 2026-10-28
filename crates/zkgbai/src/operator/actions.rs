@@ -77,6 +77,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
     ("escorts", "Army", "escorts for Impaler batteries (the impaler doctrine)"),
+    ("lance", "Army", "Lances in taskforces with a Mace guarding each (the lance doctrine)"),
     ("jaeger", "Army", "anti-heavy hunters once enemy heavies show"),
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),

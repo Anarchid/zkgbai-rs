@@ -5,8 +5,9 @@
 //! fighter-store ids; methods take the store explicitly.
 //!
 //! Taskforces (see `military::taskforce`; the shield ball is one) keep
-//! their leader *outside* `fighters` (the other members orbit it); all
-//! other kinds keep the leader among `fighters`.
+//! their leader *outside* `fighters` (the other members keep with it, each
+//! in its doctrine's way: see `Keep`); all other kinds keep the leader
+//! among `fighters`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3, Weapon};
 
 use crate::defs::cmd;
 use crate::kgbutil::{Nav, kgb_move_to};
-use crate::military::taskforce::Shape;
+use crate::military::taskforce::{Keep, Shape};
 use crate::military::wrappers::fighter::next_waypoint;
 use crate::military::{FighterStore, ScoutTasks};
 use crate::util::{
@@ -314,14 +315,9 @@ impl Squad {
         self.max_shield_power = 0.0;
         for id in self.everyone().collect::<Vec<_>>() {
             let Some(f) = fighters.get(&id) else { continue };
-            let unit = f.unit;
-            self.gauge(id, unit);
-            if id != lid {
-                let radius = self.shape.orbit(def_id(unit));
-                unit.execute_custom_command(cmd::ORBIT, &[lid as f32, radius], 0, NO_TIMEOUT);
-                unit.execute_custom_command(cmd::ORBIT_DRAW, &[lid as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
-            }
+            self.gauge(id, f.unit);
         }
+        self.rekeep(fighters, &[Keep::Orbit, Keep::Guard]);
     }
 
     pub fn get_threat(&self, fighters: &FighterStore) -> i32 {
@@ -713,14 +709,15 @@ impl Squad {
                         }
                     }
                 }
+                // Guards take the new leader; orbiters keep theirs, as they
+                // always did.
+                self.rekeep(fighters, &[Keep::Guard]);
                 self.collect_stragglers(fighters, frame, nav);
             }
-            Some((leader_id, _)) => {
+            Some((_, leader)) => {
                 unit.set_move_state(0, 0);
                 self.fighters.push(id);
-                let radius = self.shape.orbit(def);
-                unit.execute_custom_command(cmd::ORBIT, &[leader_id as f32, radius], 0, NO_TIMEOUT);
-                unit.execute_custom_command(cmd::ORBIT_DRAW, &[leader_id as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
+                self.keep_order(unit, leader, 0);
             }
         }
     }
@@ -833,6 +830,7 @@ impl Squad {
                 }
             }
             self.target = NULLPOS;
+            self.rekeep(fighters, &[Keep::Guard]);
             self.collect_stragglers(fighters, frame, nav);
         } else {
             self.fighters.retain(|&f| f != id);
@@ -867,11 +865,11 @@ impl Squad {
         }
     }
 
-    /// Bring members that strayed far from the leader back into orbit.
+    /// Bring members that strayed far from the leader back to keep with it.
     /// Without `nav`, they move straight back instead of avoiding enemies.
     fn collect_stragglers(&self, fighters: &mut FighterStore, frame: i32, mut nav: Option<&mut Nav>) {
         let Some(lid) = self.leader else { return };
-        let Some(leader_pos) = fighters.get(&lid).map(|l| l.get_pos()) else { return };
+        let Some((leader, leader_pos)) = fighters.get(&lid).map(|l| (l.unit, l.get_pos())) else { return };
         for id in &self.fighters {
             let Some(f) = fighters.get_mut(id) else { continue };
             let fpos = f.get_pos();
@@ -885,9 +883,35 @@ impl Squad {
                 Some(nav) => f.move_to(regroup, nav),
                 None => kgb_move_to(f.unit, regroup, 0, frame),
             }
-            let radius = self.shape.orbit(def_id(f.unit));
-            f.unit.execute_custom_command(cmd::ORBIT, &[lid as f32, radius], OPTION_SHIFT_KEY, NO_TIMEOUT);
-            f.unit.execute_custom_command(cmd::ORBIT_DRAW, &[lid as f32], OPTION_SHIFT_KEY, NO_TIMEOUT);
+            self.keep_order(f.unit, leader, OPTION_SHIFT_KEY);
+        }
+    }
+
+    /// Give member `unit` its doctrine's order to keep with `leader` (see
+    /// `Keep`), after what it is doing with `opts` shift.
+    fn keep_order(&self, unit: Unit, leader: Unit, opts: i16) {
+        let lid = leader.id() as f32;
+        match self.shape.keep(def_id(unit)) {
+            Keep::Orbit => {
+                let radius = self.shape.orbit(def_id(unit));
+                unit.execute_custom_command(cmd::ORBIT, &[lid, radius], opts, NO_TIMEOUT);
+                unit.execute_custom_command(cmd::ORBIT_DRAW, &[lid], OPTION_SHIFT_KEY, NO_TIMEOUT);
+            }
+            Keep::Guard => {
+                unit.guard(leader, opts);
+            }
+        }
+    }
+
+    /// Give again the keep orders of the members that keep in `ways` (for a
+    /// new leader, or a changed doctrine); spotters keep their own.
+    fn rekeep(&self, fighters: &FighterStore, ways: &[Keep]) {
+        let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        for f in self.fighters.iter().filter_map(|id| fighters.get(id)) {
+            let def = def_id(f.unit);
+            if ways.contains(&self.shape.keep(def)) && self.shape.spot(def).is_none() {
+                self.keep_order(f.unit, leader, 0);
+            }
         }
     }
 
@@ -1259,6 +1283,32 @@ mod tests {
         assert_eq!(members, vec![31, 33]);
         assert!(s.is_dead(&fighters));
         assert!(members.iter().all(|id| fighters[id].squad.is_none()));
+    }
+
+    #[test]
+    fn guards_guard_and_take_a_new_leader() {
+        // Thugs guard, Aspis orbit; when the leader goes, the guard takes
+        // the new one and the orbiter keeps its old order, as it always did.
+        let (cb, defs, mut fighters) = setup();
+        let classes = crate::military::taskforce::Classes::default();
+        let mut felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        felon.roles[1].keep = Keep::Guard;
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        s.shape = Arc::new(felon.shape(&defs, &classes));
+        for (id, def) in [(40, FELON), (41, FELON), (42, THUG), (43, ASPIS)] {
+            add(cb, &mut fighters, id, def, 300.0);
+            s.add_unit(id, &mut fighters, 0);
+        }
+        let orders = take_orders();
+        let by = |id: i32, topic: u32, custom: i32| orders.iter().filter(|o| **o == (id, topic, custom)).count();
+        let (custom, guard) = (CommandTopic::COMMAND_UNIT_CUSTOM, CommandTopic::COMMAND_UNIT_GUARD);
+        assert_eq!((by(42, guard, -1), by(42, custom, cmd::ORBIT)), (1, 0));
+        assert_eq!((by(43, guard, -1), by(43, custom, cmd::ORBIT)), (0, 1));
+        s.remove_unit(40, &mut fighters, 0);
+        assert_eq!(s.leader, Some(41));
+        let orders = take_orders();
+        let by = |id: i32, topic: u32, custom: i32| orders.iter().filter(|o| **o == (id, topic, custom)).count();
+        assert_eq!((by(42, guard, -1), by(43, custom, cmd::ORBIT)), (1, 0));
     }
 
     #[test]
