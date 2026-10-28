@@ -2,13 +2,15 @@
 
 mod astar;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use springai::{Callback, Map, MoveData, Unit, UnitDef, Vec3};
 
-use self::astar::{AStar, Best, IMPASSABLE, Reach, SearchOpts, thin_waypoints};
+use self::astar::{AStar, Best, IMPASSABLE, Links, Reach, SearchOpts, thin_waypoints};
+use super::HeightMap;
 use crate::defs::Defs;
 use crate::military::MilitaryManager;
+use crate::military::jumps::{JumpDef, arc_clear};
 use crate::military::water::Dive;
 use crate::util::{NULLPOS, distance};
 
@@ -25,6 +27,42 @@ const NO_MIN_DEPTH: f32 = 65535.0;
 /// Extra cost of a cell inside a keep-out circle (see
 /// [`Pathfinder::find_path_keepout`]): above any threat cost.
 const KEEPOUT_COST: f32 = 200.0;
+
+/// A jump link's cost beyond its length, in steps: the stop to take off
+/// and the landing.
+const JUMP_STEPS: f32 = 3.0;
+
+/// Jump links reach this much short of the jump: units take off from
+/// near a link's start, not on it.
+const TAKEOFF_SLACK: f32 = 48.0;
+
+/// A squad member still on the near side follows its leader's jump for
+/// this long after the leader took it, frames.
+const FOLLOW_JUMP: i32 = 30 * 15;
+
+/// What jump links depend on: the movement's slope and depths, the jump's
+/// reach and height (as bits).
+type JumpKey = [u32; 5];
+
+/// The jump on a unit's way. The way the unit was last given ends where it
+/// takes off; the jump module jumps it from there to the landing once it
+/// can (see `military::jumps`).
+#[derive(Clone, Copy, Debug)]
+pub struct JumpPlan {
+    pub unit: Unit,
+    /// Take-off and landing.
+    pub from: Vec3,
+    pub to: Vec3,
+    /// On along the way from the landing (the landing, if the way jumps
+    /// again from there).
+    pub then: Vec3,
+    /// When planned (or taken).
+    pub frame: i32,
+    /// Another unit's way: its squad leader's.
+    pub shared: bool,
+    key: JumpKey,
+    cells: (usize, usize),
+}
 
 /// Path cost model (the original's `costSupplier` integer constants, in order).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -77,6 +115,24 @@ pub struct Pathfinder {
     /// the blasts of missiles of ours and our allies' in flight (see
     /// `military::blasts`).
     pub no_go: Vec<(Vec3, f32)>,
+    /// Whether jumpers' ways may jump, and the frame (the jump module sets
+    /// both).
+    pub jumps_on: bool,
+    pub now: i32,
+    /// The next query walks: the way of a squad with members that cannot
+    /// jump.
+    pub walk_only: bool,
+    /// The ground, for jump arcs.
+    heights: HeightMap,
+    /// Jump links by movement and jumps, built when first wanted after the
+    /// ground last changed.
+    jump_links: Vec<(JumpKey, Links)>,
+    jumpers: BTreeMap<i32, Option<JumpDef>>,
+    /// The jump on each unit's last way, and the last one each took.
+    pub jump_plans: BTreeMap<i32, JumpPlan>,
+    jumped: BTreeMap<i32, JumpPlan>,
+    /// Jump links built since the jump module last looked: def, links, ms.
+    pub jump_link_builds: Vec<(String, usize, f32)>,
     scythe_id: i32,
     /// Spider movement class max slope; units sharing it path like spiders.
     spider_max_slope: Option<f32>,
@@ -138,6 +194,15 @@ impl Pathfinder {
             path_buf: Vec::with_capacity(256),
             keepout: Vec::new(),
             no_go: Vec::new(),
+            jumps_on: true,
+            now: 0,
+            walk_only: false,
+            heights: HeightMap::new(cb),
+            jump_links: Vec::new(),
+            jumpers: BTreeMap::new(),
+            jump_plans: BTreeMap::new(),
+            jumped: BTreeMap::new(),
+            jump_link_builds: Vec::new(),
             scythe_id: defs.id("cloakheavyraid"),
             spider_max_slope: defs.get("spidercon").and_then(|d| d.move_data()).map(|md| md.max_slope()),
             spider_scout_id: defs.id("spiderscout"),
@@ -151,6 +216,11 @@ impl Pathfinder {
 
     /// Refresh the slope map (terrain can be deformed during the game).
     pub fn update_slope_map(&mut self) {
+        let heights = HeightMap::new(self.cb);
+        if heights != self.heights {
+            self.heights = heights;
+            self.jump_links.clear();
+        }
         let map = self.cb.map().slope_map();
         let t = &mut self.terrain;
         let sm_len = map.len() / MAP_COMPRESSION as usize / MAP_COMPRESSION as usize;
@@ -215,6 +285,8 @@ impl Pathfinder {
     ) -> VecDeque<Vec3> {
         let start = u.pos();
         let mut result = VecDeque::new();
+        let walk_only = std::mem::take(&mut self.walk_only);
+        let jump_plan = self.jump_plans.remove(&u.id());
 
         if start == NULLPOS {
             return result;
@@ -229,6 +301,10 @@ impl Pathfinder {
         let Some(def) = u.def() else {
             return result;
         };
+        // Keep a squad leader's jump while the unit still follows it.
+        if let Some(p) = jump_plan.filter(|p| p.shared) {
+            self.jump_plans.insert(u.id(), p);
+        }
         let target = self.no_go_exit(target, start).unwrap_or(target);
         let mut cost = cost;
         let mut flyer = true;
@@ -275,23 +351,130 @@ impl Pathfinder {
             &circles
         };
         paint_keepout(self.terrain.smwidth, self.terrain.slope_map.len(), keepout, &mut self.keepout);
+        // Jumpers' ways jump what they cannot walk (see `jump_links`), the
+        // dearer the longer their jump has yet to reload.
+        let jumps = if flyer || walk_only || !self.jumps_on { None } else { self.jumper(def) };
+        let links = jumps.map(|jd| (self.jump_links_for(jd, def), jump_wait(u, jd, def)));
         let (terrain, extra) = (&self.terrain, &self.keepout);
+        let links = links.map(|(i, wait)| (&self.jump_links[i].1, wait));
         let mut cell_cost = |c: usize| match terrain.cost(cost, war, c) {
             IMPASSABLE => IMPASSABLE,
             base => base + extra.get(c).copied().unwrap_or(0.0),
         };
-        match self.astar.find_path(start_pos, target_pos, &mut cell_cost) {
+        match self.astar.find_path(start_pos, target_pos, &mut cell_cost, links) {
             // Nothing closer to the target is reachable: head straight for it.
             None => result.push_back(target),
             Some(end) => {
                 self.astar.trace(start_pos, end, &mut self.path_buf);
-                for cell in thin_waypoints(&self.path_buf) {
+                // A jump on the way: the way ends where it takes off, so the
+                // unit is never sent past it to walk round (the engine's
+                // own pathing knows no jumps).
+                let path = &self.path_buf;
+                let w = terrain.smwidth.max(1) as usize;
+                let step = |a: usize, b: usize| (a % w).abs_diff(b % w) <= 1 && (a / w).abs_diff(b / w) <= 1;
+                let jump_at = (0..path.len()).find(|&i| !step(if i == 0 { start_pos } else { path[i - 1] }, path[i]));
+                for cell in thin_waypoints(&path[..jump_at.unwrap_or(path.len())]) {
                     result.push_back(if flyer { terrain.to_pos_raised(cell, flyheight) } else { terrain.to_pos(cell) });
                 }
-                result.push_back(target);
+                match (jump_at, jumps) {
+                    (Some(i), Some(jd)) => {
+                        let (a, b) = (if i == 0 { start_pos } else { path[i - 1] }, path[i]);
+                        let (from, to) = (terrain.centre(a), terrain.centre(b));
+                        // Walking on from the landing, as far as two steps.
+                        let mut then = b;
+                        for &c in path[i + 1..].iter().take(2) {
+                            if !step(then, c) {
+                                break;
+                            }
+                            then = c;
+                        }
+                        let then = if then == b { to } else { terrain.to_pos(then) };
+                        let key = jump_key(terrain, jd);
+                        let frame = self.now;
+                        let plan = JumpPlan { unit: u, from, to, then, frame, shared: false, key, cells: (a, b) };
+                        self.jump_plans.insert(u.id(), plan);
+                        result.push_back(from);
+                    }
+                    _ => result.push_back(target),
+                }
             }
         }
         result
+    }
+
+    /// The jumps of def `ud`, if it jumps.
+    fn jumper(&mut self, ud: UnitDef) -> Option<JumpDef> {
+        *self.jumpers.entry(ud.id()).or_insert_with(|| JumpDef::of(ud))
+    }
+
+    /// Whether `u`'s ways may jump.
+    pub fn can_jump(&mut self, u: Unit) -> bool {
+        self.jumps_on && u.def().is_some_and(|d| d.move_data().is_some() && self.jumper(d).is_some())
+    }
+
+    /// The jump links of the movement set (see `Terrain::set_movement`)
+    /// and of `jd`, built if not yet: their index.
+    fn jump_links_for(&mut self, jd: JumpDef, def: UnitDef) -> usize {
+        let t = &self.terrain;
+        let key = jump_key(t, jd);
+        if let Some(i) = self.jump_links.iter().position(|l| l.0 == key) {
+            return i;
+        }
+        let begun = std::time::Instant::now();
+        let passable: Vec<bool> = (0..t.slope_map.len())
+            .map(|c| {
+                let elev = t.elev_map.get(c).copied().unwrap_or(0.0);
+                t.slope_map[c] <= t.max_slope && elev >= t.max_depth && elev <= t.min_depth
+            })
+            .collect();
+        let hm = &self.heights;
+        let reach = jd.reach() - TAKEOFF_SLACK;
+        let links = jump_links(t.smwidth.max(0) as usize, &passable, |x, z| hm.height_at(x, z), reach, jd.height);
+        self.jump_link_builds.push((def.name(), links.len(), begun.elapsed().as_secs_f32() * 1000.0));
+        self.jump_links.push((key, links));
+        self.jump_links.len() - 1
+    }
+
+    /// Give squad member `member` its leader's jump: the one on the
+    /// leader's way, or the one the leader just took while the member is
+    /// still on its near side; none if the member cannot jump.
+    pub fn share_jump(&mut self, leader: Unit, member: Unit) {
+        if member.id() == leader.id() {
+            return;
+        }
+        let pos = member.pos();
+        let took = (self.jumped.get(&leader.id()))
+            .filter(|p| self.now - p.frame <= FOLLOW_JUMP && distance(pos, p.from) < distance(pos, p.to));
+        let plan = self.jump_plans.get(&leader.id()).filter(|p| !p.shared).or(took).copied();
+        match plan.filter(|_| self.can_jump(member)) {
+            Some(p) => {
+                self.jump_plans.insert(member.id(), JumpPlan { unit: member, frame: self.now, shared: true, ..p });
+            }
+            None => {
+                if self.jump_plans.get(&member.id()).is_some_and(|p| p.shared) {
+                    self.jump_plans.remove(&member.id());
+                }
+            }
+        }
+    }
+
+    /// `plan`'s jump was ordered: off the plans, kept for the unit's squad.
+    pub fn jump_taken(&mut self, plan: &JumpPlan) {
+        let id = plan.unit.id();
+        self.jump_plans.remove(&id);
+        self.jumped.insert(id, JumpPlan { frame: self.now, ..*plan });
+        let now = self.now;
+        self.jumped.retain(|_, p| now - p.frame <= FOLLOW_JUMP);
+    }
+
+    /// `plan`'s jump does not go from its take-off: no way jumps it again
+    /// (until the ground changes). Its link's cells.
+    pub fn drop_jump(&mut self, plan: &JumpPlan) -> (Vec3, Vec3) {
+        for (_, links) in self.jump_links.iter_mut().filter(|l| l.0 == plan.key) {
+            links.drop_edge(plan.cells.0, plan.cells.1);
+        }
+        self.jump_plans.remove(&plan.unit.id());
+        (plan.from, plan.to)
     }
 
     /// The no-go circle `p` is in, if any.
@@ -530,6 +713,13 @@ impl Terrain {
         Vec3::new(x, self.map.elevation_at(x, z), z)
     }
 
+    /// The middle of `cell`, on the ground.
+    fn centre(&self, cell: usize) -> Vec3 {
+        let (x, z) = cell_corner(self.smwidth, cell);
+        let (x, z) = (x + MAP_RES as f32 / 2.0, z + MAP_RES as f32 / 2.0);
+        Vec3::new(x, self.map.elevation_at(x, z), z)
+    }
+
     fn to_pos_raised(&self, cell: usize, height: f32) -> Vec3 {
         let (x, z) = cell_corner(self.smwidth, cell);
         Vec3::new(x, self.map.elevation_at(x, z) + height, z)
@@ -668,6 +858,71 @@ impl Terrain {
     }
 }
 
+/// What `jd`'s links depend on with the movement set in `t`.
+fn jump_key(t: &Terrain, jd: JumpDef) -> JumpKey {
+    [t.max_slope, t.max_depth, t.min_depth, jd.reach(), jd.height].map(f32::to_bits)
+}
+
+/// Steps of walking `u` would do while its jump reloads.
+fn jump_wait(u: Unit, jd: JumpDef, def: UnitDef) -> f32 {
+    let ready = if u.rules_param_float("is_jumping", 0.0) == 1.0 {
+        0.0
+    } else {
+        u.rules_param_float("jumpReload", 1.0).clamp(0.0, 1.0)
+    };
+    (1.0 - ready) * jd.reload as f32 / 30.0 * def.speed() / MAP_RES as f32
+}
+
+/// Jump links over ground a unit cannot walk, for a grid of `passable`
+/// cells in rows of `width`: from each passable cell beside an impassable
+/// one to each other such cell within `reach` that the straight way to
+/// crosses impassable cells, where a jump `height` high between their
+/// middles clears the `ground`; each costs its length in steps and
+/// [`JUMP_STEPS`].
+fn jump_links(width: usize, passable: &[bool], ground: impl Fn(f32, f32) -> f32, reach: f32, height: f32) -> Links {
+    let len = passable.len();
+    let rows = len / width.max(1);
+    let res = MAP_RES as f32;
+    let blocked = |x: isize, z: isize| {
+        x >= 0 && z >= 0 && (x as usize) < width && (z as usize) < rows && !passable[z as usize * width + x as usize]
+    };
+    let rim: Vec<bool> = (0..rows * width)
+        .map(|c| {
+            let (x, z) = ((c % width) as isize, (c / width) as isize);
+            passable[c] && (-1..=1).any(|dz| (-1..=1).any(|dx| blocked(x + dx, z + dz)))
+        })
+        .collect();
+    let middle = |x: isize, z: isize| {
+        let (x, z) = ((x as f32 + 0.5) * res, (z as f32 + 0.5) * res);
+        Vec3::new(x, ground(x, z), z)
+    };
+    let r = (reach / res).floor() as isize;
+    let mut list = Vec::new();
+    for a in (0..rim.len()).filter(|&c| rim[c]) {
+        let (ax, az) = ((a % width) as isize, (a / width) as isize);
+        let from = middle(ax, az);
+        for bz in (az - r).max(0)..=(az + r).min(rows as isize - 1) {
+            for bx in (ax - r).max(0)..=(ax + r).min(width as isize - 1) {
+                let b = bz as usize * width + bx as usize;
+                let (dx, dz) = ((bx - ax) as f32, (bz - az) as f32);
+                let steps = dx.hypot(dz);
+                if !rim[b] || steps < 1.5 || steps * res > reach {
+                    continue;
+                }
+                let n = (steps * 4.0).ceil() as i32;
+                let over = (1..n).any(|k| {
+                    let t = k as f32 / n as f32;
+                    blocked((ax as f32 + dx * t).round() as isize, (az as f32 + dz * t).round() as isize)
+                });
+                if over && arc_clear(&ground, height, from, middle(bx, bz)) {
+                    list.push((a, b, steps + JUMP_STEPS));
+                }
+            }
+        }
+    }
+    Links::new(len, list)
+}
+
 /// Precomputed answers to reachability checks from one unit's position;
 /// see [`Pathfinder::reachability`].
 pub struct Reachability {
@@ -797,5 +1052,64 @@ mod tests {
         assert!(near(p[15], Vec3::xz(900.0, 1000.0)));
         // A side on the centre itself still gives points.
         assert!(rim_points(c, 100.0, c).iter().all(|q| q.x.is_finite() && q.z.is_finite()));
+    }
+
+    /// A 20 x 10 cell map (1280 x 640 elmos): low ground west, a plateau
+    /// `top` high east of a cliff at cells x = 10 and 11, walkable only on
+    /// the ramp at z = 0.
+    fn cliff(top: f32) -> (Vec<bool>, impl Fn(f32, f32) -> f32) {
+        let passable = (0..200).map(|c| !(10..=11).contains(&(c % 20)) || c / 20 == 0).collect();
+        let ground = move |x: f32, _z: f32| top * ((x - 640.0) / 128.0).clamp(0.0, 1.0);
+        (passable, ground)
+    }
+
+    #[test]
+    fn jump_links_cross_cliffs() {
+        let at = |x: usize, z: usize| z * 20 + x;
+        let (passable, ground) = cliff(150.0);
+        let links = jump_links(20, &passable, ground, 320.0, 200.0);
+        // Up and down the cliff, straight across and slanting.
+        for (a, b) in [(at(9, 5), at(12, 5)), (at(12, 5), at(9, 5)), (at(9, 3), at(12, 6))] {
+            let l = links.of(a).iter().find(|e| e.0 as usize == b);
+            assert!(l.is_some_and(|e| (e.1 - (distance_steps(a, b) + JUMP_STEPS)).abs() < 1e-4), "{a} -> {b}");
+        }
+        // Not along the cliff (no impassable cell on the way), not beyond
+        // reach, not from off the rim.
+        for (a, b) in [(at(9, 5), at(9, 8)), (at(9, 5), at(14, 5)), (at(8, 5), at(12, 5))] {
+            assert!(links.of(a).iter().all(|e| e.0 as usize != b), "{a} -> {b}");
+        }
+
+        // A ridge too high to clear: no links.
+        let passable: Vec<bool> = (0..200).map(|c| !(10..=11).contains(&(c % 20))).collect();
+        let ridge = |x: f32, _z: f32| if (640.0..768.0).contains(&x) { 600.0 } else { 0.0 };
+        assert_eq!(jump_links(20, &passable, ridge, 320.0, 200.0).len(), 0);
+    }
+
+    fn distance_steps(a: usize, b: usize) -> f32 {
+        ((a % 20) as f32 - (b % 20) as f32).hypot((a / 20) as f32 - (b / 20) as f32)
+    }
+
+    #[test]
+    fn ways_jump_cliffs_instead_of_walking_round() {
+        let (passable, ground) = cliff(150.0);
+        let links = jump_links(20, &passable, ground, 320.0, 200.0);
+        let mut cost = |c: usize| if passable[c] { 1.0 } else { IMPASSABLE };
+        let (start, target) = (5 * 20 + 2, 5 * 20 + 17);
+        let mut a = AStar::new(20, 200);
+        let mut way = Vec::new();
+        let step = |a: usize, b: usize| (a % 20).abs_diff(b % 20) <= 1 && (a / 20).abs_diff(b / 20) <= 1;
+        // Walking, round by the ramp at z = 0.
+        assert_eq!(a.find_path(start, target, &mut cost, None), Some(target));
+        a.trace(start, target, &mut way);
+        assert!(way.iter().any(|&c| c / 20 == 0) && way.windows(2).all(|w| step(w[0], w[1])), "{way:?}");
+        // Jumping: one leap over the cliff, no ramp.
+        assert_eq!(a.find_path(start, target, &mut cost, Some((&links, 0.0))), Some(target));
+        a.trace(start, target, &mut way);
+        assert_eq!(way.windows(2).filter(|w| !step(w[0], w[1])).count(), 1, "{way:?}");
+        assert!(way.iter().all(|&c| c / 20 > 1), "{way:?}");
+        // With the jump reloading the whole way round: walking again.
+        assert_eq!(a.find_path(start, target, &mut cost, Some((&links, 40.0))), Some(target));
+        a.trace(start, target, &mut way);
+        assert!(way.windows(2).all(|w| step(w[0], w[1])), "{way:?}");
     }
 }

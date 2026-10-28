@@ -18,8 +18,10 @@ use std::collections::BTreeMap;
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
+use super::water::is_fake;
 use crate::Ai;
 use crate::defs::cmd;
+use crate::kgbutil::pathfinder::JumpPlan;
 use crate::kgbutil::{PathCost, kgb_move_to};
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 
@@ -59,12 +61,32 @@ const SUMO_FRIENDS: f32 = 300.0;
 const PYRO_CLUMP: usize = 2;
 const PYRO_SPLASH: f32 = 160.0;
 const PYRO_EDGE: f32 = 0.8;
+/// Brawlers about the landing (shorter-ranged than the Pyro, together more
+/// damage per second than its own: two Glaives do 210 to its 69) only
+/// where we are four times the stronger: on foot the Pyro outranges and
+/// kites them, and a jump into their midst gives that away.
+const PYRO_EDGE_BRAWL: f32 = 0.25;
 
 /// A jump order still first in the queue after this many frames failed
 /// (the gadget leaves a jump it cannot make queued, and the unit stands).
 const STALL: i32 = 45;
 /// Light: up to this much health.
 const LIGHT_HEALTH: f32 = 1300.0;
+
+/// A jump on a unit's way (see the pathfinder's jump links) planned this
+/// long ago is stale: the unit was sent elsewhere since, frames.
+const WAY_STALE: i32 = 30 * 20;
+/// A unit this near its take-off, ready, whose jump does not go this many
+/// checks running: the jump is dropped from all ways.
+const TAKEOFF: f32 = 40.0;
+const TAKEOFF_TRIES: u32 = 3;
+/// A squad member jumps its leader's jump in parallel from as far as this
+/// off the leader's take-off.
+const ALONGSIDE: f32 = 160.0;
+
+/// Engine move and attack-move orders (ZK's raw move is `cmd::RAW_MOVE`).
+const CMD_MOVE: i32 = 10;
+const CMD_FIGHT: i32 = 16;
 
 /// What a def's jumps are like (from its custom params).
 #[derive(Clone, Copy, Debug)]
@@ -90,6 +112,8 @@ struct Pending {
 #[derive(Default)]
 pub struct Jumps {
     defs: BTreeMap<i32, Option<JumpDef>>,
+    /// Each def's guns: damage per second and longest reach.
+    guns: BTreeMap<i32, (f32, f32)>,
     /// Frame of each unit's last jump order.
     last: BTreeMap<i32, i32>,
     /// Jump orders not yet seen taking off.
@@ -106,10 +130,57 @@ pub struct Jumps {
     /// Jump orders by use, since the last summary.
     pub counts: BTreeMap<String, u32>,
     pub total: u32,
+    /// Units at the take-off of a jump on their way that does not go: the
+    /// take-off, and checks so far.
+    takeoff: BTreeMap<i32, (Vec3, u32)>,
+    /// Jumps on ways dropped since the summary, and how far each one
+    /// taken rose (or fell, below 0).
+    pub dropped: u32,
+    way_rises: Vec<f32>,
 }
 
 fn param(ud: UnitDef, key: &str) -> Option<f32> {
     ud.custom_param(key).and_then(|v| v.trim().parse::<f32>().ok())
+}
+
+impl JumpDef {
+    /// The jumps of def `ud`, if it jumps (and the gadget drives them).
+    pub fn of(ud: UnitDef) -> Option<JumpDef> {
+        (ud.custom_param("canjump").is_some_and(|v| v.trim() == "1")
+            && param(ud, "no_jump_handling").is_none_or(|v| v != 1.0))
+        .then(|| JumpDef {
+            range: param(ud, "jump_range").unwrap_or(400.0),
+            height: param(ud, "jump_height").unwrap_or(200.0),
+            speed: param(ud, "jump_speed").unwrap_or(6.0).max(1.0),
+            reload: (param(ud, "jump_reload").unwrap_or(10.0) * 30.0) as i32,
+            max_depth: ud.max_water_depth(),
+        })
+    }
+
+    /// How far a jump is ordered.
+    pub fn reach(&self) -> f32 {
+        self.range * REACH
+    }
+}
+
+/// Whether a jump `height` high from `from` to `to` (each at the height it
+/// leaves or lands at) clears the ground (`ground(x, z)`), as the gadget
+/// samples its arc, and lands where a unit can stand.
+pub fn arc_clear(ground: impl Fn(f32, f32) -> f32, height: f32, from: Vec3, to: Vec3) -> bool {
+    // Landing slope.
+    let d = 12.0;
+    let dx = (ground(to.x + d, to.z) - ground(to.x - d, to.z)) / (2.0 * d);
+    let dz = (ground(to.x, to.z + d) - ground(to.x, to.z - d)) / (2.0 * d);
+    if (dx * dx + dz * dz).sqrt() > MAX_LANDING_SLOPE {
+        return false;
+    }
+    let (vx, vy, vz) = (to.x - from.x, to.y - from.y, to.z - from.z);
+    let steps = 40;
+    (1..steps).all(|k| {
+        let i = k as f32 / steps as f32;
+        let arc = from.y + vy * i + (1.0 - (2.0 * i - 1.0).powi(2)) * height;
+        ground(from.x + vx * i, from.z + vz * i) - ARC_CLEARANCE <= arc
+    })
 }
 
 /// Ground position of `p` on the live map.
@@ -123,17 +194,32 @@ impl Ai {
         if let Some(d) = self.jumps.defs.get(&ud.id()) {
             return *d;
         }
-        let d = (ud.custom_param("canjump").is_some_and(|v| v.trim() == "1")
-            && param(ud, "no_jump_handling").is_none_or(|v| v != 1.0))
-        .then(|| JumpDef {
-            range: param(ud, "jump_range").unwrap_or(400.0),
-            height: param(ud, "jump_height").unwrap_or(200.0),
-            speed: param(ud, "jump_speed").unwrap_or(6.0).max(1.0),
-            reload: (param(ud, "jump_reload").unwrap_or(10.0) * 30.0) as i32,
-            max_depth: ud.max_water_depth(),
-        });
+        let d = JumpDef::of(ud);
         self.jumps.defs.insert(ud.id(), d);
         d
+    }
+
+    /// What `ud`'s guns do to units on the ground, close up: damage per
+    /// second (bare, without the threat map's bonuses for fire, area or
+    /// slow) and their longest reach.
+    fn jumps_gun(&mut self, ud: UnitDef) -> (f32, f32) {
+        if let Some(&g) = self.jumps.guns.get(&ud.id()) {
+            return g;
+        }
+        let dps = (ud.weapon_mounts().iter())
+            .filter_map(|m| m.weapon_def())
+            .filter(|wd| !is_fake(&wd.name().to_lowercase()))
+            .filter(|wd| wd.weapon_type() != "TorpedoLauncher" || wd.is_sub_missile())
+            .map(|wd| {
+                let shot = wd.damage_types().get(1).copied().unwrap_or(0.0)
+                    * wd.projectiles_per_shot() as f32
+                    * wd.salvo_size() as f32;
+                if wd.reload() > 0.0 { shot / wd.reload() } else { shot }
+            })
+            .sum();
+        let g = (dps, ud.max_weapon_range());
+        self.jumps.guns.insert(ud.id(), g);
+        g
     }
 
     /// The jumps of `unit` if it can jump right now.
@@ -170,24 +256,8 @@ impl Ai {
         if end < -jd.max_depth {
             return false;
         }
-        // Landing slope.
-        let d = 12.0;
-        let dx = (map.elevation_at(to.x + d, to.z) - map.elevation_at(to.x - d, to.z)) / (2.0 * d);
-        let dz = (map.elevation_at(to.x, to.z + d) - map.elevation_at(to.x, to.z - d)) / (2.0 * d);
-        if (dx * dx + dz * dz).sqrt() > MAX_LANDING_SLOPE {
-            return false;
-        }
-        // The arc, as the gadget samples it.
-        let (vx, vy, vz) = (to.x - from.x, end - start, to.z - from.z);
-        let steps = 40;
-        for k in 1..steps {
-            let i = k as f32 / steps as f32;
-            let arc = start + vy * i + (1.0 - (2.0 * i - 1.0).powi(2)) * jd.height;
-            if map.elevation_at(from.x + vx * i, from.z + vz * i) - ARC_CLEARANCE > arc {
-                return false;
-            }
-        }
-        true
+        let (from, to) = (Vec3::new(from.x, start, from.z), Vec3::new(to.x, end, to.z));
+        arc_clear(|x, z| map.elevation_at(x, z), jd.height, from, to)
     }
 
     /// Order `unit` to jump to `to` now (replacing its orders); `why` is
@@ -350,31 +420,115 @@ impl Ai {
     pub fn jumps_remove_unit(&mut self, unit: Unit) {
         self.jumps.last.remove(&unit.id());
         self.jumps.sumos.remove(&unit.id());
+        self.jumps.takeoff.remove(&unit.id());
+        self.pathfinder.jump_plans.remove(&unit.id());
+    }
+
+    /// Jumps on our units' ways (see the pathfinder's jump links): each
+    /// goes once its unit is in reach of the landing and can (a squad
+    /// member's alongside its leader's). One that does not go from its
+    /// take-off is dropped.
+    fn jumps_follow_ways(&mut self, frame: i32) {
+        let plans: Vec<JumpPlan> = self.pathfinder.jump_plans.values().copied().collect();
+        for p in plans {
+            let (unit, id) = (p.unit, p.unit.id());
+            if unit.health() <= 0.0 || unit.team() != self.team_id || frame - p.frame > WAY_STALE {
+                self.pathfinder.jump_plans.remove(&id);
+                self.jumps.takeoff.remove(&id);
+                continue;
+            }
+            // Only on its way: not from a build or an attack it was given since.
+            let first = unit.current_commands().first().map(|c| c.id());
+            if first.is_some_and(|c| ![CMD_MOVE, CMD_FIGHT, cmd::RAW_MOVE].contains(&c)) {
+                continue;
+            }
+            let pos = unit.pos();
+            let off = Vec3::new(pos.x - p.from.x, 0.0, pos.z - p.from.z);
+            let alongside = Vec3::new(p.to.x + off.x, p.to.y, p.to.z + off.z);
+            let beside = p.shared && distance(pos, p.from) > TAKEOFF && distance(pos, p.from) <= ALONGSIDE;
+            let landing = if beside && self.jump_to(unit, alongside, "way") {
+                Some(alongside)
+            } else if self.jump_to(unit, p.to, "way") {
+                Some(p.to)
+            } else {
+                None
+            };
+            if let Some(to) = landing {
+                if distance(p.then, p.to) > 16.0 {
+                    kgb_move_to(unit, p.then, OPTION_SHIFT_KEY, frame);
+                }
+                let map = self.cb.map();
+                self.jumps.way_rises.push(map.elevation_at(to.x, to.z) - map.elevation_at(pos.x, pos.z));
+                self.pathfinder.jump_taken(&p);
+                self.jumps.takeoff.remove(&id);
+                continue;
+            }
+            if distance(pos, p.from) > TAKEOFF || self.jump_ready(unit).is_none() {
+                continue;
+            }
+            let tries = match self.jumps.takeoff.get(&id) {
+                Some(&(at, n)) if at == p.from => n + 1,
+                _ => 1,
+            };
+            self.jumps.takeoff.insert(id, (p.from, tries));
+            if tries < TAKEOFF_TRIES {
+                continue;
+            }
+            self.jumps.takeoff.remove(&id);
+            if p.shared {
+                // The leader's jump, not this unit's: its own way next.
+                self.pathfinder.jump_plans.remove(&id);
+                continue;
+            }
+            let (from, to) = self.pathfinder.drop_jump(&p);
+            self.jumps.dropped += 1;
+            self.log(&format!(
+                "jumps: {} {} stands at its take-off ({:.0}, {:.0}) and cannot jump to ({:.0}, {:.0}): no way \
+                 jumps there now",
+                self.defs.name_of(unit),
+                id,
+                from.x,
+                from.z,
+                to.x,
+                to.z
+            ));
+        }
     }
 
     pub fn jumps_update(&mut self, frame: i32) {
+        self.pathfinder.jumps_on = !self.dev_off("jumps") && !self.dev_off("jumppath");
+        for (def, n, ms) in std::mem::take(&mut self.pathfinder.jump_link_builds) {
+            self.log(&format!("jumps: {n} jump links for the ways of {def} ({ms:.0} ms)"));
+        }
         if frame % 1800 == (self.offset + 17) % 1800 && self.jumps.total > 0 {
             let counts: Vec<String> = self.jumps.counts.iter().map(|(k, n)| format!("{k} {n}")).collect();
+            let rises: Vec<String> = self.jumps.way_rises.iter().map(|r| format!("{r:+.0}")).collect();
             self.log(&format!(
-                "jumps: {} in the last minute ({} flew, {} replaced, {} never queued, {} stalled): {}",
+                "jumps: {} in the last minute ({} flew, {} replaced, {} never queued, {} stalled, {} dropped from \
+                 ways): {}{}",
                 self.jumps.total,
                 self.jumps.flew,
                 self.jumps.replaced,
                 self.jumps.refused,
                 self.jumps.stalled,
-                counts.join(", ")
+                self.jumps.dropped,
+                counts.join(", "),
+                if rises.is_empty() { String::new() } else { format!("; ways rose {}", rises.join(" ")) }
             ));
+            self.jumps.way_rises.clear();
             self.jumps.counts.clear();
             self.jumps.total = 0;
             self.jumps.flew = 0;
             self.jumps.replaced = 0;
             self.jumps.refused = 0;
             self.jumps.stalled = 0;
+            self.jumps.dropped = 0;
         }
         self.jumps_watch(frame);
         if frame % PERIOD != (self.offset + 5) % PERIOD || self.dev_off("jumps") {
             return;
         }
+        self.jumps_follow_ways(frame);
         self.jumps_sumo_gravity();
         let ids: Vec<(i32, Unit)> = self.fighters.iter().map(|(&id, f)| (id, f.unit)).collect();
         for (id, unit) in ids {
@@ -405,7 +559,7 @@ impl Ai {
             .values()
             .filter(|e| !e.is_dead && e.identified && !e.can_fly() && !e.is_static)
             .filter(|e| frame - e.last_seen <= FRESH && distance(e.position, p) <= r)
-            .map(|e| (e.unit_id, e.position, e.ud.map_or(e.value, |d| d.cost(self.metal)), e.get_health()))
+            .map(|e| (e.unit_id, e.position, e.ud.map_or(e.value, |d| d.cost(self.metal)), e.current_health()))
             .collect()
     }
 
@@ -464,9 +618,12 @@ impl Ai {
     }
 
     /// A Pyro jumps into a clump of light enemies (its flames go through
-    /// them all), away from defenses.
+    /// them all), away from defenses, and not into brawlers it would
+    /// rather kite.
     fn jumps_pyro(&mut self, unit: Unit) {
         let Some(jd) = self.jump_ready(unit) else { return };
+        let Some(def) = unit.def() else { return };
+        let (own_dps, own_range) = self.jumps_gun(def);
         let pos = unit.pos();
         let light: Vec<(i32, Vec3, f32, f32)> = self
             .jumps_enemies_near(pos, jd.range * REACH + PYRO_SPLASH)
@@ -494,10 +651,18 @@ impl Ai {
                 near.iter().map(|e| e.1.z).sum::<f32>() / n,
             );
             let metal: f32 = near.iter().map(|e| e.2).sum();
-            if distance(pos, c) > jd.range * REACH
-                || self.war.get_porc_threat(c) > 0.0
-                || self.war.get_enemy_power(c) > PYRO_EDGE * mine
-            {
+            if distance(pos, c) > jd.range * REACH || self.war.get_porc_threat(c) > 0.0 {
+                continue;
+            }
+            // Those that the Pyro outranges, within its reach of the landing.
+            let brawlers: Vec<UnitDef> = (self.war.targets.values())
+                .filter(|e| !e.is_dead && e.identified && !e.can_fly() && self.frame - e.last_seen <= FRESH)
+                .filter(|e| e.def_max_weapon_range() < own_range && distance(e.position, c) <= own_range)
+                .filter_map(|e| e.ud)
+                .collect();
+            let brawl: f32 = brawlers.into_iter().map(|d| self.jumps_gun(d).0).sum();
+            let edge = if brawl > own_dps { PYRO_EDGE_BRAWL } else { PYRO_EDGE };
+            if self.war.get_enemy_power(c) > edge * mine {
                 continue;
             }
             if best.is_none_or(|b| (near.len(), metal) > (b.0, b.1)) {

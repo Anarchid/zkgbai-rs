@@ -92,6 +92,57 @@ impl Best {
     }
 }
 
+/// Edges beside the grid's eight steps (jumps): from each cell, the cells
+/// it reaches at once, each at a cost in steps (before the multiplier of
+/// the cell reached, as a grid step's).
+#[derive(Clone, Debug, Default)]
+pub(super) struct Links {
+    /// Where each cell's edges start in `edges` (and where the last ends).
+    start: Vec<u32>,
+    edges: Vec<(u32, f32)>,
+}
+
+impl Links {
+    /// Edges `(from, to, steps)` of a grid of `len` cells.
+    pub fn new(len: usize, mut list: Vec<(usize, usize, f32)>) -> Self {
+        list.sort_by_key(|e| (e.0, e.1));
+        let mut start = Vec::with_capacity(len + 1);
+        let mut edges = Vec::with_capacity(list.len());
+        let mut k = 0;
+        for cell in 0..len {
+            start.push(edges.len() as u32);
+            while let Some(&(from, to, steps)) = list.get(k).filter(|e| e.0 == cell) {
+                debug_assert_eq!(from, cell);
+                edges.push((to as u32, steps));
+                k += 1;
+            }
+        }
+        start.push(edges.len() as u32);
+        Links { start, edges }
+    }
+
+    /// The edges from `cell`: (cell reached, steps).
+    pub fn of(&self, cell: usize) -> &[(u32, f32)] {
+        match (self.start.get(cell), self.start.get(cell + 1)) {
+            (Some(&a), Some(&b)) => &self.edges[a as usize..b as usize],
+            _ => &[],
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Take the edge from `from` to `to` out of all searches.
+    pub fn drop_edge(&mut self, from: usize, to: usize) {
+        if let (Some(&a), Some(&b)) = (self.start.get(from), self.start.get(from + 1)) {
+            for e in self.edges[a as usize..b as usize].iter_mut().filter(|e| e.0 as usize == to) {
+                e.1 = f32::INFINITY;
+            }
+        }
+    }
+}
+
 /// Reusable A* state for a row-major grid of `width` columns.
 pub(super) struct AStar {
     width: usize,
@@ -179,6 +230,20 @@ impl AStar {
         best: &mut Best,
         cost: &mut F,
     ) -> bool {
+        self.search_linked(start, target, opts, best, cost, None)
+    }
+
+    /// [`search`](Self::search) over `links` too, each this many steps
+    /// dearer than it says.
+    pub fn search_linked<F: FnMut(usize) -> f32>(
+        &mut self,
+        start: usize,
+        target: usize,
+        opts: SearchOpts,
+        best: &mut Best,
+        cost: &mut F,
+        links: Option<(&Links, f32)>,
+    ) -> bool {
         let len = self.cells.len();
         if start >= len || target >= len {
             return false;
@@ -209,17 +274,12 @@ impl AStar {
                 return true;
             }
 
-            let col = pos % width;
-            for &(dx, dz, step_cost) in &NEIGHBOURS {
-                // left/right map-edge checks; the index range check covers top/bottom.
-                if (dx < 0 && col == 0) || (dx > 0 && col + 1 == width) {
+            let jumps = links.map_or(&[][..], |(l, _)| l.of(pos)).iter();
+            let extra = links.map_or(0.0, |l| l.1);
+            for (neighbor, step_cost) in steps(width, len, pos).chain(jumps.map(|&(n, s)| (n as usize, s + extra))) {
+                if neighbor >= len {
                     continue;
                 }
-                let n = pos as isize + dz * width as isize + dx;
-                if n < 0 || n as usize >= len {
-                    continue;
-                }
-                let neighbor = n as usize;
                 let cell = &mut self.cells[neighbor];
 
                 // don't explore the same node twice
@@ -283,11 +343,18 @@ impl AStar {
     /// unreachable, a second search to the reachable cell closest to it.
     /// Returns the cell the path ends at, or `None` if no cell closer than
     /// `start` is reachable (the caller then heads straight for the target).
-    pub fn find_path<F: FnMut(usize) -> f32>(&mut self, start: usize, target: usize, cost: &mut F) -> Option<usize> {
+    /// Over `links` too, if any (see [`search_linked`](Self::search_linked)).
+    pub fn find_path<F: FnMut(usize) -> f32>(
+        &mut self,
+        start: usize,
+        target: usize,
+        cost: &mut F,
+        links: Option<(&Links, f32)>,
+    ) -> Option<usize> {
         let opts = SearchOpts { pass_target: true, track_best: true, record_path: true };
         self.new_query();
         let mut best = Best::new(start);
-        if self.search(start, target, opts, &mut best, cost) {
+        if self.search_linked(start, target, opts, &mut best, cost, links) {
             return Some(target);
         }
         if best.pos == start {
@@ -297,7 +364,7 @@ impl AStar {
         // reachable, so one restart suffices. Bail out instead of looping if
         // that fails anyway (e.g. NaN costs).
         let closest = best.pos;
-        self.search(start, closest, opts, &mut best, cost).then_some(closest)
+        self.search_linked(start, closest, opts, &mut best, cost, links).then_some(closest)
     }
 
     /// Reachability of every cell towards `origin`, for many targets at once.
@@ -355,13 +422,20 @@ impl AStar {
 
 /// In-grid neighbours of `pos`, in [`NEIGHBOURS`] order.
 fn neighbours(width: usize, len: usize, pos: usize) -> impl Iterator<Item = usize> {
+    steps(width, len, pos).map(|(n, _)| n)
+}
+
+/// In-grid neighbours of `pos` and the cost multiplier of the step to each,
+/// in [`NEIGHBOURS`] order.
+fn steps(width: usize, len: usize, pos: usize) -> impl Iterator<Item = (usize, f32)> {
     let col = pos % width.max(1);
-    NEIGHBOURS.iter().filter_map(move |&(dx, dz, _)| {
+    NEIGHBOURS.iter().filter_map(move |&(dx, dz, step)| {
+        // left/right map-edge checks; the index range check covers top/bottom.
         if (dx < 0 && col == 0) || (dx > 0 && col + 1 == width) {
             return None;
         }
         let n = pos as isize + dz * width as isize + dx;
-        (n >= 0 && (n as usize) < len).then_some(n as usize)
+        (n >= 0 && (n as usize) < len).then_some((n as usize, step))
     })
 }
 
@@ -418,7 +492,7 @@ mod tests {
         target: usize,
         cost: &mut impl FnMut(usize) -> f32,
     ) -> (Option<usize>, Vec<usize>) {
-        let end = a.find_path(start, target, cost);
+        let end = a.find_path(start, target, cost, None);
         let mut out = Vec::new();
         if let Some(e) = end {
             a.trace(start, e, &mut out);
@@ -509,7 +583,7 @@ mod tests {
         let mut a = AStar::new(W, W * W);
         let start = cell(5, 5);
         let mut cost = grid_cost(|x, z| x.abs_diff(5) <= 1 && z.abs_diff(5) <= 1 && (x, z) != (5, 5));
-        assert_eq!(a.find_path(start, cell(0, 0), &mut cost), None);
+        assert_eq!(a.find_path(start, cell(0, 0), &mut cost, None), None);
     }
 
     #[test]
@@ -538,7 +612,7 @@ mod tests {
         // A degenerate grid never finds anything.
         let mut empty = AStar::new(0, 5);
         assert_eq!(empty.len(), 0);
-        assert_eq!(empty.find_path(0, 0, &mut cost), None);
+        assert_eq!(empty.find_path(0, 0, &mut cost, None), None);
     }
 
     #[test]
@@ -557,12 +631,51 @@ mod tests {
             calls.set(calls.get() + 1);
             1.0
         };
-        a.find_path(cell(0, 0), cell(9, 9), &mut cost);
+        a.find_path(cell(0, 0), cell(9, 9), &mut cost, None);
         let first = calls.get();
         assert!(first > 0 && first <= W * W);
         // A new query must re-evaluate costs (threat maps change between queries).
-        a.find_path(cell(0, 0), cell(9, 9), &mut cost);
+        a.find_path(cell(0, 0), cell(9, 9), &mut cost, None);
         assert_eq!(calls.get(), 2 * first);
+    }
+
+    #[test]
+    fn links_jump_walls_when_cheaper() {
+        // Wall at x = 5 with a single gap at z = 9; a link over it at z = 0.
+        let wall = |x: usize, z: usize| x == 5 && z != 9;
+        let links = Links::new(W * W, vec![(cell(4, 0), cell(6, 0), 2.0 + 3.0)]);
+        let (start, target) = (cell(0, 0), cell(9, 0));
+        let mut a = AStar::new(W, W * W);
+        let end = a.find_path(start, target, &mut grid_cost(wall), Some((&links, 0.0)));
+        assert_eq!(end, Some(target));
+        let mut cells = Vec::new();
+        a.trace(start, target, &mut cells);
+        assert!(cells.windows(2).any(|w| w == [cell(4, 0), cell(6, 0)]), "{cells:?}");
+        assert!(!cells.contains(&cell(5, 9)), "{cells:?}");
+        // Four steps, the link's five (times its landing's multiplier), three.
+        assert!((a.min_cost(target) - 12.0).abs() < 1e-4, "{}", a.min_cost(target));
+
+        // Dearer than the way round (here by a reload to wait out), or
+        // dropped: through the gap.
+        let mut dropped = links.clone();
+        dropped.drop_edge(cell(4, 0), cell(6, 0));
+        for (links, extra) in [(&links, 30.0), (&dropped, 0.0)] {
+            let end = a.find_path(start, target, &mut grid_cost(wall), Some((links, extra)));
+            assert_eq!(end, Some(target));
+            a.trace(start, target, &mut cells);
+            assert!(cells.contains(&cell(5, 9)), "{cells:?}");
+            assert_connected(start, &cells);
+        }
+    }
+
+    #[test]
+    fn links_lists() {
+        let l = Links::new(6, vec![(4, 1, 2.0), (0, 5, 3.0), (4, 0, 1.0)]);
+        assert_eq!(l.of(0), [(5, 3.0)]);
+        assert!(l.of(1).is_empty() && l.of(5).is_empty() && l.of(6).is_empty() && l.of(99).is_empty());
+        assert_eq!(l.of(4), [(0, 1.0), (1, 2.0)]);
+        assert_eq!(l.len(), 3);
+        assert!(Links::new(0, Vec::new()).of(0).is_empty());
     }
 
     #[test]

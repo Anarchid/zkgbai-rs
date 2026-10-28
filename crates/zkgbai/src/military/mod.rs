@@ -502,6 +502,7 @@ impl Ai {
 
     pub fn war_update(&mut self, frame: i32) {
         self.war.frame = frame;
+        self.pathfinder.now = frame;
         self.war.updated = true;
 
         // Each step is guarded separately: a fault in one handler must not

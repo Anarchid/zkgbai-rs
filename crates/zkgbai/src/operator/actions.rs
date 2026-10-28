@@ -79,6 +79,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
     ),
     ("jumps", "Army", "jumpjets jump"),
+    ("jumppath", "Army", "jumpjets' ways jump cliffs they would walk round"),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
     ("escorts", "Army", "escorts for Impaler batteries (the impaler doctrine)"),

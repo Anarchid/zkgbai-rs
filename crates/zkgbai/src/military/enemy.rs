@@ -371,7 +371,7 @@ impl Enemy {
 
     /// Current health, falling back to the last observed value when the unit
     /// is out of sight, and to the def's max health if never observed.
-    fn current_health(&self) -> f32 {
+    pub fn current_health(&self) -> f32 {
         let h = self.unit.health();
         if h > 0.0 {
             self.last_health.set(h);

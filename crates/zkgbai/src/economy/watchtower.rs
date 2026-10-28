@@ -8,10 +8,13 @@
 //!
 //! From some income on, the nearest constructors raise a spike on safe
 //! ground of ours whose radar would see enough of that (of the places that
-//! bring in nearly the most, the farthest back), and the radar goes on top
-//! (or on the ground, if the spike does not come up). Radar sees by sight
-//! lines over the terrain, as the engine's does: what a hill between hides,
-//! a site does not count, unless the spike lifts the radar over it.
+//! bring in nearly the most, the farthest back; there, on the highest
+//! ground about it that sees nearly as much), and the radar goes on top
+//! (or on the ground, if the spike does not come up, or if the hill alone
+//! sees all a spike would). The spike is the radar's footprint wide. Radar
+//! sees by sight lines over the terrain, as the engine's does: what a hill
+//! between hides, a site does not count, unless the spike lifts the radar
+//! over it.
 
 use springai::{Unit, Vec3};
 
@@ -25,10 +28,17 @@ const RADAR: &str = "staticheavyradar";
 /// How far its radar reaches, less a margin, elmos.
 const REACH: f32 = 5000.0;
 
-/// The spike: a flat top this much higher than the ground under it, this
-/// wide, elmos.
+/// The spike: a flat top this much higher than the ground under it, elmos,
+/// just the radar's footprint wide (see `eco_raise_spike`).
 const SPIKE: f32 = 64.0;
-const TOP: f32 = 48.0;
+
+/// Natural high ground is looked for this far about the chosen place, on
+/// a grid this fine, elmos; the highest this many points are weighed.
+const HILL_SEARCH: f32 = 480.0;
+const HILL_STEP: f32 = 32.0;
+const HILLS: usize = 24;
+/// Not on top of the metal spot itself.
+const HILL_OFF_SPOT: f32 = 64.0;
 
 /// The radar's height above its footing (`radarEmitHeight`), and how high
 /// above the ground what it watches stands, elmos.
@@ -64,7 +74,9 @@ pub struct Watchtower {
     site: Vec3,
     /// Ground height there before the spike.
     ground: f32,
-    worker: Unit,
+    /// The constructor raising the spike (none when the ground is high
+    /// enough as it is).
+    worker: Option<Unit>,
     since: i32,
     /// Constructors sent to raise the spike.
     tries: u32,
@@ -85,17 +97,18 @@ impl Ai {
             let (site, ground, worker, since, planned, tries) =
                 (t.site, t.ground, t.worker, t.since, t.planned, t.tries);
             let raised = self.cb.map().elevation_at(site.x, site.z) - ground;
-            let called_away = !planned && raised < SPIKE - 8.0 && !is_terraforming(worker);
+            let called_away = !planned && raised < SPIKE - 8.0 && worker.is_some_and(|w| !is_terraforming(w));
             if towers.iter().any(|r| distance(r.pos(), site) < 300.0) {
                 self.log(&format!("radar: watchtower up at ({:.0}, {:.0}), {raised:.0} elmos up", site.x, site.z));
                 (self.eco.watchtower, self.eco.watchtower_after) = (None, frame + RETRY);
             } else if called_away && tries < RAISE_TRIES && frame - since <= RAISE_FRAMES {
                 // Another constructor, when one is free.
-                let orders: Vec<i32> = worker.current_commands().iter().map(|c| c.id()).collect();
+                let orders: Vec<i32> =
+                    worker.map(|w| w.current_commands().iter().map(|c| c.id()).collect()).unwrap_or_default();
                 if let Some(unit) = self.eco_raise_spike(site) {
                     let tries = tries + 1;
                     if let Some(t) = self.eco.watchtower.as_mut() {
-                        (t.worker, t.tries) = (unit, tries);
+                        (t.worker, t.tries) = (Some(unit), tries);
                     }
                     self.log(&format!(
                         "radar: the constructor raising the spike at ({:.0}, {:.0}) was called away (orders \
@@ -177,22 +190,62 @@ impl Ai {
         else {
             return;
         };
-        // Beside the metal spot, away from the enemy.
+        // Beside the metal spot, away from the enemy, unless a hill about it
+        // sees as much: of the safe ground of ours there whose spike would
+        // see nearly the most, the highest.
         let base = self.graph.get_ally_center();
+        let beside = get_directional_point(spot, base, 150.0);
+        let n = (HILL_SEARCH / HILL_STEP) as i32;
+        let (w, h) = (self.cb.map().width() as f32 * 8.0, self.cb.map().height() as f32 * 8.0);
+        let mut hills: Vec<(f32, Vec3)> = (-n..=n)
+            .flat_map(|i| (-n..=n).map(move |j| Vec3::xz(spot.x + i as f32 * HILL_STEP, spot.z + j as f32 * HILL_STEP)))
+            .filter(|p| p.x > 32.0 && p.z > 32.0 && p.x < w - 32.0 && p.z < h - 32.0)
+            .filter(|&p| (HILL_OFF_SPOT..=HILL_SEARCH).contains(&distance(p, spot)))
+            .filter(|&p| self.graph.is_ally_territory(p) && self.war.get_threat(p) <= 0.0)
+            .map(|p| (hm.height_at(p.x, p.z), p))
+            .collect();
+        hills.sort_by(|a, b| b.0.total_cmp(&a.0));
+        hills.truncate(HILLS);
+        hills.push((hm.height_at(beside.x, beside.z), beside));
+        let hills: Vec<(usize, f32, Vec3)> = hills.into_iter().map(|(y, p)| (reached(p), y, p)).collect();
+        let best = hills.iter().map(|c| c.0).max().unwrap_or(0);
+        let mut hills: Vec<(f32, Vec3)> =
+            (hills.into_iter()).filter(|c| 5 * c.0 >= 4 * best).map(|c| (c.1, c.2)).collect();
+        hills.sort_by(|a, b| b.0.total_cmp(&a.0));
         // Clear of other buildings by the spike's skirts (terraforming stops
-        // at buildings).
-        let site =
-            self.cb.map().find_closest_build_site(def, get_directional_point(spot, base, 150.0), 600.0, CLEARANCE, 0);
+        // at buildings): on the hill, or the nearest place to it; else
+        // beside the spot as before.
+        let map = self.cb.map();
+        let site = (hills.iter().map(|&(_, p)| map.find_closest_build_site(def, p, 2.0 * HILL_STEP, CLEARANCE, 0)))
+            .find(|s| s.x >= 0.0)
+            .unwrap_or_else(|| map.find_closest_build_site(def, beside, 600.0, CLEARANCE, 0));
         if site.x < 0.0 {
             return;
         }
-        let ground = self.cb.map().elevation_at(site.x, site.z);
+        let ground = map.elevation_at(site.x, site.z);
         let (worth, flat) = (reached(site), reached_from(site, EMIT_HEIGHT));
+        // How much higher than beside the spot (+ 0.0: no "-0").
+        let hill = (ground - hm.height_at(beside.x, beside.z)).round() + 0.0;
+        if flat >= worth {
+            // High enough as it is: the radar alone.
+            if self.eco_add_simple(def, site, List::Construction, None).is_none() {
+                return;
+            }
+            self.eco.watchtower =
+                Some(Watchtower { site, ground, worker: None, since: frame, tries: 0, planned: true });
+            self.log(&format!(
+                "radar: a watchtower at ({:.0}, {:.0}) on the ground, {hill} higher than beside the spot: a spike \
+                 would see no more (worth {flat})",
+                site.x, site.z
+            ));
+            return;
+        }
         let Some(unit) = self.eco_raise_spike(site) else { return };
-        self.eco.watchtower = Some(Watchtower { site, ground, worker: unit, since: frame, tries: 1, planned: false });
+        self.eco.watchtower =
+            Some(Watchtower { site, ground, worker: Some(unit), since: frame, tries: 1, planned: false });
         self.log(&format!(
-            "radar: raising a spike at ({:.0}, {:.0}) for a watchtower over enemy ground out of radar (worth {worth} \
-             in sight from the spike, {flat} from the ground)",
+            "radar: raising a spike at ({:.0}, {:.0}), {hill} higher than beside the spot, for a watchtower over enemy \
+             ground out of radar (worth {worth} in sight from the spike, {flat} from the ground)",
             site.x, site.z
         ));
     }
@@ -214,8 +267,13 @@ impl Ai {
             }
         }
         let unit = *units.first()?;
-        let h = TOP / 2.0;
-        let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
+        // The gadget levels whole 16-elmo cells, from those the polygon's
+        // corners floor to (`floor(x / 16) * 16`) through the next row and
+        // column: corners just inside the footprint level it and no more.
+        let (fx, fz) =
+            self.defs.get(RADAR).map_or((16.0, 16.0), |d| (d.x_size() as f32 * 8.0, d.z_size() as f32 * 8.0));
+        let (hx, hz) = (fx / 2.0 - 4.0, fz / 2.0 - 4.0);
+        let square = [(-hx, -hz), (hx, -hz), (hx, hz), (-hx, hz)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
         let map = self.cb.map();
         let top = square.iter().map(|p| map.elevation_at(p.x, p.z)).fold(map.elevation_at(site.x, site.z), f32::max);
         self.terraform_level(&units, &square, top + SPIKE, false);
