@@ -1215,6 +1215,7 @@ impl Ai {
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
+        self.fightsim_enemy_destroyed(id);
         self.strikes_enemy_destroyed(enemy, attacker);
         self.impalers_enemy_destroyed(enemy, attacker);
         self.taskforce_enemy_destroyed(enemy, attacker);
