@@ -23,7 +23,13 @@
 //! their way, and what dodges a tangent cannot sidestep a ram. With
 //! `commit`, a run begun is finished through its target before threat,
 //! raiders or its health are judged again (runs are for doing damage; they
-//! expect losses); `shun_porc` off lets it run at turrets too.
+//! expect losses); `shun_porc` off lets it run at turrets too. With `judge`
+//! predictor, whether a run is worth it is the fight predictor's call
+//! instead of the threat maps': a run is a sequence of fights, one per
+//! group of enemies along its way, each asked of the predictor with the
+//! pack as the fights before should leave it; it goes if the expected kills
+//! and the economy at the target beat the expected losses by
+//! `judge_margin`, and gives up when the rest of a run stops being worth it.
 //!
 //! It falls back as one: from threat that outweighs it where it is, home
 //! (10 s before it judges again); from raiders worth `rip_value` near it,
@@ -41,12 +47,15 @@
 //! back to its screen, parks / is repaired, takes in (merges), is led from
 //! its bulk; engages and break-offs as other forces'.
 
-use springai::{Unit, Vec3};
+use std::sync::Arc;
 
-use super::Attack;
+use springai::{Unit, UnitDef, Vec3};
+
+use super::{Attack, Judge};
 use crate::Ai;
 use crate::kgbutil::PathCost;
 use crate::military::SquadId;
+use crate::military::fightsim::{FightSnapshot, Model, SnapUnit, UnitSpec};
 use crate::military::wrappers::squad::health_fraction;
 use crate::nav;
 use crate::util::{NULLPOS, distance, get_directional_point};
@@ -71,6 +80,18 @@ const SHUN_FOR: i32 = 1800;
 /// A charge is aimed anew each conduct until this close to its target,
 /// then runs straight through.
 const CHARGE_LOCK: f32 = 200.0;
+/// The predictor judges a run on enemies seen within this many frames...
+const JUDGE_SEEN: i32 = 900;
+/// ...within their reach of the run's way, mobiles this much more (they
+/// close in)...
+const JUDGE_CHASE: f32 = 300.0;
+/// ...as engagements apart where a gap this long along the way parts them;
+/// the pack meets each this far short of it.
+const JUDGE_GAP: f32 = 600.0;
+const JUDGE_MEET: f32 = 500.0;
+/// A run the predictor judges not worth it shuns its target this many
+/// frames (30 s).
+const JUDGE_SHUN: i32 = 900;
 /// A pack is led from where most of its cores stand within this of one
 /// another...
 const BULK: f32 = 400.0;
@@ -225,6 +246,12 @@ pub fn pass_way(pos: Vec3, target: Vec3, pass: &Pass) -> [Vec3; 2] {
     [on(a), on(a + PASS_ON)]
 }
 
+/// The way a run judges: from `pos` by the target `t` and on past it.
+fn pack_route(pos: Vec3, t: Vec3) -> [Vec3; 3] {
+    let d = distance(pos, t).max(1.0);
+    [pos, t, Vec3::xz(t.x + (t.x - pos.x) / d * PASS_ON, t.z + (t.z - pos.z) / d * PASS_ON)]
+}
+
 /// For a way to `dest` that lies more than a right angle off `heading` at
 /// `pos`: a first waypoint [`TURN`] along, turned a right angle toward its
 /// side, so that the force swings round instead of reversing.
@@ -255,6 +282,73 @@ pub fn spaced(path: impl IntoIterator<Item = Vec3>, from: Vec3, n: usize, spacin
         out.extend(end);
     }
     out
+}
+
+/// What the fight predictor expects of a run (see `pack_judge`): its
+/// engagements, the enemy metal they kill, the economy at the target taken
+/// if any of the pack gets there, the pack's metal lost, and how many of its
+/// cores go in and are left.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Judgement {
+    pub engagements: usize,
+    pub gain: f32,
+    pub prize: f32,
+    pub loss: f32,
+    pub cores: usize,
+    pub left: usize,
+}
+
+impl Judgement {
+    pub fn worth(&self) -> f32 {
+        self.gain + self.prize - self.loss
+    }
+}
+
+/// How far along `route` the point of it nearest `p` lies, and how far off
+/// `p` is.
+pub fn route_project(route: &[Vec3], p: Vec3) -> (f32, f32) {
+    let (mut best, mut along) = ((f32::INFINITY, 0.0), 0.0);
+    for w in route.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let (dx, dz) = (b.x - a.x, b.z - a.z);
+        let len2 = dx * dx + dz * dz;
+        let t = if len2 > 0.0 { (((p.x - a.x) * dx + (p.z - a.z) * dz) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let q = Vec3::xz(a.x + t * dx, a.z + t * dz);
+        let off = distance(p, q);
+        if off < best.0 {
+            best = (off, along + t * len2.sqrt());
+        }
+        along += len2.sqrt();
+    }
+    (best.1, best.0)
+}
+
+/// The point `s` along `route` (its last point beyond its end).
+pub fn route_point(route: &[Vec3], mut s: f32) -> Vec3 {
+    for w in route.windows(2) {
+        let len = distance(w[0], w[1]);
+        if s <= len && len > 0.0 {
+            let t = s / len;
+            return Vec3::xz(w[0].x + t * (w[1].x - w[0].x), w[0].z + t * (w[1].z - w[0].z));
+        }
+        s -= len;
+    }
+    route.last().copied().unwrap_or(NULLPOS)
+}
+
+/// Engagements along a way: the indices of `along` (distances along it) in
+/// order, grouped where a gap longer than `gap` parts them.
+pub fn engagements(along: &[f32], gap: f32) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..along.len()).collect();
+    order.sort_by(|&a, &b| along[a].total_cmp(&along[b]));
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for i in order {
+        match groups.last_mut() {
+            Some(g) if along[i] - along[*g.last().unwrap()] <= gap => g.push(i),
+            _ => groups.push(vec![i]),
+        }
+    }
+    groups
 }
 
 fn ordinal(n: u32) -> String {
@@ -346,10 +440,13 @@ impl Ai {
 
         // Outweighed where it is: home.
         // (Porc counts whatever the pack weighs: it outranges every gun.)
+        // (Judged by the predictor, a run's fights are its business: porc only.)
+        let predictor = shape.judge == Judge::Predictor;
         let (outweighed, fthreat) = {
             let view = self.war.view(leader.def());
             let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
-            let threat = view.get_effective_threat(pos).max(view.get_porc_threat(pos));
+            let porc = view.get_porc_threat(pos);
+            let threat = if predictor { porc } else { view.get_effective_threat(pos).max(porc) };
             (threat / courage > tolerance, view.get_friendly_threat(pos))
         };
         if shape.flee_threat && outweighed && !running {
@@ -397,11 +494,21 @@ impl Ai {
             .flatten();
         // (By the rule it was chosen by, the threat there less ours: a
         // stricter one dropped it again a conduct later.)
-        let keep = left.filter(|&(t, _)| {
+        let mut keep = left.filter(|&(t, _)| {
             let view = self.war.view(leader.def());
-            running || (view.get_effective_threat(t) <= fthreat && (!shape.shun_porc || view.get_porc_threat(t) <= 0.0))
+            let porc_ok = !shape.shun_porc || view.get_porc_threat(t) <= 0.0;
+            running || (porc_ok && (predictor || view.get_effective_threat(t) <= fthreat))
         });
         st.shun.retain(|s| s.1 > self.frame);
+        // Judged by the predictor, the rest of the run must stay worth it.
+        if let Some((t, _)) = keep.filter(|_| predictor && !running)
+            && let Some(j) = self.pack_judge(sid, &pack_route(pos, t))
+            && j.worth() < shape.judge_margin
+        {
+            self.pack_log_judgement(sid, t, &j, "gives up on");
+            st.shun.push((t, self.frame + JUDGE_SHUN));
+            keep = None;
+        }
         if let Some((t, mobile)) = keep {
             st.target = t;
             st.mobile = mobile;
@@ -418,6 +525,20 @@ impl Ai {
                 self.pack_go(sid, pos, head, at, false);
                 self.pack_screen(sid, at, false);
                 return (None, "no target".into());
+            }
+            // Judged by the predictor, a run not worth it is passed up.
+            if predictor && let Some(j) = self.pack_judge(sid, &pack_route(pos, t)) {
+                let go = j.worth() >= shape.judge_margin;
+                self.pack_log_judgement(sid, t, &j, if go { "takes on" } else { "passes up" });
+                if !go {
+                    st.shun.push((t, self.frame + JUDGE_SHUN));
+                    st.target = NULLPOS;
+                    self.taskforces.packs.insert(sid, st);
+                    let at = self.pack_gather(pos);
+                    self.pack_go(sid, pos, head, at, false);
+                    self.pack_screen(sid, at, false);
+                    return (None, "judged not worth it".into());
+                }
             }
             st.target = self.war_mark_target(t);
             st.since = self.frame;
@@ -503,6 +624,111 @@ impl Ai {
         self.pack_screen(sid, home, false);
         self.taskforces.packs.insert(sid, st);
         (Some(target), String::new())
+    }
+
+    /// What the fight predictor expects of pack `sid` running along `route`
+    /// (from where it stands, by its target, `route[1]`, and on): the armed
+    /// enemies seen lately within their reach of the way (mobiles a little
+    /// more) grouped into engagements by where they lie along it, each asked
+    /// in turn as a fight with the pack as it would arrive there (moved to
+    /// meet it, less the cores the fights before were expected to kill, the
+    /// most hurt first); the unarmed enemy economy at the target is the prize
+    /// if any core gets there. None without the model.
+    fn pack_judge(&mut self, sid: SquadId, route: &[Vec3]) -> Option<Judgement> {
+        if self.taskforces.model.is_none() {
+            let m = Model::load().map(Arc::new);
+            if let Err(e) = &m {
+                self.log(&format!("taskforce: packs cannot load the fight predictor ({e}); they judge by threat"));
+            }
+            self.taskforces.model = Some(m.ok());
+        }
+        let model = self.taskforces.model.clone().flatten()?;
+        let target = *route.get(1)?;
+        let s = self.squads.get(sid)?;
+        let ours: Vec<(UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+            .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())) && f.unit.health() > 0.0)
+            .filter_map(|f| f.unit.def().map(|d| (d, f.unit.health(), f.get_pos())))
+            .collect();
+        let frame = self.frame;
+        let seen: Vec<(UnitDef, f32, Vec3, bool)> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.identified && frame - e.last_seen <= JUDGE_SEEN)
+            .filter_map(|e| e.ud.map(|d| (d, e.get_health() * e.def_health(), e.position, e.can_fly())))
+            .collect();
+        let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3)> =
+            ours.into_iter().map(|(d, hp, p)| (self.fight_spec(d), hp, p)).collect();
+        let mut j = Judgement { cores: pack.len(), ..Judgement::default() };
+        let mut armed: Vec<(Arc<UnitSpec>, f32, Vec3)> = Vec::new();
+        let mut along = Vec::new();
+        for (def, hp, p, flies) in seen {
+            let spec = self.fight_spec(def);
+            if spec.weapons.is_empty() {
+                if !flies && distance(p, target) < TARGET_LEFT {
+                    j.prize += spec.cost;
+                }
+                continue;
+            }
+            let reach =
+                spec.weapons.iter().map(|w| w.range).fold(0.0, f32::max) + if spec.mobile { JUDGE_CHASE } else { 0.0 };
+            let (s, off) = route_project(route, p);
+            if off <= reach {
+                armed.push((spec, hp, p));
+                along.push(s);
+            }
+        }
+        for group in engagements(&along, JUDGE_GAP) {
+            if pack.is_empty() {
+                break;
+            }
+            j.engagements += 1;
+            let at = group.iter().map(|&i| along[i]).sum::<f32>() / group.len() as f32;
+            // The pack as it meets them: moved along the way unless they are
+            // upon it already.
+            let n = pack.len() as f32;
+            let c = Vec3::xz(pack.iter().map(|u| u.2.x).sum::<f32>() / n, pack.iter().map(|u| u.2.z).sum::<f32>() / n);
+            let meet = if at > JUDGE_MEET { route_point(route, at - JUDGE_MEET) } else { c };
+            let (sx, sz) = (meet.x - c.x, meet.z - c.z);
+            let mut snap = FightSnapshot::default();
+            for (spec, hp, p) in &pack {
+                snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x + sx, z: p.z + sz });
+            }
+            for &i in &group {
+                let (spec, hp, p) = &armed[i];
+                snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+            }
+            let out = model.predict(&snap);
+            let cost_a: f32 = pack.iter().map(|u| u.0.cost).sum();
+            let cost_b: f32 = group.iter().map(|&i| armed[i].0.cost).sum();
+            j.loss += out.mean_a * cost_a;
+            j.gain += out.mean_b * cost_b;
+            for u in &mut pack {
+                (u.2.x, u.2.z) = (u.2.x + sx, u.2.z + sz);
+            }
+            let dead = (out.mean_a * n).round() as usize;
+            pack.sort_by(|a, b| a.1.total_cmp(&b.1));
+            pack.drain(..dead.min(pack.len()));
+        }
+        j.left = pack.len();
+        if pack.is_empty() {
+            j.prize = 0.0;
+        }
+        Some(j)
+    }
+
+    fn pack_log_judgement(&mut self, sid: SquadId, t: Vec3, j: &Judgement, verdict: &str) {
+        let doctrine = self.squads.get(sid).map(|s| s.shape.doctrine.clone()).unwrap_or_default();
+        self.log(&format!(
+            "taskforce: the {doctrine} pack (squad {sid}) {verdict} ({:.0}, {:.0}): worth {:.0} = kills {:.0} + \
+             prize {:.0} - losses {:.0} over {} engagements, {} of {} cores left",
+            t.x,
+            t.z,
+            j.worth(),
+            j.gain,
+            j.prize,
+            j.loss,
+            j.engagements,
+            j.left,
+            j.cores
+        ));
     }
 
     /// The pack's guns for a pass: each core's place in the formation (the
@@ -734,6 +960,26 @@ mod tests {
         assert!(c.side.abs() <= PASS_STEP / 2.0 && n == 3);
         let [a, _] = pass_way(o, t, &c);
         assert!(distance(a, t) <= PASS_STEP / 2.0);
+    }
+
+    #[test]
+    fn routes_measure_along_and_off() {
+        let route = [Vec3::xz(0.0, 0.0), Vec3::xz(1000.0, 0.0), Vec3::xz(1000.0, 500.0)];
+        let (s, off) = route_project(&route, Vec3::xz(400.0, 100.0));
+        assert!((s - 400.0).abs() < 0.5 && (off - 100.0).abs() < 0.5);
+        // On the second leg: 1000 along the first, then 300 up it.
+        let (s, off) = route_project(&route, Vec3::xz(1200.0, 300.0));
+        assert!((s - 1300.0).abs() < 0.5 && (off - 200.0).abs() < 0.5);
+        assert!(close(route_point(&route, 1250.0), Vec3::xz(1000.0, 250.0)));
+        assert!(close(route_point(&route, 5000.0), Vec3::xz(1000.0, 500.0)));
+    }
+
+    #[test]
+    fn engagements_split_at_gaps() {
+        let along = [900.0, 100.0, 300.0, 2000.0, 1300.0];
+        assert_eq!(engagements(&along, 600.0), vec![vec![1, 2, 0, 4], vec![3]]);
+        assert_eq!(engagements(&along, 300.0), vec![vec![1, 2], vec![0], vec![4], vec![3]]);
+        assert!(engagements(&[], 600.0).is_empty());
     }
 
     #[test]

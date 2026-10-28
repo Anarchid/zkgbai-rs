@@ -211,7 +211,7 @@ impl Ai {
     }
 
     /// The simulation's view of a unit type, cached per def.
-    fn fight_spec(&mut self, def: UnitDef) -> Arc<UnitSpec> {
+    pub(crate) fn fight_spec(&mut self, def: UnitDef) -> Arc<UnitSpec> {
         if let Some(s) = self.war.fightsim.specs.get(&def.id()) {
             return s.clone();
         }

@@ -107,6 +107,35 @@ impl Attack {
     }
 }
 
+/// How a pack judges whether a run is worth it (see `pack`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Judge {
+    /// The threat maps: the target's threat less ours no more than ours
+    /// where the pack stands.
+    Map,
+    /// The fight predictor (`military::fightsim`), asked about each
+    /// engagement along the run in turn.
+    Predictor,
+}
+
+const JUDGES: [Judge; 2] = [Judge::Map, Judge::Predictor];
+
+impl Judge {
+    pub fn name(self) -> &'static str {
+        match self {
+            Judge::Map => "map",
+            Judge::Predictor => "predictor",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Judge, String> {
+        JUDGES.into_iter().find(|j| j.name() == s).ok_or_else(|| {
+            let names: Vec<&str> = JUDGES.iter().map(|j| j.name()).collect();
+            format!("judge '{s}': one of {}", names.join(", "))
+        })
+    }
+}
+
 /// How a member keeps with its force's leader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keep {
@@ -389,6 +418,10 @@ pub struct Doctrine {
     pub commit: bool,
     /// Packs: targets, run lines and ground under enemy porc are shunned.
     pub shun_porc: bool,
+    /// Packs: how a run is judged worth going on, and (the predictor) by how
+    /// much metal its expected kills must beat its expected losses.
+    pub judge: Judge,
+    pub judge_margin: f32,
 }
 
 impl Doctrine {
@@ -435,6 +468,8 @@ impl Doctrine {
             attack: Attack::Pass,
             commit: false,
             shun_porc: true,
+            judge: Judge::Map,
+            judge_margin: 0.0,
         }
     }
 
@@ -473,7 +508,7 @@ impl Doctrine {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "name": self.name,
             "note": self.note,
             "enabled": self.enabled,
@@ -505,6 +540,9 @@ impl Doctrine {
             "mark_wait_ratio": self.mark_wait_ratio,
             "mark_hold_for": self.mark_hold_for,
             "mark_move": self.mark_move,
+        });
+        // Packs' fields (one json! with all of them overflows its recursion).
+        let pack = json!({
             "core_keep": self.core_keep.name(),
             "core_orbit": self.core_orbit,
             "cores_to_go": self.cores_to_go,
@@ -515,7 +553,13 @@ impl Doctrine {
             "attack": self.attack.name(),
             "commit": self.commit,
             "shun_porc": self.shun_porc,
-        })
+            "judge": self.judge.name(),
+            "judge_margin": self.judge_margin,
+        });
+        if let (Value::Object(m), Value::Object(p)) = (&mut v, pack) {
+            m.extend(p);
+        }
+        v
     }
 
     /// Change the fields `patch` names. `roles` replaces them all (each
@@ -585,6 +629,8 @@ impl Doctrine {
                 "attack" => self.attack = Attack::parse(&string(k, v)?)?,
                 "commit" => self.commit = flag(k, v)?,
                 "shun_porc" => self.shun_porc = flag(k, v)?,
+                "judge" => self.judge = Judge::parse(&string(k, v)?)?,
+                "judge_margin" => self.judge_margin = num(k, v, -1e5, 1e5)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -727,6 +773,8 @@ impl Doctrine {
             attack: self.attack,
             commit: self.commit,
             shun_porc: self.shun_porc,
+            judge: self.judge,
+            judge_margin: self.judge_margin,
         }
     }
 }
@@ -794,6 +842,8 @@ pub struct Shape {
     pub attack: Attack,
     pub commit: bool,
     pub shun_porc: bool,
+    pub judge: Judge,
+    pub judge_margin: f32,
 }
 
 /// Orbit radius of members that are in no role (extra cores), unless the
@@ -844,6 +894,8 @@ impl Default for Shape {
             attack: Attack::Pass,
             commit: false,
             shun_porc: true,
+            judge: Judge::Map,
+            judge_margin: 0.0,
         }
     }
 }
@@ -1237,6 +1289,10 @@ mod tests {
         assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Charge, true, false));
         let Value::Object(p) = json!({"attack": "ram"}) else { panic!() };
         assert!(d.apply(&p).is_err());
+        assert_eq!(d.judge, Judge::Map);
+        let Value::Object(p) = json!({"judge": "predictor", "judge_margin": 200}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.judge, d.judge_margin), (Judge::Predictor, 200.0));
         let Value::Object(p) = json!({"pace_slowest": 2}) else { panic!() };
         assert!(d.apply(&p).is_err());
         // Formations and screens only move under a pack's conduct.

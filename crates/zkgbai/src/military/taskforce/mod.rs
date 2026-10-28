@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-pub use doctrine::{Aim, Attack, Doctrine, Keep, Role, Shape, seeds};
+pub use doctrine::{Aim, Attack, Doctrine, Judge, Keep, Role, Shape, seeds};
 pub use expr::{Expr, Force};
 
 use crate::Ai;
@@ -128,6 +128,9 @@ pub struct Taskforces {
     pub spotters: spotter::Spotters,
     /// Packs' targets and repairs, by force (see `pack`).
     pub packs: BTreeMap<crate::military::SquadId, pack::Pack>,
+    /// The fight predictor's model for packs that judge by it, loaded at
+    /// the first ask (`None` inside if it would not load).
+    pub model: Option<Option<Arc<crate::military::fightsim::Model>>>,
 }
 
 /// Aims whose forces are squads of the squad handler (see
