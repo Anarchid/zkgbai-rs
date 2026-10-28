@@ -1131,6 +1131,44 @@ pub fn seeds() -> Vec<Doctrine> {
     // 2026-10-28, for the full-play test).
     ravager.wake_share = 0.5;
 
+    // Minotaurs as Ravagers, but a pack from one (user, 2026-10-28): Ogres
+    // their screen.
+    let mut minotaur = Doctrine {
+        note: "A Minotaur pack, as the Ravagers' (see `ravager`) but one or more go in, an Ogre screen \
+               trailing. Off by default: enable=minotaur."
+            .into(),
+        core: vec!["tankassault".into()],
+        core_orbit: 75.0,
+        roles: vec![Role { keep: Keep::Trail, ..Role::escort("screen", &["tankriot"], "ceil(cores / 3)", 450.0, 0.0) }],
+        pace: 66.0,
+        cores_to_go: 1,
+        cores_to_stay: 1,
+        ..ravager.clone()
+    };
+    minotaur.name = "minotaur".into();
+
+    // Raider packs, a side experiment (user, 2026-10-28): the same conduct,
+    // no screen, awake from the start.
+    let raiders = |name: &str, unit: &str, pace: f32, orbit: f32, go: u32| Doctrine {
+        name: name.into(),
+        note: format!(
+            "A {name} pack, as the Ravagers' (see `ravager`) but awake from the start, no screen, {go} or more \
+             going in. Off by default: enable={name}."
+        ),
+        core: vec![unit.into()],
+        core_orbit: orbit,
+        roles: Vec::new(),
+        pace,
+        cores_to_go: go,
+        cores_to_stay: 2,
+        rip_value: 0.0,
+        wake_share: 0.0,
+        ..ravager.clone()
+    };
+    let scorcher = raiders("scorcher", "vehraid", 100.0, 45.0, 4);
+    let dagger = raiders("dagger", "hoverraid", 130.0, 45.0, 4);
+    let blitz = raiders("blitz", "tankheavyraid", 88.0, 55.0, 3);
+
     let mut ghostbombs = Doctrine::new("ghostbombs");
     ghostbombs.note = "An Iris cloaking bombs (orbiting within its 350 cloak, holding fire) unseen to a \
                        valuable target, where they charge in."
@@ -1144,7 +1182,9 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.engage_value = 600.0;
     ghostbombs.muster = 90.0;
 
-    vec![felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, ghostbombs]
+    vec![
+        felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger, blitz, ghostbombs,
+    ]
 }
 
 fn string(k: &str, v: &Value) -> Result<String, String> {
@@ -1350,6 +1390,20 @@ mod tests {
         felon.apply(&p).unwrap();
         let defs = Defs::new(crate::military::wrappers::squad::fake_engine::callback());
         assert!(felon.check(&defs, &Classes::default()).is_err_and(|e| e.contains("aim pack")));
+    }
+
+    #[test]
+    fn minotaurs_and_raiders_pack_too() {
+        let seeds = seeds();
+        let get = |n: &str| seeds.iter().find(|d| d.name == n).unwrap();
+        let m = get("minotaur");
+        assert_eq!((m.core[0].as_str(), m.aim, m.cores_to_go, m.cores_to_stay), ("tankassault", Aim::Pack, 1, 1));
+        assert_eq!((m.role("screen").unwrap().units[0].as_str(), m.wake_share), ("tankriot", 0.5));
+        for (n, unit, go) in [("scorcher", "vehraid", 4), ("dagger", "hoverraid", 4), ("blitz", "tankheavyraid", 3)] {
+            let d = get(n);
+            assert_eq!((d.core[0].as_str(), d.cores_to_go, d.wake_share), (unit, go, 0.0));
+            assert!(d.roles.is_empty() && d.aim == Aim::Pack && d.core_keep == Keep::Formation);
+        }
     }
 
     #[test]

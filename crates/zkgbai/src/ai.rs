@@ -65,8 +65,10 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// metal, as priced jobs; gate turrets without the expensive-porc pull;
 /// chokepoints held for our own metal only) awaits its A/B (2026-10-28).
 /// `ravager` (Ravager packs, see `military::taskforce::pack`) is new
-/// (2026-10-28) and unread.
-pub(crate) const OFF_BY_DEFAULT: [&str; 13] = [
+/// (2026-10-28) and lost a full-play series (zkgbai-runs/pack/full);
+/// `minotaur` (Minotaur packs, from one) and the raider packs `scorcher`,
+/// `dagger` and `blitz` are newer still.
+pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
     "pairs",
     "currency",
     "permanence",
@@ -80,6 +82,10 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 13] = [
     "garrison",
     "detour",
     "ravager",
+    "minotaur",
+    "scorcher",
+    "dagger",
+    "blitz",
 ];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
