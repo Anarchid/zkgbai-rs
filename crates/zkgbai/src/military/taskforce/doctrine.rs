@@ -70,6 +70,35 @@ impl Aim {
     }
 }
 
+/// How a member keeps with its force's leader.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    /// Circling it at `orbit` (ZK's circle guard): shieldbots round a
+    /// Felon, for escorts faster than what they circle.
+    Orbit,
+    /// Guarding it (ZK's guard): following it, standing beside it when it
+    /// stops, and striking back at what hits it: a Lance's Mace.
+    Guard,
+}
+
+const KEEPS: [Keep; 2] = [Keep::Orbit, Keep::Guard];
+
+impl Keep {
+    pub fn name(self) -> &'static str {
+        match self {
+            Keep::Orbit => "orbit",
+            Keep::Guard => "guard",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Keep, String> {
+        KEEPS.into_iter().find(|k| k.name() == s).ok_or_else(|| {
+            let names: Vec<&str> = KEEPS.iter().map(|k| k.name()).collect();
+            format!("keep '{s}': one of {}", names.join(", "))
+        })
+    }
+}
+
 /// Units that join a core.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Role {
@@ -82,6 +111,8 @@ pub struct Role {
     pub want: Option<Expr>,
     /// How far from the leader they orbit.
     pub orbit: f32,
+    /// How they keep with the leader (circling it, guarding it).
+    pub keep: Keep,
     /// A new one goes to the force with the fewest of the role, the most
     /// valuable first (true: where it does most good, as Aspis do); else
     /// to the least valuable force.
@@ -112,6 +143,7 @@ impl Role {
             units: Vec::new(),
             want: Some(Expr::per_core(1.0)),
             orbit: 120.0,
+            keep: Keep::Orbit,
             to_strongest: false,
             gauge: true,
             switch_on: false,
@@ -148,6 +180,7 @@ impl Role {
             "units": self.units,
             "want": self.want.as_ref().map(Expr::source),
             "orbit": self.orbit,
+            "keep": self.keep.name(),
             "to_strongest": self.to_strongest,
             "gauge": self.gauge,
             "switch_on": self.switch_on,
@@ -187,6 +220,7 @@ impl Role {
                 "release" => self.release = flag(k, v)?,
                 "spot" => self.spot = optional(v, |v| Spot::parse(&string(k, v)?))?,
                 "orbit" => self.orbit = num(k, v, 20.0, 600.0)?,
+                "keep" => self.keep = Keep::parse(&string(k, v)?)?,
                 "to_strongest" => self.to_strongest = flag(k, v)?,
                 "gauge" => self.gauge = flag(k, v)?,
                 "switch_on" => self.switch_on = flag(k, v)?,
@@ -538,6 +572,7 @@ impl Doctrine {
             roles: (self.roles.iter())
                 .map(|r| RoleShape {
                     orbit: r.orbit,
+                    keep: r.keep,
                     gauge: r.gauge,
                     switch_on: r.switch_on,
                     fire_state: r.fire_state,
@@ -581,6 +616,7 @@ impl Doctrine {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RoleShape {
     pub orbit: f32,
+    pub keep: Keep,
     pub gauge: bool,
     pub switch_on: bool,
     pub fire_state: Option<i32>,
@@ -690,6 +726,12 @@ impl Shape {
         self.role(def).map_or(ORBIT, |r| r.orbit)
     }
 
+    /// How members of this type keep with the leader: their role's way;
+    /// cores and strays circle it.
+    pub fn keep(&self, def: Option<i32>) -> Keep {
+        self.role(def).map_or(Keep::Orbit, |r| r.keep)
+    }
+
     /// A member's fire orders by its doctrine: the core's, or its role's.
     pub fn fire_orders(&self, def: Option<i32>) -> (Option<i32>, Option<bool>) {
         if self.is_core(def) {
@@ -733,14 +775,18 @@ pub fn seeds() -> Vec<Doctrine> {
 
     let mut lance = Doctrine::new("lance");
     lance.note = "Lances (980 range, 3000 a shot) with a Mace, or two Bolas, against the raiders that pick \
-                  them off alone; firing at will, each set on the best target in reach one shot kills. On \
+                  them off alone, guarding it (beside it, striking back at what hits it) rather than \
+                  circling it; firing at will, each set on the best target in reach one shot kills. On \
                   since the 2026-10-24 Circuit read (ab16: army@15 +1402, 15-3-2 against 12-7-1); \
                   disable=lance switches it off."
         .into();
     lance.core = vec!["hoverarty".into()];
     lance.roles = vec![
-        Role::escort("mace", &["hoverriot"], "cores", 130.0, 0.5),
-        Role::escort("bolas", &["hoverheavyraid"], "2 * max(0, cores - mace)", 150.0, 0.0),
+        Role { keep: Keep::Guard, ..Role::escort("mace", &["hoverriot"], "cores", 130.0, 0.5) },
+        Role {
+            keep: Keep::Guard,
+            ..Role::escort("bolas", &["hoverheavyraid"], "2 * max(0, cores - mace)", 150.0, 0.0)
+        },
     ];
     lance.marksman = true;
     lance.engage_value = 1400.0;
@@ -920,6 +966,7 @@ mod tests {
         // Every role takes all that come; Aspis go to the strongest ball
         // and their area shields are not gauged.
         assert!(felon.roles.iter().all(|r| r.want.is_none() && r.produce == 0.0));
+        assert!(felon.roles.iter().all(|r| r.keep == Keep::Orbit));
         let aspis = felon.role("aspis").unwrap();
         assert!(aspis.to_strongest && !aspis.gauge && aspis.orbit == 40.0);
         assert!(felon.role("outlaws").unwrap().switch_on);
@@ -985,6 +1032,8 @@ mod tests {
         let classes = Classes::default();
         let lance = seeds().into_iter().find(|d| d.name == "lance").unwrap();
         assert!(lance.marksman && lance.enabled);
+        // Bodyguards, not orbiters.
+        assert!(lance.roles.iter().all(|r| r.keep == Keep::Guard));
         let force = |units: &[&'static str]| lance.force(units.iter().map(|u| (*u, 100.0)), &classes);
         let (mace, bolas) = (&lance.roles[0], &lance.roles[1]);
         let one = force(&["hoverarty"]);
