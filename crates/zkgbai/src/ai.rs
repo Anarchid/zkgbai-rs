@@ -64,7 +64,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `detour` (ditches by how much longer they make the enemy's way to our
 /// metal, as priced jobs; gate turrets without the expensive-porc pull;
 /// chokepoints held for our own metal only) awaits its A/B (2026-10-28).
-pub(crate) const OFF_BY_DEFAULT: [&str; 12] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 11] = [
     "pairs",
     "currency",
     "permanence",
@@ -75,7 +75,6 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 12] = [
     "fightsim",
     "posture",
     "ecoladder",
-    "garrison",
     "detour",
 ];
 
