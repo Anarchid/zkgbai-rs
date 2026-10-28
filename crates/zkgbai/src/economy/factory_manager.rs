@@ -1535,10 +1535,11 @@ impl Ai {
     /// map is sparse (density under the `density_ref` dial), feature
     /// `puppyscout`: the first two units after the Constables, then one for
     /// every two Pyros. At 45 metal and sight 640 they look and picket where
-    /// 220-metal Pyros scouted; none while pickets die fast (see
-    /// `stakeouts_hot`).
+    /// 220-metal Pyros scouted; none while the stakeouts' loss cap holds
+    /// (`stakeouts_capped`; not the delay after each loss: with a pick per
+    /// Pyro, 40-60 s apart, it kept one Puppy to six Pyros on Comet).
     fn fac_wants_puppy_scout(&self, fac: &Factory) -> bool {
-        if !fac.opener || self.dev_off("puppyscout") || self.dev_off("stakeouts") || self.stakeouts_hot() {
+        if !fac.opener || self.dev_off("puppyscout") || self.dev_off("stakeouts") || self.stakeouts_capped() {
             return false;
         }
         if self.posture.density >= self.posture_levers().density_ref {

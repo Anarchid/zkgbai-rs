@@ -275,12 +275,16 @@ impl Stakeouts {
         self.posts.len().min(MAX_POSTS) + Self::lookers_wanted(frame)
     }
 
-    /// Whether [`LOSS_CAP`] pickets died within [`LOSS_RECALL`], or one
-    /// within [`REPLACE_DELAY`]. (The losses are pruned only at the next
-    /// loss, which a cap that stops building pickets would never bring.)
+    /// Whether [`LOSS_CAP`] pickets died within [`LOSS_RECALL`]. (The
+    /// losses are pruned only at the next loss, which a cap that stops
+    /// building pickets would never bring.)
+    fn capped(&self, frame: i32) -> bool {
+        self.losses.iter().filter(|&&l| frame - l <= LOSS_RECALL).count() >= LOSS_CAP
+    }
+
+    /// Whether the loss cap holds, or a picket died within [`REPLACE_DELAY`].
     fn hot(&self, frame: i32) -> bool {
-        let recent = self.losses.iter().filter(|&&l| frame - l <= LOSS_RECALL).count();
-        recent >= LOSS_CAP || self.losses.back().is_some_and(|&l| frame - l < REPLACE_DELAY)
+        self.capped(frame) || self.losses.back().is_some_and(|&l| frame - l < REPLACE_DELAY)
     }
 }
 
@@ -452,6 +456,12 @@ impl Ai {
     /// Whether pickets have been dying fast lately: none is to be built.
     pub(crate) fn stakeouts_hot(&self) -> bool {
         self.stakeouts.hot(self.frame)
+    }
+
+    /// Whether too many pickets died lately (the cap alone, without the
+    /// delay after each loss).
+    pub(crate) fn stakeouts_capped(&self) -> bool {
+        self.stakeouts.capped(self.frame)
     }
 
     pub fn stakeouts_update(&mut self, frame: i32) {
@@ -1005,6 +1015,9 @@ mod tests {
         assert!(s.hot(90 + REPLACE_DELAY));
         assert!(s.hot(LOSS_RECALL));
         assert!(!s.hot(LOSS_RECALL + 1));
+        s.losses.clear();
+        s.losses.push_back(0);
+        assert!(s.hot(1) && !s.capped(1));
     }
 
     #[test]
