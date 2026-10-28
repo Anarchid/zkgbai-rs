@@ -416,8 +416,16 @@ pub struct Doctrine {
     /// Packs: a run begun is finished through the target before the pack
     /// judges threat, raiders or its health again.
     pub commit: bool,
-    /// Packs: targets, run lines and ground under enemy porc are shunned.
+    /// Packs: targets, run lines and ground under more enemy porc than
+    /// `porc_share` of the pack's own threat are shunned (off: porc is
+    /// not looked at).
     pub shun_porc: bool,
+    pub porc_share: f32,
+    /// Packs: repositioning (neither taking nor dealing damage for `quiet`
+    /// seconds) with a way home clear of threat, members below
+    /// `repair_below` health go for repairs alone (0: never).
+    pub quiet: f32,
+    pub repair_below: f32,
     /// Packs: how a run is judged worth going on, and (the predictor) by how
     /// much metal its expected kills must beat its expected losses.
     pub judge: Judge,
@@ -472,6 +480,9 @@ impl Doctrine {
             attack: Attack::Pass,
             commit: false,
             shun_porc: true,
+            porc_share: 0.0,
+            quiet: 20.0,
+            repair_below: 0.0,
             judge: Judge::Map,
             judge_margin: 0.0,
             wake_share: 0.0,
@@ -558,6 +569,9 @@ impl Doctrine {
             "attack": self.attack.name(),
             "commit": self.commit,
             "shun_porc": self.shun_porc,
+            "porc_share": self.porc_share,
+            "quiet": self.quiet,
+            "repair_below": self.repair_below,
             "judge": self.judge.name(),
             "judge_margin": self.judge_margin,
             "wake_share": self.wake_share,
@@ -635,6 +649,9 @@ impl Doctrine {
                 "attack" => self.attack = Attack::parse(&string(k, v)?)?,
                 "commit" => self.commit = flag(k, v)?,
                 "shun_porc" => self.shun_porc = flag(k, v)?,
+                "porc_share" => self.porc_share = num(k, v, 0.0, 10.0)?,
+                "quiet" => self.quiet = num(k, v, 1.0, 300.0)?,
+                "repair_below" => self.repair_below = num(k, v, 0.0, 1.0)?,
                 "judge" => self.judge = Judge::parse(&string(k, v)?)?,
                 "judge_margin" => self.judge_margin = num(k, v, -1e5, 1e5)?,
                 "wake_share" => self.wake_share = num(k, v, 0.0, 1.0)?,
@@ -780,6 +797,9 @@ impl Doctrine {
             attack: self.attack,
             commit: self.commit,
             shun_porc: self.shun_porc,
+            porc_share: self.porc_share,
+            quiet: self.quiet,
+            repair_below: self.repair_below,
             judge: self.judge,
             judge_margin: self.judge_margin,
         }
@@ -849,6 +869,9 @@ pub struct Shape {
     pub attack: Attack,
     pub commit: bool,
     pub shun_porc: bool,
+    pub porc_share: f32,
+    pub quiet: f32,
+    pub repair_below: f32,
     pub judge: Judge,
     pub judge_margin: f32,
 }
@@ -901,6 +924,9 @@ impl Default for Shape {
             attack: Attack::Pass,
             commit: false,
             shun_porc: true,
+            porc_share: 0.0,
+            quiet: 20.0,
+            repair_below: 0.0,
             judge: Judge::Map,
             judge_margin: 0.0,
         }
@@ -1096,6 +1122,11 @@ pub fn seeds() -> Vec<Doctrine> {
     // a scenario against uncommitted passes).
     ravager.attack = Attack::Mixed;
     ravager.commit = true;
+    // Porc weighed, not shunned outright (user, 2026-10-28: five Ravagers
+    // shied off from two Lotus), and the hurt sent for repairs between
+    // fights.
+    ravager.porc_share = 0.5;
+    ravager.repair_below = 0.6;
     // The middle game: once most armed ground units are not raiders (user,
     // 2026-10-28, for the full-play test).
     ravager.wake_share = 0.5;
@@ -1293,6 +1324,7 @@ mod tests {
         assert_eq!((d.aim, d.core_keep, d.cores_per_force, d.pace_slowest), (Aim::Pack, Keep::Formation, 0, 0.0));
         assert_eq!((d.cores_to_go, d.cores_to_stay, d.retreat_health, d.heal_to), (5, 3, 0.5, 0.9));
         assert_eq!(d.wake_share, 0.5);
+        assert_eq!((d.porc_share, d.quiet, d.repair_below), (0.5, 20.0, 0.6));
         assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
         assert_eq!(d.role("screen").unwrap().keep, Keep::Trail);
         let Value::Object(p) = json!({"core_keep": "orbit", "pass_reach": 0.5, "pace_slowest": 0.85}) else { panic!() };

@@ -774,7 +774,10 @@ impl Ai {
             Event::EnemyEnterRadar { enemy } => self.guard("war.enemyEnterRadar", |ai| ai.war_enemy_enter_radar(enemy)),
             Event::EnemyLeaveRadar { enemy } => self.guard("war.enemyLeaveRadar", |ai| ai.war_enemy_leave_radar(enemy)),
             Event::EnemyDamaged { enemy, attacker, damage, .. } => {
-                self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage))
+                self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage));
+                if let Some(a) = attacker {
+                    self.guard("pack.enemyDamaged", |ai| ai.pack_touched(a, false));
+                }
             }
             Event::EnemyDestroyed { enemy, attacker } => {
                 self.guard("war.enemyDestroyed", |ai| ai.war_enemy_destroyed(enemy, attacker))

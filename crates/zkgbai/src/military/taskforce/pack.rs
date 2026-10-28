@@ -23,7 +23,12 @@
 //! their way, and what dodges a tangent cannot sidestep a ram. With
 //! `commit`, a run begun is finished through its target before threat,
 //! raiders or its health are judged again (runs are for doing damage; they
-//! expect losses); `shun_porc` off lets it run at turrets too. With `judge`
+//! expect losses). Enemy porc is weighed against the pack: it takes on
+//! targets, run lines and ground under porc threat up to `porc_share` of its
+//! own (`shun_porc` off: porc is not looked at). Repositioning (neither
+//! taking nor dealing damage for `quiet` seconds) with a way home clear of
+//! threat, its members below `repair_below` health go for repairs alone, to
+//! rejoin when healed. With `judge`
 //! predictor, whether a run is worth it is the fight predictor's call
 //! instead of the threat maps': a run is a sequence of fights, one per
 //! group of enemies along its way, each asked of the predictor with the
@@ -168,6 +173,9 @@ pub struct Pack {
     pub back_until: i32,
     /// Falling back to its screen (from raiders) until it gets there.
     pub to_screen: bool,
+    /// When a member last took damage, and last dealt it (frames).
+    pub last_hurt: i32,
+    pub last_hit: i32,
 }
 
 impl Default for Pack {
@@ -182,6 +190,8 @@ impl Default for Pack {
             parked: false,
             back_until: 0,
             to_screen: false,
+            last_hurt: 0,
+            last_hit: 0,
         }
     }
 }
@@ -426,6 +436,31 @@ impl Ai {
             return (None, "parked for repairs".into());
         }
 
+        // Repositioning (neither hurt nor hitting for `quiet` s) with the way
+        // home clear, the hurt go for repairs alone.
+        let quiet = (shape.quiet * 30.0) as i32;
+        if shape.repair_below > 0.0 && !running && self.frame - st.last_hurt > quiet && self.frame - st.last_hit > quiet
+        {
+            let hurt: Vec<Unit> = cores.iter().copied().filter(|&u| health_fraction(u) < shape.repair_below).collect();
+            if !hurt.is_empty() && self.pack_way_clear(leader, home) {
+                let healths: Vec<String> =
+                    hurt.iter().map(|&u| format!("{:.0}%", 100.0 * health_fraction(u))).collect();
+                self.log(&format!(
+                    "taskforce: the {doctrine} pack (squad {sid}) sends {} of {} cores for repairs ({}): quiet {:.0} s, \
+                     the way home clear",
+                    hurt.len(),
+                    cores.len(),
+                    healths.join(" "),
+                    (self.frame - st.last_hurt.max(st.last_hit)) as f32 / 30.0
+                ));
+                self.taskforces.packs.insert(sid, st);
+                for u in hurt {
+                    self.retreat_send(u);
+                }
+                return (None, "sends its hurt for repairs".into());
+            }
+        }
+
         // Enough cores, and together before it goes.
         let need = if engaging { shape.cores_to_stay } else { shape.cores_to_go } as usize;
         if cores.len() < need || (!engaging && !rallied) {
@@ -441,14 +476,18 @@ impl Ai {
         // Outweighed where it is: home.
         // (Porc counts whatever the pack weighs: it outranges every gun.)
         // (Judged by the predictor, a run's fights are its business: porc only.)
+        // Porc counts beyond `porc_share` of the pack's own threat.
         let predictor = shape.judge == Judge::Predictor;
-        let (outweighed, fthreat) = {
+        let (outweighed, fthreat, porc_cap) = {
             let view = self.war.view(leader.def());
+            let fthreat = view.get_friendly_threat(pos);
+            let porc_cap = shape.shun_porc.then_some(shape.porc_share * fthreat);
             let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
-            let porc = view.get_porc_threat(pos);
+            let porc = porc_cap.map_or(0.0, |c| (view.get_porc_threat(pos) - c).max(0.0));
             let threat = if predictor { porc } else { view.get_effective_threat(pos).max(porc) };
-            (threat / courage > tolerance, view.get_friendly_threat(pos))
+            (threat / courage > tolerance, fthreat, porc_cap)
         };
+        let porc_ok = |ai: &Ai, p: Vec3| porc_cap.is_none_or(|c| ai.war.view(leader.def()).get_porc_threat(p) <= c);
         if shape.flee_threat && outweighed && !running {
             st.back_until = self.frame + BACK_FOR;
         }
@@ -496,8 +535,7 @@ impl Ai {
         // stricter one dropped it again a conduct later.)
         let mut keep = left.filter(|&(t, _)| {
             let view = self.war.view(leader.def());
-            let porc_ok = !shape.shun_porc || view.get_porc_threat(t) <= 0.0;
-            running || (porc_ok && (predictor || view.get_effective_threat(t) <= fthreat))
+            running || (porc_ok(self, t) && (predictor || view.get_effective_threat(t) <= fthreat))
         });
         st.shun.retain(|s| s.1 > self.frame);
         // Judged by the predictor, the rest of the run must stay worth it.
@@ -517,7 +555,7 @@ impl Ai {
             st.passes = 0;
             let ahead = Vec3::xz(pos.x + head.0 * LOOK_AHEAD, pos.z + head.1 * LOOK_AHEAD);
             let shun: Vec<Vec3> = st.shun.iter().map(|s| s.0).collect();
-            let (t, _) = self.war_best_target_shunning(leader, ahead, false, shape.shun_porc, &shun);
+            let (t, _) = self.war_best_target_shunning(leader, ahead, false, porc_cap, &shun);
             if t == NULLPOS {
                 st.target = NULLPOS;
                 self.taskforces.packs.insert(sid, st);
@@ -577,13 +615,13 @@ impl Ai {
                     let clear = |p: &Pass| {
                         let q = p.point(target);
                         let at = |x: f32| Vec3::xz(q.x + p.way.0 * x, q.z + p.way.1 * x);
-                        let porc = || {
+                        let porc = |c: f32| {
                             [-PASS_IN, -PASS_IN / 2.0, 0.0, PASS_ON / 2.0, PASS_ON]
                                 .iter()
-                                .all(|&x| view.get_porc_threat(at(x)) <= 0.0)
+                                .all(|&x| view.get_porc_threat(at(x)) <= c)
                         };
                         // A charge runs over it (the line nearest).
-                        (!charge || p.side.abs() <= PASS_STEP / 2.0) && (!shape.shun_porc || porc())
+                        (!charge || p.side.abs() <= PASS_STEP / 2.0) && porc_cap.is_none_or(porc)
                     };
                     let planned = plan_pass(pos, head, target, &guns, clear);
                     let Some((p, n)) = planned else {
@@ -729,6 +767,31 @@ impl Ai {
             j.left,
             j.cores
         ));
+    }
+
+    /// A unit of ours took damage (`hurt`) or dealt it: if it is in a pack,
+    /// that pack is fighting.
+    pub fn pack_touched(&mut self, unit: Unit, hurt: bool) {
+        if self.taskforces.packs.is_empty() {
+            return;
+        }
+        let Some(sid) = self.fighters.get(&unit.id()).and_then(|f| f.squad) else { return };
+        let frame = self.frame;
+        if let Some(p) = self.taskforces.packs.get_mut(&sid) {
+            if hurt {
+                p.last_hurt = frame;
+            } else {
+                p.last_hit = frame;
+            }
+        }
+    }
+
+    /// Whether the way from the pack's leader to `home` (its path avoiding
+    /// enemies) crosses no enemy threat or porc.
+    fn pack_way_clear(&mut self, leader: Unit, home: Vec3) -> bool {
+        let path = self.pathfinder.find_path(&self.war, leader, home, PathCost::AvoidEnemies);
+        let view = self.war.view(leader.def());
+        path.iter().all(|&p| view.get_threat(p) <= 0.0 && view.get_porc_threat(p) <= 0.0)
     }
 
     /// The pack's guns for a pass: each core's place in the formation (the
