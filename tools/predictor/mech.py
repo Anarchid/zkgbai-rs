@@ -30,6 +30,23 @@ def load(path):
     M.update(pickle.load(open(path, "rb")))
 
 
+def load_shield(path, hitcells=None):
+    """Shield units (shield_dump.py): charge, regen per second, radius, shot cost of its own weapon.
+    With hit cells, also the heatray switch's damage per hit by range band for the weapons whose
+    damage falls off with distance (dynDamage), pooled over targets."""
+    import json
+    d = json.load(open(path))
+    dyn = set(d.pop("_dyn_weapons", []))
+    M["shield"] = d
+    if hitcells is not None:
+        c = pickle.load(open(hitcells, "rb"))["train"].reset_index()
+        c = c[c["wd"].isin(dyn)].groupby(["wd", "rb"])[["n", "hit_any", "dmg", "nominal"]].sum()
+        M["dynfrac"] = {}
+        for (wd, rb), r in c.iterrows():
+            if r["hit_any"] >= 30 and r["nominal"] > 0:
+                M["dynfrac"].setdefault(wd, {})[int(rb)] = float(r["dmg"] / r["hit_any"] / (r["nominal"] / r["n"]))
+
+
 def load_tacai(path):
     """ZK's Tactical Unit AI, resolved by tacai_dump.py: per unit def, whom it skirms and flees."""
     import json
@@ -83,7 +100,7 @@ ENGAGE_NAMES = ["const", "ratio>0.5", "ratio>1", "ratio>1.5", "ratio>2.5", "rati
 class X:
     """Per-unit mechanics state riding on a SimUnit."""
     __slots__ = ("maxhp", "air", "kamikaze", "death", "engage", "blockers", "para", "slowdmg", "slow_last",
-                 "burns", "range_", "speed_")
+                 "burns", "range_", "speed_", "sh", "shmax", "shregen", "shr", "drain")
 
 
 def _setup(fight, opts):
@@ -104,6 +121,12 @@ def _setup(fight, opts):
         x.slowdmg = 0.0
         x.slow_last = -10 ** 9
         x.burns = []
+        sd = M.get("shield", {}).get(r["def"]) if opts.get("shield") else None
+        x.sh = sd["power"] if sd else None  # fights start with shields up (70% of shots at shield units find it up)
+        x.shmax = sd["power"] if sd else 0.0
+        x.shregen = sd["regen"] if sd else 0.0
+        x.shr = sd["radius"] if sd else 0.0
+        x.drain = sd["drain"] if sd else 0.0
         xs.append(x)
         if opts.get("emp") and d is not None:
             # pure EMP weapons (damage 0 in the weapon table) are dropped by SimUnit: add them back
@@ -250,7 +273,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
         moved = False
         approached = False
         # status: burn ticks, EMP decay, slow decay
-        if opts.get("burn") or opts.get("emp") or opts.get("slow"):
+        if opts.get("burn") or opts.get("emp") or opts.get("slow"):  # (shield regen below)
             for u in alive:
                 x = xof[id(u)]
                 if x.burns:
@@ -263,6 +286,11 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 if x.slowdmg > 0 and f - x.slow_last > SLOW_GRACE:
                     x.slowdmg = max(0.0, x.slowdmg - SLOW_DECAY * max(u.hp, 1.0) * DT / 30.0)
             alive = [u for u in us if u.alive]
+        if opts.get("shield"):
+            for u in alive:
+                x = xof[id(u)]
+                if x.sh is not None:
+                    x.sh = min(x.shmax, x.sh + x.shregen * DT / 30.0)
             sides = [[u for u in alive if u.side == s] for s in (0, 1)]
         # movement: close until an enemy is within own range
         for u in alive:
@@ -341,6 +369,45 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 moved = True
         alive = [u for u in us if u.alive]
         # fire
+        groups = {}
+        if opts.get("shield"):
+            # shields whose bubbles overlap share charge (unit_shield_link.lua): one pool per group
+            for side in (0, 1):
+                sh = [u for u in alive if u.side == side and xof[id(u)].sh is not None]
+                for i, a in enumerate(sh):
+                    groups.setdefault(id(a), {id(a): a})
+                    for b in sh[i + 1:]:
+                        if abs(a.x - b.x) < xof[id(a)].shr + xof[id(b)].shr:
+                            ga, gb = groups[id(a)], groups.setdefault(id(b), {id(b): b})
+                            if ga is not gb:
+                                ga.update(gb)
+                                for k in gb:
+                                    groups[k] = ga
+
+        def pool(g):
+            return sum(xof[k].sh for k in g)
+
+        def draw(g, amount):
+            tot = pool(g)
+            if tot <= 0:
+                return 0.0
+            take = min(amount, tot)
+            for k in g:
+                xof[k].sh -= take * xof[k].sh / tot
+            return take
+
+        def absorb(shooter, tgt, dmg):
+            """Damage left after the shields covering tgt (bubble reaches it, shooter outside) take it."""
+            best = None
+            for k, g in groups.items():
+                sh_u = g[k]
+                xs_ = xof[k]
+                if sh_u.side != tgt.side or not sh_u.alive or abs(sh_u.x - tgt.x) > xs_.shr or abs(sh_u.x - shooter.x) <= xs_.shr:
+                    continue
+                if best is None or pool(g) > pool(best):
+                    best = g
+            return dmg - draw(best, dmg) if best is not None and dmg > 0 else dmg
+
         for u in alive:
             if not u.armed or not u.alive:
                 continue
@@ -375,14 +442,29 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                        and (not opts.get("air") or (can_air if xof[id(e)].air else can_ground))]
                 if not inr:
                     continue
+                if opts.get("shield") and ux.drain > 0:
+                    g = groups.get(id(u))
+                    shots_ = 1 if w.hitscan else w.salvo
+                    if g is None or pool(g) < ux.drain * shots_:
+                        continue  # the shield cannot pay for the shot (Felon)
+                    draw(g, ux.drain * shots_)
                 w.next = f + (int(w.reload / (1.0 - sf)) if sf > 0 else w.reload)
                 shot_fired = True
                 dist, tgt = min(inr, key=lambda t: t[0])
                 rb = min(int(RBANDS * dist / w.range), RBANDS) if w.range > 0 else RBANDS
                 sb = sband(tgt.speed if tgt.moving else 0.0)
                 p_any, p_tgt, frac, _ = hits.lookup(w.name, tgt.def_, rb, sb)
+                if opts.get("heatray"):
+                    frac = M.get("dynfrac", {}).get(w.name, {}).get(rb, frac)
                 shots = 1 if w.hitscan else w.salvo
                 dmg = p_tgt * frac * w.nominal * shots * eff
+                if groups:
+                    # absorbed shots carry no burn, EMP or slow; EMP-only shots spend shield charge too
+                    amount = dmg if dmg > 0 else emp * p_tgt * shots * eff
+                    if amount > 0:
+                        left = absorb(u, tgt, amount)
+                        eff *= left / amount
+                        dmg = left if dmg > 0 else 0.0
                 xt = xof[id(tgt)]
                 if opts.get("burn") and burn > 0 and blen > 0:
                     xt.burns.append((f + blen, burn * p_tgt * shots * eff / blen))
