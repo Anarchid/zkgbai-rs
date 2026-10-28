@@ -21,6 +21,10 @@
 --   stun  EMP stun on (1) or off (0)
 --   (shot.tlos, v2: the aimed target's LOS state for the shooter's ally team
 --   at the fire frame: 2 in sight, 1 radar only, 0 neither, empty unknown)
+--   (v3: shot.pdmg = the paralyze part of shot.dmg, which stays the total;
+--   src=x = a blast without a projectile, e.g. the Outlaw's pulse at its own
+--   feet: damage of a weapon in the attacker's own weapon list that matched
+--   no projectile and no hitscan salvo, one row per attacker, weapon, frame)
 --   unit  state of a unit in combat, every UNIT_SAMPLE frames
 --   meta  game, map, teams
 -- Positions are elmos, speeds elmos per frame, frames at 30 per second.
@@ -39,7 +43,7 @@ function widget:GetInfo()
 	}
 end
 
-local VERSION = 2
+local VERSION = 3
 local UNIT_SAMPLE = 30     -- frames between unit rows
 local ACTIVE_FRAMES = 600  -- a unit stays in combat this long after its last shot or wound
 local SALVO_POLL = 6       -- longest poll period of a unit in combat (shorter for fast lasers)
@@ -83,6 +87,8 @@ local MAP_X, MAP_Z = Game.mapSizeX, Game.mapSizeZ
 local wdInfo = {}
 -- Per unit def: list of {weaponNum, weaponDefID} for its hitscan weapons.
 local udHitscan = {}
+-- Per unit def: set of its own weapon def ids (blasts without a projectile).
+local udWeapons = {}
 -- Engine damage ids -> names.
 local envName = {}
 
@@ -163,12 +169,12 @@ end
 -- Columns of a shot row; src p/s/d as described above.
 local SHOT_HEADER = "#shot\tsrc\tn\tf0\tf1\tlag\tpid\twd\town\todef\toteam\tox\toz\tospd\tpspd" ..
 	"\ttt\ttid\ttdef\ttteam\ttx\ttz\ttdist\ttspd\tthp\tthpmax\ttpara\ttstun\ttslow\ttdis\ttsh\ttfire" ..
-	"\thits\tdmg\tdmgt\tnvict\tpara\ttdead\ttspd1\ttsh1\ttlos"
+	"\thits\tdmg\tdmgt\tnvict\tpara\ttdead\ttspd1\ttsh1\ttlos\tpdmg"
 
 local function newShot(src, f, wdid, owner, f0)
 	local rec = {
 		src = src, n = 1, f0 = f0 or f, fseen = f, wd = wdid, own = owner,
-		hits = 0, dmg = 0, dmgt = 0, nvict = 0, para = 0, victims = {},
+		hits = 0, dmg = 0, dmgt = 0, nvict = 0, para = 0, pdmg = 0, victims = {},
 	}
 	if owner then
 		local s = unitState(owner, f)
@@ -239,7 +245,10 @@ local function addDamage(rec, f, vid, vdef, vteam, damage, paralyzer)
 		rec.victims[vid] = true
 		rec.nvict = rec.nvict + 1
 	end
-	if paralyzer then rec.para = 1 end
+	if paralyzer then
+		rec.para = 1
+		rec.pdmg = rec.pdmg + damage
+	end
 	touch(vid, f)
 end
 
@@ -263,7 +272,7 @@ local function closeShot(rec, f)
 		num(rec.tdist), num(rec.tspd, 2), num(rec.thp), num(rec.thpmax), num(rec.tpara), num(rec.tstun),
 		num(rec.tslow, 3), num(rec.tdis), num(rec.tsh), num(rec.tfire),
 		num(rec.hits), num(rec.dmg, 1), num(rec.dmgt, 1), num(rec.nvict), num(rec.para),
-		num(tdead), num(tspd1, 2), num(tsh1), num(rec.tlos),
+		num(tdead), num(tspd1, 2), num(tsh1), num(rec.tlos), num(rec.pdmg, 1),
 	}, "\t"))
 end
 
@@ -482,13 +491,29 @@ local function flushPending(f)
 	for aid, pa in pairs(pending) do
 		for wdid, list in pairs(pa) do
 			local keep = {}
+			local w = wdInfo[wdid]
+			local blasts  -- frame -> shot record, for a projectile-less weapon of the attacker's own
 			for i = 1, #list do
 				local d = list[i]
 				if f - d.f > PENDING_FRAMES then
-					emitDamage(d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para, wdid, aid, d.adef, d.ateam, d.pid)
+					local own = d.adef and udWeapons[d.adef]
+					if w and not w.hitscan and own and own[wdid] then
+						blasts = blasts or {}
+						local rec = blasts[d.f]
+						if not rec then
+							rec = newShot("x", d.f, wdid, aid)
+							blasts[d.f] = rec
+						end
+						addDamage(rec, d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para)
+					else
+						emitDamage(d.f, d.vid, d.vdef, d.vteam, d.dmg, d.para, wdid, aid, d.adef, d.ateam, d.pid)
+					end
 				else
 					keep[#keep + 1] = d
 				end
+			end
+			if blasts then
+				for bf, rec in pairs(blasts) do closeShot(rec, bf) end
 			end
 			pa[wdid] = #keep > 0 and keep or nil
 		end
@@ -622,7 +647,10 @@ function widget:Initialize()
 	end
 	for udid, ud in pairs(UnitDefs) do
 		local list
+		local own = {}
+		udWeapons[udid] = own
 		for i, w in ipairs(ud.weapons) do
+			own[w.weaponDef] = true
 			local wi = wdInfo[w.weaponDef]
 			if wi and wi.hitscan then
 				list = list or { period = SALVO_POLL }
