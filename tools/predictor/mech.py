@@ -147,7 +147,11 @@ def _weapon_info(w):
     return r
 
 
-def simulate_mech(fight, opts, hazard=None):
+def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False):
+    """trace: a dict to fill with per-unit fates in build_units order (A's records, then B's):
+    pdead = probability the unit is dead when the fight stops, ehp = expected HP then (with a hazard;
+    without one, the end state). withdraw: the "A withdraws now" query (predict.simulate's): every mobile
+    A unit reverses away from B at full speed."""
     hits = predict.G["hits"]
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
@@ -214,11 +218,17 @@ def simulate_mech(fight, opts, hazard=None):
     def is_armed(u):
         return u.armed or (death_on and xof[id(u)].kamikaze)
 
+    if trace is not None:
+        trace["pdead"] = [0.0] * len(us); trace["ehp"] = [0.0] * len(us)
     while f < HORIZON:
         if hazard is not None and f > 0 and f % 30 == 0:
             kA, kB = kfrac()
             h = hazard.h(f // 30 - 1, kA, kB, lr, None)
             exp_k[0] += surv * h * kA; exp_k[1] += surv * h * kB
+            if trace is not None:
+                for i, u in enumerate(us):
+                    trace["pdead"][i] += surv * h * (0.0 if u.alive else 1.0)
+                    trace["ehp"][i] += surv * h * (max(u.hp, 0.0) if u.alive else 0.0)
             surv *= 1.0 - h
         alive = [u for u in us if u.alive]
         sides = [[u for u in alive if u.side == s] for s in (0, 1)]
@@ -255,6 +265,11 @@ def simulate_mech(fight, opts, hazard=None):
             dist = abs(nearest.x - u.x)
             speed = u.speed * (1.0 - slowf(u)) if opts.get("slow") else u.speed
             x = xof[id(u)]
+            if withdraw and u.side == 0:
+                u.x -= speed * DT if nearest.x > u.x else -speed * DT
+                u.moving = True
+                moved = True
+                continue
             if death_on and x.kamikaze:
                 if dist <= 20.0:
                     kill(u)
@@ -333,11 +348,16 @@ def simulate_mech(fight, opts, hazard=None):
                     xt.slow_last = f
                 if dmg > 0:
                     hurt(tgt, dmg)
-        quiet = 0 if (shot_fired or moved) else quiet + DT
-        if quiet > 300:
+        quiet = 0 if (shot_fired or (moved and not withdraw)) else quiet + DT
+        if quiet > (150 if withdraw else 300):
             break
         f += DT
     kA, kB = kfrac()
+    if trace is not None:
+        w = surv if hazard is not None else 1.0
+        for i, u in enumerate(us):
+            trace["pdead"][i] += w * (0.0 if u.alive else 1.0)
+            trace["ehp"][i] += w * (max(u.hp, 0.0) if u.alive else 0.0)
     if hazard is not None:
         return exp_k[0] + surv * kA, exp_k[1] + surv * kB
     return kA, kB
