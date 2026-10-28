@@ -75,6 +75,38 @@ impl Aim {
     }
 }
 
+/// How a pack runs at a target (see `pack`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attack {
+    /// Passing it on the line that brings the most guns within reach.
+    Pass,
+    /// Charging it head-on, aimed anew each conduct until close, then
+    /// ramming through: units push mobiles out of their way, and a dodging
+    /// target cannot sidestep what runs over it.
+    Charge,
+    /// Charging what moves, passing what stands.
+    Mixed,
+}
+
+const ATTACKS: [Attack; 3] = [Attack::Pass, Attack::Charge, Attack::Mixed];
+
+impl Attack {
+    pub fn name(self) -> &'static str {
+        match self {
+            Attack::Pass => "pass",
+            Attack::Charge => "charge",
+            Attack::Mixed => "mixed",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Attack, String> {
+        ATTACKS.into_iter().find(|a| a.name() == s).ok_or_else(|| {
+            let names: Vec<&str> = ATTACKS.iter().map(|a| a.name()).collect();
+            format!("attack '{s}': one of {}", names.join(", "))
+        })
+    }
+}
+
 /// How a member keeps with its force's leader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keep {
@@ -350,6 +382,13 @@ pub struct Doctrine {
     /// Packs: enemy raiders worth this much metal near one send it back to
     /// its screen (0: never).
     pub rip_value: f32,
+    /// Packs: how they run at a target.
+    pub attack: Attack,
+    /// Packs: a run begun is finished through the target before the pack
+    /// judges threat, raiders or its health again.
+    pub commit: bool,
+    /// Packs: targets, run lines and ground under enemy porc are shunned.
+    pub shun_porc: bool,
 }
 
 impl Doctrine {
@@ -393,6 +432,9 @@ impl Doctrine {
             heal_to: 0.0,
             pass_reach: 0.7,
             rip_value: 0.0,
+            attack: Attack::Pass,
+            commit: false,
+            shun_porc: true,
         }
     }
 
@@ -470,6 +512,9 @@ impl Doctrine {
             "heal_to": self.heal_to,
             "pass_reach": self.pass_reach,
             "rip_value": self.rip_value,
+            "attack": self.attack.name(),
+            "commit": self.commit,
+            "shun_porc": self.shun_porc,
         })
     }
 
@@ -537,6 +582,9 @@ impl Doctrine {
                 "heal_to" => self.heal_to = num(k, v, 0.0, 1.0)?,
                 "pass_reach" => self.pass_reach = num(k, v, 0.2, 1.0)?,
                 "rip_value" => self.rip_value = num(k, v, 0.0, 1e6)?,
+                "attack" => self.attack = Attack::parse(&string(k, v)?)?,
+                "commit" => self.commit = flag(k, v)?,
+                "shun_porc" => self.shun_porc = flag(k, v)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -676,6 +724,9 @@ impl Doctrine {
             heal_to: self.heal_to,
             pass_reach: self.pass_reach,
             rip_value: self.rip_value,
+            attack: self.attack,
+            commit: self.commit,
+            shun_porc: self.shun_porc,
         }
     }
 }
@@ -740,6 +791,9 @@ pub struct Shape {
     pub heal_to: f32,
     pub pass_reach: f32,
     pub rip_value: f32,
+    pub attack: Attack,
+    pub commit: bool,
+    pub shun_porc: bool,
 }
 
 /// Orbit radius of members that are in no role (extra cores), unless the
@@ -787,6 +841,9 @@ impl Default for Shape {
             heal_to: 0.0,
             pass_reach: 0.7,
             rip_value: 0.0,
+            attack: Attack::Pass,
+            commit: false,
+            shun_porc: true,
         }
     }
 }
@@ -1173,6 +1230,12 @@ mod tests {
         d.apply(&p).unwrap();
         assert_eq!((d.core_keep, d.pass_reach, d.pace_slowest), (Keep::Orbit, 0.5, 0.85));
         let Value::Object(p) = json!({"core_keep": "circle"}) else { panic!() };
+        assert!(d.apply(&p).is_err());
+        assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Pass, false, true));
+        let Value::Object(p) = json!({"attack": "charge", "commit": true, "shun_porc": false}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Charge, true, false));
+        let Value::Object(p) = json!({"attack": "ram"}) else { panic!() };
         assert!(d.apply(&p).is_err());
         let Value::Object(p) = json!({"pace_slowest": 2}) else { panic!() };
         assert!(d.apply(&p).is_err());

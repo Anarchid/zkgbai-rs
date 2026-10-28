@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-pub use doctrine::{Aim, Doctrine, Keep, Role, Shape, seeds};
+pub use doctrine::{Aim, Attack, Doctrine, Keep, Role, Shape, seeds};
 pub use expr::{Expr, Force};
 
 use crate::Ai;

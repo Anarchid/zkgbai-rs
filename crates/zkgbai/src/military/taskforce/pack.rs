@@ -17,7 +17,13 @@
 //! need not mind who is in front), runs on, and swings round for another,
 //! until nothing is left there (or for 45 s); then the next, staying out
 //! while it has `cores_to_stay`. A turn back of more than a right angle
-//! starts with an arc.
+//! starts with an arc. With `attack` charge (or mixed, for what moves) it
+//! runs at the target head-on instead, aimed anew each conduct until
+//! [`CHARGE_LOCK`] off, then straight through: ZK units push mobiles out of
+//! their way, and what dodges a tangent cannot sidestep a ram. With
+//! `commit`, a run begun is finished through its target before threat,
+//! raiders or its health are judged again (runs are for doing damage; they
+//! expect losses); `shun_porc` off lets it run at turrets too.
 //!
 //! It falls back as one: from threat that outweighs it where it is, home
 //! (10 s before it judges again); from raiders worth `rip_value` near it,
@@ -26,16 +32,18 @@
 //! them; the screen holds meanwhile); below `retreat_health`, to a haven,
 //! where it parks for repairs until its cores average `heal_to`. A screen
 //! member below `retreat_health` goes for repairs alone. Packs neither out
-//! nor parked merge, the smaller into the larger, and gather at the haven
-//! nearest the rally point, not at it.
+//! nor parked merge, the smaller into the larger, are led from where most
+//! of their cores stand, and gather at the haven nearest the rally point,
+//! not at it.
 //!
 //! Log lines `taskforce: the ravager pack (squad N) ...`: dives (target),
-//! passes (the how manyth, guns within reach of how many), falls back to
-//! its screen, parks / is repaired, takes in (merges); engages and
-//! break-offs as other forces'.
+//! passes or charges (the how manyth, guns within reach of how many), falls
+//! back to its screen, parks / is repaired, takes in (merges), is led from
+//! its bulk; engages and break-offs as other forces'.
 
 use springai::{Unit, Vec3};
 
+use super::Attack;
 use crate::Ai;
 use crate::kgbutil::PathCost;
 use crate::military::SquadId;
@@ -60,6 +68,14 @@ const PASS_IN: f32 = 250.0;
 /// A target no pass line can clear of porc is shunned this many frames
 /// (60 s).
 const SHUN_FOR: i32 = 1800;
+/// A charge is aimed anew each conduct until this close to its target,
+/// then runs straight through.
+const CHARGE_LOCK: f32 = 200.0;
+/// A pack is led from where most of its cores stand within this of one
+/// another...
+const BULK: f32 = 400.0;
+/// ...once that core has this many more of them near it than the leader.
+const BULK_MORE: usize = 2;
 /// Waypoints along a path lie at least this far apart.
 const SPACING: f32 = 250.0;
 /// The next target is looked for from this far ahead of the leader.
@@ -121,6 +137,8 @@ pub struct Pack {
     pub since: i32,
     pub pass: Option<Pass>,
     pub passes: u32,
+    /// Whether what it dives moves (`mixed` charges it).
+    pub mobile: bool,
     /// Targets it shuns, until when: no pass over them clear of porc.
     pub shun: Vec<(Vec3, i32)>,
     /// At a haven for repairs.
@@ -138,6 +156,7 @@ impl Default for Pack {
             since: 0,
             pass: None,
             passes: 0,
+            mobile: false,
             shun: Vec::new(),
             parked: false,
             back_until: 0,
@@ -252,6 +271,7 @@ impl Ai {
     /// else why not.
     pub(crate) fn taskforce_pack(&mut self, sid: SquadId) -> (Option<Vec3>, String) {
         self.pack_merge(sid);
+        self.pack_lead(sid);
         let Some(s) = self.squads.get(sid) else { return (None, "gone".into()) };
         let shape = s.shape.clone();
         let Some(leader) = s.get_leader(&self.fighters) else { return (None, "no leader".into()) };
@@ -283,6 +303,9 @@ impl Ai {
         });
         let head = heading(leader.vel(), pos, st.target);
         let home = self.graph_get_closest_haven(pos);
+        // Committed, a run begun is finished through its target first.
+        let running =
+            shape.commit && st.target != NULLPOS && st.pass.is_some_and(|p| p.along(pos, st.target) <= PASS_OUT);
 
         // Parked for repairs until healed.
         let healed = shape.heal_to.max(shape.retreat_health);
@@ -293,7 +316,7 @@ impl Ai {
                 100.0 * health,
                 cores.len()
             ));
-        } else if !st.parked && health < shape.retreat_health {
+        } else if !st.parked && health < shape.retreat_health && !running {
             st.parked = true;
             st.target = NULLPOS;
             self.log(&format!(
@@ -329,7 +352,7 @@ impl Ai {
             let threat = view.get_effective_threat(pos).max(view.get_porc_threat(pos));
             (threat / courage > tolerance, view.get_friendly_threat(pos))
         };
-        if shape.flee_threat && outweighed {
+        if shape.flee_threat && outweighed && !running {
             st.back_until = self.frame + BACK_FOR;
         }
         if self.frame < st.back_until {
@@ -347,7 +370,7 @@ impl Ai {
         if far_screen.is_none() {
             st.to_screen = false;
         }
-        if let Some(at) = far_screen.filter(|_| shape.rip_value > 0.0) {
+        if let Some(at) = far_screen.filter(|_| shape.rip_value > 0.0 && !running) {
             let raiders = self.pack_raiders(pos);
             if st.to_screen || raiders >= shape.rip_value {
                 if !st.to_screen {
@@ -372,19 +395,20 @@ impl Ai {
         let left = (st.target != NULLPOS && self.frame - st.since < TARGET_FOR)
             .then(|| self.pack_target_left(st.target))
             .flatten();
-        let keep = left.filter(|&t| {
+        let keep = left.filter(|&(t, _)| {
             let view = self.war.view(leader.def());
-            view.get_threat(t) <= fthreat && view.get_porc_threat(t) <= 0.0
+            running || (view.get_threat(t) <= fthreat && (!shape.shun_porc || view.get_porc_threat(t) <= 0.0))
         });
         st.shun.retain(|s| s.1 > self.frame);
-        if let Some(t) = keep {
+        if let Some((t, mobile)) = keep {
             st.target = t;
+            st.mobile = mobile;
         } else {
             st.pass = None;
             st.passes = 0;
             let ahead = Vec3::xz(pos.x + head.0 * LOOK_AHEAD, pos.z + head.1 * LOOK_AHEAD);
             let shun: Vec<Vec3> = st.shun.iter().map(|s| s.0).collect();
-            let (t, _) = self.war_best_target_shunning(leader, ahead, false, true, &shun);
+            let (t, _) = self.war_best_target_shunning(leader, ahead, false, shape.shun_porc, &shun);
             if t == NULLPOS {
                 st.target = NULLPOS;
                 self.taskforces.packs.insert(sid, st);
@@ -395,6 +419,7 @@ impl Ai {
             }
             st.target = self.war_mark_target(t);
             st.since = self.frame;
+            st.mobile = self.pack_target_left(t).is_some_and(|l| l.1);
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) dives ({:.0}, {:.0}), {:.0} away, {} cores at {:.0}%",
                 st.target.x,
@@ -410,11 +435,18 @@ impl Ai {
             st.pass = None;
             st.passes += 1;
         }
+        let charge = match shape.attack {
+            Attack::Pass => false,
+            Attack::Charge => true,
+            Attack::Mixed => st.mobile,
+        };
+        // A charge is aimed anew until it is close.
+        let aim = charge && st.pass.is_some_and(|p| p.along(pos, target) < -CHARGE_LOCK);
         if st.pass.is_none() && distance(pos, target) > PLAN_AT {
             let way = self.pack_way(sid, pos, head, target, true);
             self.pack_drive(sid, &way);
         } else {
-            let pass = match st.pass {
+            let pass = match st.pass.filter(|_| !aim) {
                 Some(p) => p,
                 None => {
                     let guns = self.pack_guns(sid, shape.pass_reach);
@@ -422,9 +454,13 @@ impl Ai {
                     let clear = |p: &Pass| {
                         let q = p.point(target);
                         let at = |x: f32| Vec3::xz(q.x + p.way.0 * x, q.z + p.way.1 * x);
-                        [-PASS_IN, -PASS_IN / 2.0, 0.0, PASS_ON / 2.0, PASS_ON]
-                            .iter()
-                            .all(|&x| view.get_porc_threat(at(x)) <= 0.0)
+                        let porc = || {
+                            [-PASS_IN, -PASS_IN / 2.0, 0.0, PASS_ON / 2.0, PASS_ON]
+                                .iter()
+                                .all(|&x| view.get_porc_threat(at(x)) <= 0.0)
+                        };
+                        // A charge runs over it (the line nearest).
+                        (!charge || p.side.abs() <= PASS_STEP / 2.0) && (!shape.shun_porc || porc())
                     };
                     let planned = plan_pass(pos, head, target, &guns, clear);
                     let Some((p, n)) = planned else {
@@ -441,15 +477,18 @@ impl Ai {
                         self.pack_screen(sid, home, false);
                         return (None, "no pass clear of porc".into());
                     };
-                    self.log(&format!(
-                        "taskforce: the {doctrine} pack (squad {sid}) passes ({:.0}, {:.0}) {} time, {n} of {} guns \
-                         within reach, its line {:.0} off",
-                        target.x,
-                        target.z,
-                        ordinal(st.passes + 1),
-                        guns.len(),
-                        p.side
-                    ));
+                    if !aim {
+                        self.log(&format!(
+                            "taskforce: the {doctrine} pack (squad {sid}) {} ({:.0}, {:.0}) {} time, {n} of {} guns \
+                             within reach, its line {:.0} off",
+                            if charge { "charges" } else { "passes" },
+                            target.x,
+                            target.z,
+                            ordinal(st.passes + 1),
+                            guns.len(),
+                            p.side
+                        ));
+                    }
                     p
                 }
             };
@@ -557,18 +596,48 @@ impl Ai {
             .sum()
     }
 
-    /// What of the enemy's is left at `t`: an enemy metal spot there, else
-    /// the nearest unit we know of near it (the target moves with it).
-    fn pack_target_left(&self, t: Vec3) -> Option<Vec3> {
+    /// What of the enemy's is left at `t`, and whether it moves: an enemy
+    /// metal spot there, else the nearest unit we know of near it (the
+    /// target moves with it).
+    fn pack_target_left(&self, t: Vec3) -> Option<(Vec3, bool)> {
         if self.graph.get_enemy_spots().iter().any(|m| distance(m.get_pos(), t) < 100.0) {
-            return Some(t);
+            return Some((t, false));
         }
         (self.war.targets.values())
             .filter(|e| !e.is_dead && !e.can_fly())
-            .map(|e| (distance(e.position, t), e.position))
-            .filter(|&(d, _)| d < TARGET_LEFT)
+            .map(|e| (distance(e.position, t), e.position, !e.is_static))
+            .filter(|&(d, _, _)| d < TARGET_LEFT)
             .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, p)| p)
+            .map(|(_, p, mobile)| (p, mobile))
+    }
+
+    /// A pack neither out nor parked is led from where most of it stands:
+    /// by the core with the most others within [`BULK`], once it has
+    /// [`BULK_MORE`] more than the leader (a stray core first in line, as
+    /// after a save's load, would gather the pack round itself).
+    fn pack_lead(&mut self, sid: SquadId) {
+        let parked = self.taskforces.packs.get(&sid).is_some_and(|p| p.parked);
+        let Some(s) = self.squads.get(sid).filter(|s| !s.engaging && !parked) else { return };
+        let cores: Vec<(i32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+            .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())))
+            .map(|f| (f.id, f.get_pos()))
+            .collect();
+        let near = |p: Vec3| cores.iter().filter(|c| distance(c.1, p) < BULK).count();
+        let Some(&(best, at)) = cores.iter().max_by_key(|c| near(c.1)) else { return };
+        let led = s.leader.and_then(|l| cores.iter().find(|c| c.0 == l)).map_or(0, |c| near(c.1));
+        if near(at) < led + BULK_MORE {
+            return;
+        }
+        let doctrine = s.shape.doctrine.clone();
+        self.log(&format!(
+            "taskforce: the {doctrine} pack (squad {sid}) is led from where {} of its {} cores stand ({led} near \
+             the old leader)",
+            near(at),
+            cores.len()
+        ));
+        if let Some(s) = self.squads.get_mut(sid) {
+            s.take_lead(best, &mut self.fighters);
+        }
     }
 
     /// A pack neither out nor parked takes in the smaller ones of its
@@ -648,6 +717,21 @@ mod tests {
         let (p, n) = plan_pass(o, (1.0, 0.0), t, &abreast, |p| p.side <= -40.0).unwrap();
         assert!(n == 5 && (p.side + 40.0).abs() < 1.0, "{} {n}", p.side);
         assert!(plan_pass(o, (1.0, 0.0), t, &abreast, |_| false).is_none());
+    }
+
+    #[test]
+    fn a_charge_runs_over_the_target() {
+        let o = Vec3::xz(0.0, 0.0);
+        let t = Vec3::xz(1000.0, 300.0);
+        let guns: Vec<((f32, f32), f32)> = [-60.0, 0.0, 60.0].map(|z| ((0.0, z), 200.0)).to_vec();
+        // Heading well off: a pass keeps near the heading's line, a charge
+        // takes the line over the target all the same.
+        let (p, _) = plan_pass(o, (1.0, 0.0), t, &guns, |_| true).unwrap();
+        assert!(p.side.abs() > 50.0, "{}", p.side);
+        let (c, n) = plan_pass(o, (1.0, 0.0), t, &guns, |p| p.side.abs() <= PASS_STEP / 2.0).unwrap();
+        assert!(c.side.abs() <= PASS_STEP / 2.0 && n == 3);
+        let [a, _] = pass_way(o, t, &c);
+        assert!(distance(a, t) <= PASS_STEP / 2.0);
     }
 
     #[test]

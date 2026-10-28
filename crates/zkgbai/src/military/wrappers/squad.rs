@@ -893,6 +893,31 @@ impl Squad {
         }
     }
 
+    /// Taskforces: member `id` leads instead (a pack is led from where most
+    /// of it stands); the old leader becomes a member.
+    pub fn take_lead(&mut self, id: i32, fighters: &mut FighterStore) {
+        let Some(old) = self.leader.filter(|&l| l != id) else { return };
+        if !self.fighters.contains(&id) {
+            return;
+        }
+        self.fighters.retain(|&f| f != id);
+        self.fighters.push(old);
+        self.leader = Some(id);
+        self.paced = 0.0;
+        self.unpace_member(id, fighters);
+        if let Some(l) = fighters.get(&id) {
+            self.leader_weight = self.unit_weight(def_id(l.unit), l.index);
+            l.unit.set_move_state(1, 0);
+            if self.shape.pace > 0.0 {
+                l.unit.execute_custom_command(cmd::WANTED_SPEED, &[self.shape.pace], 0, NO_TIMEOUT);
+            }
+        }
+        if let Some(o) = fighters.get(&old) {
+            o.unit.set_move_state(0, 0);
+        }
+        self.rekeep(fighters, &[Keep::Guard]);
+    }
+
     /// Lift the speed limit the formation gave member `id` (it leaves it,
     /// or leads it now).
     fn unpace_member(&mut self, id: i32, fighters: &FighterStore) {
