@@ -13,3 +13,8 @@ springai-sys.workspace = true
 # Minimal engine smoke test: `cargo build --example hello_ai`.
 name = "hello_ai"
 crate-type = ["cdylib"]
+
+[[example]]
+# A thread outliving its library: `tools/dll-smoke --unload`.
+name = "unload_probe"
+crate-type = ["cdylib"]
