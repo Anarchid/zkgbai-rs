@@ -10,7 +10,7 @@ use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
 use crate::military::roles::Role;
 use crate::military::scouts;
-use crate::military::stakeouts::stakeout_unit;
+use crate::military::stakeouts::{opens_with_scouts, stakeout_unit};
 use crate::util::kgb_rand;
 
 /// Firewalker and Jugglenaut metal, and from how much enemy light
@@ -28,9 +28,16 @@ const EARLY_CONS_INCOME: f32 = 5.5;
 const EARLY_CONS_MAX: usize = 14;
 
 /// Scouts for the stakeouts in a 1v1 opening (see `fac_opening_scout`):
-/// this many first, then one per this many raiders.
-const OPENING_SCOUTS_FIRST: usize = 2;
-const RAIDERS_PER_SCOUT: usize = 2;
+/// a wave of this much metal first (8 Fleas' worth, or one Kodachi), then
+/// a wave more per this many raiders (a Puppy per two Pyros).
+const SCOUT_WAVE: f32 = 200.0;
+const RAIDERS_PER_WAVE: f32 = 8.0;
+
+/// Whether scouts of `have` metal fall short of the waves wanted with
+/// `raiders` raiders by more than half a scout of `cost`.
+fn scout_wave_short(have: f32, cost: f32, raiders: usize) -> bool {
+    have + cost / 2.0 < SCOUT_WAVE * (raiders as f32 / RAIDERS_PER_WAVE).max(1.0)
+}
 
 /// From when the spider factory raids with Venoms rather than Fleas
 /// (frames: minute 2).
@@ -604,13 +611,14 @@ impl Ai {
         // must not move the economy off its builder curve.
         let ai_wants_builder = self.defs.get(choice).is_some_and(|d| d.speed() > 0.0 && !d.build_options().is_empty());
         // Raiders for home defense while its budget is short (see `qrf`),
-        // in place of a plain fighter. (Not of a scout for the stakeouts:
-        // the QRF floor took a jump opening's second Puppy for a Pyro guard.)
+        // in place of a plain fighter. (Not of the scouts of the factories
+        // that open with a wave of them: the QRF floor took a jump opening's
+        // second Puppy for a Pyro guard.)
         let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy")
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice)
-            || fac.building_for == Some(Role::Stakeout);
+            || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
         // Dirtbags for the strikes while snipers are about (see `strikes`).
         let picked = choice;
         let choice = match (ai_wants_builder || special, fac.unit) {
@@ -1542,14 +1550,18 @@ impl Ai {
 
     /// A scout for the stakeouts from the opening factory of a 1v1 while
     /// the map is sparse (density under the `density_ref` dial), feature
-    /// `openscouts`: the first two units after the constructors, then one
-    /// for every two raiders the raider handler runs, from the factory's
-    /// scout roster (see `stakeouts::scout_roster`). None while the
-    /// stakeouts' loss cap holds (`stakeouts_capped`; not the delay after
-    /// each loss: with a pick per Pyro, 40-60 s apart, it kept one Puppy to
-    /// six Pyros on Comet).
+    /// `openscouts`, where it is one of those that open with scouts (see
+    /// `stakeouts::opens_with_scouts`): right after the constructors, a
+    /// wave of [`SCOUT_WAVE`] metal from its scout roster (4 Puppies, 1
+    /// Kodachi, 2 Hunters or 4 Cutters), then a wave more per
+    /// [`RAIDERS_PER_WAVE`] raiders the raider handler runs. A scout is
+    /// built while the stakeouts' metal falls short of that by more than
+    /// half of it. None while the stakeouts' loss cap holds
+    /// (`stakeouts_capped`; not the delay after each loss: with a pick per
+    /// Pyro, 40-60 s apart, it kept one Puppy to six Pyros on Comet).
     fn fac_opening_scout(&self, fac: &mut Factory) -> Option<&'static str> {
         if !fac.opener
+            || !opens_with_scouts(fac.kind())
             || !self.is_1v1()
             || self.dev_off("openscouts")
             || self.dev_off("stakeouts")
@@ -1558,17 +1570,17 @@ impl Ai {
         {
             return None;
         }
+        let scout = stakeout_unit(fac.kind())?;
+        let cost = self.defs.get(scout)?.cost(self.metal);
         let h = &self.raider_handler;
         let raiders = h.solo_raiders.len() + h.kodachis.len() + h.small_raiders.len() + h.medium_raiders.len();
-        let scouts = self.roles.count(Role::Stakeout) + self.roles.declared_count(Role::Stakeout);
-        if scouts >= OPENING_SCOUTS_FIRST.max(raiders / RAIDERS_PER_SCOUT) {
+        if !scout_wave_short(self.roles_metal(Role::Stakeout), cost, raiders) {
             return None;
         }
         // Constructors first (the jump factory's early Constables too).
         if self.fac_need_workers(fac) || (fac.kind() == FacKind::Jump && self.fac_wants_early_constable()) {
             return None;
         }
-        let scout = stakeout_unit(fac.kind())?;
         fac.building_for = Some(Role::Stakeout);
         Some(scout)
     }
@@ -1720,5 +1732,28 @@ impl Ai {
             return "striderscorpion";
         }
         "striderantiheavy"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scouts of `cost` built from none, with `raiders` raiders.
+    fn wave(cost: f32, raiders: usize) -> usize {
+        (0..).find(|&n| !scout_wave_short(n as f32 * cost, cost, raiders)).unwrap()
+    }
+
+    #[test]
+    fn a_wave_is_about_200_metal() {
+        assert_eq!(wave(25.0, 0), 8); // Fleas
+        assert_eq!(wave(45.0, 0), 4); // Puppies
+        assert_eq!(wave(170.0, 0), 1); // a Kodachi
+        assert_eq!(wave(100.0, 0), 2); // Hunters
+        assert_eq!(wave(55.0, 0), 4); // Cutters
+        // A wave more per 8 raiders: a Puppy per two Pyros.
+        assert_eq!(wave(45.0, 8), 4);
+        assert_eq!(wave(45.0, 16), 9);
+        assert_eq!(wave(170.0, 16), 2);
     }
 }

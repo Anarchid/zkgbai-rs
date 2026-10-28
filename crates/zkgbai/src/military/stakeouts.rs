@@ -45,11 +45,11 @@
 //! lane that eats pickets is not a lane to picket. Spider and vehicle
 //! factories build scouts only for the stakeouts; others build for them
 //! while they are short (feature `anyscout`), the opening scout included,
-//! which so looks for the enemy rather than waiting at home. The opening
-//! factory of a 1v1 builds scouts for them first while the map is sparse,
-//! then one for every two raiders (feature `openscouts`, see
-//! `fac_opening_scout`). Either way the unit comes from the factory's
-//! [`scout_roster`]. A unit built for the stakeouts is theirs alone (see
+//! which so looks for the enemy rather than waiting at home. An opening
+//! jump, tank or ship factory of a 1v1 builds a wave of them first while
+//! the map is sparse, then a wave more per so many raiders (feature
+//! `openscouts`, see `fac_opening_scout`). Either way the unit comes from
+//! the factory's [`scout_roster`]. A unit built for the stakeouts is theirs alone (see
 //! `roles`). `disable=stakeouts` leaves the scouts to the factory's old
 //! scout budget.
 
@@ -90,6 +90,14 @@ pub(crate) fn scout_roster(kind: FacKind) -> &'static [&'static str] {
         FacKind::Ship => &["shipscout", "shiptorpraider"],
         _ => &[],
     }
+}
+
+/// Whether a factory of `kind` opens with a wave of scouts for the
+/// stakeouts (see `fac_opening_scout`): the jumpjets, tanks and ships,
+/// whose scouts the stakeouts did not take before the roster. The others
+/// keep the stakeouts' own numbers.
+pub(crate) fn opens_with_scouts(kind: FacKind) -> bool {
+    matches!(kind, FacKind::Jump | FacKind::Tank | FacKind::Ship)
 }
 
 /// The unit a factory of `kind` builds for the stakeouts: from its scout
