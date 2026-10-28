@@ -131,7 +131,7 @@ class HitModel:
 
 def main(cache, out, workers=4):
     paths = list(combatdata.cached(cache))
-    parts = {"train": [], "test": [], "human": [], "replay": []}
+    parts = {"train": [], "test": [], "human": [], "replay": [], "dev": []}
     with Pool(workers) as pool:
         for i, (sp, g) in enumerate(pool.imap_unordered(game_counts, paths, chunksize=4)):
             if g is not None:
