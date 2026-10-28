@@ -13,6 +13,12 @@
 //! it makes the enemy's way to our metal, and only by a worker whose job it
 //! beats; the old rule took the next fortified gate and the nearest worker
 //! (on Ravaged, a fifth of all constructor time to 6:00 with spots free).
+//! On by default since 2026-10-28 (user: "better to under-porc than to
+//! overporc", until a more principled answer); `disable=detour` restores
+//! the old rule. Its smoke (zkgbai-runs/detour, 4 games an arm) dug 1
+//! ditch to the old rule's 9 and showed the open point: scored one at a
+//! time, the early gates of a seal never pay, the last one (9 spots on
+//! Otago) only once the others are dug.
 
 use serde_json::json;
 use springai::{NO_TIMEOUT, Unit, Vec3};
