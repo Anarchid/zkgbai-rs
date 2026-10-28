@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Water-domain inputs for mech.py's water switch.
 
-usage: water_dump.py <unitdefs.tsv> <out.pkl> [zk.sdd]
+usage: water_dump.py <unitdefs.tsv> <out.pkl> [unitdef_dims.tsv] [zk.sdd]
+  height / waterline / min_water_depth / max_water_depth / float_on_water: per def from the engine dump (UnitDefs).
   heights: per map (name lowercased, spaces as underscores) the 64-elmo heightmap from the first
     ZKGBAI journal "map" record found under ~/Programs/zkgbai-runs (rows are bytes between min and
     max, operator/views.rs); maps never journalled are missing (water rules then stay off).
   weapons: per weapon (<unit>_<key>, commweapon_<name>) whether it is a waterweapon or may fire
     submersed (unit and modular-comm weapon files).
   floaters: LuaRules/Configs/float_defs.lua (rise to fire when aiming and not moving).
-  submerged_at: amph_submerged_at per unit def (ZK's own "under water" depth for amphibious units).
+  submerged_at: amph_submerged_at per unit def (ZK's regen depth for amphibious units, not targetability;
+    kept for water_residue.py's reference rule).
   moveclass: per unit def, from the unit-def dump.
 """
 import csv
@@ -86,7 +88,7 @@ def categories(zk):
     return cats, only
 
 
-def main(udp, out, zk=os.path.expanduser("~/.spring/games/zk.sdd")):
+def main(udp, out, dims=None, zk=os.path.expanduser("~/.spring/games/zk.sdd")):
     heights = {}
     for j in glob.iglob(os.path.join(RUNS, "**", "journal", "*.jsonl"), recursive=True):
         try:
@@ -118,8 +120,25 @@ def main(udp, out, zk=os.path.expanduser("~/.spring/games/zk.sdd")):
         for row in csv.DictReader(fh, delimiter="\t"):
             moveclass[row["name"]] = row.get("moveclass", "") or ""
     cats, only = categories(zk)
+    # engine sizes and water limits per def (tools/arena/unitdef_dims_widget.lua in a short headless match)
+    height, waterline, minwd, maxwd, floaton = {}, {}, {}, {}, set()
+    if dims:
+        with open(dims) as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                height[row["name"]] = float(row["height"])
+                waterline[row["name"]] = float(row["waterline"])
+                if row["floatonwater"] == "true":
+                    floaton.add(row["name"])
+                mn, mx = float(row["minwaterdepth"]), float(row["maxwaterdepth"])
+                if mn > -1e6:
+                    minwd[row["name"]] = mn
+                if mx < 1e6:
+                    maxwd[row["name"]] = mx
     pickle.dump({"heights": heights, "weapons": weapons, "floaters": floaters, "submerged_at": sub_at, "moveclass": moveclass,
-                 "category": cats, "only_target": only}, open(out, "wb"))
+                 "category": cats, "only_target": only, "height": height, "waterline": waterline, "min_water_depth": minwd, "max_water_depth": maxwd,
+                 "float_on_water": floaton},
+                open(out, "wb"))
+    print(f"engine heights for {len(height)} defs, min water depth {len(minwd)}, max water depth {len(maxwd)}")
     print(f"categories for {len(cats)} defs, target lists for {len(only)} weapon slots;",
           "subraider:", sorted(cats.get("subraider", [])), "| hoverriot_laser1:", sorted(only.get("hoverriot_laser1") or ["any"]))
     print(f"heightmaps for {len(heights)} maps; {sum(v['water'] for v in weapons.values())} water weapons, "
@@ -129,4 +148,4 @@ def main(udp, out, zk=os.path.expanduser("~/.spring/games/zk.sdd")):
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:4])
+    main(*sys.argv[1:5])

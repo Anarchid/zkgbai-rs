@@ -89,7 +89,7 @@ def init(pdir, mech_path, variants):
     if os.environ.get("MECH_TACAI"):
         mech.load_tacai(os.environ["MECH_TACAI"])
     if os.environ.get("MECH_WATER"):
-        mech.load_water(os.environ["MECH_WATER"], os.environ.get("MECH_WATER_HITTERS"))
+        mech.load_water(os.environ["MECH_WATER"])
     if os.environ.get("MECH_SHIELD"):  # shield variants: shield pools + hit tables of body hits
         mech.load_shield(os.environ["MECH_SHIELD"], os.path.join(pdir, "hitcells.pkl"))
         cells = pickle.load(open(os.environ["MECH_HITS_SHIELD"], "rb"))["train"]

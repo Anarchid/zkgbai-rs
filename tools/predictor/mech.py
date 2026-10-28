@@ -47,16 +47,13 @@ def load_shield(path, hitcells=None):
                 M["dynfrac"].setdefault(wd, {})[int(rb)] = float(r["dmg"] / r["hit_any"] / (r["nominal"] / r["n"]))
 
 
-def load_water(path, hitters=None):
-    """Water domain (water_dump.py): journal heightmaps, waterweapon flags, floaters, amph_submerged_at,
-    move classes, target categories; hitters (water_hitters.py): non-water weapons seen hitting
-    submerged targets in train games."""
+def load_water(path):
+    """Water domain (water_dump.py): journal heightmaps, waterweapon flags, floaters, move classes,
+    target categories, engine heights and water depth limits per def."""
     M["water"] = pickle.load(open(path, "rb"))
     M["water"]["floaters"] = set(M["water"]["floaters"])
-    M["water"]["hitters"] = pickle.load(open(hitters, "rb")) if hitters else {"sub": set(), "deep_amph": set()}
 
 
-LAND_DEPTH = 22.0    # ground units cannot enter water deeper than this
 
 
 def _water_setup(fight, us, recs):
@@ -87,8 +84,10 @@ def _water_setup(fight, us, recs):
         kind = ("air" if d is not None and d.canfly else "sub" if mc.startswith("UBOAT") else "ship" if mc.startswith("BOAT")
                 else "hover" if mc.startswith("HOVER") else "amph" if mc.startswith(("AKBOT", "ATKBOT")) else
                 "static" if r["static"] else "ground")
-        out[id(u)] = {"x0": u.x, "px": r["x"], "pz": r["z"], "kind": kind,
-                      "sub_at": W["submerged_at"].get(r["def"], 40.0), "floater": r["def"] in W["floaters"]}
+        out[id(u)] = {"x0": u.x, "px": r["x"], "pz": r["z"], "kind": kind, "height": W.get("height", {}).get(r["def"]),
+                      "waterline": W.get("waterline", {}).get(r["def"], 0.0),
+                      "floater": r["def"] in W["floaters"] or r["def"] in W.get("float_on_water", ()), "minwd": W.get("min_water_depth", {}).get(r["def"]),
+                      "maxwd": W.get("max_water_depth", {}).get(r["def"])}
     return {"cell": hm[0], "grid": hm[1], "ax": ax, "az": az, "units": out}
 
 
@@ -108,10 +107,17 @@ def _domain(wat, u):
         return None if info is None else (False, False)
     h = _height(wat, info, u.x)
     depth = -h
-    # (in water, submerged kind or None): a sub in water; a non-floater amph below amph_submerged_at
-    sub = "sub" if (info["kind"] == "sub" and depth > 0) else \
-          "deep_amph" if (info["kind"] == "amph" and not info["floater"] and depth >= info["sub_at"]) else None
-    return h < 0, sub
+    # engine: under water iff pos.y + height < 0. A bottom walker or sunk static stands on the bottom: under
+    # iff the water is deeper than it is tall; no unit stands deeper than its maxWaterDepth, so a heightmap
+    # cell deeper than that is a shore the 64-elmo grid smeared. A sub rides at its waterline (Seawolf 45
+    # down, 30 tall), not on the bottom. Floaters surface to fire.
+    if info["kind"] == "sub":
+        depth = info["waterline"] if h < 0 else 0.0
+    elif info["maxwd"] is not None:
+        depth = min(depth, info["maxwd"])
+    under = info["kind"] not in ("air", "hover", "ship") and not info["floater"] and info["height"] is not None \
+        and depth > info["height"]
+    return h < 0, under
 
 
 def _cat_ok(weapon, target_def):
@@ -449,13 +455,13 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 u.moving = True
                 moved = True
         if wat:
-            # undo moves out of a unit's domain: subs and ships stay in water, ground units out of deep water
+            # undo moves out of a unit's domain (engine minWaterDepth / maxWaterDepth per def)
             for u in alive:
                 info = wat["units"].get(id(u))
-                if info is None or u.x == prev_x[id(u)] or info["kind"] not in ("sub", "ship", "ground"):
+                if info is None or u.x == prev_x[id(u)]:
                     continue
-                h = _height(wat, info, u.x)
-                if (info["kind"] in ("sub", "ship") and h >= 0) or (info["kind"] == "ground" and h < -LAND_DEPTH):
+                depth = -_height(wat, info, u.x)
+                if (info["minwd"] is not None and depth < info["minwd"]) or (info["maxwd"] is not None and depth > info["maxwd"]):
                     u.x = prev_x[id(u)]
         alive = [u for u in us if u.alive]
         dom = {id(u): _domain(wat, u) for u in alive} if wat else {}
@@ -519,8 +525,8 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     torpedo = M.setdefault("_wtype", {}).setdefault(w.name, str(predict.G["wtab"].loc[w.name, "type"])
                                                                  if w.name in predict.G["wtab"].index else "") == "TorpedoLauncher"
                     du = dom.get(id(u))
-                    if du is not None and du[1] and not water_w and w.name not in M["water"]["hitters"].get(du[1], ()):
-                        continue  # submerged: only water weapons fire (or those seen firing from there)
+                    if du is not None and du[1] and not water_w:
+                        continue  # under water: only water weapons fire
                 eff = ux.engage
                 if opts.get("rate") and w.range >= 300 and ux.blockers:
                     eff *= max(0.0, 1.0 - opts["rate"] * min(ux.blockers, 3))
@@ -540,8 +546,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 inr = [(abs(e.x - u.x), e) for e in foes if abs(e.x - u.x) <= w.range and e.alive
                        and (not opts.get("air") or (can_air if xof[id(e)].air else can_ground))
                        and (not wat or (_cat_ok(w.name, e.def_) and (dom.get(id(e)) is None
-                            or ((water_w or not dom[id(e)][1] or w.name in M["water"]["hitters"][dom[id(e)][1]])
-                                and (not torpedo or dom[id(e)][0])))))]
+                            or ((water_w or not dom[id(e)][1]) and (not torpedo or dom[id(e)][0])))))]
                 if not inr:
                     continue
                 if opts.get("shield") and ux.drain > 0:
