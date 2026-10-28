@@ -29,33 +29,61 @@ def norm(name):
 
 
 def weapon_flags(zk):
+    """waterweapon / fireSubmersed per weapon: weapon blocks are the tables one level inside
+    weaponDefs (brace depth, so rgbColor = {...} and other inline tables are not blocks)."""
     out = {}
-    skip = {"customparams", "damage", "damages", "weapons", "weapondefs", "featuredefs", "sfxtypes", "explosiongenerators",
-            "buildoptions", "sounds", "textures", "collisionvolumes", "weapon", "select", "ok"}
     for f in glob.glob(os.path.join(zk, "units", "*.lua")):
         unit = os.path.basename(f)[:-4]
+        depth = None  # brace depth inside weaponDefs; None outside it
         block = None
-        inw = False
         for ln in open(f, errors="ignore"):
-            if re.match(r"^\s*weaponDefs\s*=\s*\{", ln, re.I):
-                inw = True
+            code = ln.split("--", 1)[0]
+            if depth is None:
+                if re.match(r"^\s*weaponDefs\s*=\s*\{", code, re.I):
+                    depth = 1
                 continue
-            if not inw:
-                continue
-            m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*\{", ln)
-            if m and m.group(1).lower() not in skip:
+            m = re.match(r"^\s*([A-Za-z0-9_]+)\s*=\s*\{", code)
+            if m and depth == 1:
                 block = f"{unit}_{m.group(1).lower()}"
                 out.setdefault(block, {"water": False, "submersed": False})
-            if block and re.search(r"waterweapon\s*=\s*true", ln, re.I):
-                out[block]["water"] = True
-            if block and re.search(r"firesubmersed\s*=\s*true", ln, re.I):
-                out[block]["submersed"] = True
+            if block and depth >= 2:
+                if re.search(r"waterweapon\s*=\s*true", code, re.I):
+                    out[block]["water"] = True
+                if re.search(r"firesubmersed\s*=\s*true", code, re.I):
+                    out[block]["submersed"] = True
+            depth += code.count("{") - code.count("}")
+            if depth <= 0:
+                depth = None
+                block = None
     for f in glob.glob(os.path.join(zk, "gamedata", "modularcomms", "weapons", "*.lua")):
         src = open(f, errors="ignore").read()
         name = "commweapon_" + os.path.basename(f)[:-4]
         out[name] = {"water": bool(re.search(r"waterweapon\s*=\s*true", src, re.I)),
                      "submersed": bool(re.search(r"firesubmersed\s*=\s*true", src, re.I))}
     return out
+
+
+def categories(zk):
+    """Unit def -> its target categories; weapon (<unit>_<def key>) -> its slot's onlyTargetCategory
+    (None = anything). A weapon can target a unit only when they share a category (engine rule)."""
+    cats, only = {}, {}
+    for f in glob.glob(os.path.join(zk, "units", "*.lua")):
+        unit = os.path.basename(f)[:-4]
+        src = open(f, errors="ignore").read()
+        m = re.search(r"\bcategory\s*=\s*\[\[([^\]]*)\]\]", src)
+        if m:
+            cats[unit] = set(m.group(1).split())
+        w = re.search(r"\bweapons\s*=\s*\{(.*?)\n\s*\},?\s*\n\s*weaponDefs", src, re.S | re.I)
+        if not w:
+            continue
+        entries = re.split(r"(?=\bdef\s*=)", w.group(1))
+        for e in entries:
+            d = re.match(r"def\s*=\s*(?:\[\[|\")([A-Za-z0-9_]+)", e)
+            if not d:
+                continue
+            o = re.search(r"onlyTargetCategory\s*=\s*\[\[([^\]]*)\]\]", e)
+            only[f"{unit}_{d.group(1).lower()}"] = set(o.group(1).split()) if o else None
+    return cats, only
 
 
 def main(udp, out, zk=os.path.expanduser("~/.spring/games/zk.sdd")):
@@ -89,12 +117,15 @@ def main(udp, out, zk=os.path.expanduser("~/.spring/games/zk.sdd")):
     with open(udp) as fh:
         for row in csv.DictReader(fh, delimiter="\t"):
             moveclass[row["name"]] = row.get("moveclass", "") or ""
-    pickle.dump({"heights": heights, "weapons": weapons, "floaters": floaters, "submerged_at": sub_at, "moveclass": moveclass},
-                open(out, "wb"))
+    cats, only = categories(zk)
+    pickle.dump({"heights": heights, "weapons": weapons, "floaters": floaters, "submerged_at": sub_at, "moveclass": moveclass,
+                 "category": cats, "only_target": only}, open(out, "wb"))
+    print(f"categories for {len(cats)} defs, target lists for {len(only)} weapon slots;",
+          "subraider:", sorted(cats.get("subraider", [])), "| hoverriot_laser1:", sorted(only.get("hoverriot_laser1") or ["any"]))
     print(f"heightmaps for {len(heights)} maps; {sum(v['water'] for v in weapons.values())} water weapons, "
           f"{sum(v['submersed'] for v in weapons.values())} fire submersed; floaters {floaters}; "
           f"amph_submerged_at for {len(sub_at)} defs")
-    print("water weapons:", sorted(k for k, v in weapons.items() if v["water"])[:40])
+    print("water weapons:", sorted(k for k, v in weapons.items() if v["water"] and not k.startswith("chicken")))
 
 
 if __name__ == "__main__":

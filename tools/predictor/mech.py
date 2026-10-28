@@ -47,6 +47,81 @@ def load_shield(path, hitcells=None):
                 M["dynfrac"].setdefault(wd, {})[int(rb)] = float(r["dmg"] / r["hit_any"] / (r["nominal"] / r["n"]))
 
 
+def load_water(path, hitters=None):
+    """Water domain (water_dump.py): journal heightmaps, waterweapon flags, floaters, amph_submerged_at,
+    move classes, target categories; hitters (water_hitters.py): non-water weapons seen hitting
+    submerged targets in train games."""
+    M["water"] = pickle.load(open(path, "rb"))
+    M["water"]["floaters"] = set(M["water"]["floaters"])
+    M["water"]["hitters"] = pickle.load(open(hitters, "rb")) if hitters else {"sub": set(), "deep_amph": set()}
+
+
+LAND_DEPTH = 22.0    # ground units cannot enter water deeper than this
+
+
+def _water_setup(fight, us, recs):
+    """Per-unit 2-D anchor on the fight axis and water traits; None when the map has no heightmap."""
+    W = M.get("water")
+    if W is None:
+        return None
+    hm = W["heights"].get(str(fight.get("map", "")).strip().lower().replace(" ", "_"))
+    if hm is None:
+        return None
+    A, B = fight["A"], fight["B"]
+    def cent(side):
+        xs = [(r["x"], r["z"]) for r in side if not math.isnan(r["x"])]
+        return (sum(x for x, _ in xs) / len(xs), sum(z for _, z in xs) / len(xs)) if xs else None
+    ca, cb = cent(A), cent(B)
+    if ca is None or cb is None:
+        return None
+    dx, dz = cb[0] - ca[0], cb[1] - ca[1]
+    d0 = math.hypot(dx, dz)
+    ax, az = (dx / d0, dz / d0) if d0 > 1 else (1.0, 0.0)
+    ud = predict.G["ud"]
+    out = {}
+    for u, r in zip(us, recs):
+        if math.isnan(r["x"]):
+            continue
+        d = ud.get(r["def"])
+        mc = W["moveclass"].get(r["def"], "")
+        kind = ("air" if d is not None and d.canfly else "sub" if mc.startswith("UBOAT") else "ship" if mc.startswith("BOAT")
+                else "hover" if mc.startswith("HOVER") else "amph" if mc.startswith(("AKBOT", "ATKBOT")) else
+                "static" if r["static"] else "ground")
+        out[id(u)] = {"x0": u.x, "px": r["x"], "pz": r["z"], "kind": kind,
+                      "sub_at": W["submerged_at"].get(r["def"], 40.0), "floater": r["def"] in W["floaters"]}
+    return {"cell": hm[0], "grid": hm[1], "ax": ax, "az": az, "units": out}
+
+
+def _height(wat, info, x):
+    gx = info["px"] + (x - info["x0"]) * wat["ax"]
+    gz = info["pz"] + (x - info["x0"]) * wat["az"]
+    g = wat["grid"]
+    r = min(max(int(gz / wat["cell"]), 0), g.shape[0] - 1)
+    c = min(max(int(gx / wat["cell"]), 0), g.shape[1] - 1)
+    return float(g[r, c])
+
+
+def _domain(wat, u):
+    """(in water, under water) for a unit at its current 1-D position; None when unknown."""
+    info = wat["units"].get(id(u)) if wat else None
+    if info is None or info["kind"] == "air":
+        return None if info is None else (False, False)
+    h = _height(wat, info, u.x)
+    depth = -h
+    # (in water, submerged kind or None): a sub in water; a non-floater amph below amph_submerged_at
+    sub = "sub" if (info["kind"] == "sub" and depth > 0) else \
+          "deep_amph" if (info["kind"] == "amph" and not info["floater"] and depth >= info["sub_at"]) else None
+    return h < 0, sub
+
+
+def _cat_ok(weapon, target_def):
+    """Engine target categories: the weapon slot's onlyTargetCategory must share one with the target."""
+    W = M["water"]
+    only = W.get("only_target", {}).get(weapon)
+    cats = W.get("category", {}).get(target_def)
+    return only is None or cats is None or bool(only & cats)
+
+
 def load_tacai(path):
     """ZK's Tactical Unit AI, resolved by tacai_dump.py: per unit def, whom it skirms and flees."""
     import json
@@ -122,7 +197,9 @@ def _setup(fight, opts):
         x.slow_last = -10 ** 9
         x.burns = []
         sd = M.get("shield", {}).get(r["def"]) if opts.get("shield") else None
-        x.sh = sd["power"] if sd else None  # fights start with shields up (70% of shots at shield units find it up)
+        x.sh = sd["power"] if sd else None  # full at the start, or (shield_start) the charge logged at the unit's first row
+        if sd and opts.get("shield_start") and r.get("sh") is not None:
+            x.sh = max(0.0, min(sd["power"], float(r["sh"])))
         x.shmax = sd["power"] if sd else 0.0
         x.shregen = sd["regen"] if sd else 0.0
         x.shr = sd["radius"] if sd else 0.0
@@ -186,8 +263,11 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     arm runs without the stopping rule and ends 10 s after the last shot or approach (5 s with a
     withdrawal). Hazards fitted with mobility features (hazmob) get disengage.mob_feats(fight)."""
     hits = predict.G["hits"]
+    if opts.get("shield2"):  # mechanics round 4: shield pools starting from the logged charge
+        opts = dict(opts, shield=1, shield_start=1)
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
+    wat = _water_setup(fight, us, list(fight["A"]) + list(fight["B"])) if opts.get("water") else None
     for u in us:
         for w in u.weapons:
             w.next = 0
@@ -293,6 +373,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     x.sh = min(x.shmax, x.sh + x.shregen * DT / 30.0)
             sides = [[u for u in alive if u.side == s] for s in (0, 1)]
         # movement: close until an enemy is within own range
+        prev_x = {id(u): u.x for u in alive} if wat else None
         for u in alive:
             u.moving = False
             if not u.mobile or u.speed <= 0:
@@ -367,7 +448,17 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 u.x -= step if nearest.x > u.x else -step
                 u.moving = True
                 moved = True
+        if wat:
+            # undo moves out of a unit's domain: subs and ships stay in water, ground units out of deep water
+            for u in alive:
+                info = wat["units"].get(id(u))
+                if info is None or u.x == prev_x[id(u)] or info["kind"] not in ("sub", "ship", "ground"):
+                    continue
+                h = _height(wat, info, u.x)
+                if (info["kind"] in ("sub", "ship") and h >= 0) or (info["kind"] == "ground" and h < -LAND_DEPTH):
+                    u.x = prev_x[id(u)]
         alive = [u for u in us if u.alive]
+        dom = {id(u): _domain(wat, u) for u in alive} if wat else {}
         # fire
         groups = {}
         if opts.get("shield"):
@@ -422,6 +513,14 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 if f < w.next:
                     continue
                 can_air, can_ground, burn, blen, emp, slow, pulse = _weapon_info(w)
+                if wat:
+                    wf = M["water"]["weapons"].get(w.name, {})
+                    water_w = wf.get("water", False) or wf.get("submersed", False)
+                    torpedo = M.setdefault("_wtype", {}).setdefault(w.name, str(predict.G["wtab"].loc[w.name, "type"])
+                                                                 if w.name in predict.G["wtab"].index else "") == "TorpedoLauncher"
+                    du = dom.get(id(u))
+                    if du is not None and du[1] and not water_w and w.name not in M["water"]["hitters"].get(du[1], ()):
+                        continue  # submerged: only water weapons fire (or those seen firing from there)
                 eff = ux.engage
                 if opts.get("rate") and w.range >= 300 and ux.blockers:
                     eff *= max(0.0, 1.0 - opts["rate"] * min(ux.blockers, 3))
@@ -439,7 +538,10 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                         hurt(e, per_victim * eff)
                     continue
                 inr = [(abs(e.x - u.x), e) for e in foes if abs(e.x - u.x) <= w.range and e.alive
-                       and (not opts.get("air") or (can_air if xof[id(e)].air else can_ground))]
+                       and (not opts.get("air") or (can_air if xof[id(e)].air else can_ground))
+                       and (not wat or (_cat_ok(w.name, e.def_) and (dom.get(id(e)) is None
+                            or ((water_w or not dom[id(e)][1] or w.name in M["water"]["hitters"][dom[id(e)][1]])
+                                and (not torpedo or dom[id(e)][0])))))]
                 if not inr:
                     continue
                 if opts.get("shield") and ux.drain > 0:
