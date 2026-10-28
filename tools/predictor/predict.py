@@ -732,7 +732,7 @@ def score(df, pdir):
         ">=500 metal/side": (df["costA"] >= 500) & (df["costB"] >= 500),
     }
     out = []
-    for sp in ("test", "human", "train"):
+    for sp in ("test", "human", "replay", "train"):
         for sub, m in subsets.items():
             mask = (df["split"] == sp).values & np.asarray(m)
             d = df[mask]
@@ -755,7 +755,7 @@ def score(df, pdir):
     sc = pd.DataFrame(out)
     sc.to_csv(os.path.join(pdir, "scores.tsv"), sep="\t", index=False, float_format="%.4f")
     with open(os.path.join(pdir, "results.md"), "w") as fh:
-        for sp in ("test", "human", "train"):
+        for sp in ("test", "human", "replay", "train"):
             s = sc[sc["split"] == sp]
             if len(s) == 0:
                 continue

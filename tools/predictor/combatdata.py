@@ -89,6 +89,9 @@ def series_name(path):
 
 def find(paths):
     for p in paths:
+        if p.startswith("@"):  # a file listing one log per line
+            yield from (q for q in open(os.path.expanduser(p[1:])).read().splitlines() if q)
+            continue
         p = os.path.expanduser(p)
         if os.path.isdir(p):
             for root, _, files in os.walk(p):
@@ -142,7 +145,7 @@ def load_cached(path):
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "build":
-        build(sys.argv[2], sys.argv[3:])
+        build(sys.argv[2], sys.argv[3:], int(os.environ.get("PRED_WORKERS", "4")))
     elif cmd == "info":
         tot = {}
         for f in cached(sys.argv[2]):
