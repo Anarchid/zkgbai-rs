@@ -370,9 +370,11 @@ impl Ai {
             self.raider_assign_solo_raiders();
         }
 
-        // Unstick raiders that are caught on buildings or wrecks.
+        // Unstick raiders that are caught on buildings or wrecks (not those
+        // waiting out a blast of ours).
         if frame % 30 == (offset + 1) % 30 {
-            let small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
+            let mut small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
+            small.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in small {
                 if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
                     f.unstick(frame, &mut self.raider_handler.scout_tasks);
@@ -381,7 +383,8 @@ impl Ai {
         }
 
         if frame % 30 == (offset + 5) % 30 {
-            let medium: Vec<i32> = self.raider_handler.medium_raiders.iter().copied().collect();
+            let mut medium: Vec<i32> = self.raider_handler.medium_raiders.iter().copied().collect();
+            medium.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in medium {
                 let Some(f) = self.fighters.get_mut(&id) else {
                     continue;
@@ -403,6 +406,7 @@ impl Ai {
             ids.extend(self.raider_handler.kodachis.iter().copied());
             // Raiders parked at a precision spot stand still on purpose.
             ids.retain(|id| !self.precision.missions.contains_key(id));
+            ids.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in ids {
                 if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
                     f.unstick(frame, &mut self.raider_handler.scout_tasks);

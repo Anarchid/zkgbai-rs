@@ -3,6 +3,7 @@
 
 pub mod air_intel;
 pub mod arsenal;
+pub mod blasts;
 pub mod drops;
 pub mod enemy;
 pub mod fightsim;
@@ -526,6 +527,7 @@ impl Ai {
         self.guard("drops.update", |ai| ai.drops_update(frame));
         self.guard("intel.update", |ai| ai.intel_update(frame));
         self.guard("nukes.update", |ai| ai.nukes_update(frame));
+        self.guard("blasts.update", |ai| ai.blasts_update(frame));
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
         self.guard("scouts.update", |ai| ai.scouts_update(frame));
         self.guard("jaeger.update", |ai| ai.jaeger_update(frame));

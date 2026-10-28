@@ -13,6 +13,7 @@ use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
 use crate::logistics::Logistics;
 use crate::los::LosManager;
+use crate::military::blasts::Blasts;
 use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::incursions::Incursions;
@@ -155,6 +156,7 @@ pub struct Ai {
     pub intel: Intel,
     /// Our nuclear strikes, and where they were intercepted.
     pub nukes: Nukes,
+    pub blasts: Blasts,
     pub missiles: Missiles,
     pub sweeps: Sweeps,
     pub strikes: Strikes,
@@ -274,6 +276,7 @@ impl SkirmishAi for Ai {
             drops: Drops::default(),
             intel: Intel::default(),
             nukes: Nukes::default(),
+            blasts: Blasts::default(),
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
             strikes: Strikes::default(),
@@ -335,6 +338,7 @@ impl SkirmishAi for Ai {
                 if self.active() {
                     self.guard("graph.luaMessage", |ai| ai.graph_lua_message(&data));
                     self.guard("nukes.luaMessage", |ai| ai.nukes_lua_message(&data));
+                    self.guard("blasts.luaMessage", |ai| ai.blasts_lua_message(&data));
                     if data.starts_with("IQ|") {
                         self.guard("iq.luaMessage", |ai| ai.iq_lua_message(&data));
                     }

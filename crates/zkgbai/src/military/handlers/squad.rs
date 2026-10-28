@@ -197,10 +197,12 @@ impl Ai {
             let retreating = self.retreat_handler.is_retreating(id);
             let flies = unit.def().is_some_and(|d| d.is_able_to_fly());
             // A squad the operator holds somewhere stands still on purpose:
-            // not stuck, not for the reclaimers.
+            // not stuck, not for the reclaimers; so does one waiting out
+            // a blast of ours (see `blasts`).
             let held = f
                 .squad
-                .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some());
+                .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some())
+                || self.blasts_waiting(unit.pos());
             if !retreating && !flies && !held && self.fighters.get_mut(&id).is_some_and(|f| f.is_stuck(frame)) {
                 self.squad_leave_squad(id);
                 self.eco_add_combat_reclaim_task(unit);
