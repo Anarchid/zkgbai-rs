@@ -24,8 +24,8 @@
 use std::collections::HashMap;
 
 use super::{
-    DT, FightSnapshot, HORIZON, Hazard, HitTables, MechOutcome, Model, RBANDS, SimUnit, ZoiBeta, data_lines, expit,
-    parse_f64, project, speed_band, take,
+    DT, FateMode, FightSnapshot, HORIZON, Hazard, HitTables, MechOutcome, Model, RBANDS, SimUnit, UnitFate, ZoiBeta,
+    data_lines, expit, logit, parse_f64, project, speed_band, take,
 };
 
 const MECH_TSV: &str = include_str!("../../../data/fightsim_mech.tsv");
@@ -111,6 +111,9 @@ pub struct MechTables {
     pub win: [f64; 2],
     pub cal_a: ZoiBeta,
     pub cal_b: ZoiBeta,
+    /// A unit's P(dead by the horizon) recalibrated: expit(t0 + t1 logit(raw)
+    /// + t2 static + t3 ln(horizon / 150)) (tools/predictor/score_fates.py).
+    pub fate: [f64; 4],
     /// The data file's fitting header.
     pub fitted: String,
 }
@@ -181,6 +184,7 @@ impl MechTables {
             win: take(&cal, "win.")?,
             cal_a: ZoiBeta { theta: take(&cal, "zoibA.")? },
             cal_b: ZoiBeta { theta: take(&cal, "zoibB.")? },
+            fate: take(&cal, "fate.")?,
             fitted: tsv.lines().next().unwrap_or_default().trim_start_matches('#').trim().to_owned(),
         })
     }
@@ -207,6 +211,8 @@ pub(super) struct MechUnit {
     slow_last: i32,
     /// (last frame, damage per frame).
     burns: Vec<(i32, f64)>,
+    /// Lateral coordinate: 0 except in a fates query's pass mode.
+    lat: f64,
 }
 
 impl MechUnit {
@@ -217,6 +223,59 @@ impl MechUnit {
     fn slowed(&self) -> f64 {
         if self.slowdmg > 0.0 { SLOW_MAX.min(self.slowdmg / self.u.hp.max(1.0)) } else { 0.0 }
     }
+}
+
+/// mech.py `apart`: distance along the axis, and across it when the two
+/// stand on different lines (pass mode).
+fn apart(a: &MechUnit, b: &MechUnit) -> f64 {
+    let dy = a.lat - b.lat;
+    if dy == 0.0 { (a.u.x - b.u.x).abs() } else { (a.u.x - b.u.x).hypot(dy) }
+}
+
+/// What a run of the mechanics fight answers.
+struct Run<'a> {
+    hazard: Option<&'a Hazard>,
+    withdraw: bool,
+    /// A's mobile units drive through B (fates' pass mode).
+    pass: bool,
+    horizon: i32,
+    /// Per-unit bookkeeping for a fates query; the fight then goes on to
+    /// the horizon while one side has an armed unit and the other anything.
+    track: Option<Track>,
+}
+
+/// mech.py's fates bookkeeping: the Bernoulli variance of the hits each
+/// unit took and the frame it died at.
+struct Track {
+    var: Vec<f64>,
+    death_f: Vec<Option<i32>>,
+}
+
+/// mech.py `_pdead`: P(dead by the horizon), the expected damage taken by
+/// then against the starting health, spread by the hits' variance
+/// (normal). A unit dead earlier has its damage and variance carried on at
+/// their rate to the horizon; one killed without spread is dead.
+fn p_dead(hp0: f64, hp: f64, death_f: Option<i32>, var: f64, horizon: i32) -> f64 {
+    let (mut taken, mut v) = (hp0 - hp, var);
+    if let Some(df) = death_f {
+        let scale = horizon as f64 / (df + DT).max(DT) as f64;
+        taken *= scale;
+        v *= scale;
+    }
+    if v <= 0.0 {
+        return if death_f.is_some() || taken >= hp0 { 1.0 } else { 0.0 };
+    }
+    0.5 * (1.0 + erf((taken - hp0) / (2.0 * v).sqrt()))
+}
+
+/// Abramowitz and Stegun 7.1.26 (absolute error below 1.5e-7).
+fn erf(x: f64) -> f64 {
+    let t = 1.0 / (1.0 + 0.3275911 * x.abs());
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592)
+            * t
+            * (-x * x).exp();
+    y.copysign(x)
 }
 
 impl Model {
@@ -236,6 +295,46 @@ impl Model {
             mean_b: t.cal_b.mean(kb) as f32,
             p_a_wins: expit(t.win[0] + t.win[1] * (kb - ka)) as f32,
         }
+    }
+
+    /// Each snapshot unit's fate, in snapshot order, after `horizon` frames
+    /// of the mechanics fight with no stopping rule and A moving as `mode`
+    /// says (mech.py `simulate_mech(fates=...)`). The fight goes on while one
+    /// side has an armed unit and the other anything alive, unarmed eco too.
+    pub fn fates(&self, snap: &FightSnapshot, horizon: i32, mode: FateMode) -> Vec<UnitFate> {
+        let mut units = self.mech_units(snap);
+        let pass = match mode {
+            FateMode::AMove => false,
+            FateMode::Pass { offset } => {
+                for m in &mut units {
+                    m.lat = if m.u.side == 1 && !m.u.mobile { 0.0 } else { offset as f64 };
+                }
+                true
+            }
+        };
+        let n = units.len();
+        let track = Track { var: vec![0.0; n], death_f: vec![None; n] };
+        let mut run = Run { hazard: None, withdraw: false, pass, horizon, track: Some(track) };
+        let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
+        let Some(tr) = run.track else { return Vec::new() };
+        let c = &self.mech.fate;
+        let ln_h = (horizon.max(1) as f64 / 150.0).ln();
+        units
+            .iter()
+            .zip(&end)
+            .enumerate()
+            .map(|(i, (u0, u))| {
+                let raw = p_dead(u0.u.hp, u.u.hp, tr.death_f[i], tr.var[i], horizon);
+                let z = c[1] * logit(raw.clamp(0.005, 0.995)) + c[2] * if u0.u.mobile { 0.0 } else { 1.0 };
+                UnitFate {
+                    dead: !u.u.alive,
+                    death_frame: tr.death_f[i],
+                    hp_left: if u.u.alive { u.u.hp.max(0.0) as f32 } else { 0.0 },
+                    p_dead: expit(c[0] + z + c[3] * ln_h) as f32,
+                    p_raw: raw as f32,
+                }
+            })
+            .collect()
     }
 
     /// The snapshot's units for the mechanics fight. Pure EMP weapons go
@@ -277,6 +376,7 @@ impl Model {
                     slowdmg: 0.0,
                     slow_last: -1_000_000_000,
                     burns: Vec::new(),
+                    lat: 0.0,
                 }
             })
             .collect();
@@ -367,12 +467,11 @@ fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize) {
         killed[us[t].u.side as usize] += us[t].u.cost;
     }
     let Some(d) = us[t].death else { return };
-    let tx = us[t].u.x;
     for o in 0..us.len() {
         if !us[o].u.alive {
             continue;
         }
-        let dd = (us[o].u.x - tx).abs();
+        let dd = apart(&us[o], &us[t]);
         if dd < d.aoe {
             let v = d.damage * (1.0 - d.edge * dd / d.aoe);
             if d.paralyzer {
@@ -395,6 +494,14 @@ pub(super) fn simulate_mech(
     hazard: Option<&Hazard>,
     withdraw: bool,
 ) -> (f64, f64) {
+    let mut run = Run { hazard, withdraw, pass: false, horizon: HORIZON, track: None };
+    run_mech(template, hits, stun_cap_s, &mut run).0
+}
+
+/// The mechanics fight as `run` asks: the killed shares, and the units at
+/// its end.
+fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut Run) -> ((f64, f64), Vec<MechUnit>) {
+    let (hazard, withdraw) = (run.hazard, run.withdraw);
     let mut us: Vec<MechUnit> = template.to_vec();
     let n = us.len();
     let dt = DT as f64;
@@ -409,7 +516,7 @@ pub(super) fn simulate_mech(
     let mut alive: Vec<usize> = Vec::with_capacity(n);
     let mut sides: [Vec<usize>; 2] = [Vec::with_capacity(n), Vec::with_capacity(n)];
     let mut foes: Vec<usize> = Vec::with_capacity(n);
-    while f < HORIZON {
+    while f < run.horizon {
         if let Some(hz) = hazard
             && f > 0
             && f % 30 == 0
@@ -426,7 +533,13 @@ pub(super) fn simulate_mech(
             side.clear();
             side.extend(alive.iter().copied().filter(|&i| us[i].u.side as usize == s));
         }
-        if !sides.iter().all(|side| side.iter().any(|&i| us[i].u.armed || us[i].kamikaze)) {
+        let armed = |s: usize| sides[s].iter().any(|&i| us[i].u.armed || us[i].kamikaze);
+        let goes_on = if run.track.is_some() {
+            (0..2).any(|s| armed(s) && !sides[1 - s].is_empty())
+        } else {
+            armed(0) && armed(1)
+        };
+        if !goes_on {
             break;
         }
         // Status: burns tick, paralysis and slow wear off (units killed by a
@@ -457,16 +570,25 @@ pub(super) fn simulate_mech(
                 continue;
             }
             let side = us[i].u.side as usize;
-            let ux = us[i].u.x;
             let mut nearest: Option<(f64, f64)> = None;
             for &j in &sides[1 - side] {
-                let d = (us[j].u.x - ux).abs();
+                let d = apart(&us[j], &us[i]);
                 if nearest.is_none_or(|n| d < n.0) {
                     nearest = Some((d, us[j].u.x));
                 }
             }
             let Some((dist, nx)) = nearest else { continue };
             let speed = us[i].u.speed * (1.0 - us[i].slowed());
+            if run.pass && side == 0 {
+                if us[i].kamikaze && dist <= KAMIKAZE_REACH {
+                    kill(&mut us, &mut killed, i);
+                    continue;
+                }
+                us[i].u.x += speed * dt;
+                us[i].u.moving = true;
+                moved = true;
+                continue;
+            }
             if withdraw && side == 0 {
                 let u = &mut us[i].u;
                 u.x -= if nx > u.x { speed * dt } else { -speed * dt };
@@ -523,11 +645,10 @@ pub(super) fn simulate_mech(
                     continue;
                 }
                 let m = us[i].mech[wi];
-                let ux = us[i].u.x;
                 let mut target: Option<(f64, usize)> = None;
                 for &j in &foes {
                     let e = &us[j];
-                    let d = (e.u.x - ux).abs();
+                    let d = apart(e, &us[i]);
                     if e.u.alive
                         && d <= range
                         && (if e.air { m.can_air } else { m.can_ground })
@@ -558,9 +679,22 @@ pub(super) fn simulate_mech(
                     t.slow_last = f;
                 }
                 if dmg > 0.0 {
+                    if let Some(tr) = run.track.as_mut() {
+                        let (p, d1) = (hit.p_tgt * eff, frac * nominal);
+                        tr.var[j] += shots * p * (1.0 - p) * d1 * d1;
+                    }
                     hurt(&mut us, &mut killed, j, dmg);
                 }
             }
+        }
+        if let Some(tr) = run.track.as_mut() {
+            for (d, m) in tr.death_f.iter_mut().zip(&us) {
+                if !m.u.alive && d.is_none() {
+                    *d = Some(f);
+                }
+            }
+            f += DT;
+            continue;
         }
         quiet = if shot_fired || (moved && !withdraw) { 0 } else { quiet + DT };
         if quiet > if withdraw { 150 } else { 300 } {
@@ -569,7 +703,8 @@ pub(super) fn simulate_mech(
         f += DT;
     }
     let k = kfrac(&killed);
-    if hazard.is_some() { (exp_k[0] + surv * k[0], exp_k[1] + surv * k[1]) } else { (k[0], k[1]) }
+    let shares = if hazard.is_some() { (exp_k[0] + surv * k[0], exp_k[1] + surv * k[1]) } else { (k[0], k[1]) };
+    (shares, us)
 }
 
 #[cfg(test)]
@@ -581,6 +716,7 @@ mod tests {
 
     const UNITS: &str = include_str!("testdata/mech_parity_units.tsv");
     const CASES: &str = include_str!("testdata/mech_parity_cases.tsv");
+    const FATES: &str = include_str!("testdata/mech_fates_cases.tsv");
     /// Absolute tolerance on killed shares against the Python model.
     const TOL: f64 = 1e-3;
 
@@ -620,29 +756,34 @@ mod tests {
             .collect()
     }
 
+    /// A case's units, `side:def:hp:x:z` separated by `;`.
+    fn snapshot(units: &str, specs: &HashMap<String, Arc<UnitSpec>>) -> FightSnapshot {
+        let units = units
+            .split(';')
+            .map(|u| {
+                let p: Vec<&str> = u.split(':').collect();
+                SnapUnit {
+                    side: p[0].parse().unwrap(),
+                    spec: specs[p[1]].clone(),
+                    hp: p[2].parse().unwrap(),
+                    x: p[3].parse().unwrap(),
+                    z: p[4].parse().unwrap(),
+                }
+            })
+            .collect();
+        FightSnapshot { units }
+    }
+
     fn cases() -> Vec<(String, FightSnapshot, [f64; 6])> {
         let specs = specs();
         data_lines(CASES)
             .map(|l| {
                 let f: Vec<&str> = l.split('\t').collect();
-                let units = f[1]
-                    .split(';')
-                    .map(|u| {
-                        let p: Vec<&str> = u.split(':').collect();
-                        SnapUnit {
-                            side: p[0].parse().unwrap(),
-                            spec: specs[p[1]].clone(),
-                            hp: p[2].parse().unwrap(),
-                            x: p[3].parse().unwrap(),
-                            z: p[4].parse().unwrap(),
-                        }
-                    })
-                    .collect();
                 let mut want = [0.0; 6];
                 for (w, s) in want.iter_mut().zip(&f[2..8]) {
                     *w = s.parse().unwrap();
                 }
-                (f[0].to_owned(), FightSnapshot { units }, want)
+                (f[0].to_owned(), snapshot(f[1], &specs), want)
             })
             .collect()
     }
@@ -690,6 +831,43 @@ mod tests {
             assert!((0.0..=1.0).contains(&out.p_a_wins) && (0.0..=1.0).contains(&out.mean_a));
         }
         eprintln!("mech parity: {} cases, worst |rust - python| = {worst_all:.2e}", cases.len());
+    }
+
+    /// Fates against mech.simulate_mech(fates=...) (testdata/mech_fates_cases.tsv,
+    /// written by export_mech.py): the a-move, eco targets, imps, and passes
+    /// at offsets 0, 120 and 220.
+    #[test]
+    fn fates_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs();
+        let mut n = 0;
+        for l in data_lines(FATES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let snap = snapshot(f[1], &specs);
+            let mode = if f[2].is_empty() { FateMode::AMove } else { FateMode::Pass { offset: f[2].parse().unwrap() } };
+            let got = m.fates(&snap, f[3].parse().unwrap(), mode);
+            let want: Vec<Vec<&str>> = f[4].split(';').map(|u| u.split(':').collect()).collect();
+            assert_eq!(got.len(), snap.units.len());
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let death: i32 = w[1].parse().unwrap();
+                let (hp, pd): (f64, f64) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                assert_eq!(g.dead, w[0] == "1", "{} unit {i}: {g:?} vs {w:?}", f[0]);
+                assert_eq!(g.death_frame, (death >= 0).then_some(death), "{} unit {i}", f[0]);
+                assert!((g.hp_left as f64 - hp).abs() <= 0.5 + 1e-3 * hp, "{} unit {i}: {g:?} vs {w:?}", f[0]);
+                assert!((g.p_raw as f64 - pd).abs() <= TOL, "{} unit {i}: {g:?} vs {w:?}", f[0]);
+                assert!(g.p_dead > 0.0 && g.p_dead < 1.0);
+            }
+            n += 1;
+        }
+        assert!(n >= 7);
+    }
+
+    #[test]
+    fn erf_matches_known_values() {
+        for (x, want) in [(0.0, 0.0), (0.5, 0.5204998778), (1.0, 0.8427007929), (-2.0, -0.9953222650)] {
+            assert!((erf(x) - want).abs() < 2e-7, "erf({x}) = {}", erf(x));
+        }
     }
 
     /// Without the switch the base answer is the same as `predict`'s.
@@ -742,10 +920,15 @@ mod tests {
             let _ = m.predict_with(big, true);
         }
         let with = start.elapsed().as_secs_f64() * 1e6 / n as f64;
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let _ = m.fates(big, 150, FateMode::Pass { offset: 200.0 });
+        }
+        let fates = start.elapsed().as_secs_f64() * 1e6 / n as f64;
         eprintln!(
-            "cost: {} units, {base:.0} us base, {with:.0} us with mechanics (a-move + withdraw each)",
+            "cost: {} units, {base:.0} us base, {with:.0} us with mechanics (a-move + withdraw each), {fates:.0} us fates (5 s pass)",
             big.units.len()
         );
-        assert!(with < 50_000.0);
+        assert!(with < 50_000.0 && fates < 50_000.0);
     }
 }

@@ -148,6 +148,34 @@ pub struct MechOutcome {
     pub p_a_wins: f32,
 }
 
+/// How side A moves in a fates query ([`Model::fates`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FateMode {
+    /// A a-moves as in the fight model.
+    AMove,
+    /// A's mobile units drive along the axis through B and out the far side
+    /// at their speed, firing as they go, on a line `offset` elmos from B's
+    /// statics (B's mobile units come to the line); A's statics hold.
+    Pass { offset: f32 },
+}
+
+/// One unit's fate at a fates query's horizon.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UnitFate {
+    /// Dead by the horizon in the expected-damage fight.
+    pub dead: bool,
+    /// The frame it died at (to the sim's step).
+    pub death_frame: Option<i32>,
+    /// Expected health left (0 when dead).
+    pub hp_left: f32,
+    /// P(dead by the horizon), recalibrated on fresh games' fights (test
+    /// fold at 5 s: Brier 0.108 against the base rate's 0.150, AUC 0.84).
+    pub p_dead: f32,
+    /// The sim's own P(dead by the horizon): the hits' spread around the
+    /// expected damage. It ranks units well but is far too sure of itself.
+    pub p_raw: f32,
+}
+
 // ----------------------------------------------------------------------------- hit tables
 
 /// Target size classes the tables shrink through.
