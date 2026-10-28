@@ -11,7 +11,7 @@ use crate::kgbutil::kgb_move_to;
 use crate::military::sweeps::DETONATE_RANGE;
 use crate::military::{Enemy, Fighter, MilitaryManager, ScoutTask, ScoutTaskId, ScoutTasks, SquadId, SquadKind};
 use crate::nav;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, distance, get_directional_point, get_radial_point};
 
 // Slots of the squads currently being formed, per raider type (the
 // original's `nextGlaiveSquad` etc.).
@@ -53,6 +53,19 @@ pub struct RaiderHandler {
     next_task_id: ScoutTaskId,
     /// What each raider squad decided last (see `raider_assign_raider_squad`).
     pub(crate) memo: BTreeMap<SquadId, SquadMemo>,
+    /// Our Venoms' stun hits on our own units (see [`STAND_SHORT`]).
+    friendly_stuns: FriendlyStuns,
+}
+
+/// Stun hits of our Venoms on our own units in the last minute, logged once
+/// a minute, and in all.
+#[derive(Default)]
+struct FriendlyStuns {
+    hits: u32,
+    /// Hits after which the unit was stunned.
+    stunned: u32,
+    units: BTreeSet<i32>,
+    total: u32,
 }
 
 /// A raider squad's memory between decisions, so it does not flip-flop
@@ -91,6 +104,11 @@ const IN_RANGE_SEEN: i32 = 30 * 10;
 const BAIL_HOLD: i32 = 30 * 4;
 const BAIL_SHUN: i32 = 30 * 20;
 const SHUN_RADIUS: f32 = 300.0;
+/// Venom squads attack from this far inside their range, elmos, and no
+/// nearer. A Venom's stun blast (128 across, not friendly-safe) paralyzes the
+/// Venoms beside its target: a squad walked onto a mex, as Scorchers are, and
+/// stunlocked itself (user, 2026-10-28). `disable=venomstand` walks on.
+const STAND_SHORT: f32 = 40.0;
 
 impl RaiderHandler {
     pub fn new() -> Self {
@@ -303,6 +321,21 @@ impl Ai {
         let offset = self.offset;
         self.squad_trace_update(frame);
 
+        let s = &mut self.raider_handler.friendly_stuns;
+        if frame % 1800 == (offset + 19) % 1800 && s.hits > 0 {
+            let line = format!(
+                "venoms: {} stun hits on our own units in the last minute ({} units, {} left stunned; {} in all)",
+                s.hits,
+                s.units.len(),
+                s.stunned,
+                s.total
+            );
+            s.hits = 0;
+            s.stunned = 0;
+            s.units.clear();
+            self.log(&line);
+        }
+
         if frame % 15 == (offset + 4) % 15 {
             let small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
             for id in small {
@@ -413,6 +446,21 @@ impl Ai {
                 }
             }
         }
+    }
+
+    /// Count a stun hit by one of our Venoms on our own `unit`.
+    pub fn raider_friendly_hit(&mut self, unit: Unit, attacker: Option<Unit>, paralyzer: bool) {
+        let Some(a) = attacker.filter(|a| paralyzer && a.id() != unit.id() && a.team() == self.team_id) else {
+            return;
+        };
+        if self.defs.name_of(a) != "spideremp" {
+            return;
+        }
+        let s = &mut self.raider_handler.friendly_stuns;
+        s.hits += 1;
+        s.total += 1;
+        s.stunned += u32::from(unit.is_paralyzed());
+        s.units.insert(unit.id());
     }
 
     /// Dodge away from an attacker that just damaged raider `h`.
@@ -1429,16 +1477,18 @@ impl Ai {
             if self.fighters.get(&leader).is_some_and(|f| f.task.is_some()) {
                 self.raider_clear_task(leader);
             }
+            let walk = self.raider_stand_point(leader_unit, leader_pos, best_target);
             if porc || distance(best_target, pos) > 400.0 {
-                self.raider_squad_sneak(sid, best_target);
+                self.raider_squad_sneak(sid, walk);
             } else {
-                self.raider_squad_raid(sid, best_target);
+                self.raider_squad_raid(sid, walk);
             }
             self.raider_handler.memo.entry(sid).or_default().target = Some(best_target);
             self.squad_note(sid, Branch::Target, best_target, pos, None);
         } else if let Some((tid, target)) = best_task {
             self.raider_take_task(leader, tid);
-            self.raider_squad_sneak(sid, target);
+            let walk = self.raider_stand_point(leader_unit, leader_pos, target);
+            self.raider_squad_sneak(sid, walk);
             self.squad_note(sid, Branch::Task, target, pos, None);
         } else {
             self.raider_clear_task(leader);
@@ -1448,11 +1498,44 @@ impl Ai {
             self.squad_note(sid, Branch::Idle, rally, pos, None);
         }
     }
+
+    /// Where the raider squad led by `leader` walks to attack `target`: the
+    /// target itself, but Venoms stop [`STAND_SHORT`] inside their range.
+    fn raider_stand_point(&self, leader: Unit, leader_pos: Vec3, target: Vec3) -> Vec3 {
+        if self.dev_off("venomstand") || self.defs.name_of(leader) != "spideremp" {
+            return target;
+        }
+        let range = leader.def().map_or(0.0, |d| d.max_weapon_range());
+        stand_off(target, leader_pos, range - STAND_SHORT)
+    }
+}
+
+/// The point `stand` from `target` towards `from`: short of it on the way in,
+/// or backing out to it when already nearer.
+fn stand_off(target: Vec3, from: Vec3, stand: f32) -> Vec3 {
+    if distance(target, from) < 1.0 {
+        return get_radial_point(target, stand);
+    }
+    get_directional_point(target, from, stand)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn venoms_stand_off_their_target() {
+        let target = Vec3::xz(1000.0, 1000.0);
+        // On the way in: short of the target, on the squad's side.
+        let p = stand_off(target, Vec3::xz(1000.0, 1600.0), 200.0);
+        assert!((distance(p, target) - 200.0).abs() < 0.01 && p.z > target.z);
+        // Already nearer: back out to it.
+        let p = stand_off(target, Vec3::xz(1050.0, 1000.0), 200.0);
+        assert!((distance(p, target) - 200.0).abs() < 0.01 && p.x > target.x);
+        // Standing on it: anywhere at that distance.
+        let p = stand_off(target, target, 200.0);
+        assert!((distance(p, target) - 200.0).abs() < 0.01);
+    }
 
     fn spot(hostile: bool, enemy_shadowed: bool, last_seen: i32) -> MetalSpot {
         MetalSpot {

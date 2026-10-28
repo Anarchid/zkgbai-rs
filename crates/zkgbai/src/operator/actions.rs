@@ -73,6 +73,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("squadhyst", "Army", "raider squads keep their rally point a while"),
     ("justenough", "Army", "one raider claim per target; QRF teams sized to the raid"),
     ("venomraid", "Army", "Venoms raid after the opening, Fleas left to the stakeouts"),
+    (
+        "venomstand",
+        "Army",
+        "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
+    ),
     ("jumps", "Army", "jumpjets jump"),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
