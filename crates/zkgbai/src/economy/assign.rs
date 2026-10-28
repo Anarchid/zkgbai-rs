@@ -3,6 +3,7 @@
 
 use springai::{UnitDef, Vec3};
 
+use super::planning::{exit_lane, keeps_exit};
 use super::worker::Approach;
 use super::{SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
@@ -869,7 +870,7 @@ impl Ai {
 
     /// Whether a building of type `def` can be queued at `pos`: not
     /// underwater where that is bad, not overlapping queued jobs or
-    /// factories.
+    /// factories, nor (but mexes) their exit lanes.
     pub(super) fn eco_build_check(&self, def: UnitDef, pos: Vec3, facing: i32) -> bool {
         // stop things from being built underwater if the map water does damage or if water pathing is bad on the map
         if (self.eco.water_damage || !self.graph.is_water_map) && self.cb.map().elevation_at(pos.x, pos.z) < 10.0 {
@@ -905,6 +906,25 @@ impl Ai {
             };
             let (cxsize, czsize) = extents(fdef, fac.building_facing(), 1.0);
             if overlaps(fac.pos(), cxsize, czsize) {
+                return false;
+            }
+        }
+
+        // nor in front of a factory's exit, built or queued (mexes go where the metal is)
+        if self.defs.name(def) != "staticmex" {
+            let in_lane = |fdef: UnitDef, fpos: Vec3, ffacing: i32| {
+                let lane = exit_lane(fdef, fpos, ffacing);
+                keeps_exit(self.defs.name(fdef))
+                    && pos.x + xsize > lane[0]
+                    && pos.x - xsize < lane[2]
+                    && pos.z + zsize > lane[1]
+                    && pos.z - zsize < lane[3]
+            };
+            let built = (self.fac.factories.values())
+                .any(|f| f.unit.def().is_some_and(|d| in_lane(d, f.unit.pos(), f.unit.building_facing())));
+            let queued = (self.eco.factory_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)))
+                .any(|t| t.as_construction().is_some_and(|c| in_lane(c.build_type, t.position, c.facing)));
+            if built || queued {
                 return false;
             }
         }

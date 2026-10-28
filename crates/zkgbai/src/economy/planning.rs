@@ -9,9 +9,9 @@ use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
 use crate::Ai;
 use crate::defs::cmd;
 use crate::military::{missiles, nukes};
-use crate::terrain::pos as terrain_pos;
+use crate::terrain::{move_class, pos as terrain_pos};
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
-use zk_terrain::Tier;
+use zk_terrain::{MoveClass, Tier};
 
 /// Turrets at metal spots and links stand this many times further apart
 /// where enemy ground forces cannot get (about half as many).
@@ -20,6 +20,41 @@ const SHELTERED_SPACING: f32 = 2.0;
 /// A factory's units reach a metal spot if they can get this close to it
 /// (about a constructor's build range).
 const FACTORY_REACH: f32 = 150.0;
+
+/// Elmos in front of a ground or sea factory's exit kept clear of our other
+/// buildings, and over which its units must be able to drive out. Comet
+/// Catcher Redux (2026-10-28): two plops in a row faced a crater rim, half
+/// the army stuck behind it.
+pub(super) const EXIT_LANE: f32 = 192.0;
+
+/// A factory's exit is clear below this cost (see `eco_exit_cost`): a few
+/// steep cells units drive round, nothing across the way.
+const EXIT_CLEAR: f32 = 0.1;
+
+/// The engine slope map's cell, elmos.
+const SLOPE_CELL: f32 = 16.0;
+
+/// Ground direction (x, z) of each building facing: south, east, north, west.
+const FACING_DIRS: [(f32, f32); 4] = [(0.0, 1.0), (1.0, 0.0), (0.0, -1.0), (-1.0, 0.0)];
+
+/// Whether factories of this type keep their exit clear: all but the
+/// aircraft plants (their units lift off).
+pub(super) fn keeps_exit(name: &str) -> bool {
+    name.starts_with("factory") && name != "factoryplane" && name != "factorygunship"
+}
+
+/// The ground in front of a factory of type `def` at `pos` facing `facing`:
+/// as wide as the factory, `EXIT_LANE` deep, as [min x, min z, max x, max z].
+pub(super) fn exit_lane(def: UnitDef, pos: Vec3, facing: i32) -> [f32; 4] {
+    let (x, z) = (def.x_size() as f32 * 4.0, def.z_size() as f32 * 4.0);
+    let (hx, hz) = if facing % 2 == 0 { (x, z) } else { (z, x) };
+    match facing {
+        0 => [pos.x - hx, pos.z + hz, pos.x + hx, pos.z + hz + EXIT_LANE],
+        1 => [pos.x + hx, pos.z - hz, pos.x + hx + EXIT_LANE, pos.z + hz],
+        2 => [pos.x - hx, pos.z - hz - EXIT_LANE, pos.x + hx, pos.z - hz],
+        _ => [pos.x - hx - EXIT_LANE, pos.z - hz, pos.x - hx, pos.z + hz],
+    }
+}
 
 /// Frames before a missile silo planned is planned again (if the job was
 /// dropped, or the silo lost).
@@ -573,12 +608,145 @@ impl Ai {
         }
     }
 
+    /// Facings for a factory at `pos`, best first: `eco_factory_facing`,
+    /// then the side nearer the map's middle, the other side, the back.
+    fn eco_factory_facings(&self, pos: Vec3) -> [i32; 4] {
+        let first = self.eco_factory_facing(pos);
+        let (mx, mz) = (self.cb.map().width() as f32 * 4.0, self.cb.map().height() as f32 * 4.0);
+        let toward = |f: i32| {
+            let (dx, dz) = FACING_DIRS[f as usize];
+            dx * (mx - pos.x) + dz * (mz - pos.z)
+        };
+        let mut sides = [(first + 1) % 4, (first + 3) % 4];
+        if toward(sides[1]) > toward(sides[0]) {
+            sides.swap(0, 1);
+        }
+        [first, sides[0], sides[1], (first + 2) % 4]
+    }
+
+    /// What a factory's exit must be clear for: the movement classes of its
+    /// units with the engine's slope map, `None` for the aircraft plants.
+    /// Spiders climb any slope, so only buildings wall the spider factory's
+    /// exit.
+    fn eco_exit_check(&self, factory: UnitDef) -> Option<(Vec<MoveClass>, Vec<f32>)> {
+        if !keeps_exit(self.defs.name(factory)) {
+            return None;
+        }
+        let classes: Vec<MoveClass> = (factory.build_options().into_iter())
+            .filter(|d| d.speed() > 0.0 && !d.is_able_to_fly())
+            .filter_map(move_class)
+            .collect();
+        Some((classes, self.cb.map().slope_map()))
+    }
+
+    /// How blocked the exit of a factory of type `def` at `pos` facing
+    /// `facing` is, 0 when clear: the share of its lane one of `classes`
+    /// cannot drive over (off the map counts), plus one for each row across
+    /// the lane mostly blocked, and one for each building, queued job and
+    /// metal spot in it.
+    fn eco_exit_cost(&self, def: UnitDef, pos: Vec3, facing: i32, classes: &[MoveClass], slopes: &[f32]) -> f32 {
+        let lane = exit_lane(def, pos, facing);
+        let inside = |p: Vec3, pad: f32| {
+            p.x + pad > lane[0] && p.x - pad < lane[2] && p.z + pad > lane[1] && p.z - pad < lane[3]
+        };
+        let mut cost = 0.0;
+
+        let map = self.cb.map();
+        let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+        let sw = map.width() / 2;
+        let blocked = |x: f32, z: f32| {
+            if x < 0.0 || z < 0.0 || x >= w || z >= h {
+                return true;
+            }
+            let cell = (z / SLOPE_CELL) as i32 * sw + (x / SLOPE_CELL) as i32;
+            let slope = slopes.get(cell as usize).copied().unwrap_or(1.0);
+            let depth = -map.elevation_at(x, z);
+            classes.iter().any(|c| c.blocks(slope, depth))
+        };
+        // rows outward from the exit, cells across it
+        let along_z = facing % 2 == 0;
+        let across = if along_z { lane[2] - lane[0] } else { lane[3] - lane[1] };
+        let (rows, cols) = ((EXIT_LANE / SLOPE_CELL) as i32, (across / SLOPE_CELL).ceil() as i32);
+        let mut bad = 0;
+        for r in 0..rows {
+            let mut row_bad = 0;
+            for c in 0..cols {
+                let (a, b) = ((r as f32 + 0.5) * SLOPE_CELL, (c as f32 + 0.5) * SLOPE_CELL);
+                let (x, z) = if along_z { (lane[0] + b, lane[1] + a) } else { (lane[0] + a, lane[1] + b) };
+                if blocked(x, z) {
+                    row_bad += 1;
+                }
+            }
+            bad += row_bad;
+            if 2 * row_bad > cols {
+                cost += 1.0;
+            }
+        }
+        cost += bad as f32 / (rows * cols).max(1) as f32;
+
+        let centre = Vec3::xz((lane[0] + lane[2]) / 2.0, (lane[1] + lane[3]) / 2.0);
+        let reach = 0.5 * (lane[2] - lane[0]).hypot(lane[3] - lane[1]) + 100.0;
+        let half_size = |d: UnitDef| d.x_size().max(d.z_size()) as f32 * 4.0;
+        for u in self.cb.friendly_units_in(centre, reach) {
+            if let Some(d) = u.def()
+                && d.speed() <= 0.0
+                && inside(u.pos(), half_size(d))
+            {
+                cost += 1.0;
+            }
+        }
+        for t in self.eco.construction_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)) {
+            if let Some(c) = t.as_construction()
+                && inside(t.position, half_size(c.build_type))
+            {
+                cost += 1.0;
+            }
+        }
+        if self.graph.get_closest_spot(centre).is_some_and(|s| inside(s.get_pos(), 24.0)) {
+            cost += 1.0;
+        }
+        cost
+    }
+
+    /// Of the facings `order` for a factory at about `pos`, the first whose
+    /// exit is clear, else the least blocked: (site, facing, exit cost). A
+    /// facing the footprint does not fit at `pos` turned is sited anew.
+    /// Without an exit to keep, the first facing that builds.
+    fn eco_factory_exit(
+        &self,
+        def: UnitDef,
+        pos: Vec3,
+        order: [i32; 4],
+        exit: Option<&(Vec<MoveClass>, Vec<f32>)>,
+    ) -> Option<(Vec3, i32, f32)> {
+        let mut best: Option<(Vec3, i32, f32)> = None;
+        for f in order {
+            let site =
+                if self.cb.map().is_possible_to_build_at(def, pos, f) { pos } else { self.eco_build_site(def, pos, f) };
+            if site.x < 0.0 || !self.eco_build_check(def, site, f) {
+                continue;
+            }
+            let cost = exit.map_or(0.0, |(classes, slopes)| self.eco_exit_cost(def, site, f, classes, slopes));
+            if cost < EXIT_CLEAR {
+                return Some((site, f, cost));
+            }
+            if best.is_none_or(|b| cost < b.2) {
+                best = Some((site, f, cost));
+            }
+        }
+        best
+    }
+
     /// Where the first factory goes for a commander at `from`, and its
     /// facing: towards the map's middle, clear of units, features and metal
-    /// spots. `None` when nothing fits. Also run from `init` for the pregame
+    /// spots, its exit clear (else the least blocked one found). `None`
+    /// when nothing fits. Also run from `init` for the pregame
     /// announcement, before any unit exists.
     pub(crate) fn eco_first_factory_site(&self, factory: UnitDef, from: Vec3) -> Option<(Vec3, i32)> {
-        let facing = self.eco_factory_facing(from);
+        let facings = self.eco_factory_facings(from);
+        let facing = facings[0];
+        let exit = self.eco_exit_check(factory);
+        let mut best: Option<(Vec3, i32, f32)> = None;
         let map_center = self.graph.get_map_center();
         let closest_spot = |p: Vec3| self.graph.get_closest_spot(p).map(|s| s.get_pos());
         let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
@@ -606,12 +774,17 @@ impl Ai {
                 position = self.eco_build_site(factory, position, facing);
                 closest = closest_spot(position);
             }
-            // only for preventing stupid placement
-            if self.eco_build_check(factory, position, facing) {
-                return Some((position, facing));
+            // only for preventing stupid placement; then a way out for its units
+            if let Some(site) = self.eco_factory_exit(factory, position, facings, exit.as_ref())
+                && best.is_none_or(|b| site.2 < b.2)
+            {
+                best = Some(site);
+            }
+            if best.is_some_and(|b| b.2 < EXIT_CLEAR) {
+                break;
             }
         }
-        None
+        best.map(|(pos, face, _)| (pos, face))
     }
 
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
@@ -776,7 +949,7 @@ impl Ai {
             return;
         };
         let mut position: Vec3;
-        let mut facing = self.eco_factory_facing(wpos);
+        let facing: i32;
 
         let closest_spot = |ai: &Ai, p: Vec3| ai.graph.get_closest_spot(p).map(|s| s.get_pos());
         let mut i = 0;
@@ -791,10 +964,17 @@ impl Ai {
             };
             (position, facing) = site;
         } else {
+            let exit = self.eco_exit_check(factory);
+            let mut best: Option<(Vec3, i32, f32)> = None;
             loop {
                 if i > 5 {
-                    restore(self, &fac_name);
-                    return;
+                    // No clear exit found: the least blocked one.
+                    let Some((p, f, _)) = best else {
+                        restore(self, &fac_name);
+                        return;
+                    };
+                    (position, facing) = (p, f);
+                    break;
                 }
                 // don't cram factories together
                 let ally_center = self.graph.get_ally_center();
@@ -829,17 +1009,27 @@ impl Ai {
                         j += 1;
                     }
                 }
-                position = self.eco_build_site(factory, position, facing);
+                let facings = self.eco_factory_facings(position);
+                position = self.eco_build_site(factory, position, facings[0]);
 
                 // only for preventing stupid placement
                 let closest = closest_spot(self, position);
                 let good = distance(facpos, position) > 400.0
                     && self.cb.friendly_units_in(position, 150.0).is_empty()
                     && closest.is_none_or(|c| distance(c, position) > 100.0)
-                    && !self.graph.is_front_line(position)
-                    && self.eco_build_check(factory, position, facing);
+                    && !self.graph.is_front_line(position);
                 i += 1;
-                if good {
+                // then a way out for its units
+                if good
+                    && let Some(site) = self.eco_factory_exit(factory, position, facings, exit.as_ref())
+                    && best.is_none_or(|b| site.2 < b.2)
+                {
+                    best = Some(site);
+                }
+                if let Some((p, f, cost)) = best
+                    && cost < EXIT_CLEAR
+                {
+                    (position, facing) = (p, f);
                     break;
                 }
             }
@@ -852,6 +1042,15 @@ impl Ai {
             && self.eco_can_reach(wid, position)
             && (is_plop || !self.eco_energy_starved())
         {
+            let exit_cost = (self.eco_exit_check(factory))
+                .map_or(0.0, |(classes, slopes)| self.eco_exit_cost(factory, position, facing, &classes, &slopes));
+            self.log(&format!(
+                "economy: {} at ({:.0}, {:.0}) facing {facing} (map middle: {}), exit cost {exit_cost:.2}",
+                self.defs.name(factory),
+                position.x,
+                position.z,
+                self.eco_factory_facing(position)
+            ));
             if is_plop {
                 if let Some(c) = ct.as_construction_mut() {
                     c.assigned_plop = wid;
