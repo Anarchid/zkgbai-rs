@@ -61,9 +61,13 @@
 //! lane that eats pickets is not a lane to picket. Spider and vehicle
 //! factories build scouts only for the stakeouts; others build for them
 //! while they are short (feature `anyscout`), the opening scout included,
-//! which so looks for the enemy rather than waiting at home. A unit built
-//! for the stakeouts is theirs alone (see `roles`). `disable=stakeouts`
-//! leaves the scouts to the factory's old scout budget.
+//! which so looks for the enemy rather than waiting at home. An opening
+//! jump, tank or ship factory of a 1v1 builds a wave of them first while
+//! the map is sparse, then a wave more per so many raiders (feature
+//! `openscouts`, see `fac_opening_scout`). Either way the unit comes from
+//! the factory's [`scout_roster`]. A unit built for the stakeouts is theirs alone (see
+//! `roles`). `disable=stakeouts` leaves the scouts to the factory's old
+//! scout budget.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -76,28 +80,49 @@ use zk_terrain::{Pos, TierMap};
 use crate::Ai;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
+use crate::military::puppies;
 use crate::military::roles::Role;
 use crate::military::{Enemy, Fighter};
 use crate::nav;
 use crate::terrain::pos;
-use crate::util::{NULLPOS, distance, get_directional_point};
+use crate::util::{NULLPOS, distance, get_directional_point, kgb_rand};
 
 /// The units taken as stakeouts.
 pub const SCOUTS: [&str; 3] = ["spiderscout", "vehscout", "shieldscout"];
 
-/// The unit a factory of `kind` builds for the stakeouts: its scout where
-/// it has one, else its cheapest fast raider; none where nothing fits
-/// (the jumpjets' Puppy is a walking bomb; tanks, ships, aircraft).
-pub(crate) fn stakeout_unit(kind: FacKind) -> Option<&'static str> {
+/// The scout roster: what a factory of `kind` builds for the stakeouts,
+/// its specialist cheap scout where it has one, else its cheapest raider
+/// (the Kodachi, cheap or not); two where either will do. None for the
+/// air factories (we do not open with them) and the strider hub.
+pub(crate) fn scout_roster(kind: FacKind) -> &'static [&'static str] {
     match kind {
-        FacKind::Spider => Some("spiderscout"),
-        FacKind::Veh => Some("vehscout"),
-        FacKind::Shield => Some("shieldscout"),
-        FacKind::Cloak => Some("cloakraid"),
-        FacKind::Hover => Some("hoverraid"),
-        FacKind::Amph => Some("amphraid"),
-        _ => None,
+        FacKind::Cloak => &["cloakraid"],
+        FacKind::Shield => &["shieldscout", "shieldraid"],
+        FacKind::Veh => &["vehscout"],
+        FacKind::Hover => &["hoverraid"],
+        FacKind::Tank => &["tankraid"],
+        FacKind::Amph => &["amphraid"],
+        FacKind::Jump => &[puppies::PUPPY],
+        FacKind::Spider => &["spiderscout"],
+        FacKind::Ship => &["shipscout", "shiptorpraider"],
+        _ => &[],
     }
+}
+
+/// Whether a factory of `kind` opens with a wave of scouts for the
+/// stakeouts (see `fac_opening_scout`): the jumpjets, tanks and ships,
+/// whose scouts the stakeouts did not take before the roster. The others
+/// keep the stakeouts' own numbers.
+pub(crate) fn opens_with_scouts(kind: FacKind) -> bool {
+    matches!(kind, FacKind::Jump | FacKind::Tank | FacKind::Ship)
+}
+
+/// The unit a factory of `kind` builds for the stakeouts: from its scout
+/// roster, rolled where it has two.
+pub(crate) fn stakeout_unit(kind: FacKind) -> Option<&'static str> {
+    let roster = scout_roster(kind);
+    let i = (kgb_rand() * roster.len() as f64) as usize;
+    roster.get(i.min(roster.len().saturating_sub(1))).copied()
 }
 
 /// Frames between a stakeout's ticks.
@@ -310,6 +335,18 @@ impl Stakeouts {
     fn wanted(&self, frame: i32) -> usize {
         self.posts.len().min(MAX_POSTS) + Self::lookers_wanted(frame)
     }
+
+    /// Whether [`LOSS_CAP`] pickets died within [`LOSS_RECALL`]. (The
+    /// losses are pruned only at the next loss, which a cap that stops
+    /// building pickets would never bring.)
+    fn capped(&self, frame: i32) -> bool {
+        self.losses.iter().filter(|&&l| frame - l <= LOSS_RECALL).count() >= LOSS_CAP
+    }
+
+    /// Whether the loss cap holds, or a picket died within [`REPLACE_DELAY`].
+    fn hot(&self, frame: i32) -> bool {
+        self.capped(frame) || self.losses.back().is_some_and(|&l| frame - l < REPLACE_DELAY)
+    }
 }
 
 /// Whether an enemy would shoot a stakeout.
@@ -518,16 +555,24 @@ impl Ai {
     /// scout is one of theirs or, with `anyscout`, it has a unit for them.
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
         let builds = self.stakeouts_own(kind)
-            || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && stakeout_unit(kind).is_some());
-        if !builds {
+            || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && !scout_roster(kind).is_empty());
+        if !builds || self.stakeouts_hot() {
             return 0;
         }
         let s = &self.stakeouts;
-        if s.losses.len() >= LOSS_CAP || s.losses.back().is_some_and(|&l| self.frame - l < REPLACE_DELAY) {
-            return 0;
-        }
         let coming = self.roles.declared_count(Role::Stakeout);
         (s.wanted(self.frame) as i32 - (s.count() + coming) as i32).max(0)
+    }
+
+    /// Whether pickets have been dying fast lately: none is to be built.
+    pub(crate) fn stakeouts_hot(&self) -> bool {
+        self.stakeouts.hot(self.frame)
+    }
+
+    /// Whether too many pickets died lately (the cap alone, without the
+    /// delay after each loss).
+    pub(crate) fn stakeouts_capped(&self) -> bool {
+        self.stakeouts.capped(self.frame)
     }
 
     pub fn stakeouts_update(&mut self, frame: i32) {
@@ -1219,6 +1264,30 @@ mod tests {
         assert_eq!(clearance(Vec3::xz(450.0, 0.0), &threats), (-50.0, 75.0));
         assert_eq!(clearance(Vec3::xz(800.0, 0.0), &threats), (-100.0, -100.0));
         assert_eq!(clearance(Vec3::ZERO, &[]), (f32::INFINITY, f32::INFINITY));
+    }
+
+    #[test]
+    fn every_opening_factory_has_a_scout() {
+        use FacKind::*;
+        for kind in [Cloak, Shield, Veh, Hover, Tank, Amph, Jump, Spider, Ship] {
+            let scout = stakeout_unit(kind).unwrap();
+            assert!(scout_roster(kind).contains(&scout));
+        }
+        for kind in [Gunship, Plane, StriderHub, Other] {
+            assert!(stakeout_unit(kind).is_none());
+        }
+    }
+
+    #[test]
+    fn losses_cool_off() {
+        let mut s = Stakeouts::default();
+        s.losses.extend([0, 30, 60, 90]);
+        assert!(s.hot(90 + REPLACE_DELAY));
+        assert!(s.hot(LOSS_RECALL));
+        assert!(!s.hot(LOSS_RECALL + 1));
+        s.losses.clear();
+        s.losses.push_back(0);
+        assert!(s.hot(1) && !s.capped(1));
     }
 
     #[test]

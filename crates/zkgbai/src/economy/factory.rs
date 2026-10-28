@@ -57,6 +57,8 @@ pub struct Factory {
     pub max_scout_allowance: i32,
     pub cost_per_bp: f32,
     pub worker_bp: f32,
+    /// The opening factory (see `new`).
+    pub opener: bool,
     pos: Vec3,
     kind: FacKind,
 }
@@ -78,6 +80,7 @@ impl Factory {
             max_scout_allowance: 0,
             cost_per_bp: 0.0,
             worker_bp: 0.0,
+            opener: first_fac,
             pos: unit.pos(),
             kind,
         };

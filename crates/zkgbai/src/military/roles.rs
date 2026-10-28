@@ -196,6 +196,12 @@ impl Ai {
         (self.roles.of.iter().chain(&self.roles.declared)).filter(|&(&id, &r)| r == role && named(id)).count() as i32
     }
 
+    /// Metal of the units with `role`, built or being built.
+    pub fn roles_metal(&self, role: Role) -> f32 {
+        let cost = |id: i32| Unit::from_id(self.cb, id).and_then(|u| u.def()).map_or(0.0, |d| d.cost(self.metal));
+        (self.roles.of.iter().chain(&self.roles.declared)).filter(|&(_, &r)| r == role).map(|(&id, _)| cost(id)).sum()
+    }
+
     /// Units per role now and all game, and the orders dropped because
     /// another module owned the unit, per module.
     pub fn roles_summary(&self) -> Value {

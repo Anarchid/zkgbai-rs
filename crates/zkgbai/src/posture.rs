@@ -182,7 +182,13 @@ impl Ai {
     }
 
     pub fn posture_update(&mut self, frame: i32) {
-        if !self.posture_on() || frame % PERIOD != (self.offset + 13) % PERIOD {
+        if frame % PERIOD != (self.offset + 13) % PERIOD {
+            return;
+        }
+        // Density is read beyond the posture (the spider factory's raider
+        // phase, the energy ladder), so it is measured with the posture off.
+        if !self.posture_on() {
+            self.posture_measure();
             return;
         }
         self.posture_start();
@@ -240,6 +246,15 @@ impl Ai {
 
     /// Standing metal, density and the share, now.
     fn posture_assess(&mut self) {
+        self.posture_measure();
+        self.posture.defense = self.posture_ledger();
+        self.posture.all_defense = self.eco_defense_value();
+        let levers = self.posture_levers();
+        self.posture.share = share(self.posture.laneness(), self.posture.richness, self.posture.density, &levers);
+    }
+
+    /// Standing metal, the map's richness and density, now.
+    fn posture_measure(&mut self) {
         let frame = self.frame;
         // Every unit at full cost, nanoframes too (F12), but not terraform
         // units: their nominal cost is a placeholder in the tens of thousands.
@@ -269,10 +284,6 @@ impl Ai {
         self.posture.richness = if usable > 0.0 { metal / usable } else { RICH };
         self.posture.density = if usable > 0.0 { (standing + enemy) / usable } else { 0.0 };
         self.posture.standing = standing;
-        self.posture.defense = self.posture_ledger();
-        self.posture.all_defense = self.eco_defense_value();
-        let levers = self.posture_levers();
-        self.posture.share = share(self.posture.laneness(), self.posture.richness, self.posture.density, &levers);
     }
 
     /// Metal the posture's turrets should hold now, beyond what they do.

@@ -64,6 +64,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("stakeouts", "Defense", "scout pickets on the raid lanes"),
     ("anyscout", "Defense", "stakeouts take any factory's scout"),
+    (
+        "openscouts",
+        "Defense",
+        "a 1v1 jump, tank or ship opening builds a 200-metal wave of scouts first, then one per 8 raiders",
+    ),
     ("firefighters", "Defense", "airborne quick-reaction squads against raids on our eco"),
     ("airfire", "Defense", "an air factory for the firefighters"),
     ("airtempo", "Army", "an air factory weighed up by the clock and the map's size"),
