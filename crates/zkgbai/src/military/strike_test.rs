@@ -40,7 +40,7 @@
 //! `test=heavies`, a passive defender gets two Grizzlies and a Cyclops
 //! halfway to the enemy, and a factory behind its base; its commander holds
 //! its fire back there; with `test=jaeger`, the attacker gets a spider
-//! factory and an Owl at once, and eight Knights and Wardens every two
+//! factory, an Owl and a Singularity in its corner (energy for the cloaks) at once, and eight Knights and Wardens every two
 //! minutes (an army for the Widows' share, to finish what they stun): its spider factory builds the Widows its
 //! jaeger squads want (see `jaeger`), which should stun the heavies for the
 //! assaults to kill; with `test=skuttle`, the same but a jump factory,
@@ -339,8 +339,17 @@ impl Ai {
                 }
                 units
             }
-            ("jaeger", 60) => vec![("factoryspider", ahead(400.0)), ("planescout", ahead(-100.0))],
-            ("skuttle", 60) => vec![("factoryjump", ahead(400.0)), ("planescout", ahead(-100.0))],
+            // A Singularity pays the hunters' cloaks (a staged side's store
+            // sat near empty, so they ran uncloaked): in the corner nearest
+            // our base, off the heavies' way, as its blast took our factory
+            // 600 off when they killed it behind the base.
+            ("jaeger" | "skuttle", 60) => {
+                let x = if base.x < w / 2.0 { 200.0 } else { w - 200.0 };
+                let z = if base.z < h / 2.0 { 200.0 } else { h - 200.0 };
+                let singu = Vec3::xz(x, z);
+                let fac = if test == "jaeger" { "factoryspider" } else { "factoryjump" };
+                vec![(fac, ahead(400.0)), ("planescout", ahead(-100.0)), ("energysingu", singu)]
+            }
             ("geo", 60) => {
                 let vents = self.eco_geo_vents();
                 let near = vents.into_iter().min_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
