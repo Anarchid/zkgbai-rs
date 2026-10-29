@@ -37,6 +37,9 @@
 //! - **Home.** Parked within a Lotus's range of one of our finished
 //!   buildings, a picket joins the QRF if a raider or scout is nearby;
 //!   otherwise it leaves its old assignment and looks farther out.
+//! A picket displaced by a retreat rolls once after three seconds without
+//! visual contact or immediate danger: half become solo raiders, half ask
+//! for a fresh stakeout. The old post is left alone for a while.
 //!
 //! A picket that cloaks standing still (the Flea) moves only when an enemy
 //! would come within its decloak radius, or within its reach: moving, it
@@ -150,6 +153,9 @@ const MAX_OFFSET: f32 = 460.0;
 
 /// A stakeout has arrived within this of where it was going.
 const ARRIVE: f32 = 80.0;
+/// A displaced lookout waits this long without sight or immediate danger
+/// before choosing a new role (frames).
+const DISPLACED_QUIET: i32 = 30 * 3;
 
 /// A picket that cannot cloak keeps this much more than an enemy's weapon
 /// range, and at least `KEEP_MIN`...
@@ -280,6 +286,41 @@ struct Stakeout {
     step_to: Option<Vec3>,
     /// A picket that cloaks holds like one that cannot until this frame.
     spooked_until: i32,
+    displacement: Displacement,
+    /// A gate this picket abandoned, and until when (gate ids survive
+    /// replanning the posts).
+    shunned_post: Option<(usize, i32)>,
+}
+
+/// One retreat episode, however many steps it takes: one roll afterwards.
+#[derive(Default)]
+struct Displacement {
+    from: Option<Vec3>,
+    quiet_since: Option<i32>,
+}
+
+impl Displacement {
+    fn start(&mut self, from: Vec3) {
+        self.from.get_or_insert(from);
+        self.quiet_since = None;
+    }
+
+    fn finish(&mut self, at: Vec3, contact: bool, danger: bool, frame: i32) -> bool {
+        if contact || danger || self.from.is_none_or(|from| distance(from, at) <= ARRIVE) {
+            self.quiet_since = None;
+            return false;
+        }
+        let since = *self.quiet_since.get_or_insert(frame);
+        if frame - since < DISPLACED_QUIET {
+            return false;
+        }
+        *self = Self::default();
+        true
+    }
+}
+
+fn displaced_role(roll: f64) -> Role {
+    if roll < 0.5 { Role::SoloRaider } else { Role::Stakeout }
 }
 
 /// A gate to picket.
@@ -497,6 +538,8 @@ impl Ai {
                 fleeing_until: 0,
                 step_to: None,
                 spooked_until: 0,
+                displacement: Displacement::default(),
+                shunned_post: None,
             },
         );
         // One that cannot cloak is a coward that runs at the first scratch.
@@ -742,8 +785,13 @@ impl Ai {
         let (unit, p, sight, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.duty);
         let (cloaks, look, bogey, armed_self) = (m.cloaks.then_some(m.decloak), m.look, m.bogey, m.armed);
         let (standing, spooked) = (m.standing, frame < m.spooked_until);
+        let displaced = m.displacement.from.is_some_and(|from| distance(from, p) > ARRIVE);
         // Running, or pulled home for repairs (see `retreat`).
-        if frame < m.fleeing_until || self.retreat_is_retreating(unit) {
+        if self.retreat_is_retreating(unit) {
+            self.stakeouts_displaced(id);
+            return;
+        }
+        if frame < m.fleeing_until {
             return;
         }
         if standing && self.stakeouts.near_home(p) {
@@ -764,22 +812,10 @@ impl Ai {
                 self.op_emit("stakeout", json!({"event": "qrf", "t": frame / 30, "unit": id, "team": team}));
                 return;
             }
-            if !raid {
-                if let Some(m) = self.stakeouts.members.get_mut(&id) {
-                    if let Some(post) = m.post.take().and_then(|i| self.stakeouts.posts.get_mut(i)) {
-                        post.manned = None;
-                    }
-                    m.duty = Duty::Look;
-                    m.look = None;
-                    m.bogey = None;
-                    m.sortie = None;
-                    m.step_to = None;
-                    m.standing = false;
-                }
+            if !raid && !displaced {
                 // Go straight to a fresh assignment: an unrelated enemy
                 // must not put us back into the old shadowing hold.
-                self.stakeouts_assign(id, frame);
-                self.stakeouts_go(id, frame);
+                self.stakeouts_relocate(id, frame);
                 return;
             }
         }
@@ -794,7 +830,11 @@ impl Ai {
         // longer, to follow it where it went).
         let mut danger: Option<(i32, f32)> = None;
         let mut near: Option<(i32, f32)> = None;
+        let mut contact = false;
         for e in self.war.targets.values() {
+            if armed(e) && e.visible && distance(p, e.position) <= sight {
+                contact = true;
+            }
             let recent = if bogey == Some(e.unit_id) { BOGEY_RECENT } else { RECENT };
             if !armed(e) || frame - e.last_seen > recent {
                 continue;
@@ -807,6 +847,38 @@ impl Ai {
             if mobile_armed(e) && d < sight + 300.0 && near.is_none_or(|(_, b)| d < b) {
                 near = Some((e.unit_id, d));
             }
+        }
+        // Radar and the remembered bogey may still drive shadowing below;
+        // they do not count as visual contact for a displaced picket.
+        if self
+            .stakeouts
+            .members
+            .get_mut(&id)
+            .is_some_and(|m| m.displacement.finish(p, contact, danger.is_some(), frame))
+        {
+            let role = displaced_role(kgb_rand());
+            self.op_emit("stakeout", json!({"event": "displaced", "t": frame / 30, "unit": id, "to": role.name()}));
+            if role == Role::SoloRaider {
+                unit.stop(0);
+                self.assign_role(unit, role);
+                self.retreat_add_coward(unit);
+            } else {
+                self.stakeouts_relocate(id, frame);
+            }
+            return;
+        }
+        // Wait out the grace period here, still watching for enemies.
+        // Resuming an ordinary duty would otherwise erase the episode
+        // before its timer could expire.
+        if let Some(m) = self.stakeouts.members.get_mut(&id)
+            && m.displacement.quiet_since.is_some()
+        {
+            if !m.standing {
+                unit.stop(0);
+            }
+            m.standing = true;
+            m.step_to = None;
+            return;
         }
         if let Some((eid, _)) = danger.or(near) {
             // A looker that fled leaves that spot alone for a while.
@@ -883,6 +955,11 @@ impl Ai {
     }
 
     fn stakeouts_go(&mut self, id: i32, frame: i32) {
+        // Returning to an ordinary duty ends any retreat too small to
+        // count as displacement.
+        if let Some(m) = self.stakeouts.members.get_mut(&id) {
+            m.displacement = Displacement::default();
+        }
         let Some(m) = self.stakeouts.members.get(&id) else { return };
         let (unit, p, speed, def) = (m.f.unit, m.f.get_pos(), m.speed, m.def);
         let (duty, standing, post) =
@@ -937,6 +1014,7 @@ impl Ai {
         let post = if want_post {
             (self.stakeouts.posts.iter().enumerate())
                 .filter(|(_, post)| !self.stakeouts.near_home(post.pos))
+                .filter(|(_, post)| !m.shunned_post.is_some_and(|(c, until)| c == post.choke && frame < until))
                 .filter(|(_, post)| post.manned.is_none_or(|u| !self.stakeouts.members.contains_key(&u)))
                 .filter(|(_, post)| self.terrain_reaches(def, p, post.pos, SNAP))
                 .min_by(|a, b| distance(p, a.1.pos).total_cmp(&distance(p, b.1.pos)))
@@ -972,6 +1050,43 @@ impl Ai {
         }
     }
 
+    /// Remember the original lookout point on the first retreat step.
+    fn stakeouts_displaced(&mut self, id: i32) {
+        let Some(m) = self.stakeouts.members.get(&id) else { return };
+        let from = m
+            .post
+            .and_then(|i| self.stakeouts.posts.get(i))
+            .map(|p| p.pos)
+            .or_else(|| m.look.and_then(|i| self.graph.metal_spots.get(i)).map(|s| s.position))
+            .unwrap_or_else(|| m.f.get_pos());
+        if let Some(m) = self.stakeouts.members.get_mut(&id) {
+            m.displacement.start(from);
+        }
+    }
+
+    /// Leave the old assignment behind, including its reservation, and
+    /// ask for somewhere else. Neither kind of old target is reused while
+    /// its retreat is still fresh.
+    fn stakeouts_relocate(&mut self, id: i32, frame: i32) {
+        let Some(m) = self.stakeouts.members.get_mut(&id) else { return };
+        if let Some(post) = m.post.take().and_then(|i| self.stakeouts.posts.get_mut(i)) {
+            post.manned = None;
+            m.shunned_post = Some((post.choke, frame + SHUN));
+        }
+        if let Some(spot) = m.look.take() {
+            self.stakeouts.shunned.insert(spot, frame + SHUN);
+        }
+        m.duty = Duty::Look;
+        m.bogey = None;
+        m.sortie = None;
+        m.step_to = None;
+        m.standing = false;
+        m.displacement = Displacement::default();
+        m.f.unit.stop(0);
+        self.stakeouts_assign(id, frame);
+        self.stakeouts_go(id, frame);
+    }
+
     /// Note an enemy a stakeout sees (once per enemy in a row).
     fn stakeouts_sighted(&mut self, id: i32, eid: i32, frame: i32, follows: bool) {
         let Some(e) = self.war.targets.get(&eid) else { return };
@@ -994,6 +1109,7 @@ impl Ai {
     /// the nearest haven, and on for a while (no turning back at the rim of
     /// the enemy's reach).
     fn stakeouts_flee(&mut self, id: i32, eid: i32, frame: i32) {
+        self.stakeouts_displaced(id);
         self.stakeouts_sighted(id, eid, frame, false);
         let Some(m) = self.stakeouts.members.get(&id) else { return };
         let haven = self.graph_get_closest_haven(m.f.get_pos());
@@ -1065,6 +1181,9 @@ impl Ai {
         }
         match target {
             Some((t, flight)) => {
+                if flight {
+                    self.stakeouts_displaced(id);
+                }
                 let s = &mut self.stakeouts.stats;
                 if flight {
                     s.flights += 1;
@@ -1283,6 +1402,62 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn displacement_waits_for_lost_sight_and_safety_then_finishes_once() {
+        let mut d = Displacement::default();
+        let away = Vec3::xz(500.0, 0.0);
+        assert!(!d.finish(away, false, false, 0));
+        d.start(Vec3::ZERO);
+        d.start(Vec3::xz(450.0, 0.0)); // Later retreat steps keep the original point.
+        assert!(!d.finish(away, true, false, 0));
+        assert!(!d.finish(away, false, true, 0));
+        assert!(!d.finish(away, false, false, 0));
+        assert!(!d.finish(away, false, false, DISPLACED_QUIET - 1));
+        assert!(d.finish(away, false, false, DISPLACED_QUIET));
+        assert!(!d.finish(away, false, false, 1000)); // No reroll next tick.
+        d.start(Vec3::ZERO);
+        assert!(!d.finish(away, false, false, 1000));
+        assert!(d.finish(away, false, false, 1000 + DISPLACED_QUIET)); // A fresh roll after another retreat.
+    }
+
+    #[test]
+    fn renewed_contact_danger_or_retreat_restarts_the_three_seconds() {
+        let away = Vec3::xz(500.0, 0.0);
+        for (contact, danger, step) in [(true, false, false), (false, true, false), (false, false, true)] {
+            let mut d = Displacement::default();
+            d.start(Vec3::ZERO);
+            assert!(!d.finish(away, false, false, 0));
+            if step {
+                d.start(Vec3::ZERO);
+            } else {
+                assert!(!d.finish(away, contact, danger, 60));
+            }
+            assert!(!d.finish(away, false, false, 60));
+            assert!(!d.finish(away, false, false, 60 + DISPLACED_QUIET - 1));
+            assert!(d.finish(away, false, false, 60 + DISPLACED_QUIET));
+        }
+    }
+
+    #[test]
+    fn a_small_shuffle_or_a_return_to_the_original_point_does_not_roll() {
+        let mut d = Displacement::default();
+        d.start(Vec3::ZERO);
+        assert!(!d.finish(Vec3::xz(ARRIVE, 0.0), false, false, 0));
+        assert!(!d.finish(Vec3::ZERO, false, false, DISPLACED_QUIET));
+        let away = Vec3::xz(ARRIVE + 1.0, 0.0);
+        assert!(!d.finish(away, false, false, DISPLACED_QUIET));
+        assert!(d.finish(away, false, false, 2 * DISPLACED_QUIET));
+    }
+
+    #[test]
+    fn displaced_lookouts_split_evenly_between_raiding_and_relocating() {
+        for (roll, want) in
+            [(0.0, Role::SoloRaider), (0.499, Role::SoloRaider), (0.5, Role::Stakeout), (0.999, Role::Stakeout)]
+        {
+            assert_eq!(displaced_role(roll), want);
+        }
+    }
 
     #[test]
     fn home_radius_includes_the_edge_and_ignores_height() {
