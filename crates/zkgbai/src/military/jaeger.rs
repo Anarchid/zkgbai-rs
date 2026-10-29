@@ -719,7 +719,7 @@ impl Ai {
                         // After a heavy out of the enemy's land (where our
                         // army is, for Widows) as ever; one beyond the
                         // enemy's lines is waited for on its way instead.
-                        let chase = !ambushing || (finished && !self.graph.is_enemy_territory(at));
+                        let chase = !ambushing || (finished && (kind.stuns || !self.graph.is_enemy_territory(at)));
                         let ambush = if ambushing && !chase {
                             self.jaeger_ambush(sid, kind, t, pos, frame)
                         } else {
