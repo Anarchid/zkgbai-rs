@@ -148,7 +148,7 @@ impl Ai {
         if !w.is_chicken
             && !self.logistics_holds(wid)
             && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
-                || ((unit.health() < unit.max_health() || w.get_shields() < 0.5)
+                || ((unit.health() < unit.max_health() && w.raid_defense.is_none() || w.get_shields() < 0.5)
                     && view.get_threat(pos) / greed > 0.0
                     && !w.is_working_on_porc(&self.eco.tasks)))
         {
@@ -195,6 +195,8 @@ impl Ai {
                     self.eco_stop_chickening(wid);
                 }
             }
+        } else if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some()) || self.jump_in_progress(unit) {
+            // Local defense and jumps own the orders until they finish.
         } else if !check_stuck {
             self.eco_assign_worker(wid);
         } else {
@@ -219,6 +221,9 @@ impl Ai {
 
     pub(super) fn eco_assign_worker(&mut self, wid: i32) {
         let frame = self.frame;
+        if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some() || self.jump_in_progress(w.unit)) {
+            return;
+        }
         // Cancel the old engine order even if no safe replacement exists.
         let blocked_construction = self.eco.workers.get(&wid).is_some_and(|w| {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
@@ -237,6 +242,7 @@ impl Ai {
             return;
         };
         let unit = w.unit;
+        let is_com = w.is_com;
         let wtask = w.task;
         let wpos = unit.pos();
         let build_dist = unit.def().map_or(0.0, |d| d.build_distance());
@@ -312,7 +318,9 @@ impl Ai {
         }
 
         let opts = if out_of_range {
-            if let Some(w) = self.eco.workers.get(&wid) {
+            let jump_goal = crate::util::get_directional_point(task_pos, wpos, build_dist * 0.95);
+            let jumped = is_com && !self.dev_off("commander") && self.jump_travel(unit, jump_goal, "commander travel");
+            if !jumped && let Some(w) = self.eco.workers.get(&wid) {
                 let mut nav = crate::nav!(self);
                 w.move_to(task_pos, &mut nav);
             }

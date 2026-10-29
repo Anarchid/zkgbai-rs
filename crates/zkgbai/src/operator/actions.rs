@@ -63,6 +63,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("refuge", "Defense", "workers flee raids to refuges ahead of them"),
     ("qrf", "Defense", "the home defense force answering raids"),
     (
+        "commander",
+        "Defense",
+        "commanders defend nearby raids and use jumpjets for defense and work travel (default on)",
+    ),
+    (
         "garrison",
         "Defense",
         "the home defense's floor: a guard per few naked mexes, posted ahead of its sector's first mex",

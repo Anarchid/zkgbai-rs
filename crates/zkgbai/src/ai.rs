@@ -1022,6 +1022,9 @@ impl Ai {
         } else {
             self.disabled.remove(feature);
         }
+        if feature == "commander" && off {
+            self.eco_release_commander_defense();
+        }
         if feature == "fortify" && changed {
             self.eco_fortify_switch_changed(off);
         }

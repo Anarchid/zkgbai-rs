@@ -1122,6 +1122,7 @@ impl Ai {
 
     /// Stop in normal play (the feature switched off): teams given back.
     pub(super) fn qrf_live_stop(&mut self) {
+        self.eco_release_commander_defense();
         let teams: Vec<usize> = self.qrf_teams().keys().copied().filter(|t| *t < MOON).collect();
         for t in teams {
             self.qrf_release_team(t, "qrf switched off");

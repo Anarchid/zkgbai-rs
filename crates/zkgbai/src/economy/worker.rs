@@ -35,6 +35,7 @@ pub struct Worker {
     pub chicken_frame: i32,
     pub last_retreat_frame: i32,
     pub task: Option<TaskId>,
+    pub(super) raid_defense: Option<super::commander::Defense>,
     pub approach: Option<Approach>,
     /// Sites this worker could not get to, shunned until a frame.
     pub shunned: Vec<(Vec3, i32)>,
@@ -108,6 +109,7 @@ impl Worker {
             chicken_frame: 0,
             last_retreat_frame: 0,
             task: None,
+            raid_defense: None,
             approach: None,
             shunned: Vec::new(),
             shield,
