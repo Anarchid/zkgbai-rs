@@ -51,7 +51,7 @@ use crate::military::qrf::field::Mobility;
 use crate::military::{DefenseTarget, Enemy, Fighter, SquadId, SquadKind, scouts};
 use crate::nav;
 use crate::terrain::reaches;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, distance, get_directional_point};
 
 /// Frames between updates.
 const PERIOD: i32 = 15;
@@ -108,6 +108,9 @@ const STALE: i32 = 30 * 15;
 /// after this many frames.
 const STRIKE_RANGE: f32 = 300.0;
 const STRIKE_TIMEOUT: i32 = 30 * 25;
+
+/// A squad with no heavy to go for waits this far behind our army.
+const WAIT_BEHIND: f32 = 400.0;
 
 /// Our army within this distance of a heavy gets to it while it is
 /// stunned (30 s).
@@ -596,6 +599,22 @@ impl Ai {
         squads.chain(loners).collect()
     }
 
+    /// Where a squad at `pos` with no heavy to go for waits: behind the part
+    /// of our army nearest it (`army`, see [`Ai::jaeger_army`]), toward the
+    /// nearest haven, or at the haven. (Not the army's rally point: that is
+    /// what the army goes for, often an enemy raider, and a squad sent there
+    /// tracked it into the enemy's escorts.)
+    fn jaeger_wait_point(&self, pos: Vec3, army: &[Vec3]) -> Vec3 {
+        let haven = self.graph_get_closest_haven(pos);
+        let near = army.iter().copied().min_by(|a, b| distance(*a, pos).total_cmp(&distance(*b, pos)));
+        match near {
+            None => haven,
+            Some(a) if haven == NULLPOS => a,
+            Some(a) if distance(a, haven) <= WAIT_BEHIND => haven,
+            Some(a) => get_directional_point(a, haven, WAIT_BEHIND),
+        }
+    }
+
     /// How dear heavy `id` is to a squad of `n` of `kind` at `from` (the
     /// nearer and the more valuable, the less), if it takes it, gets to it,
     /// and may strike there.
@@ -735,16 +754,14 @@ impl Ai {
                         } else {
                             // Not after it into the enemy's land: by our
                             // army, until it comes our way.
-                            let rally = self.war_get_rally_point(pos);
-                            let wait = if rally == NULLPOS { self.graph_get_closest_haven(pos) } else { rally };
+                            let wait = self.jaeger_wait_point(pos, &army);
                             self.jaeger_go(sid, wait, false);
                             Phase::Hunting(Some(t))
                         }
                     }
                     None => {
                         // Wait by our army, out of the way.
-                        let rally = self.war_get_rally_point(pos);
-                        let wait = if rally == NULLPOS { self.graph_get_closest_haven(pos) } else { rally };
+                        let wait = self.jaeger_wait_point(pos, &army);
                         self.jaeger_go(sid, wait, false);
                         Phase::Hunting(None)
                     }
