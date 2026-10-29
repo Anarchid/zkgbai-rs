@@ -24,6 +24,10 @@ pub struct FightRequest {
     /// The requester (a squad id); answers are kept per key.
     pub key: u32,
     pub frame: i32,
+    /// Full commitment, without the fitted disengagement hazard.
+    pub commit: bool,
+    /// Caller fingerprint; prevents using an answer for a different force.
+    pub stamp: u64,
     pub snapshot: FightSnapshot,
     /// Also run the mechanics model.
     pub mech: bool,
@@ -35,6 +39,10 @@ pub struct FightAnswer {
     pub key: u32,
     /// The request's frame.
     pub frame: i32,
+    /// Full commitment, without the fitted disengagement hazard.
+    pub commit: bool,
+    /// Caller fingerprint; prevents using an answer for a different force.
+    pub stamp: u64,
     pub outcome: FightOutcome,
     /// Microseconds the prediction took on the worker.
     pub micros: u32,
@@ -120,9 +128,23 @@ fn serve(model: Model, rx: Receiver<FightRequest>, tx: Sender<FightAnswer>, shut
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(req) => {
                 let start = Instant::now();
-                let outcome = model.predict_with(&req.snapshot, req.mech);
+                let outcome = if req.commit {
+                    model.predict_commit(&req.snapshot)
+                } else {
+                    model.predict_with(&req.snapshot, req.mech)
+                };
                 let micros = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
-                if tx.send(FightAnswer { key: req.key, frame: req.frame, outcome, micros }).is_err() {
+                if tx
+                    .send(FightAnswer {
+                        key: req.key,
+                        frame: req.frame,
+                        commit: req.commit,
+                        stamp: req.stamp,
+                        outcome,
+                        micros,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -174,7 +196,14 @@ mod tests {
         // More requests than the queue holds: some are refused, none block.
         let mut accepted = 0;
         for i in 0..(QUEUE as u32 * 4) {
-            if w.request(FightRequest { key: i, frame: 100, snapshot: snap.clone(), mech: i % 2 == 0 }) {
+            if w.request(FightRequest {
+                key: i,
+                frame: 100,
+                commit: false,
+                stamp: 0,
+                snapshot: snap.clone(),
+                mech: i % 2 == 0,
+            }) {
                 accepted += 1;
             }
         }
@@ -197,5 +226,35 @@ mod tests {
         assert_eq!(s.answers, accepted as u64);
         assert!(s.micros > 0);
         drop(w);
+    }
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+    #[test]
+    fn commitment_round_trip_preserves_request_identity() {
+        let model = Model::load().unwrap();
+        let snap = FightSnapshot::default();
+        let expected = model.predict_commit(&snap);
+        let mut worker = FightWorker::start(model).unwrap();
+        assert!(worker.request(FightRequest {
+            key: 7,
+            frame: 123,
+            commit: true,
+            stamp: 456,
+            snapshot: snap,
+            mech: true
+        }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let answer = loop {
+            if let Some(a) = worker.drain().into_iter().next() {
+                break a;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!((answer.key, answer.frame, answer.stamp, answer.commit), (7, 123, 456, true));
+        assert_eq!(answer.outcome, expected);
     }
 }

@@ -205,7 +205,8 @@ impl Ai {
             let held = f
                 .squad
                 .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some())
-                || self.blasts_waiting(unit.pos());
+                || self.blasts_waiting(unit.pos())
+                || self.fire_controls(id);
             if !retreating && !flies && !held && self.fighters.get_mut(&id).is_some_and(|f| f.is_stuck(frame)) {
                 self.squad_leave_squad(id);
                 self.eco_add_combat_reclaim_task(unit);
@@ -824,12 +825,17 @@ impl Ai {
     fn squad_assign_squad(&mut self, sid: SquadId) {
         // Moonlighting at home against a raid (see `qrf::live`).
         if self.qrf_drafted(sid) {
+            self.fire_release(sid);
             return;
         }
         // Sent somewhere by the operator.
         if let Some(target) = self.op_squad_target(sid) {
+            self.fire_release(sid);
             self.squad_set_target(sid, target);
             return;
+        }
+        if self.squads.get(sid).is_some_and(|s| s.status != 'a') {
+            self.fire_release(sid);
         }
         let Some(s) = self.squads.get(sid) else { return };
         let pos = s.get_pos(&self.fighters);
@@ -866,6 +872,9 @@ impl Ai {
                 }
             }
             'a' => {
+                if self.fire_assign(sid) {
+                    return;
+                }
                 let view = self.war.view_dive(dive);
                 let friendly = view.get_total_friendly_threat(pos);
                 let flat = view.get_effective_threat(pos) / courage > tolerance(friendly);
@@ -892,6 +901,7 @@ impl Ai {
 
     fn squad_assign_air_squad(&mut self, sid: SquadId) {
         if let Some(target) = self.op_squad_target(sid) {
+            self.fire_release(sid);
             self.squad_set_target(sid, target);
             return;
         }

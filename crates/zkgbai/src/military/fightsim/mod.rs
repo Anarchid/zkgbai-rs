@@ -518,6 +518,31 @@ impl Model {
         }
     }
 
+    /// A committed a-move using the mechanics model's calibrated per-unit
+    /// death probabilities, with no fitted early-disengagement hazard.
+    /// Cost fractions include escorts and supports, just as the real squad
+    /// pays for them. This is separate from the ordinary danger verdict.
+    pub fn predict_commit(&self, snap: &FightSnapshot) -> FightOutcome {
+        let fates = self.fates(snap, crate::military::fire_squad::COMMIT_FRAMES, FateMode::AMove);
+        let mut cost = [0.0f32; 2];
+        let mut loss = [0.0f32; 2];
+        let mut damaged_enemy = false;
+        for (u, fate) in snap.units.iter().zip(fates) {
+            let side = u.side as usize;
+            cost[side] += u.spec.cost;
+            loss[side] += u.spec.cost * fate.p_dead;
+            damaged_enemy |= side == 1 && fate.hp_left < u.hp - 1.0;
+        }
+        FightOutcome {
+            killed_a: loss[0] / cost[0].max(1.0),
+            // Calibration alone is not evidence we can reach the enemy.
+            killed_b: if damaged_enemy { loss[1] / cost[1].max(1.0) } else { 0.0 },
+            armed_a: snap.armed(0) as u16,
+            armed_b: snap.armed(1) as u16,
+            ..Default::default()
+        }
+    }
+
     /// The snapshot's units on the fight's line, with table keys resolved.
     fn sim_units(&self, snap: &FightSnapshot) -> Vec<SimUnit> {
         let xs = project(snap);
@@ -871,5 +896,50 @@ mod tests {
         };
         let out = m.predict(&snap);
         assert_eq!((out.killed_a, out.killed_b, out.armed_a, out.armed_b), (0.0, 0.0, 1, 0));
+    }
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+
+    fn gun(side: u8, damage: f32, x: f32) -> SnapUnit {
+        SnapUnit {
+            side,
+            hp: 1000.0,
+            x,
+            z: 0.0,
+            spec: Arc::new(UnitSpec {
+                def: "fire_test".into(),
+                cost: 300.0,
+                health: 1000.0,
+                radius: 10.0,
+                weapons: vec![WeaponSpec {
+                    name: "fire_test_gun".into(),
+                    range: 900.0,
+                    reload: 1.0,
+                    salvo: 1,
+                    damage,
+                    weapon_type: "BeamLaser".into(),
+                }],
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn cannot_commit_on_calibration_without_reaching_any_enemy() {
+        let model = Model::load().unwrap();
+        let snap = FightSnapshot { units: vec![gun(0, 1000.0, 0.0), gun(1, 10.0, 20000.0)] };
+        assert_eq!(model.predict_commit(&snap).killed_b, 0.0);
+    }
+
+    #[test]
+    fn mechanics_commitment_distinguishes_winning_and_losing_firefights() {
+        let model = Model::load().unwrap();
+        let win = model.predict_commit(&FightSnapshot { units: vec![gun(0, 1000.0, 0.0), gun(1, 10.0, 400.0)] });
+        let lose = model.predict_commit(&FightSnapshot { units: vec![gun(0, 10.0, 0.0), gun(1, 1000.0, 400.0)] });
+        assert!(win.killed_b > win.killed_a, "{win:?}");
+        assert!(lose.killed_a > lose.killed_b, "{lose:?}");
     }
 }

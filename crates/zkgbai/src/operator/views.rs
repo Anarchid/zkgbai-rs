@@ -537,6 +537,7 @@ pub fn squads(ai: &mut Ai, _: &Args) -> Out {
                 "value": r1(s.metal_value),
                 "members": members,
                 "courage": r2(s.courage),
+                "fire": {"mode":format!("{:?}",s.fire.mode),"cores":s.fire.cores,"range":s.fire.range,"focus":s.fire.focus},
                 "operator_target": ai.op_squad_target(s.id).map(xz),
                 "intent": ai.op.over.squad_intents.get(&s.id).map(|i| json!({"kind": i.kind.name(), "pos": xz(i.pos), "radius": r1(i.radius), "unit": i.unit, "seconds_left": (i.until - ai.frame) / 30})),
                 "block": ai.incursions.orders.get(&s.id).map(|b| xz(b.pos)),

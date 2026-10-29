@@ -96,6 +96,21 @@ targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
 that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are
 worth.
+Ordinary ground assault squads automatically adopt fire-squad tactics when anti-unit skirmishers
+supply at least 55% of their metal (45% to remain in that mode). The longest range supported by
+that share defines the cores; other units screen them in a paced formation. Firewalker joins
+jumpbot assault squads; siege artillery such as Sling and Impaler cannot be cores. Against a
+local enemy force with at least 30% of its value able to contest that range (20% while evading),
+the whole squad evades unless the mechanics predictor approves a ten-second committed a-move.
+The prediction uses the squad alone, expects at least 15% more enemy metal lost than friendly
+metal. A commitment suppresses individual retreats until its attack window ends or its target
+is gone. Outside that window, collective health below 60% or a core below 40% sends the whole
+formation for repairs; it returns above 85% collective health and 80% for every core.
+`disable=firesquads` restores ordinary assault conduct. Fire-squad predictions run independently
+of the experimental `fightsim` switch for ordinary danger checks. The `squads` operator response
+exposes each squad's fire mode, cores, range and focus; mode changes appear as `firesquad` journal
+records. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
+
 Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
 on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.
 `ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.

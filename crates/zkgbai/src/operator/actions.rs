@@ -107,6 +107,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("jaegerreserve", "Army", "the energy reserve asked of the game covers the jaegers' cloaks"),
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
+    ("firesquads", "Army", "skirmisher-heavy assault squads keep formation and range, evade or commit together"),
     ("fightsim", "Army", "the fight predictor drives squads"),
     ("fightmech", "Army", "the fight predictor's mechanics model runs beside it, logged only"),
     ("drops", "Army", "Charon drops"),

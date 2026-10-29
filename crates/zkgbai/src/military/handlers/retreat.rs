@@ -166,6 +166,9 @@ impl Ai {
     /// Re-evaluate a damaged unit; `on_fire` if it is burning.
     pub fn retreat_check_unit(&mut self, unit: Unit, on_fire: bool) {
         let id = unit.id();
+        if self.fire_controls(id) {
+            return;
+        }
         let Some(c) = self.retreat_handler.cowards.get_mut(&id) else {
             return; // Not our unit.
         };
@@ -217,6 +220,9 @@ impl Ai {
         let mut retreated = false;
         let ids: Vec<i32> = self.retreat_handler.retreating_units.iter().copied().collect();
         for id in ids {
+            if self.fire_controls(id) {
+                continue;
+            }
             let h = &mut self.retreat_handler;
             let Some(c) = h.cowards.get_mut(&id) else {
                 // port: the original assumed every retreating unit is a coward.
@@ -291,6 +297,9 @@ impl Ai {
     fn retreat_check_shields(&mut self) {
         let ids: Vec<i32> = self.retreat_handler.shields.iter().copied().collect();
         for id in ids {
+            if self.fire_controls(id) {
+                continue;
+            }
             let h = &mut self.retreat_handler;
             let Some(c) = h.cowards.get_mut(&id) else {
                 continue;

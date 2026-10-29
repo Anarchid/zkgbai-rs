@@ -7,6 +7,7 @@ pub mod blasts;
 pub mod drops;
 pub mod enemy;
 pub mod fightsim;
+pub mod fire_squad;
 pub mod firefighters;
 pub mod handlers;
 pub mod impalers;

@@ -57,6 +57,8 @@ pub struct Squad {
     /// The operator's courage dial: the threat the squad perceives is
     /// divided by it, and its members retreat at `retreat_level / courage`.
     pub courage: f32,
+    /// Organic ranged formation and its current tactical decision.
+    pub fire: crate::military::fire_squad::FireState,
     /// Taskforces: what their doctrine makes of each unit type, and the
     /// frame they formed (for mustering).
     pub shape: Arc<Shape>,
@@ -162,6 +164,7 @@ impl Squad {
             last_assignment_frame: 0,
             raider_type: '\0',
             courage: 1.0,
+            fire: Default::default(),
             shape: Arc::default(),
             formed: 0,
             low_shields: false,
@@ -387,6 +390,7 @@ impl Squad {
     /// Dissolves the squad if it ended up too small to be useful.
     pub fn cutoff(&mut self, fighters: &mut FighterStore) {
         if self.fighters.len() < 3 && self.metal_value < 1000.0 {
+            self.release_fire(fighters);
             for id in &self.fighters {
                 if let Some(f) = fighters.get_mut(id) {
                     f.squad = None;
@@ -452,6 +456,7 @@ impl Squad {
 
     /// Dissolve the squad; returns the members' fighter ids.
     pub fn disband(&mut self, fighters: &mut FighterStore) -> Vec<i32> {
+        self.release_fire(fighters);
         let mut disbanded = self.fighters.clone();
         if let Some(lid) = self.leader.take() {
             self.paced = 0.0;
@@ -536,6 +541,11 @@ impl Squad {
                 f.squad = None;
             }
             return;
+        }
+        if self.fire.active() {
+            if let Some(f) = fighters.get(&id) {
+                crate::military::fire_squad::release_unit(f.unit);
+            }
         }
         match self.kind {
             SquadKind::Taskforce => self.taskforce_remove_unit(id, fighters, frame, nav),

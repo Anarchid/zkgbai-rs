@@ -88,6 +88,7 @@ impl UnitClasses {
                 "shipskirm",
                 "shipassault",
                 "jumpskirm",
+                "jumparty", // Firewalker fights mobile armies in organic fire squads.
                 "jumpblackhole",
                 "jumpassault",
                 "jumpsumo",
@@ -114,7 +115,6 @@ impl UnitClasses {
                 "striderarty",
                 "shiparty",
                 "shipheavyarty",
-                "jumparty",
             ]),
             aas: set(&[
                 "cloakaa",

@@ -1,19 +1,22 @@
 //! The fight predictor in play: snapshots from the AI's own state, the
-//! worker's answers, and the one decision it drives.
+//! worker's answers, ordinary danger checks and fire-squad commitments.
 //!
 //! Two switches (see `ai.rs`): `fightshadow`, on by default, runs the
 //! predictor and logs what it would decide against the flat rule without
 //! acting; `fightsim`, off by default, lets it drive. A third, `fightmech`
 //! (on by default), runs the mechanics model (`mech.rs`) beside the base
 //! one on every query and logs its answer; it decides nothing. The
-//! predictor's one consumer is the attacking squad's danger check in
+//! ordinary consumer is the attacking squad's danger check in
 //! `handlers/squad.rs`: where the flat threat map says "the enemy threat
 //! here, over our courage, exceeds what we tolerate", the predictor says
 //! "the fight we are walking into is one we are expected to lose". Side A is the squad and our other fighters
 //! beside it; side B is every identified enemy within reach, as last seen.
 //! Answers arrive a few frames late and are used as long as they are
 //! younger than [`STALE`]; with no fresh answer, or no contact, the flat
-//! rule decides as before.
+//! rule decides as before. Fire squads separately ask the mechanics model
+//! for a committed a-move (per-unit fates over their commitment horizon),
+//! using only their own members. `firesquads` enables this consumer and
+//! keeps the worker running independently of the ordinary danger switch.
 //!
 //! Journal (`k=fightsim`): `event: cost` every minute; `event: verdict`
 //! whenever the two rules disagree, with both answers and the fight as the
@@ -37,7 +40,7 @@ use crate::util::distance;
 
 /// The driving switch (`enable=fightsim`).
 pub const FEATURE: &str = "fightsim";
-/// The shadow switch (`disable=fightshadow` stops the predictor entirely).
+/// The ordinary shadow switch; fire squads also need the worker.
 pub const SHADOW: &str = "fightshadow";
 /// The mechanics model beside the base one (`disable=fightmech`).
 pub const MECH: &str = "fightmech";
@@ -80,6 +83,7 @@ pub struct FightSim {
     specs: HashMap<i32, Arc<UnitSpec>>,
     /// The latest answer per squad.
     answers: BTreeMap<SquadId, FightAnswer>,
+    commits: BTreeMap<SquadId, FightAnswer>,
     windows: Vec<Window>,
     next_vid: u64,
     /// Decisions asked of the predictor and how they were made.
@@ -114,7 +118,7 @@ impl Ai {
 
     /// Whether the predictor runs at all (driving or in shadow).
     pub fn fightsim_runs(&self) -> bool {
-        self.fightsim_drives() || !self.dev_off(SHADOW)
+        self.fightsim_drives() || !self.dev_off(SHADOW) || !self.dev_off("firesquads")
     }
 
     /// An enemy died: the open windows that had it in their fight count it.
@@ -140,7 +144,8 @@ impl Ai {
                 Ok(w) => {
                     self.war.fightsim.worker = Some(w);
                     self.war.fightsim.last_report = frame;
-                    let mode = if self.fightsim_drives() { "driving squads" } else { "in shadow" };
+                    let mode =
+                        if self.fightsim_drives() { "driving squads" } else { "ordinary squad checks in shadow" };
                     self.log(&format!("fightsim: on, {mode}; the predictor thread started"));
                 }
                 Err(e) => {
@@ -153,12 +158,13 @@ impl Ai {
         let fs = &mut self.war.fightsim;
         let Some(w) = fs.worker.as_mut() else { return };
         for a in w.drain() {
-            let newer = fs.answers.get(&a.key).is_none_or(|old| a.frame >= old.frame);
-            if newer {
-                fs.answers.insert(a.key, a);
+            let answers = if a.commit { &mut fs.commits } else { &mut fs.answers };
+            if answers.get(&a.key).is_none_or(|old| a.frame >= old.frame) {
+                answers.insert(a.key, a);
             }
         }
         fs.answers.retain(|_, a| frame - a.frame <= 10 * STALE);
+        fs.commits.retain(|_, a| frame - a.frame <= STALE);
         self.fightsim_close_windows(frame);
         if frame - self.war.fightsim.last_report >= REPORT_PERIOD {
             self.fightsim_report(frame);
@@ -381,7 +387,7 @@ impl Ai {
         let armed = (snapshot.armed(0), snapshot.armed(1));
         let fs = &mut self.war.fightsim;
         if let Some(w) = fs.worker.as_mut() {
-            w.request(FightRequest { key: sid, frame, snapshot, mech });
+            w.request(FightRequest { key: sid, frame, snapshot, mech, commit: false, stamp: 0 });
         }
         let Some(a) = fs.answers.get(&sid).filter(|a| frame - a.frame <= STALE) else {
             fs.fallbacks += 1;
@@ -431,5 +437,108 @@ impl Ai {
             self.op_emit("fightsim", rec);
         }
         if drives { retreat } else { flat }
+    }
+}
+
+impl Ai {
+    /// This squad alone, against the actual local contacts. Never borrow
+    /// the ordinary query (which includes allies and early disengagement).
+    /// Missing, stale, or materially changed snapshots cannot approve a charge.
+    pub(crate) fn fire_commit_favorable(&mut self, sid: SquadId, enemies: &[i32]) -> bool {
+        use std::hash::{Hash, Hasher};
+        if self.dev_off("firesquads") || self.war.fightsim.worker.is_none() {
+            return false;
+        }
+        let Some(s) = self.squads.get(sid) else {
+            return false;
+        };
+        let mut raw = Vec::new();
+        for id in &s.fighters {
+            let Some(f) = self.fighters.get(id).filter(|f| !f.is_dead()) else {
+                continue;
+            };
+            if self.retreat_handler.is_retreating(*id) {
+                continue;
+            }
+            if let Some(d) = f.unit.def() {
+                raw.push((
+                    0u8,
+                    *id,
+                    d,
+                    (f.unit.health() - f.unit.paralyze_damage()).max(0.0) * (1.0 - f.unit.capture_progress()),
+                    f.unit.pos(),
+                ));
+            }
+        }
+        for id in enemies {
+            let Some(e) = self.war.targets.get(id) else {
+                continue;
+            };
+            if let Some(d) = e.ud {
+                raw.push((1u8, *id, d, e.get_health() * e.def_health(), e.position));
+            }
+        }
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        let mut snapshot = FightSnapshot::default();
+        let mut metal = [0.0; 2];
+        for (side, id, d, hp, p) in raw {
+            // A casualty, reinforcement, substantial damage, or movement
+            // invalidates the old result even inside the freshness window.
+            (side, id, d.id(), (hp / d.health().max(1.0) * 5.0) as i32, (p.x / 256.0) as i32, (p.z / 256.0) as i32)
+                .hash(&mut hash);
+            let spec = self.fight_spec(d);
+            metal[side as usize] += spec.cost;
+            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z });
+        }
+        if snapshot.armed(0) == 0 || snapshot.armed(1) == 0 {
+            return false;
+        }
+        let stamp = hash.finish();
+        let fs = &mut self.war.fightsim;
+        let favorable = fs
+            .commits
+            .get(&sid)
+            .filter(|a| commit_answer_usable(a, self.frame, stamp))
+            .is_some_and(|a| favorable_commit(a.outcome, metal));
+        if let Some(w) = fs.worker.as_mut() {
+            w.request(FightRequest { key: sid, frame: self.frame, commit: true, stamp, snapshot, mech: true });
+        }
+        favorable
+    }
+}
+
+fn favorable_commit(o: super::FightOutcome, metal: [f32; 2]) -> bool {
+    o.killed_b >= 0.10 && o.killed_b * metal[1] > 1.15 * o.killed_a * metal[0]
+}
+
+#[cfg(test)]
+mod fire_tests {
+    use super::*;
+    #[test]
+    fn commit_requires_damage_and_a_favorable_metal_exchange() {
+        let o = |a, b| super::super::FightOutcome { killed_a: a, killed_b: b, ..Default::default() };
+        assert!(!favorable_commit(o(0.0, 0.0), [1000.0, 1000.0]));
+        assert!(favorable_commit(o(0.2, 0.8), [1000.0, 1000.0]));
+        assert!(!favorable_commit(o(0.2, 0.8), [5000.0, 1000.0]));
+        assert!(favorable_commit(o(0.9, 1.0), [1000.0, 2000.0]));
+    }
+}
+
+fn commit_answer_usable(a: &FightAnswer, frame: i32, stamp: u64) -> bool {
+    a.commit && (0..=STALE).contains(&(frame - a.frame)) && a.stamp == stamp
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    #[test]
+    fn old_rosters_and_ordinary_answers_cannot_authorize_commitment() {
+        let mut a = FightAnswer { key: 1, frame: 100, commit: true, stamp: 42, outcome: Default::default(), micros: 0 };
+        assert!(commit_answer_usable(&a, 130, 42));
+        assert!(!commit_answer_usable(&a, 130, 43));
+        assert!(!commit_answer_usable(&a, 191, 42));
+        assert!(!commit_answer_usable(&a, 99, 42));
+        a.commit = false;
+        assert!(!commit_answer_usable(&a, 130, 42));
     }
 }
