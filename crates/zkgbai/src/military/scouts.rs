@@ -339,7 +339,8 @@ impl Ai {
         let upkeep = self.scouts_upkeep()
             + ordered(self.scouts.ordered, WIDOW)
             + ordered(self.scouts.ordered_scythe, SCYTHE)
-            + self.jaeger_upkeep();
+            + self.jaeger_upkeep()
+            + self.taskforce_spotter_upkeep();
         let want = if upkeep > 0.0 { (RESERVE_SECONDS * upkeep).max(RESERVE_MIN).round() } else { 0.0 };
         if self.scouts.reserve > 0.0 && self.scouts.reserve_taken.is_none() {
             let held = self.cb.game().team_rules_param_float(self.team_id, "energyReserve", -1.0);

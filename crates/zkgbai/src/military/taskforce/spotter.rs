@@ -1,5 +1,5 @@
-//! Spotters: a member of a doctrine's role with `spot`, one per force
-//! whatever its number of guns, who holds the core's mark in sight from
+//! Volley spotters: a member of a doctrine's role with `spot`, who holds
+//! the core's mark in sight from
 //! the mark to the volley. A Lance or a Phantom firing at a radar dot hits
 //! about half as often as at a target in sight (0.49 against 0.90 for the
 //! Lance over 472 games, predictor/LOS-READ.md), because dots wobble.
@@ -20,6 +20,11 @@
 //!   sight, past its decloak distance;
 //! - `air`: a plane (a Sparrow) overflies the target at the volley and
 //!   waits over the force; fired on, it flees home.
+//! - `watch`: a standing ground spotter per gun, as used by Phantoms,
+//!   Lances and Emissaries. It continuously holds the nearest known enemy
+//!   just inside its own sight, on the gun's side. Cloakers keep clear of
+//!   enemies along the path and at the destination; Halberds hold fire
+//!   throughout, retaining their armour, and repair below 60% health.
 //!
 //! A force short of its spotter calls one from our standing units, in the
 //! order of the role's `units` (a plane only while the enemy shows no
@@ -52,7 +57,9 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 use super::marksman::Fix;
 use crate::Ai;
 use crate::defs::cmd;
+use crate::kgbutil::PathCost;
 use crate::kgbutil::kgb_move_to;
+use crate::military::nukes::segment_distance;
 use crate::military::{Fighter, SquadId};
 use crate::nav;
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance, get_directional_point};
@@ -65,9 +72,11 @@ pub enum Spot {
     Air,
     /// By the unit's type: a plane, a cloaked unit, or else a tank.
     Any,
+    /// Hold the nearest known enemy at the ground spotter's sight edge.
+    Watch,
 }
 
-const SPOTS: [Spot; 4] = [Spot::Tank, Spot::Cloak, Spot::Air, Spot::Any];
+const SPOTS: [Spot; 5] = [Spot::Tank, Spot::Cloak, Spot::Air, Spot::Any, Spot::Watch];
 
 impl Spot {
     pub fn name(self) -> &'static str {
@@ -76,6 +85,7 @@ impl Spot {
             Spot::Cloak => "cloak",
             Spot::Air => "air",
             Spot::Any => "any",
+            Spot::Watch => "watch",
         }
     }
 
@@ -91,7 +101,7 @@ impl Spot {
         match self {
             Spot::Air if !d.is_able_to_fly() => Err("cannot fly (spot air)".into()),
             Spot::Cloak if !d.is_able_to_cloak() => Err("cannot cloak (spot cloak)".into()),
-            Spot::Tank | Spot::Cloak if d.is_able_to_fly() => Err("flies (spot air)".into()),
+            Spot::Tank | Spot::Cloak | Spot::Watch if d.is_able_to_fly() => Err("flies (spot air)".into()),
             _ => Ok(()),
         }
     }
@@ -100,8 +110,8 @@ impl Spot {
     pub fn way(self, d: Option<UnitDef>) -> Spot {
         match (self, d) {
             (Spot::Any, Some(d)) if d.is_able_to_fly() => Spot::Air,
-            (Spot::Any, Some(d)) if d.is_able_to_cloak() => Spot::Cloak,
-            (Spot::Any, _) => Spot::Tank,
+            (Spot::Any | Spot::Watch, Some(d)) if d.is_able_to_cloak() => Spot::Cloak,
+            (Spot::Any | Spot::Watch, _) => Spot::Tank,
             (s, _) => s,
         }
     }
@@ -110,7 +120,7 @@ impl Spot {
     /// fired on instead).
     fn repair(self) -> f32 {
         match self {
-            Spot::Tank | Spot::Any => 0.6,
+            Spot::Tank | Spot::Any | Spot::Watch => 0.6,
             Spot::Cloak => 0.5,
             Spot::Air => 0.0,
         }
@@ -119,7 +129,7 @@ impl Spot {
     /// What it does on an errand, for the log.
     fn spotting(self) -> &'static str {
         match self {
-            Spot::Tank | Spot::Any => "scouting",
+            Spot::Tank | Spot::Any | Spot::Watch => "scouting",
             Spot::Cloak => "loitering",
             Spot::Air => "overflight",
         }
@@ -173,6 +183,9 @@ pub struct Spotter {
     /// How it stands (the role's `spot`, resolved for its type).
     pub spot: Spot,
     pub job: Job,
+    pub watch: bool,
+    /// The gun whose standing spotter this is, including while repairing.
+    gun: Option<i32>,
     since: i32,
     sent: Vec3,
     sent_at: i32,
@@ -227,7 +240,7 @@ fn spot_point(spot: Spot, def: Option<UnitDef>, at: Vec3, gun: Vec3) -> Vec3 {
     let sight = def.map_or(400.0, |d| d.los_radius());
     let off = match spot {
         Spot::Air => return at,
-        Spot::Tank | Spot::Any => TANK_SIGHT * sight,
+        Spot::Tank | Spot::Any | Spot::Watch => TANK_SIGHT * sight,
         Spot::Cloak => (CLOAK_SIGHT * sight).max(def.map_or(0.0, |d| d.decloak_distance()) + CLOAK_MARGIN),
     };
     if distance(at, gun) <= off {
@@ -246,7 +259,218 @@ struct Gun {
     reload: i32,
 }
 
+/// Keep existing assignments, reserving a distinct gun for each spotter.
+/// Repairing spotters participate so their place is kept until they return.
+fn pair_guns(watchers: impl IntoIterator<Item = (i32, Option<i32>)>, guns: &[i32]) -> BTreeMap<i32, i32> {
+    let watchers: Vec<_> = watchers.into_iter().collect();
+    let mut pairs = BTreeMap::new();
+    let mut taken = BTreeSet::new();
+    for &(id, gun) in &watchers {
+        if let Some(gun) = gun.filter(|g| guns.contains(g) && !taken.contains(g)) {
+            pairs.insert(id, gun);
+            taken.insert(gun);
+        }
+    }
+    for (id, _) in watchers {
+        if !pairs.contains_key(&id)
+            && let Some(&gun) = guns.iter().find(|g| !taken.contains(g))
+        {
+            pairs.insert(id, gun);
+            taken.insert(gun);
+        }
+    }
+    pairs
+}
+
+const WATCH_ARRIVED: f32 = 24.0;
+const WATCH_MARGIN: f32 = WATCH_ARRIVED + 8.0;
+const WATCH_REPATH: i32 = 15;
+const WATCH_LEG: f32 = 300.0;
+
+/// Alternatives stay at the spotter's sight edge, on the gun's side of
+/// the enemy. Arrival tolerance must not leave the enemy outside sight.
+fn watch_points(gun: Vec3, enemy: Vec3, sight: f32) -> Vec<Vec3> {
+    let angle = (gun.z - enemy.z).atan2(gun.x - enemy.x);
+    let reach = (sight - WATCH_MARGIN).max(0.0);
+    [0.0_f32, 0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 1.0, -1.0]
+        .into_iter()
+        .map(|turn| {
+            let a = angle + turn * std::f32::consts::FRAC_PI_2;
+            Vec3::xz(enemy.x + reach * a.cos(), enemy.z + reach * a.sin())
+        })
+        .collect()
+}
+
+fn watch_clear(p: Vec3, circles: &[(Vec3, f32)]) -> bool {
+    circles.iter().all(|&(c, r)| distance(p, c) >= r)
+}
+
+/// Escape a circle already entered, without crossing another or taking
+/// a shortcut back through the enemy on the way out.
+fn watch_safe_leg(a: Vec3, b: Vec3, circles: &[(Vec3, f32)]) -> bool {
+    circles.iter().all(|&(c, r)| {
+        let away = (a.x - c.x) * (b.x - a.x) + (a.z - c.z) * (b.z - a.z);
+        segment_distance(c, a, b) >= r || (distance(a, c) < r && away >= 0.0 && distance(b, c) > distance(a, c))
+    })
+}
+
 impl Ai {
+    /// A repaired watcher returns to its reserved place in the same force.
+    /// Once its gun or doctrine is gone, let its ordinary handler have it.
+    pub(crate) fn taskforce_watch_rejoin(&mut self, id: i32) -> bool {
+        let Some(sp) = self.taskforces.spotters.by_unit.get(&id).filter(|sp| sp.watch && sp.job == Job::Repairing)
+        else {
+            return false;
+        };
+        if self.retreat_handler.is_retreating(id) {
+            return true;
+        }
+        let sid = sp.sid;
+        let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return false };
+        let role = self.squads.get(sid).and_then(|s| s.shape.by_def.get(&unit.def()?.id()).copied());
+        let Some(mut sp) = self.taskforces.spotters.by_unit.remove(&id) else { return false };
+        if role.is_some_and(|r| self.squad_short_of(sid, r)) {
+            self.retreat_remove_unit(unit);
+            let mut nav = nav!(self);
+            if let Some(s) = self.squads.get_mut(sid) {
+                s.add_unit_nav(id, &mut self.fighters, &mut nav);
+            }
+            sp.job = Job::Escorting;
+            sp.sent_at = i32::MIN / 2;
+            self.taskforces.spotters.by_unit.insert(id, sp);
+        } else {
+            self.taskforces.spotters.by_unit.insert(id, sp);
+            self.taskforce_spotter_release(id);
+        }
+        true
+    }
+
+    pub(crate) fn taskforce_spotter_upkeep(&self) -> f32 {
+        self.taskforces
+            .spotters
+            .by_unit
+            .values()
+            .filter(|s| s.watch)
+            .filter_map(|s| self.fighters.get(&s.unit))
+            .filter(|f| !f.is_dead())
+            .filter_map(|f| f.unit.def())
+            .map(|d| d.cloak_cost_moving())
+            .sum()
+    }
+
+    fn taskforce_watch_circles(&self, unit: Unit) -> Vec<(Vec3, f32)> {
+        if !unit.def().is_some_and(|d| d.is_able_to_cloak()) {
+            return Vec::new();
+        }
+        let decloak = unit.def().map_or(125.0, |d| d.decloak_distance()) + 64.0;
+        self.war
+            .targets
+            .values()
+            .filter(|e| !e.is_dead && e.position != NULLPOS)
+            .map(|e| {
+                let size = e.ud.map_or(32.0, |d| d.x_size().max(d.z_size()) as f32 * 4.0);
+                (e.position, decloak + size)
+            })
+            .collect()
+    }
+
+    fn taskforce_watch(&mut self, id: i32, unit: Unit, gun: Unit) {
+        let frame = self.frame;
+        if self.taskforces.spotters.by_unit.get(&id).is_some_and(|sp| frame - sp.sent_at < WATCH_REPATH) {
+            return;
+        }
+        let here = unit.pos();
+        let nearest = self
+            .war
+            .targets
+            .values()
+            .filter(|e| !e.is_dead && e.position != NULLPOS)
+            .min_by(|a, b| distance(a.position, here).total_cmp(&distance(b.position, here)))
+            .map(|e| (e.unit_id, e.position));
+        let circles = self.taskforce_watch_circles(unit);
+        let points = match nearest {
+            Some((_, enemy)) if !self.retreat_handler.is_retreating(gun.id()) => {
+                watch_points(gun.pos(), enemy, unit.def().map_or(0.0, |d| d.los_radius()))
+            }
+            _ => vec![gun.pos()],
+        };
+        let map = self.cb.map();
+        let target = points
+            .into_iter()
+            .find(|p| {
+                p.x >= 0.0
+                    && p.z >= 0.0
+                    && p.x < (map.width() * 8) as f32
+                    && p.z < (map.height() * 8) as f32
+                    && watch_clear(*p, &circles)
+                    && self.pathfinder.is_reachable(&self.war, unit, *p, PathCost::AvoidEnemies)
+            })
+            .unwrap_or_else(|| self.graph_get_closest_haven(here));
+        if let Some(sp) = self.taskforces.spotters.by_unit.get_mut(&id) {
+            sp.gun = Some(gun.id());
+            sp.sent = target;
+            sp.sent_at = frame;
+            sp.orbiting = false;
+            sp.job = nearest.map_or(Job::Escorting, |(target, _)| Job::Spotting { gun: gun.id(), target, reload: 0 });
+        }
+        self.taskforce_watch_move(unit, target, &circles);
+    }
+
+    /// Repairs use the same enemy clearance as the outward journey.
+    pub(crate) fn taskforce_watch_retreat(&mut self, id: i32, target: Vec3) -> bool {
+        if !self.taskforces.spotters.by_unit.get(&id).is_some_and(|sp| sp.watch) {
+            return false;
+        }
+        let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return false };
+        let circles = self.taskforce_watch_circles(unit);
+        self.taskforce_watch_move(unit, target, &circles);
+        true
+    }
+
+    fn taskforce_watch_move(&mut self, unit: Unit, mut target: Vec3, circles: &[(Vec3, f32)]) {
+        let here = unit.pos();
+        let cloaker = unit.def().is_some_and(|d| d.is_able_to_cloak());
+        unit.set_fire_state(0, 0);
+        unit.set_move_state(0, 0);
+        unit.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
+        unit.execute_custom_command(cmd::UNIT_AI, &[0.0], 0, NO_TIMEOUT);
+        if cloaker {
+            unit.cloak(true, 0);
+            if watch_clear(here, circles)
+                && self.cb.economy().current(self.energy) < 2.0 * unit.def().map_or(0.0, |d| d.cloak_cost_moving())
+            {
+                unit.stop(0);
+                return;
+            }
+        }
+        target.y = self.cb.map().elevation_at(target.x, target.z);
+        if distance(here, target) < WATCH_ARRIVED && watch_clear(here, circles) {
+            unit.stop(0);
+            return;
+        }
+        let cost = if cloaker { PathCost::ScythePath } else { PathCost::AvoidEnemies };
+        let path = self.pathfinder.find_path_keepout(&self.war, unit, target, cost, circles);
+        let (mut from, mut length, mut ordered) = (here, 0.0, false);
+        for p in path {
+            if distance(from, p) < 1.0 {
+                continue;
+            }
+            if !watch_safe_leg(from, p, circles) {
+                break;
+            }
+            kgb_move_to(unit, p, if ordered { OPTION_SHIFT_KEY } else { 0 }, self.frame);
+            ordered = true;
+            length += distance(from, p);
+            from = p;
+            if length >= WATCH_LEG {
+                break;
+            }
+        }
+        if !ordered {
+            unit.stop(0);
+        }
+    }
+
     /// Whether the enemy shows anti-air: seen, or felt (hits on our
     /// aircraft, see `air_intel`).
     pub fn taskforce_enemy_aa(&self) -> bool {
@@ -294,10 +518,17 @@ impl Ai {
     /// A spotter no force wants goes back to its usual handler, for good.
     pub(crate) fn taskforce_spotter_release(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
-        self.taskforces.spotters.by_unit.remove(&id);
+        let watching = self.taskforces.spotters.by_unit.remove(&id).is_some_and(|sp| sp.watch);
         self.taskforces.spotters.released.insert(id);
         self.squad_forget_fighter(id);
         unit.stop(0);
+        if watching {
+            self.retreat_remove_unit(unit);
+            unit.set_fire_state(2, 0);
+            unit.set_move_state(1, 0);
+            unit.execute_custom_command(cmd::UNIT_AI, &[1.0], 0, NO_TIMEOUT);
+            unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[0.0], 0, NO_TIMEOUT);
+        }
         self.war_unit_finished(unit);
         self.war_unit_idle(unit);
     }
@@ -354,7 +585,7 @@ impl Ai {
                 standing.iter().copied().filter(|u| u.def().is_some_and(|d| d.id() == def.id())).collect();
             ours.sort_by(|a, b| distance(a.pos(), lpos).total_cmp(&distance(b.pos(), lpos)));
             for unit in ours {
-                if unit.health() <= 0.0 || !self.taskforce_detach(unit) {
+                if health_share(unit) <= spot.way(Some(def)).repair() || !self.taskforce_detach(unit) {
                     continue;
                 }
                 let id = unit.id();
@@ -407,8 +638,12 @@ impl Ai {
         let frame = self.frame;
         let Some(s) = self.squads.get(sid) else { return };
         let shape = s.shape.clone();
-        let members: Vec<(i32, Unit, Spot)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
-            .filter_map(|f| shape.spot(f.unit.def().map(|d| d.id())).map(|sp| (f.id, f.unit, sp.way(f.unit.def()))))
+        let members: Vec<(i32, Unit, Spot, bool)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+            .filter_map(|f| {
+                shape
+                    .spot(f.unit.def().map(|d| d.id()))
+                    .map(|sp| (f.id, f.unit, sp.way(f.unit.def()), sp == Spot::Watch))
+            })
             .collect();
         // Spotters that left the force (other than for repairs) are done.
         let here: BTreeSet<i32> = members.iter().map(|m| m.0).collect();
@@ -425,23 +660,40 @@ impl Ai {
             })
             .collect();
         if guns.is_empty() {
+            for (id, _, _, watch) in members {
+                if watch {
+                    self.taskforce_spotter_release(id);
+                }
+            }
             return;
         }
-        // Short of its spotter (none with it, none away for repairs): call
-        // one from the standing units.
+        // A role may want several spotters. Repairing members reserve their
+        // places too, so a new recruit cannot displace them.
         let role = shape.roles.iter().position(|r| r.spot.is_some());
-        let away = self.taskforces.spotters.by_unit.values().any(|sp| sp.sid == sid && sp.job == Job::Repairing);
-        if let Some(role) = role.filter(|_| members.is_empty() && !away)
+        if let Some(role) = role
             && self.squad_short_of(sid, role)
         {
             self.taskforce_spotter_call(sid, role);
-            return;
         }
+        let watchers = members
+            .iter()
+            .filter(|m| m.3)
+            .map(|m| m.0)
+            .chain(
+                self.taskforces
+                    .spotters
+                    .by_unit
+                    .values()
+                    .filter(|sp| sp.sid == sid && sp.watch && sp.job == Job::Repairing)
+                    .map(|sp| sp.unit),
+            )
+            .map(|id| (id, self.taskforces.spotters.by_unit.get(&id).and_then(|sp| sp.gun)));
+        let pairs = pair_guns(watchers, &guns.iter().map(|g| g.id).collect::<Vec<_>>());
         let shields = self.impalers_shields();
         let share = shape.mark_share;
         let orbit = |unit: Unit| shape.orbit(unit.def().map(|d| d.id()));
         let mut lines = Vec::new();
-        for (id, unit, spot) in members {
+        for (id, unit, spot, watch) in members {
             let name = self.defs.name_of(unit).to_owned();
             let entry = self.taskforces.spotters.by_unit.get(&id);
             if entry.is_none_or(|sp| sp.sid != sid || sp.job == Job::Repairing) {
@@ -455,6 +707,8 @@ impl Ai {
                     sid,
                     spot,
                     job: Job::Escorting,
+                    watch,
+                    gun: pairs.get(&id).copied(),
                     since: frame,
                     sent: NULLPOS,
                     sent_at: i32::MIN / 2,
@@ -473,6 +727,14 @@ impl Ai {
                     distance(unit.pos(), lpos)
                 ));
                 self.taskforce_spotter_away(id, unit);
+                continue;
+            }
+            if watch {
+                let Some(gun) = pairs.get(&id).and_then(|g| guns.iter().find(|x| x.id == *g)) else {
+                    self.taskforce_spotter_release(id);
+                    continue;
+                };
+                self.taskforce_watch(id, unit, gun.unit);
                 continue;
             }
             // The gun that fires next, and what to see for it.
@@ -639,10 +901,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn watchers_keep_distinct_guns_and_repair_reservations() {
+        let pairs = pair_guns([(1, Some(20)), (2, None), (3, Some(10))], &[10, 20]);
+        assert_eq!(pairs, BTreeMap::from([(1, 20), (3, 10)]));
+        // A dead gun releases its assignment; survivors keep theirs.
+        let pairs = pair_guns([(1, Some(20)), (2, Some(99)), (3, None)], &[10, 20, 30]);
+        assert_eq!(pairs, BTreeMap::from([(1, 20), (2, 10), (3, 30)]));
+        assert!(pair_guns([(1, Some(20))], &[]).is_empty());
+    }
+
+    #[test]
+    fn watchers_use_their_own_sight_edge_even_when_enemy_is_close() {
+        let (gun, enemy) = (Vec3::xz(1000.0, 1000.0), Vec3::xz(3000.0, 1000.0));
+        for sight in [425.0, 550.0, 660.0, 760.0] {
+            let points = watch_points(gun, enemy, sight);
+            assert!((points[0].x - (enemy.x - sight + WATCH_MARGIN)).abs() < 0.01);
+            for p in points {
+                assert!((distance(p, enemy) - (sight - WATCH_MARGIN)).abs() < 0.01);
+                assert!(distance(p, enemy) + WATCH_ARRIVED < sight);
+                assert!(p.x <= enemy.x + 0.01);
+            }
+        }
+        let edge = watch_points(gun, enemy, 425.0)[0];
+        let moved_gun = watch_points(Vec3::xz(2000.0, 1000.0), enemy, 425.0)[0];
+        assert!(distance(edge, moved_gun) < 0.01);
+        let close = Vec3::xz(1000.0, 1100.0);
+        let edge = watch_points(gun, close, 660.0)[0];
+        assert!(edge.z < gun.z);
+        assert!((distance(edge, close) - (660.0 - WATCH_MARGIN)).abs() < 0.01);
+    }
+
+    #[test]
+    fn watchers_avoid_decloak_circles_and_only_escape_outwards() {
+        let points = watch_points(Vec3::xz(1000.0, 1000.0), Vec3::xz(2000.0, 1000.0), 660.0);
+        let circles = [(points[0], 200.0)];
+        assert!(!watch_clear(points[0], &circles));
+        assert!(points.iter().any(|&p| watch_clear(p, &circles)));
+        let circles = [(Vec3::xz(500.0, 500.0), 125.0)];
+        assert!(!watch_safe_leg(Vec3::xz(0.0, 500.0), Vec3::xz(1000.0, 500.0), &circles));
+        assert!(watch_safe_leg(Vec3::xz(0.0, 250.0), Vec3::xz(1000.0, 250.0), &circles));
+        assert!(watch_safe_leg(Vec3::xz(550.0, 500.0), Vec3::xz(700.0, 500.0), &circles));
+        assert!(!watch_safe_leg(Vec3::xz(550.0, 500.0), Vec3::xz(510.0, 500.0), &circles));
+        assert!(!watch_safe_leg(Vec3::xz(550.0, 500.0), Vec3::xz(300.0, 500.0), &circles));
+    }
+
+    #[test]
     fn spots_parse() {
         assert_eq!(Spot::parse("cloak"), Ok(Spot::Cloak));
         assert_eq!(Spot::parse("any"), Ok(Spot::Any));
-        assert!(Spot::parse("boat").unwrap_err().contains("tank, cloak, air, any"));
+        assert_eq!(Spot::parse("watch"), Ok(Spot::Watch));
+        assert!(Spot::parse("boat").unwrap_err().contains("tank, cloak, air, any, watch"));
     }
 
     #[test]

@@ -34,6 +34,16 @@ pub struct Coward {
 }
 
 impl Coward {
+    /// Spotters repair below 60%, including Scythes while uncloaked, and
+    /// never resume firing when healed (a Halberd must keep its armour).
+    pub(crate) fn new_spotter(unit: Unit, def: UnitDef, def_name: &str, team: i32) -> Self {
+        let mut c = Self::new(unit, def, def_name, 0.6, team);
+        // `hold_fire` toggles fire at will back on after repair for ordinary
+        // Halberds. A spotter stays on the hold-fire state it was given.
+        c.hold_fire = false;
+        c
+    }
+
     /// `def`/`def_name` are the unit's definition and its internal name;
     /// `retreat_level` is the health fraction below which it retreats.
     pub fn new(unit: Unit, def: UnitDef, def_name: &str, retreat_level: f32, team: i32) -> Self {
@@ -162,5 +172,67 @@ impl Coward {
 
     pub fn is_cloaked(&self) -> bool {
         self.unit.is_cloaked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use springai::ffi::SSkirmishAICallback;
+    use std::cell::Cell;
+    use std::ffi::c_void;
+
+    #[test]
+    fn spotter_repairs_at_sixty_percent_and_never_resumes_fire() {
+        thread_local! {
+            static HEALTH: Cell<f32> = const { Cell::new(1.0) };
+            static ORDERS: Cell<usize> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            HEALTH.with(Cell::get)
+        }
+        unsafe extern "C" fn full(_: i32, _: i32) -> f32 {
+            1.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> f32 {
+            0.0
+        }
+        unsafe extern "C" fn count(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn fly(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn order(_: i32, _: i32, _: i32, _: i32, _: *mut c_void) -> i32 {
+            ORDERS.with(|n| n.set(n.get() + 1));
+            0
+        }
+        let table = SSkirmishAICallback {
+            UnitDef_isAbleToFly: Some(fly),
+            Unit_getWeapons: Some(count),
+            Unit_getHealth: Some(health),
+            Unit_getMaxHealth: Some(full),
+            Unit_getCaptureProgress: Some(zero),
+            Unit_getParalyzeDamage: Some(zero),
+            Engine_handleCommand: Some(order),
+            ..Default::default()
+        };
+        // SAFETY: all handles stay within the callback table's lifetime.
+        let cb = unsafe { springai::Callback::from_raw(0, &table) };
+        let unit = Unit::from_id(cb, 1).unwrap();
+        let def = UnitDef::from_id(cb, 1).unwrap();
+        for name in ["hoverassault", "spiderantiheavy", "cloakheavyraid", "cloakaa"] {
+            let mut c = Coward::new_spotter(unit, def, name, 0);
+            assert!(!c.is_scythe);
+            HEALTH.with(|h| h.set(0.61));
+            assert!(!c.should_retreat());
+            HEALTH.with(|h| h.set(0.59));
+            assert!(c.should_retreat());
+            assert!(!c.is_healed());
+            ORDERS.with(|n| n.set(0));
+            HEALTH.with(|h| h.set(1.0));
+            assert!(c.is_healed());
+            assert_eq!(ORDERS.with(Cell::get), 0, "healing must not enable fire for {name}");
+        }
     }
 }
