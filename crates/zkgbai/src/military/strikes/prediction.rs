@@ -16,9 +16,12 @@ struct Request {
     target: usize,
     pos: springai::Vec3,
     members: Vec<i32>,
+    paralysis: Option<f32>,
+    stun_required: bool,
 }
 struct Answer {
     key: u64,
+    kill_frames: Option<i32>,
     probability: f32,
     pos: springai::Vec3,
     members: Vec<i32>,
@@ -36,9 +39,24 @@ impl Predictor {
             .name("strike-fates".into())
             .spawn(move || {
                 while let Ok(r) = requests.recv() {
-                    let fates = model.fates(&r.snapshot, DIVE_TIMEOUT, FateMode::Assassinate { target: r.target });
-                    let probability = fates.get(r.target).map_or(0.0, |f| f.p_dead);
-                    if answers.send(Answer { key: r.key, probability, pos: r.pos, members: r.members }).is_err() {
+                    let stun_frames = r.paralysis.map(super::super::fightsim::mech::paralysis_frames).unwrap_or(0);
+                    // Leave time for the async response and the next command tick.
+                    let horizon =
+                        if r.stun_required { (stun_frames - 90).clamp(1, DIVE_TIMEOUT) } else { DIVE_TIMEOUT };
+                    let paralysis: Vec<_> = r.paralysis.map(|ratio| (r.target, ratio)).into_iter().collect();
+                    let fates = model.fates_with_paralysis(
+                        &r.snapshot,
+                        horizon,
+                        FateMode::Assassinate { target: r.target },
+                        &paralysis,
+                    );
+                    let fate = fates.get(r.target);
+                    let kill_frames = fate.and_then(|f| f.death_frame);
+                    let probability = fate.filter(|f| !r.stun_required || f.dead).map_or(0.0, |f| f.p_dead);
+                    if answers
+                        .send(Answer { key: r.key, kill_frames, probability, pos: r.pos, members: r.members })
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -49,9 +67,13 @@ impl Predictor {
 }
 
 impl Ai {
-    fn strike_spec(&self, def: UnitDef) -> Arc<UnitSpec> {
+    fn strike_spec(&self, def: UnitDef, target: Option<UnitDef>) -> Arc<UnitSpec> {
         let mut weapons: Vec<WeaponSpec> = Vec::new();
-        for wd in def.weapon_mounts().iter().filter_map(|m| m.weapon_def()) {
+        for mount in def.weapon_mounts() {
+            let Some(wd) = mount.weapon_def() else { continue };
+            if target.is_some_and(|d| d.category() != 0 && mount.only_target_category() & d.category() == 0) {
+                continue;
+            }
             let name = wd.name();
             if weapons.iter().any(|w| w.name == name)
                 || wd.is_shield()
@@ -108,7 +130,9 @@ impl Ai {
                 && distance(a.pos, w.job.pos) < 150.0
             {
                 w.query = None;
-                if launchable(a.probability) {
+                let fits = !w.job.prey.needs_stun(w.tactic)
+                    || stun_window_fits(self.strike_stun(&w.job).map_or(0, |(_, frames)| frames), a.kill_frames);
+                if launchable(a.probability) && fits {
                     w.phase = Phase::Diving;
                     w.since = self.frame;
                     self.log(&format!(
@@ -139,7 +163,7 @@ impl Ai {
             let pos = f.get_pos();
             snapshot.units.push(SnapUnit {
                 side: 0,
-                spec: self.strike_spec(def),
+                spec: self.strike_spec(def, None),
                 hp: f.unit.health(),
                 x: pos.x,
                 z: pos.z,
@@ -153,14 +177,21 @@ impl Ai {
         let hp =
             w.job.id.and_then(|id| self.war.targets.get(&id)).map_or(def.health(), |e| e.get_health() * e.def_health());
         let target = snapshot.units.len();
-        snapshot.units.push(SnapUnit { side: 1, spec: self.strike_spec(def), hp, x: w.job.pos.x, z: w.job.pos.z });
+        let seen = w.job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible);
+        let ground_target = self.defs.get(w.tactic.name());
+        let mut spec = self.strike_spec(def, ground_target);
+        if let Some(e) = seen {
+            Arc::make_mut(&mut spec).health = e.unit.max_health().max(1.0);
+        }
+        let hp = seen.map_or(hp, |e| e.unit.health());
+        snapshot.units.push(SnapUnit { side: 1, spec, hp, x: w.job.pos.x, z: w.job.pos.z });
         // Inferred extra Phantoms also shoot; never treat a three-Phantom fix as
         // just one defender merely because the current focus is one of them.
         if w.job.phantom() {
             for i in 1..w.job.count {
                 snapshot.units.push(SnapUnit {
                     side: 1,
-                    spec: self.strike_spec(def),
+                    spec: self.strike_spec(def, ground_target),
                     hp: def.health(),
                     x: w.job.pos.x + i as f32 * 80.0,
                     z: w.job.pos.z,
@@ -194,11 +225,16 @@ impl Ai {
             } // Fail closed for unbounded fronts.
             snapshot.units.push(SnapUnit {
                 side: 1,
-                spec: self.strike_spec(def),
+                spec: self.strike_spec(def, ground_target),
                 hp: e.get_health() * e.def_health(),
                 x: e.position.x,
                 z: e.position.z,
             });
+        }
+        let paralysis = self.strike_stun(&w.job).map(|(ratio, _)| ratio);
+        let stun_required = w.job.prey.needs_stun(w.tactic);
+        if stun_required && paralysis.is_none() {
+            return;
         }
         self.strikes.serial += 1;
         let key = self.strikes.serial;
@@ -208,10 +244,35 @@ impl Ai {
             .as_ref()
             .unwrap()
             .tx
-            .try_send(Request { key, snapshot, target, pos: w.job.pos, members: w.members.clone() })
+            .try_send(Request {
+                key,
+                snapshot,
+                target,
+                pos: w.job.pos,
+                members: w.members.clone(),
+                paralysis,
+                stun_required,
+            })
             .is_ok()
         {
             w.query = Some((key, self.frame));
         }
+    }
+}
+
+/// Recheck the live window when an asynchronous answer comes back.
+fn stun_window_fits(remaining: i32, kill_frames: Option<i32>) -> bool {
+    kill_frames.is_some_and(|kill| kill >= 0 && remaining > kill.saturating_add(super::PERIOD))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn stale_prediction_cannot_spend_an_expired_stun() {
+        assert!(stun_window_fits(600, Some(300)));
+        assert!(!stun_window_fits(330, Some(300)));
+        assert!(!stun_window_fits(0, Some(300)));
+        assert!(!stun_window_fits(600, None));
     }
 }

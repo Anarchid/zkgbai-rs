@@ -37,6 +37,8 @@ pub mod cmd {
     /// range first, waits for the reload.
     pub const JUMP: i32 = 38521;
     pub const WANTED_SPEED: i32 = 38825;
+    /// Odin shield cluster (x, y, z), separate from its thermite attack.
+    pub const AIR_MANUALFIRE: i32 = 38571;
     pub const AIR_STRAFE: i32 = 39381;
 }
 

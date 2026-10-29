@@ -1127,7 +1127,7 @@ impl Ai {
             self.eco.radars.push(unit);
         }
 
-        if def_name == "planelightscout" {
+        if def_name == "planelightscout" && !self.airstrike_claims(unit.id()) {
             self.eco.sparrow = Some(unit);
         }
 

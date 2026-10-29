@@ -23,6 +23,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ("workers", "constructors: count, fleeing, reserved, the commander's position and task"),
     ("factories", "each factory, what it builds, operator production orders"),
     ("squads", "each squad: kind, status, position, target, size"),
+    ("airstrikes", "available air missions, missions in progress, required aircraft and grounded production"),
     ("threats", "enemy incursions and the squads blocking them, places defended"),
     ("qrf", "the quick-reaction force: budget, teams and what each does, raids near our value"),
     (
@@ -31,7 +32,7 @@ pub const SECTIONS: &[(&str, &str)] = &[
     ),
     (
         "board",
-        "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta, home-defense (QRF) teams as gold lines to where they stand (ring: marking a raid, square: striking)",
+        "the map as a picture (MCPL hosts only): terrain, grid in thousands of elmos, metal spots (ours blue, enemy red, free white), our units (commander yellow, workers green, fighters cyan, buildings blue), enemies (red; orange when remembered), enemy defenses with their reach, squad lines to targets, defended places in magenta, home-defense (QRF) teams as gold lines to where they stand (ring: marking a raid, square: striking), air missions (orange diamond: available, green double ring: in progress)",
     ),
 ];
 
@@ -259,6 +260,29 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                     }
                     line(&mut out, s);
                 }
+            }
+            "airstrikes" if active => {
+                let air = ai.airstrikes_status();
+                let mut s = format!(
+                    "air missions: {} available, {} in progress{}",
+                    air["available"],
+                    air["in_progress"],
+                    if air["grounded"] == true { " | production grounded" } else { "" }
+                );
+                if let Some(missions) = air["missions"].as_array() {
+                    for m in missions.iter().take(12) {
+                        let _ = write!(
+                            s,
+                            " | {} {} target #{} at {}: {}",
+                            if m["state"] == "in_progress" { "in progress" } else { "available" },
+                            m["kind"].as_str().unwrap_or("?"),
+                            m["target"],
+                            m["pos"],
+                            m["packages"]
+                        );
+                    }
+                }
+                line(&mut out, s);
             }
             "threats" if active => {
                 let inc = &ai.incursions;

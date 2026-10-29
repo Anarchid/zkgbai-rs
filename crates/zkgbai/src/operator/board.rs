@@ -303,6 +303,22 @@ pub fn render(ai: &Ai, terrain: &Terrain) -> Vec<u8> {
             c.disc(x, y, 1, [0, 255, 255]);
         }
     }
+    // Match the dashboard and in-game legend: diamonds available, double rings active.
+    if let Some(missions) = ai.airstrikes_status()["missions"].as_array() {
+        for m in missions {
+            let (Some(x), Some(z)) = (m["pos"][0].as_f64(), m["pos"][1].as_f64()) else { continue };
+            let (x, y) = c.at(Vec3::xz(x as f32, z as f32));
+            if m["state"] == "in_progress" {
+                c.ring(x, y, 8, [30, 230, 140]);
+                c.ring(x, y, 5, [30, 230, 140]);
+            } else {
+                let points = [(x, y - 8), (x + 8, y), (x, y + 8), (x - 8, y), (x, y - 8)];
+                for p in points.windows(2) {
+                    c.line(p[0], p[1], [255, 165, 50]);
+                }
+            }
+        }
+    }
     encode(&c)
 }
 

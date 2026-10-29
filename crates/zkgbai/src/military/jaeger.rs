@@ -221,7 +221,7 @@ fn cost(e: &Enemy, metal: Resource) -> f32 {
 }
 
 /// Whether an enemy is a heavy.
-fn is_heavy(e: &Enemy, metal: Resource) -> bool {
+pub(crate) fn is_heavy(e: &Enemy, metal: Resource) -> bool {
     is_army(e) && e.def_health() >= HEAVY_HEALTH && cost(e, metal) >= HEAVY_COST
 }
 
@@ -307,6 +307,15 @@ pub struct Jaegers {
 }
 
 impl Ai {
+    /// A Widow hunt is a warning to nearby finishers to gather before EMP lands.
+    pub(crate) fn jaeger_stun_expected(&self, target: i32) -> bool {
+        self.jaegers.hunts.values().any(|h| {
+            h.kind.stuns
+                && (matches!(h.phase, Phase::Hunting(Some(id)) | Phase::Striking(id, _) if id == target)
+                    || h.ambush.as_ref().is_some_and(|a| a.target == target && a.eta <= 30.0))
+        })
+    }
+
     /// Metal of heavies and of the whole army seen lately.
     fn jaeger_heavy_value(&self) -> (f32, f32) {
         let seen = self.jaegers.seen.values();

@@ -84,7 +84,7 @@ select, input[type=text], input[type=search], textarea {
   position: absolute; left: 8px; bottom: 8px; background: color-mix(in srgb, var(--surface) 88%, transparent);
   border: 1px solid var(--border); border-radius: 8px; padding: 4px 8px; font-size: 12px; max-width: calc(100% - 16px);
 }
-.hint { position: absolute; right: 8px; top: 8px; color: var(--muted); font-size: 12px; }
+.hint { position: absolute; right: 8px; top: 52px; color: var(--muted); font-size: 12px; }
 @media (max-width: 1300px) { .hint { display: none; } }
 #tip {
   position: fixed; pointer-events: none; z-index: 10; display: none; max-width: 320px;
@@ -200,6 +200,12 @@ table.lanes tr.decides td:first-child::after { content: " ◂"; color: var(--acc
 .modal tr:hover td { background: var(--surface-2); cursor: pointer; }
 #toast { position: fixed; right: 16px; bottom: 16px; z-index: 12; display: none; max-width: 420px;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 20px rgba(0,0,0,.2); }
+#missions { padding: 8px 10px; }
+#missions h2 { font-size: 13px; margin: 0 0 6px; font-weight: 600; }
+.mission { border-top: 1px solid var(--border); padding: 7px 0; }
+.mission .state { font-weight: 600; color: var(--series-2); }
+.mission.active .state { color: var(--accent); }
+.mission .detail { color: var(--ink-2); font-size: 12px; margin-top: 3px; }
 </style>
 </head>
 <body>
@@ -221,6 +227,7 @@ table.lanes tr.decides td:first-child::after { content: " ◂"; color: var(--acc
       <label><input type="checkbox" id="showOurs" checked> ours</label>
       <label><input type="checkbox" id="showEnemies" checked> enemies</label>
       <label><input type="checkbox" id="showSquads" checked> squads</label>
+      <label><input type="checkbox" id="showMissions" checked> missions</label>
       <label><input type="checkbox" id="showSpots" checked> metal</label>
       <label><input type="checkbox" id="showIntents" checked> intents</label>
       <label title="The metal-spot graph's Delaunay links: who holds a spot unseen is inferred along the walkable ones"><input type="checkbox" id="showLinks" checked> links</label>
@@ -238,6 +245,7 @@ table.lanes tr.decides td:first-child::after { content: " ◂"; color: var(--acc
       <button id="fitBtn" title="Fit the map">Fit</button>
     </div>
     <div class="maplegend legend">
+      <span title="Broken route: available; solid route: in progress">◇ mission available · ◎ in progress</span>
       <span><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="var(--ours)"/></svg>ours</span>
       <span><svg width="10" height="10" aria-hidden="true"><circle cx="5" cy="5" r="3.5" fill="none" stroke="var(--enemy)" stroke-width="1.6"/></svg>enemy</span>
       <span><svg width="10" height="10" aria-hidden="true"><rect x="1" y="1" width="8" height="8" fill="var(--ink-2)"/></svg>building</span>
@@ -255,6 +263,7 @@ table.lanes tr.decides td:first-child::after { content: " ◂"; color: var(--acc
     <div class="tiles" id="tiles"></div>
     <div class="card levers foldable" id="levers"><h2>Levers</h2><div class="empty">Levers need a live game.</div></div>
     <div class="card regime foldable" id="regime"><h2>Regime</h2><div class="empty">No regime read yet.</div></div>
+    <div class="card intel" id="missions"><h2>Air missions</h2></div>
     <div class="card intel foldable" id="intel"><h2>Intel</h2><div class="empty">No intel yet.</div></div>
     <div class="card chart" data-chart="metal">
       <div class="head"><span class="title">Metal</span><span class="legend"><span><i class="key" style="background:var(--ours)"></i>income</span><span><i class="key" style="background:var(--series-2)"></i>spent</span></span></div>
@@ -652,6 +661,7 @@ function drawMap() {
   }
   hits = [];
   const snap = snapNow();
+  renderMissions(snap);
   const rad = unitRadius();
 
   // The metal-spot graph's Delaunay links, by who holds their ends (ours,
@@ -778,7 +788,51 @@ function drawMap() {
       hits.push([sx, sy, 'unit', u]);
     }
   }
+  if ($('#showMissions').checked) {
+    for (const m of snap.airstrikes?.missions || []) {
+      if (!m.pos) continue;
+      const active = m.state === 'in_progress';
+      const [x, y] = toScreen(...m.pos);
+      ctx.save(); ctx.strokeStyle = active ? colors.accent : colors.series2;
+      ctx.lineWidth = active ? 2.5 : 1.5; ctx.globalAlpha = 0.65;
+      ctx.setLineDash(active ? [] : [5, 5]); ctx.beginPath();
+      for (const [i, p] of (m.route || []).entries()) {
+        const q = toScreen(...p); if (i) ctx.lineTo(...q); else ctx.moveTo(...q);
+      }
+      ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.beginPath();
+      if (active) {
+        ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.moveTo(x + 7, y); ctx.arc(x, y, 7, 0, Math.PI * 2);
+      } else {
+        ctx.moveTo(x, y - 11); ctx.lineTo(x + 11, y); ctx.lineTo(x, y + 11); ctx.lineTo(x - 11, y); ctx.closePath();
+      }
+      ctx.stroke(); ctx.restore(); hits.push([x, y, 'mission', m]);
+    }
+  }
   drawSelectionBox();
+}
+
+function missionName(m) { return String(m.kind || 'Mission').replace(/([a-z])([A-Z])/g, '$1 $2'); }
+function missionPackage(m) {
+  return (m.packages || []).map(p => p.map(u => `${u.count} ${u.name || u.unit}`).join(' + ')).join(' or ');
+}
+function renderMissions(snap) {
+  const node = $('#missions');
+  node.replaceChildren(el('h2', null, 'Air missions'));
+  const a = snap?.airstrikes;
+  if (!a) { node.append(el('div', 'empty', 'No mission telemetry in this snapshot.')); return; }
+  node.append(el('div', 'detail', `${a.available || 0} available · ${a.in_progress || 0} in progress`));
+  if (a.grounded) node.append(el('div', 'empty', 'Production grounded: unsafe airspace.'));
+  for (const m of a.missions || []) {
+    const active = m.state === 'in_progress';
+    const row = el('div', 'mission' + (active ? ' active' : ''));
+    row.append(el('div', 'state', active ? '◎ Mission in progress' : '◇ Mission available'));
+    row.append(el('div', null, missionName(m) + (m.deep ? ' · deep strike' : '') + (m.primary ? '' : ' · secondary')));
+    row.append(el('div', 'detail', missionPackage(m)));
+    row.append(el('div', 'detail', `Target #${m.target}` + (active ? ` · ${m.members.length} aircraft assigned` : ' · awaiting available aircraft')));
+    node.append(row);
+  }
+  if (!a.missions?.length) node.append(el('div', 'empty', 'No feasible missions.'));
 }
 
 let box = null; // [sx0, sy0, sx1, sy1] while shift-dragging
@@ -790,7 +844,7 @@ function drawSelectionBox() {
 }
 
 function hitAt(sx, sy, maxd = 12) {
-  const prio = { unit: 0, enemy: 0, squad: 1, defend: 2, spot: 3, front: 4 };
+  const prio = { mission: -1, unit: 0, enemy: 0, squad: 1, defend: 2, spot: 3, front: 4 };
   let best = null, bd = maxd * maxd;
   for (const h of hits) {
     const d = (h[0] - sx) ** 2 + (h[1] - sy) ** 2;
@@ -877,6 +931,7 @@ function select(h, add) {
 function tipFor(h) {
   const d = h[3];
   switch (h[2]) {
+    case 'mission': return [[d.state === 'in_progress' ? 'Mission in progress' : 'Mission available', missionName(d)], [missionPackage(d), 'aircraft'], ['#' + d.target, 'target'], [d.primary ? 'primary' : 'secondary', 'priority']];
     case 'unit': return [[`#${d[0]}`, d[1]], [d[5], 'role'], [d[4] + '%', 'health'], ...(d[6] ? [['S' + d[6], 'squad']] : []),
       ...(d[7] ? [[d[7][2] || `${d[7][0]}, ${d[7][1]}`, d[7][2] ? 'task' : 'going to']] : [])];
     case 'enemy': return [[`#${d[0]}`, d[1] || 'unidentified'], [fmtNum(d[6]), 'value'], [d[4] <= 30 ? 'now' : fmtTime(d[4]) + ' ago', 'seen']];
@@ -1777,7 +1832,7 @@ $('#runsBtn').addEventListener('click', async () => {
 });
 $('#runs').addEventListener('click', (ev) => { if (ev.target === $('#runs')) $('#runs').style.display = 'none'; });
 $('#fitBtn').addEventListener('click', fitView);
-for (const id of ['#showOurs', '#showEnemies', '#showSquads', '#showSpots', '#showIntents', '#showLinks', '#showFronts']) $(id).addEventListener('change', () => touch('map'));
+for (const id of ['#showOurs', '#showEnemies', '#showSquads', '#showMissions', '#showSpots', '#showIntents', '#showLinks', '#showFronts']) $(id).addEventListener('change', () => touch('map'));
 
 // ---------------------------------------------------------------- frame loop
 let lastT = performance.now();

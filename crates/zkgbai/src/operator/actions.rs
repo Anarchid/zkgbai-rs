@@ -74,6 +74,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Defense",
         "a 1v1 jump, tank or ship opening builds a 200-metal wave of scouts first, then one per 8 raiders",
     ),
+    ("airstrikes", "Military", "mission-driven aircraft production, strikes and interception"),
     ("firefighters", "Defense", "airborne quick-reaction squads against raids on our eco"),
     ("airfire", "Defense", "an air factory for the firefighters"),
     ("airtempo", "Army", "an air factory weighed up by the clock and the map's size"),

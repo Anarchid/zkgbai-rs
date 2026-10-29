@@ -36,6 +36,15 @@ const KAMIKAZE: [&str; 6] = ["cloakbomb", "shieldbomb", "jumpbomb", "amphbomb", 
 const KAMIKAZE_REACH: f64 = 20.0;
 /// Seconds for full paralysis to wear off (unit_paralysis_damage.lua).
 const STUN_DECAY_S: f64 = 40.0;
+
+/// Remaining stun from paralysis damage divided by current max health.
+pub(crate) fn paralysis_frames(ratio: f32) -> i32 {
+    if !ratio.is_finite() || ratio <= 1.0 {
+        return 0;
+    }
+    ((ratio - 1.0) * STUN_DECAY_S as f32 * 30.0).floor() as i32
+}
+
 /// Most a unit is slowed (timeslow_defs.lua).
 const SLOW_MAX: f64 = 0.5;
 /// Slow damage wearing off per second, as a share of health.
@@ -303,7 +312,27 @@ impl Model {
     /// says (mech.py `simulate_mech(fates=...)`). The fight goes on while one
     /// side has an armed unit and the other anything alive, unarmed eco too.
     pub fn fates(&self, snap: &FightSnapshot, horizon: i32, mode: FateMode) -> Vec<UnitFate> {
+        self.fates_with_paralysis(snap, horizon, mode, &[])
+    }
+
+    /// Seed observed EMP as (snapshot index, paralysis/max-health ratio).
+    /// It decays normally: a disabled target can recover and fight back.
+    pub fn fates_with_paralysis(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        mode: FateMode,
+        paralysis: &[(usize, f32)],
+    ) -> Vec<UnitFate> {
         let mut units = self.mech_units(snap);
+        for &(index, ratio) in paralysis {
+            if ratio.is_finite()
+                && ratio >= 0.0
+                && let Some(u) = units.get_mut(index)
+            {
+                u.para = ratio as f64 * u.maxhp;
+            }
+        }
         let pass = match mode {
             FateMode::AMove | FateMode::Assassinate { .. } => false,
             FateMode::Pass { offset } => {
@@ -844,6 +873,27 @@ mod tests {
             assert!((0.0..=1.0).contains(&out.p_a_wins) && (0.0..=1.0).contains(&out.mean_a));
         }
         eprintln!("mech parity: {} cases, worst |rust - python| = {worst_all:.2e}", cases.len());
+    }
+
+    #[test]
+    fn observed_paralysis_expires_and_the_defender_fires_again() {
+        let model = Model::load().unwrap();
+        let defs = specs();
+        let snap = FightSnapshot {
+            units: vec![
+                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 30.0, x: 0.0, z: 0.0 },
+                SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 100000.0, x: 100.0, z: 0.0 },
+            ],
+        };
+        let mode = FateMode::Assassinate { target: 1 };
+        let long = model.fates_with_paralysis(&snap, 300, mode, &[(1, 2.0)]);
+        let short = model.fates_with_paralysis(&snap, 300, mode, &[(1, 1.05)]);
+        let awake = model.fates(&snap, 300, mode);
+        assert_eq!(long[0].hp_left, 30.0);
+        assert!(short[0].dead && awake[0].dead);
+        assert_eq!(paralysis_frames(1.5), 600);
+        assert_eq!(paralysis_frames(1.0), 0);
+        assert_eq!(paralysis_frames(f32::NAN), 0);
     }
 
     #[test]
