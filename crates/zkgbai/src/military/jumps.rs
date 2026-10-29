@@ -186,9 +186,10 @@ pub struct Jumps {
     /// taken rose (or fell, below 0).
     pub dropped: u32,
     way_rises: Vec<f32>,
-    /// Our Skuttles: whether each was cloaked at the last check, and its
-    /// health then.
-    skuttles: BTreeMap<i32, (bool, f32)>,
+    /// Our Skuttles: whether each was cloaked at the last check, its health
+    /// then, and whether it has ever been cloaked (one fresh from the
+    /// factory is not yet).
+    skuttles: BTreeMap<i32, (bool, f32, bool)>,
     /// Skuttles seen losing their cloak since the summary.
     pub shown: u32,
 }
@@ -889,16 +890,18 @@ impl Ai {
     }
     /// A Skuttle shown against its will jumps at once if it can (jumps are
     /// silent and keep the cloak): onto the best blast in reach if that is
-    /// worth it, else away from what shows it. Shown with nothing near, no
-    /// hit and the energy store near empty (its upkeep ran dry), it walks
-    /// on.
+    /// worth it, else away from what shows it. Shown with nothing near and
+    /// no hit, it walks on if the energy store is near empty (its upkeep
+    /// ran dry) or it has not cloaked yet (fresh from the factory).
     fn jumps_skuttle(&mut self, unit: Unit) {
         let id = unit.id();
         if unit.is_being_built() || unit.health() <= 0.0 {
             return;
         }
         let (cloaked, health) = (unit.is_cloaked(), unit.health());
-        let (was_cloaked, was_health) = self.jumps.skuttles.insert(id, (cloaked, health)).unwrap_or((true, health));
+        let (was_cloaked, was_health, was_ever) =
+            self.jumps.skuttles.get(&id).copied().unwrap_or((false, health, false));
+        self.jumps.skuttles.insert(id, (cloaked, health, was_ever || cloaked));
         // (A jump ordered just now has not taken off yet.)
         let ordered = self.jumps.last.get(&id).is_some_and(|&f| self.frame - f < 15);
         if cloaked || ordered || unit.rules_param_float("is_jumping", 0.0) == 1.0 {
@@ -921,7 +924,7 @@ impl Ai {
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(d, e)| (d, e.ud.map_or("radar dot", |u| self.defs.name(u))));
         let dry = self.eco.energy + self.eco.energy_reserve < UPKEEP_DRY;
-        if near.is_none() && !hit && dry {
+        if near.is_none() && !hit && (dry || !was_ever) {
             return;
         }
         let shown_by = match near {
