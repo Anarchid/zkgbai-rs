@@ -52,7 +52,7 @@ use crate::defs::cmd;
 use crate::kgbutil::{ArrayGraphics, ByteArrayGraphics};
 use crate::military::roles::Role;
 use crate::nav;
-use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
+use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, kgb_rand};
 use radar::RadarIdentifier;
 
 /// Starting cost for target searches ("nothing found yet").
@@ -715,6 +715,16 @@ impl Ai {
             self.puppies_add(unit);
             return;
         }
+        // Set patient mine states now, but let the factory's short exit move
+        // finish before adopting them on idle. Mines do not retreat.
+        if self.unit_classes.sappers.contains(name) {
+            self.misc_prepare_sapper(unit);
+            self.war.new_units.insert(unit.id());
+            if !self.war.updated {
+                self.war_unit_idle(unit);
+            }
+            return;
+        }
         // Jugglenauts pull (see `jumps`).
         if name == "jumpsumo" {
             unit.execute_custom_command(cmd::PUSH_PULL, &[0.0], 0, NO_TIMEOUT);
@@ -904,10 +914,6 @@ impl Ai {
                 unit.fight(pos, 0);
             }
         } else if classes.sappers.contains(name) {
-            unit.set_move_state(2, 0);
-            unit.set_fire_state(2, 0);
-            unit.execute_custom_command(cmd::UNIT_AI, &[0.0], 0, NO_TIMEOUT);
-            unit.fight(get_radial_point(self.graph.get_ally_center(), 800.0), 0);
             self.misc_add_sapper(unit);
         }
     }

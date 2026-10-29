@@ -691,7 +691,7 @@ impl Ai {
         // Skuttles: jaegers, and the odd one left to the sappers;
         // retreating too.
         let skuttles: Vec<Unit> = (self.fighters.values().map(|f| f.unit))
-            .chain(self.misc_handler.sappers.values().copied())
+            .chain(self.misc_handler.sapper_units())
             .filter(|&u| self.defs.name_of(u) == "jumpbomb")
             .collect();
         for unit in skuttles {

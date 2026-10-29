@@ -145,6 +145,16 @@ impl UnitDef {
     pub fn shield_def(&self) -> Option<WeaponDef> {
         WeaponDef::from_id(self.cb, ffi!(self.cb, UnitDef_getShieldDef, self.def_id))
     }
+
+    /// The explosion when this unit is killed.
+    pub fn death_explosion(&self) -> Option<WeaponDef> {
+        WeaponDef::from_id(self.cb, ffi!(self.cb, UnitDef_getDeathExplosion, self.def_id))
+    }
+
+    /// The explosion when this unit self-destructs (including kamikaze bombs).
+    pub fn self_d_explosion(&self) -> Option<WeaponDef> {
+        WeaponDef::from_id(self.cb, ffi!(self.cb, UnitDef_getSelfDExplosion, self.def_id))
+    }
 }
 
 /// A weapon slot on a unit definition.

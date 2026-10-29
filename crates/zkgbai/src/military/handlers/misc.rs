@@ -10,7 +10,9 @@ use crate::defs::cmd;
 use crate::kgbutil::kgb_move_to;
 use crate::military::Fighter;
 use crate::nav;
-use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point};
+use crate::util::{NULLPOS, distance, get_directional_point, get_radial_point};
+
+mod sappers;
 
 #[derive(Default)]
 pub struct MiscHandler {
@@ -24,7 +26,7 @@ pub struct MiscHandler {
     pub arties: BTreeSet<i32>,
     /// Fighter-store ids.
     pub krows: BTreeSet<i32>,
-    pub sappers: BTreeMap<i32, Unit>,
+    sappers: BTreeMap<i32, sappers::Sapper>,
     berthas: BTreeMap<i32, Unit>,
     /// Swifts waiting for enough company before scouting.
     swifts: BTreeMap<i32, Unit>,
@@ -39,6 +41,10 @@ pub struct MiscHandler {
 impl MiscHandler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn sapper_units(&self) -> impl Iterator<Item = Unit> + '_ {
+        self.sappers.values().map(|s| s.unit)
     }
 
     fn contains(&self, id: i32) -> bool {
@@ -189,10 +195,6 @@ impl Ai {
         }
     }
 
-    pub fn misc_add_sapper(&mut self, u: Unit) {
-        self.misc_handler.sappers.insert(u.id(), u);
-    }
-
     pub fn misc_add_strider(&mut self, f: Fighter) {
         if let Some(id) = self.misc_insert_fighter(f) {
             self.misc_handler.striders.insert(id);
@@ -307,7 +309,7 @@ impl Ai {
         }
 
         let h = &mut self.misc_handler;
-        h.sappers.retain(|_, u| !gone(*u));
+        h.sappers.retain(|_, s| !gone(s.unit));
         h.swifts.retain(|_, u| !gone(*u));
         // port: see misc_remove_unit.
         h.active_swifts.retain(|_, u| !gone(*u));
@@ -370,40 +372,6 @@ impl Ai {
             let mut nav = nav!(self);
             if let Some(s) = self.fighters.get_mut(&id) {
                 s.move_to(target, &mut nav);
-            }
-        }
-    }
-
-    fn misc_update_sappers(&mut self, frame: i32) {
-        let sappers: Vec<Unit> = self.misc_handler.sappers.values().copied().collect();
-        for s in sappers {
-            if s.health() <= 0.0 || s.num_current_commands() > 0 {
-                continue;
-            }
-            let pos = s.pos();
-            let enemy = self
-                .cb
-                .enemy_units_in(pos, 350.0)
-                .into_iter()
-                .find(|e| e.def().is_some_and(|d| d.cost(self.metal) > 100.0));
-            if let Some(enemy) = enemy {
-                s.attack_timeout(enemy, 0, frame + 300);
-                continue;
-            }
-
-            if self.defs.name_of(s) == "gunshipbomb" {
-                if let Some(ms) = self.graph.get_closest_enemy_spot(pos) {
-                    s.fight(ms.get_pos(), 0);
-                }
-                continue;
-            }
-            let ms = self
-                .graph
-                .get_closest_front_line_spot(pos)
-                .or_else(|| self.graph.get_closest_neutral_spot(pos))
-                .map(|ms| ms.get_pos());
-            if let Some(ms) = ms.filter(|&ms| distance(pos, ms) > 500.0) {
-                s.fight(get_angular_point(ms, self.graph.get_enemy_center(), 350.0), 0);
             }
         }
     }
