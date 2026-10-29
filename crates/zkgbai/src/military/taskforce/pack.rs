@@ -42,9 +42,11 @@
 //! (10 s before it judges again); from raiders worth `rip_value` near it,
 //! all the way to its screen (roles that `Keep::Trail`, Rippers, following
 //! it home-side at their own pace, so that what chases the pack runs into
-//! them; the screen holds meanwhile); below `retreat_health`, to a haven,
-//! where it parks for repairs until its cores average `heal_to`. A screen
-//! member below `retreat_health` goes for repairs alone. Packs neither out
+//! them; the screen holds meanwhile); below `retreat_health` of its original
+//! core strength (losses and damage both count), to a haven, where it parks
+//! for repairs until its surviving cores average `heal_to`. Recovery starts
+//! a fresh strength baseline; each pass ends 150 beyond its fixed pass point.
+//! A screen member below `retreat_health` goes for repairs alone. Packs neither out
 //! nor parked merge, the smaller into the larger, are led from where most
 //! of their cores stand, and gather at the haven nearest the rally point,
 //! not at it.
@@ -77,7 +79,7 @@ const PASS_LEAD: f32 = 150.0;
 const PASS_ON: f32 = 400.0;
 /// A pass is over this far beyond its pass point; the next is planned from
 /// there.
-const PASS_OUT: f32 = 300.0;
+const PASS_OUT: f32 = 150.0;
 /// Pass lines are tried this far apart across the way.
 const PASS_STEP: f32 = 10.0;
 /// A pass line must be clear of enemy porc from this far before its pass
@@ -177,7 +179,13 @@ pub struct Pack {
     pub target: Vec3,
     pub since: i32,
     pub pass: Option<Pass>,
+    /// The pass point's target, fixed once a charge locks: a moving enemy
+    /// must not drag the finish line along with it.
+    pass_target: Vec3,
     pub passes: u32,
+    /// Full-health core equivalents at the start of an outing, increased
+    /// by reinforcements but not reduced by casualties or repair departures.
+    original_cores: usize,
     /// Whether what it dives moves (`mixed` charges it).
     pub mobile: bool,
     /// Judged by fates: ram the target (true) or pass it (false), as the
@@ -204,7 +212,9 @@ impl Default for Pack {
             target: NULLPOS,
             since: 0,
             pass: None,
+            pass_target: NULLPOS,
             passes: 0,
+            original_cores: 0,
             mobile: false,
             ram: None,
             shun: Vec::new(),
@@ -219,6 +229,34 @@ impl Default for Pack {
 }
 
 impl Pack {
+    /// Losses stay in the denominator until the survivors recover at home.
+    fn strength(&mut self, cores: usize, health_sum: f32) -> f32 {
+        self.original_cores = self.original_cores.max(cores);
+        health_sum / self.original_cores.max(1) as f32
+    }
+
+    fn recover(&mut self, cores: usize, health: f32, healed: f32, at_haven: bool) -> bool {
+        if !self.parked || health < healed || !at_haven {
+            return false;
+        }
+        self.parked = false;
+        self.opportunistic_rest = false;
+        self.original_cores = cores;
+        true
+    }
+
+    /// Resolve a completed or abandoned pass before judging health, threat
+    /// or another target, so commitment cannot chain past those checks.
+    fn finish_pass(&mut self, pos: Vec3, target_left: bool) {
+        if !target_left {
+            self.target = NULLPOS;
+            self.pass = None;
+        } else if self.pass.is_some_and(|p| p.along(pos, self.pass_target) >= PASS_OUT) {
+            self.pass = None;
+            self.passes += 1;
+        }
+    }
+
     fn fired(&mut self, frame: i32) {
         self.last_fired = Some(self.last_fired.map_or(frame, |old| old.max(frame)));
     }
@@ -445,11 +483,13 @@ impl Ai {
             .map(|f| f.unit)
             .filter(|u| shape.is_core(u.def().map(|d| d.id())))
             .collect();
-        let health = cores.iter().map(|&u| health_fraction(u)).sum::<f32>() / cores.len().max(1) as f32;
+        let health_sum = cores.iter().map(|&u| health_fraction(u)).sum::<f32>();
+        let health = health_sum / cores.len().max(1) as f32;
         let rallied = s.rally_fraction(&self.fighters).is_none_or(|r| r > shape.rallied);
         let trailers: Vec<Unit> =
             (s.trailers(&self.fighters).iter().filter_map(|id| self.fighters.get(id))).map(|f| f.unit).collect();
         let mut st = self.taskforces.packs.get(&sid).cloned().unwrap_or_default();
+        let strength = st.strength(cores.len(), health_sum);
         let doctrine = shape.doctrine.clone();
         // A new or reloaded pack has no five-second firing history yet.
         if st.last_fired.is_none() && st.reload_frames.is_empty() {
@@ -480,29 +520,34 @@ impl Ai {
         });
         let head = heading(leader.vel(), pos, st.target);
         let home = self.graph_get_closest_haven(pos);
-        // Committed, a run begun is finished through its target first.
-        let running =
-            shape.commit && st.target != NULLPOS && st.pass.is_some_and(|p| p.along(pos, st.target) <= PASS_OUT);
+        let target_left =
+            st.target != NULLPOS && self.frame - st.since < TARGET_FOR && self.pack_target_left(st.target).is_some();
+        st.finish_pass(pos, target_left);
+        // Committed, finish 150 beyond the fixed pass point first. Once
+        // finished (or the target is gone), safety checks precede any new run.
+        let running = shape.commit && st.target != NULLPOS && st.pass.is_some();
 
         // Forced retreats keep the old recovery target. Discretionary rests
         // can end earlier when the next run offers more value per second.
         let healed = shape.heal_to.max(shape.retreat_health);
-        if st.parked && health >= healed {
-            st.parked = false;
-            st.opportunistic_rest = false;
+        if st.recover(cores.len(), health, healed, distance(pos, home) <= STAND_NEAR) {
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) is repaired ({:.0}%, {} cores)",
                 100.0 * health,
                 cores.len()
             ));
-        } else if health < shape.retreat_health && !running && (!st.parked || st.opportunistic_rest) {
+        } else if strength < shape.retreat_health && !running && (!st.parked || st.opportunistic_rest) {
             st.parked = true;
             st.opportunistic_rest = false;
             st.target = NULLPOS;
+            st.pass = None;
             self.log(&format!(
-                "taskforce: the {doctrine} pack (squad {sid}) parks for repairs ({:.0}%, {} cores)",
+                "taskforce: the {doctrine} pack (squad {sid}) parks for repairs ({:.0}% strength, \
+                 {:.0}% health, {} of {} original cores)",
+                100.0 * strength,
                 100.0 * health,
-                cores.len()
+                cores.len(),
+                st.original_cores
             ));
         }
         if !running && ((!st.parked && health < shape.repair_below) || st.opportunistic_rest) {
@@ -592,6 +637,7 @@ impl Ai {
         let need = if engaging { shape.cores_to_stay } else { shape.cores_to_go } as usize;
         if cores.len() < need || (!engaging && !rallied) {
             st.target = NULLPOS;
+            st.pass = None;
             self.taskforces.packs.insert(sid, st);
             let at = self.pack_gather(pos);
             self.pack_go(sid, pos, head, at, false);
@@ -622,6 +668,7 @@ impl Ai {
         }
         if self.frame < st.back_until {
             st.target = NULLPOS;
+            st.pass = None;
             st.to_screen = false;
             self.taskforces.packs.insert(sid, st);
             self.pack_go(sid, pos, head, home, false);
@@ -647,6 +694,7 @@ impl Ai {
                 }
                 st.to_screen = true;
                 st.target = NULLPOS;
+                st.pass = None;
                 self.taskforces.packs.insert(sid, st);
                 let past = if distance(at, home) > 1.0 { get_directional_point(at, home, 150.0) } else { at };
                 self.pack_go(sid, pos, head, past, false);
@@ -807,11 +855,6 @@ impl Ai {
             ));
         }
         let target = st.target;
-        // A pass is over once it is well beyond its pass point.
-        if st.pass.is_some_and(|p| p.along(pos, target) > PASS_OUT) {
-            st.pass = None;
-            st.passes += 1;
-        }
         let charge = match (st.ram.filter(|_| fates), shape.attack) {
             (Some(ram), _) => ram,
             (None, Attack::Pass) => false,
@@ -819,7 +862,7 @@ impl Ai {
             (None, Attack::Mixed) => st.mobile,
         };
         // A charge is aimed anew until it is close.
-        let aim = charge && st.pass.is_some_and(|p| p.along(pos, target) < -CHARGE_LOCK);
+        let aim = charge && st.pass.is_some_and(|p| p.along(pos, st.pass_target) < -CHARGE_LOCK);
         if st.pass.is_none() && distance(pos, target) > PLAN_AT {
             let way = self.pack_way(sid, pos, head, target, true);
             self.pack_drive(sid, &way);
@@ -870,8 +913,11 @@ impl Ai {
                     p
                 }
             };
+            if st.pass.is_none() || aim {
+                st.pass_target = target;
+            }
             st.pass = Some(pass);
-            let [a, b] = pass_way(pos, target, &pass);
+            let [a, b] = pass_way(pos, st.pass_target, &pass);
             // Swinging round to come back over it.
             let way: Vec<Vec3> = turn_point(pos, head, a).into_iter().chain([a, b]).collect();
             self.pack_drive(sid, &way);
@@ -1465,6 +1511,74 @@ fn sweep_target(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn casualties_and_damage_both_reduce_original_strength() {
+        let mut pack = Pack::default();
+        assert_eq!(pack.strength(5, 5.0), 1.0);
+        // Two healthy survivors are 40% of the original five, not 100%.
+        assert_eq!(pack.strength(2, 2.0), 0.4);
+        assert_eq!(pack.strength(2, 1.0), 0.2);
+        // Selecting another target must not forget the casualties.
+        pack.target = Vec3::xz(2000.0, 0.0);
+        assert_eq!(pack.strength(2, 2.0), 0.4);
+        // Replacements restore strength; a larger pack expands the baseline.
+        assert_eq!(pack.strength(5, 5.0), 1.0);
+        assert_eq!(pack.strength(6, 3.0), 0.5);
+    }
+
+    #[test]
+    fn a_single_minotaur_keeps_its_actual_health_fraction() {
+        let mut pack = Pack::default();
+        assert_eq!(pack.strength(1, 1.0), 1.0);
+        assert_eq!(pack.strength(1, 0.2), 0.2);
+        assert_eq!(pack.strength(0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn recovery_allows_survivors_to_start_a_fresh_outing() {
+        let mut pack = Pack::default();
+        pack.strength(5, 5.0);
+        pack.parked = true;
+        // Healthy survivors still have to finish retreating, rather than
+        // forgetting the casualties on the next conduct in enemy territory.
+        assert!(!pack.recover(2, 1.0, 0.9, false));
+        assert_eq!(pack.strength(2, 2.0), 0.4);
+        assert!(!pack.recover(2, 0.8, 0.9, true));
+        assert!(pack.parked);
+        assert!(pack.recover(2, 0.9, 0.9, true));
+        assert!(!pack.parked);
+        assert_eq!(pack.strength(2, 2.0), 1.0);
+        assert_eq!(pack.strength(1, 0.8), 0.4);
+    }
+
+    #[test]
+    fn commitment_ends_150_beyond_the_locked_point_even_if_the_enemy_moves() {
+        let target = Vec3::xz(1000.0, 0.0);
+        let mut pack =
+            Pack { target, pass_target: target, pass: Some(Pass { way: (1.0, 0.0), side: 0.0 }), ..Pack::default() };
+        pack.finish_pass(Vec3::xz(1149.0, 0.0), true);
+        assert!(pack.pass.is_some());
+        // The enemy moves forward. The locked pass and its finish do not.
+        pack.target = Vec3::xz(1300.0, 0.0);
+        pack.finish_pass(Vec3::xz(1150.0, 0.0), true);
+        assert!(pack.pass.is_none());
+        assert_eq!(pack.passes, 1);
+        // Further conducts cannot complete the same pass twice.
+        pack.finish_pass(Vec3::xz(1151.0, 0.0), true);
+        assert_eq!(pack.passes, 1);
+    }
+
+    #[test]
+    fn a_lost_target_ends_commitment_before_another_run() {
+        let target = Vec3::xz(1000.0, 0.0);
+        let mut pack =
+            Pack { target, pass_target: target, pass: Some(Pass { way: (1.0, 0.0), side: 0.0 }), ..Pack::default() };
+        pack.finish_pass(Vec3::xz(500.0, 0.0), false);
+        assert!(pack.pass.is_none());
+        assert_eq!(pack.target, NULLPOS);
+        assert_eq!(pack.passes, 0);
+    }
+
     #[test]
     fn a_missed_shot_still_requires_five_seconds_of_quiet() {
         let mut pack = Pack::default();
