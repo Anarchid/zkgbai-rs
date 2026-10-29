@@ -31,7 +31,13 @@ Gate fortification scores the direct route and equidistant frontier using ground
 our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
 gate's value; distance from home and constructor travel reduce it sharply. The planner compares
 turret sites by uncovered gate value per metal, including shared sites between gates, and checks
-range and terrain clearance across each front. Existing and queued defenses reserve coverage.
+range and terrain clearance at the centre and both edges of each front. Existing and queued
+defenses reserve each sample separately, so complementary coverage counts and saturated overlap
+earns no additional value. Fusion, Caretaker, Singularity and geothermal ground-defense requests
+reuse a matching existing or queued turret when it covers the asset's nearby approaches. Otherwise
+they prefer a safe shared gate site that retains that coverage, falling back to ordinary local
+placement when no such site is available. Weapon types are retained; AA, shields and the opening
+factory defense keep their existing placement.
 Forward construction and ditches require local support, reachable approaches, and checks against
 current threats and recent raids; workers reconsider fortification jobs when support changes.
 The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds

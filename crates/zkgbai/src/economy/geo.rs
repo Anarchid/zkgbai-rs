@@ -226,6 +226,9 @@ impl Ai {
         let Some(guard) = self.defs.get(GEO_GUARD) else { return };
         let ally_base = self.graph.get_ally_base();
         let pos = get_directional_point(ally_base, position, distance(ally_base, position) + 90.0);
+        if self.eco_share_point_defense(guard, position, pos) {
+            return;
+        }
         let pos = self.eco_build_site(guard, pos, 0);
         if pos.x >= 0.0 {
             self.eco_add_simple(guard, pos, List::Porc, Some(List::Porc));

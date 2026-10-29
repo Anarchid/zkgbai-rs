@@ -48,6 +48,8 @@ pub struct ConstructionTask {
     pub fac_def: bool,
     /// Opportunistic gate defense: requires support and a safe approach.
     pub fortification: bool,
+    /// A shared site fulfilling an asset guard request; keep it on live disable.
+    pub point_defense: bool,
 }
 
 /// Reclaim a feature (wreck, tree, ...).
@@ -89,6 +91,7 @@ impl WorkerTask {
                 assigned_plop: 0,
                 fac_def: false,
                 fortification: false,
+                point_defense: false,
             }),
         )
     }

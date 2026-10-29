@@ -1824,6 +1824,15 @@ impl Ai {
         let Some(def) = def else {
             return;
         };
+        if extra == Some(List::Porc)
+            && self.eco_share_point_defense(
+                def,
+                position,
+                get_directional_point(position, self.graph.get_enemy_center(), radius),
+            )
+        {
+            return;
+        }
         let mut i = 0;
         loop {
             if i > 100 {
@@ -1940,6 +1949,9 @@ impl Ai {
 
         let (tpos, npos) = (n.target.pos(), n.unit.pos());
         let pos = get_directional_point(tpos, npos, distance(tpos, npos) + 100.0);
+        if self.eco_share_point_defense(turret, npos, pos) {
+            return;
+        }
         let pos = self.eco_build_site(turret, pos, 0);
 
         self.eco_add_simple(turret, pos, List::Porc, Some(List::Porc));
@@ -1950,13 +1962,17 @@ impl Ai {
         let emp = self.defs.get("turretemp");
         // build an hlt and a faraday
         let mut pos = get_radial_point(position, if factory { 175.0 } else { 125.0 });
-        if let Some(hlt) = hlt {
+        if let Some(hlt) = hlt
+            && !self.eco_share_point_defense(hlt, position, pos)
+        {
             pos = self.eco_build_site(hlt, pos, 0);
             self.eco_add_simple(hlt, pos, List::Porc, Some(List::Porc));
         }
 
         pos = get_directional_point(position, pos, distance(position, pos) + 75.0);
-        if let Some(emp) = emp {
+        if let Some(emp) = emp
+            && !self.eco_share_point_defense(emp, position, pos)
+        {
             pos = self.eco_build_site(emp, pos, 0);
             self.eco_add_simple(emp, pos, List::Porc, Some(List::Porc));
         }
