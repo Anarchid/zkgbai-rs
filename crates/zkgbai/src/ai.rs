@@ -580,6 +580,7 @@ impl Ai {
                     | "airstrike-farm"
                     | "airstrike-singu"
                     | "airstrike-aa"
+                    | "assassin-lance"
                     | "assassin-aa"
                     | "assassin-heavy"
                     | "assassin-commander"

@@ -1,6 +1,6 @@
 # Assassination waves
 
-The controller accepts only Halberds, Dirtbags and Fleas. It flags commanders,
+The controller accepts Halberds, Dirtbags, Fleas and Scythes. It flags commanders,
 Phantoms, Lances, Firewalkers, Merlins and Tremors, and remembered Phantom firing
 areas. It borrows eligible existing units from ordinary handlers, requests only
 missing units from an existing factory, gathers the full wave, dives, searches,
@@ -38,7 +38,7 @@ modeled target-death probability, regardless of whether the wave survives.
 
 This focused mode is new and has not been calibrated on assassination matches.
 The inherited model is one-dimensional, lacks shields and water, and does not
-model Halberd approach armor or locating a cloaked target. Terrain reachability,
+model Halberd approach armor, Scythe approach cloak or locating a cloaked target. Terrain reachability,
 recent fixes and the bounded search timeout are separate runtime checks. The
 calibrated probability is a decision heuristic, not a measured assassination
 success rate.
@@ -113,3 +113,14 @@ hold fire for approach armor and explicitly attack the revealed victim in range.
 A confirmed Phantom kill near an inferred fix also resolves that target before
 unit-id acquisition, including kills by allied fire between strike ticks. The
 wave returns after the last expected victim dies.
+
+Scythes form dedicated artillery-hunting squads: three per estimated Phantom,
+and three against a single Lance or another named glass cannon. A cloak factory
+can fill the shortfall; ordinary Scythe raiders can be borrowed, while dedicated
+scouts and operator forces keep their assignments. They enable cloak, hold fire
+while approaching and circling the inferred firing area, then explicitly focus
+the revealed target. Returning survivors rejoin normal raider squads. The same
+kill/death-evidence rules apply. The predictor still checks escorts conservatively
+without assuming a perfectly cloaked approach. `assassin-scythe` versus
+`assassin-target`, and `assassin-scythe-lance` versus `assassin-lance`, exercise
+these paths in the engine.

@@ -1,4 +1,4 @@
-//! Dedicated assassination waves. Only Halberds, Dirtbags and Fleas qualify.
+//! Dedicated assassination waves. Halberds, Dirtbags, Fleas and Scythes qualify.
 //! Halberds are borrowed from normal assault squads and returned when jobs end.
 //! Kill probability, not winning the escort fight, is the launch criterion.
 
@@ -28,6 +28,7 @@ const SPREAD: f32 = 105.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tactic {
     Halberd,
+    Scythe,
     Dirtbag,
     Flea,
 }
@@ -35,16 +36,18 @@ impl Tactic {
     fn name(self) -> &'static str {
         match self {
             Self::Halberd => "hoverassault",
+            Self::Scythe => "cloakheavyraid",
             Self::Dirtbag => "shieldscout",
             Self::Flea => "spiderscout",
         }
     }
     fn fire_state(self) -> i32 {
-        if self == Self::Halberd { 0 } else { 2 }
+        if matches!(self, Self::Halberd | Self::Scythe) { 0 } else { 2 }
     }
     fn factory(self) -> FacKind {
         match self {
             Self::Halberd => FacKind::Hover,
+            Self::Scythe => FacKind::Cloak,
             Self::Dirtbag => FacKind::Shield,
             Self::Flea => FacKind::Spider,
         }
@@ -52,6 +55,7 @@ impl Tactic {
     fn size(self, targets: usize, value: f32, cost: f32) -> usize {
         match self {
             Self::Halberd => (5 * targets).clamp(5, 10),
+            Self::Scythe => 3 * targets,
             Self::Dirtbag => (value / cost.max(1.0)).ceil() as usize,
             Self::Flea => (15 * targets).max(20),
         }
@@ -76,7 +80,9 @@ impl Prey {
         match self {
             Self::GlassCannon => true,
             Self::Defenseless => tactic == Tactic::Flea,
-            Self::Commander => tactic != Tactic::Flea || stunned,
+            Self::Commander => {
+                matches!(tactic, Tactic::Halberd | Tactic::Dirtbag) || (tactic == Tactic::Flea && stunned)
+            }
             Self::Heavy => tactic == Tactic::Flea && stunned,
         }
     }
@@ -348,7 +354,18 @@ impl Ai {
             return false;
         }
         let name = self.defs.name_of(unit);
-        if let Some((&factory, _)) = self.strikes.orders.iter().find(|(_, (_, _, id))| *id == Some(unit.id())) {
+        let order =
+            self.strikes.orders.iter().find(|(_, (_, _, id))| *id == Some(unit.id())).map(|(&factory, _)| factory);
+        if name == Tactic::Scythe.name()
+            && order.is_none()
+            && self.scouts_adopt_scythe()
+            && !self.raider_handler.medium_raiders.contains(&unit.id())
+        {
+            // Preserve the pending dedicated scout; ordinary raider squads
+            // and units explicitly produced for this strike remain eligible.
+            return false;
+        }
+        if let Some(factory) = order {
             self.strikes.orders.remove(&factory);
         }
         let Some(w) = self.strikes.wave.as_ref() else { return false };
@@ -399,6 +416,9 @@ impl Ai {
         unit.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
         unit.set_fire_state(self.strikes.wave.as_ref().map_or(2, |w| w.tactic.fire_state()), 0);
         unit.set_move_state(0, 0);
+        if self.strikes.wave.as_ref().is_some_and(|w| w.tactic == Tactic::Scythe) {
+            unit.cloak(true, 0);
+        }
         let cost = unit.def().map_or(0.0, |d| d.cost(self.metal));
         self.fighters.insert(unit.id(), Fighter::new(unit, cost, self.team_id));
         self.strikes.members.insert(unit.id());
@@ -532,7 +552,8 @@ impl Ai {
                 .is_some_and(|sid| self.op.over.squad_intents.contains_key(&sid) || self.op_squad_target(sid).is_some())
             && (self.squad_handler.fighters.contains(&f.id)
                 || self.raider_handler.solo_raiders.contains(&f.id)
-                || self.raider_handler.small_raiders.contains(&f.id))
+                || self.raider_handler.small_raiders.contains(&f.id)
+                || (name == Tactic::Scythe.name() && self.raider_handler.medium_raiders.contains(&f.id)))
     }
 
     fn strike_cooling(&self, pos: Vec3) -> bool {
@@ -557,7 +578,7 @@ impl Ai {
                 if self.strike_cooling(j.pos) {
                     continue;
                 }
-                for tactic in [Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea] {
+                for tactic in [Tactic::Scythe, Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea] {
                     let base = self
                         .fac
                         .factories
@@ -886,7 +907,7 @@ impl Ai {
                 && let Some(t) = visible
                 && distance(u.pos(), t.pos()) <= u.max_range().max(80.0) * 0.9
             {
-                u.set_fire_state(w.tactic.fire_state(), 0); // Halberds focus fire; bot swarms also shoot on approach.
+                u.set_fire_state(w.tactic.fire_state(), 0); // Armored/stealth approaches focus fire; chaff shoots freely.
                 u.attack(t, 0);
                 continue;
             }
@@ -905,7 +926,10 @@ impl Ai {
             let width = (w.members.len() as f32).sqrt().ceil().max(1.0) as usize;
             let angle = ((self.frame - w.since) / 90 % 8) as f32 * std::f32::consts::FRAC_PI_4;
             let searching = w.phase == Phase::Diving && close && visible.is_none();
-            let sweep = if searching { (angle.cos() * 200.0, angle.sin() * 200.0) } else { (0.0, 0.0) };
+            // Three cloaked hunters cover a wider circuit than a chaff comb;
+            // the Phantom's larger decloak radius does the final locating.
+            let sweep_radius = if w.tactic == Tactic::Scythe { 400.0 } else { 200.0 };
+            let sweep = if searching { (angle.cos() * sweep_radius, angle.sin() * sweep_radius) } else { (0.0, 0.0) };
             // Once it is revealed, every member must enter firing range; a
             // permanent wide grid would leave the outside Fleas/Dirtbags idle.
             let spacing = if w.tactic != Tactic::Halberd && matches!(w.phase, Phase::Forming | Phase::Returning) {
@@ -1078,8 +1102,9 @@ mod tests {
     }
 
     #[test]
-    fn only_halberds_hold_fire_for_the_armored_approach() {
+    fn armored_and_cloaked_approaches_hold_fire_but_chaff_shoots() {
         assert_eq!(Tactic::Halberd.fire_state(), 0);
+        assert_eq!(Tactic::Scythe.fire_state(), 0);
         assert_eq!(Tactic::Flea.fire_state(), 2);
         assert_eq!(Tactic::Dirtbag.fire_state(), 2);
     }
@@ -1100,6 +1125,12 @@ mod tests {
 
     #[test]
     fn waves_follow_requested_costs_and_counts() {
+        assert_eq!(Tactic::Scythe.size(1, 750.0, 250.0), 3);
+        assert_eq!(Tactic::Scythe.size(4, 3000.0, 250.0), 12);
+        assert_eq!(Tactic::Scythe.size(1, 1000.0, 250.0), 3);
+        assert!(Prey::GlassCannon.can_requisition(Tactic::Scythe));
+        assert!(!Prey::Commander.can_requisition(Tactic::Scythe));
+        assert!(!Prey::Heavy.allows(Tactic::Scythe, true));
         assert_eq!(Tactic::Halberd.size(1, 750.0, 210.0), 5);
         assert_eq!(Tactic::Halberd.size(3, 2250.0, 210.0), 10);
         assert_eq!(Tactic::Dirtbag.size(1, 750.0, 30.0), 25);

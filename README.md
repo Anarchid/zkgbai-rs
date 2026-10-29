@@ -189,8 +189,9 @@ the raw hits, and every minute the contacts it has placed, to compare with the f
 `ZKGBAI?test=hunt` against `ZKGBAI?test=snipers` (or `test=lances`) stages assassination strikes: the defender
 posts a Phantom (a Lance) 1400 elmos out every 2.5 minutes, every second one with a Reaver behind it, and the
 attacker gets raiders every 2 minutes; the strikes (`strikes:` lines, scored by `tools/arena/strikes.py`) should
-kill the snipers. `disable=strikes` switches them off; `strike_margin` sets the gate (0 = break-even on a sniper
-worth 1.5x its metal, negative = every wave goes).
+kill the snipers. `disable=strikes` switches them off. Dedicated Halberd, Dirtbag, Flea and Scythe waves use
+modeled target-death probability; the older `strike_margin` setting no longer controls this gate.
+See [assassination waves](crates/zkgbai/src/military/strikes/README.md) for tactic rules and isolated engine scenarios.
 `ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
 
 Operator API and run journal

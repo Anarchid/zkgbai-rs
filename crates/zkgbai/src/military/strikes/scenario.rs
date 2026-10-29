@@ -122,8 +122,9 @@ impl Ai {
             self.log("assassin-test: 20 ordinary Fleas await a stunned finisher target");
             return;
         }
-        if test == "assassin-target" || test == "assassin-target2" {
-            if let Some(def) = self.defs.get("cloaksnipe")
+        if matches!(test, "assassin-target" | "assassin-target2" | "assassin-lance") {
+            let name = if test == "assassin-lance" { "hoverarty" } else { "cloaksnipe" };
+            if let Some(def) = self.defs.get(name)
                 && let Some(u) = self.cb.cheat_new_unit(def, pos)
             {
                 u.set_move_state(0, 0);
@@ -132,7 +133,7 @@ impl Ai {
                         other.set_move_state(0, 0);
                     }
                 }
-                self.log(&format!("assassin-test: Phantom {} at {:.0},{:.0}", u.id(), pos.x, pos.z));
+                self.log(&format!("assassin-test: {name} {} at {:.0},{:.0}", u.id(), pos.x, pos.z));
             }
             return;
         }
@@ -156,13 +157,15 @@ impl Ai {
         }
         let tactic = match test {
             "assassin-halberd" => Tactic::Halberd,
+            "assassin-scythe" | "assassin-scythe-lance" => Tactic::Scythe,
             "assassin-dirtbag" => Tactic::Dirtbag,
             "assassin-flea" => Tactic::Flea,
             _ => return,
         };
         let Some(def) = self.defs.get(tactic.name()) else { return };
         let home = Vec3::xz(center.x, center.z - 700.0);
-        let cost = self.defs.get("cloaksnipe").map_or(750.0, |d| d.cost(self.metal));
+        let target_name = if test == "assassin-scythe-lance" { "hoverarty" } else { "cloaksnipe" };
+        let cost = self.defs.get(target_name).map_or(750.0, |d| d.cost(self.metal));
         let count = tactic.size(1, cost, def.cost(self.metal));
         self.strikes.wave = Some(Wave {
             tactic,
@@ -172,7 +175,7 @@ impl Ai {
                 last: frame,
                 count: 1,
                 value: cost,
-                name: "cloaksnipe".into(),
+                name: target_name.into(),
                 prey: Prey::GlassCannon,
             },
             needed: count,
@@ -191,7 +194,11 @@ impl Ai {
                 u.stop(0);
             }
         }
-        self.sweeps_seed_phantom_fix(pos, 1);
+        if target_name == "cloaksnipe" {
+            self.sweeps_seed_phantom_fix(pos, 1);
+        } else if let Some(scout) = self.defs.get("planescout") {
+            self.cb.cheat_new_unit(scout, Vec3::xz(pos.x + 150.0, pos.z));
+        }
         self.log(&format!("assassin-test: {count} {} assembled", tactic.name()));
     }
 }
