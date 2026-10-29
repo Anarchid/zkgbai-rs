@@ -4,29 +4,19 @@
 //! the terrain, or by what holds the regions on it (see
 //! `zk_terrain::occupancy`) — while the sky over the way there is clear.
 //!
-//! With a gunship factory, the AI keeps a flight of Charons. Once they are
-//! home, they pick up the strongest units of one movement tier that ride
-//! light (Zero-K slows a Charon to 0.7 with cargo up to 500 metal, to 0.4
-//! above, and it is too slow to live then) — assaults and riots of squads
-//! still gathering, light raiders only to fill up. The landing is by the
-//! enemy's buildings with fewer defenders, turrets and units together, than
-//! the force takes on, scored by the value at stake there times how much
-//! longer the walk is (fighting through the regions in between) than the
-//! flight. The flight takes the cheapest way through the anti-air threat
-//! map (see `AirField`), and each Charon sets its cargo down on ground of
-//! its own that the cargo can stand on; one whose unload falls through
-//! (the engine drops the order when it finds no room) or that cannot set
-//! down tries elsewhere nearby. Landed, the force is an attacking squad on
-//! its own; the Charons fly home round the anti-air for the next sortie.
+//! A sortie carries at least five true riots of one movement tier. It raids
+//! reachable economic checkpoints, discounting light QRF but rejecting
+//! systematically fortified pockets. Landed troops stay under drop control:
+//! they spend themselves damaging local infrastructure, evade skirmishers,
+//! and never inherit the ordinary army's mainland retreat orders.
 //!
-//! Between sorties a free Charon also flies a constructor to a colony the
-//! economy has picked (see `economy::colonize`).
+//! Between sorties a free Charon also ferries colony constructors.
 
 use std::collections::BTreeMap;
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 use zk_terrain::occupancy::Occupancy;
-use zk_terrain::paths::SNAP;
+use zk_terrain::paths::{Paths, SNAP};
 use zk_terrain::{Tier, TierMap};
 
 use crate::Ai;
@@ -35,6 +25,11 @@ use crate::military::Fighter;
 use crate::nav;
 use crate::terrain::{pos, tier_of};
 use crate::util::{OPTION_SHIFT_KEY, distance};
+
+mod policy;
+mod raid;
+use policy::{Contact, RAID_REACH, cargo_allowed, pocket_value};
+use raid::Raid;
 
 /// Engine commands, and Zero-K's one-click abilities (the Charon's first is
 /// Drop Cargo).
@@ -48,7 +43,7 @@ const CMD_UNLOAD_UNIT: i32 = 81;
 const PERIOD: i32 = 30;
 
 /// Charons per sortie.
-const FLIGHT: usize = 4;
+pub(crate) const FLIGHT: usize = 5;
 
 /// Drops are worth making from this income on.
 const MIN_INCOME: f32 = 20.0;
@@ -82,12 +77,9 @@ const STATUS_PERIOD: i32 = 30 * 30;
 /// Units this far from the Charons are not picked up.
 const PICKUP_RANGE: f32 = 3500.0;
 
-/// Charons are worth having for this much enemy value that only drops get
-/// to, reassessed this often (frames); a flight's strength, when we have no
-/// cargo to judge by.
-const PROSPECT: f32 = 2400.0;
+/// Minimum economic utility for transport procurement; reassessment period.
+const PROSPECT: f32 = MIN_DROP_VALUE;
 const PROSPECT_PERIOD: i32 = 900;
-const PROSPECT_POWER: f32 = 400.0;
 
 /// Unload radius around each Charon's landing spot, elmos, doubling with
 /// every spot it tries: the engine refuses an unload order outright if it
@@ -132,11 +124,8 @@ const MAX_TRIES: u32 = 4;
 /// scale of enemy danger) may be this share of the drop force's.
 const GROUND_ODDS: f32 = 0.6;
 
-/// Enemy value within this of the landing counts as at stake, elmos.
-const DAMAGE_RADIUS: f32 = 600.0;
-
-/// A landing must put at least this much enemy value at stake.
-const MIN_DROP_VALUE: f32 = 800.0;
+/// A landing must offer this much economic utility (replacement + mex denial).
+pub(crate) const MIN_DROP_VALUE: f32 = 800.0;
 
 /// The walk there (fighting through what holds the way) must be this many
 /// times the flight; a closed way counts as the most.
@@ -152,7 +141,7 @@ const MAX_EXPOSURE: f32 = 0.25;
 const MAX_FLIGHT: f32 = 8000.0;
 const FLIGHT_SCALE: f32 = 3000.0;
 
-/// A Charon and the unit it carries (`squad`: an assault, not a raider).
+/// A Charon and its cargo (`squad`: the original handler for aborted loads).
 #[derive(Clone)]
 struct Load {
     charon: Unit,
@@ -227,6 +216,8 @@ struct Sortie {
     since: i32,
     /// Frames the flight should take.
     flight: i32,
+    aborting: bool,
+    raid: Raid,
 }
 
 /// A Charon flying a constructor to a colony.
@@ -250,12 +241,14 @@ pub struct Drops {
     last_sortie: i32,
     /// When it was last told why no sortie went.
     last_report: i32,
+    last_reason: &'static str,
     /// Enemy value only drops get to (see `drops_prospect`).
     prospect: f32,
+    raids: Vec<Raid>,
 }
 
 /// A unit that fits a seat, and what it brings (on the scale of enemy
-/// danger); `squad`: an assault or riot, not a raider.
+/// danger); `squad` remembers which handler to restore after an abort.
 struct Seat {
     unit: Unit,
     def: UnitDef,
@@ -309,31 +302,15 @@ impl Ai {
         self.drops.prospect
     }
 
-    /// The enemy's buildings, by value, that a flight's worth of our ground
-    /// forces at home would walk to (fighting through what holds the way)
-    /// much further than they would fly, or not get to at all.
+    /// Economic utility of the best viable pocket for the available riots.
+    /// Procurement and launch share their terrain, defense and flight gates.
     fn drops_prospect(&self) -> f32 {
         let home = self.graph.get_ally_center();
-        let seats = self.drops_cargo(home);
-        let mut count: BTreeMap<u8, (Tier, usize)> = BTreeMap::new();
-        for t in seats.iter().filter_map(|s| s.tier) {
-            count.entry(t as u8).or_insert((t, 0)).1 += 1;
-        }
-        let tier = (count.into_values().max_by_key(|c| c.1).map(|c| c.0))
-            .or_else(|| self.strategy.as_ref().map(|s| s.tier))
-            .unwrap_or(Tier::Bot);
-        let power = seats.iter().filter(|s| s.tier == Some(tier)).take(FLIGHT).map(|s| s.power).sum::<f32>();
-        let power = if power > 0.0 { power } else { PROSPECT_POWER };
-        let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return 0.0 };
-        let walk = Occupancy::new(map, &self.region_presence()).fighting_distances(map, pos(home), power);
-        (self.war.targets.values())
-            .filter(|e| e.identified && e.is_static && !e.is_dead && !self.graph.is_ally_territory(e.position))
-            .filter(|e| {
-                map.region_near(pos(e.position), SPOT_REACH)
-                    .is_some_and(|r| walk[r] >= MIN_GAIN * distance(home, e.position).max(1.0))
-            })
-            .map(|e| e.value)
-            .sum()
+        let Some((tier, seats)) = self.drops_pick(self.drops_cargo(home)) else { return 0.0 };
+        let power = seats.iter().map(|s| s.power).sum::<f32>();
+        // Procurement uses the same economic, fortification and flight gates
+        // as launch. Many bad pockets cannot add up to one good sortie.
+        self.drops_target(home, power, tier, seats[0].def).map_or(0.0, |landing| landing.value)
     }
 
     /// A factory has been told to build a Charon.
@@ -394,6 +371,7 @@ impl Ai {
         let team = self.team_id;
         self.drops.charons.retain(|_, u| u.health() > 0.0 && u.team() == team);
         self.drops_ferry_update(frame);
+        self.drops_raids_update();
         if self.drops.sortie.is_some() {
             self.drops_fly(frame);
         } else if self.drops.charons.len() >= FLIGHT && frame - self.drops.last_sortie >= SORTIE_DELAY {
@@ -410,8 +388,8 @@ impl Ai {
         self.drops_pick(self.drops_cargo(at)).map_or(0, |(_, seats)| seats.len())
     }
 
-    /// Units near `at` that ride a Charon light, the most useful first:
-    /// assaults and riots of squads still gathering, then light raiders.
+    /// True riots that ride light and are gathering or safely at home,
+    /// strongest first. QRF and operator-controlled units stay with their job.
     fn drops_cargo(&self, at: Vec3) -> Vec<Seat> {
         let Some(charon) = self.defs.get("gunshiptrans") else { return Vec::new() };
         let max_size = 2 * charon.transport_size();
@@ -419,11 +397,24 @@ impl Ai {
             d.custom_param("requiremediumtrans").is_none() && d.custom_param("requireheavytrans").is_none()
         };
         let fits = |f: &Fighter| {
-            f.unit.def().is_some_and(|d| light(d) && d.x_size() <= max_size && !d.is_able_to_fly())
+            cargo_allowed(self.defs.name_of(f.unit))
+                && f.unit.health() > 0.0
+                && f.unit.team() == self.team_id
+                && !self.qrf_claims(f.id)
+                && !f.squad.is_some_and(|sid| {
+                    self.op.over.squad_intents.contains_key(&sid) || self.op_squad_target(sid).is_some()
+                })
+                && f.unit.def().is_some_and(|d| light(d) && d.x_size() <= max_size && !d.is_able_to_fly())
                 && !self.retreat_is_retreating(f.unit)
                 && distance(f.get_pos(), at) <= PICKUP_RANGE
         };
-        let gathering = |f: &Fighter| f.squad.and_then(|s| self.squads.get(s)).is_none_or(|s| s.status != 'a');
+        let gathering = |f: &Fighter| {
+            f.squad.and_then(|s| self.squads.get(s)).is_none_or(|s| s.status != 'a')
+                // Small ordinary squads become active before five riots
+                // accumulate. They remain recruitable while safely at home.
+                || (distance(f.get_pos(), self.graph.get_ally_center()) <= 1200.0
+                    && self.war.get_effective_threat(f.get_pos()) <= 0.0)
+        };
         let seat = |f: &Fighter, squad| {
             let def = f.unit.def()?;
             Some(Seat { unit: f.unit, def, tier: tier_of(def), power: (f.power + f.unit.max_health()) / 10.0, squad })
@@ -477,10 +468,9 @@ impl Ai {
         let grid = self.cb.map();
         let air = AirField::new(war, grid.width() / 8, grid.height() / 8, from);
         let mut options: Vec<(Vec3, f32, f32, f32, f32, f32)> = Vec::new();
-        let buildings = (war.targets.values())
-            .filter(|e| e.identified && e.is_static && !e.is_dead && !self.graph.is_ally_territory(e.position));
-        for p in buildings.map(|e| e.position) {
-            if war.get_enemy_power(p) > GROUND_ODDS * power {
+        let contacts = self.drops_contacts();
+        for p in contacts.iter().filter(|c| c.value > 0.0).map(|c| c.at) {
+            if policy::danger_at(&contacts, p) > GROUND_ODDS * power {
                 passed.defended += 1;
                 continue;
             }
@@ -498,10 +488,13 @@ impl Ai {
                 passed.walkable += 1;
                 continue;
             }
-            let at_stake: f32 = (war.targets.values())
-                .filter(|e| e.identified && !e.is_dead && !e.can_fly() && distance(e.position, p) <= DAMAGE_RADIUS)
-                .map(|e| e.value)
-                .sum();
+            let paths = policy::combat_paths(map, &contacts, p, GROUND_ODDS * power);
+            let Some(at_stake) =
+                pocket_value(&contacts, p, power, |at| paths.distance_to(pos(at)).is_some_and(|d| d <= RAID_REACH))
+            else {
+                passed.defended += 1;
+                continue;
+            };
             if at_stake < if staged { 0.0 } else { MIN_DROP_VALUE } {
                 passed.little += 1;
                 continue;
@@ -574,6 +567,9 @@ impl Ai {
     fn drops_launch(&mut self, frame: i32) {
         let ferrying = self.drops.ferry.as_ref().map(|f| f.load.charon.id());
         let charons: Vec<Unit> = self.drops.charons.values().copied().filter(|c| Some(c.id()) != ferrying).collect();
+        if charons.len() < FLIGHT || self.dev_off("drops") {
+            return;
+        }
         let Some(&first) = charons.first() else { return };
         let base = first.pos();
         let seats = self.drops_cargo(base);
@@ -582,8 +578,9 @@ impl Ai {
             *tiers.entry(s.tier.map_or("none", |t| t.name())).or_default() += 1;
         }
         let Some((tier, mut cargo)) = self.drops_pick(seats) else {
-            if frame - self.drops.last_report >= REPORT_PERIOD {
+            if self.drops.last_reason != "cargo" || frame - self.drops.last_report >= REPORT_PERIOD {
                 self.drops.last_report = frame;
+                self.drops.last_reason = "cargo";
                 let (squads, raiders) = (self.squad_handler.fighters.len(), self.raider_handler.small_raiders.len());
                 self.log(&format!(
                     "drops: {} Charons home, but no {FLIGHT} of one tier to carry within {PICKUP_RANGE:.0}: {tiers:?} \
@@ -598,8 +595,9 @@ impl Ai {
         let landing = match self.drops_target(base, power, tier, cargo[0].def) {
             Ok(landing) => landing,
             Err(p) => {
-                if frame - self.drops.last_report >= REPORT_PERIOD {
+                if self.drops.last_reason != "landing" || frame - self.drops.last_report >= REPORT_PERIOD {
                     self.drops.last_report = frame;
+                    self.drops.last_reason = "landing";
                     self.log(&format!(
                         "drops: no landing for {} {} (power {power:.0}): of the enemy's buildings {} too well \
                          defended, {} without ground for them, {} past anti-air or too far, {} as near on foot, {} with \
@@ -616,6 +614,7 @@ impl Ai {
                 return;
             }
         };
+        self.drops.last_reason = "";
         let mut spots = landing.spots.clone();
         spots.truncate(FLIGHT + SPARE_SPOTS);
         let spare = spots.split_off(FLIGHT.min(spots.len()));
@@ -658,7 +657,7 @@ impl Ai {
             "no way on foot".into()
         };
         self.log(&format!(
-            "drops: {} Charons loading {} (power {power:.0}) for ({:.0}, {:.0}), {:.0} metal at stake: {on_foot}, \
+            "drops: {} Charons loading {} (power {power:.0}) for ({:.0}, {:.0}), {:.0} economic utility: {on_foot}, \
              {:.0} by air past {:.2} anti-air",
             loads.len(),
             names.join(", "),
@@ -671,8 +670,17 @@ impl Ai {
         let speed = self.defs.get("gunshiptrans").map_or(100.0, |d| d.speed()).max(1.0);
         let flight = ((30.0 * landing.flight / (LADEN * speed)) as i32).clamp(MIN_FLIGHT, MAX_FLIGHT_FRAMES);
         let route = landing.route;
-        self.drops.sortie =
-            Some(Sortie { loads, drop: landing.at, route, spare, stage: Stage::Loading, since: frame, flight });
+        self.drops.sortie = Some(Sortie {
+            loads,
+            drop: landing.at,
+            route,
+            spare,
+            stage: Stage::Loading,
+            since: frame,
+            flight,
+            aborting: false,
+            raid: Raid::new(landing.at, tier),
+        });
     }
 
     /// Unload where `l` is to set its cargo down, the wider the more spots
@@ -684,7 +692,8 @@ impl Ai {
 
     fn drops_fly(&mut self, frame: i32) {
         let Some(s) = self.drops.sortie.as_ref() else { return };
-        let (drop, stage, since, flight) = (s.drop, s.stage, s.since, s.flight);
+        let (drop, stage, since, flight, aborting) = (s.drop, s.stage, s.since, s.flight, s.aborting);
+        let mut raid = s.raid.clone();
         let route = s.route.clone();
         let mut spare = s.spare.clone();
         let mut loads = s.loads.clone();
@@ -698,6 +707,40 @@ impl Ai {
             Stage::Loading => {
                 let all = loads.iter().all(|l| !alive(l.cargo) || !alive(l.charon) || carried(l));
                 if all || frame - since > LOAD_TIMEOUT {
+                    let ready = loads.iter().filter(|l| alive(l.charon) && alive(l.cargo) && carried(l)).count();
+                    if !policy::full_flight(ready) {
+                        // A timeout is not permission to send a token raid.
+                        // Keep ownership until loaded units are safely down.
+                        self.log(&format!("drops: abort loading, only {ready}/{FLIGHT} aboard"));
+                        let home = self.graph.get_ally_center();
+                        for l in &mut loads {
+                            if alive(l.charon) && alive(l.cargo) && carried(l) {
+                                l.spot = home;
+                                let opts = self.drops_fly_to(l.charon, home, 0);
+                                Self::drops_unload(l, opts);
+                                l.ordered = frame;
+                            } else if alive(l.cargo) && lifted(l.cargo) {
+                                // A transport loss can leave falling cargo.
+                                // Do not hand it to a ground handler mid-air.
+                                l.ejected = true;
+                            } else {
+                                l.landed = true;
+                                l.returned = true;
+                                self.drops_return(l.cargo, l.squad);
+                                if alive(l.charon) {
+                                    self.drops_go_home(l.charon);
+                                }
+                            }
+                        }
+                        if let Some(s) = self.drops.sortie.as_mut() {
+                            s.loads = loads;
+                            s.spare.clear();
+                            s.stage = Stage::Flying;
+                            s.since = frame;
+                            s.aborting = true;
+                        }
+                        return;
+                    }
                     for l in loads.iter_mut() {
                         if alive(l.charon) && alive(l.cargo) && carried(l) {
                             let opts = self.drops_follow(l.charon, route.clone(), 0);
@@ -763,6 +806,25 @@ impl Ai {
                     if !alive(l.cargo) || !carried(l) {
                         // Dropped (or shot down with its Charon).
                         l.landed = true;
+                        if aborting {
+                            self.drops_return(l.cargo, l.squad);
+                            l.returned = true;
+                        } else if alive(l.cargo) {
+                            // Fight immediately; a stuck final transport must
+                            // not leave the first landed riots idle for minutes.
+                            let local = self.terrain().and_then(|t| t.tier(raid.tier)).is_some_and(|map| {
+                                Paths::new(map, pos(drop), |_| false)
+                                    .distance_to(pos(l.cargo.pos()))
+                                    .is_some_and(|d| d <= RAID_REACH)
+                            });
+                            if local {
+                                raid.members.push(l.cargo);
+                            } else {
+                                let mut stranded = Raid::new(l.cargo.pos(), raid.tier);
+                                stranded.members.push(l.cargo);
+                                self.drops.raids.push(stranded);
+                            }
+                        }
                         let what = &l.what;
                         let fate = if alive(l.cargo) {
                             let p = l.cargo.pos();
@@ -783,26 +845,23 @@ impl Ai {
             }
         }
 
+        self.drops_raid_command(&mut raid);
         let done = loads.iter().all(|l| l.landed);
         if let Some(s) = self.drops.sortie.as_mut() {
             s.loads = loads;
             s.spare = spare;
+            s.raid = raid;
         }
         if !done {
             return;
         }
-        // Those on the ground fight on together: by the drop, or where their
-        // Charons fell.
-        let landed: Vec<Unit> = (self.drops.sortie.take().map(|s| s.loads).unwrap_or_default().iter())
-            .filter(|l| !l.returned && l.cargo.health() > 0.0 && l.cargo.team() == self.team_id)
-            .map(|l| l.cargo)
-            .collect();
-        let by_drop = landed.iter().filter(|u| distance(u.pos(), drop) < 2.0 * DAMAGE_RADIUS).count();
-        let squads = self.squad_adopt(&landed);
-        for &u in &landed {
-            self.retreat_add_coward(u);
+        if let Some(s) = self.drops.sortie.take() {
+            let n = s.raid.members.len();
+            if n > 0 {
+                self.drops.raids.push(s.raid);
+            }
+            self.log(&format!("drops: {n} landed raiders remain on local damage orders"));
         }
-        self.log(&format!("drops: {} landed, {by_drop} by the drop (squads {squads:?})", landed.len()));
         self.drops.last_sortie = frame;
     }
 
@@ -868,7 +927,7 @@ impl Ai {
     /// drop, drops its cargo now (Zero-K's Charons also drop it as they
     /// crash, but from on high).
     fn drops_eject_check(&mut self) {
-        let Some(s) = self.drops.sortie.as_ref().filter(|s| s.stage == Stage::Flying) else { return };
+        let Some(s) = self.drops.sortie.as_ref().filter(|s| s.stage == Stage::Flying && !s.aborting) else { return };
         let (drop, mut loads) = (s.drop, s.loads.clone());
         let aboard = self.drops_aboard();
         for l in loads.iter_mut().filter(|l| !l.landed && aboard.carried(l)) {

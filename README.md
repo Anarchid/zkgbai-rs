@@ -178,7 +178,7 @@ The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?t
 `ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
 spider factory, should be intercepted, find the anti-nuke with Widows, stun it and get a missile through;
 with `test=eos` it gets a missile silo by the Fusions instead, and its Eos should count each one they hit gone.
-With `test=drop` (hovers) or `test=dropbot` (bots) it gets four Charons and four assaults and riots every
+With `test=drop` (hovers) or `test=dropbot` (bots) it gets five Charons and five riots every
 three minutes and drops them by the defender's buildings, walkable or not: a check of the air route,
 landing spots and unload handling (`drops:` lines, with a status line every 30 s in the air).
 `test=bertha` gives it five Fusions and a radar at once (a superweapon soon, sited by shell paths, its
