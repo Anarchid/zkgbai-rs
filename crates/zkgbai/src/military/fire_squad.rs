@@ -157,7 +157,13 @@ fn may_leave_for_repair(health: f32, commitment_finished: bool, safe_home: bool)
 /// Check the entire route, including the departure and destination, not
 /// just the haven or the sparse pathfinder waypoints. A partial or failed
 /// path is not evidence that a unit can safely leave its screen.
-fn repair_route_clear(start: Vec3, home: Vec3, path: &[Vec3], reachable: bool, safe: impl Fn(Vec3) -> bool) -> bool {
+pub(crate) fn repair_route_clear(
+    start: Vec3,
+    home: Vec3,
+    path: &[Vec3],
+    reachable: bool,
+    safe: impl Fn(Vec3) -> bool,
+) -> bool {
     if !reachable || path.last().is_none_or(|&p| distance(p, home) > 1.0) || !safe(start) {
         return false;
     }
