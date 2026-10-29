@@ -216,6 +216,10 @@ Type these in chat in a game with the AI:
 
 - `kgbdebug` — toggle debug mode (internal errors are also said in chat) and print economy figures.
 - `kgbprofile` — write per-module CPU time to the infolog (also logged when the game ends).
+  The [density profiling harness](tools/perf/README.md) reproduces AA, QRF and precision
+  workloads. QRF and precision log background worker costs separately.
+  `ZKGBAI_PRECISION_REPORT=full` enables the expensive exhaustive precision diagnostic;
+  normal games log mission counters without running those searches.
 - `kgbgraph` — dump the metal-spot graph as ASCII art to `zkgbai_graph.txt`.
 - `kgbmap threat|porc|riot` — dump a threat map as ASCII art.
 - `kgbterrain spider|bot|vehicle|hover|ship|amphib` — mark a tier's regions, chokepoints and gates

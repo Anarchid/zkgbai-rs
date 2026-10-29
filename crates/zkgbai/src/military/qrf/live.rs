@@ -462,7 +462,7 @@ impl Ai {
         q.budget.gain = num("qrf_gain").unwrap_or(GAIN).max(0.0);
         q.budget.size = opt("qrf_size").and_then(|v| Sizing::parse(&v)).unwrap_or(Sizing::Lossy);
         q.budget.production = opt("qrf_production").is_some_and(|v| matches!(v.as_str(), "on" | "1" | "true"));
-        q.grid = Some(Grid::new(self.cb));
+        q.grid = Some(std::sync::Arc::new(Grid::new(self.cb)));
         q.candidates = super::candidates(self.cb);
         let line = format!(
             "qrf: live algo={} team={} moonlight={} defense={:?} cap={} gain={} size={}",

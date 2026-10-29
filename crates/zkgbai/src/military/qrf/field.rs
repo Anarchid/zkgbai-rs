@@ -239,3 +239,40 @@ impl Field {
         out
     }
 }
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+    use crate::kgbutil::worker::Worker;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn worker_preserves_travel_times_across_blocked_and_weighted_ground() {
+        let mut grid = Grid { w: 32, h: 32, slopes: vec![[0.1; 16]; 1024], low: vec![0.0; 1024] };
+        for z in 0..30 {
+            grid.slopes[z * 32 + 16] = [1.0; 16];
+        }
+        for x in 0..10 {
+            grid.low[x] = -100.0;
+        }
+        let grid = Arc::new(grid);
+        let sources = [(Vec3::xz(128.0, 128.0), 0.0), (Vec3::xz(1800.0, 1800.0), 10.0)];
+        let expected = grid.field_within(Mobility::BOT, 90.0, &sources, 30.0);
+        let mut worker = Worker::new("qrf-parity", |(grid, sources): (Arc<Grid>, [(Vec3, f32); 2])| {
+            grid.field_within(Mobility::BOT, 90.0, &sources, 30.0)
+        });
+        worker.submit((grid, sources));
+        let start = Instant::now();
+        let actual = loop {
+            if let Some((result, _)) = worker.poll() {
+                break result.unwrap();
+            }
+            assert!(start.elapsed() < Duration::from_secs(5));
+            std::thread::yield_now();
+        };
+        assert_eq!(actual.t, expected.t);
+        assert!(actual.t.iter().any(|t| !t.is_finite()));
+        assert!(actual.t.iter().any(|t| t.is_finite() && *t > 0.0));
+    }
+}

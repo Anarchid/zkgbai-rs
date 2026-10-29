@@ -273,16 +273,30 @@ impl Ai {
         // In normal play the travel times go only as far as they are used
         // (the staged game keeps the whole map, as it was tuned on).
         let (raid_max, team_max) = if self.qrf.live { (HORIZON + 15.0, HORIZON * 2.0) } else { (NEVER, NEVER) };
+        if self.qrf.live && !self.qrf_prepare_fields(&teams, raid_max, team_max) {
+            self.qrf.plan_pending = true;
+            return;
+        }
         // A team's travel times: kept while it stands, in normal play.
         let team_field = |ai: &Ai, team: usize, ids: &[i32]| -> Option<Arc<Field>> {
             if ai.qrf.live {
-                ai.qrf_team_field_kept(team, ids, team_max)
+                ai.qrf.async_fields.team(team)
             } else {
                 ai.qrf_team_field_within(ids, team_max).map(Arc::new)
             }
         };
-        let group_fields: Vec<Option<Field>> =
-            self.qrf.groups.iter().map(|g| self.qrf_group_field_within(g, raid_max)).collect();
+        let group_fields: Vec<Option<Arc<Field>>> = self
+            .qrf
+            .groups
+            .iter()
+            .map(|g| {
+                if self.qrf.live {
+                    self.qrf.async_fields.group(&g.members)
+                } else {
+                    self.qrf_group_field_within(g, raid_max).map(Arc::new)
+                }
+            })
+            .collect();
         for (gi, f) in group_fields.iter().enumerate() {
             let Some(f) = f.as_ref() else { continue };
             let g = &self.qrf.groups[gi];

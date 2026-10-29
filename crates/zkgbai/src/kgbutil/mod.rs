@@ -7,6 +7,7 @@ pub mod line_of_fire;
 pub mod move_to;
 pub mod pathfinder;
 pub mod terrain_analyzer;
+pub(crate) mod worker;
 
 pub use air_field::AirField;
 pub use grid::{ArrayGraphics, ByteArrayGraphics};

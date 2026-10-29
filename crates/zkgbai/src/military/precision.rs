@@ -9,15 +9,17 @@
 //! a raider can hit an enemy building without being hit by any defense, and
 //! [`Precision::approach`] plans the way in under as little fire as can be.
 //! Raiders on precision missions use it (see `handlers::precision`); the
-//! rest of the AI does not. Buildings do not cast shadows here, only
-//! terrain: see [`BUILDINGS_SHADOW`].
+//! rest of the AI does not. Buildings cast shadows too: see
+//! [`BUILDINGS_SHADOW`].
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::sync::Arc;
 
 use springai::{UnitDef, Vec3, WeaponDef};
 
 use crate::Ai;
 use crate::kgbutil::line_of_fire::CELL;
+use crate::kgbutil::worker::Worker;
 use crate::kgbutil::{FireGround, Flight, Gun, Shadow, Shape, Volume};
 use crate::military::handlers::precision::{Mission, MissionStats};
 use crate::military::wrappers::weapon_power;
@@ -78,9 +80,9 @@ const RAIDERS: [&str; 7] = ["cloakraid", "shieldraid", "hoverraid", "vehraid", "
 /// One weapon of an enemy defense, and where it hits.
 struct Arm {
     gun: Gun,
-    shadow: Shadow,
+    shadow: Option<Shadow>,
     /// Where it hits as far as the terrain goes (buildings aside).
-    bare: Shadow,
+    bare: Option<Shadow>,
     dps: f32,
     /// Torpedoes: hits only what is on or in the water.
     water_only: bool,
@@ -93,6 +95,7 @@ struct Armed {
     arms: Vec<Arm>,
     /// Shadows to recompute: the ground around it changed.
     stale: bool,
+    revision: u64,
 }
 
 /// An enemy building as the model takes it in.
@@ -258,7 +261,9 @@ pub struct Approach {
 
 #[derive(Default)]
 pub struct Precision {
-    ground: Option<FireGround>,
+    ground: Option<Arc<FireGround>>,
+    revision: u64,
+    worker: Option<Worker<ShadowJob, ShadowResult>>,
     corners: Vec<f32>,
     guns: BTreeMap<i32, Armed>,
     blocks: BTreeMap<i32, Footing>,
@@ -323,7 +328,7 @@ fn aim_offset(def: UnitDef) -> f32 {
 
 /// The weapons of a defense of type `def` standing at `pos` (its middle)
 /// on `ground`.
-fn arms_of(ground: &FireGround, def: UnitDef, pos: Vec3, gravity: f32) -> Vec<Arm> {
+fn arm_specs_of(ground: &FireGround, def: UnitDef, pos: Vec3, gravity: f32) -> Vec<Arm> {
     let base = ground.ground(pos.x, pos.z).max(0.0);
     let muzzle = (base + MUZZLE_SHARE * def.height()).max(pos.y + aim_offset(def) + MUZZLE_OVER_AIM);
     let body = (def.x_size().max(def.z_size()) as f32) * 4.0;
@@ -358,20 +363,46 @@ fn arms_of(ground: &FireGround, def: UnitDef, pos: Vec3, gravity: f32) -> Vec<Ar
             avoids_friends: wd.is_avoid_friendly(),
             through_ground: wd.collision_flags() & NO_GROUND != 0,
         };
-        let shadow = Shadow::compute(ground, &gun, RANGE_MARGIN + CELL);
-        let bare = Shadow::compute(ground, &Gun { avoids_friends: false, ..gun }, RANGE_MARGIN + CELL);
+        let (shadow, bare) = (None, None);
         arms.push(Arm { gun, shadow, bare, dps: weapon_power(wd, false), water_only: kind == "TorpedoLauncher" });
     }
     arms
 }
 
+// No UnitDef or other callback handle is captured by this job.
+type ShadowResult = Vec<(i32, u64, Vec<Arm>)>;
+type ShadowJob = (Arc<FireGround>, ShadowResult);
+fn cast_shadows((ground, mut guns): ShadowJob) -> ShadowResult {
+    for (_, _, arms) in &mut guns {
+        for a in arms {
+            a.shadow = Some(Shadow::compute(&ground, &a.gun, RANGE_MARGIN + CELL));
+            a.bare = Some(Shadow::compute(&ground, &Gun { avoids_friends: false, ..a.gun }, RANGE_MARGIN + CELL));
+        }
+    }
+    guns
+}
+
+impl Arm {
+    fn need_at(&self, x: f32, z: f32) -> f32 {
+        self.shadow.as_ref().map_or(f32::NEG_INFINITY, |s| s.need_at(x, z))
+    }
+    fn bare_need_at(&self, x: f32, z: f32) -> f32 {
+        self.bare.as_ref().map_or(f32::NEG_INFINITY, |s| s.need_at(x, z))
+    }
+}
+
 impl Precision {
     pub fn ground(&self) -> Option<&FireGround> {
-        self.ground.as_ref()
+        self.ground.as_deref()
     }
 
     /// Bring the model up to date with the enemy buildings we know of.
     pub fn sync(&mut self, standing: &[Standing], gravity: f32) {
+        self.sync_model(standing, gravity, false);
+    }
+
+    fn sync_model(&mut self, standing: &[Standing], gravity: f32, asynchronous: bool) {
+        self.revision += 1;
         let Some(ground) = self.ground.as_mut() else { return };
         // Buildings: re-stand them all when any came, went or moved, and
         // recompute the shadows of the defenses near those.
@@ -382,6 +413,9 @@ impl Precision {
         for (id, b) in &blocks {
             if self.blocks.get(id) != Some(b) {
                 changed.push(*b);
+                if let Some(old) = self.blocks.get(id) {
+                    changed.push(*old);
+                }
             }
         }
         changed.extend(self.blocks.iter().filter(|(id, _)| !blocks.contains_key(id)).map(|(_, b)| *b));
@@ -389,13 +423,14 @@ impl Precision {
             // Footprints always (raiders cannot stand on them); lines of
             // fire only see them if buildings shadow.
             if BUILDINGS_SHADOW {
-                ground.set_volumes(blocks.values().filter_map(|b| b.volume));
+                Arc::make_mut(ground).set_volumes(blocks.values().filter_map(|b| b.volume));
             }
             self.blocks = blocks;
             for g in self.guns.values_mut() {
                 let reach = g.arms.iter().map(|a| a.gun.range).fold(0.0, f32::max) + RANGE_MARGIN + 64.0;
-                if changed.iter().any(|b| (b.x - g.pos.x).hypot(b.z - g.pos.z) < reach + b.hx) {
+                if changed.iter().any(|b| (b.x - g.pos.x).hypot(b.z - g.pos.z) < reach + b.hx.hypot(b.hz)) {
                     g.stale = true;
+                    g.revision = self.revision;
                 }
             }
         }
@@ -410,19 +445,63 @@ impl Precision {
                 name: s.def.name(),
                 arms: Vec::new(),
                 stale: true,
+                revision: self.revision,
             });
             if let Some(g) = self.guns.get_mut(&id).filter(|g| g.stale) {
-                g.arms = arms_of(ground, s.def, s.pos, gravity);
+                g.arms = arm_specs_of(ground, s.def, s.pos, gravity);
+            }
+        }
+        // Validate after updating invalidations, never before. A removed or
+        // changed gun cannot acquire shadows from an obsolete snapshot.
+        self.poll_shadows();
+        if asynchronous && self.worker.as_ref().is_some_and(|w| w.busy()) {
+            return;
+        }
+        let pending: Vec<_> = self
+            .guns
+            .iter()
+            .filter(|(_, g)| g.stale)
+            .map(|(&id, g)| {
+                let arms = g
+                    .arms
+                    .iter()
+                    .map(|a| Arm { gun: a.gun, dps: a.dps, water_only: a.water_only, shadow: None, bare: None })
+                    .collect();
+                (id, g.revision, arms)
+            })
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        let job = (self.ground.as_ref().unwrap().clone(), pending);
+        if asynchronous {
+            self.worker.get_or_insert_with(|| Worker::new("precision-shadows", cast_shadows)).submit(job);
+        } else {
+            self.accept_shadows(cast_shadows(job));
+        }
+    }
+
+    fn accept_shadows(&mut self, result: ShadowResult) {
+        for (id, revision, arms) in result {
+            if let Some(g) = self.guns.get_mut(&id).filter(|g| g.revision == revision) {
+                g.arms = arms;
                 g.stale = false;
             }
+        }
+    }
+
+    fn poll_shadows(&mut self) {
+        if let Some((Some(result), _elapsed)) = self.worker.as_mut().and_then(Worker::poll) {
+            self.accept_shadows(result);
         }
     }
 
     /// Take in the terrain as it is now (corner heights); recompute the
     /// shadows of the defenses whose ground changed.
     pub fn set_terrain(&mut self, corners: Vec<f32>, w: i32, h: i32) {
+        self.revision += 1;
         let Some(ground) = self.ground.as_mut() else {
-            self.ground = Some(FireGround::new(corners.clone(), w, h));
+            self.ground = Some(Arc::new(FireGround::new(corners.clone(), w, h)));
             self.corners = corners;
             return;
         };
@@ -437,12 +516,13 @@ impl Precision {
         if changed.is_empty() {
             return;
         }
-        ground.set_terrain(corners.clone());
+        Arc::make_mut(ground).set_terrain(corners.clone());
         self.corners = corners;
         for g in self.guns.values_mut() {
             let reach = g.arms.iter().map(|a| a.gun.range).fold(0.0, f32::max) + RANGE_MARGIN + 64.0;
             if changed.len() > 5000 || changed.iter().any(|&(x, z)| (x - g.pos.x).hypot(z - g.pos.z) < reach) {
                 g.stale = true;
+                g.revision = self.revision;
             }
         }
     }
@@ -458,7 +538,7 @@ impl Precision {
                 if (a.water_only && terrain >= 0.0) || !a.gun.reaches(x, z, stand + aim, RANGE_MARGIN) {
                     continue;
                 }
-                if self.distrusted.contains(id) || a.shadow.need_at(x, z) <= aim + HIDE_MARGIN {
+                if g.stale || self.distrusted.contains(id) || a.need_at(x, z) <= aim + HIDE_MARGIN {
                     dps += a.dps;
                 }
             }
@@ -493,7 +573,7 @@ impl Precision {
                     let (px, pz) = (x + ax * along - az * across, z + az * along + ax * across);
                     let stand = ground.stand(px, pz);
                     a.gun.reaches(px, pz, stand + aim, RANGE_MARGIN)
-                        && (self.distrusted.contains(id) || a.shadow.need_at(px, pz) <= aim + HIDE_MARGIN)
+                        && (g.stale || self.distrusted.contains(id) || a.need_at(px, pz) <= aim + HIDE_MARGIN)
                 });
                 if hits {
                     dps += a.dps;
@@ -611,7 +691,7 @@ impl Precision {
         for g in self.guns.values() {
             for a in &g.arms {
                 if !a.gun.reaches(spot.x, spot.z, stand + sh.aim, RANGE_MARGIN)
-                    || a.bare.need_at(spot.x, spot.z) > sh.aim + HIDE_MARGIN
+                    || (!g.stale && a.bare_need_at(spot.x, spot.z) > sh.aim + HIDE_MARGIN)
                 {
                     continue;
                 }
@@ -811,7 +891,7 @@ impl Precision {
         let stand = ground.stand(x, z);
         (g.arms.iter())
             .filter(|a| a.gun.reaches(x, z, stand + aim, RANGE_MARGIN))
-            .map(|a| a.shadow.need_at(x, z))
+            .map(|a| if g.stale { f32::NEG_INFINITY } else { a.need_at(x, z) })
             .fold(f32::INFINITY, f32::min)
     }
 
@@ -894,7 +974,7 @@ impl Precision {
         let stand = ground.stand(x, z);
         (g.arms.iter())
             .filter(|a| a.gun.reaches(x, z, stand + aim, RANGE_MARGIN))
-            .map(|a| a.bare.need_at(x, z))
+            .map(|a| if g.stale { f32::NEG_INFINITY } else { a.bare_need_at(x, z) })
             .fold(f32::INFINITY, f32::min)
     }
 
@@ -910,7 +990,8 @@ impl Precision {
         let (mut reach, mut shadowed) = (0, 0);
         for g in self.guns.values() {
             for a in &g.arms {
-                let (r, s) = a.shadow.count(ground, &a.gun, aim + HIDE_MARGIN);
+                let Some(shadow) = a.shadow.as_ref().filter(|_| !g.stale) else { continue };
+                let (r, s) = shadow.count(ground, &a.gun, aim + HIDE_MARGIN);
                 reach += r;
                 shadowed += s;
             }
@@ -940,6 +1021,7 @@ impl Ord for Visit {
 impl Ai {
     /// Keep the precision map current, and report on it now and then.
     pub fn precision_update(&mut self, frame: i32) {
+        self.precision.poll_shadows();
         if frame % SYNC_FRAMES != (self.offset + 11) % SYNC_FRAMES {
             return;
         }
@@ -950,11 +1032,11 @@ impl Ai {
         }
         let standing = self.precision_standing();
         let gravity = map.gravity();
-        self.precision.sync(&standing, gravity);
+        self.guard("precision.sync", |ai| ai.precision.sync_model(&standing, gravity, true));
         self.precision_cleanup();
         if frame - self.precision.last_report >= REPORT_FRAMES {
             self.precision.last_report = frame;
-            self.precision_report(frame);
+            self.guard("precision.report", |ai| ai.precision_report(frame));
         }
     }
 
@@ -1058,6 +1140,19 @@ impl Ai {
             st.lost,
             st.hit_at_spot
         );
+        if let Some(worker) = &p.worker {
+            line += &format!(
+                "; shadow worker {} pending_guns={}",
+                worker.stats(),
+                p.guns.values().filter(|g| g.stale).count()
+            );
+        }
+        // Exhaustive diagnostics used to stall normal play once a minute.
+        // Opt in explicitly when calibrating precision raids.
+        if std::env::var("ZKGBAI_PRECISION_REPORT").as_deref() != Ok("full") {
+            self.log(&line);
+            return;
+        }
         // The raider types we have (the search is costly at fine cells).
         let ours: BTreeSet<&str> = self.fighters.values().map(|f| self.defs.name_of(f.unit)).collect();
         let mut shadow_done = false;
@@ -1120,11 +1215,40 @@ mod tests {
         };
         let shadow = Shadow::compute(&ground, &gun, RANGE_MARGIN + CELL);
         let bare = Shadow::compute(&ground, &Gun { avoids_friends: false, ..gun }, RANGE_MARGIN + CELL);
-        let arm = Arm { gun, shadow, bare, dps: 100.0, water_only: false };
-        let mut p = Precision { ground: Some(ground), ..Default::default() };
+        let arm = Arm { gun, shadow: Some(shadow), bare: Some(bare), dps: 100.0, water_only: false };
+        let mut p = Precision { ground: Some(Arc::new(ground)), ..Default::default() };
         p.blocks.insert(1, Footing { x: volume.x, z, hx: 16.0, hz: 120.0, volume: Some(volume) });
-        p.guns.insert(2, Armed { pos: Vec3::xz(x, z), name: "turretlaser".into(), arms: vec![arm], stale: false });
+        p.guns.insert(
+            2,
+            Armed { pos: Vec3::xz(x, z), name: "turretlaser".into(), arms: vec![arm], stale: false, revision: 0 },
+        );
         p
+    }
+
+    #[test]
+    fn stale_shadows_are_not_safe_and_obsolete_results_are_rejected() {
+        let mut p = walled_lotus(500.0, 500.0, 100.0);
+        assert!(p.hidden_at(700.0, 500.0, 14.0));
+        let gun = p.guns.get_mut(&2).unwrap();
+        let arms = std::mem::take(&mut gun.arms);
+        gun.arms = arms
+            .iter()
+            .map(|a| Arm { gun: a.gun, dps: a.dps, water_only: a.water_only, shadow: None, bare: None })
+            .collect();
+        gun.stale = true;
+        gun.revision = 2;
+        assert!(!p.hidden_at(700.0, 500.0, 14.0));
+        p.accept_shadows(vec![(2, 1, arms)]);
+        assert!(p.guns[&2].stale);
+        assert!(!p.hidden_at(700.0, 500.0, 14.0));
+        let arms = std::mem::take(&mut p.guns.get_mut(&2).unwrap().arms);
+        let result = cast_shadows((p.ground.as_ref().unwrap().clone(), vec![(2, 2, arms)]));
+        p.accept_shadows(result);
+        assert!(!p.guns[&2].stale);
+        assert!(p.hidden_at(700.0, 500.0, 14.0));
+        p.guns.remove(&2);
+        p.accept_shadows(vec![(2, 2, vec![])]);
+        assert!(p.guns.is_empty());
     }
 
     #[test]
@@ -1191,9 +1315,12 @@ mod tests {
         };
         let shadow = Shadow::compute(&ground, &gun, RANGE_MARGIN + CELL);
         let bare = Shadow::compute(&ground, &Gun { avoids_friends: false, ..gun }, RANGE_MARGIN + CELL);
-        let arm = Arm { gun, shadow, bare, dps: 100.0, water_only: false };
-        let mut p = Precision { ground: Some(ground), ..Default::default() };
-        p.guns.insert(1, Armed { pos: Vec3::xz(lx, lz), name: "turretlaser".into(), arms: vec![arm], stale: false });
+        let arm = Arm { gun, shadow: Some(shadow), bare: Some(bare), dps: 100.0, water_only: false };
+        let mut p = Precision { ground: Some(Arc::new(ground)), ..Default::default() };
+        p.guns.insert(
+            1,
+            Armed { pos: Vec3::xz(lx, lz), name: "turretlaser".into(), arms: vec![arm], stale: false, revision: 0 },
+        );
         p.blocks.insert(2, Footing { x: radar.x, z: lz, hx: 16.0, hz: 16.0, volume: Some(radar) });
         let spots = p.firing_spots(Vec3::new(radar.x, 30.0, lz), 30.0, 16.0, &glaive());
         assert!(spots.len() >= 6, "{}", spots.len());

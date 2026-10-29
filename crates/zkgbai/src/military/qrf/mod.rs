@@ -20,6 +20,7 @@
 //!   which answer raids while they wait to fill (moonlighting). Off with
 //!   `disable=qrf`; steered by the operator ([`ops`]).
 
+mod async_fields;
 pub mod cover;
 pub mod field;
 pub mod floor;
@@ -29,7 +30,6 @@ pub mod mark;
 pub mod ops;
 pub mod station;
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -170,7 +170,9 @@ pub struct Qrf {
     /// to them still counts (see `qrf_live_filter`).
     pub heavies: Vec<RaidGroup>,
     pub assets: Vec<Asset>,
-    pub grid: Option<Grid>,
+    pub grid: Option<Arc<Grid>>,
+    async_fields: async_fields::Fields,
+    plan_pending: bool,
     /// Types a contact may be, slowest first: armed mobile ground units.
     candidates: Vec<(f32, UnitDef)>,
     pub initial_members: usize,
@@ -206,13 +208,8 @@ pub struct Qrf {
     pub live_stats: live::Stats,
     /// Teams are being given back (none are taken meanwhile).
     releasing: bool,
-    /// Travel times of teams standing still, kept a while (normal play):
-    /// by team, the frame, members' places, the horizon.
-    team_fields: RefCell<TeamFields>,
     stats: Stats,
 }
-
-type TeamFields = BTreeMap<usize, (i32, Vec<(i32, Vec3)>, f32, Arc<Field>)>;
 
 /// Types a contact may be, slowest first: armed mobile ground units.
 fn candidates(cb: springai::Callback) -> Vec<(f32, UnitDef)> {
@@ -244,7 +241,7 @@ impl Ai {
         q.on = on;
         q.algo = self.cb.option("qrf_algo").unwrap_or_else(|| "station".into());
         q.team_size = self.cb.option("qrf_team").and_then(|v| v.parse().ok()).unwrap_or(3).max(1);
-        q.grid = Some(Grid::new(self.cb));
+        q.grid = Some(Arc::new(Grid::new(self.cb)));
         q.trace = self.cb.option("qrf_trace").and_then(|v| v.parse().ok()).unwrap_or(0);
         q.candidates = candidates(self.cb);
         let algo = q.algo.clone();
@@ -325,6 +322,7 @@ impl Ai {
             });
             self.guard("qrf.floor", |ai| ai.qrf_floor_update(frame));
         }
+        self.qrf.plan_pending = false;
         self.guard("qrf.algo", |ai| match ai.qrf.algo.as_str() {
             "station" => ai.qrf_station_update(frame),
             "cover" => ai.qrf_cover_update(frame),
@@ -337,7 +335,7 @@ impl Ai {
                 ai.qrf_station_update(frame)
             }
         });
-        if self.qrf.live {
+        if self.qrf.live && !self.qrf.plan_pending {
             self.qrf_live_after(frame);
         }
         if frame % LOG_PERIOD < PERIOD {
@@ -549,25 +547,6 @@ impl Ai {
         Some(grid.field_within(m.mobility, speed, &sources, max))
     }
 
-    /// [`Ai::qrf_team_field_within`], kept while every member stays within
-    /// a cell of where it was, for up to three updates: teams screening or
-    /// marking mostly stand.
-    pub fn qrf_team_field_kept(&self, team: usize, ids: &[i32], max: f32) -> Option<Arc<Field>> {
-        let now: Vec<(i32, Vec3)> =
-            ids.iter().filter_map(|id| self.qrf.members.get(id).map(|m| (*id, m.pos()))).collect();
-        if let Some((at, then, m, f)) = self.qrf.team_fields.borrow().get(&team)
-            && *m == max
-            && self.frame - at <= 3 * PERIOD
-            && then.len() == now.len()
-            && then.iter().zip(&now).all(|(a, b)| a.0 == b.0 && distance(a.1, b.1) < field::CELL * 0.75)
-        {
-            return Some(f.clone());
-        }
-        let f = Arc::new(self.qrf_team_field_within(ids, max)?);
-        self.qrf.team_fields.borrow_mut().insert(team, (self.frame, now, max, f.clone()));
-        Some(f)
-    }
-
     /// Seconds for a raid to get anywhere.
     pub fn qrf_group_field(&self, g: &RaidGroup) -> Option<Field> {
         self.qrf_group_field_within(g, field::NEVER)
@@ -636,5 +615,8 @@ impl Ai {
             q.stats.guessed,
         );
         self.log(&line);
+        if let Some(stats) = q.async_fields.stats() {
+            self.log(&format!("qrf: field worker {stats}"));
+        }
     }
 }

@@ -554,6 +554,9 @@ impl Ai {
     fn war_update_aas(&mut self) {
         let mut dead = Vec::new();
         let ids: Vec<i32> = self.war.aas.iter().copied().collect();
+        // The fallback is identical for every AA in this update. In dense
+        // bases its engine build-site query can cost over a millisecond.
+        let mut fallback = None;
         for id in ids {
             let Some(r) = self.fighters.get(&id) else {
                 dead.push(id);
@@ -579,7 +582,7 @@ impl Ai {
                     r.sneak(haven, &mut nav);
                 }
             } else {
-                let target = get_angular_point(self.war_get_aa_target(id), pos, 350.0);
+                let target = get_angular_point(self.war_get_aa_target(id, &mut fallback), pos, 350.0);
                 let mut nav = nav!(self);
                 if let Some(r) = self.fighters.get_mut(&id) {
                     r.raid(target, &mut nav);
@@ -2114,7 +2117,7 @@ impl Ai {
     }
 
     /// Target for an anti-air raider (fighter-store id).
-    pub fn war_get_aa_target(&mut self, raider: i32) -> Vec3 {
+    fn war_get_aa_target(&mut self, raider: i32, fallback: &mut Option<Vec3>) -> Vec3 {
         let Some(r) = self.fighters.get(&raider) else { return NULLPOS };
         let origin = r.get_pos();
         let range = r.unit.max_range();
@@ -2152,10 +2155,13 @@ impl Ai {
             }
         }
 
-        if target == NULLPOS
-            && let Some(spot) = self.graph.get_closest_front_line_spot(self.graph.get_enemy_center())
-        {
-            target = self.graph_get_closest_air_haven(spot.get_pos());
+        if target == NULLPOS {
+            target = *fallback.get_or_insert_with(|| {
+                self.graph
+                    .get_closest_front_line_spot(self.graph.get_enemy_center())
+                    .map(|spot| spot.get_pos())
+                    .map_or(NULLPOS, |pos| self.graph_get_closest_air_haven(pos))
+            });
         }
         if target != NULLPOS {
             return self.war_mark_target(target);

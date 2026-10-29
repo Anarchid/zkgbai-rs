@@ -25,6 +25,7 @@ const GRAZE: f32 = 1.0;
 
 /// The ground for lines of fire: terrain heights and the top surfaces of
 /// the buildings' collision volumes.
+#[derive(Clone)]
 pub struct FireGround {
     /// Corner heights, `(w + 1) * (h + 1)`, row-major.
     corners: Vec<f32>,
