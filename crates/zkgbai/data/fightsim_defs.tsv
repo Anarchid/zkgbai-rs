@@ -1,4 +1,4 @@
-# fightsim unit def size classes: fitted 2026-10-24 by tools/predictor/export_tables.py; 265 defs (radius <= 12 small, <= 24 medium, else large; static; air)
+# fightsim unit def size classes: fitted 2026-10-28 by tools/predictor/export_tables.py; 265 defs (radius <= 12 small, <= 24 medium, else large; static; air)
 def	cls
 amphaa	small
 amphassault	medium

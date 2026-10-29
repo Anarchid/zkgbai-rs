@@ -21,6 +21,12 @@ import numpy as np
 import pandas as pd
 
 RUNS = os.path.expanduser("~/Programs/zkgbai-runs")
+# Cleaning on load (2026-10-28; PRED_NO_CLEAN=1 reproduces earlier rounds): hitscan salvo rows
+# back-dated more than MAX_LAG frames or to before frame 0 are a weapon the game parked (reloadFrame
+# moved without a shot; widget v4 stops logging them), and fake/bogus weapons (aiming and float
+# checks) never fire.
+CLEAN = os.environ.get("PRED_NO_CLEAN") != "1"
+MAX_LAG = 3600
 
 INT_COLS = {"tlos", "n", "f0", "f1", "lag", "pid", "own", "oteam", "tid", "tteam", "tstun", "tdis", "tfire",
             "hits", "nvict", "tdead", "f", "vid", "vteam", "aid", "ateam", "uid", "uteam", "on", "stun", "dis", "fire"}
@@ -89,6 +95,9 @@ def series_name(path):
 
 def find(paths):
     for p in paths:
+        if p.startswith("@"):  # a file listing one log per line
+            yield from (q for q in open(os.path.expanduser(p[1:])).read().splitlines() if q)
+            continue
         p = os.path.expanduser(p)
         if os.path.isdir(p):
             for root, _, files in os.walk(p):
@@ -134,15 +143,27 @@ def cached(cache):
             yield os.path.join(cache, f)
 
 
+def clean(d):
+    s = d.get("shot")
+    if s is not None and len(s):
+        bad = s["wd"].astype(str).str.contains("fake|bogus", regex=True).values
+        salvo = (s["src"].astype(str) == "s").values
+        bad |= salvo & ((s["f0"] < 0).values | (s["lag"] > MAX_LAG).values)
+        if bad.any():
+            d["shot"] = s[~bad].reset_index(drop=True)
+    return d
+
+
 def load_cached(path):
     with open(path, "rb") as fh:
-        return pickle.load(fh)
+        d = pickle.load(fh)
+    return clean(d) if CLEAN else d
 
 
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "build":
-        build(sys.argv[2], sys.argv[3:])
+        build(sys.argv[2], sys.argv[3:], int(os.environ.get("PRED_WORKERS", "4")))
     elif cmd == "info":
         tot = {}
         for f in cached(sys.argv[2]):

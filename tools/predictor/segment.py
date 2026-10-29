@@ -86,10 +86,11 @@ def unit_index(d):
     hp = u["hp"].values[order]; hpmax = u["hpmax"].values[order]
     x = u["x"].values[order]; z = u["z"].values[order]
     para = u["para"].values[order]
+    sh = u["sh"].values[order] if "sh" in u.columns else np.full(len(order), np.nan)
     cuts = np.flatnonzero(np.diff(uid)) + 1
     starts = np.concatenate([[0], cuts]); ends = np.concatenate([cuts, [len(uid)]])
     for s0, e0 in zip(starts, ends):
-        idx[int(uid[s0])] = (f[s0:e0], hp[s0:e0], hpmax[s0:e0], x[s0:e0], z[s0:e0], para[s0:e0])
+        idx[int(uid[s0])] = (f[s0:e0], hp[s0:e0], hpmax[s0:e0], x[s0:e0], z[s0:e0], para[s0:e0], sh[s0:e0])
     return idx
 
 
@@ -108,6 +109,17 @@ def state_near(uidx, uid, frame, before=30, after=30):
     if best is None:
         return None
     return float(r[1][best]), float(r[2][best]), float(r[3][best]), float(r[4][best])
+
+
+def shield_first(uidx, uid, f_from, f_to):
+    """Shield charge at the unit's first row in [f_from, f_to]; None without a shield or a row."""
+    r = uidx.get(uid)
+    if r is None:
+        return None
+    i = np.searchsorted(r[0], f_from)
+    if i < len(r[0]) and r[0][i] <= f_to and not np.isnan(r[6][i]):
+        return float(r[6][i])
+    return None
 
 
 def state_last_before(uidx, uid, frame):
@@ -258,7 +270,8 @@ def segment_game(path):
             hp_end = 0.0 if died else (last[0] if last is not None else hp)
             rec = {"uid": u, "def": dname, "cost": dd.cost, "armed": dd.armed, "static": dd.static, "com": dd.is_com,
                    "hp": hp, "hpmax": hpmax, "x": x, "z": z, "first": ff - start, "died": died, "hp_end": hp_end,
-                   "kill_f": (kf - start) if died else None}
+                   "kill_f": (kf - start) if died else None,
+                   "sh": shield_first(uidx, u, ff - 30, end + TAIL)}
             if initial:
                 sides[team].append(rec)
             else:

@@ -43,7 +43,8 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `fightsim`: attacking squads fall back on the fight predictor's verdict
 /// (`military::fightsim`) instead of the threat map's; its first arm pending.
 /// The predictor itself runs in shadow in every game (its verdicts logged,
-/// not acted on) unless `fightshadow` is disabled.
+/// not acted on) unless `fightshadow` is disabled; `fightmech` (on) runs
+/// its mechanics model beside it, logged only.
 /// `permanence` (the interception planner keeps unseen enemy groups 45 s,
 /// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
@@ -62,7 +63,8 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// both off went 9-0-1 against 3-3-4 with both on, with the old economy at
 /// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
 /// better than both, each taking up the metal the other left.
-pub(crate) const OFF_BY_DEFAULT: [&str; 10] = [
+/// The experimental Ravager, Minotaur and raider packs remain opt-in.
+pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
     "pairs",
     "currency",
     "permanence",
@@ -73,6 +75,11 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 10] = [
     "fightsim",
     "posture",
     "ecoladder",
+    "ravager",
+    "minotaur",
+    "scorcher",
+    "dagger",
+    "blitz",
 ];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
@@ -781,7 +788,10 @@ impl Ai {
             Event::EnemyEnterRadar { enemy } => self.guard("war.enemyEnterRadar", |ai| ai.war_enemy_enter_radar(enemy)),
             Event::EnemyLeaveRadar { enemy } => self.guard("war.enemyLeaveRadar", |ai| ai.war_enemy_leave_radar(enemy)),
             Event::EnemyDamaged { enemy, attacker, damage, .. } => {
-                self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage))
+                self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage));
+                if let Some(a) = attacker {
+                    self.guard("pack.enemyDamaged", |ai| ai.pack_touched(a, false));
+                }
             }
             Event::EnemyDestroyed { enemy, attacker } => {
                 self.guard("war.enemyDestroyed", |ai| ai.war_enemy_destroyed(enemy, attacker))

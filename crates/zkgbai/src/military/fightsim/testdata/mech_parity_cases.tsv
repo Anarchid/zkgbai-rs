@@ -1,0 +1,16 @@
+# Python mech.simulate_mech, opts six + heatray: units side:def:hp:x:z; dps = no hazard, stop = with the hazard, wd = A withdraws, with the hazard
+case	units	dps_A	dps_B	stop_A	stop_B	wd_A	wd_B
+fire_kodachi	0:tankraid:660:0:0;0:tankraid:660:-20:7;0:tankraid:660:-40:14;1:cloakraid:230:260:0;1:cloakraid:230:280:7;1:cloakraid:230:300:14;1:cloakraid:230:260:46	0.3333333333	1	0.2759565154	0.7966379929	0	0
+emp_venom	0:spideremp:740:0:0;0:spideremp:740:-20:7;1:shieldassault:960:300:0;1:shieldassault:960:320:7	0	1	0	0.1612871514	0	0
+emp_faraday	0:turretemp:1600:0:0;1:cloakraid:230:380:0;1:cloakraid:230:400:7;1:cloakraid:230:420:14	1	0	0.4954483097	0	0.4954483097	0
+imp_death	0:cloakbomb:50:0:0;0:cloakraid:230:-20:7;1:shieldraid:350:150.7:0;1:shieldraid:350:170.7:7;1:shieldraid:350:190.7:14	0	0	0	0	0.883892288	0
+slow_bolas	0:hoverheavyraid:700:0:0;0:hoverheavyraid:700:-20:7;0:hoverheavyraid:700:-40:14;1:tankassault:7200:301.1:0	0.3333333333	1	0.05449597865	0.02411029956	0	0
+aa_vs_air	0:gunshipraid:800:0:0;0:gunshipraid:800:-20:7;1:shieldraid:350:301.9:0;1:shieldraid:350:321.9:7;1:shieldraid:350:341.9:14	0	1	0	0.4192200869	0	0
+kamikaze_skuttle	0:jumpbomb:380:0:0;1:amphassault:5220:250:0	0	1	0	0.3550669718	0	0
+heatray_short	0:vehraid:480:0:0;0:vehraid:480:-20:7;1:shieldassault:960:60:0;1:shieldassault:960:80:7	0	1	0	0.6459521979	0	0
+heatray_long	0:vehraid:480:0:0;0:vehraid:480:-20:7;1:turretlaser:785:255:0	0	1	0	0.6240031963	0	0
+engage_crowd	0:cloakskirm:400:0:0;0:cloakskirm:400:-20:7;0:cloakskirm:400:-40:14;0:cloakskirm:400:0:46;0:cloakskirm:400:-20:53;0:cloakskirm:400:-40:60;1:shieldassault:960:470.3:0;1:shieldassault:960:490.3:7;1:shieldassault:960:510.3:14;1:shieldriot:1200:470.3:46;1:shieldriot:1200:490.3:53	1	0	0.2755577969	0	0	0
+engage_line	0:hoverskirm:660:0:0;0:hoverskirm:660:-30:3;0:hoverassault:1450:-60:6;0:hoverassault:1450:-90:9;1:tankassault:7200:450:0;1:tankriot:1950:480:3	1	0	0.5854897034	0	0	0
+mirror_mixed	0:cloakraid:230:0:0;0:cloakraid:230:-20:7;0:cloakraid:230:-40:14;0:cloakraid:230:0:46;0:cloakriot:574:-20:53;1:shieldraid:350:303.7:0;1:shieldraid:350:323.7:7;1:shieldraid:350:343.7:14;1:shieldraid:350:303.7:46;1:shieldassault:768:323.7:53	0.414893617	1	0.3132354232	0.6923657807	0.2987641089	0.1272914004
+imps_and_fire	0:cloakbomb:50:0:0;0:cloakbomb:50:-20:7;0:cloakraid:230:-40:14;0:cloakraid:230:0:46;0:cloakraid:230:-20:53;1:tankraid:660:260:0;1:spideremp:666:280:7;1:vehraid:480:300:14	1	0	0.7682295542	0	0	0
+big_mixed	0:cloakraid:184:0:0;0:cloakraid:184:-20:7;0:cloakraid:184:-40:14;0:cloakriot:820:0:46;0:cloakskirm:400:-20:53;0:cloakassault:2250:-40:60;0:cloakcon:600:0:92;1:shieldraid:350:550:0;1:shieldraid:350:570:7;1:shieldraid:350:590:14;1:shieldraid:350:550:46;1:shieldriot:1200:570:53;1:shieldskirm:364:590:60;1:shieldassault:960:550:92;1:turretlaser:785:570:99	1	0.5053191489	0.3248970612	0.1962607968	0	0

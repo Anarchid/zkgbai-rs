@@ -949,6 +949,7 @@ impl Ai {
         self.qrf_asset_pressed(unit, attacker);
         self.strikes_unit_damaged(unit, attacker, dir, weapon);
         self.taskforce_spotter_damaged(unit);
+        self.pack_touched(unit, true);
 
         // check if the damaged unit is on fire.
         let on_fire = h.rules_param_float("on_fire", 0.0) > 0.0;
@@ -1222,6 +1223,7 @@ impl Ai {
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
+        self.fightsim_enemy_destroyed(id);
         self.strikes_enemy_destroyed(enemy, attacker);
         self.impalers_enemy_destroyed(enemy, attacker);
         self.taskforce_enemy_destroyed(enemy, attacker);
@@ -1804,6 +1806,20 @@ impl Ai {
     /// The best attack target for `u` if it were at `origin`, and its cost
     /// (lower is better; `NULLPOS` if none).
     pub fn war_best_target(&mut self, u: Unit, origin: Vec3, defend: bool) -> (Vec3, f32) {
+        self.war_best_target_shunning(u, origin, defend, None, &[])
+    }
+
+    /// [`Ai::war_best_target`] of those under no more enemy porc than
+    /// `porc_cap` (none: any) nor within 300 of `shun` (Ravager packs, which
+    /// outrange no turret).
+    pub fn war_best_target_shunning(
+        &mut self,
+        u: Unit,
+        origin: Vec3,
+        defend: bool,
+        porc_cap: Option<f32>,
+        shun: &[Vec3],
+    ) -> (Vec3, f32) {
         let mut target = NULLPOS;
         // The threat maps as the unit sees them, under water too (see `water`).
         let war = &self.war;
@@ -1821,7 +1837,12 @@ impl Ai {
         let at_unit = distance(origin, u.pos()) < 1.0;
         // Where the terrain lets the unit get in range at all.
         let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
-        let engage = crate::terrain::engage_test_from(terrain, u.def(), origin);
+        let in_reach = crate::terrain::engage_test_from(terrain, u.def(), origin);
+        let engage = |p: Vec3| {
+            in_reach(p)
+                && !porc_cap.is_some_and(|c| view.get_porc_threat(p) > c)
+                && !shun.iter().any(|&s| distance(s, p) < 300.0)
+        };
 
         // first check defense targets
         if defend {

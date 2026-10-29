@@ -1,10 +1,10 @@
 # Python dps_stop reference: units side:def:hp:x:z; outputs from predict.simulate (deterministic)
 case	units	dps_A	dps_B	dstop_A	dstop_B	wd_A	wd_B
-raid_mirror	0:cloakraid:230:0:0;0:cloakraid:230:20:7;0:cloakraid:230:40:14;1:cloakraid:230:400:0;1:cloakraid:230:380:7;1:cloakraid:230:360:14	0.3333333333	1	0.2997645054	0.7542682478	0	0
-raid_vs_riot	0:cloakraid:230:0:0;0:cloakraid:230:20:7;0:cloakraid:230:40:14;0:cloakraid:230:0:121;1:cloakriot:820:500:0;1:cloakriot:820:480:7	1	0	0.7916681853	0	0	0
-skirm_riot_vs_bandits	0:cloakskirm:400:0:0;0:cloakskirm:400:20:7;0:cloakriot:820:40:14;1:shieldraid:350:600:0;1:shieldraid:350:580:7;1:shieldraid:350:560:14	0	1	0	0.6741920133	0	0
-assault_vs_llt	0:shieldassault:960:0:0;0:shieldraid:350:20:7;0:shieldraid:350:40:14;1:turretlaser:785:450:0;1:cloakraid:230:430:7	0.4615384615	1	0.2849695866	0.5244083743	0	0.07648913253
-swarm_vs_hurt_thug	0:cloakraid:230:0:0;0:cloakraid:230:20:7;0:cloakraid:230:40:14;0:cloakraid:230:0:121;0:cloakraid:230:20:128;1:shieldassault:480:300:0	0	1	0	0.8183836257	0	0
-scalpels_vs_darts	0:hoverskirm:660:0:0;0:hoverskirm:660:20:7;1:vehraid:480:700:0;1:vehraid:480:680:7;1:vehraid:480:660:14	1	0.3333333333	0.5832562567	0.3000245372	0.3397307757	0.2218468857
+raid_mirror	0:cloakraid:230:0:0;0:cloakraid:230:20:7;0:cloakraid:230:40:14;1:cloakraid:230:400:0;1:cloakraid:230:380:7;1:cloakraid:230:360:14	0.3333333333	1	0.2986052857	0.7609944515	0	0
+raid_vs_riot	0:cloakraid:230:0:0;0:cloakraid:230:20:7;0:cloakraid:230:40:14;0:cloakraid:230:0:121;1:cloakriot:820:500:0;1:cloakriot:820:480:7	1	0	0.799139661	0	0	0
+skirm_riot_vs_bandits	0:cloakskirm:400:0:0;0:cloakskirm:400:20:7;0:cloakriot:820:40:14;1:shieldraid:350:600:0;1:shieldraid:350:580:7;1:shieldraid:350:560:14	0	1	0	0.6736767216	0	0
+assault_vs_llt	0:shieldassault:960:0:0;0:shieldraid:350:20:7;0:shieldraid:350:40:14;1:turretlaser:785:450:0;1:cloakraid:230:430:7	0.4615384615	1	0.2890317864	0.5393244916	0	0.05076688284
+swarm_vs_hurt_thug	0:cloakraid:230:0:0;0:cloakraid:230:20:7;0:cloakraid:230:40:14;0:cloakraid:230:0:121;0:cloakraid:230:20:128;1:shieldassault:480:300:0	0	1	0	0.8161283482	0	0
+scalpels_vs_darts	0:hoverskirm:660:0:0;0:hoverskirm:660:20:7;1:vehraid:480:700:0;1:vehraid:480:680:7;1:vehraid:480:660:14	1	0.3333333333	0.5872799506	0.2989715462	0.3402736954	0.2200860508
 raid_vs_mex	0:cloakraid:230:0:0;0:cloakraid:230:20:7;1:staticmex:560:350:0	0	0	0	0	0	0
-big_mixed	0:cloakraid:184:0:0;0:cloakraid:184:20:7;0:cloakraid:184:40:14;0:cloakriot:820:0:121;0:cloakskirm:400:20:128;0:cloakassault:2250:40:135;1:shieldraid:350:550:0;1:shieldraid:350:530:7;1:shieldraid:350:510:14;1:shieldraid:350:550:121;1:shieldriot:1200:530:128;1:shieldskirm:364:510:135;1:shieldassault:960:550:242	0.4792899408	1	0.2937778575	0.3232866516	0.007854492915	0.1974991726
+big_mixed	0:cloakraid:184:0:0;0:cloakraid:184:20:7;0:cloakraid:184:40:14;0:cloakriot:820:0:121;0:cloakskirm:400:20:128;0:cloakassault:2250:40:135;1:shieldraid:350:550:0;1:shieldraid:350:530:7;1:shieldraid:350:510:14;1:shieldraid:350:550:121;1:shieldriot:1200:530:128;1:shieldskirm:364:510:135;1:shieldassault:960:550:242	0.4792899408	1	0.2570886789	0.2980195456	0.01678618495	0.1476275563

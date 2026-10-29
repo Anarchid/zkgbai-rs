@@ -25,6 +25,8 @@ pub struct FightRequest {
     pub key: u32,
     pub frame: i32,
     pub snapshot: FightSnapshot,
+    /// Also run the mechanics model.
+    pub mech: bool,
 }
 
 /// The model's answer to a request.
@@ -118,7 +120,7 @@ fn serve(model: Model, rx: Receiver<FightRequest>, tx: Sender<FightAnswer>, shut
         match rx.recv_timeout(Duration::from_millis(200)) {
             Ok(req) => {
                 let start = Instant::now();
-                let outcome = model.predict(&req.snapshot);
+                let outcome = model.predict_with(&req.snapshot, req.mech);
                 let micros = start.elapsed().as_micros().min(u32::MAX as u128) as u32;
                 if tx.send(FightAnswer { key: req.key, frame: req.frame, outcome, micros }).is_err() {
                     break;
@@ -149,6 +151,9 @@ mod tests {
                 damage: 10.5,
                 weapon_type: "Cannon".into(),
             }],
+            health: 230.0,
+            radius: 9.0,
+            ..Default::default()
         })
     }
 
@@ -169,7 +174,7 @@ mod tests {
         // More requests than the queue holds: some are refused, none block.
         let mut accepted = 0;
         for i in 0..(QUEUE as u32 * 4) {
-            if w.request(FightRequest { key: i, frame: 100, snapshot: snap.clone() }) {
+            if w.request(FightRequest { key: i, frame: 100, snapshot: snap.clone(), mech: i % 2 == 0 }) {
                 accepted += 1;
             }
         }
@@ -186,6 +191,7 @@ mod tests {
         // A mirror: both sides expect to lose alike, within the sim's asymmetry.
         assert!((a.outcome.killed_a - a.outcome.killed_b).abs() < 0.6, "{:?}", a.outcome);
         assert!(a.outcome.armed_a == 3 && a.outcome.armed_b == 3);
+        assert!(answers.iter().all(|a| a.outcome.mech.is_some() == (a.key % 2 == 0)));
         let s = w.stats();
         assert_eq!(s.queries, QUEUE as u64 * 4);
         assert_eq!(s.answers, accepted as u64);

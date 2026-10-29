@@ -85,10 +85,16 @@ pub struct Squad {
     max_shield_power: f32,
     /// Taskforces: each gauged member's shield weapon and its capacity.
     shields: BTreeMap<i32, (Weapon, f32)>,
+    /// Taskforces: the formation's places by member (see
+    /// `Keep::Formation`), round which leader, and the speed limit each was
+    /// last given.
+    formation: BTreeMap<i32, (f32, f32)>,
+    formation_leader: Option<i32>,
+    formation_speed: BTreeMap<i32, f32>,
 }
 
 /// Remaining health fraction, counting paralysis and capture as damage.
-fn health_fraction(u: Unit) -> f32 {
+pub(crate) fn health_fraction(u: Unit) -> f32 {
     let max = u.max_health();
     if max <= 0.0 {
         return 0.0;
@@ -98,6 +104,47 @@ fn health_fraction(u: Unit) -> f32 {
 
 fn def_id(u: Unit) -> Option<i32> {
     u.def().map(|d| d.id())
+}
+
+/// Formations: speed a member gains (elmos/s) per elmo it lags behind its
+/// place, along the way the leader goes.
+const CATCH_UP: f32 = 0.25;
+/// Formations: a member farther than this from its place goes to it by a
+/// path of its own.
+const FAR_FROM_PLACE: f32 = 600.0;
+
+/// Where place `k` of a formation lies round its leader: its radius
+/// (`step` a ring) and its bearing (radians in 0..2π on the map's axes),
+/// in rings of 6, 12, 18..., every other ring staggered half a place.
+pub fn formation_place(k: usize, step: f32) -> (f32, f32) {
+    let (mut ring, mut first) = (0, 0);
+    while k >= first + 6 * (ring + 1) {
+        first += 6 * (ring + 1);
+        ring += 1;
+    }
+    let places = 6 * (ring + 1);
+    let stagger = if ring % 2 == 1 { 0.5 } else { 0.0 };
+    let bearing = std::f32::consts::TAU * ((k - first) as f32 + stagger) / places as f32;
+    (step * (ring + 1) as f32, bearing)
+}
+
+/// Places for a formation round a leader at `lead`, by member (id, where
+/// it stands, spacing): nearest first, each takes the free place nearest
+/// where it stands (offsets from the leader on the map's axes).
+pub fn place_formation(lead: Vec3, members: &[(i32, Vec3, f32)]) -> BTreeMap<i32, (f32, f32)> {
+    let step = members.iter().map(|m| m.2).fold(0.0, f32::max);
+    let mut free: Vec<(f32, f32)> =
+        (0..members.len()).map(|k| formation_place(k, step)).map(|(r, b)| (r * b.cos(), r * b.sin())).collect();
+    let mut order: Vec<&(i32, Vec3, f32)> = members.iter().collect();
+    order.sort_by(|a, b| distance(a.1, lead).total_cmp(&distance(b.1, lead)));
+    let d2 = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2);
+    let mut places = BTreeMap::new();
+    for &&(id, pos, _) in &order {
+        let rel = (pos.x - lead.x, pos.z - lead.z);
+        let Some(i) = (0..free.len()).min_by(|&a, &b| d2(free[a], rel).total_cmp(&d2(free[b], rel))) else { break };
+        places.insert(id, free.swap_remove(i));
+    }
+    places
 }
 
 impl Squad {
@@ -130,6 +177,9 @@ impl Squad {
             leader_weight: 0,
             max_shield_power: 0.0,
             shields: BTreeMap::new(),
+            formation: BTreeMap::new(),
+            formation_leader: None,
+            formation_speed: BTreeMap::new(),
         }
     }
 
@@ -238,9 +288,9 @@ impl Squad {
         if self.fighters.is_empty() {
             return None;
         }
-        // Spotters go their own ways (see `taskforce::spotter`).
+        // Spotters and trailing screens go their own ways.
         let members: Vec<_> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
-            .filter(|f| self.shape.spot(def_id(f.unit)).is_none())
+            .filter(|f| !self.shape.own_way(def_id(f.unit)))
             .collect();
         if members.is_empty() {
             return None;
@@ -382,9 +432,9 @@ impl Squad {
         if leader.is_dead() {
             return 0.0;
         }
-        // Spotters go for repairs on their own (see `taskforce::spotter`).
+        // Spotters and trailing screens go for repairs on their own.
         let members: Vec<f32> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
-            .filter(|f| self.shape.spot(def_id(f.unit)).is_none())
+            .filter(|f| !self.shape.own_way(def_id(f.unit)))
             .map(|f| health_fraction(f.unit))
             .collect();
         let leader_health = health_fraction(leader.unit);
@@ -418,6 +468,10 @@ impl Squad {
             }
             self.leader_weight = 0;
         }
+        for id in self.formation_speed.keys().copied().collect::<Vec<_>>() {
+            self.unpace_member(id, fighters);
+        }
+        self.formation.clear();
         for id in &self.fighters {
             if let Some(f) = fighters.get_mut(id) {
                 f.squad = None;
@@ -720,8 +774,8 @@ impl Squad {
                         }
                     }
                 }
-                // Guards take the new leader; orbiters keep theirs, as they
-                // always did.
+                // Guards take the new leader (formations do at their next
+                // move); orbiters keep theirs, as they always did.
                 self.rekeep(fighters, &[Keep::Guard]);
                 self.collect_stragglers(fighters, frame, nav);
             }
@@ -824,6 +878,7 @@ impl Squad {
         if let Some(f) = fighters.get(&id) {
             self.metal_value -= f.metal_value;
         }
+        self.unpace_member(id, fighters);
 
         if self.leader == Some(id) {
             self.leader = self.get_new_leader(fighters);
@@ -833,6 +888,7 @@ impl Squad {
             };
             self.fighters.retain(|&f| f != lid);
             self.paced = 0.0;
+            self.unpace_member(lid, fighters);
             if let Some(l) = fighters.get(&lid) {
                 self.leader_weight = self.unit_weight(def_id(l.unit), l.index);
                 l.unit.set_move_state(1, 0);
@@ -845,6 +901,41 @@ impl Squad {
             self.collect_stragglers(fighters, frame, nav);
         } else {
             self.fighters.retain(|&f| f != id);
+        }
+    }
+
+    /// Taskforces: member `id` leads instead (a pack is led from where most
+    /// of it stands); the old leader becomes a member.
+    pub fn take_lead(&mut self, id: i32, fighters: &mut FighterStore) {
+        let Some(old) = self.leader.filter(|&l| l != id) else { return };
+        if !self.fighters.contains(&id) {
+            return;
+        }
+        self.fighters.retain(|&f| f != id);
+        self.fighters.push(old);
+        self.leader = Some(id);
+        self.paced = 0.0;
+        self.unpace_member(id, fighters);
+        if let Some(l) = fighters.get(&id) {
+            self.leader_weight = self.unit_weight(def_id(l.unit), l.index);
+            l.unit.set_move_state(1, 0);
+            if self.shape.pace > 0.0 {
+                l.unit.execute_custom_command(cmd::WANTED_SPEED, &[self.shape.pace], 0, NO_TIMEOUT);
+            }
+        }
+        if let Some(o) = fighters.get(&old) {
+            o.unit.set_move_state(0, 0);
+        }
+        self.rekeep(fighters, &[Keep::Guard]);
+    }
+
+    /// Lift the speed limit the formation gave member `id` (it leaves it,
+    /// or leads it now).
+    fn unpace_member(&mut self, id: i32, fighters: &FighterStore) {
+        if self.formation_speed.remove(&id).is_some()
+            && let Some(f) = fighters.get(&id).filter(|f| f.unit.health() > 0.0)
+        {
+            f.unit.execute_custom_command(cmd::WANTED_SPEED, &[f.unit.max_speed() * 30.0], 0, NO_TIMEOUT);
         }
     }
 
@@ -883,9 +974,12 @@ impl Squad {
         let Some((leader, leader_pos)) = fighters.get(&lid).map(|l| (l.unit, l.get_pos())) else { return };
         for id in &self.fighters {
             let Some(f) = fighters.get_mut(id) else { continue };
+            let def = def_id(f.unit);
             let fpos = f.get_pos();
-            // Spotters come back on their own (see `taskforce::spotter`).
-            if distance(leader_pos, fpos) <= 600.0 || self.shape.spot(def_id(f.unit)).is_some() {
+            // Spotters and trailing screens come back on their own, and
+            // formations with the leader's next move.
+            if distance(leader_pos, fpos) <= 600.0 || self.shape.own_way(def) || self.shape.keep(def) == Keep::Formation
+            {
                 continue;
             }
             // Have units that haven't rallied yet avoid enemies.
@@ -899,18 +993,21 @@ impl Squad {
     }
 
     /// Give member `unit` its doctrine's order to keep with `leader` (see
-    /// `Keep`), after what it is doing with `opts` shift.
+    /// `Keep`), after what it is doing with `opts` shift. Formations and
+    /// trailing screens get none: their force's conduct moves them.
     fn keep_order(&self, unit: Unit, leader: Unit, opts: i16) {
+        let def = def_id(unit);
         let lid = leader.id() as f32;
-        match self.shape.keep(def_id(unit)) {
+        let radius = self.shape.orbit(def);
+        match self.shape.keep(def) {
             Keep::Orbit => {
-                let radius = self.shape.orbit(def_id(unit));
                 unit.execute_custom_command(cmd::ORBIT, &[lid, radius], opts, NO_TIMEOUT);
                 unit.execute_custom_command(cmd::ORBIT_DRAW, &[lid], OPTION_SHIFT_KEY, NO_TIMEOUT);
             }
             Keep::Guard => {
                 unit.guard(leader, opts);
             }
+            Keep::Formation | Keep::Trail => {}
         }
     }
 
@@ -922,6 +1019,75 @@ impl Squad {
             let def = def_id(f.unit);
             if ways.contains(&self.shape.keep(def)) && self.shape.spot(def).is_none() {
                 self.keep_order(f.unit, leader, 0);
+            }
+        }
+    }
+
+    /// Taskforces: the formation's members and their places round the
+    /// leader (see `Keep::Formation`), placed anew (see [`place_formation`])
+    /// whenever who is in it, or who leads, changed.
+    pub fn formation(&mut self, fighters: &FighterStore) -> Vec<(i32, (f32, f32))> {
+        let Some(lpos) = self.leader_fighter(fighters).map(|l| l.get_pos()) else { return Vec::new() };
+        let members: Vec<(i32, Vec3, f32)> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter(|f| self.shape.keep(def_id(f.unit)) == Keep::Formation)
+            .map(|f| (f.id, f.get_pos(), self.shape.orbit(def_id(f.unit))))
+            .collect();
+        let same = self.formation_leader == self.leader
+            && members.len() == self.formation.len()
+            && members.iter().all(|m| self.formation.contains_key(&m.0));
+        if !same {
+            self.formation = place_formation(lpos, &members);
+            self.formation_leader = self.leader;
+        }
+        members.iter().filter_map(|m| self.formation.get(&m.0).map(|&o| (m.0, o))).collect()
+    }
+
+    /// Taskforces: members of a trailing screen (see `Keep::Trail`).
+    pub fn trailers(&self, fighters: &FighterStore) -> Vec<i32> {
+        (self.fighters.iter().copied())
+            .filter(|id| fighters.get(id).is_some_and(|f| self.shape.keep(def_id(f.unit)) == Keep::Trail))
+            .collect()
+    }
+
+    /// Packs: send the leader along `waypoints` under move orders, the
+    /// rest queued, so it never brakes before the last; and its formation
+    /// along the same waypoints shifted by each member's place, at the
+    /// leader's pace plus [`CATCH_UP`] for what a member lags behind its
+    /// place (less for what it is ahead). A member far from its place goes
+    /// there by a path of its own, at full speed; other stragglers come
+    /// back first.
+    pub fn drive(&mut self, waypoints: &[Vec3], fighters: &mut FighterStore, nav: &mut Nav) {
+        let Some(&last) = waypoints.last() else { return };
+        self.target = last;
+        let frame = nav.frame;
+        self.collect_stragglers(fighters, frame, Some(&mut *nav));
+        let Some((leader, lpos)) = self.leader_fighter(fighters).map(|l| (l.unit, l.get_pos())) else { return };
+        let opts = |i: usize| if i == 0 { 0 } else { OPTION_SHIFT_KEY };
+        for (i, &wp) in waypoints.iter().enumerate() {
+            kgb_move_to(leader, wp, opts(i), frame);
+        }
+        let (dx, dz) = (waypoints[0].x - lpos.x, waypoints[0].z - lpos.z);
+        let len = (dx * dx + dz * dz).sqrt();
+        let travel = (len > 1.0).then(|| (dx / len, dz / len));
+        let pace = self.pace(leader);
+        for (id, (ox, oz)) in self.formation(fighters) {
+            let Some(f) = fighters.get_mut(&id) else { continue };
+            let (unit, pos) = (f.unit, f.get_pos());
+            let place = Vec3::xz(lpos.x + ox, lpos.z + oz);
+            let top = unit.max_speed() * 30.0;
+            let speed = if distance(pos, place) > FAR_FROM_PLACE {
+                f.move_to(place, nav);
+                top
+            } else {
+                for (i, wp) in waypoints.iter().enumerate() {
+                    kgb_move_to(unit, Vec3::xz(wp.x + ox, wp.z + oz), opts(i), frame);
+                }
+                let lag = travel.map_or(f32::INFINITY, |(tx, tz)| (place.x - pos.x) * tx + (place.z - pos.z) * tz);
+                (pace + CATCH_UP * lag).clamp(0.5 * pace, top)
+            };
+            if self.formation_speed.get(&id).is_none_or(|&s| (s - speed).abs() > 2.0) {
+                unit.execute_custom_command(cmd::WANTED_SPEED, &[speed], 0, NO_TIMEOUT);
+                self.formation_speed.insert(id, speed);
             }
         }
     }
@@ -1184,6 +1350,7 @@ mod tests {
     const FELON: i32 = 0;
     const ASPIS: i32 = 1;
     const THUG: i32 = 3;
+    const OUTLAW: i32 = 4;
     const GLAIVE: i32 = 5;
     const IMP: i32 = 6;
     const ZEUS: i32 = 7;
@@ -1294,6 +1461,90 @@ mod tests {
         assert_eq!(members, vec![31, 33]);
         assert!(s.is_dead(&fighters));
         assert!(members.iter().all(|id| fighters[id].squad.is_none()));
+    }
+
+    #[test]
+    fn members_keep_by_their_doctrine() {
+        // Cores keep formation, thugs guard, outlaws trail (neither of those
+        // gets an order: their conduct moves them; trailers are not
+        // counted as rallied).
+        let (cb, defs, mut fighters) = setup();
+        let classes = crate::military::taskforce::Classes::default();
+        let mut d = crate::military::taskforce::Doctrine::new("x");
+        d.core = vec!["shieldfelon".into()];
+        d.core_keep = Keep::Formation;
+        d.aim = crate::military::taskforce::Aim::Pack;
+        d.roles = vec![
+            crate::military::taskforce::Role { keep: Keep::Guard, ..crate::military::taskforce::Role::new("thugs") },
+            crate::military::taskforce::Role { keep: Keep::Trail, ..crate::military::taskforce::Role::new("outlaws") },
+        ];
+        d.roles[0].units = vec!["shieldassault".into()];
+        d.roles[1].units = vec!["shieldriot".into()];
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        s.shape = Arc::new(d.shape(&defs, &classes));
+        for (id, def) in [(40, FELON), (41, FELON), (42, THUG), (43, OUTLAW), (44, FELON)] {
+            add(cb, &mut fighters, id, def, 300.0);
+            s.add_unit(id, &mut fighters, 0);
+        }
+        let orders = take_orders();
+        let by = |id: i32, topic: u32, custom: i32| orders.iter().filter(|o| **o == (id, topic, custom)).count();
+        let custom = CommandTopic::COMMAND_UNIT_CUSTOM;
+        let guard = CommandTopic::COMMAND_UNIT_GUARD;
+        assert_eq!((by(41, custom, cmd::ORBIT), by(44, custom, cmd::ORBIT)), (0, 0));
+        assert_eq!((by(42, guard, -1), by(42, custom, cmd::ORBIT)), (1, 0));
+        assert_eq!((by(43, guard, -1), by(43, custom, cmd::ORBIT)), (0, 0));
+        assert_eq!(s.trailers(&fighters), vec![43]);
+        let places: Vec<i32> = s.formation(&fighters).iter().map(|p| p.0).collect();
+        assert_eq!(places, vec![41, 44]);
+        // The outlaw is far off; rallied counts the others only.
+        fake_engine::UNITS.with(|u| u.borrow_mut().get_mut(&43).unwrap().pos = Vec3::xz(5000.0, 0.0));
+        assert_eq!(s.rally_fraction(&fighters), Some(1.0));
+
+        // A new leader: guards take it, the formation is placed anew round
+        // it, the trailer still gets nothing.
+        s.remove_unit(40, &mut fighters, 0);
+        assert_eq!(s.leader, Some(41));
+        let orders = take_orders();
+        let by = |id: i32, topic: u32, custom: i32| orders.iter().filter(|o| **o == (id, topic, custom)).count();
+        assert_eq!((by(42, guard, -1), by(44, custom, cmd::ORBIT)), (1, 0));
+        assert_eq!(by(43, custom, cmd::ORBIT) + by(43, guard, -1), 0);
+        assert_eq!(s.formation(&fighters).iter().map(|p| p.0).collect::<Vec<_>>(), vec![44]);
+    }
+
+    #[test]
+    fn formations_fill_rings_of_six_then_twelve() {
+        use std::f32::consts::TAU;
+        for k in 0..6 {
+            let (r, b) = formation_place(k, 90.0);
+            assert_eq!(r, 90.0);
+            assert!((b - TAU * k as f32 / 6.0).abs() < 1e-5);
+        }
+        // The second ring is staggered half a place.
+        let (r, b) = formation_place(6, 90.0);
+        assert!(r == 180.0 && (b - TAU * 0.5 / 12.0).abs() < 1e-5);
+        assert_eq!(formation_place(17, 90.0).0, 180.0);
+        assert_eq!(formation_place(18, 90.0), (270.0, 0.0));
+    }
+
+    #[test]
+    fn members_take_the_places_nearest_them() {
+        use std::f32::consts::TAU;
+        let lead = Vec3::xz(1000.0, 1000.0);
+        // One east of the leader, one north, one far off to the west: three
+        // places, at 0°, 60° and 120°.
+        let members = [
+            (1, Vec3::xz(1070.0, 1000.0), 60.0),
+            (2, Vec3::xz(1010.0, 1050.0), 60.0),
+            (3, Vec3::xz(-2000.0, 1000.0), 60.0),
+        ];
+        let places = place_formation(lead, &members);
+        let near = |id: i32, x: f32, z: f32| {
+            let (ox, oz) = places[&id];
+            (ox - x).abs() < 1.0 && (oz - z).abs() < 1.0
+        };
+        assert!(near(1, 60.0, 0.0));
+        assert!(near(2, 60.0 * (TAU / 6.0).cos(), 60.0 * (TAU / 6.0).sin()));
+        assert!(near(3, 60.0 * (TAU / 3.0).cos(), 60.0 * (TAU / 3.0).sin()));
     }
 
     #[test]

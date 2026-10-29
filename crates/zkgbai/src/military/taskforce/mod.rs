@@ -2,10 +2,10 @@
 //! doctrine (see `doctrine`), with wants written as expressions over what
 //! the force has (see `expr`). On by default: `felon` (the shield ball),
 //! `impaler` (the escorts of Impaler batteries, see `military::impalers`)
-//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`,
-//! `phantom` and `envoy` are seeded off; the rest wait for conducts of
-//! their own. The `disable` option switches off doctrines it names
-//! (`disable=lance`).
+//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`
+//! (packs, see `pack`) is off by default (`enable=ravager`), `phantom` and
+//! `envoy` are seeded off; the rest wait for conducts of their own. The
+//! `disable` option switches off doctrines it names (`disable=lance`).
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -21,6 +21,7 @@
 pub mod doctrine;
 pub mod expr;
 pub mod marksman;
+pub mod pack;
 pub mod spotter;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,7 +29,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-pub use doctrine::{Aim, Doctrine, Keep, Role, Shape, seeds};
+pub use doctrine::{Aim, Attack, Doctrine, Judge, Keep, Role, Shape, seeds};
 pub use expr::{Expr, Force};
 
 use crate::Ai;
@@ -125,12 +126,26 @@ pub struct Taskforces {
     pub volleys: marksman::Volleys,
     /// Spotters (see `spotter`).
     pub spotters: spotter::Spotters,
+    /// Packs' targets and repairs, by force (see `pack`).
+    pub packs: BTreeMap<crate::military::SquadId, pack::Pack>,
+    /// The fight predictor's model for packs that judge by it, loaded at
+    /// the first ask (`None` inside if it would not load).
+    pub model: Option<Option<Arc<crate::military::fightsim::Model>>>,
+    /// Doctrines switched on that sleep until their `wake_share` (see
+    /// `taskforce_wake`).
+    pub asleep: Vec<String>,
 }
+
+/// A sleeping doctrine wakes only once the map holds this many armed ground
+/// units (ours and the enemy's we know)...
+const WAKE_MIN: usize = 12;
+/// ...of them this many the enemy's.
+const WAKE_MIN_ENEMY: usize = 6;
 
 /// Aims whose forces are squads of the squad handler (see
 /// `handlers::squad`); the others have modules of their own.
 pub fn squad_aim(aim: Aim) -> bool {
-    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff)
+    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff | Aim::Pack)
 }
 
 impl Taskforces {
@@ -192,6 +207,99 @@ pub fn patch(doctrines: &mut Vec<Doctrine>, patches: &Value, defs: &Defs, classe
 }
 
 impl Ai {
+    /// Wake the sleeping doctrines whose moment has come: more than their
+    /// `wake_share` of the armed ground units on the map (ours, and the
+    /// enemy's we have identified; no commanders, constructors or aircraft)
+    /// are not raiders, at least [`WAKE_MIN`] of them, and as much of the
+    /// enemy's alone, at least [`WAKE_MIN_ENEMY`] (a vehicle opening's own
+    /// Rippers and Ravagers tip the whole map at four minutes while the
+    /// enemy still raids: what Ravagers fare worst against). Their units
+    /// fighting elsewhere join their forces at once, cores first.
+    pub fn taskforce_wake(&mut self) {
+        if self.taskforces.asleep.is_empty() {
+            return;
+        }
+        let ((our_raiders, our_others), (raiders, others)) = self.taskforce_army_mix();
+        let n_enemy = raiders + others;
+        let n = n_enemy + our_raiders + our_others;
+        if n < WAKE_MIN || n_enemy < WAKE_MIN_ENEMY {
+            return;
+        }
+        let share = (others + our_others) as f32 / n as f32;
+        let enemy_share = others as f32 / n_enemy as f32;
+        let waking: Vec<String> = (self.taskforces.asleep.iter())
+            .filter(|name| {
+                (self.taskforces.doctrines.iter())
+                    .any(|d| &d.name == *name && share > d.wake_share && enemy_share > d.wake_share)
+            })
+            .cloned()
+            .collect();
+        for name in waking {
+            self.taskforces.asleep.retain(|a| a != &name);
+            let Some(d) = self.taskforces.doctrines.iter_mut().find(|d| d.name == name) else { continue };
+            d.enabled = true;
+            let d = d.clone();
+            let classes = &self.taskforces.classes;
+            let mut ids: Vec<(bool, i32)> = (self.squad_handler.fighters.iter().copied())
+                .filter_map(|id| {
+                    let f = self.fighters.get(&id)?;
+                    let unit = self.defs.name_of(f.unit);
+                    let core = d.is_core(unit, classes);
+                    let taken = core || d.role_of(unit, classes).is_some();
+                    let in_force = f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_taskforce());
+                    (taken && !in_force && f.unit.health() > 0.0 && !self.retreat_handler.is_retreating(id))
+                        .then_some((!core, id))
+                })
+                .collect();
+            ids.sort();
+            self.log(&format!(
+                "taskforce: {name} wakes: {} of {n} armed ground units are not raiders ({:.0}%), {others} of the \
+                 enemy's {n_enemy} ({:.0}%); {} of its units join",
+                others + our_others,
+                100.0 * share,
+                100.0 * enemy_share,
+                ids.len()
+            ));
+            for (_, id) in ids {
+                self.squad_leave_squad(id);
+                if let Some(f) = self.fighters.get_mut(&id) {
+                    f.squad = None;
+                    f.shield_mob = true;
+                }
+                self.squad_assign_taskforce_member(id);
+            }
+        }
+    }
+
+    /// Raiders and other armed ground units, ours and the enemy's we have
+    /// identified (no commanders, constructors or aircraft).
+    fn taskforce_army_mix(&self) -> ((usize, usize), (usize, usize)) {
+        let uc = &self.unit_classes;
+        let raider =
+            |n: &str| uc.small_raiders.contains(n) || uc.medium_raiders.contains(n) || uc.solo_raiders.contains(n);
+        let (mut ours, mut theirs) = ((0, 0), (0, 0));
+        for f in self.fighters.values() {
+            let Some(def) = f.unit.def() else { continue };
+            if f.unit.health() <= 0.0
+                || f.unit.team() != self.team_id
+                || def.is_able_to_fly()
+                || def.is_builder()
+                || !def.is_able_to_attack()
+                || self.defs.is_commander(def)
+            {
+                continue;
+            }
+            if raider(self.defs.name(def)) { ours.0 += 1 } else { ours.1 += 1 }
+        }
+        for e in self.war.targets.values() {
+            if e.is_dead || !e.identified || e.is_static || e.can_fly() || e.is_worker || e.is_com || !e.can_attack() {
+                continue;
+            }
+            if e.is_raider { theirs.0 += 1 } else { theirs.1 += 1 }
+        }
+        (ours, theirs)
+    }
+
     /// The map's density, openness and reach for doctrine expressions (see
     /// [`Force`]): reserved, 0 until intel measures them.
     pub fn taskforce_map(&self) -> (f32, f32, f32) {
@@ -236,6 +344,16 @@ impl Ai {
                 d.enabled = false;
                 self.cb.log(&format!("doctrines: {} switched off (disable)", d.name));
             }
+        }
+        // Doctrines with a `wake_share` sleep until their moment.
+        for d in doctrines.iter_mut().filter(|d| d.enabled && d.wake_share > 0.0) {
+            d.enabled = false;
+            self.taskforces.asleep.push(d.name.clone());
+            self.cb.log(&format!(
+                "doctrines: {} sleeps until more than {:.0}% of the armed ground units are not raiders",
+                d.name,
+                100.0 * d.wake_share
+            ));
         }
         let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base());
         if let Some(b) = b {

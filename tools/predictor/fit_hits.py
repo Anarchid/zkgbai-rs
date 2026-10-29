@@ -23,6 +23,39 @@ SPEED_EDGES = (0.5, 2.0, 4.0)  # elmos per frame -> bands 0..3
 SHRINK = 20.0
 
 UD = None
+NOSHIELD = os.environ.get("PRED_HITS_NOSHIELD") == "1"
+# PRED_HITS_NOBUBBLE=<shield.json>: body hits only, also dropping shots at targets inside a charged
+# bubble (> 50) of a shield unit of their team with the shooter outside it (mechanics round 4)
+NOBUBBLE = os.environ.get("PRED_HITS_NOBUBBLE")
+SHIELD_R = None
+
+
+def covered(d, s):
+    """Mask over shot rows s: target inside a charged ally bubble at fire time, shooter outside."""
+    global SHIELD_R
+    if SHIELD_R is None:
+        import json
+        SHIELD_R = {k: v["radius"] for k, v in json.load(open(NOBUBBLE)).items() if not k.startswith("_")}
+    u = d.get("unit")
+    out = np.zeros(len(s), bool)
+    if u is None or not len(u) or "sh" not in u.columns:
+        return out
+    u = u[u["udef"].astype(str).isin(SHIELD_R.keys())]
+    f0 = s["f0"].values; tt = s["tteam"].values
+    tx = s["tx"].values.astype(float); tz = s["tz"].values.astype(float)
+    ox = s["ox"].values.astype(float); oz = s["oz"].values.astype(float)
+    for (uid, udef, team), g in u.sort_values("f").groupby(["uid", u["udef"].astype(str), "uteam"]):
+        rad = SHIELD_R[udef]
+        fr = g["f"].values
+        i = np.clip(np.searchsorted(fr, f0), 0, len(fr) - 1)
+        j = np.clip(i - 1, 0, len(fr) - 1)
+        k = np.where(np.abs(fr[j] - f0) < np.abs(fr[i] - f0), j, i)
+        near = np.abs(fr[k] - f0) <= 30
+        sx = g["x"].values[k].astype(float); sz = g["z"].values[k].astype(float); sh = g["sh"].values[k].astype(float)
+        inside = np.hypot(tx - sx, tz - sz) <= rad
+        shooter_out = np.hypot(ox - sx, oz - sz) > rad
+        out |= near & (tt == team) & (sh > 50) & inside & shooter_out
+    return out
 
 
 def sband(spd):
@@ -40,6 +73,12 @@ def game_counts(path):
     sp = split.split_of(meta.get("game", ""), series)
     s = d["shot"]
     s = s[(s["tt"] == "u") & (s["tid"] >= 0) & (s["tteam"] != s["oteam"])]
+    if NOSHIELD and "tsh" in s.columns:
+        s = s[~(s["tsh"] > 50)]  # body hits only: the target's own shield was down (mech.py shield switch)
+    if NOBUBBLE:
+        if "tsh" in s.columns:
+            s = s[~(s["tsh"] > 50)]
+        s = s[~covered(d, s)]
     if not len(s):
         return sp, None
     w = meta["weapons"]
@@ -131,7 +170,7 @@ class HitModel:
 
 def main(cache, out, workers=4):
     paths = list(combatdata.cached(cache))
-    parts = {"train": [], "test": [], "human": []}
+    parts = {"train": [], "test": [], "human": [], "replay": [], "dev": []}
     with Pool(workers) as pool:
         for i, (sp, g) in enumerate(pool.imap_unordered(game_counts, paths, chunksize=4)):
             if g is not None:

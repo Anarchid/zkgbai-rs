@@ -1,0 +1,266 @@
+# fightsim mechanics: fitted 2026-10-28 by tools/predictor/export_mech.py; mechanics from refit2/mech.pkl, heatray bands from its empcap hit cells, on the crate's refit-1 tables and hazard; calibration on 12000 train fights (7956 decided)
+kind	name	values
+weapon	amphaa_missile	1	0	0	0	0	0	0
+weapon	amphassault_laser	1	1	0	0	0	0	0
+weapon	amphfloater_cannon	0	1	0	0	0	0	0
+weapon	amphimpulse_sonic	1	1	0	0	0	0	0
+weapon	amphraid_torpedo	0	1	0	0	0	0	0
+weapon	amphraid_torpmissile	1	1	0	0	0	0	0
+weapon	amphriot_flechette	1	1	0	0	0	0	0
+weapon	amphriot_torpedo	0	1	0	0	0	0	0
+weapon	bomberprec_bombsabot	1	1	0	0	0	0	0
+weapon	bomberriot_napalm	0	1	21.89097052	136	0	0	0
+weapon	cloakaa_aa_laser	1	1	0	0	0	0	0
+weapon	cloakarty_hammer_weapon	0	1	0	0	0	0	0
+weapon	cloakassault_lightning	0	1	0	0	720	0	0
+weapon	cloakheavyraid_blade	0	1	0	0	0	0	0
+weapon	cloakraid_emg	1	1	0	0	0	0	0
+weapon	cloakriot_warrior_weapon	1	1	0	0	0	0	0
+weapon	cloakskirm_bot_rocket	1	1	0	0	0	0	0
+weapon	cloaksnipe_shockrifle	1	1	0	0	0	0	0
+weapon	commweapon_beamlaser	1	1	0	0	0	0	0
+weapon	dronecarry_captureray	0	1	0	0	0	0	0
+weapon	droneheavyslow_disruptor	1	1	0	0	0	2	0
+weapon	dronelight_laser	0	1	0	0	0	0	0
+weapon	empmissile_emp_weapon	1	1	0	0	30002.4	0	1
+weapon	gunshipaa_aa_missile	1	0	0	0	0	0	0
+weapon	gunshipassault_vtol_salvo	0	1	0	0	0	0	0
+weapon	gunshipemp_paralyzer	0	1	0	0	700	0	1
+weapon	gunshipheavyskirm_emg	1	1	0	0	0	0	0
+weapon	gunshipkrow_clusterbomb	0	1	0	0	0	0	0
+weapon	gunshipkrow_krowlaser	1	1	0	0	0	0	0
+weapon	gunshipraid_laser	1	1	0	0	0	0	0
+weapon	gunshipskirm_vtol_rocket	1	1	0	0	0	0	0
+weapon	hoveraa_weapon	1	0	0	0	0	0	0
+weapon	hoverarty_ata	1	1	0	0	0	0	0
+weapon	hoverassault_dew	0	1	0	0	0	0	0
+weapon	hoverheavyraid_disruptor	0	1	0	0	0	1.667	0
+weapon	hoverraid_gauss	1	1	0	0	0	0	0
+weapon	hoverriot_laser1	1	1	0	0	0	0	0
+weapon	hoverskirm_missile	1	1	0	0	0	0	0
+weapon	jumpaa_emg	1	0	0	0	0	0	0
+weapon	jumpaa_laser	1	0	0	0	0	0	0
+weapon	jumparty_napalm_sprayer	0	1	211.8784513	162	0	0	0
+weapon	jumpassault_spike	0	1	0	0	0	0	0
+weapon	jumpblackhole_black_hole	1	1	0	0	0	0	0
+weapon	jumpcon_slowbeam	0	1	0	0	0	0	0
+weapon	jumpraid_flamethrower	0	1	7.807345253	215	0	0	0
+weapon	jumpscout_missile	1	1	0	0	0	0	0
+weapon	jumpskirm_disruptor_beam	1	1	0	0	0	0	0
+weapon	jumpsumo_gravity_neg	1	1	0	0	0	0	0
+weapon	jumpsumo_gravity_pos	1	1	0	0	0	0	0
+weapon	napalmmissile_weapon	1	1	8112.173526	418	0	0	0
+weapon	planefighter_swift_gun	1	1	0	0	0	0	0
+weapon	planeheavyfighter_laser	1	0	0	0	0	0	0
+weapon	planesupport_disruptor_cannon	1	1	0	0	0	5.5	0
+weapon	raveparty_blue_shocker	1	1	0	0	30000	0	1
+weapon	shieldaa_armkbot_missile	1	0	0	0	0	0	0
+weapon	shieldarty_emp_rocket	1	1	0	0	0	0	0
+weapon	shieldassault_thud_weapon	0	1	0	0	0	0	0
+weapon	shieldfelon_shieldgun	1	1	0	0	0	0	0
+weapon	shieldraid_laser	0	1	0	0	0	0	0
+weapon	shieldriot_blast	1	1	0	0	0	2.5	0
+weapon	shieldscout_headbutt	0	1	0	0	0	0	0
+weapon	shieldskirm_storm_rocket	0	1	0	0	0	0	0
+weapon	shipaa_aa_missile	1	0	0	0	0	0	0
+weapon	shipaa_aalaser	1	0	0	0	0	0	0
+weapon	shiparty_plasma	1	1	0	0	0	0	0
+weapon	shipassault_missile	0	1	0	0	0	0	0
+weapon	shipassault_sonic	0	1	0	0	0	0	0
+weapon	shipriot_shotgun	0	1	0	0	0	0	0
+weapon	shipscout_missile	0	1	0	0	0	0	0
+weapon	shipskirm_rocket	0	1	0	0	0	0	0
+weapon	shiptorpraider_torpedo	0	1	0	0	0	0	0
+weapon	small_buildingex	1	1	0	0	0	0	0
+weapon	spideraa_aa	1	0	0	0	0	0	0
+weapon	spiderantiheavy_spy	0	1	0	0	8000.1	0	1
+weapon	spiderassault_thud_weapon	0	1	0	0	0	0	0
+weapon	spidercrabe_arm_crabe_gauss	0	1	0	0	0	0	0
+weapon	spideremp_spider	0	1	0	0	400	0	0
+weapon	spiderriot_particlebeam	0	1	0	0	0	0	0
+weapon	spiderscout_laser	0	1	0	0	0	0	0
+weapon	spiderskirm_adv_rocket	1	1	0	0	0	0	0
+weapon	staticheavyarty_plasma	1	1	0	0	0	0	0
+weapon	striderarty_rocket	1	1	0	0	0	0	0
+weapon	striderbantha_ata	1	1	0	0	0	0	0
+weapon	striderbantha_emp_missile	1	1	0	0	1250	0	1
+weapon	striderbantha_lightning	1	1	0	0	960	0	0
+weapon	striderdante_dante_flamer	1	1	16.46929134	267	0	0	0
+weapon	striderdante_heatray	1	1	0	0	0	0	0
+weapon	striderdante_napalm_rockets	1	1	84.99442343	93	0	0	0
+weapon	striderdante_napalm_rockets_salvo	1	1	76.03497045	106	0	0	0
+weapon	striderscorpion_lightning	1	1	0	0	1080	0	0
+weapon	striderscorpion_multilightning	1	1	0	0	1000.01	0	1
+weapon	striderscorpion_particlebeam	1	1	0	0	0	0	0
+weapon	subraider_torpedo	0	1	0	0	0	0	0
+weapon	tankaa_flak	1	0	0	0	0	0	0
+weapon	tankarty_core_artillery	0	1	0	0	0	0	0
+weapon	tankassault_cor_reap	0	1	0	0	0	0	0
+weapon	tankcon_laser	0	1	0	0	0	0	0
+weapon	tankheavyarty_plasma	0	1	0	0	0	0	0
+weapon	tankheavyassault_cor_gol	0	1	0	0	0	0	0
+weapon	tankheavyassault_slowbeam	1	1	0	0	0	0	0
+weapon	tankheavyraid_armlatnk_weapon	0	1	0	0	500	0	0
+weapon	tankraid_napalm_bomblet	0	1	42.81457782	75	0	0	0
+weapon	tankriot_tawf_banisher	1	1	0	0	0	0	0
+weapon	turretaafar_missile	1	0	0	0	0	0	0
+weapon	turretaaflak_armflak_gun	1	0	0	0	0	0	0
+weapon	turretaalaser_aagun	1	0	0	0	0	0	0
+weapon	turretemp_arm_det_weapon	1	1	0	0	1100	0	1
+weapon	turretgauss_gauss	1	1	0	0	0	0	0
+weapon	turretheavylaser_laser	1	1	0	0	0	0	0
+weapon	turretlaser_laser	1	1	0	0	0	0	0
+weapon	turretmissile_armrl_missile	1	1	0	0	0	0	0
+weapon	turretriot_turretriot_weapon	1	1	0	0	0	0	0
+weapon	turrettorp_torpedo	0	1	0	0	0	0	0
+weapon	vehaa_missile	1	0	0	0	0	0	0
+weapon	veharty_mine	0	1	0	0	0	0	0
+weapon	vehassault_plasma	0	1	0	0	0	0	0
+weapon	vehcapture_captureray	1	1	0	0	0	0	0
+weapon	vehheavyarty_cortruck_rocket	0	1	0	0	0	0	0
+weapon	vehraid_heatray	0	1	0	0	0	0	0
+weapon	vehriot_vehriot_weapon	1	1	0	0	0	0	0
+weapon	vehscout_disruptor	0	1	0	0	0	4	0
+weapon	vehsupport_cortruck_missile	0	1	0	0	0	0	0
+weapon	wolverine_mine_bomblet	0	1	0	0	0	0	0
+death	amphaa	25	32	0	0
+death	amphbomb	120.1	250	0.4	0
+death	amphcon	25	32	0	0
+death	amphfloater	25	32	0	0
+death	amphimpulse	25	32	0	0
+death	amphraid	25	32	0	0
+death	amphriot	25	32	0	0
+death	bomberprec	150	8	0	0
+death	cloakaa	25	32	0	0
+death	cloakarty	25	32	0	0
+death	cloakassault	25	32	0	0
+death	cloakbomb	887.3200195	176	0.5	1
+death	cloakcon	25	32	0	0
+death	cloakheavyraid	10	16	0	0
+death	cloakjammer	25	32	0	0
+death	cloakraid	10	16	0	0
+death	cloakriot	10	16	0	0
+death	cloakskirm	25	32	0	0
+death	cloaksnipe	25	32	0	0
+death	dyntrainer_assault_base	14.4	6	1	0
+death	dyntrainer_recon_base	14.4	6	1	0
+death	dyntrainer_strike_base	14.4	6	1	0
+death	dyntrainer_support_base	14.4	6	1	0
+death	energyfusion	2400	240	0	0
+death	energygeo	1270	260	0	0
+death	energypylon	885	210	0	0
+death	energysingu	9500	640	0	0
+death	energysolar	80	90	0	0
+death	energywind	80	90	0	0
+death	factoryamph	600	170	0	0
+death	factorycloak	600	170	0	0
+death	factoryhover	600	170	0	0
+death	factoryjump	600	170	0	0
+death	factoryspider	600	170	0	0
+death	factoryveh	600	170	0	0
+death	gunshipheavyskirm	150	8	0	0
+death	gunshiptrans	150	8	0	0
+death	hoveraa	25	32	0	0
+death	hoverarty	200	130	0	0
+death	hoverassault	25	32	0	0
+death	hovercon	25	32	0	0
+death	hoverdepthcharge	25	32	0	0
+death	hoverheavyraid	25	32	0	0
+death	hoverraid	10	16	0	0
+death	hoverskirm	25	32	0	0
+death	jumpaa	25	32	0	0
+death	jumpassault	25	32	0	0
+death	jumpblackhole	25	32	0	0
+death	jumpbomb	8002.4	90	0.4	0
+death	jumpcon	25	32	0	0
+death	jumpscout	5	8	0	0
+death	jumpskirm	25	32	0	0
+death	shieldaa	25	32	0	0
+death	shieldarty	25	32	0	0
+death	shieldassault	25	32	0	0
+death	shieldbomb	1200.8	192	0.4	0
+death	shieldcon	25	32	0	0
+death	shieldfelon	25	32	0	0
+death	shieldraid	10	16	0	0
+death	shieldscout	1	4	0	0
+death	shieldshield	25	32	0	0
+death	shieldskirm	25	32	0	0
+death	shipaa	25	32	0	0
+death	shipcon	10	16	0	0
+death	shipriot	10	16	0	0
+death	shipskirm	10	16	0	0
+death	shiptorpraider	10	16	0	0
+death	spideraa	25	32	0	0
+death	spiderantiheavy	25	32	0	0
+death	spiderassault	25	32	0	0
+death	spidercon	25	32	0	0
+death	spiderriot	25	32	0	0
+death	spiderskirm	25	32	0	0
+death	staticcon	500	64	0.75	0
+death	staticmex	80	90	0	0
+death	staticradar	80	90	0	0
+death	subraider	10	16	0	0
+death	tankaa	25	32	0	0
+death	tankarty	25	32	0	0
+death	tankassault	25	32	0	0
+death	tankcon	25	32	0	0
+death	tankheavyraid	25	32	0	0
+death	tankraid	25	32	0	0
+death	turretaalaser	80	90	0	0
+death	turretmissile	25	32	0	0
+death	vehaa	25	32	0	0
+death	veharty	25	32	0	0
+death	vehassault	25	32	0	0
+death	vehcapture	25	32	0	0
+death	vehcon	25	32	0	0
+death	vehheavyarty	25	32	0	0
+death	vehraid	25	32	0	0
+death	vehriot	25	32	0	0
+death	vehscout	10	16	0	0
+death	vehsupport	25	32	0	0
+dyn	striderdante_heatray	0	0.892026382
+dyn	striderdante_heatray	1	0.710770786
+dyn	striderdante_heatray	2	0.552134224
+dyn	striderdante_heatray	3	0.3941833148
+dyn	striderdante_heatray	4	0.2500735521
+dyn	striderdante_heatray	5	0.1937310173
+dyn	vehraid_heatray	0	0.843908842
+dyn	vehraid_heatray	1	0.7740780464
+dyn	vehraid_heatray	2	0.6017733446
+dyn	vehraid_heatray	3	0.4114328623
+dyn	vehraid_heatray	4	0.2452753041
+dyn	vehraid_heatray	5	0.2502107639
+engage	const	0.824834325
+engage	ratio>0.5	2.613069122
+engage	ratio>1	-1.320633987
+engage	ratio>1.5	-1.209791766
+engage	ratio>2.5	-0.5736686281
+engage	ratio>5	-0.155254762
+engage	short	-0.764075147
+engage	static	-0.4701443338
+engage	com	-1.145620668
+engage	builder	-0.3851473515
+engage	blockers	0.3914264458
+engage	log1p(crowd)	1.560490474
+engage	log1p(foes)	0.1448174406
+const	stun_cap_s	0.8333333333
+cal	win.w0	0.2815840849
+cal	win.w1	3.423491257
+cal	zoibA.t0	-0.1892517478
+cal	zoibA.t1	-0.3869368595
+cal	zoibA.t2	-0.1471884365
+cal	zoibA.t3	0.321226815
+cal	zoibA.t4	-0.4069330475
+cal	zoibA.t5	0.1690293451
+cal	zoibA.t6	1.647926685
+cal	zoibB.t0	-0.4806959438
+cal	zoibB.t1	-0.4287918192
+cal	zoibB.t2	0.2047557326
+cal	zoibB.t3	0.2758038924
+cal	zoibB.t4	-0.3752883513
+cal	zoibB.t5	0.1641228154
+cal	zoibB.t6	1.604395265
+cal	fate.t0	-1.108232
+cal	fate.t1	0.256247
+cal	fate.t2	0.380171
+cal	fate.t3	0.080529

@@ -13,7 +13,7 @@
 //! batteries' escorts (`impaler`), and, off until switched on, shooter
 //! teams (`lance`, `phantom`, `envoy`; a doctrine's spotter role, see
 //! `spotter`, sees for them), siege detachments (`tremor`,
-//! `emissary`), Ravager squads (`ravager`) and cloaked bombs
+//! `emissary`), Ravager packs (`ravager`, see `pack`) and cloaked bombs
 //! (`ghostbombs`). A file named by the `doctrines` option patches them and
 //! adds more (see `taskforce::load`).
 
@@ -46,9 +46,13 @@ pub enum Aim {
     /// Unseen to a valuable target, the core leading, then the roles that
     /// `release` charge in (bombs under an area cloak).
     Strike,
+    /// Always on the move as one body (Ravagers; see `pack`): at what it
+    /// survives, circling it under move orders instead of stopping, back to
+    /// its screen from raiders, stopping only to park for repairs.
+    Pack,
 }
 
-const AIMS: [Aim; 6] = [Aim::Assault, Aim::Artillery, Aim::Standoff, Aim::Siege, Aim::Battery, Aim::Strike];
+const AIMS: [Aim; 7] = [Aim::Assault, Aim::Artillery, Aim::Standoff, Aim::Siege, Aim::Battery, Aim::Strike, Aim::Pack];
 
 impl Aim {
     pub fn name(self) -> &'static str {
@@ -59,6 +63,7 @@ impl Aim {
             Aim::Siege => "siege",
             Aim::Battery => "battery",
             Aim::Strike => "strike",
+            Aim::Pack => "pack",
         }
     }
 
@@ -66,6 +71,78 @@ impl Aim {
         AIMS.into_iter().find(|a| a.name() == s).ok_or_else(|| {
             let names: Vec<&str> = AIMS.iter().map(|a| a.name()).collect();
             format!("aim '{s}': one of {}", names.join(", "))
+        })
+    }
+}
+
+/// How a pack runs at a target (see `pack`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attack {
+    /// Passing it on the line that brings the most guns within reach.
+    Pass,
+    /// Charging it head-on, aimed anew each conduct until close, then
+    /// ramming through: units push mobiles out of their way, and a dodging
+    /// target cannot sidestep what runs over it.
+    Charge,
+    /// Charging what moves, passing what stands.
+    Mixed,
+}
+
+const ATTACKS: [Attack; 3] = [Attack::Pass, Attack::Charge, Attack::Mixed];
+
+impl Attack {
+    pub fn name(self) -> &'static str {
+        match self {
+            Attack::Pass => "pass",
+            Attack::Charge => "charge",
+            Attack::Mixed => "mixed",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Attack, String> {
+        ATTACKS.into_iter().find(|a| a.name() == s).ok_or_else(|| {
+            let names: Vec<&str> = ATTACKS.iter().map(|a| a.name()).collect();
+            format!("attack '{s}': one of {}", names.join(", "))
+        })
+    }
+}
+
+/// How a pack judges whether a run is worth it (see `pack`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Judge {
+    /// The threat maps: the target's threat less ours no more than ours
+    /// where the pack stands.
+    Map,
+    /// The fight predictor (`military::fightsim`), asked about each
+    /// engagement along the run in turn.
+    Predictor,
+    /// The same, by the predictor's mechanics model (air, burn, death
+    /// blasts, EMP, slow, engagement odds; `fightsim::mech`).
+    Mech,
+    /// Planned by who dies (`fightsim::mech` fates): a run as a chain of
+    /// short engagements along its way, each `fate_secs` long, worth the
+    /// expected value of the enemies killed (statics `lasting` times
+    /// theirs) less our own expected losses; the best of a few targets and
+    /// of ramming or passing each wins (user, 2026-10-28).
+    Fates,
+}
+
+const JUDGES: [Judge; 4] = [Judge::Map, Judge::Predictor, Judge::Mech, Judge::Fates];
+
+impl Judge {
+    pub fn name(self) -> &'static str {
+        match self {
+            Judge::Map => "map",
+            Judge::Predictor => "predictor",
+            Judge::Mech => "mech",
+            Judge::Fates => "fates",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Judge, String> {
+        JUDGES.into_iter().find(|j| j.name() == s).ok_or_else(|| {
+            let names: Vec<&str> = JUDGES.iter().map(|j| j.name()).collect();
+            format!("judge '{s}': one of {}", names.join(", "))
         })
     }
 }
@@ -79,15 +156,29 @@ pub enum Keep {
     /// Guarding it (ZK's guard): following it, standing beside it when it
     /// stops, and striking back at what hits it: a Lance's Mace.
     Guard,
+    /// Moving with it in formation: each move it gets, shifted by a place of
+    /// their own round it (rings of 6, 12, ... `orbit` apart, on the map's
+    /// axes, so the formation slides and never turns: nobody runs round the
+    /// outside of a turn), at its pace, a little faster while behind their
+    /// place and slower while ahead. For equals, which cannot circle one of
+    /// their own: a Ravager pack. Only packs' conduct moves them (see
+    /// `pack`).
+    Formation,
+    /// Not with it: following it at `orbit` behind on its way home, a
+    /// screen of their own the force falls back to (a pack's Rippers; see
+    /// `pack`). They go for repairs alone, and do not count as rallied.
+    Trail,
 }
 
-const KEEPS: [Keep; 2] = [Keep::Orbit, Keep::Guard];
+const KEEPS: [Keep; 4] = [Keep::Orbit, Keep::Guard, Keep::Formation, Keep::Trail];
 
 impl Keep {
     pub fn name(self) -> &'static str {
         match self {
             Keep::Orbit => "orbit",
             Keep::Guard => "guard",
+            Keep::Formation => "formation",
+            Keep::Trail => "trail",
         }
     }
 
@@ -111,7 +202,7 @@ pub struct Role {
     pub want: Option<Expr>,
     /// How far from the leader they orbit.
     pub orbit: f32,
-    /// How they keep with the leader (circling it, guarding it).
+    /// How they keep with the leader (circling it, guarding it, ...).
     pub keep: Keep,
     /// A new one goes to the force with the fewest of the role, the most
     /// valuable first (true: where it does most good, as Aspis do); else
@@ -315,6 +406,49 @@ pub struct Doctrine {
     pub mark_wait_ratio: f32,
     pub mark_hold_for: f32,
     pub mark_move: f32,
+    /// How cores other than the leader keep with it (see [`Keep`]), and at
+    /// what `orbit`.
+    pub core_keep: Keep,
+    pub core_orbit: f32,
+    /// Packs (see `pack`): the cores it takes to go in, and to stay in.
+    pub cores_to_go: u32,
+    pub cores_to_stay: u32,
+    /// Packs: below `retreat_health` they park for repairs until their
+    /// cores average this (0: until back above `retreat_health`).
+    pub heal_to: f32,
+    /// Packs: a pass counts the guns that come within this share of their
+    /// reach of the target.
+    pub pass_reach: f32,
+    /// Packs: enemy raiders worth this much metal near one send it back to
+    /// its screen (0: never).
+    pub rip_value: f32,
+    /// Packs: how they run at a target.
+    pub attack: Attack,
+    /// Packs: a run begun is finished through the target before the pack
+    /// judges threat, raiders or its health again.
+    pub commit: bool,
+    /// Packs: targets, run lines and ground under more enemy porc than
+    /// `porc_share` of the pack's own threat are shunned (off: porc is
+    /// not looked at).
+    pub shun_porc: bool,
+    pub porc_share: f32,
+    /// Packs: repositioning (neither taking nor dealing damage for `quiet`
+    /// seconds) with a way home clear of threat, members below
+    /// `repair_below` health go for repairs alone (0: never).
+    pub quiet: f32,
+    pub repair_below: f32,
+    /// Packs: how a run is judged worth going on, and (the predictor) by how
+    /// much metal its expected kills must beat its expected losses.
+    pub judge: Judge,
+    pub judge_margin: f32,
+    /// Packs judged by fates: each engagement's length (s), and what a
+    /// static killed (economy, turrets) is worth over its metal.
+    pub fate_secs: f32,
+    pub lasting: f32,
+    /// It sleeps (its units fight as they would without it) until more than
+    /// this share of the armed ground units on the map are not raiders: the
+    /// game's middle (0: awake from the start; see `taskforce_wake`).
+    pub wake_share: f32,
 }
 
 impl Doctrine {
@@ -351,6 +485,24 @@ impl Doctrine {
             mark_wait_ratio: 0.0,
             mark_hold_for: 3.0,
             mark_move: 150.0,
+            core_keep: Keep::Orbit,
+            core_orbit: ORBIT,
+            cores_to_go: 0,
+            cores_to_stay: 0,
+            heal_to: 0.0,
+            pass_reach: 0.7,
+            rip_value: 0.0,
+            attack: Attack::Pass,
+            commit: false,
+            shun_porc: true,
+            porc_share: 0.0,
+            quiet: 20.0,
+            repair_below: 0.0,
+            judge: Judge::Map,
+            judge_margin: 0.0,
+            fate_secs: 5.0,
+            lasting: 1.0,
+            wake_share: 0.0,
         }
     }
 
@@ -389,7 +541,7 @@ impl Doctrine {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "name": self.name,
             "note": self.note,
             "enabled": self.enabled,
@@ -421,7 +573,32 @@ impl Doctrine {
             "mark_wait_ratio": self.mark_wait_ratio,
             "mark_hold_for": self.mark_hold_for,
             "mark_move": self.mark_move,
-        })
+        });
+        // Packs' fields (one json! with all of them overflows its recursion).
+        let pack = json!({
+            "core_keep": self.core_keep.name(),
+            "core_orbit": self.core_orbit,
+            "cores_to_go": self.cores_to_go,
+            "cores_to_stay": self.cores_to_stay,
+            "heal_to": self.heal_to,
+            "pass_reach": self.pass_reach,
+            "rip_value": self.rip_value,
+            "attack": self.attack.name(),
+            "commit": self.commit,
+            "shun_porc": self.shun_porc,
+            "porc_share": self.porc_share,
+            "quiet": self.quiet,
+            "repair_below": self.repair_below,
+            "judge": self.judge.name(),
+            "judge_margin": self.judge_margin,
+            "fate_secs": self.fate_secs,
+            "lasting": self.lasting,
+            "wake_share": self.wake_share,
+        });
+        if let (Value::Object(m), Value::Object(p)) = (&mut v, pack) {
+            m.extend(p);
+        }
+        v
     }
 
     /// Change the fields `patch` names. `roles` replaces them all (each
@@ -481,6 +658,24 @@ impl Doctrine {
                 "mark_wait_ratio" => self.mark_wait_ratio = num(k, v, 0.0, 100.0)?,
                 "mark_hold_for" => self.mark_hold_for = num(k, v, 0.0, 30.0)?,
                 "mark_move" => self.mark_move = num(k, v, 0.0, 1000.0)?,
+                "core_keep" => self.core_keep = Keep::parse(&string(k, v)?)?,
+                "core_orbit" => self.core_orbit = num(k, v, 20.0, 600.0)?,
+                "cores_to_go" => self.cores_to_go = num(k, v, 0.0, 100.0)? as u32,
+                "cores_to_stay" => self.cores_to_stay = num(k, v, 0.0, 100.0)? as u32,
+                "heal_to" => self.heal_to = num(k, v, 0.0, 1.0)?,
+                "pass_reach" => self.pass_reach = num(k, v, 0.2, 1.0)?,
+                "rip_value" => self.rip_value = num(k, v, 0.0, 1e6)?,
+                "attack" => self.attack = Attack::parse(&string(k, v)?)?,
+                "commit" => self.commit = flag(k, v)?,
+                "shun_porc" => self.shun_porc = flag(k, v)?,
+                "porc_share" => self.porc_share = num(k, v, 0.0, 10.0)?,
+                "quiet" => self.quiet = num(k, v, 1.0, 300.0)?,
+                "repair_below" => self.repair_below = num(k, v, 0.0, 1.0)?,
+                "judge" => self.judge = Judge::parse(&string(k, v)?)?,
+                "judge_margin" => self.judge_margin = num(k, v, -1e5, 1e5)?,
+                "fate_secs" => self.fate_secs = num(k, v, 1.0, 30.0)?,
+                "lasting" => self.lasting = num(k, v, 0.0, 10.0)?,
+                "wake_share" => self.wake_share = num(k, v, 0.0, 1.0)?,
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -494,6 +689,11 @@ impl Doctrine {
     pub fn check(&self, defs: &Defs, classes: &Classes) -> Result<(), String> {
         if self.core.is_empty() {
             return Err(format!("doctrine {}: no core", self.name));
+        }
+        // Only packs' conduct moves formations and screens.
+        let moved = |k: Keep| matches!(k, Keep::Formation | Keep::Trail);
+        if self.aim != Aim::Pack && (moved(self.core_keep) || self.roles.iter().any(|r| moved(r.keep))) {
+            return Err(format!("doctrine {}: keep formation or trail needs aim pack", self.name));
         }
         let known = |u: &str| {
             if u.starts_with('@') { classes.known(u) } else { defs.get(u).is_some_and(|d| d.speed() > 0.0) }
@@ -608,6 +808,23 @@ impl Doctrine {
             mark_move: self.mark_move,
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
+            core_keep: self.core_keep,
+            core_orbit: self.core_orbit,
+            cores_to_go: self.cores_to_go,
+            cores_to_stay: self.cores_to_stay,
+            heal_to: self.heal_to,
+            pass_reach: self.pass_reach,
+            rip_value: self.rip_value,
+            attack: self.attack,
+            commit: self.commit,
+            shun_porc: self.shun_porc,
+            porc_share: self.porc_share,
+            quiet: self.quiet,
+            repair_below: self.repair_below,
+            judge: self.judge,
+            judge_margin: self.judge_margin,
+            fate_secs: self.fate_secs,
+            lasting: self.lasting,
         }
     }
 }
@@ -665,9 +882,27 @@ pub struct Shape {
     pub mark_move: f32,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
+    pub core_keep: Keep,
+    pub core_orbit: f32,
+    pub cores_to_go: u32,
+    pub cores_to_stay: u32,
+    pub heal_to: f32,
+    pub pass_reach: f32,
+    pub rip_value: f32,
+    pub attack: Attack,
+    pub commit: bool,
+    pub shun_porc: bool,
+    pub porc_share: f32,
+    pub quiet: f32,
+    pub repair_below: f32,
+    pub judge: Judge,
+    pub judge_margin: f32,
+    pub fate_secs: f32,
+    pub lasting: f32,
 }
 
-/// Orbit radius of members that are in no role (extra cores).
+/// Orbit radius of members that are in no role (extra cores), unless the
+/// doctrine says (`core_orbit`).
 pub const ORBIT: f32 = 90.0;
 
 impl Default for Shape {
@@ -704,6 +939,23 @@ impl Default for Shape {
             mark_move: 150.0,
             fire_state: None,
             fire_at_radar: None,
+            core_keep: Keep::Orbit,
+            core_orbit: ORBIT,
+            cores_to_go: 0,
+            cores_to_stay: 0,
+            heal_to: 0.0,
+            pass_reach: 0.7,
+            rip_value: 0.0,
+            attack: Attack::Pass,
+            commit: false,
+            shun_porc: true,
+            porc_share: 0.0,
+            quiet: 20.0,
+            repair_below: 0.0,
+            judge: Judge::Map,
+            judge_margin: 0.0,
+            fate_secs: 5.0,
+            lasting: 1.0,
         }
     }
 }
@@ -723,13 +975,20 @@ impl Shape {
     }
 
     pub fn orbit(&self, def: Option<i32>) -> f32 {
-        self.role(def).map_or(ORBIT, |r| r.orbit)
+        self.role(def).map_or(self.core_orbit, |r| r.orbit)
     }
 
-    /// How members of this type keep with the leader: their role's way;
-    /// cores and strays circle it.
+    /// How members of this type keep with the leader: their role's way,
+    /// else the cores' (other members than roles' are cores).
     pub fn keep(&self, def: Option<i32>) -> Keep {
-        self.role(def).map_or(Keep::Orbit, |r| r.keep)
+        self.role(def).map_or(self.core_keep, |r| r.keep)
+    }
+
+    /// Whether members of this type go their own ways rather than keep
+    /// with the leader (spotters, trailing screens): not straggling, not
+    /// counted as rallied, not in the force's health.
+    pub fn own_way(&self, def: Option<i32>) -> bool {
+        self.spot(def).is_some() || self.keep(def) == Keep::Trail
     }
 
     /// A member's fire orders by its doctrine: the core's, or its role's.
@@ -862,17 +1121,82 @@ pub fn seeds() -> Vec<Doctrine> {
     impaler.engage_value = 900.0;
 
     let mut ravager = Doctrine::new("ravager");
-    ravager.note = "Rover assault: Ravagers with a Leveler per five against raiders, a composition grown \
-                    without end; it goes in at the Levelers' pace once worth 1200 and rallied."
+    ravager.note = "A Ravager pack (see `pack`), from the middle game (once most armed ground units, and most \
+                    of the enemy's, are not raiders): five or more go in as one body, in a formation that slides \
+                    with the leader's moves (60 apart: their shells go over each other), always on the move under \
+                    move orders; they charge what moves and pass over what stands on the line that brings the \
+                    most guns within 70% of their reach, finishing a run once begun; only at what the threat maps \
+                    say they survive. From raiders they fall back to their Ripper screen, which trails them \
+                    home-side at its own pace; below half health they park for repairs until 90%. Off by \
+                    default: enable=ravager (Ravagers otherwise fight in the vehicle assault squads)."
         .into();
-    ravager.enabled = false;
     ravager.core = vec!["vehassault".into()];
+    ravager.core_keep = Keep::Formation;
+    ravager.core_orbit = 60.0;
     ravager.cores_per_force = 0;
-    ravager.roles = vec![Role::escort("screen", &["vehriot"], "ceil(cores / 5)", 100.0, 0.5)];
-    ravager.pace_slowest = 0.85;
-    ravager.aim = Aim::Assault;
-    ravager.engage_value = 1200.0;
+    ravager.roles =
+        vec![Role { keep: Keep::Trail, ..Role::escort("screen", &["vehriot"], "ceil(cores / 3)", 450.0, 0.0) }];
+    ravager.aim = Aim::Pack;
+    ravager.pace = 80.0;
     ravager.muster = 0.0;
+    ravager.retreat_health = 0.5;
+    ravager.heal_to = 0.9;
+    ravager.cores_to_go = 5;
+    ravager.cores_to_stay = 3;
+    ravager.rip_value = 400.0;
+    // Charging what moves, passing what stands, committed: the best net of
+    // the scenario runs (zkgbai-runs/pack/scen: +117 (87), +127 (85) metal
+    // a scenario against uncommitted passes).
+    ravager.attack = Attack::Mixed;
+    ravager.commit = true;
+    // Porc weighed, not shunned outright (user, 2026-10-28: five Ravagers
+    // shied off from two Lotus), and the hurt sent for repairs between
+    // fights.
+    ravager.porc_share = 0.5;
+    ravager.repair_below = 0.6;
+    // Judged by fates, a dead mex or turret counts half again its metal.
+    ravager.lasting = 1.5;
+    // The middle game: once most armed ground units are not raiders (user,
+    // 2026-10-28, for the full-play test).
+    ravager.wake_share = 0.5;
+
+    // Minotaurs as Ravagers, but a pack from one (user, 2026-10-28): Ogres
+    // their screen.
+    let mut minotaur = Doctrine {
+        note: "A Minotaur pack, as the Ravagers' (see `ravager`) but one or more go in, an Ogre screen \
+               trailing. Off by default: enable=minotaur."
+            .into(),
+        core: vec!["tankassault".into()],
+        core_orbit: 75.0,
+        roles: vec![Role { keep: Keep::Trail, ..Role::escort("screen", &["tankriot"], "ceil(cores / 3)", 450.0, 0.0) }],
+        pace: 66.0,
+        cores_to_go: 1,
+        cores_to_stay: 1,
+        ..ravager.clone()
+    };
+    minotaur.name = "minotaur".into();
+
+    // Raider packs, a side experiment (user, 2026-10-28): the same conduct,
+    // no screen, awake from the start.
+    let raiders = |name: &str, unit: &str, pace: f32, orbit: f32, go: u32| Doctrine {
+        name: name.into(),
+        note: format!(
+            "A {name} pack, as the Ravagers' (see `ravager`) but awake from the start, no screen, {go} or more \
+             going in. Off by default: enable={name}."
+        ),
+        core: vec![unit.into()],
+        core_orbit: orbit,
+        roles: Vec::new(),
+        pace,
+        cores_to_go: go,
+        cores_to_stay: 2,
+        rip_value: 0.0,
+        wake_share: 0.0,
+        ..ravager.clone()
+    };
+    let scorcher = raiders("scorcher", "vehraid", 100.0, 45.0, 4);
+    let dagger = raiders("dagger", "hoverraid", 130.0, 45.0, 4);
+    let blitz = raiders("blitz", "tankheavyraid", 88.0, 55.0, 3);
 
     let mut ghostbombs = Doctrine::new("ghostbombs");
     ghostbombs.note = "An Iris cloaking bombs (orbiting within its 350 cloak, holding fire) unseen to a \
@@ -887,7 +1211,9 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.engage_value = 600.0;
     ghostbombs.muster = 90.0;
 
-    vec![felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, ghostbombs]
+    vec![
+        felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger, blitz, ghostbombs,
+    ]
 }
 
 fn string(k: &str, v: &Value) -> Result<String, String> {
@@ -966,7 +1292,7 @@ mod tests {
         // Every role takes all that come; Aspis go to the strongest ball
         // and their area shields are not gauged.
         assert!(felon.roles.iter().all(|r| r.want.is_none() && r.produce == 0.0));
-        assert!(felon.roles.iter().all(|r| r.keep == Keep::Orbit));
+        assert!(felon.roles.iter().all(|r| r.keep == Keep::Orbit) && felon.core_keep == Keep::Orbit);
         let aspis = felon.role("aspis").unwrap();
         assert!(aspis.to_strongest && !aspis.gauge && aspis.orbit == 40.0);
         assert!(felon.role("outlaws").unwrap().switch_on);
@@ -1059,17 +1385,54 @@ mod tests {
     }
 
     #[test]
-    fn ravagers_are_a_composition() {
-        // A Leveler per five Ravagers, grown without end, at the Levelers'
-        // pace, going in on value alone (no muster clock).
+    fn ravagers_are_a_pack() {
+        // Five or more go in as one body, each in a place of its own, grown
+        // without end; the Rippers trail as a screen of their own, at their
+        // own pace; parked below half health until 90%.
         let mut d = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
-        assert_eq!((d.cores_per_force, d.muster, d.pace_slowest), (0, 0.0, 0.85));
+        assert_eq!((d.aim, d.core_keep, d.cores_per_force, d.pace_slowest), (Aim::Pack, Keep::Formation, 0, 0.0));
+        assert_eq!((d.cores_to_go, d.cores_to_stay, d.retreat_health, d.heal_to), (5, 3, 0.5, 0.9));
+        assert_eq!(d.wake_share, 0.5);
+        assert_eq!((d.porc_share, d.quiet, d.repair_below), (0.5, 20.0, 0.6));
         assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
-        let Value::Object(p) = json!({"cores_per_force": 0, "pace_slowest": 0.5}) else { panic!() };
+        assert_eq!(d.role("screen").unwrap().keep, Keep::Trail);
+        let Value::Object(p) = json!({"core_keep": "orbit", "pass_reach": 0.5, "pace_slowest": 0.85}) else { panic!() };
         d.apply(&p).unwrap();
-        assert_eq!((d.cores_per_force, d.pace_slowest), (0, 0.5));
+        assert_eq!((d.core_keep, d.pass_reach, d.pace_slowest), (Keep::Orbit, 0.5, 0.85));
+        let Value::Object(p) = json!({"core_keep": "circle"}) else { panic!() };
+        assert!(d.apply(&p).is_err());
+        assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Mixed, true, true));
+        let Value::Object(p) = json!({"attack": "charge", "commit": true, "shun_porc": false}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.attack, d.commit, d.shun_porc), (Attack::Charge, true, false));
+        let Value::Object(p) = json!({"attack": "ram"}) else { panic!() };
+        assert!(d.apply(&p).is_err());
+        assert_eq!(d.judge, Judge::Map);
+        let Value::Object(p) = json!({"judge": "predictor", "judge_margin": 200}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.judge, d.judge_margin), (Judge::Predictor, 200.0));
         let Value::Object(p) = json!({"pace_slowest": 2}) else { panic!() };
         assert!(d.apply(&p).is_err());
+        // Formations and screens only move under a pack's conduct.
+        let mut felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        let Value::Object(p) = json!({"core_keep": "formation"}) else { panic!() };
+        felon.apply(&p).unwrap();
+        let defs = Defs::new(crate::military::wrappers::squad::fake_engine::callback());
+        assert!(felon.check(&defs, &Classes::default()).is_err_and(|e| e.contains("aim pack")));
+    }
+
+    #[test]
+    fn minotaurs_and_raiders_pack_too() {
+        let seeds = seeds();
+        let get = |n: &str| seeds.iter().find(|d| d.name == n).unwrap();
+        let m = get("minotaur");
+        assert_eq!((m.core[0].as_str(), m.aim, m.cores_to_go, m.cores_to_stay), ("tankassault", Aim::Pack, 1, 1));
+        assert_eq!((m.role("screen").unwrap().units[0].as_str(), m.wake_share), ("tankriot", 0.5));
+        for (n, unit, go) in [("scorcher", "vehraid", 4), ("dagger", "hoverraid", 4), ("blitz", "tankheavyraid", 3)] {
+            let d = get(n);
+            assert_eq!((d.core[0].as_str(), d.cores_to_go, d.wake_share), (unit, go, 0.0));
+            assert!(d.roles.is_empty() && d.aim == Aim::Pack && d.core_keep == Keep::Formation);
+        }
     }
 
     #[test]
