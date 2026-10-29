@@ -74,7 +74,7 @@ impl Prey {
         tactic == Tactic::Flea && matches!(self, Self::Commander | Self::Heavy)
     }
     fn can_requisition(self, tactic: Tactic) -> bool {
-        self.allows(tactic, true) && !self.needs_stun(tactic)
+        self != Self::Commander && self.allows(tactic, true) && !self.needs_stun(tactic)
     }
     fn allows(self, tactic: Tactic, stunned: bool) -> bool {
         match self {
@@ -665,10 +665,11 @@ impl Ai {
                 self.strikes.killed.clear();
             }
             if matches!(w.phase, Phase::Forming | Phase::Screening) && frame - w.job.last >= SNIPER_MEMORY {
+                let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
                 if let Some(j) = self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
                     !self.strike_cooling(j.pos)
                         && self.strike_suitable(w.tactic, j, w.home)
-                        && (!j.prey.needs_stun(w.tactic) || w.members.len() >= j.size(w.tactic, 1.0))
+                        && (j.production_pays(w.tactic, cost) || w.members.len() >= j.size(w.tactic, cost))
                 }) {
                     self.log(&format!(
                         "strikes: waiting {} wave switches to fresh {} activity",
@@ -857,18 +858,14 @@ impl Ai {
             && (w.members.iter().all(|id| self.fighters.get(id).is_none_or(|f| distance(f.get_pos(), w.home) < 450.0))
                 || frame - w.since > JOB_MEMORY)
         {
-            if let Some(j) = self
-                .strike_jobs(SNIPER_MEMORY)
-                .into_iter()
-                .find(|j| !self.strike_cooling(j.pos) && self.strike_suitable(w.tactic, j, w.home))
-            {
-                let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
+            let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
+            if let Some(j) = self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
+                !self.strike_cooling(j.pos)
+                    && self.strike_suitable(w.tactic, j, w.home)
+                    && (j.production_pays(w.tactic, cost) || w.members.len() >= j.size(w.tactic, cost))
+            }) {
                 let needed = j.size(w.tactic, cost);
                 if needed <= MAX_WAVE {
-                    if j.prey.needs_stun(w.tactic) && w.members.len() < needed {
-                        self.strikes_release(w);
-                        return;
-                    }
                     w.job = j;
                     w.needed = needed;
                     w.phase = Phase::Forming;
@@ -1058,11 +1055,28 @@ mod tests {
     }
 
     #[test]
-    fn commanders_never_requisition_fleas_even_when_a_widow_is_expected() {
-        assert!(!Prey::Commander.can_requisition(Tactic::Flea));
+    fn commanders_never_requisition_any_strike_tactic() {
+        let commander = Job {
+            id: Some(1),
+            pos: Vec3::ZERO,
+            last: 0,
+            count: 1,
+            value: 1200.0,
+            name: "dyntrainer_recon_base".into(),
+            prey: Prey::Commander,
+        };
+        for tactic in [Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea, Tactic::Scythe] {
+            assert!(!Prey::Commander.can_requisition(tactic));
+            assert!(!commander.production_pays(tactic, 30.0));
+            assert!(Prey::GlassCannon.can_requisition(tactic));
+        }
         assert!(!Prey::Heavy.can_requisition(Tactic::Flea));
-        assert!(Prey::GlassCannon.can_requisition(Tactic::Flea));
-        assert!(Prey::Commander.can_requisition(Tactic::Halberd));
+        // Only procurement is forbidden: an existing Dirtbag/Halberd force
+        // can still commit, and existing Fleas still need paralysis.
+        assert!(Prey::Commander.allows(Tactic::Dirtbag, false));
+        assert!(Prey::Commander.allows(Tactic::Halberd, false));
+        assert!(!Prey::Commander.allows(Tactic::Flea, false));
+        assert!(Prey::Commander.allows(Tactic::Flea, true));
     }
 
     #[test]

@@ -9,6 +9,12 @@ returning; without one they rejoin normal assault squads. Operator-controlled
 squads and QRF members are excluded from recruitment. Strike units have no
 ordinary retreat handler while committed.
 
+Commanders never requisition strike units, regardless of tactic or paralysis.
+They are opportunities for an already available full wave only; neither an early
+sighting nor a waiting/returning wave can start commander-driven production.
+Halberds and Dirtbags can use such opportunities without a stun; Fleas still
+require one.
+
 While Phantom evidence remains within the three-minute memory, an existing hover
 factory also requisitions one Halberd every 30 seconds, topping up to 5–10 owned
 Halberds even without a launchable job or during a strike cooldown. Existing
