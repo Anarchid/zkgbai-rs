@@ -202,14 +202,17 @@ impl Ai {
         }
         self.log(&format!(
             "missiles: silo at ({:.0}, {:.0}), {:.0} Eos/Shockley payoff ({} targets); \
-             {:.0} static metal in reach ({:.1}%, density {:.0} metal/Melmo²); {}",
+             {:.0} static metal in reach ({:.1}%); battlefield density {:.0}, \
+             coverage trigger needs >{:.0} metal/Melmo² (laneness {:.2}); {}",
             site.x,
             site.z,
             choice.payoff,
             choice.targets,
             choice.coverage.value,
             100.0 * choice.coverage.share,
-            choice.coverage.density,
+            choice.siege.density,
+            choice.siege.threshold,
+            choice.siege.laneness,
             if threatened { "waiting for completed lasers, flak and shield" } else { "summoning constructors" }
         ));
     }
