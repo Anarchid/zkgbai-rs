@@ -24,7 +24,7 @@ pub struct MiscHandler {
     pub arties: BTreeSet<i32>,
     /// Fighter-store ids.
     pub krows: BTreeSet<i32>,
-    sappers: BTreeMap<i32, Unit>,
+    pub sappers: BTreeMap<i32, Unit>,
     berthas: BTreeMap<i32, Unit>,
     /// Swifts waiting for enough company before scouting.
     swifts: BTreeMap<i32, Unit>,

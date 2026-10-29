@@ -158,6 +158,9 @@ pub struct Jaegers {
     forming: BTreeMap<&'static str, SquadId>,
     /// Jaegers ordered from factories, and when.
     ordered: Vec<(&'static str, i32)>,
+    /// Jaegers out of squads on their own (a Skuttle that jumped when
+    /// shown), until a frame.
+    held: BTreeMap<i32, i32>,
 }
 
 impl Ai {
@@ -237,6 +240,7 @@ impl Ai {
 
     pub fn jaeger_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
+        self.jaegers.held.remove(&id);
         if self.jaegers.members.remove(&id) {
             self.jaeger_leave_squad(id);
             self.fighters.remove(&id);
@@ -245,6 +249,16 @@ impl Ai {
 
     pub fn jaeger_enemy_destroyed(&mut self, id: i32) {
         self.jaegers.seen.remove(&id);
+    }
+
+    /// Jaeger `id` (a fighter-store id; others are let be) leaves its squad
+    /// and stays out of squads for `frames`, to act on its own. Call it
+    /// before ordering the unit: a squad's leader leaving is stopped.
+    pub fn jaeger_hold(&mut self, id: i32, frames: i32) {
+        if self.jaegers.members.contains(&id) {
+            self.jaeger_leave_squad(id);
+            self.jaegers.held.insert(id, self.frame + frames);
+        }
     }
 
     fn jaeger_leave_squad(&mut self, id: i32) {
@@ -297,6 +311,8 @@ impl Ai {
     /// squads left empty.
     fn jaeger_muster(&mut self) {
         let team = self.team_id;
+        let frame = self.frame;
+        self.jaegers.held.retain(|_, &mut until| frame < until);
         let ids: Vec<i32> = self.jaegers.members.iter().copied().collect();
         for id in ids {
             let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else {
@@ -311,7 +327,7 @@ impl Ai {
                 self.jaeger_leave_squad(id);
                 continue;
             }
-            if self.fighters.get(&id).is_some_and(|f| f.squad.is_some()) {
+            if self.fighters.get(&id).is_some_and(|f| f.squad.is_some()) || self.jaegers.held.contains_key(&id) {
                 continue;
             }
             let Some(kind) = kind_of(self.defs.name_of(unit)) else { continue };
@@ -534,13 +550,15 @@ impl Ai {
     fn jaeger_strike(&mut self, sid: SquadId, target: Unit, all: bool) {
         let Some(s) = self.squads.get(sid) else { return };
         let frame = self.frame;
-        let strikers: Vec<Unit> = (s.fighters.iter().filter_map(|id| self.fighters.get(id)))
-            .filter(|f| all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame)))
-            .map(|f| f.unit)
+        let strikers: Vec<(Unit, bool)> = (s.fighters.iter().filter_map(|id| self.fighters.get(id)))
+            .map(|f| (f.unit, all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame))))
             .collect();
-        for unit in strikers {
-            // Skuttles jump the last stretch onto it (see `jumps`).
-            if !self.jump_strike(unit, target, NULLPOS, "skuttle") {
+        for (unit, free) in strikers {
+            if self.defs.name_of(unit) == "jumpbomb" {
+                // Skuttles jump onto it, all of them each time, and never
+                // walk up (see `jumps`).
+                self.skuttle_strike(unit, target);
+            } else if free {
                 unit.attack(target, 0);
             }
         }

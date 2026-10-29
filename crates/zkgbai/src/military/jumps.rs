@@ -11,8 +11,13 @@
 //! first stretch of its way home: over the chasers, often over a cliff),
 //! Jacks jumping onto a target worth it, Pyros into a clump of light
 //! units, Jugglenauts into a crowd (the landing hits 1000 in 340), and
-//! Skuttles onto their heavy (see `jaeger`). Jugglenauts pull with their
-//! gravity guns and push while they retreat, throwing chasers off.
+//! Skuttles onto their heavy (see `jaeger`). A Skuttle shown against its
+//! will (an enemy near, or hit) jumps at once: onto the best blast in
+//! reach, or else away from what shows it. Skuttles never walk up to
+//! their mark: the blast (90) is short of the decloak (180), so one
+//! walking in is seen and shot for nothing. Jugglenauts
+//! pull with their gravity guns and push while they retreat, throwing
+//! chasers off.
 
 use std::collections::BTreeMap;
 
@@ -87,6 +92,40 @@ const ALONGSIDE: f32 = 160.0;
 /// Engine move and attack-move orders (ZK's raw move is `cmd::RAW_MOVE`).
 const CMD_MOVE: i32 = 10;
 const CMD_FIGHT: i32 = 16;
+const CMD_ATTACK: i32 = 20;
+
+/// A Skuttle's death blast (`jumpbomb_DEATH`): 8002 within 90 (half the
+/// def's areaOfEffect) of what it hits, 40% of it at the rim
+/// (edgeEffectiveness).
+const BLAST: f32 = 8002.4;
+const BLAST_RADIUS: f32 = 90.0;
+const BLAST_EDGE: f32 = 0.4;
+
+/// Anything this close shows a Skuttle (`minCloakDistance` 180, from mid
+/// positions in 3D, and some for our stale view of the enemy).
+const SHOWN_NEAR: f32 = 220.0;
+
+/// Energy in store below which a Skuttle's cloak (15 a second moving)
+/// may have dropped for want of upkeep rather than for an enemy.
+const UPKEEP_DRY: f32 = 150.0;
+
+/// A shown Skuttle (550 metal) jumps onto a blast that kills this much
+/// more enemy metal than ours; this much once it is half dead.
+const SKUTTLE_WORTH: f32 = 300.0;
+const SKUTTLE_WORTH_HURT: f32 = 100.0;
+
+/// A Skuttle that cannot jump onto its mark yet waits this far from it:
+/// in jump reach (368), beyond the mark's decloak (180) and some.
+const SKUTTLE_STANDOFF: f32 = 280.0;
+
+/// A shown Skuttle jumping away lands as far as this from the enemies it
+/// knows of, at best (farther is no better).
+const SKUTTLE_CLEAR: f32 = 600.0;
+
+/// A Skuttle that jumped on its own stays out of its squad this long: the
+/// flight (about 2.5 s), the cloak's 1.5 s linger after the last enemy,
+/// and some.
+const SKUTTLE_HOLD: i32 = 30 * 6;
 
 /// What a def's jumps are like (from its custom params).
 #[derive(Clone, Copy, Debug)]
@@ -137,6 +176,11 @@ pub struct Jumps {
     /// taken rose (or fell, below 0).
     pub dropped: u32,
     way_rises: Vec<f32>,
+    /// Our Skuttles: whether each was cloaked at the last check, and its
+    /// health then.
+    skuttles: BTreeMap<i32, (bool, f32)>,
+    /// Skuttles seen losing their cloak since the summary.
+    pub shown: u32,
 }
 
 fn param(ud: UnitDef, key: &str) -> Option<f32> {
@@ -186,6 +230,16 @@ pub fn arc_clear(ground: impl Fn(f32, f32) -> f32, height: f32, from: Vec3, to: 
 /// Ground position of `p` on the live map.
 fn ground(ai: &Ai, p: Vec3) -> Vec3 {
     Vec3::new(p.x, ai.cb.map().elevation_at(p.x, p.z), p.z)
+}
+
+/// Damage of a Skuttle's blast to a unit of radius `r` whose middle is
+/// `d` from it (the engine measures to the unit's surface).
+fn blast_damage(d: f32, r: f32) -> f32 {
+    let d = (d - r).max(0.0);
+    if d >= BLAST_RADIUS {
+        return 0.0;
+    }
+    BLAST * (BLAST_RADIUS - d) / (BLAST_RADIUS - d * BLAST_EDGE)
 }
 
 impl Ai {
@@ -281,23 +335,53 @@ impl Ai {
     /// position, when it is out of sight) and attack it on landing, if it
     /// can now and it is in reach; `why` is counted.
     pub fn jump_strike(&mut self, unit: Unit, target: Unit, known: Vec3, why: &str) -> bool {
-        let Some(jd) = self.jump_ready(unit) else { return false };
+        let Some(to) = self.jump_strike_landing(unit, target, known) else { return false };
+        self.jump_order(unit, to, why);
+        unit.attack(target, OPTION_SHIFT_KEY);
+        true
+    }
+
+    /// Where `unit` would land jumping onto `target` (see `jump_strike`),
+    /// if it can now and that is in reach.
+    fn jump_strike_landing(&mut self, unit: Unit, target: Unit, known: Vec3) -> Option<Vec3> {
+        let jd = self.jump_ready(unit)?;
         let seen = target.pos();
         let at = if seen == NULLPOS || (seen.x == 0.0 && seen.z == 0.0) { known } else { seen };
         let from = unit.pos();
         if at == NULLPOS {
-            return false;
+            return None;
         }
         let lead = Self::jump_flight(jd, distance(from, at)) * 0.5;
         let v = target.vel();
         let to = Vec3::new(at.x + (v.x * lead).clamp(-150.0, 150.0), at.y, at.z + (v.z * lead).clamp(-150.0, 150.0));
         let d = distance(from, to);
-        if !(MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d) || !self.jump_clear(jd, from, to) {
-            return false;
+        ((MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d) && self.jump_clear(jd, from, to)).then_some(to)
+    }
+
+    /// A Skuttle strikes `target`: it jumps onto it once it can, else
+    /// waits in jump reach and out of the mark's sight (walking up it would
+    /// be seen and shot short of its blast); one already on top of it goes
+    /// off.
+    pub fn skuttle_strike(&mut self, unit: Unit, target: Unit) {
+        if unit.rules_param_float("is_jumping", 0.0) == 1.0 || self.jump_strike(unit, target, NULLPOS, "skuttle") {
+            return;
         }
-        self.jump_order(unit, to, why);
-        unit.attack(target, OPTION_SHIFT_KEY);
-        true
+        let (pos, at) = (unit.pos(), target.pos());
+        if at == NULLPOS || (at.x == 0.0 && at.z == 0.0) {
+            return;
+        }
+        let d = distance(pos, at);
+        if d < MIN_ENGAGE * 0.5 {
+            if unit.current_commands().first().map(|c| c.id()) != Some(CMD_ATTACK) {
+                unit.attack(target, 0);
+            }
+            return;
+        }
+        let k = SKUTTLE_STANDOFF / d.max(1.0);
+        let stand = Vec3::new(at.x + (pos.x - at.x) * k, 0.0, at.z + (pos.z - at.z) * k);
+        if distance(pos, stand) > 40.0 {
+            kgb_move_to(unit, stand, 0, self.frame);
+        }
     }
 
     /// Jump `unit` to `to` if it can now, `to` is in reach and the arc is
@@ -421,6 +505,7 @@ impl Ai {
         self.jumps.last.remove(&unit.id());
         self.jumps.sumos.remove(&unit.id());
         self.jumps.takeoff.remove(&unit.id());
+        self.jumps.skuttles.remove(&unit.id());
         self.pathfinder.jump_plans.remove(&unit.id());
     }
 
@@ -500,12 +585,12 @@ impl Ai {
         for (def, n, ms) in std::mem::take(&mut self.pathfinder.jump_link_builds) {
             self.log(&format!("jumps: {n} jump links for the ways of {def} ({ms:.0} ms)"));
         }
-        if frame % 1800 == (self.offset + 17) % 1800 && self.jumps.total > 0 {
+        if frame % 1800 == (self.offset + 17) % 1800 && (self.jumps.total > 0 || self.jumps.shown > 0) {
             let counts: Vec<String> = self.jumps.counts.iter().map(|(k, n)| format!("{k} {n}")).collect();
             let rises: Vec<String> = self.jumps.way_rises.iter().map(|r| format!("{r:+.0}")).collect();
             self.log(&format!(
                 "jumps: {} in the last minute ({} flew, {} replaced, {} never queued, {} stalled, {} dropped from \
-                 ways): {}{}",
+                 ways): {}{}{}",
                 self.jumps.total,
                 self.jumps.flew,
                 self.jumps.replaced,
@@ -513,7 +598,8 @@ impl Ai {
                 self.jumps.stalled,
                 self.jumps.dropped,
                 counts.join(", "),
-                if rises.is_empty() { String::new() } else { format!("; ways rose {}", rises.join(" ")) }
+                if rises.is_empty() { String::new() } else { format!("; ways rose {}", rises.join(" ")) },
+                if self.jumps.shown == 0 { String::new() } else { format!("; Skuttles shown {}", self.jumps.shown) }
             ));
             self.jumps.way_rises.clear();
             self.jumps.counts.clear();
@@ -523,6 +609,7 @@ impl Ai {
             self.jumps.refused = 0;
             self.jumps.stalled = 0;
             self.jumps.dropped = 0;
+            self.jumps.shown = 0;
         }
         self.jumps_watch(frame);
         if frame % PERIOD != (self.offset + 5) % PERIOD || self.dev_off("jumps") {
@@ -530,6 +617,15 @@ impl Ai {
         }
         self.jumps_follow_ways(frame);
         self.jumps_sumo_gravity();
+        // Skuttles: jaegers, and the odd one left to the sappers;
+        // retreating too.
+        let skuttles: Vec<Unit> = (self.fighters.values().map(|f| f.unit))
+            .chain(self.misc_handler.sappers.values().copied())
+            .filter(|&u| self.defs.name_of(u) == "jumpbomb")
+            .collect();
+        for unit in skuttles {
+            self.jumps_skuttle(unit);
+        }
         let ids: Vec<(i32, Unit)> = self.fighters.iter().map(|(&id, f)| (id, f.unit)).collect();
         for (id, unit) in ids {
             if self.retreat_handler.is_retreating(id) {
@@ -721,6 +817,175 @@ impl Ai {
             }
         }
     }
+    /// A Skuttle shown against its will jumps at once if it can (jumps are
+    /// silent and keep the cloak): onto the best blast in reach if that is
+    /// worth it, else away from what shows it. Shown with nothing near, no
+    /// hit and the energy store near empty (its upkeep ran dry), it walks
+    /// on.
+    fn jumps_skuttle(&mut self, unit: Unit) {
+        let id = unit.id();
+        if unit.is_being_built() || unit.health() <= 0.0 {
+            return;
+        }
+        let (cloaked, health) = (unit.is_cloaked(), unit.health());
+        let (was_cloaked, was_health) = self.jumps.skuttles.insert(id, (cloaked, health)).unwrap_or((true, health));
+        if cloaked || unit.rules_param_float("is_jumping", 0.0) == 1.0 {
+            return;
+        }
+        if was_cloaked {
+            self.jumps.shown += 1;
+        }
+        let frame = self.frame;
+        let hit = health < was_health - 1.0;
+        let pos = unit.pos();
+        // What showed it: an enemy close enough to (the Skuttle sees 330,
+        // so whatever is within its decloak is in its own sight), a hit,
+        // or else something it cannot see (a cloaked enemy) unless its
+        // upkeep ran dry. (Guns that reach it from farther are not known:
+        // it is myopic, and spotters are seldom about.)
+        let near = (self.war.targets.values())
+            .filter(|e| !e.is_dead && frame - e.last_seen <= FRESH && distance(e.position, pos) <= SHOWN_NEAR)
+            .map(|e| (distance(e.position, pos), e))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(d, e)| (d, e.ud.map_or("radar dot", |u| self.defs.name(u))));
+        let dry = self.eco.energy + self.eco.energy_reserve < UPKEEP_DRY;
+        if near.is_none() && !hit && dry {
+            return;
+        }
+        let shown_by = match near {
+            Some((d, name)) => format!("{name} at {d:.0}{}", if hit { ", hit" } else { "" }),
+            None if hit => "a hit".to_owned(),
+            None => "nothing in sight".to_owned(),
+        };
+        let Some(jd) = self.jump_ready(unit) else {
+            if was_cloaked {
+                self.log(&format!(
+                    "jumps: Skuttle {id} shown at ({:.0}, {:.0}) by {shown_by}, its jump not ready",
+                    pos.x, pos.z
+                ));
+            }
+            return;
+        };
+        let reach = jd.range * REACH;
+
+        // Onto the best blast in reach (a moving target is led, so a bit
+        // beyond reach may land in it).
+        let mut best: Option<(f32, Unit, Vec3, String)> = None;
+        for e in self.war.targets.values() {
+            let fresh = frame - e.last_seen <= FRESH || e.is_static;
+            if e.is_dead || !e.identified || e.can_fly() || !fresh || distance(pos, e.position) > reach + 40.0 {
+                continue;
+            }
+            let worth = self.skuttle_blast_worth(e.position, id);
+            if best.as_ref().is_none_or(|b| worth > b.0) {
+                best = Some((worth, e.unit, e.position, e.ud.map_or(String::new(), |u| self.defs.name(u).to_owned())));
+            }
+        }
+        let need = if health < 0.5 * unit.max_health() { SKUTTLE_WORTH_HURT } else { SKUTTLE_WORTH };
+        if let Some((worth, target, at, name)) = best.clone().filter(|b| b.0 >= need) {
+            let close = distance(pos, at) < MIN_ENGAGE * 0.5;
+            let landing = if close { None } else { self.jump_strike_landing(unit, target, at) };
+            if close || landing.is_some() {
+                // Out of its squad first: a leader leaving is stopped.
+                self.jaeger_hold(id, SKUTTLE_HOLD);
+                match landing {
+                    Some(to) => {
+                        self.jump_order(unit, to, "skuttle shown: onto");
+                        unit.attack(target, OPTION_SHIFT_KEY);
+                    }
+                    None => {
+                        if unit.current_commands().first().map(|c| c.id()) != Some(CMD_ATTACK) {
+                            unit.attack(target, 0);
+                        }
+                    }
+                }
+                self.log(&format!(
+                    "jumps: Skuttle {id} shown at ({:.0}, {:.0}) by {shown_by} {} {name} at ({:.0}, {:.0}): {worth:.0} \
+                     metal more theirs than ours in the blast",
+                    pos.x,
+                    pos.z,
+                    if close { "goes off on" } else { "jumps onto" },
+                    at.x,
+                    at.z
+                ));
+                return;
+            }
+        }
+
+        // Away: the landing farthest from the enemies we know of, out of
+        // their threat, toward home.
+        let enemies: Vec<Vec3> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && (frame - e.last_seen <= FRESH || e.is_static))
+            .filter(|e| distance(e.position, pos) <= reach + SKUTTLE_CLEAR)
+            .map(|e| e.position)
+            .collect();
+        let haven = self.graph_get_closest_haven(pos);
+        let def = unit.def();
+        let mut away: Option<(f32, Vec3, f32)> = None;
+        for k in 0..16 {
+            let a = k as f32 * std::f32::consts::TAU / 16.0;
+            for frac in [1.0, 0.75, 0.5] {
+                let to = ground(self, Vec3::new(pos.x + a.cos() * reach * frac, 0.0, pos.z + a.sin() * reach * frac));
+                if !self.jump_clear(jd, pos, to) {
+                    continue;
+                }
+                let clear = enemies.iter().map(|&p| distance(p, to)).fold(SKUTTLE_CLEAR, f32::min);
+                let threat = if self.war.view(def).get_threat(to) > 0.0 { 300.0 } else { 0.0 };
+                let home = if haven == NULLPOS { 0.0 } else { distance(pos, haven) - distance(to, haven) };
+                let score = clear - threat + 0.25 * home;
+                if away.is_none_or(|b| score > b.0) {
+                    away = Some((score, to, clear));
+                }
+            }
+        }
+        match away {
+            Some((_, to, clear)) => {
+                self.jaeger_hold(id, SKUTTLE_HOLD);
+                self.jump_order(unit, to, "skuttle shown: away");
+                self.log(&format!(
+                    "jumps: Skuttle {id} shown at ({:.0}, {:.0}) by {shown_by} jumps away to ({:.0}, {:.0}), {clear:.0} \
+                     from the nearest enemy{}",
+                    pos.x,
+                    pos.z,
+                    to.x,
+                    to.z,
+                    best.as_ref().map_or(String::new(), |b| format!(" (best blast {:.0})", b.0))
+                ));
+            }
+            None if was_cloaked => {
+                self.log(&format!(
+                    "jumps: Skuttle {id} shown at ({:.0}, {:.0}) by {shown_by} has nowhere to jump",
+                    pos.x, pos.z
+                ));
+            }
+            None => {}
+        }
+    }
+
+    /// Enemy metal a Skuttle's blast at `c` kills, less ours and our
+    /// allies' (a Skuttle of ours there goes off too) but Skuttle `me`.
+    fn skuttle_blast_worth(&self, c: Vec3, me: i32) -> f32 {
+        let r = BLAST_RADIUS + 60.0;
+        let frame = self.frame;
+        let theirs: f32 = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.identified && !e.can_fly() && (frame - e.last_seen <= FRESH || e.is_static))
+            .filter(|e| distance(e.position, c) <= r)
+            .filter_map(|e| {
+                let ud = e.ud?;
+                let dmg = blast_damage(distance(e.position, c), ud.radius());
+                Some(ud.cost(self.metal) * (dmg / e.current_health().max(1.0)).min(1.0))
+            })
+            .sum();
+        let ours: f32 = (self.cb.friendly_units_in(c, r).iter())
+            .filter(|u| u.id() != me && u.health() > 0.0)
+            .filter_map(|u| {
+                let ud = u.def()?;
+                let dmg = blast_damage(distance(u.pos(), c), ud.radius());
+                Some(ud.cost(self.metal) * (dmg / u.health()).min(1.0))
+            })
+            .sum();
+        theirs - ours
+    }
 }
 
 #[cfg(test)]
@@ -735,5 +1000,15 @@ mod tests {
         assert!(near < far);
         // A full Pyro-like jump takes a couple of seconds.
         assert!((60.0..120.0).contains(&far), "{far}");
+    }
+
+    #[test]
+    fn skuttle_blasts_fall_off_to_the_rim() {
+        // On top of a Grizzly-sized unit: all of it; at its surface's rim:
+        // nothing; halfway: most (edgeEffectiveness 0.4).
+        assert_eq!(blast_damage(10.0, 30.0), BLAST);
+        assert_eq!(blast_damage(30.0 + BLAST_RADIUS, 30.0), 0.0);
+        let half = blast_damage(30.0 + BLAST_RADIUS / 2.0, 30.0);
+        assert!((0.6 * BLAST..0.65 * BLAST).contains(&half), "{half}");
     }
 }
