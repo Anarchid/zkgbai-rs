@@ -422,6 +422,9 @@ pub struct Doctrine {
     /// Packs: enemy raiders worth this much metal near one send it back to
     /// its screen (0: never).
     pub rip_value: f32,
+    /// Local sweep radius (zero disables it) and minimum cluster value.
+    pub sweep: f32,
+    pub sweep_min: f32,
     /// Packs: how they run at a target.
     pub attack: Attack,
     /// Packs: a run begun is finished through the target before the pack
@@ -492,6 +495,8 @@ impl Doctrine {
             heal_to: 0.0,
             pass_reach: 0.7,
             rip_value: 0.0,
+            sweep: 0.0,
+            sweep_min: 100.0,
             attack: Attack::Pass,
             commit: false,
             shun_porc: true,
@@ -583,6 +588,8 @@ impl Doctrine {
             "heal_to": self.heal_to,
             "pass_reach": self.pass_reach,
             "rip_value": self.rip_value,
+            "sweep": self.sweep,
+            "sweep_min": self.sweep_min,
             "attack": self.attack.name(),
             "commit": self.commit,
             "shun_porc": self.shun_porc,
@@ -665,6 +672,8 @@ impl Doctrine {
                 "heal_to" => self.heal_to = num(k, v, 0.0, 1.0)?,
                 "pass_reach" => self.pass_reach = num(k, v, 0.2, 1.0)?,
                 "rip_value" => self.rip_value = num(k, v, 0.0, 1e6)?,
+                "sweep" => self.sweep = num(k, v, 0.0, 5000.0)?,
+                "sweep_min" => self.sweep_min = num(k, v, 0.0, 1e5)?,
                 "attack" => self.attack = Attack::parse(&string(k, v)?)?,
                 "commit" => self.commit = flag(k, v)?,
                 "shun_porc" => self.shun_porc = flag(k, v)?,
@@ -815,6 +824,8 @@ impl Doctrine {
             heal_to: self.heal_to,
             pass_reach: self.pass_reach,
             rip_value: self.rip_value,
+            sweep: self.sweep,
+            sweep_min: self.sweep_min,
             attack: self.attack,
             commit: self.commit,
             shun_porc: self.shun_porc,
@@ -889,6 +900,9 @@ pub struct Shape {
     pub heal_to: f32,
     pub pass_reach: f32,
     pub rip_value: f32,
+    /// Local sweep radius (zero disables it) and minimum cluster value.
+    pub sweep: f32,
+    pub sweep_min: f32,
     pub attack: Attack,
     pub commit: bool,
     pub shun_porc: bool,
@@ -946,6 +960,8 @@ impl Default for Shape {
             heal_to: 0.0,
             pass_reach: 0.7,
             rip_value: 0.0,
+            sweep: 0.0,
+            sweep_min: 100.0,
             attack: Attack::Pass,
             commit: false,
             shun_porc: true,
@@ -1154,7 +1170,9 @@ pub fn seeds() -> Vec<Doctrine> {
     // fights.
     ravager.porc_share = 0.5;
     ravager.repair_below = 0.6;
-    // Judged by fates, a dead mex or turret counts half again its metal.
+    // Clear nearby value before taking the global picker's next destination.
+    ravager.sweep = 1500.0;
+    // In the sweep and fates judge, a dead mex or turret counts half again its metal.
     ravager.lasting = 1.5;
     // The middle game: once most armed ground units are not raiders (user,
     // 2026-10-28, for the full-play test).
@@ -1393,6 +1411,10 @@ mod tests {
         assert_eq!((d.aim, d.core_keep, d.cores_per_force, d.pace_slowest), (Aim::Pack, Keep::Formation, 0, 0.0));
         assert_eq!((d.cores_to_go, d.cores_to_stay, d.retreat_health, d.heal_to), (5, 3, 0.5, 0.9));
         assert_eq!(d.wake_share, 0.5);
+        assert_eq!((d.sweep, d.sweep_min, d.lasting), (1500.0, 100.0, 1.5));
+        let Value::Object(p) = json!({"sweep": 0, "sweep_min": 250}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.sweep, d.sweep_min), (0.0, 250.0));
         assert_eq!((d.porc_share, d.quiet, d.repair_below), (0.5, 20.0, 0.6));
         assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
         assert_eq!(d.role("screen").unwrap().keep, Keep::Trail);

@@ -56,7 +56,7 @@ use std::sync::Arc;
 
 use springai::{Unit, UnitDef, Vec3};
 
-use super::{Attack, Judge};
+use super::{Attack, Judge, Shape};
 use crate::Ai;
 use crate::kgbutil::PathCost;
 use crate::military::SquadId;
@@ -110,6 +110,10 @@ const BULK_MORE: usize = 2;
 const SPACING: f32 = 250.0;
 /// The next target is looked for from this far ahead of the leader.
 const LOOK_AHEAD: f32 = 250.0;
+/// Enemy value within this radius contributes to a sweep candidate.
+const SWEEP_CLUSTER: f32 = 250.0;
+/// Prevent a nearly coincident candidate from winning on distance alone.
+const SWEEP_PAD: f32 = 300.0;
 /// A target is kept while an enemy remains within this of it...
 const TARGET_LEFT: f32 = 300.0;
 /// ...for up to this many frames (45 s).
@@ -580,13 +584,26 @@ impl Ai {
             st.passes = 0;
             let ahead = Vec3::xz(pos.x + head.0 * LOOK_AHEAD, pos.z + head.1 * LOOK_AHEAD);
             let mut shun: Vec<Vec3> = st.shun.iter().map(|s| s.0).collect();
+            let pick = |ai: &mut Ai, shun: &[Vec3]| {
+                ai.pack_sweep(leader, pos, porc_cap, fthreat, shun, &shape, predictor)
+                    .map(|(t, value)| (t, Some(value)))
+                    .unwrap_or_else(|| (ai.war_best_target_shunning(leader, ahead, false, porc_cap, shun).0, None))
+            };
+            let mut near_value = None;
             // Judged by fates: the best run of a few targets, each rammed or
             // passed, by what it should kill less what it should lose.
             if fates {
-                let mut best: Option<(Vec3, bool, Judgement, Vec<Value>)> = None;
+                struct JudgedRun {
+                    target: Vec3,
+                    ram: bool,
+                    judgement: Judgement,
+                    detail: Vec<Value>,
+                    near_value: Option<f32>,
+                }
+                let mut best: Option<JudgedRun> = None;
                 let mut tried = Vec::new();
                 for _ in 0..FATE_CANDIDATES {
-                    let (t, _) = self.war_best_target_shunning(leader, ahead, false, porc_cap, &shun);
+                    let (t, value) = pick(self, &shun);
                     if t == NULLPOS {
                         break;
                     }
@@ -594,13 +611,16 @@ impl Ai {
                     tried.push(t);
                     for ram in [true, false] {
                         let Some((j, detail)) = self.pack_fates(sid, &pack_route(pos, t), ram) else { continue };
-                        if best.as_ref().is_none_or(|b| j.worth() > b.2.worth()) {
-                            best = Some((t, ram, j, detail));
+                        if best.as_ref().is_none_or(|b| j.worth() > b.judgement.worth()) {
+                            best = Some(JudgedRun { target: t, ram, judgement: j, detail, near_value: value });
                         }
                     }
                 }
                 match best {
-                    Some((t, ram, j, detail)) if j.worth() >= shape.judge_margin => {
+                    Some(JudgedRun { target: t, ram, judgement: j, detail, near_value: value })
+                        if j.worth() >= shape.judge_margin =>
+                    {
+                        near_value = value;
                         let verdict = if ram { "rams" } else { "passes" };
                         self.pack_log_judgement(sid, t, &j, verdict);
                         self.pack_emit_judgement(sid, t, &j, detail, verdict);
@@ -610,7 +630,7 @@ impl Ai {
                         st.mobile = self.pack_target_left(t).is_some_and(|l| l.1);
                     }
                     best => {
-                        if let Some((t, _, j, detail)) = best {
+                        if let Some(JudgedRun { target: t, judgement: j, detail, .. }) = best {
                             self.pack_log_judgement(sid, t, &j, "passes up");
                             self.pack_emit_judgement(sid, t, &j, detail, "passes up");
                         }
@@ -626,10 +646,12 @@ impl Ai {
                     }
                 }
             }
-            let (t, _) = if fates {
-                (st.target, 0.0)
+            let t = if fates {
+                st.target
             } else {
-                self.war_best_target_shunning(leader, ahead, false, porc_cap, &shun)
+                let (target, value) = pick(self, &shun);
+                near_value = value;
+                target
             };
             if t == NULLPOS {
                 st.target = NULLPOS;
@@ -666,8 +688,9 @@ impl Ai {
                 st.since = self.frame;
                 st.mobile = self.pack_target_left(t).is_some_and(|l| l.1);
             }
+            let how = near_value.map_or("by the global picker".to_owned(), |v| format!("swept, {v:.0} near it"));
             self.log(&format!(
-                "taskforce: the {doctrine} pack (squad {sid}) dives ({:.0}, {:.0}), {:.0} away, {} cores at {:.0}%",
+                "taskforce: the {doctrine} pack (squad {sid}) dives ({:.0}, {:.0}), {:.0} away, {} cores at {:.0}%, {how}",
                 st.target.x,
                 st.target.z,
                 distance(pos, st.target),
@@ -1128,6 +1151,49 @@ impl Ai {
             .sum()
     }
 
+    /// The pack's local sweep: of the enemy units we know and the enemy metal
+    /// spots within `sweep` of it (not flying, not shunned, under no more
+    /// porc than `porc_cap`, and, unless the predictor judges, under no more
+    /// threat less ours than the pack's own), the one with the most enemy
+    /// value standing within [`SWEEP_CLUSTER`] of it (statics `lasting`
+    /// times their metal, a spot whose mex we have not seen at a mex's)
+    /// per elmo of the way there (plus [`SWEEP_PAD`]); none worth
+    /// `sweep_min`: none. With the value near it.
+    #[allow(clippy::too_many_arguments)]
+    fn pack_sweep(
+        &self,
+        leader: Unit,
+        pos: Vec3,
+        porc_cap: Option<f32>,
+        fthreat: f32,
+        shun: &[Vec3],
+        shape: &Shape,
+        predictor: bool,
+    ) -> Option<(Vec3, f32)> {
+        if shape.sweep <= 0.0 {
+            return None;
+        }
+        let view = self.war.view(leader.def());
+        let value = |e: &crate::military::enemy::Enemy| e.value * if e.is_static { shape.lasting } else { 1.0 };
+        let known: Vec<(Vec3, f32)> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.identified && !e.can_fly())
+            .filter(|e| distance(e.position, pos) < shape.sweep + SWEEP_CLUSTER)
+            .map(|e| (e.position, value(e)))
+            .collect();
+        let mex = self.defs.get("staticmex").map_or(0.0, |d| d.cost(self.metal)) * shape.lasting;
+        let spots: Vec<(Vec3, f32)> = (self.graph.get_enemy_spots().iter())
+            .map(|m| m.get_pos())
+            .filter(|&p| distance(p, pos) < shape.sweep && !known.iter().any(|k| distance(k.0, p) < 50.0))
+            .map(|p| (p, mex))
+            .collect();
+        let candidates: Vec<_> = known.into_iter().chain(spots).collect();
+        sweep_target(pos, shape.sweep, shape.sweep_min, &candidates, |c| {
+            !shun.iter().any(|&s| distance(s, c) < 300.0)
+                && porc_cap.is_none_or(|cap| view.get_porc_threat(c) <= cap)
+                && (predictor || view.get_effective_threat(c) <= fthreat)
+        })
+    }
+
     /// What of the enemy's is left at `t`, and whether it moves: an enemy
     /// metal spot there, else the nearest unit we know of near it (the
     /// target moves with it).
@@ -1211,8 +1277,41 @@ impl Ai {
     }
 }
 
+/// Value a destination by the whole nearby cluster, then divide by travel.
+fn sweep_target(
+    pos: Vec3,
+    radius: f32,
+    minimum: f32,
+    candidates: &[(Vec3, f32)],
+    allowed: impl Fn(Vec3) -> bool,
+) -> Option<(Vec3, f32)> {
+    candidates
+        .iter()
+        .map(|c| c.0)
+        .filter(|&c| distance(c, pos) < radius && allowed(c))
+        .map(|c| (c, candidates.iter().filter(|k| distance(k.0, c) < SWEEP_CLUSTER).map(|k| k.1).sum::<f32>()))
+        .filter(|&(_, value)| value >= minimum)
+        .max_by(|a, b| (a.1 / (distance(a.0, pos) + SWEEP_PAD)).total_cmp(&(b.1 / (distance(b.0, pos) + SWEEP_PAD))))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sweep_cleans_nearby_clusters_before_distant_value() {
+        use super::sweep_target;
+        let candidates = [(Vec3::xz(300.0, 0.0), 90.0), (Vec3::xz(320.0, 0.0), 90.0), (Vec3::xz(1400.0, 0.0), 400.0)];
+        let (target, value) = sweep_target(Vec3::ZERO, 1500.0, 100.0, &candidates, |_| true).unwrap();
+        assert!(target.x < 400.0);
+        assert_eq!(value, 180.0);
+        // The nearer cluster can still be rejected by threat or shunning.
+        assert_eq!(
+            sweep_target(Vec3::ZERO, 1500.0, 100.0, &candidates, |p| p.x > 400.0),
+            Some((Vec3::xz(1400.0, 0.0), 400.0))
+        );
+        assert!(sweep_target(Vec3::ZERO, 1500.0, 500.0, &candidates, |_| true).is_none());
+        assert!(sweep_target(Vec3::ZERO, 0.0, 100.0, &candidates, |_| true).is_none());
+    }
+
     use super::*;
 
     fn close(a: Vec3, b: Vec3) -> bool {
