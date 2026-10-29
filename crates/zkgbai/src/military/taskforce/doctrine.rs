@@ -78,7 +78,8 @@ impl Aim {
 /// How a pack runs at a target (see `pack`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Attack {
-    /// Passing it on the line that brings the most guns within reach.
+    /// Tangential passes: most guns within reach, then maximum standoff.
+    /// The predictor may not replace this with a ram.
     Pass,
     /// Charging it head-on, aimed anew each conduct until close, then
     /// ramming through: units push mobiles out of their way, and a dodging
@@ -1202,7 +1203,7 @@ pub fn seeds() -> Vec<Doctrine> {
 
     // Minotaurs go in and stay out with at least two cores; Ogres screen them.
     let mut minotaur = Doctrine {
-        note: "A Minotaur pack, as the Ravagers' (see `ravager`) but two or more go in, an Ogre screen \
+        note: "A Minotaur pack, as the Ravagers' (see `ravager`) but two or more go in, always passing tangentially, an Ogre screen \
                trailing. Off by default: enable=minotaur."
             .into(),
         core: vec!["tankassault".into()],
@@ -1211,6 +1212,7 @@ pub fn seeds() -> Vec<Doctrine> {
         pace: 66.0,
         cores_to_go: 2,
         cores_to_stay: 2,
+        attack: Attack::Pass,
         ..ravager.clone()
     };
     minotaur.name = "minotaur".into();
@@ -1488,6 +1490,7 @@ mod tests {
         let m = get("minotaur");
         assert_eq!((m.core[0].as_str(), m.aim, m.cores_to_go, m.cores_to_stay), ("tankassault", Aim::Pack, 2, 2));
         assert_eq!((m.role("screen").unwrap().units[0].as_str(), m.wake_share), ("tankriot", 0.5));
+        assert_eq!(m.attack, Attack::Pass);
         for (n, unit, go) in [("scorcher", "vehraid", 4), ("dagger", "hoverraid", 4), ("blitz", "tankheavyraid", 3)] {
             let d = get(n);
             assert_eq!((d.core[0].as_str(), d.cores_to_go, d.wake_share), (unit, go, 0.0));
