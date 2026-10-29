@@ -513,7 +513,13 @@ impl Ai {
             return true;
         }
         let units = q.everyone().filter_map(|id| self.fighters.get(&id));
-        let force = d.force(units.map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
+        let away = tf
+            .spotters
+            .by_unit
+            .values()
+            .filter(|sp| r.spot.is_some() && sp.sid == sid && sp.job == taskforce::spotter::Job::Repairing)
+            .filter_map(|sp| self.fighters.get(&sp.unit));
+        let force = d.force(units.chain(away).map(|f| (self.defs.name_of(f.unit), f.metal_value)), &tf.classes);
         r.want(&force).is_some_and(|w| force.roles.get(role).is_some_and(|x| x.1 < w))
     }
 
@@ -609,10 +615,28 @@ impl Ai {
     /// joins the least valuable force of a doctrine taking `strays` (the
     /// shield ball, as always), else fights as an assault too.
     pub(crate) fn squad_assign_taskforce_member(&mut self, id: i32) {
+        if self.taskforce_watch_rejoin(id) {
+            return;
+        }
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
         let tf = &self.taskforces;
-        let doctrine = tf.squad_doctrine(&name);
+        // Shared spotter types join a doctrine that actually has a vacancy.
+        let doctrine = tf
+            .doctrines
+            .iter()
+            .find(|d| {
+                d.enabled
+                    && taskforce::squad_aim(d.aim)
+                    && d.role_of(&name, &tf.classes).is_some_and(|r| {
+                        d.roles[r].spot.is_some()
+                            && self.squad_handler.taskforces.iter().any(|&sid| {
+                                self.squads.get(sid).is_some_and(|q| q.shape.doctrine == d.name)
+                                    && self.squad_short_of(sid, r)
+                            })
+                    })
+            })
+            .or_else(|| tf.squad_doctrine(&name));
         let dname = doctrine.map(|d| d.name.clone());
         let is_core = doctrine.is_some_and(|d| d.is_core(&name, &tf.classes));
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));

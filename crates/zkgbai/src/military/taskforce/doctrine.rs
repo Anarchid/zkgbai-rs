@@ -260,6 +260,22 @@ impl Role {
         }
     }
 
+    /// Draw a ground spotter per gun from the standing army.
+    fn spotter() -> Role {
+        Role {
+            fire_state: Some(0),
+            fire_at_radar: Some(false),
+            spot: Some(Spot::Watch),
+            ..Role::escort(
+                "spotter",
+                &["hoverassault", "spiderantiheavy", "cloakheavyraid", "cloakaa"],
+                "cores",
+                120.0,
+                0.0,
+            )
+        }
+    }
+
     /// How many `force` wants; `None`: all that come.
     pub fn want(&self, force: &Force) -> Option<usize> {
         self.want.as_ref().map(|w| w.want(force))
@@ -1063,6 +1079,7 @@ pub fn seeds() -> Vec<Doctrine> {
             keep: Keep::Guard,
             ..Role::escort("bolas", &["hoverheavyraid"], "2 * max(0, cores - mace)", 150.0, 0.0)
         },
+        Role::spotter(),
     ];
     lance.marksman = true;
     lance.engage_value = 1400.0;
@@ -1070,12 +1087,12 @@ pub fn seeds() -> Vec<Doctrine> {
     lance.retreat_health = 0.7;
 
     let mut phantom = Doctrine::new("phantom");
-    phantom.note = "Phantoms (700 range, 1500 a shot) with a Scythe, cloaked as they are; firing at will, \
+    phantom.note = "Phantoms (700 range, 1500 a shot) with a spotter per gun; firing at will, \
                     each set on the best target in reach one shot kills."
         .into();
     phantom.enabled = false;
     phantom.core = vec!["cloaksnipe".into()];
-    phantom.roles = vec![Role::escort("scythe", &["cloakheavyraid"], "cores", 200.0, 0.5)];
+    phantom.roles = vec![Role::spotter()];
     phantom.marksman = true;
     phantom.engage_value = 900.0;
     phantom.muster = 0.0;
@@ -1111,8 +1128,8 @@ pub fn seeds() -> Vec<Doctrine> {
     tremor.muster = 90.0;
 
     let mut emissary = Doctrine::new("emissary");
-    emissary.note = "A siege detachment: Emissaries stand where they reach the most and fire at everything, \
-                     Ogres against raiders, an Ettin past 3000 metal."
+    emissary.note = "An artillery detachment: Emissaries advance into range and fire at everything, \
+                     Ogres against raiders, an Ettin past 3000 metal, and a standing spotter per gun."
         .into();
     emissary.enabled = false;
     emissary.core = vec!["tankarty".into()];
@@ -1120,8 +1137,10 @@ pub fn seeds() -> Vec<Doctrine> {
     emissary.roles = vec![
         Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),
         Role::escort("aa", &["tankaa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
+        Role::spotter(),
     ];
-    emissary.aim = Aim::Siege;
+    // Use the implemented artillery conduct; siege stations remain a seed.
+    emissary.aim = Aim::Artillery;
     emissary.engage_value = 1500.0;
     emissary.muster = 90.0;
 
@@ -1281,6 +1300,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gun_doctrines_draw_one_hold_fire_spotter_per_core() {
+        let classes = Classes::default();
+        for (name, core) in [("lance", "hoverarty"), ("phantom", "cloaksnipe"), ("emissary", "tankarty")] {
+            let d = seeds().into_iter().find(|d| d.name == name).unwrap();
+            assert!(super::super::squad_aim(d.aim), "{name} needs a conduct that drives its spotters");
+            let role = d.role("spotter").unwrap();
+            assert_eq!((role.spot, role.fire_state, role.produce), (Some(Spot::Watch), Some(0), 0.0));
+            let force = d.force([(core, 1000.0), (core, 1000.0)], &classes);
+            assert_eq!(role.want(&force), Some(2));
+            for unit in ["hoverassault", "spiderantiheavy", "cloakheavyraid", "cloakaa"] {
+                assert!(role.units.iter().any(|u| u == unit));
+                assert_eq!(d.role_of(unit, &classes), d.roles.iter().position(|r| r.name == "spotter"));
+            }
+        }
+    }
+
+    #[test]
     fn seeds_round_trip_through_json() {
         for d in seeds() {
             let Value::Object(patch) = d.to_json() else { panic!() };
@@ -1378,7 +1414,7 @@ mod tests {
         let lance = seeds().into_iter().find(|d| d.name == "lance").unwrap();
         assert!(lance.marksman && lance.enabled);
         // Bodyguards, not orbiters.
-        assert!(lance.roles.iter().all(|r| r.keep == Keep::Guard));
+        assert!(lance.roles.iter().filter(|r| r.spot.is_none()).all(|r| r.keep == Keep::Guard));
         let force = |units: &[&'static str]| lance.force(units.iter().map(|u| (*u, 100.0)), &classes);
         let (mace, bolas) = (&lance.roles[0], &lance.roles[1]);
         let one = force(&["hoverarty"]);

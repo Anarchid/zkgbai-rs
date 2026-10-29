@@ -128,9 +128,14 @@ impl Ai {
             0.5
         };
 
-        let mut c = Coward::new(unit, def, self.defs.name(def), rlvl, self.team_id);
+        let watching = self.taskforces.spotters.by_unit.get(&unit.id()).is_some_and(|sp| sp.watch);
+        let mut c = if watching {
+            Coward::new_spotter(unit, def, self.defs.name(def), self.team_id)
+        } else {
+            Coward::new(unit, def, self.defs.name(def), rlvl, self.team_id)
+        };
         c.small_raider = h.small_raiders.contains(&def_id);
-        c.is_scythe = def_id == h.scythe_id;
+        c.is_scythe = !watching && def_id == h.scythe_id;
         c.is_plane = h.planes.contains(&def_id);
 
         if c.shield.is_some() {
@@ -210,6 +215,9 @@ impl Ai {
     }
 
     fn retreat_coward_to(&mut self, id: i32, pos: Vec3) {
+        if self.taskforce_watch_retreat(id, pos) {
+            return;
+        }
         let mut nav = nav!(self);
         if let Some(c) = self.retreat_handler.cowards.get_mut(&id) {
             c.retreat_to(pos, &mut nav);
