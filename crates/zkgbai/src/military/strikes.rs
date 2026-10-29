@@ -6,8 +6,8 @@ use crate::Ai;
 use crate::defs::cmd;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
-use crate::military::sweeps::SNIPER_MEMORY;
-use crate::military::{Enemy, Fighter};
+use crate::military::Fighter;
+use crate::military::sweeps::{PHANTOM_FIX_RADIUS, SNIPER_MEMORY};
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod prediction;
 mod scenario;
+mod staging;
 
 const PERIOD: i32 = 30;
 const JOB_MEMORY: i32 = 30 * 180;
@@ -38,6 +39,9 @@ impl Tactic {
             Self::Flea => "spiderscout",
         }
     }
+    fn fire_state(self) -> i32 {
+        if self == Self::Halberd { 0 } else { 2 }
+    }
     fn factory(self) -> FacKind {
         match self {
             Self::Halberd => FacKind::Hover,
@@ -54,6 +58,30 @@ impl Tactic {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Prey {
+    GlassCannon,
+    Defenseless,
+    Commander,
+    Heavy,
+}
+impl Prey {
+    fn needs_stun(self, tactic: Tactic) -> bool {
+        tactic == Tactic::Flea && matches!(self, Self::Commander | Self::Heavy)
+    }
+    fn can_requisition(self, tactic: Tactic) -> bool {
+        self.allows(tactic, true) && !self.needs_stun(tactic)
+    }
+    fn allows(self, tactic: Tactic, stunned: bool) -> bool {
+        match self {
+            Self::GlassCannon => true,
+            Self::Defenseless => tactic == Tactic::Flea,
+            Self::Commander => tactic != Tactic::Flea || stunned,
+            Self::Heavy => tactic == Tactic::Flea && stunned,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Job {
     id: Option<i32>,
@@ -62,8 +90,23 @@ struct Job {
     count: usize,
     value: f32,
     name: String,
+    prey: Prey,
 }
 impl Job {
+    fn size(&self, tactic: Tactic, cost: f32) -> usize {
+        tactic.size(if self.phantom() { self.count } else { 1 }, self.value, cost)
+    }
+    fn production_pays(&self, tactic: Tactic, cost: f32) -> bool {
+        self.prey.can_requisition(tactic)
+            && (self.prey != Prey::Defenseless || self.value >= self.size(tactic, cost) as f32 * cost)
+    }
+    fn matches_death(&self, id: i32, name: &str, pos: Vec3) -> bool {
+        self.id == Some(id)
+            || (self.phantom()
+                && name == "cloaksnipe"
+                && (self.id.is_none() || self.count > 1)
+                && distance(self.pos, pos) < PHANTOM_FIX_RADIUS)
+    }
     fn phantom(&self) -> bool {
         self.name == "cloaksnipe"
     }
@@ -71,6 +114,7 @@ impl Job {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Phase {
+    Screening,
     Forming,
     Diving,
     Returning,
@@ -103,13 +147,8 @@ pub struct Strikes {
     badgers: BTreeSet<i32>,
 }
 
-fn valuable(e: &Enemy) -> bool {
-    e.identified
-        && !e.is_dead
-        && !e.can_fly()
-        && !e.is_static
-        && (e.is_com
-            || matches!(e.def_name.as_str(), "cloaksnipe" | "hoverarty" | "jumparty" | "striderarty" | "tankheavyarty"))
+fn glass_cannon(name: &str) -> bool {
+    matches!(name, "cloaksnipe" | "hoverarty" | "jumparty" | "striderarty" | "tankheavyarty")
 }
 
 /// Keep a modest assault force available while Phantoms remain implied,
@@ -140,6 +179,8 @@ impl Ai {
                     "target": j.id, "def": j.name, "pos": [j.pos.x, j.pos.z], "count": j.count,
                     "value": j.value, "age_frames": self.frame - j.last, "cooldown": self.strike_cooling(j.pos),
                     "fresh": self.frame - j.last < SNIPER_MEMORY,
+                    "flea_requires_stun": j.prey.needs_stun(Tactic::Flea),
+                    "stun_frames": self.strike_stun(j).map(|(_, frames)| frames),
                 })
             })
             .collect();
@@ -147,6 +188,11 @@ impl Ai {
             serde_json::json!({
                 "tactic": w.tactic.name(), "phase": format!("{:?}", w.phase).to_lowercase(),
                 "members": w.members, "needed": w.needed, "target": w.job.id,
+                "staging": [w.home.x, w.home.z], "job_pos": [w.job.pos.x, w.job.pos.z],
+                "job_age_frames": self.frame - w.job.last,
+                "gathered": w.members.iter().filter(|id| self.fighters.get(id).is_some_and(|f|
+                    distance(f.get_pos(), w.home) < staging::muster_radius(w.tactic, w.members.len()))).count(),
+                "prediction_pending": w.query.is_some(),
             })
         });
         serde_json::json!({ "enabled": !self.dev_off("strikes"), "jobs": jobs, "wave": wave })
@@ -166,11 +212,25 @@ impl Ai {
                 count: f.count,
                 value: f.count as f32 * phantom_cost,
                 name: "cloaksnipe".into(),
+                prey: Prey::GlassCannon,
             })
             .collect();
-        for e in
-            self.war.targets.values().filter(|e| valuable(e) && self.frame - e.last_seen < age && e.position != NULLPOS)
-        {
+        for e in self.war.targets.values().filter(|e| {
+            e.identified && !e.is_dead && !e.can_fly() && self.frame - e.last_seen < age && e.position != NULLPOS
+        }) {
+            let prey = if e.is_com {
+                Prey::Commander
+            } else if glass_cannon(&e.def_name) {
+                Prey::GlassCannon
+            } else if e.ud.is_some_and(|d| self.strike_defenseless(d)) {
+                Prey::Defenseless
+            } else if super::jaeger::is_heavy(e, self.metal)
+                && ((e.visible && e.unit.is_paralyzed()) || self.jaeger_stun_expected(e.unit_id))
+            {
+                Prey::Heavy
+            } else {
+                continue;
+            };
             if e.def_name == "cloaksnipe" {
                 if let Some(j) = jobs.iter_mut().find(|j| j.phantom() && distance(j.pos, e.position) < 400.0) {
                     if e.visible {
@@ -201,9 +261,24 @@ impl Ai {
                 count: 1,
                 value: e.ud.map_or(e.value, |d| d.cost(self.metal)),
                 name: e.def_name.clone(),
+                prey,
             });
         }
-        jobs.sort_by(|a, b| b.value.total_cmp(&a.value));
+        // Value AA formations and other defenseless clusters together; do not
+        // build a whole wave for a lone cheap mex. Existing waves can still raid it.
+        let soft: Vec<_> = jobs.iter().filter(|j| j.prey == Prey::Defenseless).map(|j| (j.pos, j.value)).collect();
+        for j in jobs.iter_mut().filter(|j| j.prey == Prey::Defenseless) {
+            let nearby: Vec<_> = soft.iter().filter(|(p, _)| distance(*p, j.pos) < 600.0).collect();
+            j.count = nearby.len();
+            j.value = nearby.iter().map(|(_, value)| value).sum();
+        }
+        jobs.sort_by(|a, b| {
+            let pounce = |j: &Job| j.prey.needs_stun(Tactic::Flea) && self.strike_stun(j).is_some();
+            (self.frame - b.last < SNIPER_MEMORY)
+                .cmp(&(self.frame - a.last < SNIPER_MEMORY))
+                .then_with(|| pounce(b).cmp(&pounce(a)))
+                .then_with(|| b.value.total_cmp(&a.value))
+        });
         jobs
     }
 
@@ -218,8 +293,14 @@ impl Ai {
         if self.strikes.orders.get(&factory).is_some_and(|(_, f, _)| self.frame - *f < JOB_MEMORY) {
             return None;
         }
-        if let Some(w) = self.strikes.wave.as_ref().filter(|w| w.phase == Phase::Forming && w.tactic.factory() == kind)
-        {
+        if let Some(w) = self.strikes.wave.as_ref().filter(|w| {
+            matches!(w.phase, Phase::Forming | Phase::Screening)
+                && w.tactic.factory() == kind
+                && w.job.production_pays(
+                    w.tactic,
+                    self.defs.get(w.tactic.name()).map_or(f32::INFINITY, |d| d.cost(self.metal)),
+                )
+        }) {
             let outstanding = self
                 .strikes
                 .orders
@@ -272,9 +353,10 @@ impl Ai {
         }
         let Some(w) = self.strikes.wave.as_ref() else { return false };
         if self.dev_off("strikes")
-            || w.phase != Phase::Forming
+            || !matches!(w.phase, Phase::Forming | Phase::Screening)
             || name != w.tactic.name()
             || w.members.len() >= w.needed
+            || !self.strike_preparable(w.tactic, &w.job)
         {
             return false;
         }
@@ -298,7 +380,13 @@ impl Ai {
         if let Some(e) = self.war.targets.get(&id).filter(|e| e.def_name == "cloaksnipe") {
             self.sweeps_phantom_destroyed(e.position);
         }
-        if self.strikes.wave.as_ref().is_some_and(|w| w.job.id == Some(id)) {
+        if let Some(e) = self.war.targets.get(&id)
+            && let Some(w) = self.strikes.wave.as_mut()
+            && w.job.matches_death(id, &e.def_name, e.position)
+        {
+            // An inferred fix may be revealed and killed by an ally between
+            // strike ticks, before the wave ever acquires its unit id.
+            w.job.id.get_or_insert(id);
             self.strikes.killed.insert(id);
         }
     }
@@ -309,7 +397,7 @@ impl Ai {
         self.retreat_remove_unit(unit);
         self.war.new_units.remove(&unit.id());
         unit.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
-        unit.set_fire_state(0, 0);
+        unit.set_fire_state(self.strikes.wave.as_ref().map_or(2, |w| w.tactic.fire_state()), 0);
         unit.set_move_state(0, 0);
         let cost = unit.def().map_or(0.0, |d| d.cost(self.metal));
         self.fighters.insert(unit.id(), Fighter::new(unit, cost, self.team_id));
@@ -332,6 +420,7 @@ impl Ai {
     }
 
     fn strikes_release(&mut self, w: Wave) {
+        self.strikes.killed.clear();
         self.log(&format!("strikes: {} survivors of {} return to normal handlers", w.members.len(), w.tactic.name()));
         self.strikes_release_members(w.members);
     }
@@ -350,13 +439,65 @@ impl Ai {
                 if !self.unit_classes.no_retreat.contains(self.defs.name_of(u)) {
                     self.retreat_add_coward(u);
                 }
-                self.war.new_units.insert(id);
-                self.war_unit_idle(u);
+                if matches!(self.defs.name_of(u), "spiderscout" | "shieldscout") {
+                    self.assign_role(u, super::roles::Role::SoloRaider);
+                } else {
+                    self.war.new_units.insert(id);
+                    self.war_unit_idle(u);
+                }
             }
         }
     }
 
+    /// Mount target masks distinguish dedicated AA from flex-AA and exclude
+    /// fake/shield-only weapons. Unknown masks/definitions fail closed.
+    fn strike_defenseless(&self, def: springai::UnitDef) -> bool {
+        let Some(flea) = self.defs.get("spiderscout") else { return false };
+        let category = flea.category();
+        if category == 0 {
+            return false;
+        }
+        for mount in def.weapon_mounts() {
+            let Some(w) = mount.weapon_def() else { return false };
+            if w.is_shield() || super::water::is_fake(&w.name()) {
+                continue;
+            }
+            if mount.only_target_category() & category != 0 && w.damage_types().iter().any(|d| *d > 0.0) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Only current LOS exposes a trustworthy paralysis amount. The ratio
+    /// uses live max health, including commander upgrades.
+    fn strike_stun(&self, j: &Job) -> Option<(f32, i32)> {
+        let e = j.id.and_then(|id| self.war.targets.get(&id))?;
+        if e.is_dead || !e.visible || !e.unit.is_paralyzed() {
+            return None;
+        }
+        let maxhp = e.unit.max_health();
+        if !maxhp.is_finite() || maxhp <= 0.0 {
+            return None;
+        }
+        let ratio = e.unit.paralyze_damage() / maxhp;
+        let frames = super::fightsim::mech::paralysis_frames(ratio);
+        (frames > 0).then_some((ratio, frames))
+    }
+
+    fn strike_target_allowed(&self, tactic: Tactic, j: &Job) -> bool {
+        j.prey.allows(tactic, self.strike_stun(j).is_some())
+    }
+
+    fn strike_preparable(&self, tactic: Tactic, j: &Job) -> bool {
+        self.strike_target_allowed(tactic, j)
+            || (j.prey.needs_stun(tactic) && j.id.is_some_and(|id| self.jaeger_stun_expected(id)))
+    }
+
     fn strike_suitable(&self, tactic: Tactic, j: &Job, from: Vec3) -> bool {
+        if !self.strike_preparable(tactic, j) {
+            return false;
+        }
         let Some(def) = self.defs.get(tactic.name()) else { return false };
         if self.missiles_ground_burning(j.pos) || !reaches(self.reach_terrain(), def, from, j.pos, 80.0) {
             return false;
@@ -372,6 +513,8 @@ impl Ai {
             .filter(|e| {
                 !e.is_dead
                     && self.frame - e.last_seen < JOB_MEMORY
+                    && Some(e.unit_id) != j.id
+                    && !(e.visible && e.unit.is_paralyzed())
                     && (e.is_riot || !e.identified)
                     && distance(e.position, j.pos) < 600.0
             })
@@ -432,7 +575,7 @@ impl Ai {
                         continue;
                     }
                     let cost = self.defs.get(tactic.name()).map_or(1.0, |d| d.cost(self.metal));
-                    let needed = tactic.size(j.count, j.value, cost);
+                    let needed = j.size(tactic, cost);
                     if needed == 0 || needed > MAX_WAVE {
                         continue;
                     }
@@ -444,7 +587,10 @@ impl Ai {
                         .collect();
                     // A partial borrowed force without a factory must not
                     // monopolize selection and starve another viable tactic.
-                    if existing.len() < needed && !self.fac.factories.values().any(|f| f.kind() == tactic.factory()) {
+                    if existing.len() < needed
+                        && (!j.production_pays(tactic, cost)
+                            || !self.fac.factories.values().any(|f| f.kind() == tactic.factory()))
+                    {
                         continue;
                     }
                     existing.sort_by(|a, b| distance(*a, j.pos).total_cmp(&distance(*b, j.pos)));
@@ -453,7 +599,18 @@ impl Ai {
                         .copied()
                         .filter(|p| self.war.get_effective_threat(*p) <= 0.0)
                         .unwrap_or_else(|| self.graph_get_closest_haven(base));
-                    let home = if home == NULLPOS { base } else { home };
+                    let home = if j.prey.needs_stun(tactic) {
+                        // Pounce from the existing force, not a distant factory.
+                        let n = needed as f32;
+                        Vec3::xz(
+                            existing.iter().take(needed).map(|p| p.x).sum::<f32>() / n,
+                            existing.iter().take(needed).map(|p| p.z).sum::<f32>() / n,
+                        )
+                    } else if home == NULLPOS {
+                        base
+                    } else {
+                        home
+                    };
                     self.log(&format!(
                         "strikes: assemble {needed} {} for {} (~{} targets)",
                         tactic.name(),
@@ -474,9 +631,71 @@ impl Ai {
                 }
             }
         }
+        // A waiting/returning Flea wave may exploit a freshly stunned heavy.
+        // No new procurement for this short window; keep the full-wave rule.
+        if let Some(mut w) = self.strikes.wave.take() {
+            if matches!(w.phase, Phase::Forming | Phase::Screening) {
+                if w.job.id.is_some_and(|id| self.strikes.killed.contains(&id)) {
+                    self.strikes_release(w);
+                    return;
+                }
+                // Surviving estimates are refreshed below from the kill-adjusted
+                // evidence; do not subtract these deaths again after launch.
+                self.strikes.killed.clear();
+            }
+            if matches!(w.phase, Phase::Forming | Phase::Screening) && frame - w.job.last >= SNIPER_MEMORY {
+                if let Some(j) = self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
+                    !self.strike_cooling(j.pos)
+                        && self.strike_suitable(w.tactic, j, w.home)
+                        && (!j.prey.needs_stun(w.tactic) || w.members.len() >= j.size(w.tactic, 1.0))
+                }) {
+                    self.log(&format!(
+                        "strikes: waiting {} wave switches to fresh {} activity",
+                        w.tactic.name(),
+                        j.name
+                    ));
+                    w.job = j;
+                    w.query = None;
+                }
+            }
+            if w.tactic == Tactic::Flea && w.phase != Phase::Diving {
+                let positions: Vec<_> = w
+                    .members
+                    .iter()
+                    .filter_map(|id| self.fighters.get(id))
+                    .filter(|f| f.unit.health() > 0.0)
+                    .map(|f| f.get_pos())
+                    .collect();
+                let n = positions.len().max(1) as f32;
+                let from = Vec3::xz(
+                    positions.iter().map(|p| p.x).sum::<f32>() / n,
+                    positions.iter().map(|p| p.z).sum::<f32>() / n,
+                );
+                if let Some(j) = self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
+                    j.prey.needs_stun(w.tactic)
+                        && j.id != w.job.id
+                        && !self.strike_cooling(j.pos)
+                        && positions.len() >= j.size(Tactic::Flea, 1.0)
+                        && self.strike_suitable(w.tactic, j, from)
+                }) {
+                    self.log(&format!("strikes: Flea wave pounces on stunned {}", j.name));
+                    w.needed = j.size(Tactic::Flea, 1.0);
+                    w.job = j;
+                    w.home = from;
+                    w.phase = Phase::Forming;
+                    w.since = frame;
+                    w.query = None;
+                }
+            }
+            if matches!(w.phase, Phase::Forming | Phase::Screening) && !self.strike_preparable(w.tactic, &w.job) {
+                self.strikes_release(w);
+                return;
+            }
+            self.strikes.wave = Some(w);
+        }
         // Borrow only the named tactic, from ordinary handlers. Never steal QRF,
         // operator-controlled units, scouts or other special forces.
-        if let Some(w) = self.strikes.wave.as_ref().filter(|w| w.phase == Phase::Forming) {
+        if let Some(w) = self.strikes.wave.as_ref().filter(|w| matches!(w.phase, Phase::Forming | Phase::Screening)) {
             let name = w.tactic.name();
             let need = w.needed.saturating_sub(w.members.len());
             let home = w.home;
@@ -490,9 +709,13 @@ impl Ai {
         let Some(mut w) = self.strikes.wave.take() else { return };
         w.members
             .retain(|id| self.fighters.get(id).is_some_and(|f| f.unit.health() > 0.0 && f.unit.team() == self.team_id));
-        if w.phase == Phase::Forming {
+        if matches!(w.phase, Phase::Forming | Phase::Screening) {
             let fresh = self.strike_jobs(JOB_MEMORY).into_iter().find(|j| {
-                (w.job.id.is_some() && j.id == w.job.id) || (j.name == w.job.name && distance(j.pos, w.job.pos) < 500.0)
+                if w.job.id.is_some() {
+                    j.id == w.job.id
+                } else {
+                    j.name == w.job.name && distance(j.pos, w.job.pos) < 500.0
+                }
             });
             if let Some(j) = fresh {
                 w.job = j;
@@ -508,35 +731,87 @@ impl Ai {
                 return;
             }
             let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
-            w.needed = w.tactic.size(w.job.count, w.job.value, cost);
+            w.needed = w.job.size(w.tactic, cost);
             if w.members.len() > w.needed {
                 self.strikes_release_members(w.members.split_off(w.needed));
             }
             if w.needed > MAX_WAVE
-                || (w.members.len() < w.needed && !self.fac.factories.values().any(|f| f.kind() == w.tactic.factory()))
+                || (w.members.len() < w.needed
+                    && (!w.job.production_pays(w.tactic, cost)
+                        || !self.fac.factories.values().any(|f| f.kind() == w.tactic.factory())))
             {
                 self.strikes_release(w);
                 return;
             }
-            let radius = formation_radius(w.members.len());
+            // Follow the front while waiting, and gather before a likely call.
+            if !(w.job.prey.needs_stun(w.tactic) && self.strike_stun(&w.job).is_some()) {
+                if let Some(stage) = self.strike_stage(&w) {
+                    if distance(stage, w.home) > 100.0 {
+                        w.home = stage;
+                        w.query = None;
+                    }
+                }
+            }
+            let expected = w.job.id.is_some_and(|id| self.jaeger_stun_expected(id));
+            w.phase = staging::waiting_phase(w.tactic, frame - w.job.last, expected);
+            if w.phase == Phase::Screening {
+                w.query = None;
+            }
+            let radius = staging::muster_radius(w.tactic, w.members.len());
             let gathered = w.members.len() >= w.needed
                 && w.members
                     .iter()
                     .all(|id| self.fighters.get(id).is_some_and(|f| distance(f.get_pos(), w.home) < radius));
-            if gathered && frame - w.job.last < SNIPER_MEMORY && self.strike_suitable(w.tactic, &w.job, w.home) {
+            if w.phase == Phase::Forming
+                && gathered
+                && frame - w.job.last < SNIPER_MEMORY
+                && self.strike_target_allowed(w.tactic, &w.job)
+                && self.strike_suitable(w.tactic, &w.job, w.home)
+            {
                 self.strike_predict(&mut w);
             }
         } else if w.phase == Phase::Diving {
             let target = w.job.id.and_then(|id| self.war.targets.get(&id));
-            let dead = w.job.id.is_some_and(|id| self.strikes.killed.remove(&id));
-            if dead && w.job.phantom() && w.job.count > 1 {
-                w.job.count -= 1;
+            let mut killed = std::mem::take(&mut self.strikes.killed);
+            if let Some(e) = target.filter(|e| e.is_dead) {
+                killed.insert(e.unit_id);
+            }
+            let dead = w.job.id.is_some_and(|id| killed.contains(&id));
+            if w.job.phantom() {
+                w.job.count = w.job.count.saturating_sub(killed.len());
+            }
+            let next_soft = if dead && w.job.prey == Prey::Defenseless {
+                self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
+                    j.prey == Prey::Defenseless
+                        && j.id != w.job.id
+                        && distance(j.pos, w.job.pos) < 600.0
+                        && !self.strike_cooling(j.pos)
+                        && self.strike_suitable(w.tactic, j, w.job.pos)
+                })
+            } else {
+                None
+            };
+            if let Some(next) = next_soft {
+                self.log(&format!("strikes: Fleas continue through defenseless formation onto {}", next.name));
+                w.job = next;
+                w.since = frame;
+            } else if dead && w.job.phantom() && w.job.count > 0 {
                 w.job.id = None; // Sweep for the next Phantom with the surviving wave.
-            } else if dead || frame - w.since > DIVE_TIMEOUT || w.members.is_empty() {
+            } else if dead
+                || !self.strike_target_allowed(w.tactic, &w.job)
+                || frame - w.since > DIVE_TIMEOUT
+                || w.members.is_empty()
+            {
                 self.log(&format!(
                     "strikes: {} ended ({})",
                     w.tactic.name(),
-                    if dead { "target killed" } else { "search expired or wave lost" }
+                    if dead {
+                        "target killed"
+                    } else if !self.strike_target_allowed(w.tactic, &w.job) {
+                        "stun window closed"
+                    } else {
+                        "search expired or wave lost"
+                    }
                 ));
                 w.phase = Phase::Returning;
                 w.since = frame;
@@ -546,7 +821,10 @@ impl Ai {
                 w.job.last = frame;
             } else if w.job.phantom() {
                 if let Some(e) = self.war.targets.values().find(|e| {
-                    !e.is_dead && e.visible && e.def_name == "cloaksnipe" && distance(e.position, w.job.pos) < 750.0
+                    !e.is_dead
+                        && e.visible
+                        && e.def_name == "cloaksnipe"
+                        && distance(e.position, w.job.pos) < PHANTOM_FIX_RADIUS
                 }) {
                     w.job.id = Some(e.unit_id);
                     w.job.pos = e.position;
@@ -564,8 +842,12 @@ impl Ai {
                 .find(|j| !self.strike_cooling(j.pos) && self.strike_suitable(w.tactic, j, w.home))
             {
                 let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
-                let needed = w.tactic.size(j.count, j.value, cost);
+                let needed = j.size(w.tactic, cost);
                 if needed <= MAX_WAVE {
+                    if j.prey.needs_stun(w.tactic) && w.members.len() < needed {
+                        self.strikes_release(w);
+                        return;
+                    }
                     w.job = j;
                     w.needed = needed;
                     w.phase = Phase::Forming;
@@ -604,12 +886,12 @@ impl Ai {
                 && let Some(t) = visible
                 && distance(u.pos(), t.pos()) <= u.max_range().max(80.0) * 0.9
             {
-                u.set_fire_state(0, 0); // Explicit attack fires only at the assassination target.
+                u.set_fire_state(w.tactic.fire_state(), 0); // Halberds focus fire; bot swarms also shoot on approach.
                 u.attack(t, 0);
                 continue;
             }
-            u.set_fire_state(0, 0);
-            let goal = if w.phase == Phase::Diving && !close {
+            u.set_fire_state(w.tactic.fire_state(), 0);
+            let goal = if w.tactic == Tactic::Halberd && w.phase == Phase::Diving && !close {
                 if lagging {
                     mid
                 } else {
@@ -626,7 +908,9 @@ impl Ai {
             let sweep = if searching { (angle.cos() * 200.0, angle.sin() * 200.0) } else { (0.0, 0.0) };
             // Once it is revealed, every member must enter firing range; a
             // permanent wide grid would leave the outside Fleas/Dirtbags idle.
-            let spacing = if w.phase == Phase::Diving && visible.is_some() {
+            let spacing = if w.tactic != Tactic::Halberd && matches!(w.phase, Phase::Forming | Phase::Returning) {
+                staging::MUSTER_SPACING
+            } else if w.phase == Phase::Diving && visible.is_some() {
                 SPREAD.min(u.max_range().max(40.0) / width.max(2) as f32)
             } else {
                 SPREAD
@@ -635,6 +919,27 @@ impl Ai {
                 goal.x + (i % width) as f32 * spacing - (width - 1) as f32 * spacing / 2.0 + sweep.0,
                 goal.z + (i / width) as f32 * spacing - (width - 1) as f32 * spacing / 2.0 + sweep.1,
             );
+            if w.tactic != Tactic::Halberd && (w.phase == Phase::Screening || w.phase == Phase::Diving) {
+                let spacing = if visible.is_some() && w.phase == Phase::Diving {
+                    u.max_range().max(40.0) / w.members.len().max(2) as f32
+                } else {
+                    SPREAD
+                };
+                p = staging::line_point(goal, w.job.pos, w.home, i, w.members.len(), spacing);
+                if w.phase == Phase::Screening {
+                    // Contract unsafe/unreachable ends instead of stretching
+                    // the screen across cliffs or into known enemy fire.
+                    for _ in 0..5 {
+                        if self.strike_stage_clear(u, w.home, p) {
+                            break;
+                        }
+                        p = Vec3::xz((p.x + w.home.x) * 0.5, (p.z + w.home.z) * 0.5);
+                    }
+                    if !self.strike_stage_clear(u, w.home, p) {
+                        p = w.home;
+                    }
+                }
+            }
             let map = self.cb.map();
             p.x = p.x.clamp(1.0, (map.width() * 8 - 1).max(1) as f32);
             p.z = p.z.clamp(1.0, (map.height() * 8 - 1).max(1) as f32);
@@ -708,6 +1013,77 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn defenseless_formations_are_flea_jobs_with_a_production_budget() {
+        let mut j = Job {
+            id: Some(1),
+            pos: Vec3::ZERO,
+            last: 0,
+            count: 4,
+            value: 400.0,
+            name: "vehaa".into(),
+            prey: Prey::Defenseless,
+        };
+        assert!(j.prey.allows(Tactic::Flea, false));
+        assert!(!j.prey.allows(Tactic::Halberd, false));
+        assert!(!j.prey.needs_stun(Tactic::Flea));
+        assert_eq!(j.size(Tactic::Flea, 25.0), 20);
+        assert!(!j.production_pays(Tactic::Flea, 25.0));
+        j.value = 800.0;
+        assert!(j.production_pays(Tactic::Flea, 25.0));
+    }
+
+    #[test]
+    fn commanders_never_requisition_fleas_even_when_a_widow_is_expected() {
+        assert!(!Prey::Commander.can_requisition(Tactic::Flea));
+        assert!(!Prey::Heavy.can_requisition(Tactic::Flea));
+        assert!(Prey::GlassCannon.can_requisition(Tactic::Flea));
+        assert!(Prey::Commander.can_requisition(Tactic::Halberd));
+    }
+
+    #[test]
+    fn fleas_need_stunned_commanders_and_heavies_but_not_glass_cannons() {
+        assert!(!Prey::Commander.allows(Tactic::Flea, false));
+        assert!(Prey::Commander.allows(Tactic::Flea, true));
+        assert!(Prey::Commander.allows(Tactic::Halberd, false));
+        assert!(Prey::Commander.allows(Tactic::Dirtbag, false));
+        assert!(!Prey::Heavy.allows(Tactic::Flea, false));
+        assert!(Prey::Heavy.allows(Tactic::Flea, true));
+        assert!(!Prey::Heavy.allows(Tactic::Dirtbag, true));
+        for name in ["cloaksnipe", "hoverarty", "jumparty", "striderarty", "tankheavyarty"] {
+            assert!(glass_cannon(name));
+        }
+        assert!(Prey::GlassCannon.allows(Tactic::Flea, false));
+    }
+
+    #[test]
+    fn inferred_phantom_death_is_recognized_before_acquisition() {
+        let mut job = Job {
+            id: None,
+            pos: Vec3::xz(1000.0, 1000.0),
+            last: 0,
+            count: 1,
+            value: 750.0,
+            name: "cloaksnipe".into(),
+            prey: Prey::GlassCannon,
+        };
+        assert!(job.matches_death(42, "cloaksnipe", Vec3::xz(1100.0, 1000.0)));
+        assert!(!job.matches_death(42, "cloaksnipe", Vec3::xz(2000.0, 1000.0)));
+        assert!(!job.matches_death(42, "jumparty", job.pos));
+        job.id = Some(43);
+        assert!(!job.matches_death(42, "cloaksnipe", job.pos));
+        assert!(job.matches_death(43, "cloaksnipe", job.pos));
+        job.count = 2;
+        assert!(job.matches_death(42, "cloaksnipe", job.pos));
+    }
+
+    #[test]
+    fn only_halberds_hold_fire_for_the_armored_approach() {
+        assert_eq!(Tactic::Halberd.fire_state(), 0);
+        assert_eq!(Tactic::Flea.fire_state(), 2);
+        assert_eq!(Tactic::Dirtbag.fire_state(), 2);
+    }
+
     #[test]
     fn persistent_phantoms_requisition_halberds_periodically_without_a_wave() {
         assert!(halberd_requisition_due(100, None, 1, 0));

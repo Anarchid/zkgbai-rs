@@ -4,7 +4,56 @@
 use super::*;
 impl Ai {
     pub(crate) fn strikes_scenario(&mut self, frame: i32) {
-        let Some(test) = self.test.as_deref() else { return };
+        let Some(test) = self.test.clone() else { return };
+        let test = test.as_str();
+        if test.starts_with("assassin-") && frame == 1500 {
+            let orphaned = self
+                .cb
+                .friendly_units()
+                .iter()
+                .filter(|u| {
+                    self.defs.name_of(**u) == "spiderscout"
+                        && u.health() > 0.0
+                        && !self.fighters.contains_key(&u.id())
+                        && !self.war.new_units.contains(&u.id())
+                        && self.role_of(u.id()).is_none()
+                })
+                .count();
+            self.log(&format!("assassin-test: orphaned Fleas={orphaned}; {}", self.strikes_status()));
+        }
+        if matches!(test, "assassin-widow" | "assassin-no-widow") && frame == 90 {
+            // UnitFinished has now run: detach the staged Fleas from automatic
+            // picket claims and offer a real ordinary raider force to strikes.
+            for u in self
+                .cb
+                .friendly_units()
+                .into_iter()
+                .filter(|u| self.defs.name_of(*u) == "spiderscout")
+                .collect::<Vec<_>>()
+            {
+                self.assign_role(u, super::super::roles::Role::SoloRaider);
+                springai::reserved::own(
+                    self.cb,
+                    u.id(),
+                    springai::reserved::Owner { module: "strike_test", helpers: &["war.unitFinished", "war.unitIdle"] },
+                );
+                u.stop(0);
+                u.set_fire_state(0, 0);
+            }
+            let target = self
+                .war
+                .targets
+                .values()
+                .find(|e| e.visible && !e.is_dead && (e.is_com || super::super::jaeger::is_heavy(e, self.metal)))
+                .map(|e| e.unit);
+            if let Some(target) = target {
+                for u in self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "spiderantiheavy") {
+                    springai::reserved::as_owner(|| u.attack(target, 0));
+                    self.log("assassin-test: Widow attacks the finisher target");
+                }
+            }
+            return;
+        }
         if !test.starts_with("assassin-") || frame != 60 {
             return;
         }
@@ -12,6 +61,67 @@ impl Ai {
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
         let pos = Vec3::xz(center.x, center.z + 300.0);
         self.cb.cheats_set_enabled(true);
+        if test == "assassin-aa" {
+            if let Some(def) = self.defs.get("vehaa") {
+                for i in 0..4 {
+                    if let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + i as f32 * 70.0, pos.z)) {
+                        u.set_move_state(0, 0);
+                        self.log(&format!("assassin-test: AA {} awaits the swarm", u.id()));
+                    }
+                }
+            }
+            return;
+        }
+        if test == "assassin-heavy" || test == "assassin-commander" {
+            let def = if test == "assassin-heavy" {
+                self.defs.get("tankassault")
+            } else {
+                self.cb.friendly_units().iter().filter_map(|u| u.def()).find(|d| self.defs.is_commander(*d))
+            };
+            if let Some(def) = def
+                && let Some(u) = self.cb.cheat_new_unit(def, pos)
+            {
+                u.set_move_state(0, 0);
+                self.log(&format!("assassin-test: {} {} waits for the Widow", self.defs.name(def), u.id()));
+            }
+            return;
+        }
+        if test == "assassin-widow" || test == "assassin-no-widow" {
+            let home = Vec3::xz(center.x, center.z - 350.0);
+            if let Some(def) = self.defs.get("spiderscout") {
+                for i in 0..20 {
+                    let at = Vec3::xz(home.x + (i % 5) as f32 * 35.0, home.z + (i / 5) as f32 * 35.0);
+                    if let Some(u) = self.cb.cheat_new_unit(def, at) {
+                        self.assign_role(u, super::super::roles::Role::SoloRaider);
+                        u.set_fire_state(0, 0);
+                        // Hold the ordinary raiders for the real strike selector.
+                        // Adopting a raider releases this role ownership.
+                        springai::reserved::own(
+                            self.cb,
+                            u.id(),
+                            springai::reserved::Owner {
+                                module: "strike_test",
+                                helpers: &["war.unitFinished", "war.unitIdle"],
+                            },
+                        );
+                    }
+                }
+            }
+            let name = if test == "assassin-widow" { "spiderantiheavy" } else { "planescout" };
+            if let Some(def) = self.defs.get(name)
+                && let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z))
+            {
+                springai::reserved::own(
+                    self.cb,
+                    u.id(),
+                    springai::reserved::Owner { module: "strike_test", helpers: &["war.unitFinished", "war.unitIdle"] },
+                );
+                u.set_fire_state(0, 0);
+                u.set_move_state(0, 0);
+            }
+            self.log("assassin-test: 20 ordinary Fleas await a stunned finisher target");
+            return;
+        }
         if test == "assassin-target" || test == "assassin-target2" {
             if let Some(def) = self.defs.get("cloaksnipe")
                 && let Some(u) = self.cb.cheat_new_unit(def, pos)
@@ -56,7 +166,15 @@ impl Ai {
         let count = tactic.size(1, cost, def.cost(self.metal));
         self.strikes.wave = Some(Wave {
             tactic,
-            job: Job { id: None, pos, last: frame, count: 1, value: cost, name: "cloaksnipe".into() },
+            job: Job {
+                id: None,
+                pos,
+                last: frame,
+                count: 1,
+                value: cost,
+                name: "cloaksnipe".into(),
+                prey: Prey::GlassCannon,
+            },
             needed: count,
             members: Vec::new(),
             phase: Phase::Forming,
@@ -73,7 +191,7 @@ impl Ai {
                 u.stop(0);
             }
         }
-        self.sweeps_note_sniper(pos, 510);
+        self.sweeps_seed_phantom_fix(pos, 1);
         self.log(&format!("assassin-test: {count} {} assembled", tactic.name()));
     }
 }

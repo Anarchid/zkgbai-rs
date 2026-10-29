@@ -580,6 +580,9 @@ impl Ai {
                     | "airstrike-farm"
                     | "airstrike-singu"
                     | "airstrike-aa"
+                    | "assassin-aa"
+                    | "assassin-heavy"
+                    | "assassin-commander"
             )
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));

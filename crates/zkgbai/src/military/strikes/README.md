@@ -63,3 +63,53 @@ Phantom, and actual engine movement and firing. Run `tools/arena/match.sh` with
 `test=assassin-target`; `assassin-support` against `assassin-target2` exercises
 Badger, Firewalker and Inferno support. These isolate controller behavior; they
 do not measure noisy bearing accuracy, escorted dives or economic performance.
+
+## Flea finishers and forward readiness
+
+Fleas still attack glass cannons directly. Commanders require a currently visible,
+paralyzed target, and other mobile heavies (the jaeger classification) become
+Flea-only opportunities during paralysis. A Widow hunt/ambush warns an existing
+Flea wave to muster before the stun lands. These transient jobs require a full
+existing wave; they do not order new Fleas. Waiting or returning Flea waves may
+switch to one, but committed dives keep their target. Any observed EMP qualifies;
+the AI does not need to attribute the stun to a particular Widow.
+
+The worker seeds observed paralysis into the mechanics model, with normal decay.
+A finisher must be predicted to kill before the remaining stun expires, with a
+response margin, and the live window is checked again when the answer arrives.
+Recovery or lost LOS ends a stun-dependent dive. Heavy and commander weapons are
+not assumed permanently disabled.
+
+Waves stage toward the nearest friendly front, normally 250–900 elmos behind it,
+and prefer a point 600–950 from the job where both constraints permit it. Threat
+and terrain checks can retain the previous staging point when no safe forward
+point exists. Fleas and Dirtbags screen in a tangent line up to 1600 elmos wide
+while evidence is quiet. Fresh activity (45 seconds) or a Widow hunt brings them
+into a compact muster before a call; launching still requires a fresh fix (20
+seconds), all members gathered and a successful prediction. Bot dives advance as
+a line, converging to focus a revealed target; Halberds retain pack pacing.
+
+`assassin-widow` versus `assassin-heavy` or `assassin-commander` exercises a real
+Widow EMP and an existing 20-Flea force through the normal selector.
+`assassin-no-widow` versus `assassin-commander` checks the unstunned commander veto,
+and versus `assassin-aa` exercises dedicated-AA target masks and the swarm attack.
+
+Defenseless ground targets, including dedicated AA formations and unarmed economy,
+are Flea opportunities without a stun. Classification uses real weapon mount
+masks against the Flea category, not an AA tooltip; flex-AA and ground weapons
+are still dangerous. Nearby soft targets share a value budget: an existing wave
+can raid a cheap target, but production requires at least the whole wave's cost
+in target value. Twenty Fleas sweep a soft formation, continuing to nearby
+eligible targets after each kill. Enemy snapshot weapons use the same target
+masks; escorts remain in the prediction and riot-cover checks.
+
+Released Fleas and Dirtbags explicitly rejoin solo-raider roles. Fresh jobs sort
+ahead of stale fixes, and waiting waves may switch to fresh activity rather than
+holding on an old Phantom estimate. Operator status includes the job position,
+age, staging point, gathered-member count and whether a prediction is pending.
+
+Fleas and Dirtbags fire at will while screening, moving and diving. Halberds keep
+hold fire for approach armor and explicitly attack the revealed victim in range.
+A confirmed Phantom kill near an inferred fix also resolves that target before
+unit-id acquisition, including kills by allied fire between strike ticks. The
+wave returns after the last expected victim dies.

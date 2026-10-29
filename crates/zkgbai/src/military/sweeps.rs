@@ -29,6 +29,8 @@ const SNIPER_RANGE: f32 = 650.0;
 pub const SNIPER_MEMORY: i32 = 30 * 20;
 const PRESENCE_MEMORY: i32 = 30 * 180;
 const SNIPER_MERGE: f32 = 400.0;
+/// Search/death association around an approximate firing bearing.
+pub(crate) const PHANTOM_FIX_RADIUS: f32 = 750.0;
 const SNIPER_SHOTS: u32 = 2;
 
 #[derive(Default)]
@@ -71,13 +73,19 @@ impl Ai {
         s.shots.push(frame);
     }
 
+    /// Scenario location evidence is not an actual impact: adding a fake
+    /// shot would inflate cadence when the real Phantom fires soon afterward.
+    pub(crate) fn sweeps_seed_phantom_fix(&mut self, pos: Vec3, count: usize) {
+        self.sweeps.snipers.push(Snipers { pos, last: self.frame, shots: Vec::new(), residual: count, reload: 510 });
+    }
+
     /// Approximate infestations, with a lower-bound count from impact cadence.
     pub fn phantom_fixes(&self, max_age: i32) -> Vec<PhantomFix> {
         self.sweeps
             .snipers
             .iter()
             .filter(|s| self.frame - s.last < max_age)
-            .map(|s| PhantomFix { pos: s.pos, last: s.last, count: impact_count(&s.shots, s.reload).max(s.residual) })
+            .map(|s| PhantomFix { pos: s.pos, last: s.last, count: s.count() })
             .collect()
     }
 
@@ -96,11 +104,10 @@ impl Ai {
             .sweeps
             .snipers
             .iter_mut()
-            .filter(|s| distance(s.pos, pos) < SNIPER_MERGE)
+            .filter(|s| distance(s.pos, pos) < PHANTOM_FIX_RADIUS)
             .min_by(|a, b| distance(a.pos, pos).total_cmp(&distance(b.pos, pos)))
         {
-            s.residual = impact_count(&s.shots, s.reload).max(s.residual).saturating_sub(1);
-            s.shots.clear();
+            s.note_kill();
         }
         self.sweeps.snipers.retain(|s| s.residual > 0 || !s.shots.is_empty());
     }
@@ -128,6 +135,18 @@ struct Snipers {
     residual: usize,
 }
 
+impl Snipers {
+    fn count(&self) -> usize {
+        impact_count(&self.shots, self.reload).max(self.residual)
+    }
+    fn note_kill(&mut self) {
+        self.residual = self.count().saturating_sub(1);
+        // Pre-kill impacts cannot resurrect an exhausted estimate. Only
+        // another shot (or an independently observed live unit) can do that.
+        self.shots.clear();
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PhantomFix {
     pub pos: Vec3,
@@ -144,12 +163,25 @@ fn impact_count(shots: &[i32], reload: i32) -> usize {
         .enumerate()
         .map(|(i, f)| shots[i..].iter().take_while(|t| **t - *f < window).count())
         .max()
-        .unwrap_or(1)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmed_kills_exhaust_estimate_until_another_shot() {
+        let mut fix = Snipers { pos: Vec3::xz(0.0, 0.0), last: 10, shots: vec![0, 10], reload: 510, residual: 1 };
+        assert_eq!(fix.count(), 2);
+        fix.note_kill();
+        assert_eq!(fix.count(), 1);
+        assert!(fix.shots.is_empty());
+        fix.note_kill();
+        assert_eq!(fix.count(), 0);
+        fix.shots.push(600);
+        assert_eq!(fix.count(), 1);
+    }
+
     #[test]
     fn cadence_counts_snipers_not_lifetime_shots() {
         assert_eq!(impact_count(&[0, 510, 1020, 1530], 510), 1);
