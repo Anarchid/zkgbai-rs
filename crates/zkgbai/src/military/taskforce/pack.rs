@@ -17,14 +17,15 @@
 //! need not mind who is in front), runs on, and swings round for another,
 //! until nothing is left there (or for 45 s); then the next, staying out
 //! while it has `cores_to_stay`. A turn back of more than a right angle
-//! starts with an arc. With `attack` charge (or mixed, for what moves) it
+//! starts with an arc when attacking; retreats may reverse directly.
+//! With `attack` charge (or mixed, for what moves) it
 //! runs at the target head-on instead, aimed anew each conduct until
 //! [`CHARGE_LOCK`] off, then straight through: ZK units push mobiles out of
 //! their way, and what dodges a tangent cannot sidestep a ram. With
-//! `commit`, a run begun is finished through its target before threat,
-//! raiders or its health are judged again (runs are for doing damage; they
-//! expect losses). Enemy porc is weighed against the pack: it takes on
-//! targets, run lines and ground under porc threat up to `porc_share` of its
+//! `commit`, a run begun is finished through its target before threat or
+//! raiders are judged again. Health retreats always interrupt immediately,
+//! regardless of run progress or heading. Enemy porc is weighed against the
+//! pack: it takes on targets, run lines and ground under porc threat up to `porc_share` of its
 //! own (`shun_porc` off: porc is not looked at). After `quiet` seconds
 //! without firing (five by default), members below `repair_below` health
 //! leave along their own clear routes home, regardless of incoming hits.
@@ -235,6 +236,20 @@ impl Pack {
         health_sum / self.original_cores.max(1) as f32
     }
 
+    /// Health always wins over run commitment and discretionary resting.
+    fn retreat_for_health(&mut self, strength: f32, threshold: f32) -> bool {
+        if strength >= threshold || (self.parked && !self.opportunistic_rest) {
+            return false;
+        }
+        self.parked = true;
+        self.opportunistic_rest = false;
+        self.target = NULLPOS;
+        self.pass = None;
+        self.to_screen = false;
+        self.back_until = 0;
+        true
+    }
+
     fn recover(&mut self, cores: usize, health: f32, healed: f32, at_haven: bool) -> bool {
         if !self.parked || health < healed || !at_haven {
             return false;
@@ -392,6 +407,28 @@ pub fn spaced(path: impl IntoIterator<Item = Vec3>, from: Vec3, n: usize, spacin
     out
 }
 
+/// Movement toward a destination. Attacks may start with a turning arc;
+/// retreats follow the terrain path immediately, even directly behind us.
+/// Always replace old orders near the destination too.
+fn approach_way(
+    pos: Vec3,
+    head: (f32, f32),
+    dest: Vec3,
+    assault: bool,
+    path: impl IntoIterator<Item = Vec3>,
+) -> Vec<Vec3> {
+    if distance(pos, dest) <= STAND_NEAR {
+        return vec![dest];
+    }
+    let mut way: Vec<Vec3> = if assault { turn_point(pos, head, dest).into_iter().collect() } else { Vec::new() };
+    let from = way.last().copied().unwrap_or(pos);
+    way.extend(spaced(path.into_iter().filter(|p| distance(*p, pos) > SPACING / 2.0), from, 2, SPACING));
+    if way.last().is_none_or(|&l| distance(l, dest) < 2.0 * SPACING && distance(l, dest) > 1.0) {
+        way.push(dest);
+    }
+    way
+}
+
 /// What the fight predictor expects of a run (see `pack_judge`): its
 /// engagements, the enemy metal they kill, the economy at the target taken
 /// if any of the pack gets there, the pack's metal lost, and how many of its
@@ -523,8 +560,8 @@ impl Ai {
         let target_left =
             st.target != NULLPOS && self.frame - st.since < TARGET_FOR && self.pack_target_left(st.target).is_some();
         st.finish_pass(pos, target_left);
-        // Committed, finish 150 beyond the fixed pass point first. Once
-        // finished (or the target is gone), safety checks precede any new run.
+        // Commitment only defers tactical reconsideration. Health below
+        // the retreat threshold cancels the run at any point.
         let running = shape.commit && st.target != NULLPOS && st.pass.is_some();
 
         // Forced retreats keep the old recovery target. Discretionary rests
@@ -536,11 +573,7 @@ impl Ai {
                 100.0 * health,
                 cores.len()
             ));
-        } else if strength < shape.retreat_health && !running && (!st.parked || st.opportunistic_rest) {
-            st.parked = true;
-            st.opportunistic_rest = false;
-            st.target = NULLPOS;
-            st.pass = None;
+        } else if st.retreat_for_health(strength, shape.retreat_health) {
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) parks for repairs ({:.0}% strength, \
                  {:.0}% health, {} of {} original cores)",
@@ -1291,30 +1324,23 @@ impl Ai {
         self.graph_get_closest_haven(if rally == NULLPOS { pos } else { rally })
     }
 
-    /// Send pack `sid` from `pos` to `dest` unless it stands there already
-    /// (`assault`: by the attack path, else away from enemies).
+    /// Send pack `sid` to `dest`, replacing any previous attack orders
+    /// even when already nearby (`assault`: attack path, else avoid enemies).
     fn pack_go(&mut self, sid: SquadId, pos: Vec3, head: (f32, f32), dest: Vec3, assault: bool) {
-        if distance(pos, dest) <= STAND_NEAR {
-            return;
-        }
         let way = self.pack_way(sid, pos, head, dest, assault);
         self.pack_drive(sid, &way);
     }
 
-    /// Waypoints for pack `sid`'s leader from `pos` to `dest`: an arc
-    /// first if `dest` lies more than a right angle off its heading, then
-    /// its path, points [`SPACING`] apart, ending at `dest` when it is near.
+    /// Path waypoints [`SPACING`] apart. Only attacks use turning arcs;
+    /// retreating packs may reverse immediately.
     fn pack_way(&mut self, sid: SquadId, pos: Vec3, head: (f32, f32), dest: Vec3, assault: bool) -> Vec<Vec3> {
-        let mut way: Vec<Vec3> = turn_point(pos, head, dest).into_iter().collect();
-        let from = way.last().copied().unwrap_or(pos);
-        let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return way };
+        if distance(pos, dest) <= STAND_NEAR {
+            return approach_way(pos, head, dest, assault, []);
+        }
+        let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return Vec::new() };
         let cost = if assault { PathCost::AssaultPath } else { PathCost::AvoidEnemies };
         let path = self.pathfinder.find_path(&self.war, leader, dest, cost);
-        way.extend(spaced(path.into_iter().filter(|p| distance(*p, pos) > SPACING / 2.0), from, 2, SPACING));
-        if way.last().is_none_or(|&l| distance(l, dest) < 2.0 * SPACING && distance(l, dest) > 1.0) {
-            way.push(dest);
-        }
-        way
+        approach_way(pos, head, dest, assault, path)
     }
 
     fn pack_drive(&mut self, sid: SquadId, way: &[Vec3]) {
@@ -1512,6 +1538,60 @@ fn sweep_target(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn health_retreat_interrupts_any_part_of_a_run_even_while_firing() {
+        let target = Vec3::xz(1000.0, 0.0);
+        for x in [100.0, 1000.0, 1100.0, 1200.0] {
+            let mut pack = Pack {
+                target,
+                pass_target: target,
+                pass: Some(Pass { way: (1.0, 0.0), side: 0.0 }),
+                to_screen: true,
+                back_until: 1000,
+                ..Pack::default()
+            };
+            pack.fired(100);
+            assert!(!pack.quiet(100, 5.0));
+            pack.finish_pass(Vec3::xz(x, 0.0), true);
+            assert!(pack.retreat_for_health(0.2, 0.5));
+            assert!(pack.parked && !pack.opportunistic_rest);
+            assert_eq!(pack.target, NULLPOS);
+            assert!(pack.pass.is_none() && !pack.to_screen);
+            assert_eq!(pack.back_until, 0);
+            // Forced recovery cannot be converted back to an early-ending rest.
+            assert!(!pack.retreat_for_health(0.2, 0.5));
+            assert!(pack.parked && !pack.opportunistic_rest);
+        }
+    }
+
+    #[test]
+    fn low_health_promotes_discretionary_rest_to_forced_recovery() {
+        let mut pack = Pack { parked: true, opportunistic_rest: true, ..Pack::default() };
+        assert!(!pack.retreat_for_health(0.6, 0.5));
+        assert!(pack.opportunistic_rest);
+        assert!(pack.retreat_for_health(0.4, 0.5));
+        assert!(pack.parked && !pack.opportunistic_rest);
+    }
+
+    #[test]
+    fn retreat_reverses_directly_while_attack_can_still_turn_in_an_arc() {
+        let pos = Vec3::ZERO;
+        let home = Vec3::xz(-1000.0, 0.0);
+        let path = [Vec3::ZERO, Vec3::xz(-400.0, 0.0), Vec3::xz(-800.0, 0.0), home];
+        let retreat = approach_way(pos, (1.0, 0.0), home, false, path);
+        assert_eq!(retreat[0], Vec3::xz(-400.0, 0.0));
+        assert!(retreat.iter().all(|p| p.x < 0.0 && p.z == 0.0));
+        let attack = approach_way(pos, (1.0, 0.0), home, true, path);
+        assert_eq!(attack[0].x, 0.0);
+        assert_eq!(attack[0].z.abs(), TURN);
+    }
+
+    #[test]
+    fn retreat_near_a_haven_still_replaces_queued_attack_orders() {
+        let home = Vec3::xz(-100.0, 0.0);
+        assert_eq!(approach_way(Vec3::ZERO, (1.0, 0.0), home, false, []), vec![home]);
+    }
+
+    #[test]
     fn casualties_and_damage_both_reduce_original_strength() {
         let mut pack = Pack::default();
         assert_eq!(pack.strength(5, 5.0), 1.0);
@@ -1552,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn commitment_ends_150_beyond_the_locked_point_even_if_the_enemy_moves() {
+    fn passes_end_150_beyond_the_locked_point_even_if_the_enemy_moves() {
         let target = Vec3::xz(1000.0, 0.0);
         let mut pack =
             Pack { target, pass_target: target, pass: Some(Pass { way: (1.0, 0.0), side: 0.0 }), ..Pack::default() };
