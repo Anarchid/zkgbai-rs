@@ -219,6 +219,16 @@ impl Ai {
 
     pub(super) fn eco_assign_worker(&mut self, wid: i32) {
         let frame = self.frame;
+        // Cancel the old engine order even if no safe replacement exists.
+        let unsafe_fortification = self.eco.workers.get(&wid).is_some_and(|w| {
+            w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
+                t.as_construction().is_some_and(|c| c.fortification)
+                    && self.eco_fortify_travel(w, t.get_pos()).is_none()
+            })
+        });
+        if unsafe_fortification && let Some(w) = self.eco.workers.get_mut(&wid) {
+            w.clear_task(&mut self.eco.tasks);
+        }
         let Some(task_id) = self.eco_get_cheapest_job(wid) else {
             return;
         };
@@ -419,6 +429,11 @@ impl Ai {
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let reaches = |t: &WorkerTask| {
+            if t.as_construction().is_some_and(|c| c.fortification)
+                && self.eco_fortify_travel(worker, t.get_pos()).is_none()
+            {
+                return false;
+            }
             def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
                 && !self.eco_worker_shuns(worker, t.get_pos())
         };
@@ -545,7 +560,7 @@ impl Ai {
 
     /// Enemy armed ground units seen within RAID_MEMORY frames: where last
     /// seen and their danger (empty with `disable=raidmem`).
-    fn eco_recent_raiders(&self) -> Vec<(Vec3, f32)> {
+    pub(super) fn eco_recent_raiders(&self) -> Vec<(Vec3, f32)> {
         if self.dev_off("raidmem") {
             return Vec::new();
         }

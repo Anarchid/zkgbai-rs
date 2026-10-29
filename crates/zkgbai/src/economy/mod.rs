@@ -6,6 +6,7 @@ pub mod build_ids;
 mod colonize;
 pub mod factory;
 pub mod factory_manager;
+mod fortify;
 mod geo;
 pub mod grid;
 mod planning;
@@ -174,6 +175,7 @@ pub struct EconomyManager {
     /// The ditch being dug, ditches dug (their middles), and ditches tried
     /// lately (middle, frame).
     pub ditch: Option<terraform::Ditch>,
+    pub last_fortify_plan: i32,
     pub ditched: Vec<Vec3>,
     pub ditch_tries: Vec<(Vec3, i32)>,
     /// When a ditch none was worth digging was last journaled (`detour`).
@@ -370,6 +372,7 @@ impl EconomyManager {
             terraform_tags: 0,
             terraform_test: None,
             ditch: None,
+            last_fortify_plan: -300,
             ditched: Vec::new(),
             ditch_tries: Vec::new(),
             ditch_noted: 0,

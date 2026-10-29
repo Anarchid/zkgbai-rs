@@ -29,6 +29,7 @@
 
 mod borders;
 mod build;
+pub mod fortify;
 mod graph;
 pub mod lanes;
 pub mod occupancy;

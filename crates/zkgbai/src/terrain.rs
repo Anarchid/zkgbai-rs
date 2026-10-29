@@ -475,7 +475,7 @@ pub struct Strategy {
     pub frame: i32,
     pub tier: Tier,
     pub analysis: Analysis,
-    /// Chokepoints worth fortifying, nearest the enemy first.
+    /// Chokepoints by strategic value (legacy: nearest the enemy first).
     pub fortify: Vec<Fortification>,
     /// Regions (of the tier's map) the enemy's ground army can only reach
     /// through our base or past chokepoints our defenses hold, or not at
@@ -486,13 +486,18 @@ pub struct Strategy {
     /// The enemy's base, and the other movement tiers its ground forces
     /// have shown.
     pub(crate) enemy_base: Pos,
+    /// Initial enemy base estimate, stable as their territory expands.
+    leyline_enemy: Pos,
     other_tiers: Vec<Tier>,
 }
 
 /// A chokepoint guarding our territory from enemy ground forces.
+#[derive(Clone)]
 pub struct Fortification {
     pub choke: usize,
-    /// Where its defenses go: just behind the gate on our side.
+    pub home: usize,
+    pub score: f32,
+    /// Placement seed; shared defenses may stand elsewhere.
     pub pos: Vec3,
     /// Width of the front its defenses cover, elmos (see
     /// `Choke::hold_width`).
@@ -651,12 +656,13 @@ impl Ai {
     }
 
     /// Run the strategic analysis now.
-    fn strategy_refresh(&mut self, frame: i32) {
+    pub(crate) fn strategy_refresh(&mut self, frame: i32) {
         let Some((ally, enemy)) = self.strategy_bases() else { return };
         let tiers = self.enemy_ground_tiers();
         let tier = tiers[0];
         let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
-        let mut assets = self.strategy_assets();
+        let all_assets = self.strategy_assets();
+        let mut assets = all_assets.clone();
         // With `detour`, chokepoints are held (and walled) for our own metal
         // only, not half of every free spot behind them: on Otago three
         // mexes of ours had gates fortified at 1:29.
@@ -665,14 +671,35 @@ impl Ai {
         }
         let analysis = Analysis::run(&Scenario { map, ally_base: pos(ally), enemy_base: pos(enemy), assets: &assets });
         let elevation = self.cb.map();
-        // Spiders climb around any chokepoint.
-        let fortify = if tier == Tier::Spider { Vec::new() } else { fortifications(map, &analysis) };
-        let fortify = fortify
+        let leyline_enemy = self.strategy.as_ref().map_or(pos(enemy), |s| s.leyline_enemy);
+        // The default-on fortify policy uses shared coverage and leylines.
+        // Disabling it restores the old value-cut gates and their ordering.
+        let gates = if tier == Tier::Spider {
+            Vec::new()
+        } else if self.dev_off("fortify") {
+            fortifications(map, &analysis)
+                .into_iter()
+                .filter_map(|(choke, pos, width)| {
+                    Some(zk_terrain::fortify::GateValue {
+                        choke,
+                        home: analysis.home_side(map, choke)?,
+                        pos,
+                        width,
+                        score: 1.0,
+                    })
+                })
+                .collect()
+        } else {
+            zk_terrain::fortify::gates(map, &analysis, pos(ally), leyline_enemy, &all_assets)
+        };
+        let fortify = gates
             .into_iter()
-            .map(|(choke, p, width)| Fortification {
-                choke,
-                pos: Vec3::new(p.x, elevation.elevation_at(p.x, p.z), p.z),
-                width,
+            .map(|g| Fortification {
+                choke: g.choke,
+                home: g.home,
+                score: g.score,
+                pos: Vec3::new(g.pos.x, elevation.elevation_at(g.pos.x, g.pos.z), g.pos.z),
+                width: g.width,
                 blocked: false,
             })
             .collect();
@@ -688,8 +715,17 @@ impl Ai {
         let sheltered = analysis.sheltered(map, pos(enemy), held, held_region);
         let other_tiers = tiers[1..].to_vec();
         let occupancy = Occupancy::new(map, &self.region_presence());
-        let strategy =
-            Strategy { frame, tier, analysis, fortify, sheltered, occupancy, enemy_base: pos(enemy), other_tiers };
+        let strategy = Strategy {
+            frame,
+            tier,
+            analysis,
+            fortify,
+            sheltered,
+            occupancy,
+            enemy_base: pos(enemy),
+            leyline_enemy,
+            other_tiers,
+        };
         // The first analysis, and whenever what is sheltered changes much.
         let before = self.strategy.as_ref().map_or(0, |s| s.sheltered.iter().filter(|&&s| s).count());
         let now = strategy.sheltered.iter().filter(|&&s| s).count();

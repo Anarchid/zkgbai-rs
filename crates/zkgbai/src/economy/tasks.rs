@@ -46,6 +46,8 @@ pub struct ConstructionTask {
     /// Unit id of the commander that owns the factory plop.
     pub assigned_plop: i32,
     pub fac_def: bool,
+    /// Opportunistic gate defense: requires support and a safe approach.
+    pub fortification: bool,
 }
 
 /// Reclaim a feature (wreck, tree, ...).
@@ -86,6 +88,7 @@ impl WorkerTask {
                 fac_plop: false,
                 assigned_plop: 0,
                 fac_def: false,
+                fortification: false,
             }),
         )
     }

@@ -51,6 +51,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("mexporc", "Defense", "a turret by every mex and link"),
     ("ditch", "Defense", "ditches across chokepoints we fortify"),
     (
+        "fortify",
+        "Defense",
+        "shared gate defenses and ground-route leyline priorities, with distance, density and constructor support checks (off: legacy gate planning)",
+    ),
+    (
         "detour",
         "Defense",
         "ditches by how much longer the enemy's way to our metal gets, priced against workers' jobs; gate turrets priced as light porc; chokepoints held for our own metal only",

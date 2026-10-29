@@ -1005,10 +1005,14 @@ impl Ai {
 
     /// Switch a feature off (or back on) while playing.
     pub fn set_feature_off(&mut self, feature: &str, off: bool) {
+        let changed = self.dev_off(feature) != off;
         if off {
             self.disabled.insert(feature.to_owned());
         } else {
             self.disabled.remove(feature);
+        }
+        if feature == "fortify" && changed {
+            self.eco_fortify_switch_changed(off);
         }
     }
 

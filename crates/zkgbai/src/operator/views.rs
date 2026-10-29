@@ -874,7 +874,7 @@ pub fn terrain(ai: &mut Ai, _: &Args) -> Out {
     let fortify: Vec<Value> = s
         .fortify
         .iter()
-        .map(|f| json!({"choke": f.choke, "pos": xz(f.pos), "width": r1(f.width), "blocked": f.blocked}))
+        .map(|f| json!({"choke": f.choke, "pos": xz(f.pos), "width": r1(f.width), "score": r1(f.score), "home_region": f.home, "blocked": f.blocked}))
         .collect();
     let a = &s.analysis;
     Ok(json!({

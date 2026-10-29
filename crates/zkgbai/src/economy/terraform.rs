@@ -109,6 +109,12 @@ impl Ai {
                 self.log(&format!("terraform: ditch at ({:.0}, {:.0}) dug {dug:.0} deep", d.mid.x, d.mid.z));
                 self.eco.ditched.push(d.mid);
                 self.eco.ditch = None;
+            } else if !self.dev_off("fortify") && !self.eco_fortify_supported(d.mid) {
+                if self.eco.workers.get(&d.worker.id()).is_some_and(|w| !w.is_chicken) {
+                    d.worker.stop(0);
+                }
+                self.eco.ditch_tries.push((d.mid, frame));
+                self.eco.ditch = None;
             } else if frame - d.ordered > 30 * 30 && !is_terraforming(d.worker) {
                 self.eco.ditch_tries.push((d.mid, frame));
                 self.eco.ditch = None;
@@ -128,6 +134,7 @@ impl Ai {
         }
         let Some(tier_map) = self.terrain().and_then(|t| t.tier(s.tier)) else { return };
         let detour = !self.dev_off("detour");
+        let fortify = !self.dev_off("fortify");
         let near = |list: &[Vec3], p: Vec3| list.iter().any(|&q| distance(p, q) < 150.0);
         let tried: Vec<Vec3> =
             self.eco.ditch_tries.iter().filter(|&&(_, f)| frame - f < DITCH_RETRY).map(|&(p, _)| p).collect();
@@ -136,7 +143,7 @@ impl Ai {
                 let choke = &tier_map.chokes[f.choke];
                 // Only across a gate with no way round it: units would walk round
                 // a ditch over the slopes beside it.
-                let home = s.analysis.home_side(tier_map, f.choke)?;
+                let home = f.home;
                 if choke.kind != ChokeKind::Gate || choke.bypass_into(home).is_finite() {
                     return None;
                 }
@@ -178,41 +185,83 @@ impl Ai {
         let candidates: Vec<_> = (sites.iter().zip(&worth))
             .map(|((c, mid, _), w)| json!({"choke": c, "x": mid.x.round(), "z": mid.z.round(), "worth": round2(*w)}))
             .collect();
-        // The old rule takes the first (nearest the enemy).
-        let pick = if detour {
-            (0..sites.len()).filter(|&i| worth[i] >= DITCH_MIN_WORTH).max_by(|&i, &j| worth[i].total_cmp(&worth[j]))
+        let chosen = if fortify {
+            // Ditch value and the worker's existing job remain admission
+            // tests; rank admitted opportunities by gate value and travel.
+            sites
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (choke, mid, line))| {
+                    if detour && worth[i] < DITCH_MIN_WORTH {
+                        return None;
+                    }
+                    let gate = s.fortify.iter().find(|f| f.choke == *choke)?;
+                    self.eco
+                        .workers
+                        .values()
+                        .filter(|w| !is_terraforming(w.unit))
+                        .filter_map(|w| {
+                            let travel = self.eco_fortify_travel(w, *mid)?;
+                            let price = travel / 4.0 - DITCH_SPOT_PRICE * worth[i];
+                            let job = if detour { self.eco_current_job_cost(w).min(IDLE_JOB) } else { IDLE_JOB };
+                            if detour && price >= job {
+                                return None;
+                            }
+                            let value = gate.score
+                                * super::fortify::travel_discount(travel)
+                                * if detour { worth[i] } else { 1.0 }
+                                / (line.len() as f32 * 16.0).max(1.0);
+                            Some((value, i, (w.id, price, job)))
+                        })
+                        .max_by(|a, b| a.0.total_cmp(&b.0))
+                })
+                .max_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, i, w)| (i, w))
         } else {
-            Some(0)
+            (|| {
+                // The old rule takes the first (nearest the enemy).
+                let pick = if detour {
+                    (0..sites.len())
+                        .filter(|&i| worth[i] >= DITCH_MIN_WORTH)
+                        .max_by(|&i, &j| worth[i].total_cmp(&worth[j]))
+                } else {
+                    Some(0)
+                };
+                let i = pick?;
+                let (_, mid, _) = &sites[i];
+                let mid = *mid;
+                let worth = worth[i];
+
+                // The old rule: the nearest worker that is not running from
+                // anything. With `detour`, the ditch is a job like a mex (a quarter
+                // of the way, less DITCH_SPOT_PRICE per spot of worth) for whoever
+                // it beats the present job of by most.
+                let eligible = (self.eco.workers.values())
+                    .filter(|w| !w.is_chicken && !w.assigned_plop && !w.unit.is_being_built())
+                    .map(|w| (distance(w.get_pos(), mid), w))
+                    .filter(|&(d, _)| d <= DITCH_WORKER_RANGE);
+                let worker = if detour {
+                    eligible
+                        .map(|(d, w)| {
+                            (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, self.eco_current_job_cost(w).min(IDLE_JOB))
+                        })
+                        .filter(|&(_, price, job)| price < job)
+                        .max_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))
+                } else {
+                    eligible
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(d, w)| (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, IDLE_JOB))
+                };
+                let (wid, price, job) = worker?;
+                Some((i, (wid, price, job)))
+            })()
         };
-        let Some(i) = pick else {
-            self.eco_note_no_ditch(frame, "none worth it", candidates);
+        let Some((i, (wid, price, job))) = chosen else {
+            self.eco_note_no_ditch(frame, "no worthwhile site with an eligible worker", candidates);
             return;
         };
         let (choke, mid, line) = sites.swap_remove(i);
         let worth = worth[i];
-
-        // The old rule: the nearest worker that is not running from
-        // anything. With `detour`, the ditch is a job like a mex (a quarter
-        // of the way, less DITCH_SPOT_PRICE per spot of worth) for whoever
-        // it beats the present job of by most.
-        let eligible = (self.eco.workers.values())
-            .filter(|w| !w.is_chicken && !w.assigned_plop && !w.unit.is_being_built())
-            .map(|w| (distance(w.get_pos(), mid), w))
-            .filter(|&(d, _)| d <= DITCH_WORKER_RANGE);
-        let worker = if detour {
-            eligible
-                .map(|(d, w)| (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, self.eco_current_job_cost(w).min(IDLE_JOB)))
-                .filter(|&(_, price, job)| price < job)
-                .max_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))
-        } else {
-            eligible
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(d, w)| (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, IDLE_JOB))
-        };
-        let Some((wid, price, job)) = worker else {
-            self.eco_note_no_ditch(frame, "no worker's job is worth less", candidates);
-            return;
-        };
         let Some(w) = self.eco.workers.get_mut(&wid) else { return };
         let was = (w.task.and_then(|t| self.eco.tasks.get(t)).and_then(|t| t.as_construction()))
             .map_or_else(|| "none".to_owned(), |c| self.defs.name(c.build_type).to_owned());

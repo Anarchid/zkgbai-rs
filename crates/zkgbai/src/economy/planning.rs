@@ -509,7 +509,11 @@ impl Ai {
         // The posture's budget and sites (see `posture`): its own queue, not
         // the rest's (its orders would crowd out theirs, and theirs its).
         if self.posture_on() && self.eco.defended_fac {
-            self.eco_defend_posture();
+            // Shared gate sites spend the same posture budget. If none is
+            // safe or useful, retain its ordinary point-defense planner.
+            if self.dev_off("fortify") || !self.eco_defend_shared_chokes() {
+                self.eco_defend_posture();
+            }
         }
         // porc push against nearby enemy porc and defend the front line
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
@@ -2049,6 +2053,10 @@ impl Ai {
     /// `Strategy::fortify`): at most one new turret per call, more per
     /// chokepoint as income grows.
     fn eco_defend_chokes(&mut self) {
+        if !self.dev_off("fortify") {
+            self.eco_defend_shared_chokes();
+            return;
+        }
         let income = self.eco.adjusted_income;
         if income < 10.0 {
             return;

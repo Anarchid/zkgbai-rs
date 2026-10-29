@@ -27,6 +27,21 @@ Layout
 | `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. `luaui/gui_zkgbai_operator.lua`: the same in the game, as a LuaUI widget. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
 
+Gate fortification scores the direct route and equidistant frontier using ground travel between
+our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
+gate's value; distance from home and constructor travel reduce it sharply. The planner compares
+turret sites by uncovered gate value per metal, including shared sites between gates, and checks
+range and terrain clearance across each front. Existing and queued defenses reserve coverage.
+Forward construction and ditches require local support, reachable approaches, and checks against
+current threats and recent raids; workers reconsider fortification jobs when support changes.
+The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds
+in `crates/zkgbai/src/economy/fortify.rs`.
+
+The `fortify` feature is on by default. Set `disable=fortify` (or
+`ZKGBAI_DISABLE=fortify`) to restore the previous gate planner; it can also be
+toggled live with the operator feature switch. The new planner respects the
+posture defense budget and the existing `detour` ditch-value and job-cost checks.
+
 Building
 --------
 
