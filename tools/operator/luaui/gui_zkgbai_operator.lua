@@ -222,8 +222,8 @@ local nextProbe = 0
 local focus -- port of the AI shown
 local focusChosen = false -- picked by hand
 
-local show = {squads = true, intents = true, memory = true, spots = true, links = true, fronts = true, roles = true, defend = true, chokes = true, feed = true}
-local SHOW_ORDER = {"squads", "intents", "memory", "spots", "links", "fronts", "roles", "defend", "chokes", "feed"}
+local show = {missions = true, squads = true, intents = true, memory = true, spots = true, links = true, fronts = true, roles = true, defend = true, chokes = true, feed = true}
+local SHOW_ORDER = {"missions", "squads", "intents", "memory", "spots", "links", "fronts", "roles", "defend", "chokes", "feed"}
 local LAYERS = {"none", "threat", "enemy_porc", "aa_threat", "sub_threat", "value", "ally_threat", "riot"}
 local layer = "none"
 local SEGMENTATIONS = {"off", "regions", "holders"}
@@ -1633,6 +1633,36 @@ local function drawWorld(inst)
 		end
 	end
 
+	-- Diamonds are available candidates; double rings are launched missions.
+	if show.missions then
+		for _, m in ipairs((s.airstrikes or {}).missions or {}) do
+			local p = m.pos
+			if p then
+				local active = m.state == "in_progress"
+				local color = active and ACCENT or {1, 0.7, 0.2, 1}
+				glColor(color[1], color[2], color[3], 0.85)
+				glLineWidth(active and 3 or 1.5)
+				glDrawGroundCircle(p[1], 0, p[2], 100, active and 32 or 4)
+				if active then glDrawGroundCircle(p[1], 0, p[2], 75, 32) end
+				local route = m.route or {}
+				glBeginEnd(GL_LINES, function()
+					for i = 2, #route do
+						local a, b = route[i - 1], route[i]
+						-- Candidate routes have gaps; active routes are continuous.
+						local t = active and 1 or 0.55
+						local bx, bz = a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t
+						glVertex(a[1], groundY(a[1], a[2]) + 10, a[2])
+						glVertex(bx, groundY(bx, bz) + 10, bz)
+					end
+				end)
+				if cameraNear(p[1], p[2], 6000) then
+					worldText((active and "mission in progress: " or "mission available: ") .. tostring(m.kind),
+						p[1], groundY(p[1], p[2]) + 75, p[2], 16, color)
+				end
+			end
+		end
+	end
+
 	-- Roles of the AI's units, and those the operator holds.
 	if show.roles then
 		local labels = 0
@@ -2086,6 +2116,24 @@ local function intelLines(inst, add)
 		add(GREY .. format("incursions %d, %d blocked: ", #inc, #(m.blocks or {})) .. WHITE .. table.concat(parts, GREY .. " · " .. WHITE))
 	end
 	add(GREY .. format("places defended: %d", #(m.defend or {})))
+	local air = (inst.snap or {}).airstrikes or m.airstrikes
+	if air then
+		add(WHITE .. format("Air missions: %d available · %d in progress", air.available or 0, air.in_progress or 0))
+		if air.grounded then add(RED .. "Production grounded: unsafe airspace") end
+		for idx, job in ipairs(air.missions or {}) do
+			if idx > 12 then add(GREY .. "More missions shown on map…"); break end
+			local active = job.state == "in_progress"
+			add((active and GREEN or WHITE) .. (active and "In progress: " or "Available: ") .. tostring(job.kind)
+				.. " #" .. tostring(job.target) .. (job.deep and " · deep strike" or ""))
+			local packages = {}
+			for _, package in ipairs(job.packages or {}) do
+				local units = {}
+				for _, u in ipairs(package) do units[#units + 1] = tostring(u.count) .. " " .. tostring(u.name or u.unit) end
+				packages[#packages + 1] = table.concat(units, " + ")
+			end
+			add(GREY .. table.concat(packages, " or "))
+		end
+	end
 end
 
 local function makeIntel(Chili, font)

@@ -55,6 +55,18 @@ pub struct AirField {
 impl AirField {
     /// The cheapest ways from `from` over a `w` x `h` cell threat grid.
     pub fn new(war: &MilitaryManager, w: i32, h: i32, from: Vec3) -> Self {
+        Self::with_interceptors(war, w, h, from, |_| 0.0)
+    }
+
+    /// Include interception risk (fighters are deliberately absent from the
+    /// ordinary AA map) in both route choice and accumulated exposure.
+    pub fn with_interceptors(
+        war: &MilitaryManager,
+        w: i32,
+        h: i32,
+        from: Vec3,
+        interceptors: impl Fn(Vec3) -> f32,
+    ) -> Self {
         let n = (w * h).max(0) as usize;
         let mut f = AirField {
             w,
@@ -65,7 +77,7 @@ impl AirField {
             prev: vec![NONE; n],
         };
         let at = |i: i32| Vec3::xz((i % w) as f32 * CELL, (i / w) as f32 * CELL);
-        let aa: Vec<f32> = (0..n as i32).map(|i| war.get_aa_threat(at(i))).collect();
+        let aa: Vec<f32> = (0..n as i32).map(|i| war.get_aa_threat(at(i)) + interceptors(at(i))).collect();
         let toll: Vec<f32> =
             (0..n as i32).map(|i| 1.0 + AA_TOLL * aa[i as usize] + GROUND_TOLL * war.get_threat(at(i))).collect();
         let Some(start) = f.index(from) else { return f };

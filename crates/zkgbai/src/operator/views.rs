@@ -456,6 +456,7 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
         "incursions": incursions,
         "blocks": blocks,
         "strikes": ai.strikes_status(),
+        "airstrikes": ai.airstrikes_status(),
         "intel": {
             "enemy_produced": r1(i.produced),
             "enemy_income": r1(i.income),
@@ -1219,6 +1220,7 @@ pub fn snapshot_value(ai: &Ai) -> Value {
     let e = ai.cb.economy();
     let res = |r: Resource| json!([r1(e.current(r)), r1(e.income(r)), r1(e.usage(r)), r1(e.storage(r))]);
     json!({
+        "airstrikes": ai.airstrikes_status(),
         "frame": frame,
         "units": units,
         "enemies": enemies,
@@ -1312,7 +1314,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("squad", "assault, shield, hover and air squads: forming, rallying, attacking"),
     ("retreat", "hurt units going home to repair"),
     ("misc", "support units, loners, striders, artillery, nukes' targets"),
-    ("bomber", "bombers"),
+    ("bomber", "airstrike missions, bomber sorties and fighter interception"),
     ("scouts", "scouting runs"),
     ("drops", "Charon air drops"),
     ("teleport", "Djinn teleports"),

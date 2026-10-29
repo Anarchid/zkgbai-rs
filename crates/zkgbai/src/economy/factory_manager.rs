@@ -314,6 +314,20 @@ impl Ai {
         if frame % 60 != self.offset % 60 {
             return;
         }
+        // Deliberately idle air plants need another decision when missions change;
+        // the engine does not keep sending idle events for an empty queue.
+        let idle_air: Vec<i32> = self
+            .fac
+            .factories
+            .iter()
+            .filter(|(_, f)| {
+                f.kind() == FacKind::Plane && !f.unit.is_being_built() && f.unit.num_current_commands() == 0
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        for id in idle_air {
+            self.fac_assign_factory_task(id);
+        }
         let Some(hub_id) = self.fac.strider_hub else { return };
         match self.fac.strider_target {
             None => self.fac_assign_factory_task(hub_id),
@@ -326,6 +340,7 @@ impl Ai {
     }
 
     pub fn fac_unit_created(&mut self, unit: Unit, builder: Option<Unit>) {
+        self.airstrike_created(unit, builder);
         let Some(def) = unit.def() else { return };
         let name = self.defs.name(def);
         let cost = def.cost(self.metal);
@@ -557,6 +572,18 @@ impl Ai {
             self.fac_build_firefighter(fac_id);
             return;
         }
+        if self.test.as_deref().is_some_and(|t| matches!(t, "airstrike-wind" | "airstrike-odin")) {
+            if let Some(f) = self.fac.factories.get(&fac_id).filter(|f| f.kind() == FacKind::Plane) {
+                let unit = f.unit;
+                if let Some(name) = self.airstrike_production()
+                    && let Some(def) = self.defs.get(name)
+                {
+                    self.airstrike_ordered(fac_id, name);
+                    unit.build(def, unit.pos(), 0, 0);
+                }
+            }
+            return;
+        }
         if self.test.as_deref().is_some_and(|t| t != "hijack" && t != "impalerwar") {
             return;
         }
@@ -665,6 +692,13 @@ impl Ai {
         }
         let (unit, pos) = (fac.unit, fac.get_pos());
         self.fac.factories.insert(fac_id, fac);
+        // Empty is an intentional production pause, not a missing unit def.
+        if choice.is_empty() {
+            return;
+        }
+        if kind == FacKind::Plane && self.firefighters_order(kind) != Some(choice) {
+            self.airstrike_ordered(fac_id, choice);
+        }
         match choice {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
@@ -1691,6 +1725,9 @@ impl Ai {
     }
 
     fn fac_get_planes(&self, fac: &mut Factory) -> &'static str {
+        if self.bomber_handler.grounded {
+            return "";
+        }
         if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
             return "planecon";
         }
@@ -1700,8 +1737,8 @@ impl Ai {
         if self.eco.sparrow.is_none() {
             return "planescout";
         }
-        // raven raven raven raven raven... :D
-        "bomberprec"
+        // Primary missions buy aircraft; secondary missions only use the fleet.
+        self.airstrike_production().unwrap_or("")
     }
 
     fn fac_get_strider(&self) -> &'static str {

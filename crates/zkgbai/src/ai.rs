@@ -577,6 +577,9 @@ impl Ai {
                     | "lances"
                     | "assassin-target"
                     | "assassin-target2"
+                    | "airstrike-farm"
+                    | "airstrike-singu"
+                    | "airstrike-aa"
             )
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));

@@ -142,9 +142,11 @@ impl UnitClasses {
                 "bomberprec",
                 "bomberriot",
                 "bomberheavy",
+                "bomberassault",
+                "planesupport",
                 "planescout",
             ]),
-            bombers: set(&["bomberdive", "bomberprec", "bomberheavy", "bomberriot", "bomberdisarm"]),
+            bombers: set(&["bomberdive", "bomberprec", "bomberheavy", "bomberriot", "bomberdisarm", "bomberassault"]),
             sappers: set(&["cloakbomb", "shieldbomb", "jumpbomb"]),
             no_retreat: set(&[
                 "spidercrabe",

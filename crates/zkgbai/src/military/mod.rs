@@ -2,6 +2,7 @@
 //! handlers (raiders, squads, retreat, misc, bombers).
 
 pub mod air_intel;
+pub mod airstrikes;
 pub mod arsenal;
 pub mod blasts;
 pub mod drops;
@@ -624,6 +625,13 @@ impl Ai {
             }
             return;
         }
+        if self.airstrike_claims(unit.id()) {
+            unit.set_idle_mode(0, 0);
+            unit.set_move_state(0, 0);
+            unit.set_fire_state(0, 0);
+            self.bomber_add_bomber(Bomber::new(unit, team));
+            return;
+        }
         if self.strikes_claims(unit) {
             return;
         }
@@ -642,17 +650,18 @@ impl Ai {
             return;
         }
 
-        if name == "planelightscout" || name == "planescout" {
-            unit.set_idle_mode(0, 0);
-            unit.set_move_state(1, 0);
-            self.raider_add_sparrow(Fighter::new_raider(unit, cost, team));
-        }
-
-        if self.unit_classes.bombers.contains(name) {
+        if airstrikes::Plane::of(name).is_some() && (name != "planelightscout" || self.airstrike_claims(unit.id())) {
             unit.set_idle_mode(0, 0);
             unit.set_move_state(0, 0);
             unit.set_fire_state(0, 0);
             self.bomber_add_bomber(Bomber::new(unit, team));
+            return;
+        }
+
+        if name == "planelightscout" || name == "planescout" {
+            unit.set_idle_mode(0, 0);
+            unit.set_move_state(1, 0);
+            self.raider_add_sparrow(Fighter::new_raider(unit, cost, team));
         }
 
         // Deactivate outlaws so they don't destroy reclaim
