@@ -45,6 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use springai::{Resource, Unit, Vec3};
 
 use crate::Ai;
+use crate::military::jumps::SKUTTLE_PRESS;
 use crate::military::qrf::field::CELL;
 use crate::military::qrf::field::Mobility;
 use crate::military::{DefenseTarget, Enemy, Fighter, SquadId, SquadKind, scouts};
@@ -81,9 +82,6 @@ const WIDOW_ARMY_SHARE: f32 = 0.25;
 /// A pounce holds its Skuttle out of its squad, its blast counted on the
 /// heavy, this many frames (a jump flies about 2.5 s).
 const POUNCE_HOLD: i32 = 30 * 5;
-
-/// A Skuttle that cannot jump walks onto a heavy this close.
-const POUNCE_WALK: f32 = 140.0;
 
 /// A heavy is pounced on only if seen within this many frames.
 const POUNCE_SEEN: i32 = 30;
@@ -293,6 +291,9 @@ pub struct Jaegers {
     threatened: u32,
     /// Each hunter's cloak as last seen: cloaked, since when, its health.
     cloak: BTreeMap<i32, (bool, i32, f32)>,
+    /// Jaegers out of squads on their own (a Skuttle that jumped when
+    /// shown), until a frame.
+    held: BTreeMap<i32, i32>,
 }
 
 impl Ai {
@@ -422,6 +423,7 @@ impl Ai {
 
     pub fn jaeger_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
+        self.jaegers.held.remove(&id);
         self.jaegers.pounces.remove(&id);
         if let Some((cloaked, since, _)) = self.jaegers.cloak.remove(&id)
             && unit.health() <= 0.0
@@ -444,6 +446,26 @@ impl Ai {
 
     pub fn jaeger_enemy_destroyed(&mut self, id: i32) {
         self.jaegers.seen.remove(&id);
+    }
+
+    /// Jaeger `id` (a fighter-store id; others are let be) leaves its squad
+    /// and stays out of squads for `frames`, to act on its own. Call it
+    /// before ordering the unit: a squad's leader leaving is stopped.
+    pub fn jaeger_hold(&mut self, id: i32, frames: i32) {
+        if self.jaegers.members.contains(&id) {
+            self.jaeger_leave_squad(id);
+            self.jaegers.held.insert(id, self.frame + frames);
+        }
+    }
+
+    /// Skuttle `id` (a fighter-store id) goes onto enemy `eid` on its own,
+    /// as a pounce: out of its squad (call it before ordering the unit), its
+    /// blast counted on the enemy, and attacking again should it land idle.
+    pub fn jaeger_pounced(&mut self, id: i32, eid: i32) {
+        if self.jaegers.members.contains(&id) {
+            self.jaeger_leave_squad(id);
+            self.jaegers.pounces.insert(id, (eid, self.frame));
+        }
     }
 
     fn jaeger_leave_squad(&mut self, id: i32) {
@@ -515,6 +537,8 @@ impl Ai {
     /// squads left empty.
     fn jaeger_muster(&mut self) {
         let team = self.team_id;
+        let frame = self.frame;
+        self.jaegers.held.retain(|_, &mut until| frame < until);
         let ids: Vec<i32> = self.jaegers.members.iter().copied().collect();
         for id in ids {
             let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else {
@@ -529,7 +553,10 @@ impl Ai {
                 self.jaeger_leave_squad(id);
                 continue;
             }
-            if self.fighters.get(&id).is_some_and(|f| f.squad.is_some()) || self.jaegers.pounces.contains_key(&id) {
+            if self.fighters.get(&id).is_some_and(|f| f.squad.is_some())
+                || self.jaegers.pounces.contains_key(&id)
+                || self.jaegers.held.contains_key(&id)
+            {
                 continue;
             }
             let Some(kind) = kind_of(self.defs.name_of(unit)) else { continue };
@@ -791,23 +818,26 @@ impl Ai {
         let Some(s) = self.squads.get(sid) else { return };
         let frame = self.frame;
         let suicide = self.jaegers.hunts.get(&sid).is_some_and(|h| h.kind.suicide);
-        let strikers: Vec<Unit> = (s.fighters.iter().filter_map(|id| self.fighters.get(id)))
-            .filter(|f| all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame)))
-            .map(|f| f.unit)
+        let strikers: Vec<(Unit, bool)> = (s.fighters.iter().filter_map(|id| self.fighters.get(id)))
+            .map(|f| (f.unit, all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame))))
             .collect();
-        for unit in strikers {
-            // Skuttles jump the last stretch onto it (see `jumps`).
-            if !self.jaeger_jump(unit, target, NULLPOS, "skuttle") {
-                unit.attack(target, 0);
-            }
+        for (unit, free) in strikers {
             if suicide {
-                self.jaegers.pounces.insert(unit.id(), (target.id(), frame));
+                // Skuttles jump onto it, all of them each time; one that
+                // cannot waits in reach rather than walk up (see `jumps`).
+                if unit.rules_param_float("is_jumping", 0.0) != 1.0
+                    && (self.jaeger_jump(unit, target, NULLPOS, "skuttle") || self.skuttle_wait(unit, target))
+                {
+                    self.jaegers.pounces.insert(unit.id(), (target.id(), frame));
+                }
+            } else if free {
+                unit.attack(target, 0);
             }
         }
     }
 
     /// Skuttles pounce: each that is not under way onto a heavy already
-    /// jumps (or, that close, walks) onto the best heavy worth one in reach
+    /// jumps (or, shown and that close, walks) onto the best heavy worth one in reach
     /// that the blasts under way do not kill, and not among more of our
     /// own: its squad's mark first, then the dearest, then the nearest. It
     /// leaves its squad for the pounce.
@@ -846,7 +876,7 @@ impl Ai {
                 _ => None,
             });
             let jump = self.jump_ready(unit);
-            let reach = jump.map_or(POUNCE_WALK, |jd| jd.range);
+            let reach = jump.map_or(SKUTTLE_PRESS, |jd| jd.range);
             // (A heavy coming on may be in reach where it will be.)
             let lead = if jump.is_some() && !self.dev_off("lead") { POUNCE_LEAD } else { 0.0 };
             let pos = unit.pos();
@@ -867,7 +897,9 @@ impl Ai {
                     (eid, e.unit, e.position, e.get_health() * e.def_health(), marked, value, d)
                 });
             let Some((eid, target, at, health, marked, value, d)) = best else { continue };
-            if jump.is_none() && d > POUNCE_WALK {
+            // Without a jump, only one that presses on goes (never walking
+            // up: see `jumps`).
+            if jump.is_none() && !Self::skuttle_presses_on(unit, d) {
                 continue;
             }
             // Out of its squad first: a leader leaving it is stopped, which
@@ -875,7 +907,7 @@ impl Ai {
             // and lands idle by the heavy).
             self.jaeger_leave_squad(id);
             if !(jump.is_some() && self.jaeger_jump(unit, target, at, "skuttle pounce")) {
-                if d > POUNCE_WALK {
+                if !Self::skuttle_presses_on(unit, d) {
                     // (Back into a squad at the next muster.)
                     continue;
                 }
