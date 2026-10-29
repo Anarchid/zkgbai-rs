@@ -33,7 +33,11 @@ gate's value; distance from home and constructor travel reduce it sharply. The p
 turret sites by uncovered gate value per metal, including shared sites between gates, and checks
 range and terrain clearance at the centre and both edges of each front. Existing and queued
 defenses reserve each sample separately, so complementary coverage counts and saturated overlap
-earns no additional value. Fusion, Caretaker, Singularity and geothermal ground-defense requests
+earns no additional value. At most two built or queued Lotus range circles may share an area.
+Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
+covers them; repeated checks of one request do not add credit. Planned upgrades reserve demand,
+and cancelled upgrades release it. Placement still requires a safe constructor route and, when
+posture is enabled, sufficient posture budget. Fusion, Caretaker, Singularity and geothermal ground-defense requests
 reuse a matching existing or queued turret when it covers the asset's nearby approaches. Otherwise
 they prefer a safe shared gate site that retains that coverage, falling back to ordinary local
 placement when no such site is available. Weapon types are retained; AA, shields and the opening

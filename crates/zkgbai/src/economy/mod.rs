@@ -9,6 +9,7 @@ pub mod factory_manager;
 mod fortify;
 mod geo;
 pub mod grid;
+mod lotus;
 mod planning;
 mod silo;
 pub mod tasks;
@@ -177,6 +178,7 @@ pub struct EconomyManager {
     /// lately (middle, frame).
     pub ditch: Option<terraform::Ditch>,
     pub last_fortify_plan: i32,
+    lotus_demand: Vec<lotus::Demand>,
     pub ditched: Vec<Vec3>,
     pub ditch_tries: Vec<(Vec3, i32)>,
     /// When a ditch none was worth digging was last journaled (`detour`).
@@ -374,6 +376,7 @@ impl EconomyManager {
             terraform_test: None,
             ditch: None,
             last_fortify_plan: -300,
+            lotus_demand: Vec::new(),
             ditched: Vec::new(),
             ditch_tries: Vec::new(),
             ditch_noted: 0,
@@ -715,6 +718,7 @@ impl Ai {
             self.eco_energy_summary();
         }
 
+        self.eco_plan_lotus_upgrades(frame);
         self.eco_dig_ditches(frame);
         self.eco_plan_grid(frame);
         self.eco_update_requisition(frame);

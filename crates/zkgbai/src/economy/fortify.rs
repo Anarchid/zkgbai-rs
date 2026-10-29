@@ -43,7 +43,7 @@ fn front(map: &TierMap, gate: &Fortification) -> [Pos; 3] {
 
 /// Gate seeds and pair midpoints expose shared sites to the build-site
 /// search. A cluster centroid also catches three-way intersections.
-fn seeds(points: &[Pos], range: f32) -> Vec<Pos> {
+pub(super) fn seeds(points: &[Pos], range: f32) -> Vec<Pos> {
     let mut out = points.to_vec();
     for (i, &a) in points.iter().enumerate() {
         let mut cluster = vec![a];
@@ -90,7 +90,7 @@ fn marginal(have: &[usize; 3], covered: [bool; 3], wanted: usize) -> f32 {
 
 /// Keep immediate approaches around the protected asset in reach even
 /// when moving its guard toward a gate. Covering only its centre is too weak.
-fn asset_front(at: Vec3) -> [Pos; 5] {
+pub(super) fn asset_front(at: Vec3) -> [Pos; 5] {
     let p = pos(at);
     [p, Pos::new(p.x - 96.0, p.z), Pos::new(p.x + 96.0, p.z), Pos::new(p.x, p.z - 96.0), Pos::new(p.x, p.z + 96.0)]
 }
@@ -113,6 +113,7 @@ impl Ai {
     /// retain their safety checks until finished by the ordinary worker loop.
     pub(crate) fn eco_fortify_switch_changed(&mut self, off: bool) {
         if off {
+            self.eco_disable_lotus_pool();
             let pending: Vec<_> = self
                 .eco
                 .construction_tasks
@@ -201,7 +202,7 @@ impl Ai {
     }
 
     /// Do not infer coverage through cliffs from a weapon range circle.
-    fn eco_fire_coverage<const N: usize>(&self, def: UnitDef, site: Vec3, targets: &[Pos; N]) -> [bool; N] {
+    pub(super) fn eco_fire_coverage<const N: usize>(&self, def: UnitDef, site: Vec3, targets: &[Pos; N]) -> [bool; N] {
         let Some(ground) = self.precision.ground() else { return [false; N] };
         if def.name().starts_with("turretaa") {
             return [false; N];
@@ -217,7 +218,7 @@ impl Ai {
     }
 
     /// Include all sources of ground defenses, with nanoframes counted once.
-    fn eco_fire_positions(&self) -> Vec<(UnitDef, Vec3, Option<i32>)> {
+    pub(super) fn eco_fire_positions(&self) -> Vec<(UnitDef, Vec3, Option<i32>)> {
         // Nanoframes occur in both lists: count each reservation only once.
         let mut defenses: Vec<_> = self
             .eco
@@ -252,7 +253,7 @@ impl Ai {
             .collect()
     }
 
-    fn eco_shared_site_travel(&self, def: UnitDef, site: Vec3) -> Option<f32> {
+    pub(super) fn eco_shared_site_travel(&self, def: UnitDef, site: Vec3) -> Option<f32> {
         self.eco
             .workers
             .values()
@@ -292,6 +293,9 @@ impl Ai {
             }
             return true;
         }
+        if self.eco_defer_point_lotus(def, asset, preferred) {
+            return true;
+        }
         let Some(strategy) = &self.strategy else { return false };
         let Some(map) = self.terrain().and_then(|t| t.tier(strategy.tier)) else { return false };
         let gates: Vec<_> = strategy.fortify.iter().take(MAX_GATES).cloned().collect();
@@ -306,6 +310,7 @@ impl Ai {
             let site = self.cb.map().find_closest_build_site(def, Vec3::xz(seed.x, seed.z), 160.0, 3, 0);
             if site.x < 0.0
                 || !self.eco_build_check(def, site, 0)
+                || (def.name() == "turretlaser" && self.eco_lotus_crowded(site))
                 || !self.eco_fire_coverage(def, site, &guard).iter().all(|&hit| hit)
                 || (self.posture_on() && self.posture_shuns(site))
             {
@@ -346,6 +351,20 @@ impl Ai {
 
     fn eco_gate_demand(&self) -> usize {
         1 + usize::from(self.eco.adjusted_income > 25.0) + usize::from(self.eco.adjusted_income > 45.0)
+    }
+
+    pub(super) fn eco_unmet_gate_layers(&self) -> std::collections::BTreeSet<(usize, usize)> {
+        let Some(strategy) = &self.strategy else { return Default::default() };
+        let Some(map) = self.terrain().and_then(|t| t.tier(strategy.tier)) else { return Default::default() };
+        let gates: Vec<_> = strategy.fortify.iter().take(MAX_GATES).collect();
+        let targets: Vec<_> = gates.iter().map(|g| front(map, g)).collect();
+        let counts = self.eco_front_counts(&targets);
+        let wanted = self.eco_gate_demand();
+        gates
+            .iter()
+            .zip(counts)
+            .flat_map(|(g, count)| (*count.iter().min().unwrap()..wanted).map(move |layer| (g.choke, layer)))
+            .collect()
     }
 
     pub(super) fn eco_defend_shared_chokes(&mut self) -> bool {
@@ -392,6 +411,7 @@ impl Ai {
             .filter(|(i, _)| have[*i].iter().any(|&n| n < wanted))
             .map(|(_, g)| pos(g.pos))
             .collect();
+        let mut deferred = Vec::new();
         let mut best: Option<(f32, UnitDef, Vec3, Vec<usize>, f32)> = None;
         for def in types {
             if posture && def.cost(self.metal) > self.posture_deficit() {
@@ -419,6 +439,20 @@ impl Ai {
                 if !covered.iter().any(|&i| gates[i].home == region) || !self.eco_fortify_supported(site) {
                     continue;
                 }
+                if self.eco_lotus_crowded(site) {
+                    for &i in &covered {
+                        for layer in *have[i].iter().min().unwrap()..wanted {
+                            deferred.push((
+                                super::lotus::DemandKey::Gate(gates[i].choke, layer),
+                                gates[i].pos,
+                                targets[i].to_vec(),
+                            ));
+                        }
+                    }
+                    // The pooled-request planner spends this budget when
+                    // it can afford a larger turret; never a third Lotus.
+                    continue;
+                }
                 let Some(travel) = self.eco_shared_site_travel(def, site) else { continue };
                 // Sum only uncovered demand: shared coverage earns value
                 // immediately and existing/queued defenses remove it.
@@ -433,6 +467,9 @@ impl Ai {
                     best = Some((score, def, site, covered, travel));
                 }
             }
+        }
+        for (key, at, targets) in deferred {
+            self.eco_defer_lotus(key, at, targets);
         }
         if let Some((_, def, site, covered, travel)) = best {
             let mut task = WorkerTask::construction(def, site, 0);

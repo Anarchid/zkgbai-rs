@@ -291,6 +291,16 @@ impl Ai {
         if dedup.is_some_and(|l| self.eco.tasks.contains(self.eco.list(l), &task)) {
             return None;
         }
+        if c.build_type.name() == "turretlaser" && self.eco_lotus_crowded(task.position) {
+            // Point and gate planners register their own stable request
+            // keys. Other sources contribute at most one request per area.
+            if !c.fortification {
+                let at = task.position;
+                let key = super::lotus::DemandKey::Area((at.x / 460.0).floor() as i32, (at.z / 460.0).floor() as i32);
+                self.eco_defer_lotus(key, at, super::fortify::asset_front(at).to_vec());
+            }
+            return None;
+        }
         let id = self.eco.tasks.insert(task);
         self.eco.construction_tasks.push(id);
         if let Some(l) = extra {
