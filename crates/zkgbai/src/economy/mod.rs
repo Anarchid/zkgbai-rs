@@ -10,6 +10,7 @@ mod fortify;
 mod geo;
 pub mod grid;
 mod planning;
+mod silo;
 pub mod tasks;
 pub mod terraform;
 mod watchtower;

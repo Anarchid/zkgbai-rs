@@ -36,7 +36,7 @@ const START_METAL: f32 = 1000.0;
 /// inferred to be the enemy's, and what the enemy really makes for what
 /// the estimate says (all fitted, see above).
 const BASE_VALUE: f32 = 24.0;
-const INFERRED_WEIGHT: f32 = 0.1;
+pub(super) const INFERRED_WEIGHT: f32 = 0.1;
 const CALIBRATION: f32 = 1.03;
 
 /// Suspicious metal that makes a hidden nuke a worry (a silo's cost, or

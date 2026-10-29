@@ -50,6 +50,15 @@ pub struct ConstructionTask {
     pub fortification: bool,
     /// A shared site fulfilling an asset guard request; keep it on live disable.
     pub point_defense: bool,
+    /// Buildings that must be alive and finished before this job starts.
+    /// Positions, not task ids: a canceled task is never proof of completion.
+    pub prerequisites: Vec<BuildPrerequisite>,
+}
+
+#[derive(Clone, Copy)]
+pub struct BuildPrerequisite {
+    pub def: UnitDef,
+    pub pos: Vec3,
 }
 
 /// Reclaim a feature (wreck, tree, ...).
@@ -92,6 +101,7 @@ impl WorkerTask {
                 fac_def: false,
                 fortification: false,
                 point_defense: false,
+                prerequisites: Vec::new(),
             }),
         )
     }

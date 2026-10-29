@@ -220,13 +220,14 @@ impl Ai {
     pub(super) fn eco_assign_worker(&mut self, wid: i32) {
         let frame = self.frame;
         // Cancel the old engine order even if no safe replacement exists.
-        let unsafe_fortification = self.eco.workers.get(&wid).is_some_and(|w| {
+        let blocked_construction = self.eco.workers.get(&wid).is_some_and(|w| {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
-                t.as_construction().is_some_and(|c| c.fortification)
-                    && self.eco_fortify_travel(w, t.get_pos()).is_none()
+                !self.eco_prerequisites_ready(t)
+                    || (t.as_construction().is_some_and(|c| c.fortification)
+                        && self.eco_fortify_travel(w, t.get_pos()).is_none())
             })
         });
-        if unsafe_fortification && let Some(w) = self.eco.workers.get_mut(&wid) {
+        if blocked_construction && let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }
         let Some(task_id) = self.eco_get_cheapest_job(wid) else {
@@ -434,7 +435,8 @@ impl Ai {
             {
                 return false;
             }
-            def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
+            self.eco_prerequisites_ready(t)
+                && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
                 && !self.eco_worker_shuns(worker, t.get_pos())
         };
         // Metal only this type of constructor gets to goes first.
@@ -886,7 +888,7 @@ impl Ai {
     /// Whether a building of type `def` can be queued at `pos`: not
     /// underwater where that is bad, not overlapping queued jobs or
     /// factories, nor (but mexes) their exit lanes.
-    pub(super) fn eco_build_check(&self, def: UnitDef, pos: Vec3, facing: i32) -> bool {
+    pub(crate) fn eco_build_check(&self, def: UnitDef, pos: Vec3, facing: i32) -> bool {
         // stop things from being built underwater if the map water does damage or if water pathing is bad on the map
         if (self.eco.water_damage || !self.graph.is_water_map) && self.cb.map().elevation_at(pos.x, pos.z) < 10.0 {
             return false;

@@ -11,6 +11,16 @@
 
 local options = {
 	{
+		key    = 'missile_silo_density',
+		name   = 'Missile silo static density',
+		desc   = 'Also build a tactical missile silo when it reaches more than 70% of known and inferred enemy static metal, with metal per million square elmos across its full firing disk above this threshold. This is an additional trigger; income and construction safety requirements still apply.',
+		type   = 'number',
+		def    = 1500,
+		min    = 0,
+		max    = 10000,
+		step   = 100,
+	},
+	{
 		key    = 'disable',
 		name   = 'Disabled features',
 		desc   = 'Comma-separated features to switch off: porc, reach, refuge, teleport, drops, ditch, fortify (shared gate defenses and safe leyline priorities; off restores legacy planning), reanalysis, intel, grid, nukes, missiles, scouts, radar, requisition, colonize, aaintel, precision, logistics, pause, clients, jumps, jumppath (jump units route over cliffs instead of walking round), puppies, earlycons, raidmem, odreserve, qrf (home defense against raids), firefighters, geo (geothermal plants), advgeo (their upgrade), geobox (walls round advanced plants), wind (turbines by height: on high ground and hill batches), strikes (assassination strikes on Phantoms and Lances), airfire (an air factory for the firefighters once raids cost us mexes no home defense team was near), nukeclear (units keep clear of the blasts of our and allied missiles in flight), and taskforce doctrines by name: felon (the shield ball), impaler (Impaler escorts), lance (escorted, aimed Lances).',

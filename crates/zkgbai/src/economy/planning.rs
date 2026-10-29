@@ -8,7 +8,7 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
 use crate::Ai;
 use crate::defs::cmd;
-use crate::military::{missiles, nukes};
+use crate::military::nukes;
 use crate::terrain::{move_class, pos as terrain_pos};
 use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, get_radial_point, kgb_rand};
 use zk_terrain::{MoveClass, Tier};
@@ -55,10 +55,6 @@ pub(super) fn exit_lane(def: UnitDef, pos: Vec3, facing: i32) -> [f32; 4] {
         _ => [pos.x - hx - EXIT_LANE, pos.z - hz, pos.x - hx, pos.z + hz],
     }
 }
-
-/// Frames before a missile silo planned is planned again (if the job was
-/// dropped, or the silo lost).
-const SILO_REPLAN: i32 = 30 * 120;
 
 /// Water at least this deep takes an Urchin, elmos.
 const URCHIN_DEPTH: f32 = 8.0;
@@ -172,12 +168,6 @@ const BERTHA_SHARES: [f32; 4] = [0.4, 0.55, 0.7, 0.85];
 const BERTHA_HIGH_GROUND: f32 = 500.0;
 const BERTHA_SPOT_WORTH: f32 = 300.0;
 const BERTHA_TARGET_HEIGHT: f32 = 20.0;
-
-/// A missile silo's guard turrets stand this far towards the enemy, this
-/// far apart, elmos; caretakers by it.
-const SILO_GUARD: f32 = 220.0;
-const SILO_GUARD_SPREAD: f32 = 110.0;
-const SILO_CARETAKERS: usize = 2;
 
 /// From this income on, a factory asked for is built (the usual second
 /// factory waits for 50 and a few caretakers); and how often the asking is
@@ -1709,88 +1699,6 @@ impl Ai {
         }
     }
 
-    /// A missile silo where it reaches enough worth Eos (see `missiles`),
-    /// once we can afford one; its job summons the constructors near it.
-    fn eco_plan_missile_silo(&mut self) {
-        let Some(silo) = self.defs.get(missiles::SILO) else { return };
-        if self.dev_off("missiles")
-            || self.missiles_silo().is_some()
-            || self.eco.adjusted_income < missiles::SILO_INCOME
-            || self.eco.estalled
-        {
-            return;
-        }
-        let planned = self.eco.construction_tasks.iter().any(|&id| {
-            self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == silo.id())
-        });
-        if planned || self.missiles.planned.is_some_and(|f| self.frame - f < SILO_REPLAN) {
-            return;
-        }
-        let Some((site, value, n)) = self.missiles_site() else {
-            self.missiles_report_no_site();
-            return;
-        };
-        let pos = self.eco_build_site(silo, site, 0);
-        if pos.x < 0.0 {
-            return;
-        }
-        if self.eco_add_simple(silo, pos, List::Construction, None).is_some() {
-            self.missiles.planned = Some(self.frame);
-            self.log(&format!(
-                "missiles: silo at ({:.0}, {:.0}), {value:.0} metal of targets ({n}) in reach; summoning constructors",
-                pos.x, pos.z
-            ));
-        }
-    }
-
-    /// Make a firebase of a missile silo just up (it stands forward, within
-    /// reach of the enemy's buildings): its missiles first for resources, a
-    /// heavy and a light laser and a flak turret between it and the enemy,
-    /// an area shield over it against artillery, and caretakers that speed
-    /// its missiles and repair it.
-    pub fn eco_fortify_silo(&mut self, silo: Unit) {
-        silo.execute_custom_command(cmd::PRIORITY, &[2.0], 0, NO_TIMEOUT);
-        let at = silo.pos();
-        let enemy = self.graph.get_enemy_center();
-        let toward = if enemy == NULLPOS { self.graph.get_map_center() } else { enemy };
-        let ahead = get_directional_point(at, toward, SILO_GUARD);
-        let (dx, dz) = ((ahead.x - at.x) / SILO_GUARD, (ahead.z - at.z) / SILO_GUARD);
-        let aside = |d: f32| Vec3::xz(ahead.x - dz * d, ahead.z + dx * d);
-        let mut planned = Vec::new();
-        for (name, p, list) in [
-            ("turretheavylaser", aside(0.0), List::Porc),
-            ("turretlaser", aside(SILO_GUARD_SPREAD), List::Porc),
-            ("turretlaser", aside(-SILO_GUARD_SPREAD), List::Porc),
-            ("turretaaflak", get_directional_point(at, toward, SILO_GUARD / 2.0), List::Aa),
-            ("staticshield", get_directional_point(at, toward, 110.0), List::Construction),
-        ] {
-            let Some(def) = self.defs.get(name) else { continue };
-            let site = self.eco_build_site(def, p, 0);
-            let extra = (list != List::Construction).then_some(list);
-            if site.x >= 0.0 && self.eco_add_simple(def, site, list, extra).is_some() {
-                planned.push(name);
-            }
-        }
-        // The caretakers, by the nearest constructor's reach.
-        let wid = (self.eco.workers.values())
-            .min_by(|a, b| distance(a.get_pos(), at).total_cmp(&distance(b.get_pos(), at)))
-            .map(|w| w.id);
-        let mut caretakers = 0;
-        if let Some(wid) = wid {
-            for _ in 0..SILO_CARETAKERS {
-                let before = self.eco.nano_tasks.len();
-                self.eco_create_nano_turret_task(wid, silo);
-                caretakers += self.eco.nano_tasks.len() - before;
-            }
-        }
-        self.log(&format!(
-            "missiles: fortifying the silo at ({:.0}, {:.0}): {}, {caretakers} caretakers",
-            at.x,
-            at.z,
-            if planned.is_empty() { "no room for defenses".to_owned() } else { planned.join(", ") }
-        ));
-    }
-
     /// Re-assess what factory the modules would have, now and then.
     pub(super) fn eco_update_requisition(&mut self, frame: i32) {
         if (frame + self.offset) % REQUISITION_PERIOD != 0
@@ -2748,7 +2656,7 @@ impl Ai {
         self.eco_add_simple(pylon, best, List::Pylon, Some(List::Pylon));
     }
 
-    fn eco_create_nano_turret_task(&mut self, wid: i32, target: Unit) {
+    pub(super) fn eco_create_nano_turret_task(&mut self, wid: i32, target: Unit) {
         let Some(nano) = self.defs.get("staticcon") else {
             return;
         };

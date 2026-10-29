@@ -48,6 +48,22 @@ The `fortify` feature is on by default. Set `disable=fortify` (or
 toggled live with the operator feature switch. The new planner respects the
 posture defense budget and the existing `detour` ditch-value and job-cost checks.
 
+Tactical missile silos are scored at their final buildable positions, with a 3450-elmo reach
+including a margin for the pads. Sites near significant enemy region density or recent raids
+reserve their silo footprint while a heavy laser, two light lasers, flak and an area shield are
+built first. Only live, completed defenses release the silo job; missing guards are requeued,
+and blocked preparation sites are abandoned. Existing defenses can satisfy the prerequisites.
+Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
+
+Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
+known and inferred enemy static metal and exceeds the **Missile silo static density** slider
+(`missile_silo_density`: default 1500, range 0–10000, step 100). Density is covered metal divided
+by the full firing disk's area in millions of square elmos, including off-map area. Static value
+includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
+confidence), without double-counting known mexes or assigning locations to unobserved spending.
+The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
+and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
+
 Building
 --------
 
