@@ -379,6 +379,19 @@ impl Ai {
             <= 1
     }
 
+    fn strike_can_recruit(&self, f: &Fighter, name: &str) -> bool {
+        self.defs.name_of(f.unit) == name
+            && !springai::reserved::is_reserved(self.cb, f.id)
+            && !self.retreat_handler.is_retreating(f.id)
+            && !self.qrf_claims(f.id)
+            && !f
+                .squad
+                .is_some_and(|sid| self.op.over.squad_intents.contains_key(&sid) || self.op_squad_target(sid).is_some())
+            && (self.squad_handler.fighters.contains(&f.id)
+                || self.raider_handler.solo_raiders.contains(&f.id)
+                || self.raider_handler.small_raiders.contains(&f.id))
+    }
+
     fn strike_cooling(&self, pos: Vec3) -> bool {
         self.strikes.cooldowns.iter().any(|(p, f)| self.frame - *f < COOLDOWN && distance(*p, pos) < 500.0)
     }
@@ -426,14 +439,14 @@ impl Ai {
                     let mut existing: Vec<Vec3> = self
                         .fighters
                         .values()
-                        .filter(|f| {
-                            self.defs.name_of(f.unit) == tactic.name()
-                                && self.squad_handler.fighters.contains(&f.id)
-                                && !self.qrf_claims(f.id)
-                                && !self.retreat_handler.is_retreating(f.id)
-                        })
+                        .filter(|f| self.strike_can_recruit(f, tactic.name()))
                         .map(|f| f.get_pos())
                         .collect();
+                    // A partial borrowed force without a factory must not
+                    // monopolize selection and starve another viable tactic.
+                    if existing.len() < needed && !self.fac.factories.values().any(|f| f.kind() == tactic.factory()) {
+                        continue;
+                    }
                     existing.sort_by(|a, b| distance(*a, j.pos).total_cmp(&distance(*b, j.pos)));
                     let home = existing
                         .first()
@@ -467,22 +480,8 @@ impl Ai {
             let name = w.tactic.name();
             let need = w.needed.saturating_sub(w.members.len());
             let home = w.home;
-            let mut recruits: Vec<Unit> = self
-                .fighters
-                .values()
-                .filter(|f| {
-                    self.defs.name_of(f.unit) == name
-                        && !self.retreat_handler.is_retreating(f.id)
-                        && !self.qrf_claims(f.id)
-                        && !f.squad.is_some_and(|sid| {
-                            self.op.over.squad_intents.contains_key(&sid) || self.op_squad_target(sid).is_some()
-                        })
-                        && (self.squad_handler.fighters.contains(&f.id)
-                            || self.raider_handler.solo_raiders.contains(&f.id)
-                            || self.raider_handler.small_raiders.contains(&f.id))
-                })
-                .map(|f| f.unit)
-                .collect();
+            let mut recruits: Vec<Unit> =
+                self.fighters.values().filter(|f| self.strike_can_recruit(f, name)).map(|f| f.unit).collect();
             recruits.sort_by(|a, b| distance(a.pos(), home).total_cmp(&distance(b.pos(), home)));
             for u in recruits.into_iter().take(need) {
                 self.strikes_claims(u);
