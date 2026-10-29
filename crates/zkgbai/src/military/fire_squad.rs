@@ -1,6 +1,7 @@
 //! Organic fire squads. Ordinary assault squads keep their membership and
 //! production, but a majority of anti-unit skirmishers can fight as a line:
-//! long guns behind a screen, a common pace, and one retreat decision.
+//! long guns behind a screen and a common pace. Wounded units leave for
+//! repairs after a commitment or when their own route home is clear.
 //! Opt in with `enable=firesquads`; disabled by default. The predictor's
 //! mechanics model approves commitments; missing answers mean evade.
 
@@ -24,7 +25,6 @@ pub enum Mode {
     Kite,
     Evade,
     Commit,
-    Recover,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -43,7 +43,6 @@ impl Mode {
             Self::Kite => "kiting",
             Self::Evade => "evading",
             Self::Commit => "committing",
-            Self::Recover => "recovering",
         }
     }
 }
@@ -137,18 +136,43 @@ fn outranged(contacts: &[Contact], range: f32, was_evading: bool) -> bool {
     total > 0.0 && long >= total * if was_evading { 0.20 } else { 0.30 }
 }
 
-fn choose_mode(old: Mode, hurt: bool, recovered: bool, out: bool, favorable: bool, committed: bool) -> Mode {
-    // Commit means finishing the attack window even through losses, as
-    // with packs. Health is judged again after it, or when its target goes.
+fn choose_mode(old: Mode, out: bool, favorable: bool, committed: bool) -> Mode {
     if old == Mode::Commit && committed {
         Mode::Commit
-    } else if hurt || (old == Mode::Recover && !recovered) {
-        Mode::Recover
     } else if out {
         if favorable { Mode::Commit } else { Mode::Evade }
     } else {
         Mode::Kite
     }
+}
+
+fn needs_repair(health: f32) -> bool {
+    health < 0.60
+}
+
+fn may_leave_for_repair(health: f32, commitment_finished: bool, safe_home: bool) -> bool {
+    needs_repair(health) && (commitment_finished || safe_home)
+}
+
+/// Check the entire route, including the departure and destination, not
+/// just the haven or the sparse pathfinder waypoints. A partial or failed
+/// path is not evidence that a unit can safely leave its screen.
+fn repair_route_clear(start: Vec3, home: Vec3, path: &[Vec3], reachable: bool, safe: impl Fn(Vec3) -> bool) -> bool {
+    if !reachable || path.last().is_none_or(|&p| distance(p, home) > 1.0) || !safe(start) {
+        return false;
+    }
+    let mut from = start;
+    for &to in path {
+        let steps = (distance(from, to) / 32.0).ceil().max(1.0) as usize;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            if !safe(Vec3::xz(from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t)) {
+                return false;
+            }
+        }
+        from = to;
+    }
+    true
 }
 
 fn toward(from: Vec3, to: Vec3, step: f32) -> Vec3 {
@@ -197,13 +221,35 @@ impl Ai {
         }
     }
 
-    /// Damage/shield callbacks leave these units with the squad. Recovery
-    /// is decided below for the whole formation, never one gun at a time.
+    /// Damage/shield callbacks leave these units with the squad until the
+    /// tactical controller can release them after a commitment or along a
+    /// clear route home. The ordinary retreat handler owns them afterward.
     pub(crate) fn fire_controls(&self, id: i32) -> bool {
         !self.dev_off("firesquads")
             && self.fighters.get(&id).and_then(|f| f.squad).and_then(|sid| self.squads.get(sid)).is_some_and(|s| {
                 s.fire.active() && s.status == 'a' && !self.qrf_drafted(s.id) && self.op_squad_target(s.id).is_none()
             })
+    }
+
+    /// Like a pack's clear-way check, but for the wounded member's own
+    /// movement and position. Require a complete reachable route and
+    /// inspect between waypoints so a safe haven cannot hide an ambush.
+    fn fire_way_home_clear(&mut self, unit: Unit) -> bool {
+        let start = unit.pos();
+        let home = self.graph_get_closest_haven(start);
+        if start == NULLPOS || home == NULLPOS || self.incursion_imminent(home, (unit.power() + unit.health()) / 10.0) {
+            return false;
+        }
+        let reachable = self.pathfinder.is_reachable(&self.war, unit, home, PathCost::AvoidEnemies);
+        if !reachable {
+            return false;
+        }
+        let path: Vec<_> =
+            self.pathfinder.find_path(&self.war, unit, home, PathCost::AvoidEnemies).into_iter().collect();
+        let view = self.war.view(unit.def());
+        repair_route_clear(start, home, &path, reachable, |p| {
+            view.get_threat(p) <= 0.0 && view.get_porc_threat(p) <= 0.0
+        })
     }
 
     /// Returns true when this tactical controller owns the squad's orders.
@@ -287,15 +333,40 @@ impl Ai {
         if !old.active() && (contacts.is_empty() || (!out && !contacts.iter().any(|e| !e.outranges(range)))) {
             return false;
         }
-        let health = members.iter().map(|m| m.value * m.health).sum::<f32>() / total.max(1.0);
-        let core_health = members.iter().filter(|m| cores.contains(&m.id)).map(|m| m.health).fold(1.0, f32::min);
-        let hurt = health < 0.60 || core_health < 0.40;
-        let recovered = health > 0.85 && core_health > 0.80;
-        let enemy_ids: Vec<_> = contacts.iter().map(|e| e.id).collect();
-        let favorable = out && self.fire_commit_favorable(sid, &enemy_ids);
         let focus_alive = old.focus.is_some_and(|id| contacts.iter().any(|e| e.id == id));
         let committed = self.frame < old.commit_until && focus_alive;
-        let mode = choose_mode(old.mode, hurt, recovered, out, favorable, committed);
+        let commitment_finished = old.mode == Mode::Commit && !committed;
+        let repairs: Vec<_> = members
+            .iter()
+            .filter(|m| needs_repair(m.health))
+            .filter(|m| {
+                may_leave_for_repair(
+                    m.health,
+                    commitment_finished,
+                    !commitment_finished && self.fire_way_home_clear(m.unit),
+                )
+            })
+            .map(|m| (m.unit, m.health))
+            .collect();
+        if !repairs.is_empty() {
+            for &(unit, _) in &repairs {
+                self.retreat_send(unit);
+            }
+            self.op_emit(
+                "firesquad_repair",
+                json!({"squad":sid,
+                "units":repairs.iter().map(|(u, hp)| json!({"id":u.id(),"health":hp})).collect::<Vec<_>>(),
+                "reason":if commitment_finished { "commitment_finished" } else { "safe_route" }}),
+            );
+            // Every released unit is now outside this squad. Recompute
+            // cores, pace, leadership and the prediction from the healthy
+            // remainder in this same update; never reuse a stale roster.
+            return self.fire_assign(sid);
+        }
+        let health = members.iter().map(|m| m.value * m.health).sum::<f32>() / total.max(1.0);
+        let enemy_ids: Vec<_> = contacts.iter().map(|e| e.id).collect();
+        let favorable = out && self.fire_commit_favorable(sid, &enemy_ids);
+        let mode = choose_mode(old.mode, out, favorable, committed);
         let target = contacts
             .iter()
             .filter(|e| e.kiteable && (mode != Mode::Kite || !e.outranges(range)))
@@ -306,9 +377,7 @@ impl Ai {
         } else {
             target
         };
-        let goal = if mode == Mode::Recover {
-            self.graph_get_closest_haven(anchor)
-        } else if mode == Mode::Evade {
+        let goal = if mode == Mode::Evade {
             // Back away from the nearest long gun; candidate scoring below
             // also accounts for guns on our flanks and behind us.
             let danger = contacts
@@ -366,8 +435,7 @@ impl Ai {
         let nav = nav!(self);
         // Shared anchor follows a real path. Use a short reachable step
         // and score exposure before translating the entire formation.
-        let cost =
-            if matches!(mode, Mode::Evade | Mode::Recover) { PathCost::AvoidEnemies } else { PathCost::AssaultPath };
+        let cost = if mode == Mode::Evade { PathCost::AvoidEnemies } else { PathCost::AssaultPath };
         let path = nav.pathfinder.find_path(nav.war, leader, goal, cost);
         let waypoint = path.iter().find(|p| distance(**p, anchor) > 40.0).copied().unwrap_or(goal);
         let mut next = clamp(toward(anchor, waypoint, step));
@@ -477,7 +545,7 @@ mod tests {
             assert!(!outranged(&[Contact { range: 540.0, ..mirror }], 570.0, was_evading));
             assert!(outranged(&[Contact { range: 620.0, ..mirror }], 570.0, was_evading));
         }
-        assert_eq!(choose_mode(Mode::Evade, false, true, false, false, false), Mode::Kite);
+        assert_eq!(choose_mode(Mode::Evade, false, false, false), Mode::Kite);
         // The same predicate admits a mirror as a firing target. A blind
         // spot (e.g. aircraft our guns cannot hit) still demands evasion.
         assert!(!mirror.outranges(570.0));
@@ -497,15 +565,44 @@ mod tests {
     }
 
     #[test]
-    fn commitment_finishes_before_collective_recovery() {
-        assert_eq!(choose_mode(Mode::Kite, false, true, true, false, false), Mode::Evade);
-        assert_eq!(choose_mode(Mode::Evade, false, true, true, true, false), Mode::Commit);
-        assert_eq!(choose_mode(Mode::Commit, false, true, false, false, true), Mode::Commit);
-        assert_eq!(choose_mode(Mode::Commit, true, false, true, true, true), Mode::Commit);
-        assert_eq!(choose_mode(Mode::Commit, true, false, true, true, false), Mode::Recover);
-        assert_eq!(choose_mode(Mode::Recover, false, false, false, false, false), Mode::Recover);
-        assert_eq!(choose_mode(Mode::Recover, false, true, false, false, false), Mode::Kite);
-        assert_eq!(choose_mode(Mode::Commit, false, true, true, false, false), Mode::Evade);
+    fn commitments_continue_and_healthy_remainders_keep_fighting() {
+        assert_eq!(choose_mode(Mode::Kite, true, false, false), Mode::Evade);
+        assert_eq!(choose_mode(Mode::Evade, true, true, false), Mode::Commit);
+        assert_eq!(choose_mode(Mode::Commit, false, false, true), Mode::Commit);
+        assert_eq!(choose_mode(Mode::Commit, true, false, true), Mode::Commit);
+        assert_eq!(choose_mode(Mode::Commit, false, false, false), Mode::Kite);
+        assert_eq!(choose_mode(Mode::Commit, true, false, false), Mode::Evade);
+    }
+
+    #[test]
+    fn wounded_members_leave_only_after_a_commitment_or_on_a_clear_route() {
+        // During an attack (or before one), damage alone never splits
+        // the formation onto an unsafe route.
+        assert!(!may_leave_for_repair(0.20, false, false));
+        assert!(may_leave_for_repair(0.20, true, false));
+        assert!(may_leave_for_repair(0.20, false, true));
+        for (finished, safe) in [(true, false), (false, true), (true, true)] {
+            assert!(!may_leave_for_repair(0.60, finished, safe));
+            assert!(!may_leave_for_repair(0.95, finished, safe));
+        }
+        let healths = [0.25, 0.90, 0.55, 1.0];
+        let retained: Vec<_> = healths.into_iter().filter(|&hp| !may_leave_for_repair(hp, true, false)).collect();
+        assert_eq!(retained, vec![0.90, 1.0]);
+    }
+
+    #[test]
+    fn safe_home_requires_the_full_route_to_be_clear() {
+        let start = Vec3::xz(100.0, 100.0);
+        let home = Vec3::xz(500.0, 100.0);
+        assert!(repair_route_clear(start, home, &[home], true, |_| true));
+        assert!(!repair_route_clear(start, home, &[], true, |_| true));
+        assert!(!repair_route_clear(start, home, &[home], false, |_| true));
+        assert!(!repair_route_clear(start, home, &[Vec3::xz(300.0, 100.0)], true, |_| true));
+        // A dangerous departure, haven, or stretch between otherwise safe
+        // waypoints each forbids detaching, even with a reachable haven.
+        assert!(!repair_route_clear(start, home, &[home], true, |p| p.x > 110.0));
+        assert!(!repair_route_clear(start, home, &[home], true, |p| p.x < 490.0));
+        assert!(!repair_route_clear(start, home, &[home], true, |p| !(280.0..320.0).contains(&p.x)));
     }
     #[test]
     fn screen_faces_enemy_and_coincident_points_are_finite() {

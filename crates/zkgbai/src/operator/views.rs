@@ -1383,12 +1383,7 @@ mod fire_labels_tests {
         let mut s = Squad::new(1, SquadKind::Assault, 0);
         s.status = 'a';
         assert_eq!((squad_label(&s), squad_tactic(&s)), ("assault", None));
-        for (mode, label) in [
-            (Mode::Kite, "kiting"),
-            (Mode::Evade, "evading"),
-            (Mode::Commit, "committing"),
-            (Mode::Recover, "recovering"),
-        ] {
+        for (mode, label) in [(Mode::Kite, "kiting"), (Mode::Evade, "evading"), (Mode::Commit, "committing")] {
             s.fire.mode = mode;
             assert_eq!((squad_label(&s), squad_tactic(&s)), ("fireteam", Some(label)));
             assert_eq!(squad_kind(s.kind), "assault");

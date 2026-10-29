@@ -138,12 +138,16 @@ automatically adopt fire-squad tactics when anti-unit skirmishers
 supply at least 55% of their metal (45% to remain in that mode). The longest range supported by
 that share defines the cores; other units screen them in a paced formation. Firewalker joins
 jumpbot assault squads; siege artillery such as Sling and Impaler cannot be cores. Against a
-local enemy force with at least 30% of its value able to contest that range (20% while evading),
+local enemy force with at least 30% of its value outranging the cores or unanswerable by them (20% while evading),
 the whole squad evades unless the mechanics predictor approves a ten-second committed a-move.
 The prediction uses the squad alone, expects at least 15% more enemy metal lost than friendly
-metal. A commitment suppresses individual retreats until its attack window ends or its target
-is gone. Outside that window, collective health below 60% or a core below 40% sends the whole
-formation for repairs; it returns above 85% collective health and 80% for every core.
+metal. Equal-range opponents are engaged. Members below 60% effective health leave individually
+for repairs once a commitment ends (its ten-second window expires or its target is gone), or
+sooner if their own complete, reachable route to a haven is free of known enemy threat and porc.
+Without either condition they stay with the formation. Healthy members keep fighting; after
+releasing the wounded, the squad immediately reassesses its cores and tactics. The ordinary
+retreat handler returns healed units to the assault pool. Individual departures appear as
+`firesquad_repair` journal records; there is no whole-squad recovery state.
 Fire squads are disabled by default; without the switch, Firewalker keeps its artillery role.
 `disable=firesquads` restores ordinary assault conduct. Fire-squad predictions run independently
 of the experimental `fightsim` switch for ordinary danger checks. The `squads` operator response
