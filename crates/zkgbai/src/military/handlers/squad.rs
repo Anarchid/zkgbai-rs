@@ -945,6 +945,9 @@ impl Ai {
     }
 
     pub(crate) fn squad_set_target(&mut self, sid: SquadId, target: Vec3) {
+        if self.lobster_squad_move(sid, target, false) {
+            return;
+        }
         let mut nav = nav!(self);
         if let Some(s) = self.squads.get_mut(sid) {
             s.set_target(target, &mut self.fighters, &mut nav);
@@ -952,6 +955,9 @@ impl Ai {
     }
 
     fn squad_retreat_to(&mut self, sid: SquadId, pos: Vec3) {
+        if self.lobster_squad_move(sid, pos, true) {
+            return;
+        }
         let mut nav = nav!(self);
         if let Some(s) = self.squads.get_mut(sid) {
             s.retreat_to(pos, &mut self.fighters, &mut nav);
@@ -1032,6 +1038,7 @@ impl Ai {
                 if danger && (!self.graph.is_ally_territory(pos) || porc) {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
+                    return;
                 }
                 // Sent to block an incursion's way.
                 if let Some(block) = self.incursion_block(sid) {

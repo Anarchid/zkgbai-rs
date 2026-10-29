@@ -190,6 +190,10 @@ impl Ai {
     }
 
     pub fn misc_add_support(&mut self, f: Fighter) {
+        if self.defs.name_of(f.unit) == "amphlaunch" {
+            // Throw only on our manual-fire order, never at an automatic target.
+            f.unit.set_fire_state(0, 0);
+        }
         if let Some(id) = self.misc_insert_fighter(f) {
             self.misc_handler.supports.insert(id);
         }
@@ -324,6 +328,9 @@ impl Ai {
     fn misc_update_supports(&mut self) {
         let ids: Vec<i32> = self.misc_handler.supports.iter().copied().collect();
         for id in ids {
+            if self.lobster_support(id) {
+                continue;
+            }
             if self.retreat_handler.is_retreating(id) {
                 continue;
             }

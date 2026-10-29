@@ -248,6 +248,13 @@ pinned reads (`hud pin=enemies args={...}`) and the `board`, the map as a PNG (`
 MCPL hosts get it as an image block). Calls run on the AI's thread at its next frame, so they are
 answered while the game runs.
 
+Optional Lobster squad equipment is on by default (`lobsters`): amphib factories aim for one
+launcher per Grizzly. Squads gather briefly for a throw when a loaded launcher is nearby,
+then continue normally while it reloads and catches up; a fresh launcher may take over.
+Use `feature name=lobsters off=true` to stop new production and cancel pending throws;
+`feature name=lobsters off=false` turns it back on. Flights already underway finish.
+For A/B runs use `disable=lobsters` or `ZKGBAI_DISABLE=lobsters`.
+
 **Piloting.** `tools/arena/pilot.sh -m "Agalta v1.0" -f factorytank -D mexporc` starts a real-time
 match of the operator-served build against an unsteered copy of itself and prints the pilot's
 endpoints (`PILOT url=... mcpl=ws://127.0.0.1:7460/mcpl out=...`); the replay stays in `out/wd/demos/`

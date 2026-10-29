@@ -87,6 +87,8 @@ pub struct FactoryManager {
     // Unit counts by type (including unfinished units).
     pub num_aas: i32,
     pub num_erasers: i32,
+    pub num_grizzlies: i32,
+    pub num_lobsters: i32,
     pub num_aspis: i32,
     pub num_warriors: i32,
     pub num_zeus: i32,
@@ -170,6 +172,8 @@ impl FactoryManager {
             aa_value: 0.0,
             num_aas: 0,
             num_erasers: 0,
+            num_grizzlies: 0,
+            num_lobsters: 0,
             num_aspis: 0,
             num_warriors: 0,
             num_zeus: 0,
@@ -219,6 +223,8 @@ impl FactoryManager {
             "cloakraid" => &mut self.num_glaives,
             "cloakheavyraid" => &mut self.num_scythes,
             "cloakjammer" => &mut self.num_erasers,
+            "amphassault" => &mut self.num_grizzlies,
+            "amphlaunch" => &mut self.num_lobsters,
             "shieldraid" => &mut self.num_bandits,
             "shieldfelon" => &mut self.num_felons,
             "shieldskirm" => &mut self.num_rogues,
@@ -1079,6 +1085,12 @@ impl Ai {
 
         if self.fac_aa_roll() {
             return "amphaa";
+        }
+
+        // Optional squad equipment, like Iris: one launcher per Grizzly,
+        // counting nanoframes too so multiple factories do not overproduce.
+        if !self.dev_off("lobsters") && !self.dev_off("jumps") && fm.num_lobsters < fm.num_grizzlies {
+            return "amphlaunch";
         }
 
         if income > 30.0

@@ -30,6 +30,8 @@ use crate::kgbutil::pathfinder::JumpPlan;
 use crate::kgbutil::{PathCost, kgb_move_to};
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 
+mod lobster;
+
 /// Frames between engagement checks.
 const PERIOD: i32 = 10;
 
@@ -160,6 +162,7 @@ struct Pending {
 
 #[derive(Default)]
 pub struct Jumps {
+    lobsters: lobster::Lobsters,
     defs: BTreeMap<i32, Option<JumpDef>>,
     /// Each def's guns: damage per second and longest reach.
     guns: BTreeMap<i32, (f32, f32)>,
@@ -482,13 +485,34 @@ impl Ai {
             return;
         }
         let Some(jd) = self.jump_ready(unit) else { return };
+        let Some((to, way)) = self.jump_path(unit, home, jd.range * REACH, |ai, p| ai.jump_clear(jd, pos, p)) else {
+            return;
+        };
+        let why = format!("escape {}", self.defs.name(def));
+        self.jump_order(unit, to, &why);
+        for wp in way {
+            if distance(to, wp) > 16.0 {
+                kgb_move_to(unit, wp, OPTION_SHIFT_KEY, self.frame);
+            }
+        }
+    }
+
+    /// Farthest safe landing along the walking route. Lobsters use the
+    /// same shortcut selection, checking every passenger's landing.
+    fn jump_path(
+        &mut self,
+        unit: Unit,
+        home: Vec3,
+        reach: f32,
+        clear: impl Fn(&Self, Vec3) -> bool,
+    ) -> Option<(Vec3, Vec<Vec3>)> {
+        let pos = unit.pos();
         let way: Vec<Vec3> =
             self.pathfinder.find_path(&self.war, unit, home, PathCost::AvoidEnemies).into_iter().collect();
         if way.is_empty() {
-            return;
+            return None;
         }
         // The farthest point along it within reach that a jump gets to.
-        let reach = jd.range * REACH;
         let mut best: Option<(Vec3, usize)> = None;
         let mut prev = pos;
         let mut along = 0.0;
@@ -501,21 +525,14 @@ impl Ai {
                 if distance(pos, p) > reach {
                     break 'way;
                 }
-                if along + seg * t >= MIN_ESCAPE && self.jump_clear(jd, pos, p) {
+                if along + seg * t >= MIN_ESCAPE && clear(self, p) {
                     best = Some((p, i));
                 }
             }
             along += seg;
             prev = wp;
         }
-        let Some((to, i)) = best else { return };
-        let why = format!("escape {}", self.defs.name(def));
-        self.jump_order(unit, to, &why);
-        for &wp in &way[i..] {
-            if distance(to, wp) > 16.0 {
-                kgb_move_to(unit, wp, OPTION_SHIFT_KEY, self.frame);
-            }
-        }
+        best.map(|(to, i)| (to, way[i..].to_vec()))
     }
 
     /// Follow jump orders: seen in the air, or still queued and not taking
@@ -573,6 +590,7 @@ impl Ai {
     }
 
     pub fn jumps_remove_unit(&mut self, unit: Unit) {
+        self.lobster_remove_unit(unit.id());
         self.jumps.last.remove(&unit.id());
         self.jumps.sumos.remove(&unit.id());
         self.jumps.takeoff.remove(&unit.id());
@@ -683,6 +701,7 @@ impl Ai {
             self.jumps.shown = 0;
         }
         self.jumps_watch(frame);
+        self.lobster_update();
         if frame % PERIOD != (self.offset + 5) % PERIOD || self.dev_off("jumps") {
             return;
         }
@@ -792,19 +811,29 @@ impl Ai {
         let Some(def) = unit.def() else { return };
         let (own_dps, own_range) = self.jumps_gun(def);
         let pos = unit.pos();
+        let mine = self.war.get_total_friendly_power(pos) + (unit.power() + unit.health()) / 10.0;
+        if let Some(to) = self.jumps_pyro_target(pos, jd.range, mine, own_dps, own_range)
+            && self.jump_clear(jd, pos, to)
+        {
+            self.jump_order(unit, to, "pyro");
+            unit.fight(to, OPTION_SHIFT_KEY);
+        }
+    }
+
+    /// Pyros and equipped squads share target selection and brawler safety.
+    fn jumps_pyro_target(&mut self, pos: Vec3, range: f32, mine: f32, own_dps: f32, own_range: f32) -> Option<Vec3> {
         let light: Vec<(i32, Vec3, f32, f32)> = self
-            .jumps_enemies_near(pos, jd.range * REACH + PYRO_SPLASH)
+            .jumps_enemies_near(pos, range * REACH + PYRO_SPLASH)
             .into_iter()
             .filter(|e| e.3 <= LIGHT_HEALTH)
             .collect();
         if light.len() < PYRO_CLUMP {
-            return;
+            return None;
         }
-        let mine = self.war.get_total_friendly_power(pos) + (unit.power() + unit.health()) / 10.0;
         let mut best: Option<(usize, f32, Vec3)> = None;
         for &(_, p, _, _) in &light {
             let d = distance(pos, p);
-            if !(MIN_ENGAGE..=jd.range * REACH).contains(&d) {
+            if !(MIN_ENGAGE..=range * REACH).contains(&d) {
                 continue;
             }
             let near: Vec<&(i32, Vec3, f32, f32)> = light.iter().filter(|e| distance(e.1, p) <= PYRO_SPLASH).collect();
@@ -818,7 +847,7 @@ impl Ai {
                 near.iter().map(|e| e.1.z).sum::<f32>() / n,
             );
             let metal: f32 = near.iter().map(|e| e.2).sum();
-            if distance(pos, c) > jd.range * REACH || self.war.get_porc_threat(c) > 0.0 {
+            if distance(pos, c) > range * REACH || self.war.get_porc_threat(c) > 0.0 {
                 continue;
             }
             // Those that the Pyro outranges, within its reach of the landing.
@@ -836,12 +865,7 @@ impl Ai {
                 best = Some((near.len(), metal, c));
             }
         }
-        if let Some((_, _, to)) = best
-            && self.jump_clear(jd, pos, to)
-        {
-            self.jump_order(unit, to, "pyro");
-            unit.fight(to, OPTION_SHIFT_KEY);
-        }
+        best.map(|(_, _, to)| to)
     }
 
     /// A Jugglenaut jumps into the thick of a crowd (its landing hits all

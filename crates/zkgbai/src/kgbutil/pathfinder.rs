@@ -283,6 +283,33 @@ impl Pathfinder {
         cost: PathCost,
         keepout: &[(Vec3, f32)],
     ) -> VecDeque<Vec3> {
+        self.find_path_inner(war, u, target, cost, keepout, None)
+    }
+
+    /// The first jump on a squad's route with optional, currently ready
+    /// equipment. The caller drives the throw; no intrinsic jump order is
+    /// left on the passenger, which cannot jump by itself.
+    pub(crate) fn equipped_jump(
+        &mut self,
+        war: &MilitaryManager,
+        u: Unit,
+        target: Vec3,
+        cost: PathCost,
+        jump: JumpDef,
+    ) -> Option<JumpPlan> {
+        self.find_path_inner(war, u, target, cost, &[], Some(jump));
+        self.jump_plans.remove(&u.id())
+    }
+
+    fn find_path_inner(
+        &mut self,
+        war: &MilitaryManager,
+        u: Unit,
+        target: Vec3,
+        cost: PathCost,
+        keepout: &[(Vec3, f32)],
+        equipment: Option<JumpDef>,
+    ) -> VecDeque<Vec3> {
         let start = u.pos();
         let mut result = VecDeque::new();
         let walk_only = std::mem::take(&mut self.walk_only);
@@ -353,7 +380,7 @@ impl Pathfinder {
         paint_keepout(self.terrain.smwidth, self.terrain.slope_map.len(), keepout, &mut self.keepout);
         // Jumpers' ways jump what they cannot walk (see `jump_links`), the
         // dearer the longer their jump has yet to reload.
-        let jumps = if flyer || walk_only || !self.jumps_on { None } else { self.jumper(def) };
+        let jumps = if flyer || walk_only || !self.jumps_on { None } else { equipment.or_else(|| self.jumper(def)) };
         let links = jumps.map(|jd| (self.jump_links_for(jd, def), jump_wait(u, jd, def)));
         let (terrain, extra) = (&self.terrain, &self.keepout);
         let links = links.map(|(i, wait)| (&self.jump_links[i].1, wait));

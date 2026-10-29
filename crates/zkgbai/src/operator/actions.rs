@@ -89,6 +89,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
     ),
     ("jumps", "Army", "jumpjets jump"),
+    ("lobsters", "Army", "optional Lobster squad throws and one launcher per Grizzly; default on"),
     ("jumppath", "Army", "jumpjets' ways jump cliffs they would walk round"),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
