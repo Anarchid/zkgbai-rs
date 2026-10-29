@@ -37,11 +37,14 @@ earns no additional value. At most two built or queued Lotus range circles may s
 Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
 covers them; repeated checks of one request do not add credit. Planned upgrades reserve demand,
 and cancelled upgrades release it. Placement still requires a safe constructor route and, when
-posture is enabled, sufficient posture budget. Fusion, Caretaker, Singularity and geothermal ground-defense requests
+posture is enabled, sufficient posture budget. Lower standing-metal density and a larger share
+of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
+pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
+so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
 reuse a matching existing or queued turret when it covers the asset's nearby approaches. Otherwise
 they prefer a safe shared gate site that retains that coverage, falling back to ordinary local
-placement when no such site is available. Weapon types are retained; AA, shields and the opening
-factory defense keep their existing placement.
+placement when no such site is available. Other requested weapon types are retained; AA, shields
+and the opening factory defense keep their existing placement, subject to the Lotus overlap cap.
 Forward construction and ditches require local support, reachable approaches, and checks against
 current threats and recent raids; workers reconsider fortification jobs when support changes.
 The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds

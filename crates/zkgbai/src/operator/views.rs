@@ -887,6 +887,7 @@ pub fn terrain(ai: &mut Ai, _: &Args) -> Out {
             "enemy_base_region": a.enemy_base,
             "sheltered_regions": s.sheltered.iter().filter(|&&b| b).count(),
             "fortify": fortify,
+            "fortify_tempo_weight": ai.eco_fortify_tempo(),
             "hold": a.hold,
             "seal": a.seal,
             "walls": a.walls.len(),

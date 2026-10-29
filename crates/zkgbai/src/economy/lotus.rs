@@ -94,7 +94,7 @@ impl Ai {
     pub(super) fn eco_defer_lotus(&mut self, key: DemandKey, at: Vec3, targets: Vec<Pos>) {
         let Some(lotus) = self.defs.get("turretlaser") else { return };
         let until = match key {
-            DemandKey::Gate(..) => self.frame + 2 * PERIOD,
+            DemandKey::Gate(..) => self.frame + 2 * self.eco_fortify_plan_period(),
             DemandKey::Area(..) => self.frame + 30 * 600,
             DemandKey::Asset(..) => i32::MAX,
         };
@@ -181,6 +181,7 @@ impl Ai {
             return;
         }
         let posture = self.posture_on();
+        let tempo = self.eco_fortify_tempo();
         if posture && self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize {
             return;
         }
@@ -206,11 +207,11 @@ impl Ai {
                     .filter(|d| self.eco_lotus_upgrade_covers(def, site, &d.targets, lotus))
                     .collect();
                 let budget: f32 = requests.iter().map(|d| d.metal).sum();
-                if budget < cost {
+                if budget * tempo < cost {
                     continue;
                 }
                 let Some(travel) = self.eco_shared_site_travel(def, site) else { continue };
-                let score = budget * super::fortify::travel_discount(travel) / cost.max(1.0);
+                let score = budget * tempo * super::fortify::travel_discount(travel) / cost.max(1.0);
                 let point = requests.iter().any(|d| !matches!(d.key, DemandKey::Gate(..)));
                 if best.is_none_or(|b| score > b.0) {
                     best = Some((score, def, site, point, budget));
@@ -231,7 +232,7 @@ impl Ai {
                 self.posture.defense += cost;
             }
             self.log(&format!(
-                "terrain: pooled {budget:.0} metal of Lotus requests into {} at ({:.0}, {:.0})",
+                "terrain: pooled {budget:.0} metal of Lotus requests (tempo weight {tempo:.2}) into {} at ({:.0}, {:.0})",
                 def.name(),
                 site.x,
                 site.z

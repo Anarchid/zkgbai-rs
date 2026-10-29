@@ -22,6 +22,13 @@ pub(super) fn travel_discount(travel: f32) -> f32 {
     1.0 / (1.0 + travel / 600.0).powi(2)
 }
 
+/// Static investment must compete with expansion. Density is standing
+/// metal per usable area relative to the posture's reference; neutral is
+/// the share of map metal still available outside known enemy territory.
+fn tempo_weight(density: f32, neutral: f32) -> f32 {
+    (0.35 + 0.65 * density.clamp(0.0, 1.0)) / (1.0 + 2.0 * neutral.clamp(0.0, 1.0))
+}
+
 fn supported(enemy: f32, friendly: f32, recent: f32, established: bool) -> bool {
     friendly >= 1.5 * enemy.max(recent) && (established || friendly >= SUPPORT_POWER)
 }
@@ -108,6 +115,24 @@ fn safe_approach(waypoints: &[Vec3], safe: impl Fn(Vec3) -> bool) -> bool {
 }
 
 impl Ai {
+    pub(crate) fn eco_fortify_tempo(&self) -> f32 {
+        let reference = self.posture_levers().density_ref;
+        let density = if reference > 0.0 { self.posture.density / reference } else { 0.0 };
+        let total: f32 = self.graph.metal_spots.iter().map(|s| s.value.max(0.0)).sum();
+        let free: f32 = self
+            .graph
+            .metal_spots
+            .iter()
+            .filter(|s| !s.owned && !s.hostile && !s.enemy_shadowed && !s.ally_shadowed)
+            .map(|s| s.value.max(0.0))
+            .sum();
+        tempo_weight(density, if total > 0.0 { free / total } else { 0.0 })
+    }
+
+    pub(super) fn eco_fortify_plan_period(&self) -> i32 {
+        (PLAN_PERIOD as f32 / self.eco_fortify_tempo()).ceil() as i32
+    }
+
     /// Recompute gates immediately on a live switch. Cancel unstarted
     /// opportunistic orders on disable; asset guards and started structures
     /// retain their safety checks until finished by the ordinary worker loop.
@@ -133,7 +158,7 @@ impl Ai {
                 self.eco.fortify_tasks.remove(&id);
             }
         }
-        self.eco.last_fortify_plan = self.frame - PLAN_PERIOD;
+        self.eco.last_fortify_plan = self.frame - self.eco_fortify_plan_period();
         self.strategy_refresh(self.frame);
     }
 
@@ -368,7 +393,7 @@ impl Ai {
     }
 
     pub(super) fn eco_defend_shared_chokes(&mut self) -> bool {
-        if self.frame - self.eco.last_fortify_plan < PLAN_PERIOD || self.eco.adjusted_income < 10.0 {
+        if self.frame - self.eco.last_fortify_plan < self.eco_fortify_plan_period() || self.eco.adjusted_income < 10.0 {
             return false;
         }
         self.eco.last_fortify_plan = self.frame;
@@ -513,6 +538,21 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_positions_and_free_expansion_both_delay_static_investment() {
+        assert_eq!(tempo_weight(1.0, 0.0), 1.0);
+        assert_eq!(tempo_weight(1.0, 0.5), 0.5);
+        assert!(tempo_weight(0.0, 0.0) < tempo_weight(0.5, 0.0));
+        assert!(tempo_weight(0.5, 0.0) < tempo_weight(1.0, 0.0));
+        assert!(tempo_weight(0.0, 1.0) < 0.12);
+        // Five 90-metal requests can buy a 420-metal turret on a full,
+        // dense map, but retain their credit and wait while expansion pays.
+        assert!(450.0 * tempo_weight(1.0, 0.0) >= 420.0);
+        assert!(450.0 * tempo_weight(0.2, 0.5) < 420.0);
+        assert_eq!(tempo_weight(5.0, -1.0), 1.0);
+        assert!(tempo_weight(-5.0, 2.0) > 0.0);
+    }
 
     #[test]
     fn shared_site_reaches_two_gates_that_individual_sites_cannot() {
