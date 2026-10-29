@@ -446,7 +446,7 @@ pub struct Doctrine {
     /// Packs: how they run at a target.
     pub attack: Attack,
     /// Packs: a run begun is finished through the target before the pack
-    /// judges threat, raiders or its health again.
+    /// judges threat or raiders again. Health retreats always interrupt.
     pub commit: bool,
     /// Packs: targets, run lines and ground under more enemy porc than
     /// `porc_share` of the pack's own threat are shunned (off: porc is
@@ -1163,8 +1163,8 @@ pub fn seeds() -> Vec<Doctrine> {
                     of the enemy's, are not raiders): five or more go in as one body, in a formation that slides \
                     with the leader's moves (60 apart: their shells go over each other), always on the move under \
                     move orders; they charge what moves and pass over what stands on the line that brings the \
-                    most guns within 70% of their reach, finishing a run once begun; only at what the threat maps \
-                    say they survive. From raiders they fall back to their Ripper screen, which trails them \
+                    most guns within 70% of their reach, unless health forces an immediate retreat; at what \
+                    the threat maps say they survive. From raiders they fall back to their Ripper screen, which trails them \
                     home-side at its own pace; below half their original core strength they park until survivors \
                     heal to 90%. Off by default: enable=ravager (Ravagers otherwise fight in the vehicle assault squads)."
         .into();
@@ -1200,18 +1200,17 @@ pub fn seeds() -> Vec<Doctrine> {
     // 2026-10-28, for the full-play test).
     ravager.wake_share = 0.5;
 
-    // Minotaurs as Ravagers, but a pack from one (user, 2026-10-28): Ogres
-    // their screen.
+    // Minotaurs go in and stay out with at least two cores; Ogres screen them.
     let mut minotaur = Doctrine {
-        note: "A Minotaur pack, as the Ravagers' (see `ravager`) but one or more go in, an Ogre screen \
+        note: "A Minotaur pack, as the Ravagers' (see `ravager`) but two or more go in, an Ogre screen \
                trailing. Off by default: enable=minotaur."
             .into(),
         core: vec!["tankassault".into()],
         core_orbit: 75.0,
         roles: vec![Role { keep: Keep::Trail, ..Role::escort("screen", &["tankriot"], "ceil(cores / 3)", 450.0, 0.0) }],
         pace: 66.0,
-        cores_to_go: 1,
-        cores_to_stay: 1,
+        cores_to_go: 2,
+        cores_to_stay: 2,
         ..ravager.clone()
     };
     minotaur.name = "minotaur".into();
@@ -1487,7 +1486,7 @@ mod tests {
         let seeds = seeds();
         let get = |n: &str| seeds.iter().find(|d| d.name == n).unwrap();
         let m = get("minotaur");
-        assert_eq!((m.core[0].as_str(), m.aim, m.cores_to_go, m.cores_to_stay), ("tankassault", Aim::Pack, 1, 1));
+        assert_eq!((m.core[0].as_str(), m.aim, m.cores_to_go, m.cores_to_stay), ("tankassault", Aim::Pack, 2, 2));
         assert_eq!((m.role("screen").unwrap().units[0].as_str(), m.wake_share), ("tankriot", 0.5));
         for (n, unit, go) in [("scorcher", "vehraid", 4), ("dagger", "hoverraid", 4), ("blitz", "tankheavyraid", 3)] {
             let d = get(n);
