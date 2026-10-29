@@ -40,14 +40,20 @@ fn prerequisite_unit(cb: Callback, team: i32, required: &BuildPrerequisite) -> O
     })
 }
 
-fn prerequisites_ready(cb: Callback, team: i32, requirements: &[BuildPrerequisite]) -> bool {
-    requirements.iter().all(|p| prerequisite_unit(cb, team, p).is_some_and(|u| !u.is_being_built()))
+fn prerequisites_ready(cb: Callback, team: i32, requirements: &[BuildPrerequisite], threatened: bool) -> bool {
+    (!threatened || !requirements.is_empty())
+        && requirements.iter().all(|p| prerequisite_unit(cb, team, p).is_some_and(|u| !u.is_being_built()))
 }
 
 impl Ai {
+    fn eco_silo_local_danger(&self, at: Vec3) -> bool {
+        // Even a small force already firing here warrants protection;
+        // the density threshold is for forces that have yet to arrive.
+        self.war.get_threat(at) > 0.0 || self.war.get_enemy_power(at).max(self.eco_raiders_near(at)) >= PREPARE_POWER
+    }
+
     fn eco_silo_needs_guards(&self, at: Vec3) -> bool {
-        let local = self.war.get_enemy_power(at).max(self.eco_raiders_near(at));
-        if local >= PREPARE_POWER {
+        if self.eco_silo_local_danger(at) {
             return true;
         }
         let Some(strategy) = &self.strategy else { return false };
@@ -70,7 +76,16 @@ impl Ai {
     }
 
     pub(super) fn eco_prerequisites_ready(&self, task: &WorkerTask) -> bool {
-        task.as_construction().is_none_or(|c| prerequisites_ready(self.cb, self.team_id, &c.prerequisites))
+        task.as_construction().is_none_or(|c| {
+            let silo = self.defs.name(c.build_type) == missiles::SILO;
+            if silo && self.missiles_shuns_site(task.position) {
+                return false;
+            }
+            // Close the gate immediately if danger arrives between
+            // preparation polls. The poll will queue the missing guards.
+            let threatened = silo && c.prerequisites.is_empty() && self.eco_silo_local_danger(task.position);
+            prerequisites_ready(self.cb, self.team_id, &c.prerequisites, threatened)
+        })
     }
 
     fn eco_prerequisite_task(&self, required: &BuildPrerequisite) -> Option<TaskId> {
@@ -142,22 +157,102 @@ impl Ai {
         })
     }
 
+    fn eco_silo_plan(&self) -> Option<TaskId> {
+        let silo = self.defs.get(missiles::SILO)?;
+        self.eco.construction_tasks.iter().copied().find(|&id| {
+            self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == silo.id())
+        })
+    }
+
+    /// Stop the original job as well as remembering the loss. Clearing only
+    /// its target makes workers immediately build another nanoframe there.
+    pub(super) fn eco_silo_lost(&mut self, unit: Unit) {
+        let at = unit.pos();
+        self.missiles_note_loss(at);
+        let jobs: Vec<_> = self
+            .eco
+            .construction_tasks
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.eco.tasks.get(id).is_some_and(|t| {
+                    t.as_construction().is_some_and(|c| {
+                        self.defs.name(c.build_type) == missiles::SILO
+                            && (c.target == Some(unit) || self.missiles_shuns_site(t.position))
+                    })
+                })
+            })
+            .collect();
+        for id in jobs {
+            self.eco.drop_construction_task(id);
+        }
+    }
+
+    /// Reserve all guards before workers may resume this silo. A partial
+    /// layout never counts as preparation, even if the silo already started.
+    fn eco_prepare_silo(&mut self, id: TaskId) -> bool {
+        let site = self.eco.task_pos(id);
+        let idle = self.eco.stop_workers(id);
+        self.eco.idle_workers(&idle);
+        let mut guards = Vec::new();
+        let mut created = Vec::new();
+        for (name, seed) in self.eco_silo_guard_layout(site) {
+            let required = self
+                .defs
+                .get(name)
+                .and_then(|def| self.eco_silo_guard_site(def, seed).map(|pos| BuildPrerequisite { def, pos }));
+            let queued = required.and_then(|r| self.eco_ensure_silo_guard(&r).map(|id| (r, id)));
+            let Some((required, task)) = queued else {
+                for task in created {
+                    self.eco.drop_construction_task(task);
+                }
+                self.eco.drop_construction_task(id);
+                self.log("missiles: no room for the full defenses; deferring the silo");
+                return false;
+            };
+            guards.push(required);
+            created.extend(task);
+        }
+        self.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().prerequisites = guards;
+        true
+    }
+
+    /// A safe site can become a front while its constructors are travelling.
+    /// Recheck pending and started jobs, independently of factory requisition.
+    pub(super) fn eco_update_silo_preparation(&mut self) {
+        let Some(id) = self.eco_silo_plan() else { return };
+        let task = self.eco.tasks.get(id).unwrap();
+        let site = task.position;
+        let guards = task.as_construction().unwrap().prerequisites.clone();
+        if self.missiles_shuns_site(site) {
+            self.eco.drop_construction_task(id);
+            return;
+        }
+        if guards.is_empty() && self.eco_silo_needs_guards(site) {
+            if self.eco_prepare_silo(id) {
+                self.log(&format!(
+                    "missiles: danger reached the silo site at ({:.0}, {:.0}); pausing for completed lasers, flak and shield",
+                    site.x, site.z
+                ));
+            }
+            return;
+        }
+        if !prerequisites_ready(self.cb, self.team_id, &guards, false) {
+            let idle = self.eco.stop_workers(id);
+            self.eco.idle_workers(&idle);
+        }
+        for guard in guards {
+            if self.eco_ensure_silo_guard(&guard).is_none() {
+                self.eco.drop_construction_task(id);
+                self.log("missiles: abandoning silo preparation: a required defense site is blocked");
+                break;
+            }
+        }
+    }
+
     pub(super) fn eco_plan_missile_silo(&mut self) {
         let Some(silo) = self.defs.get(missiles::SILO) else { return };
-        let planned = self.eco.construction_tasks.iter().copied().find(|&id| {
-            self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == silo.id())
-        });
-        if let Some(id) = planned {
-            let c = self.eco.tasks.get(id).unwrap().as_construction().unwrap();
-            let started = c.target.is_some();
-            let guards = c.prerequisites.clone();
-            for guard in guards {
-                if self.eco_ensure_silo_guard(&guard).is_none() && !started {
-                    self.eco.drop_construction_task(id);
-                    self.log("missiles: abandoning silo preparation: a required defense site is blocked");
-                    break;
-                }
-            }
+        if self.eco_silo_plan().is_some() {
             return;
         }
         if self.dev_off("missiles")
@@ -178,27 +273,8 @@ impl Ai {
         let Some(id) = self.eco_add_simple(silo, site, List::Construction, None) else { return };
         self.missiles.planned = Some(self.frame);
         let threatened = self.eco_silo_needs_guards(site);
-        if threatened {
-            let mut guards = Vec::new();
-            let mut created = Vec::new();
-            for (name, seed) in self.eco_silo_guard_layout(site) {
-                let required = self
-                    .defs
-                    .get(name)
-                    .and_then(|def| self.eco_silo_guard_site(def, seed).map(|pos| BuildPrerequisite { def, pos }));
-                let queued = required.and_then(|r| self.eco_ensure_silo_guard(&r).map(|id| (r, id)));
-                let Some((required, task)) = queued else {
-                    for task in created {
-                        self.eco.drop_construction_task(task);
-                    }
-                    self.eco.drop_construction_task(id);
-                    self.log("missiles: no room for the full defenses; deferring the silo");
-                    return;
-                };
-                guards.push(required);
-                created.extend(task);
-            }
-            self.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().prerequisites = guards;
+        if threatened && !self.eco_prepare_silo(id) {
+            return;
         }
         self.log(&format!(
             "missiles: silo at ({:.0}, {:.0}), {:.0} Eos/Shockley payoff ({} targets); \
@@ -321,7 +397,7 @@ mod tests {
                 pos: Vec3::xz(id as f32 * 100.0, 100.0),
             })
             .collect();
-        assert!(!prerequisites_ready(cb, 1, &guards)); // Jobs alone do not count.
+        assert!(!prerequisites_ready(cb, 1, &guards, true)); // Jobs alone do not count.
         GUARDS.with(|g| {
             *g.borrow_mut() = guards
                 .iter()
@@ -333,20 +409,21 @@ mod tests {
                 })
                 .collect()
         });
-        assert!(!prerequisites_ready(cb, 1, &guards)); // All nanoframes.
+        assert!(!prerequisites_ready(cb, 1, &guards, true)); // All nanoframes.
         for i in 0..5 {
-            assert!(!prerequisites_ready(cb, 1, &guards));
+            assert!(!prerequisites_ready(cb, 1, &guards, true));
             GUARDS.with(|g| g.borrow_mut()[i].building = false);
         }
-        assert!(prerequisites_ready(cb, 1, &guards));
+        assert!(prerequisites_ready(cb, 1, &guards, true));
         GUARDS.with(|g| g.borrow_mut()[2].health = 0.0);
-        assert!(!prerequisites_ready(cb, 1, &guards)); // A destroyed guard closes the gate again.
+        assert!(!prerequisites_ready(cb, 1, &guards, true)); // A destroyed guard closes the gate again.
         GUARDS.with(|g| g.borrow_mut()[2].health = 100.0);
-        assert!(prerequisites_ready(cb, 1, &guards));
+        assert!(prerequisites_ready(cb, 1, &guards, true));
         GUARDS.with(|g| g.borrow_mut()[2].pos.x += 100.0);
-        assert!(!prerequisites_ready(cb, 1, &guards)); // Same type elsewhere is not protection here.
-        assert!(prerequisites_ready(cb, 1, &[])); // Quiet sites have no preparation gate.
+        assert!(!prerequisites_ready(cb, 1, &guards, true)); // Same type elsewhere is not protection here.
+        assert!(prerequisites_ready(cb, 1, &[], false)); // Quiet sites have no preparation gate.
+        assert!(!prerequisites_ready(cb, 1, &[], true)); // A newly threatened site must acquire guards first.
         GUARDS.with(|g| g.borrow_mut().clear());
-        assert!(!prerequisites_ready(cb, 1, &guards)); // Deleted tasks/buildings cannot unlock it.
+        assert!(!prerequisites_ready(cb, 1, &guards, true)); // Deleted tasks/buildings cannot unlock it.
     }
 }

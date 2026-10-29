@@ -51,6 +51,10 @@ const SITE_STEPS: [f32; 3] = [400.0, 800.0, 1200.0];
 const STATIC_SHARE: f32 = 0.7;
 const DEFAULT_SIEGE_DENSITY: f32 = 1500.0;
 const MAX_SIEGE_DENSITY: f32 = 10000.0;
+/// A lost silo or nanoframe is evidence against the whole nearby site,
+/// not just its exact footprint. Match the former safe-site policy.
+const LOSS_MEMORY: i32 = 30 * 300;
+const LOSS_RADIUS: f32 = 800.0;
 
 /// A final buildable firing position and the reasons it pays.
 pub struct SiloSite {
@@ -189,6 +193,7 @@ pub struct Missiles {
     struck: BTreeMap<i32, i32>,
     /// When a silo was last planned (a plan dropped is not remade at once).
     pub planned: Option<i32>,
+    lost_sites: Vec<(Vec3, i32)>,
     /// Eos to follow those that drained shields: at whom, where, how many,
     /// from when.
     followups: Vec<(i32, Vec3, usize, i32)>,
@@ -202,6 +207,17 @@ pub struct Missiles {
     burns: BTreeMap<i32, (f32, i32)>,
     last_report: i32,
     last_inferno_report: i32,
+}
+
+impl Missiles {
+    fn note_loss(&mut self, pos: Vec3, frame: i32) {
+        self.lost_sites.retain(|&(_, at)| frame - at < LOSS_MEMORY);
+        self.lost_sites.push((pos, frame));
+    }
+
+    fn shuns(&self, pos: Vec3, frame: i32) -> bool {
+        self.lost_sites.iter().any(|&(site, at)| frame - at < LOSS_MEMORY && distance(pos, site) < LOSS_RADIUS)
+    }
 }
 
 /// An enemy building worth Eos: how many it takes.
@@ -258,6 +274,20 @@ fn inferno_cluster_candidates(light: &[LightTarget], worth: f32) -> Vec<(Vec3, f
 }
 
 impl Ai {
+    pub(crate) fn missiles_note_loss(&mut self, pos: Vec3) {
+        self.missiles.note_loss(pos, self.frame);
+        self.log(&format!(
+            "missiles: silo lost at ({:.0}, {:.0}); excluding sites within {LOSS_RADIUS:.0} for {} seconds",
+            pos.x,
+            pos.z,
+            LOSS_MEMORY / 30
+        ));
+    }
+
+    pub(crate) fn missiles_shuns_site(&self, pos: Vec3) -> bool {
+        self.missiles.shuns(pos, self.frame)
+    }
+
     pub(crate) fn missiles_siege_readiness(&self) -> SiegeReadiness {
         let minimum = siege_density_option(self.cb.option("missile_silo_density").as_deref());
         SiegeReadiness::new(self.posture.density, minimum, self.posture.laneness())
@@ -438,6 +468,7 @@ impl Ai {
         let sites = sites.into_iter().map(|p| self.cb.map().find_closest_build_site(silo, p, 600.0, 3, 0));
         let sites = sites.filter(|&p| {
             p.x >= 0.0
+                && !self.missiles_shuns_site(p)
                 && self.eco_build_check(silo, p, 0)
                 && self.graph.is_ally_territory(p)
                 && (self.war.get_threat(p) <= 0.0
@@ -871,6 +902,27 @@ mod site_tests {
     // Payoff triggers must work even before the battlefield is dense.
     const EARLY: SiegeReadiness = SiegeReadiness { density: 0.0, threshold: 1500.0, laneness: 0.0 };
     const DENSE: SiegeReadiness = SiegeReadiness { density: 1600.0, ..EARLY };
+
+    #[test]
+    fn lost_silo_excludes_nearby_final_sites_until_memory_expires() {
+        let mut missiles = Missiles::default();
+        let lost = Vec3::xz(2000.0, 2608.0); // TitanDuel's repeatedly rebuilt nanoframe.
+        let when = 38390;
+        missiles.note_loss(lost, when);
+        let shifted = Vec3::xz(2032.0, 2608.0);
+        let other = Vec3::xz(1100.0, 2608.0);
+        let enemy = Vec3::xz(4000.0, 4000.0);
+        let targets = [(enemy, 5000.0)];
+        let candidates = [lost, shifted, other].into_iter().filter(|&p| !missiles.shuns(p, when + 1));
+        let chosen = choose_silo_site(candidates, &targets, &[], EARLY, enemy).unwrap();
+        assert_eq!(chosen.pos, other);
+        assert!(missiles.shuns(lost, when + LOSS_MEMORY - 1));
+        assert!(!missiles.shuns(lost, when + LOSS_MEMORY));
+        // A subsequent loss refreshes protection and expires older sites.
+        missiles.note_loss(shifted, when + LOSS_MEMORY);
+        assert_eq!(missiles.lost_sites.len(), 1);
+        assert!(missiles.shuns(lost, when + LOSS_MEMORY + 1));
+    }
 
     #[test]
     fn inward_build_site_adjustment_must_not_lose_the_target() {
