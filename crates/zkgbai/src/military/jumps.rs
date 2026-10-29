@@ -258,6 +258,41 @@ fn blast_damage(d: f32, r: f32) -> f32 {
 }
 
 impl Ai {
+    /// Orders must survive the delay before the engine starts a jump,
+    /// and the flight itself.
+    pub fn jump_in_progress(&self, unit: Unit) -> bool {
+        self.jumps.pending.iter().any(|j| j.unit.id() == unit.id()) || unit.rules_param_float("is_jumping", 0.0) == 1.0
+    }
+
+    /// Shortcut a safe stretch of the walking route and queue the rest.
+    /// Callers may append their work order after this returns true.
+    pub fn jump_travel(&mut self, unit: Unit, goal: Vec3, why: &str) -> bool {
+        if goal == NULLPOS || self.jump_in_progress(unit) {
+            return false;
+        }
+        let Some(jd) = self.jump_ready(unit) else { return false };
+        let pos = unit.pos();
+        let def = unit.def();
+        let Some((to, way)) = self.jump_path(unit, goal, jd.range * REACH, |ai, p| {
+            let view = ai.war.view(def);
+            ai.jump_clear(jd, pos, p)
+                && view.get_porc_threat(p) <= 0.0
+                && view.get_effective_threat(p) <= 0.0
+                && distance(pos, p) >= MIN_ESCAPE
+                && Self::jump_flight(jd, distance(pos, p))
+                    < distance(pos, p) / def.map_or(1.0, |d| d.speed()).max(1.0) * 30.0
+        }) else {
+            return false;
+        };
+        self.jump_order(unit, to, why);
+        for wp in way {
+            if distance(to, wp) > 16.0 {
+                kgb_move_to(unit, wp, OPTION_SHIFT_KEY, self.frame);
+            }
+        }
+        true
+    }
+
     /// The jumps of def `ud`, if it jumps (and the gadget drives them).
     pub fn jump_def(&mut self, ud: UnitDef) -> Option<JumpDef> {
         if let Some(d) = self.jumps.defs.get(&ud.id()) {

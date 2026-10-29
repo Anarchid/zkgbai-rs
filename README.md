@@ -324,3 +324,12 @@ License
 -------
 
 GNU General Public License, version 2 (see `LICENSE`).
+
+Commanders also answer raids within 650 elmos of where they were working, closing to weapon
+range and returning to work when the raid leaves. They keep a fixed response area, avoid enemy
+turrets, and leave defense when below 65% health or short of shields. Recon commanders jump
+along safe routes both when responding and when traveling to construction, repair or reclaim
+jobs; reload, landing terrain and flight clearance are checked before each jump. This defaults
+on; the operator's `feature` tool with `{"name":"commander","off":true}` disables both behaviors
+and immediately releases active defenders to economy work. `off:false` re-enables them.
+`disable=commander` or `ZKGBAI_DISABLE=commander` disables them at startup.

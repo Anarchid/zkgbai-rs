@@ -4,6 +4,7 @@
 mod assign;
 pub mod build_ids;
 mod colonize;
+mod commander;
 pub mod factory;
 pub mod factory_manager;
 mod fortify;

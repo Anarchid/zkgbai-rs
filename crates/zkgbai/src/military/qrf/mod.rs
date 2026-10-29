@@ -320,6 +320,7 @@ impl Ai {
                 ai.qrf_live_filter(frame);
                 ai.qrf_live_budget(frame);
             });
+            self.guard("qrf.commanders", |ai| ai.eco_defend_commanders());
             self.guard("qrf.floor", |ai| ai.qrf_floor_update(frame));
         }
         self.qrf.plan_pending = false;
