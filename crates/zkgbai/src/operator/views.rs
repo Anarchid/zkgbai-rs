@@ -455,6 +455,7 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
         "defend": defend,
         "incursions": incursions,
         "blocks": blocks,
+        "strikes": ai.strikes_status(),
         "intel": {
             "enemy_produced": r1(i.produced),
             "enemy_income": r1(i.income),
@@ -1317,6 +1318,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("teleport", "Djinn teleports"),
     ("nukes", "nuke firing"),
     ("missiles", "tactical missile silos"),
+    ("strikes", "dedicated assassination waves and anti-Phantom support fire"),
     ("precision", "precision raids behind lone towers"),
     ("jaeger", "jaeger squads (hunting raiders)"),
     ("qrf", "the quick-reaction force: home defense against raids (dedicated teams, moonlighting squads)"),

@@ -364,7 +364,37 @@ impl Ai {
     /// burn (see [`INFERNO_WORTH`]) and how many things, the best first,
     /// none overlapping a better one.
     fn missiles_inferno_targets(&self) -> Vec<(Vec3, f32, usize)> {
-        self.missiles_clusters(INFERNO_WORTH)
+        let mut targets = self.missiles_clusters(INFERNO_WORTH);
+        // A recent multi-Phantom fix enables a broad-area Inferno from an
+        // existing silo. It does not by itself commission another silo.
+        if self.missiles_silo().is_some() && !self.dev_off("strikes") {
+            for (mut pos, count) in self.strikes_phantom_targets() {
+                if count < 2
+                    || self.missiles_ground_burning(pos)
+                    || self.missiles_shield(pos).is_some()
+                    || self
+                        .cb
+                        .friendly_units_in(pos, INFERNO_RADIUS + 100.0)
+                        .iter()
+                        .any(|u| !u.def().is_some_and(|d| d.is_able_to_fly()))
+                    || targets.iter().any(|t| distance(t.0, pos) < 2.0 * INFERNO_RADIUS)
+                {
+                    continue;
+                }
+                pos.y = self.cb.map().elevation_at(pos.x, pos.z);
+                let cost = self.defs.get("cloaksnipe").map_or(750.0, |d| d.cost(self.metal));
+                targets.push((pos, count as f32 * cost, count));
+            }
+        }
+        targets.sort_by(|a, b| b.1.total_cmp(&a.1));
+        targets
+    }
+
+    pub(crate) fn missiles_ground_burning(&self, pos: Vec3) -> bool {
+        self.missiles
+            .burnt
+            .iter()
+            .any(|(p, at)| self.frame - *at < BURN_FRAMES + 30 * 10 && distance(*p, pos) < INFERNO_RADIUS + 100.0)
     }
 
     /// Light enemies an Inferno would burn: their ids, where they are, what
@@ -649,7 +679,7 @@ impl Ai {
                 *b = (b.0 + l.burn, due);
             }
             self.log(&format!(
-                "missiles: an Inferno at {n} light things, {value:.0} metal of them burnt, at ({:.0}, {:.0})",
+                "missiles: an Inferno at {n} targets, {value:.0} estimated target value, at ({:.0}, {:.0})",
                 p.x, p.z
             ));
             if free.is_empty() {
@@ -734,8 +764,16 @@ impl Ai {
             let roast = self.missiles_inferno_targets().iter().filter(|c| distance(c.0, here) <= REACH).count();
             (n < roast.min(MAX_INFERNOS)).then_some(def)
         };
+        let phantom = !self.dev_off("strikes")
+            && self
+                .strikes_phantom_targets()
+                .iter()
+                .any(|(p, n)| *n >= 2 && distance(*p, here) <= REACH && !self.missiles_ground_burning(*p));
+        let urgent_inferno = if phantom { infernos() } else { None };
         let def = if n_shock < stun.min(2) {
             shockley
+        } else if let Some(inferno) = urgent_inferno {
+            inferno
         } else if n_eos < needed.min(PADS) {
             eos
         } else if let Some(inferno) = (stun == 0 && needed == 0).then(infernos).flatten() {

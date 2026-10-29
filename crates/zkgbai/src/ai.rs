@@ -64,14 +64,13 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
 /// better than both, each taking up the metal the other left.
 /// The experimental Ravager, Minotaur, raider packs and organic fire squads remain opt-in.
-pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
     "pairs",
     "currency",
     "permanence",
     "mexporc",
     "airtempo",
     "airfire",
-    "strikes",
     "fightsim",
     "posture",
     "ecoladder",
@@ -576,6 +575,8 @@ impl Ai {
                     | "farm"
                     | "snipers"
                     | "lances"
+                    | "assassin-target"
+                    | "assassin-target2"
             )
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
@@ -721,6 +722,7 @@ impl Ai {
         self.guard("graph.unitCreated", |ai| ai.graph_unit_created(unit, builder));
         self.guard("eco.unitCreated", |ai| ai.eco_unit_created(unit, builder));
         self.guard("fac.unitCreated", |ai| ai.fac_unit_created(unit, builder));
+        self.guard("strikes.unitCreated", |ai| ai.strikes_created(unit, builder));
     }
 
     fn unit_given(&mut self, unit: Unit, old_team: i32, new_team: i32) {

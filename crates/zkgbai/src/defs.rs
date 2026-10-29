@@ -30,6 +30,7 @@ pub mod cmd {
     /// Jugglenaut's gravity guns (cmd_onoff): 0 pulls, 1 pushes.
     pub const PUSH_PULL: i32 = 35666;
     pub const WANT_ONOFF: i32 = 35667;
+    pub const FIRE_TOWARDS_ENEMY: i32 = 36216;
     pub const UNIT_AI: i32 = 36214;
     pub const DONT_FIRE_AT_RADAR: i32 = 38372;
     /// Jump to a point (ZK's unit_jumpjets; params x, y, z): walks into

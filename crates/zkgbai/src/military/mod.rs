@@ -624,6 +624,9 @@ impl Ai {
             }
             return;
         }
+        if self.strikes_claims(unit) {
+            return;
+        }
         // Forces short of a spotter take one first (see `taskforce::spotter`).
         if self.taskforce_spotter_claims(unit, name, cost) {
             return;
@@ -865,9 +868,8 @@ impl Ai {
             self.squad_add_taskforce_member(f);
             return;
         }
-        // Dirtbags the strikes ordered (see `strikes_production`) that no
-        // stakeout took raid solo until a strike conscripts them.
-        if name == strikes::DIRTBAG {
+        // Spare Dirtbags raid until a dedicated strike needs them.
+        if name == "shieldscout" {
             self.assign_role(unit, Role::SoloRaider);
             return;
         }
@@ -954,7 +956,6 @@ impl Ai {
             return;
         }
         self.qrf_asset_pressed(unit, attacker);
-        self.strikes_unit_damaged(unit, attacker, dir, weapon);
         self.taskforce_spotter_damaged(unit);
 
         // check if the damaged unit is on fire.
@@ -1035,7 +1036,7 @@ impl Ai {
         self.firefighters_unit_destroyed(unit, attacker);
         self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
-        self.strikes_unit_destroyed(unit, attacker);
+        self.strikes_remove(unit);
 
         // (Before the retreat handler forgets whether it was retreating.)
         self.impalers_remove_unit(unit);
@@ -1160,7 +1161,6 @@ impl Ai {
             }
             war.targets.insert(id, e);
         }
-        self.strikes_enemy_seen(enemy);
     }
 
     pub fn war_enemy_finished(&mut self, enemy: Unit) {
@@ -1230,7 +1230,7 @@ impl Ai {
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
-        self.strikes_enemy_destroyed(enemy, attacker);
+        self.strikes_enemy_destroyed(enemy.id());
         self.impalers_enemy_destroyed(enemy, attacker);
         self.taskforce_enemy_destroyed(enemy, attacker);
         self.raid_test_enemy_destroyed(enemy);

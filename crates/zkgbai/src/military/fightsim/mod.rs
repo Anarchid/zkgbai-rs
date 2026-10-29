@@ -153,6 +153,8 @@ pub struct MechOutcome {
 pub enum FateMode {
     /// A a-moves as in the fight model.
     AMove,
+    /// Side A closes on and fires only at this snapshot target.
+    Assassinate { target: usize },
     /// A's mobile units drive along the axis through B and out the far side
     /// at their speed, firing as they go, on a line `offset` elmos from B's
     /// statics (B's mobile units come to the line); A's statics hold.
