@@ -375,7 +375,8 @@ pub struct Doctrine {
     /// for its value).
     pub muster: f32,
     /// It falls back below this health (the core's, or the average if
-    /// lower).
+    /// lower). Packs instead compare remaining core health to their
+    /// original core count, so casualties count as lost strength too.
     pub retreat_health: f32,
     /// It falls back once its shields drop below `shields_low`, and comes
     /// back above `shields_ok`.
@@ -429,8 +430,9 @@ pub struct Doctrine {
     /// Packs (see `pack`): the cores it takes to go in, and to stay in.
     pub cores_to_go: u32,
     pub cores_to_stay: u32,
-    /// Packs: below `retreat_health` they park for repairs until their
-    /// cores average this (0: until back above `retreat_health`).
+    /// Packs: below `retreat_health` of their original core strength they
+    /// park for repairs until surviving cores average this (0: until back
+    /// above `retreat_health`); recovery resets the original strength.
     pub heal_to: f32,
     /// Packs: a pass counts the guns that come within this share of their
     /// reach of the target.
@@ -1163,8 +1165,8 @@ pub fn seeds() -> Vec<Doctrine> {
                     move orders; they charge what moves and pass over what stands on the line that brings the \
                     most guns within 70% of their reach, finishing a run once begun; only at what the threat maps \
                     say they survive. From raiders they fall back to their Ripper screen, which trails them \
-                    home-side at its own pace; below half health they park for repairs until 90%. Off by \
-                    default: enable=ravager (Ravagers otherwise fight in the vehicle assault squads)."
+                    home-side at its own pace; below half their original core strength they park until survivors \
+                    heal to 90%. Off by default: enable=ravager (Ravagers otherwise fight in the vehicle assault squads)."
         .into();
     ravager.core = vec!["vehassault".into()];
     ravager.core_keep = Keep::Formation;
