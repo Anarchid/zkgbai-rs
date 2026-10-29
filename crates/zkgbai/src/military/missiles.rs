@@ -15,6 +15,8 @@
 //! mexes in a cluster, wind generators, caretaker farms, picket turrets,
 //! and whatever stands with them, or crowds on radar we cannot make out
 //! (the burning ground keeps their builders from repairing them).
+//! Two identified Phantoms together also warrant an Inferno, provided
+//! neither is covered by an Aspis, Aegis or Funnelweb.
 //!
 //! The AI hears of no death it does not see, and an Eos is gone from the
 //! game once launched: a building an Eos hit (all it took, its shield
@@ -150,6 +152,7 @@ const BURN_STAYING: f32 = 520.0;
 const BURN_PASSING: f32 = 150.0;
 const LIGHT: f32 = 2000.0;
 const MIN_CLUSTER: usize = 3;
+const PHANTOM: &str = "cloaksnipe";
 const INFERNO_WORTH: f32 = 600.0;
 const ECONOMY: f32 = 2.0;
 const NUISANCE: f32 = 20.0;
@@ -209,6 +212,49 @@ struct Target {
     needed: usize,
     /// Under an Aegis or Aspis: the first Eos drains it, the rest follow.
     shielded: bool,
+}
+
+struct LightTarget {
+    id: i32,
+    pos: Vec3,
+    value: f32,
+    burn: f32,
+    /// Only identified Phantoms outside every known shield count toward
+    /// the two-sniper exception. A shield over either sniper rules it out.
+    unshielded_phantom: bool,
+}
+
+/// Geometric candidates; range, shields over the aim point, friendly units
+/// and existing fires are checked by the caller before firing.
+fn inferno_cluster_candidates(light: &[LightTarget], worth: f32) -> Vec<(Vec3, f32, usize)> {
+    let within = |c: Vec3| light.iter().filter(move |l| distance(l.pos, c) <= INFERNO_RADIUS);
+    let mut clusters = Vec::new();
+    let mut consider = |mid| {
+        let (burnt, n, snipers) =
+            within(mid).fold((0.0, 0, 0), |(v, n, s), l| (v + l.value, n + 1, s + usize::from(l.unshielded_phantom)));
+        if (n >= MIN_CLUSTER && burnt > worth) || snipers >= 2 {
+            clusters.push((mid, burnt, n));
+        }
+    };
+    let phantoms: Vec<_> = light.iter().filter(|l| l.unshielded_phantom).collect();
+    // Two snipers can share a blast without either being within a blast
+    // radius of the other. Include their midpoint as an aim candidate.
+    for (i, a) in phantoms.iter().enumerate() {
+        for b in &phantoms[i + 1..] {
+            if distance(a.pos, b.pos) <= 2.0 * INFERNO_RADIUS {
+                consider(Vec3::xz((a.pos.x + b.pos.x) / 2.0, (a.pos.z + b.pos.z) / 2.0));
+            }
+        }
+    }
+    for c in light.iter().map(|l| l.pos) {
+        let n = within(c).count();
+        if n < 2 {
+            continue;
+        }
+        let (x, z) = within(c).fold((0.0, 0.0), |(x, z), l| (x + l.pos.x / n as f32, z + l.pos.z / n as f32));
+        consider(Vec3::xz(x, z));
+    }
+    clusters
 }
 
 impl Ai {
@@ -295,7 +341,7 @@ impl Ai {
     /// burning them is worth (see [`INFERNO_WORTH`]) and how much damage it
     /// would do. Contacts of unknown type count as light; what our fires
     /// should have burnt already, unseen since, does not.
-    fn missiles_light(&self) -> Vec<(i32, Vec3, f32, f32)> {
+    fn missiles_light(&self) -> Vec<LightTarget> {
         let frame = self.frame;
         let map = self.cb.map();
         (self.war.targets.values())
@@ -328,39 +374,34 @@ impl Ai {
                 }
                 let economy = e.is_mex || e.def_name.starts_with("energy");
                 let value = if economy { ECONOMY * e.value } else { e.value };
-                Some((e.unit_id, e.position, value * (burn / left).min(1.0) + NUISANCE, burn))
+                Some(LightTarget {
+                    id: e.unit_id,
+                    pos: e.position,
+                    value: value * (burn / left).min(1.0) + NUISANCE,
+                    burn,
+                    unshielded_phantom: e.identified
+                        && e.def_name == PHANTOM
+                        && self.missiles_shield(e.position).is_none(),
+                })
             })
             .collect()
     }
 
     /// [`missiles_inferno_targets`](Self::missiles_inferno_targets), of
-    /// those burning more than `worth`.
+    /// those burning more than `worth`, or at least two exposed Phantoms.
     fn missiles_clusters(&self, worth: f32) -> Vec<(Vec3, f32, usize)> {
-        let light: Vec<(Vec3, f32)> = self.missiles_light().into_iter().map(|l| (l.1, l.2)).collect();
-        let within = |c: Vec3| light.iter().filter(move |l| distance(l.0, c) <= INFERNO_RADIUS);
+        let light = self.missiles_light();
         let burning = |p: Vec3| self.missiles.burnt.iter().any(|b| distance(b.0, p) <= INFERNO_RADIUS);
         // None of ours but aircraft in the fire.
         let clear = |p: Vec3| {
             let ours = self.cb.friendly_units_in(p, INFERNO_RADIUS + 100.0);
             ours.iter().all(|u| u.def().is_some_and(|d| d.is_able_to_fly()))
         };
-        let mut clusters: Vec<(Vec3, f32, usize)> = Vec::new();
-        for &(c, _) in &light {
-            // Aimed at the middle of those around each one.
-            let n = within(c).count();
-            if n < MIN_CLUSTER {
-                continue;
-            }
-            let (x, z) = within(c).fold((0.0, 0.0), |(x, z), l| (x + l.0.x / n as f32, z + l.0.z / n as f32));
-            let mid = Vec3::new(x, self.cb.map().elevation_at(x, z), z);
-            let (burnt, n) = within(mid).fold((0.0, 0), |(v, n), l| (v + l.1, n + 1));
-            if n >= MIN_CLUSTER && burnt > worth {
-                clusters.push((mid, burnt, n));
-            }
-        }
+        let mut clusters = inferno_cluster_candidates(&light, worth);
         clusters.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut chosen: Vec<(Vec3, f32, usize)> = Vec::new();
-        for c in clusters {
+        for mut c in clusters {
+            c.0.y = self.cb.map().elevation_at(c.0.x, c.0.z);
             if chosen.iter().all(|o| distance(o.0, c.0) > 2.0 * INFERNO_RADIUS)
                 && !burning(c.0)
                 && self.missiles_shield(c.0).is_none()
@@ -475,11 +516,16 @@ impl Ai {
             .filter(|c| distance(c.0, here) <= REACH)
             .max_by(|a, b| a.1.total_cmp(&b.1));
         let pads = self.missiles_ready(INFERNO).len();
+        let queued = silo.current_commands().iter().filter(|c| c.id() < 0).count();
+        let energy_gate = if self.eco.hard_estalled { "energy shortage" } else { "open" };
         let best = best.map_or("none".to_owned(), |(p, v, n)| {
             format!("{v:.0} metal in {n} light things at ({:.0}, {:.0})", p.x, p.z)
         });
         self.log(&format!(
-            "missiles: Infernos: {pads} on the pads; best cluster in reach {best} (fire above {INFERNO_WORTH:.0})"
+            "missiles: Infernos: {pads} on the pads; best cluster in reach {best} \
+             (fire above {INFERNO_WORTH:.0} or at two exposed Phantoms); \
+             restock energy gate: {energy_gate}, {} missiles ready, {queued} queued",
+            self.missiles.ready.len()
         ));
     }
 
@@ -567,9 +613,9 @@ impl Ai {
             let due = frame + (30.0 * (EOS_RISE + distance(m.pos(), p) / EOS_SPEED)) as i32 + BURN_FRAMES;
             self.missiles_launch(m, p);
             self.missiles.burnt.push((p, frame));
-            for (id, _, _, burn) in self.missiles_light().into_iter().filter(|l| distance(l.1, p) <= INFERNO_RADIUS) {
-                let b = self.missiles.burns.entry(id).or_insert((0.0, due));
-                *b = (b.0 + burn, due);
+            for l in self.missiles_light().into_iter().filter(|l| distance(l.pos, p) <= INFERNO_RADIUS) {
+                let b = self.missiles.burns.entry(l.id).or_insert((0.0, due));
+                *b = (b.0 + l.burn, due);
             }
             self.log(&format!(
                 "missiles: an Inferno at {n} light things, {value:.0} metal of them burnt, at ({:.0}, {:.0})",
@@ -640,7 +686,10 @@ impl Ai {
         let queued: Vec<i32> = silo.current_commands().iter().map(|c| -c.id()).filter(|&id| id > 0).collect();
         let count = |kind: &str, id: i32| self.missiles_ready(kind).len() + queued.iter().filter(|&&q| q == id).count();
         let (n_eos, n_shock) = (count(EOS, eos.id()), count(SHOCKLEY, shockley.id()));
-        if self.missiles.ready.len() + queued.len() >= PADS || self.eco.estalled {
+        // Overdrive's desired energy/mex ratio is an investment target,
+        // not a reason to leave a completed silo idle. In particular, a
+        // missing Shockley must not strand an already loaded nuclear silo.
+        if self.missiles.ready.len() + queued.len() >= PADS || self.eco.hard_estalled {
             return;
         }
         let here = silo.pos();
@@ -664,6 +713,10 @@ impl Ai {
             return;
         };
         silo.build(def, here, 0, 0);
+        self.log(&format!(
+            "missiles: queued {} ({stun} anti-nukes in reach, {needed} Eos needed)",
+            self.defs.name(def)
+        ));
     }
 
     /// Fire a Shockley at each of `antis` (stunning them through a nuke's
@@ -763,6 +816,52 @@ fn choose_silo_site(
         .into_iter()
         .filter(|s| score(s) >= 0.8 * best)
         .max_by(|a, b| distance(a.pos, enemy).total_cmp(&distance(b.pos, enemy)))
+}
+
+#[cfg(test)]
+mod inferno_tests {
+    use super::*;
+
+    fn light(x: f32, value: f32, unshielded_phantom: bool) -> LightTarget {
+        LightTarget { id: 0, pos: Vec3::xz(x, 1000.0), value, burn: BURN_PASSING, unshielded_phantom }
+    }
+
+    #[test]
+    fn two_exposed_phantoms_warrant_an_inferno_even_when_moving() {
+        // Moving snipers have less predicted burn value than the usual
+        // threshold, but two together are explicitly worth suppressing.
+        let pair = [light(1000.0, 220.0, true), light(1100.0, 220.0, true)];
+        assert!(!inferno_cluster_candidates(&pair, INFERNO_WORTH).is_empty());
+        assert!(inferno_cluster_candidates(&pair[..1], INFERNO_WORTH).is_empty());
+    }
+
+    #[test]
+    fn both_phantoms_must_be_identified_and_outside_shields() {
+        // A shielded or unidentified contact cannot supply the second
+        // Phantom, even if the estimated metal value is very high.
+        let mut pair = [light(1000.0, 750.0, true), light(1100.0, 750.0, false)];
+        assert!(inferno_cluster_candidates(&pair, INFERNO_WORTH).is_empty());
+        pair[0].unshielded_phantom = false;
+        assert!(inferno_cluster_candidates(&pair, INFERNO_WORTH).is_empty());
+    }
+
+    #[test]
+    fn pair_must_fit_one_blast_and_other_contacts_must_not_displace_it() {
+        let mut group = [light(1000.0, 220.0, true), light(1400.0, 220.0, true), light(950.0, 1.0, false)];
+        let targets = inferno_cluster_candidates(&group, INFERNO_WORTH);
+        assert!(targets.iter().any(|t| t.0 == Vec3::xz(1200.0, 1000.0) && t.2 == 3));
+        group[1].pos.x = 1000.0 + 2.0 * INFERNO_RADIUS + 1.0;
+        assert!(inferno_cluster_candidates(&group, INFERNO_WORTH).is_empty());
+    }
+
+    #[test]
+    fn ordinary_clusters_keep_the_count_and_value_thresholds() {
+        let mut group = [light(1000.0, 201.0, false), light(1100.0, 201.0, false), light(1200.0, 201.0, false)];
+        assert!(!inferno_cluster_candidates(&group, INFERNO_WORTH).is_empty());
+        assert!(inferno_cluster_candidates(&group[..2], INFERNO_WORTH).is_empty());
+        group[0].value = 198.0;
+        assert!(inferno_cluster_candidates(&group, INFERNO_WORTH).is_empty());
+    }
 }
 
 #[cfg(test)]
