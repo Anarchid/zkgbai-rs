@@ -17,7 +17,9 @@
 //! need not mind who is in front), runs on, and swings round for another,
 //! until nothing is left there (or for 45 s); then the next, staying out
 //! while it has `cores_to_stay`. A turn back of more than a right angle
-//! starts with an arc when attacking; retreats may reverse directly.
+//! starts with a waypoint sized from its cores' speed and turn rate when
+//! attacking; retreats may reverse directly. Explicit `attack=pass` keeps
+//! the formation tangential, outside the target's body, even under `fates`.
 //! With `attack` charge (or mixed, for what moves) it
 //! runs at the target head-on instead, aimed anew each conduct until
 //! [`CHARGE_LOCK`] off, then straight through: ZK units push mobiles out of
@@ -132,8 +134,10 @@ const RIP_SEEN: i32 = 150;
 const SCREEN_NEAR: f32 = 400.0;
 /// Within this of where it gathers or parks, a pack stands.
 const STAND_NEAR: f32 = 300.0;
-/// A turn back of more than a right angle starts this far along an arc.
+/// Fallback lateral waypoint for cores whose turning data is unavailable.
 const TURN: f32 = 250.0;
+/// Keep enough distance for raw-move waypoints to be passed without braking.
+const TURN_MIN: f32 = 150.0;
 /// A screen member's place must move this far before it is sent anew.
 const SCREEN_REPATH: f32 = 250.0;
 /// Outweighed, a pack keeps going home this many frames (10 s) before it
@@ -336,6 +340,31 @@ pub fn plan_pass(
     guns: &[((f32, f32), f32)],
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
+    plan_pass_inner(pos, heading, target, guns, None, clear)
+}
+
+/// A forced tangential pass keeps the entire formation to one side of
+/// the target's collision margin. Of equally armed passes choose the one
+/// with the most standoff, then the least change from the current heading.
+fn plan_tangent_pass(
+    pos: Vec3,
+    heading: (f32, f32),
+    target: Vec3,
+    guns: &[((f32, f32), f32)],
+    clearance: f32,
+    clear: impl Fn(&Pass) -> bool,
+) -> Option<(Pass, usize)> {
+    plan_pass_inner(pos, heading, target, guns, Some(clearance), clear)
+}
+
+fn plan_pass_inner(
+    pos: Vec3,
+    heading: (f32, f32),
+    target: Vec3,
+    guns: &[((f32, f32), f32)],
+    tangent: Option<f32>,
+    clear: impl Fn(&Pass) -> bool,
+) -> Option<(Pass, usize)> {
     let (dx, dz) = (target.x - pos.x, target.z - pos.z);
     let d = (dx * dx + dz * dz).sqrt();
     let way = if d > 1.0 { (dx / d, dz / d) } else { heading };
@@ -345,18 +374,43 @@ pub fn plan_pass(
     let natural = (pos.x + heading.0 * ahead - target.x) * left.0 + (pos.z + heading.1 * ahead - target.z) * left.1;
     let across: Vec<(f32, f32)> = guns.iter().map(|&((ox, oz), reach)| (ox * left.0 + oz * left.1, reach)).collect();
     let span = across.iter().map(|&(p, reach)| p.abs() + reach).fold(0.0, f32::max);
-    let mut best: Option<(usize, f32, Pass)> = None;
+    let mut best: Option<(usize, f32, f32, Pass)> = None;
     let mut side = -span;
     while side <= span {
         let pass = Pass { way, side };
         let n = across.iter().filter(|&&(p, reach)| (side + p).abs() <= reach).count();
         let off = (side - natural).abs();
-        if best.is_none_or(|(m, o, _)| n > m || (n == m && off < o)) && clear(&pass) {
-            best = Some((n, off, pass));
+        let gap = tangent.map_or(0.0, |_| across.iter().map(|&(p, _)| (side + p).abs()).fold(f32::INFINITY, f32::min));
+        let outside = tangent.is_none_or(|margin| {
+            across.iter().all(|&(p, _)| side + p >= margin) || across.iter().all(|&(p, _)| side + p <= -margin)
+        });
+        if n > 0
+            && outside
+            && best.is_none_or(|(m, g, o, _)| n > m || (n == m && (gap > g || (gap == g && off < o))))
+            && clear(&pass)
+        {
+            best = Some((n, gap, off, pass));
         }
         side += PASS_STEP;
     }
-    best.map(|(n, _, pass)| (pass, n))
+    best.map(|(n, _, _, pass)| (pass, n))
+}
+
+/// Explicit pass/charge doctrines constrain prediction as well as driving.
+fn attack_modes(attack: Attack) -> &'static [bool] {
+    match attack {
+        Attack::Pass => &[false],
+        Attack::Charge => &[true],
+        Attack::Mixed => &[true, false],
+    }
+}
+
+fn charges(attack: Attack, mobile: bool, predicted: Option<bool>) -> bool {
+    match attack {
+        Attack::Pass => false,
+        Attack::Charge => true,
+        Attack::Mixed => predicted.unwrap_or(mobile),
+    }
 }
 
 /// Two waypoints along `pass` over `target` for a leader at `pos`: the pass
@@ -375,18 +429,31 @@ fn pack_route(pos: Vec3, t: Vec3) -> [Vec3; 3] {
     [pos, t, Vec3::xz(t.x + (t.x - pos.x) / d * PASS_ON, t.z + (t.z - pos.z) / d * PASS_ON)]
 }
 
-/// For a way to `dest` that lies more than a right angle off `heading` at
-/// `pos`: a first waypoint [`TURN`] along, turned a right angle toward its
-/// side, so that the force swings round instead of reversing.
-pub fn turn_point(pos: Vec3, heading: (f32, f32), dest: Vec3) -> Option<Vec3> {
+/// A lateral turning waypoint from cruise speed and angular speed. The
+/// engine slows down near raw-move goals, so the ideal radius alone is too
+/// small. Formation probes retain speed with five radii for cores allowed
+/// to turn at full speed, and 5.5 for those the engine may brake. Round up and retain the old
+/// distance when tighter steering has no margin.
+fn turn_distance(speed: f32, turn_rate: f32, turn_speed_limit: f32) -> f32 {
+    if !speed.is_finite() || speed <= 0.0 || !turn_rate.is_finite() || turn_rate <= 0.0 {
+        return TURN;
+    }
+    let omega = turn_rate * std::f32::consts::TAU * 30.0 / 65536.0;
+    let margin = if turn_speed_limit.is_finite() && turn_speed_limit >= speed { 5.0 } else { 5.5 };
+    ((margin * speed / omega / 10.0).ceil() * 10.0).clamp(TURN_MIN, TURN)
+}
+
+/// For a destination behind us, start with a lateral waypoint `turn` away
+/// so the force swings round without reversing its drive direction.
+pub fn turn_point(pos: Vec3, heading: (f32, f32), dest: Vec3, turn: f32) -> Option<Vec3> {
     let (tx, tz) = (dest.x - pos.x, dest.z - pos.z);
-    if heading.0 * tx + heading.1 * tz >= 0.0 || tx * tx + tz * tz < TURN * TURN {
+    if heading.0 * tx + heading.1 * tz >= 0.0 || tx * tx + tz * tz < turn * turn {
         return None;
     }
     let side = if heading.0 * tz - heading.1 * tx >= 0.0 { 1.0 } else { -1.0 };
     // The heading turned a right angle: (-hz, hx) to the left.
     let (ax, az) = (-heading.1 * side, heading.0 * side);
-    Some(Vec3::xz(pos.x + ax * TURN, pos.z + az * TURN))
+    Some(Vec3::xz(pos.x + ax * turn, pos.z + az * turn))
 }
 
 /// Up to `n` points of `path`, each at least `spacing` from the one before
@@ -415,12 +482,13 @@ fn approach_way(
     head: (f32, f32),
     dest: Vec3,
     assault: bool,
+    turn: f32,
     path: impl IntoIterator<Item = Vec3>,
 ) -> Vec<Vec3> {
     if distance(pos, dest) <= STAND_NEAR {
         return vec![dest];
     }
-    let mut way: Vec<Vec3> = if assault { turn_point(pos, head, dest).into_iter().collect() } else { Vec::new() };
+    let mut way: Vec<Vec3> = if assault { turn_point(pos, head, dest, turn).into_iter().collect() } else { Vec::new() };
     let from = way.last().copied().unwrap_or(pos);
     way.extend(spaced(path.into_iter().filter(|p| distance(*p, pos) > SPACING / 2.0), from, 2, SPACING));
     if way.last().is_none_or(|&l| distance(l, dest) < 2.0 * SPACING && distance(l, dest) > 1.0) {
@@ -511,6 +579,7 @@ impl Ai {
     pub(crate) fn taskforce_pack(&mut self, sid: SquadId) -> (Option<Vec3>, String) {
         self.pack_merge(sid);
         self.pack_lead(sid);
+        let turn = self.pack_turn_distance(sid);
         let Some(s) = self.squads.get(sid) else { return (None, "gone".into()) };
         let shape = s.shape.clone();
         let Some(leader) = s.get_leader(&self.fighters) else { return (None, "no leader".into()) };
@@ -751,7 +820,7 @@ impl Ai {
         // Judged by the predictor, the rest of the run must stay worth it.
         let rejudge = |ai: &mut Ai, t: Vec3| {
             if fates {
-                ai.pack_fates(sid, &pack_route(pos, t), st.ram.unwrap_or(false))
+                ai.pack_fates(sid, &pack_route(pos, t), charges(shape.attack, st.mobile, st.ram))
             } else {
                 ai.pack_judge(sid, &pack_route(pos, t), mech)
             }
@@ -798,7 +867,7 @@ impl Ai {
                     }
                     shun.push(t);
                     tried.push(t);
-                    for ram in [true, false] {
+                    for &ram in attack_modes(shape.attack) {
                         let Some((j, detail)) = self.pack_fates(sid, &pack_route(pos, t), ram) else { continue };
                         if best.as_ref().is_none_or(|b| j.worth() > b.judgement.worth()) {
                             best = Some(JudgedRun { target: t, ram, judgement: j, detail, near_value: value });
@@ -888,12 +957,7 @@ impl Ai {
             ));
         }
         let target = st.target;
-        let charge = match (st.ram.filter(|_| fates), shape.attack) {
-            (Some(ram), _) => ram,
-            (None, Attack::Pass) => false,
-            (None, Attack::Charge) => true,
-            (None, Attack::Mixed) => st.mobile,
-        };
+        let charge = charges(shape.attack, st.mobile, st.ram.filter(|_| fates));
         // A charge is aimed anew until it is close.
         let aim = charge && st.pass.is_some_and(|p| p.along(pos, st.pass_target) < -CHARGE_LOCK);
         if st.pass.is_none() && distance(pos, target) > PLAN_AT {
@@ -904,6 +968,19 @@ impl Ai {
                 Some(p) => p,
                 None => {
                     let guns = self.pack_guns(sid, shape.pass_reach);
+                    let clearance = if shape.attack == Attack::Pass {
+                        let body = cores.iter().filter_map(|u| u.def()).map(|d| d.radius()).fold(0.0, f32::max);
+                        let target_body = self
+                            .war
+                            .targets
+                            .values()
+                            .filter(|e| !e.is_dead && distance(e.position, target) < TARGET_LEFT)
+                            .filter_map(|e| e.def_radius())
+                            .fold(0.0, f32::max);
+                        body + target_body + PASS_STEP
+                    } else {
+                        0.0
+                    };
                     let view = self.war.view(leader.def());
                     let clear = |p: &Pass| {
                         let q = p.point(target);
@@ -916,7 +993,11 @@ impl Ai {
                         // A charge runs over it (the line nearest).
                         (!charge || p.side.abs() <= PASS_STEP / 2.0) && porc_cap.is_none_or(porc)
                     };
-                    let planned = plan_pass(pos, head, target, &guns, clear);
+                    let planned = if shape.attack == Attack::Pass {
+                        plan_tangent_pass(pos, head, target, &guns, clearance, clear)
+                    } else {
+                        plan_pass(pos, head, target, &guns, clear)
+                    };
                     let Some((p, n)) = planned else {
                         // No way over it clear of porc: another target.
                         self.log(&format!(
@@ -952,7 +1033,7 @@ impl Ai {
             st.pass = Some(pass);
             let [a, b] = pass_way(pos, st.pass_target, &pass);
             // Swinging round to come back over it.
-            let way: Vec<Vec3> = turn_point(pos, head, a).into_iter().chain([a, b]).collect();
+            let way: Vec<Vec3> = turn_point(pos, head, a, turn).into_iter().chain([a, b]).collect();
             self.pack_drive(sid, &way);
         }
         self.pack_screen(sid, home, false);
@@ -1278,8 +1359,9 @@ impl Ai {
         for target in targets {
             let route = pack_route(pos, target);
             let worth = if shape.judge == Judge::Fates {
-                [true, false]
-                    .into_iter()
+                attack_modes(shape.attack)
+                    .iter()
+                    .copied()
                     .filter_map(|ram| self.pack_fates(sid, &route, ram))
                     .map(|(j, _)| j.worth())
                     .max_by(f32::total_cmp)
@@ -1324,6 +1406,26 @@ impl Ai {
         self.graph_get_closest_haven(if rally == NULLPOS { pos } else { rally })
     }
 
+    /// Sliding formations give every core a translated copy of the same
+    /// turn. Allow for the least agile core and for members catching up.
+    fn pack_turn_distance(&self, sid: SquadId) -> f32 {
+        let Some(s) = self.squads.get(sid) else { return TURN };
+        s.everyone()
+            .filter_map(|id| self.fighters.get(&id))
+            .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())))
+            .map(|f| {
+                let Some(def) = f.unit.def() else { return TURN };
+                if !matches!(self.defs.name(def), "vehassault" | "tankassault") {
+                    return TURN;
+                }
+                let vel = f.unit.vel();
+                let speed = s.shape.pace.max((vel.x * vel.x + vel.z * vel.z).sqrt() * 30.0);
+                turn_distance(speed, def.turn_rate(), def.turn_in_place_speed_limit() * 30.0)
+            })
+            .reduce(f32::max)
+            .unwrap_or(TURN)
+    }
+
     /// Send pack `sid` to `dest`, replacing any previous attack orders
     /// even when already nearby (`assault`: attack path, else avoid enemies).
     fn pack_go(&mut self, sid: SquadId, pos: Vec3, head: (f32, f32), dest: Vec3, assault: bool) {
@@ -1334,13 +1436,14 @@ impl Ai {
     /// Path waypoints [`SPACING`] apart. Only attacks use turning arcs;
     /// retreating packs may reverse immediately.
     fn pack_way(&mut self, sid: SquadId, pos: Vec3, head: (f32, f32), dest: Vec3, assault: bool) -> Vec<Vec3> {
+        let turn = if assault { self.pack_turn_distance(sid) } else { TURN };
         if distance(pos, dest) <= STAND_NEAR {
-            return approach_way(pos, head, dest, assault, []);
+            return approach_way(pos, head, dest, assault, turn, []);
         }
         let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return Vec::new() };
         let cost = if assault { PathCost::AssaultPath } else { PathCost::AvoidEnemies };
         let path = self.pathfinder.find_path(&self.war, leader, dest, cost);
-        approach_way(pos, head, dest, assault, path)
+        approach_way(pos, head, dest, assault, turn, path)
     }
 
     fn pack_drive(&mut self, sid: SquadId, way: &[Vec3]) {
@@ -1538,6 +1641,64 @@ fn sweep_target(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cruise_turns_keep_a_margin_for_engine_braking_and_unknown_data() {
+        // Formation-tested margins at each doctrine's cruise speed.
+        assert_eq!(turn_distance(80.0, 688.0, 88.5), 210.0);
+        assert_eq!(turn_distance(66.0, 583.0, 44.1), 220.0);
+        // A faster catch-up member or terrain boost must not tighten a turn.
+        assert!(turn_distance(88.5, 688.0, 88.5) >= turn_distance(80.0, 688.0, 88.5));
+        assert_eq!(turn_distance(120.0, 583.0, 44.1), TURN);
+        assert_eq!(turn_distance(80.0, 0.0, 0.0), TURN);
+        assert_eq!(turn_distance(f32::NAN, 688.0, 88.5), TURN);
+    }
+
+    #[test]
+    fn tighter_attack_turns_leave_retreats_free_to_reverse() {
+        let pos = Vec3::ZERO;
+        let dest = Vec3::xz(-1000.0, 100.0);
+        let turn = turn_distance(80.0, 688.0, 88.5);
+        let point = turn_point(pos, (1.0, 0.0), dest, turn).unwrap();
+        assert_eq!(point, Vec3::xz(0.0, 210.0));
+        let retreat = approach_way(pos, (1.0, 0.0), dest, false, turn, [dest]);
+        assert_eq!(retreat, vec![dest]);
+    }
+
+    #[test]
+    fn explicit_pass_cannot_ram_even_a_mobile_target_or_a_predictor_favorite() {
+        assert_eq!(attack_modes(Attack::Pass), &[false]);
+        assert_eq!(attack_modes(Attack::Charge), &[true]);
+        assert_eq!(attack_modes(Attack::Mixed), &[true, false]);
+        for mobile in [false, true] {
+            for predicted in [None, Some(false), Some(true)] {
+                assert!(!charges(Attack::Pass, mobile, predicted));
+                assert!(charges(Attack::Charge, mobile, predicted));
+            }
+        }
+        assert!(charges(Attack::Mixed, true, None));
+        assert!(!charges(Attack::Mixed, false, None));
+        assert!(charges(Attack::Mixed, false, Some(true)));
+    }
+
+    #[test]
+    fn a_tangential_minotaur_pair_stays_outside_the_target_instead_of_ramming() {
+        let pos = Vec3::ZERO;
+        let target = Vec3::xz(1000.0, 0.0);
+        let guns = [((0.0, 0.0), 252.0), ((0.0, 75.0), 252.0)];
+        let (pass, n) = plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |_| true).unwrap();
+        assert_eq!(n, 2);
+        for &((_, z), reach) in &guns {
+            assert!((pass.side + z).abs() >= 170.0);
+            assert!((pass.side + z).abs() <= reach);
+        }
+        // If only a head-on line is clear, abandon it rather than ram.
+        assert!(plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |p| p.side.abs() < 5.0).is_none());
+        // Turn away from a blocked side, keeping both guns outside the body.
+        let (other, n) = plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |p| p.side < 0.0).unwrap();
+        assert_eq!(n, 2);
+        assert!(other.side < -170.0);
+    }
+
+    #[test]
     fn health_retreat_interrupts_any_part_of_a_run_even_while_firing() {
         let target = Vec3::xz(1000.0, 0.0);
         for x in [100.0, 1000.0, 1100.0, 1200.0] {
@@ -1577,10 +1738,10 @@ mod tests {
         let pos = Vec3::ZERO;
         let home = Vec3::xz(-1000.0, 0.0);
         let path = [Vec3::ZERO, Vec3::xz(-400.0, 0.0), Vec3::xz(-800.0, 0.0), home];
-        let retreat = approach_way(pos, (1.0, 0.0), home, false, path);
+        let retreat = approach_way(pos, (1.0, 0.0), home, false, TURN, path);
         assert_eq!(retreat[0], Vec3::xz(-400.0, 0.0));
         assert!(retreat.iter().all(|p| p.x < 0.0 && p.z == 0.0));
-        let attack = approach_way(pos, (1.0, 0.0), home, true, path);
+        let attack = approach_way(pos, (1.0, 0.0), home, true, TURN, path);
         assert_eq!(attack[0].x, 0.0);
         assert_eq!(attack[0].z.abs(), TURN);
     }
@@ -1588,7 +1749,7 @@ mod tests {
     #[test]
     fn retreat_near_a_haven_still_replaces_queued_attack_orders() {
         let home = Vec3::xz(-100.0, 0.0);
-        assert_eq!(approach_way(Vec3::ZERO, (1.0, 0.0), home, false, []), vec![home]);
+        assert_eq!(approach_way(Vec3::ZERO, (1.0, 0.0), home, false, TURN, []), vec![home]);
     }
 
     #[test]
@@ -1816,12 +1977,12 @@ mod tests {
     fn turning_back_starts_with_an_arc() {
         let o = Vec3::xz(0.0, 0.0);
         // Ahead, or near: no arc.
-        assert!(turn_point(o, (1.0, 0.0), Vec3::xz(500.0, 400.0)).is_none());
-        assert!(turn_point(o, (1.0, 0.0), Vec3::xz(-100.0, 0.0)).is_none());
+        assert!(turn_point(o, (1.0, 0.0), Vec3::xz(500.0, 400.0), TURN).is_none());
+        assert!(turn_point(o, (1.0, 0.0), Vec3::xz(-100.0, 0.0), TURN).is_none());
         // Behind and to the left: a right angle to the left first.
-        let p = turn_point(o, (1.0, 0.0), Vec3::xz(-800.0, 100.0)).unwrap();
+        let p = turn_point(o, (1.0, 0.0), Vec3::xz(-800.0, 100.0), TURN).unwrap();
         assert!(close(p, Vec3::xz(0.0, TURN)));
-        let p = turn_point(o, (1.0, 0.0), Vec3::xz(-800.0, -100.0)).unwrap();
+        let p = turn_point(o, (1.0, 0.0), Vec3::xz(-800.0, -100.0), TURN).unwrap();
         assert!(close(p, Vec3::xz(0.0, -TURN)));
     }
 

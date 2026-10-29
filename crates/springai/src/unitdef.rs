@@ -31,6 +31,8 @@ getters!(UnitDef.def_id {
     fn category() -> i32 = UnitDef_getCategory;
     fn speed() -> f32 = UnitDef_getSpeed;
     fn turn_rate() -> f32 = UnitDef_getTurnRate;
+    /// Engine turn speed floor, in elmos per frame.
+    fn turn_in_place_speed_limit() -> f32 = UnitDef_getTurnInPlaceSpeedLimit;
     fn los_radius() -> f32 = UnitDef_getLosRadius;
     fn air_los_radius() -> f32 = UnitDef_getAirLosRadius;
     fn radar_radius() -> i32 = UnitDef_getRadarRadius;
