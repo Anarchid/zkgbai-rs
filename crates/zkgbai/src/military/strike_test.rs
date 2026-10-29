@@ -13,8 +13,8 @@
 //! Fusions and then goes, and a missile silo within reach of them: its Eos
 //! should count each Fusion they hit gone, unseen, and strike each once.
 //! With `test=drop` (hovers) or `test=dropbot` (bots), the attacker gets a
-//! radar by the enemy's base and, every few minutes, four Charons and four
-//! assaults and riots at home; any landing counts, walkable or not (see
+//! radar by the enemy's base and, every few minutes, five Charons and five
+//! riots at home; any landing counts, walkable or not (see
 //! `drops`), so each round flies a sortie to the enemy's buildings. With
 //! `test=bertha`, the attacker gets five Fusions and a radar at home at
 //! once, so its economy goes for a superweapon (a Bertha, mostly) soon.
@@ -370,9 +370,9 @@ impl Ai {
             ("colony", 60) => vec![("cloakcon", ahead(-150.0)), ("gunshiptrans", ahead(-250.0))],
             ("colonyair", 60) => vec![("gunshipcon", ahead(-150.0))],
             ("drop" | "dropbot", f) if f >= DROP_FRAME && (f - DROP_FRAME) % DROP_ROUND == 0 => {
-                let cargo = if test == "drop" { ["hoverassault", "hoverriot"] } else { ["cloakassault", "cloakriot"] };
-                let mut units = vec![("gunshiptrans", ahead(-200.0)); 4];
-                units.extend((0..4).map(|k| (cargo[k % 2], ahead(-100.0))));
+                let cargo = if test == "drop" { "hoverriot" } else { "cloakriot" };
+                let mut units = vec![("gunshiptrans", ahead(-200.0)); super::drops::FLIGHT];
+                units.extend((0..super::drops::FLIGHT).map(|_| (cargo, ahead(-100.0))));
                 if f == DROP_FRAME {
                     units.push(("staticradar", enemy));
                 }

@@ -80,17 +80,8 @@ const NEW_FAC_EVERY: i32 = 30 * 300;
 const NEW_FAC_JITTER: i32 = 30 * 60;
 const NEW_FAC_PER: f32 = 25.0;
 
-/// A gunship factory is asked for, from income `DROP_INCOME` on, when this
-/// share of the enemy's value is out of ground reach or behind guarded
-/// chokepoints the long way round (ground route this many times the
-/// straight line).
-const DROP_SHARE: f32 = 0.25;
-const DROP_DETOUR: f32 = 1.5;
+/// Income before investing in a gunship factory for a viable riot drop.
 const DROP_INCOME: f32 = 30.0;
-
-/// Or when this much of the enemy's buildings is only for drops to get to
-/// (see `drops`).
-const DROP_PROSPECT: f32 = 5000.0;
 
 /// Air tempo: as a game runs on, and more so on larger maps, the speed of
 /// aircraft converts more of the enemy's value (raids across the map,
@@ -1496,45 +1487,18 @@ impl Ai {
                 skirms,
             ));
         }
-        let Some(s) = self.strategy.as_ref() else {
-            return self.eco_air_tempo();
-        };
+        let prospect = self.drops_prospect_value();
         if !self.dev_off("drops")
             && !owned("factorygunship")
             && self.eco.static_income > DROP_INCOME
-            && self.drops_cargo_count(self.graph.get_ally_center()) >= 4
+            && self.drops_cargo_count(self.graph.get_ally_center()) >= crate::military::drops::FLIGHT
+            && prospect >= crate::military::drops::MIN_DROP_VALUE
         {
-            // Value the ground forces cannot get to, or only the long way
-            // round through guarded chokepoints.
-            let total: f32 = s.analysis.values.iter().map(|v| v.enemy).sum();
-            let guarded: f32 = s
-                .analysis
-                .drops
-                .iter()
-                .filter(|d| d.ground_distance.is_none() || (d.guards > 0 && d.detour >= DROP_DETOUR))
-                .map(|d| d.enemy_value)
-                .sum();
-            if total > 0.0 && guarded >= DROP_SHARE * total {
-                return Some((
-                    "factorygunship".to_owned(),
-                    format!(
-                        "{:.0}% of the enemy's value is out of ground reach or far round guarded chokepoints: air drops",
-                        100.0 * guarded / total
-                    ),
-                    guarded,
-                ));
-            }
-            let prospect = self.drops_prospect_value();
-            if prospect >= DROP_PROSPECT {
-                return Some((
-                    "factorygunship".to_owned(),
-                    format!(
-                        "{prospect:.0} metal of enemy buildings is much further on foot, past what holds the way, \
-                         than by air: air drops"
-                    ),
-                    prospect,
-                ));
-            }
+            return Some((
+                "factorygunship".to_owned(),
+                format!("{prospect:.0} economic utility in a lightly defended pocket reachable by riot drop"),
+                prospect,
+            ));
         }
         self.eco_air_tempo()
     }
