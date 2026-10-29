@@ -726,6 +726,7 @@ impl Ai {
         self.eco_update_new_factory(frame);
 
         if frame % 30 == self.offset % 30 {
+            self.eco_update_silo_preparation();
             self.eco_capture_mexes();
             self.eco_defend_links();
             self.eco_defend_mexes();
@@ -1232,7 +1233,14 @@ impl Ai {
         }
 
         // add repair tasks for damaged units
-        if h.id() != self.eco.last_repaired_unit && h.health() > 0.0 && !self.defs.name(hdef).contains("bomber") {
+        // An unfinished silo is repaired through its construction job so
+        // a generic repair job cannot bypass its fortification prerequisites.
+        let preparing_silo = self.defs.name(hdef) == crate::military::missiles::SILO && h.is_being_built();
+        if h.id() != self.eco.last_repaired_unit
+            && h.health() > 0.0
+            && !self.defs.name(hdef).contains("bomber")
+            && !preparing_silo
+        {
             self.eco.last_repaired_unit = h.id();
             if !self.eco.has_repair_task(h) {
                 let t = WorkerTask::repair(h, self.defs.name(hdef), &self.unit_classes);
@@ -1275,6 +1283,9 @@ impl Ai {
         let _ = attacker;
         let def = unit.def();
         let uid = unit.id();
+        if def.is_some_and(|d| self.defs.name(d) == crate::military::missiles::SILO) {
+            self.eco_silo_lost(unit);
+        }
         if def.is_some_and(|d| d.speed() == 0.0) {
             let eco = &mut self.eco;
             for list in [
