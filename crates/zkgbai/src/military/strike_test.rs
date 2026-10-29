@@ -160,6 +160,7 @@ impl Ai {
     }
 
     pub fn strike_test_update(&mut self, frame: i32) {
+        self.strikes_scenario(frame);
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_update(frame);
         }

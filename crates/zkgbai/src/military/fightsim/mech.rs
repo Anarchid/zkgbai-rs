@@ -238,6 +238,7 @@ struct Run<'a> {
     withdraw: bool,
     /// A's mobile units drive through B (fates' pass mode).
     pass: bool,
+    focus: Option<usize>,
     horizon: i32,
     /// Per-unit bookkeeping for a fates query; the fight then goes on to
     /// the horizon while one side has an armed unit and the other anything.
@@ -304,7 +305,7 @@ impl Model {
     pub fn fates(&self, snap: &FightSnapshot, horizon: i32, mode: FateMode) -> Vec<UnitFate> {
         let mut units = self.mech_units(snap);
         let pass = match mode {
-            FateMode::AMove => false,
+            FateMode::AMove | FateMode::Assassinate { .. } => false,
             FateMode::Pass { offset } => {
                 for m in &mut units {
                     m.lat = if m.u.side == 1 && !m.u.mobile { 0.0 } else { offset as f64 };
@@ -314,7 +315,11 @@ impl Model {
         };
         let n = units.len();
         let track = Track { var: vec![0.0; n], death_f: vec![None; n] };
-        let mut run = Run { hazard: None, withdraw: false, pass, horizon, track: Some(track) };
+        let focus = match mode {
+            FateMode::Assassinate { target } => Some(target),
+            _ => None,
+        };
+        let mut run = Run { hazard: None, withdraw: false, pass, focus, horizon, track: Some(track) };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let Some(tr) = run.track else { return Vec::new() };
         let c = &self.mech.fate;
@@ -494,7 +499,7 @@ pub(super) fn simulate_mech(
     hazard: Option<&Hazard>,
     withdraw: bool,
 ) -> (f64, f64) {
-    let mut run = Run { hazard, withdraw, pass: false, horizon: HORIZON, track: None };
+    let mut run = Run { hazard, withdraw, pass: false, focus: None, horizon: HORIZON, track: None };
     run_mech(template, hits, stun_cap_s, &mut run).0
 }
 
@@ -572,6 +577,9 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             let side = us[i].u.side as usize;
             let mut nearest: Option<(f64, f64)> = None;
             for &j in &sides[1 - side] {
+                if side == 0 && run.focus.is_some_and(|target| target != j) {
+                    continue;
+                }
                 let d = apart(&us[j], &us[i]);
                 if nearest.is_none_or(|n| d < n.0) {
                     nearest = Some((d, us[j].u.x));
@@ -630,7 +638,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             let side = us[i].u.side as usize;
             foes.clear();
-            foes.extend(sides[1 - side].iter().copied().filter(|&j| us[j].u.alive));
+            foes.extend(
+                sides[1 - side]
+                    .iter()
+                    .copied()
+                    .filter(|&j| us[j].u.alive && (side != 0 || run.focus.is_none_or(|target| target == j))),
+            );
             if foes.is_empty() {
                 continue;
             }
@@ -831,6 +844,31 @@ mod tests {
             assert!((0.0..=1.0).contains(&out.p_a_wins) && (0.0..=1.0).contains(&out.mean_a));
         }
         eprintln!("mech parity: {} cases, worst |rust - python| = {worst_all:.2e}", cases.len());
+    }
+
+    #[test]
+    fn assassination_ignores_a_nearer_decoy_and_stops_after_the_kill() {
+        let model = Model::load().unwrap();
+        let defs = specs();
+        let ours = defs["hoverassault"].clone();
+        let mut decoy = (*defs["cloakriot"]).clone();
+        decoy.weapons.clear();
+        decoy.mobile = false;
+        decoy.health = 1.0;
+        let decoy = Arc::new(decoy);
+        let snap = FightSnapshot {
+            units: vec![
+                SnapUnit { side: 0, spec: ours, hp: 1450.0, x: 0.0, z: 0.0 },
+                SnapUnit { side: 1, spec: decoy.clone(), hp: 1.0, x: 50.0, z: 0.0 },
+                SnapUnit { side: 1, spec: decoy, hp: 1.0, x: 150.0, z: 0.0 },
+            ],
+        };
+        let focused = model.fates(&snap, 300, FateMode::Assassinate { target: 2 });
+        let normal = model.fates(&snap, 300, FateMode::AMove);
+        assert!(focused[2].dead);
+        assert!(!focused[1].dead);
+        assert_eq!(focused[1].hp_left, 1.0);
+        assert!(normal[1].dead && normal[2].dead);
     }
 
     /// Fates against mech.simulate_mech(fates=...) (testdata/mech_fates_cases.tsv,

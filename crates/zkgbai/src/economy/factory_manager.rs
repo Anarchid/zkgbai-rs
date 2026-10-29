@@ -625,12 +625,9 @@ impl Ai {
             || choice == scouts::SCYTHE
             || self.firefighters_order(kind) == Some(choice)
             || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
-        // Dirtbags for the strikes while snipers are about (see `strikes`).
         let picked = choice;
         let choice = match (ai_wants_builder || special, fac.unit) {
-            (false, unit) => {
-                (self.strikes_production(unit, choice)).or_else(|| self.qrf_production(unit, choice)).unwrap_or(choice)
-            }
+            (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
             _ => choice,
         };
         // A unit other than the one picked is not for the pick's role.
@@ -657,6 +654,14 @@ impl Ai {
             self.fac.factories.insert(fac_id, fac);
             self.fac_build_ordered(fac_id, def);
             return;
+        }
+        // Dedicated waves and periodic Phantom insurance replace only an
+        // ordinary combat slot, preserving constructors and explicit orders.
+        let strike = if !ai_wants_builder && !special { self.strikes_order(kind, fac_id) } else { None };
+        let choice = strike.unwrap_or(choice);
+        if strike.is_some() {
+            fac.building_for = None;
+            self.strikes_ordered(fac_id, choice);
         }
         let (unit, pos) = (fac.unit, fac.get_pos());
         self.fac.factories.insert(fac_id, fac);

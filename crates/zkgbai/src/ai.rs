@@ -65,14 +65,13 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// better than both, each taking up the metal the other left.
 /// Raider packs and organic fire squads remain opt-in. Ravager and Minotaur
 /// packs are on for WIP observation (disable=ravager,minotaur to opt out).
-pub(crate) const OFF_BY_DEFAULT: [&str; 14] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 13] = [
     "pairs",
     "currency",
     "permanence",
     "mexporc",
     "airtempo",
     "airfire",
-    "strikes",
     "fightsim",
     "posture",
     "ecoladder",
@@ -575,6 +574,8 @@ impl Ai {
                     | "farm"
                     | "snipers"
                     | "lances"
+                    | "assassin-target"
+                    | "assassin-target2"
             )
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
@@ -720,6 +721,7 @@ impl Ai {
         self.guard("graph.unitCreated", |ai| ai.graph_unit_created(unit, builder));
         self.guard("eco.unitCreated", |ai| ai.eco_unit_created(unit, builder));
         self.guard("fac.unitCreated", |ai| ai.fac_unit_created(unit, builder));
+        self.guard("strikes.unitCreated", |ai| ai.strikes_created(unit, builder));
     }
 
     fn unit_given(&mut self, unit: Unit, old_team: i32, new_team: i32) {
