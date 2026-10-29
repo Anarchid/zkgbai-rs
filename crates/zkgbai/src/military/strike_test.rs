@@ -40,12 +40,18 @@
 //! `test=heavies`, a passive defender gets two Grizzlies and a Cyclops
 //! halfway to the enemy, and a factory behind its base; its commander holds
 //! its fire back there; with `test=jaeger`, the attacker gets a spider
-//! factory and an Owl at once, and an assault squad's worth of Knights and
-//! Wardens every few minutes: its spider factory builds the Widows its
+//! factory and an Owl at once, and eight Knights and Wardens every two
+//! minutes (an army for the Widows' share, to finish what they stun): its spider factory builds the Widows its
 //! jaeger squads want (see `jaeger`), which should stun the heavies for the
-//! assaults to kill. With `test=farm`, a passive defender gets twelve
-//! wind generators, four caretakers and three more caretakers apart by its
-//! base: light things together, for the Infernos of a `test=eos` attacker,
+//! assaults to kill; with `test=skuttle`, the same but a jump factory,
+//! whose Skuttles the jaeger squads want. `test=heavypush` is
+//! `test=heavies` coming on: from minute 2.5 its heavies, a wave more at
+//! minute 7, fight their way to the enemy's base with Glaives and Reavers
+//! guarding them (what the jaegers lie in wait for and dodge), and a few
+//! turrets hold its base against the attacker's assaults meanwhile. With
+//! `test=farm`, a passive
+//! defender gets twelve wind generators, four caretakers and three more
+//! caretakers apart by its base: light things together, for the Infernos of a `test=eos` attacker,
 //! which has nothing there worth an Eos (see `missiles`): the first two
 //! are worth one, the three caretakers are not. With `test=impaler`
 //! (against `test=fort`), the attacker gets four Impalers, two Sparrows to
@@ -73,7 +79,7 @@
 //! `strikes`) are what should kill the snipers, measured by `strikes:`
 //! lines (kills, metal lost per kill, units sniped outside strikes).
 
-use springai::Vec3;
+use springai::{Unit, Vec3};
 
 use crate::Ai;
 use crate::military::missiles;
@@ -114,7 +120,17 @@ const PRECISION_ROUND: i32 = 30 * 120;
 
 /// When the attacker's assaults come in a jaeger test, and how often.
 const JAEGER_ARMY_FRAME: i32 = 30 * 90;
-const JAEGER_ARMY_ROUND: i32 = 30 * 180;
+const JAEGER_ARMY_ROUND: i32 = 30 * 120;
+
+/// When the heavies of a heavy push set off, how often they are told
+/// again, and when their second wave comes.
+const PUSH_FRAME: i32 = 30 * 150;
+const PUSH_ORDERS: i32 = 30 * 20;
+const PUSH_WAVE: i32 = 30 * 420;
+
+/// A heavy push's heavies and their escorts.
+const PUSH_HEAVIES: [&str; 3] = ["amphassault", "amphassault", "tankheavyassault"];
+const PUSH_ESCORTS: [&str; 5] = ["cloakraid", "cloakraid", "cloakraid", "cloakriot", "cloakriot"];
 
 /// When the attacker's Impalers come, and how often.
 const IMPALER_FRAME: i32 = 30 * 60;
@@ -280,6 +296,33 @@ impl Ai {
                     ("factorycloak", get_directional_point(base, enemy, -300.0)),
                 ]
             }
+            ("heavypush", f) if f == 60 || f == PUSH_WAVE => {
+                // Our side of halfway; a factory keeps the AI team alive.
+                let half = distance(base, enemy) / 2.0 - 500.0;
+                let mut units: Vec<(&str, Vec3)> = (PUSH_HEAVIES.iter().enumerate())
+                    .map(|(k, &n)| (n, get_directional_point(base, enemy, half - 150.0 * k as f32)))
+                    .collect();
+                units.extend(
+                    (PUSH_ESCORTS.iter().enumerate())
+                        .map(|(k, &n)| (n, get_directional_point(base, enemy, half - 120.0 - 70.0 * k as f32))),
+                );
+                if f == 60 {
+                    let back = get_directional_point(base, enemy, -300.0);
+                    units.push(("factorycloak", back));
+                    // A fort that holds the base meanwhile.
+                    let (dx, dz) =
+                        ((enemy.x - base.x) / distance(base, enemy), (enemy.z - base.z) / distance(base, enemy));
+                    for (gun, ahead, aside) in [
+                        ("turretheavylaser", 150.0, -160.0),
+                        ("turretheavylaser", 150.0, 160.0),
+                        ("turretriot", 60.0, 0.0),
+                        ("turretriot", -150.0, 250.0),
+                    ] {
+                        units.push((gun, Vec3::xz(back.x + dx * ahead - dz * aside, back.z + dz * ahead + dx * aside)));
+                    }
+                }
+                units
+            }
             ("farm", 60) => {
                 // Twelve wind generators, four caretakers, and three
                 // caretakers (too few to be worth an Inferno).
@@ -297,16 +340,22 @@ impl Ai {
                 units
             }
             ("jaeger", 60) => vec![("factoryspider", ahead(400.0)), ("planescout", ahead(-100.0))],
+            ("skuttle", 60) => vec![("factoryjump", ahead(400.0)), ("planescout", ahead(-100.0))],
             ("geo", 60) => {
                 let vents = self.eco_geo_vents();
                 let near = vents.into_iter().min_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
                 near.map(|v| vec![("energygeo", v)]).unwrap_or_default()
             }
-            ("jaeger", f) if f >= JAEGER_ARMY_FRAME && (f - JAEGER_ARMY_FRAME) % JAEGER_ARMY_ROUND == 0 => (0..6)
-                .map(|k| {
-                    (["cloakassault", "cloakriot"][k % 2], get_directional_point(base, enemy, 1200.0 - 30.0 * k as f32))
-                })
-                .collect(),
+            ("jaeger" | "skuttle", f) if f >= JAEGER_ARMY_FRAME && (f - JAEGER_ARMY_FRAME) % JAEGER_ARMY_ROUND == 0 => {
+                (0..8)
+                    .map(|k| {
+                        (
+                            ["cloakassault", "cloakriot"][k % 2],
+                            get_directional_point(base, enemy, 1200.0 - 30.0 * k as f32),
+                        )
+                    })
+                    .collect()
+            }
             ("aaprobe", f) if f % PROBE_ROUND == 0 && f > 0 => vec![("gunshiptrans", ahead(-200.0)); 2],
             ("colony", 60) => vec![("cloakcon", ahead(-150.0)), ("gunshiptrans", ahead(-250.0))],
             ("colonyair", 60) => vec![("gunshipcon", ahead(-150.0))],
@@ -417,13 +466,31 @@ impl Ai {
         }
         // Owls keep watch over the fort, and the commander holds its fire
         // (it would shoot the probes; losing it ends the game).
-        if matches!(test.as_str(), "fort" | "radarfort" | "heavies" | "farm" | "snipers" | "lances") && frame == 300 {
+        if matches!(test.as_str(), "fort" | "radarfort" | "heavies" | "heavypush" | "farm" | "snipers" | "lances")
+            && frame == 300
+        {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
                 c.set_move_state(0, 0);
                 // Out of the way of the heavies' fight.
-                if test == "heavies" {
+                if test == "heavies" || test == "heavypush" {
                     c.move_to(get_directional_point(base, enemy, -600.0), 0);
+                }
+            }
+        }
+        // A heavy push: the heavies fight their way to the enemy's base, the
+        // escorts guard the nearest heavy.
+        if test == "heavypush" && frame >= PUSH_FRAME && (frame - PUSH_FRAME) % PUSH_ORDERS == 0 {
+            let units = self.cb.team_units();
+            let heavies: Vec<Unit> =
+                units.iter().copied().filter(|u| PUSH_HEAVIES.contains(&self.defs.name_of(*u))).collect();
+            for h in &heavies {
+                h.fight(enemy, 0);
+            }
+            for e in units.iter().filter(|u| PUSH_ESCORTS.contains(&self.defs.name_of(**u))) {
+                let p = e.pos();
+                if let Some(h) = heavies.iter().min_by(|a, b| distance(a.pos(), p).total_cmp(&distance(b.pos(), p))) {
+                    e.guard(*h, 0);
                 }
             }
         }
@@ -479,6 +546,16 @@ impl Ai {
             fac.build(widow, fac.pos(), 0, 0);
             self.jaeger_ordered(crate::military::scouts::WIDOW);
             self.log("strike-test: a jaeger Widow ordered");
+        }
+        // The Skuttles wanted, from an idle jump factory.
+        let jumps = self.fac.factories.values().map(|f| f.unit).find(|u| self.defs.name_of(*u) == "factoryjump");
+        if test == "skuttle"
+            && let Some(fac) = jumps.filter(|f| f.current_commands().is_empty())
+            && self.jaeger_wants("jumpbomb")
+            && let Some(skuttle) = self.defs.get("jumpbomb")
+        {
+            fac.build(skuttle, fac.pos(), 0, 0);
+            self.log("strike-test: a jaeger Skuttle ordered");
         }
     }
 

@@ -7,7 +7,9 @@
 //! range 120, and ZK stuns on max health) from a spider factory, and
 //! Ultimatums (`striderantiheavy`, 2400 metal: 2000 a shot every 2 s at
 //! range 250) from a strider hub. Skuttles (`jumpbomb`: an 8000 blast) are
-//! taken in while heavies are about. Every Ultimatum is a jaeger.
+//! taken in while heavies are about. Every Ultimatum is a jaeger. Widows
+//! only stun, the army does the killing: they are kept to a share of the
+//! rest of our army's metal (feature `widowcap`).
 //!
 //! Jaegers walk cloaked and hold their fire, in squads of a kind, which
 //! form until they can take the heavies seen. A squad strikes a heavy
@@ -17,14 +19,35 @@
 //! target calls our squads), so stuns and Ultimatums go only where our army
 //! or ground is near, and none of them under enemy defenses but Skuttles,
 //! which die striking anyway. Widows that have fired go back to a haven
-//! until they are reloaded.
+//! until they are reloaded. Skuttles are too frail and slow to wait for
+//! their squad's strike where the enemy is about: each pounces on any heavy
+//! worth one within its jump, its squad's mark or not, even one its blast
+//! alone does not kill (feature `pounce`), and jumps where the heavy will
+//! be when it lands, by its velocity (feature `lead`).
+//!
+//! Hunters lie in wait rather than go after a heavy into the enemy's land
+//! (feature `ambush`; one out of it they go after, Widows only where our
+//! army is): its way over the ground is foreseen (a travel-time
+//! field from it, as the QRF's, down to the asset of ours it heads for by
+//! the QRF mark's rule), and the squad waits beside the first point of it
+//! that it gets to, settled, before the heavy: out of enemy land and
+//! defenses and out of the enemy's sight now, and for Widows only where our
+//! army can kill the heavy while it is stunned (a stun with nothing to
+//! finish it is wasted; they strike only there). Cloaked hunters keep out
+//! of sight of what moves (feature `dodge`): one that an enemy would
+//! decloak within two seconds (a Skuttle shows itself to anything within
+//! 180, a Widow within 60) steps aside, where it stays clearest of them all;
+//! a Skuttle that cannot get clear on foot jumps clear, since its jumps
+//! are silent and keep it cloaked.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use springai::{Resource, Unit, Vec3};
 
 use crate::Ai;
-use crate::military::{DefenseTarget, Enemy, Fighter, SquadId, SquadKind};
+use crate::military::qrf::field::CELL;
+use crate::military::qrf::field::Mobility;
+use crate::military::{DefenseTarget, Enemy, Fighter, SquadId, SquadKind, scouts};
 use crate::nav;
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance};
@@ -51,6 +74,29 @@ const HEAVY_ALONE: f32 = 6000.0;
 const JAEGER_SHARE: f32 = 0.5;
 const MAX_JAEGERS: usize = 8;
 
+/// Widows' metal, ordered ones too, is at most this share of the rest of
+/// our army's (a fifth of the whole).
+const WIDOW_ARMY_SHARE: f32 = 0.25;
+
+/// A pounce holds its Skuttle out of its squad, its blast counted on the
+/// heavy, this many frames (a jump flies about 2.5 s).
+const POUNCE_HOLD: i32 = 30 * 5;
+
+/// A Skuttle that cannot jump walks onto a heavy this close.
+const POUNCE_WALK: f32 = 140.0;
+
+/// A heavy is pounced on only if seen within this many frames.
+const POUNCE_SEEN: i32 = 30;
+
+/// A pounce, leading its heavy, may land this much farther off than the
+/// heavy is now.
+const POUNCE_LEAD: f32 = 120.0;
+
+/// No pounce where more of our own metal than the heavy's stands this close
+/// to it: the blast (8000 in the middle, 40% at 180) would take it too.
+/// (Other Skuttles go off with it, onto the heavy as well.)
+const POUNCE_FRIENDS: f32 = 120.0;
+
 /// A squad grows to at most this many.
 const SQUAD_MAX: usize = 4;
 
@@ -69,6 +115,36 @@ const STRIKE_TIMEOUT: i32 = 30 * 25;
 /// stunned (30 s).
 const SUPPORT_RANGE: f32 = 1500.0;
 
+/// A hunted heavy's way is foreseen this many seconds ahead, anew every
+/// this many frames.
+const WAY_HORIZON: f32 = 50.0;
+const AMBUSH_PERIOD: i32 = 60;
+
+/// A squad lies in wait where it is settled this many seconds before the
+/// heavy comes by, its walk there reckoned this much longer than the
+/// straight line.
+const AMBUSH_SETTLE: f32 = 4.0;
+const AMBUSH_DETOUR: f32 = 1.3;
+
+/// Hunters in wait strike once the heavy is this far beyond their range.
+const AMBUSH_STRIKE: f32 = 100.0;
+
+/// Our army can kill a stunned heavy where our power (see
+/// `get_total_friendly_power`: our units' metal and health over ten) is
+/// at least this share of the heavy's health over ten: a few units by it
+/// (1.0 kept Widows from ever striking against Circuit's tanks).
+const FINISH_SHARE: f32 = 0.25;
+
+/// A hunter dodges an enemy it would be seen by (within its decloak
+/// distance and this margin) in the next this many frames, looking at
+/// enemies this much farther off; on foot it steps this many frames of its
+/// walk aside, or a Skuttle jumps this far.
+const DODGE_MARGIN: f32 = 40.0;
+const DODGE_AHEAD: i32 = 60;
+const DODGE_LOOK: f32 = 300.0;
+const DODGE_STEP: f32 = 60.0;
+const DODGE_JUMPS: [f32; 2] = [260.0, 340.0];
+
 /// A kind of jaeger.
 #[derive(Clone, Copy)]
 struct Kind {
@@ -85,12 +161,45 @@ struct Kind {
     /// Only heavies of at least this much metal are worth one (a Skuttle
     /// costs 550: not for a 600-metal Jack).
     min_value: f32,
+    /// Enemies this close decloak it (`minCloakDistance`); 0: it does not
+    /// dodge.
+    decloak: f32,
+    /// It lies in wait this far beside the heavy's way (out of the sight of
+    /// what walks along it, in reach of the heavy); 0: it does not.
+    ambush: f32,
 }
 
 const KINDS: [Kind; 3] = [
-    Kind { name: "spiderantiheavy", alpha: Some(8000.1), stuns: true, suicide: false, range: 120.0, min_value: 0.0 },
-    Kind { name: "jumpbomb", alpha: Some(8002.4), stuns: false, suicide: true, range: 25.0, min_value: 1000.0 },
-    Kind { name: "striderantiheavy", alpha: None, stuns: false, suicide: false, range: 250.0, min_value: 0.0 },
+    Kind {
+        name: "spiderantiheavy",
+        alpha: Some(8000.1),
+        stuns: true,
+        suicide: false,
+        range: 120.0,
+        min_value: 0.0,
+        decloak: 60.0,
+        ambush: 90.0,
+    },
+    Kind {
+        name: "jumpbomb",
+        alpha: Some(8002.4),
+        stuns: false,
+        suicide: true,
+        range: 25.0,
+        min_value: 1000.0,
+        decloak: 180.0,
+        ambush: 260.0,
+    },
+    Kind {
+        name: "striderantiheavy",
+        alpha: None,
+        stuns: false,
+        suicide: false,
+        range: 250.0,
+        min_value: 0.0,
+        decloak: 0.0,
+        ambush: 0.0,
+    },
 ];
 
 fn kind_of(name: &str) -> Option<Kind> {
@@ -144,6 +253,21 @@ enum Phase {
 struct Hunt {
     kind: Kind,
     phase: Phase,
+    /// Where it lies in wait for its heavy, if it does.
+    ambush: Option<Ambush>,
+}
+
+/// A place to lie in wait for a heavy.
+#[derive(Clone, Copy)]
+struct Ambush {
+    /// The heavy (enemy id).
+    target: i32,
+    /// Where the squad waits, and the point of the heavy's way beside it.
+    at: Vec3,
+    way: Vec3,
+    /// Seconds until the heavy gets there, as foreseen at `frame`.
+    eta: f32,
+    frame: i32,
 }
 
 #[derive(Default)]
@@ -158,6 +282,17 @@ pub struct Jaegers {
     forming: BTreeMap<&'static str, SquadId>,
     /// Jaegers ordered from factories, and when.
     ordered: Vec<(&'static str, i32)>,
+    /// Skuttles under way onto a heavy, pouncing or striking with their
+    /// squad: the heavy (enemy id), and since when.
+    pounces: BTreeMap<i32, (i32, i32)>,
+    /// Since the last summary: ambushes laid, dodges on foot and by jump.
+    ambushes: u32,
+    dodges: u32,
+    dodge_jumps: u32,
+    /// Hunter updates with an enemy about to see it.
+    threatened: u32,
+    /// Each hunter's cloak as last seen: cloaked, since when, its health.
+    cloak: BTreeMap<i32, (bool, i32, f32)>,
 }
 
 impl Ai {
@@ -192,7 +327,57 @@ impl Ai {
         let orders = self.jaegers.ordered.iter().filter(|o| frame - o.1 <= ORDER_TIMEOUT);
         let ordered: f32 = orders.clone().filter_map(|o| self.defs.get(o.0)).map(|d| d.cost(self.metal)).sum();
         let have: f32 = self.jaegers.members.iter().filter_map(|id| self.fighters.get(id)).map(|f| f.metal_value).sum();
+        if kind.stuns && !self.dev_off("widowcap") && !self.jaeger_widow_fits() {
+            return false;
+        }
         self.jaegers.members.len() + orders.count() < MAX_JAEGERS && have + ordered < JAEGER_SHARE * heavy
+    }
+
+    /// Metal of our Widows (jaegers and those ordered) and of the rest of
+    /// our army, Skuttles not counted (they do their own killing).
+    fn jaeger_widow_metal(&self) -> (f32, f32) {
+        let frame = self.frame;
+        let one = self.defs.get(scouts::WIDOW).map_or(0.0, |d| d.cost(self.metal));
+        let ordered = self.jaegers.ordered.iter().filter(|o| o.0 == scouts::WIDOW && frame - o.1 <= ORDER_TIMEOUT);
+        let (mut widows, mut skuttles) = (ordered.count() as f32 * one, 0.0);
+        for f in self.jaegers.members.iter().filter_map(|id| self.fighters.get(id)) {
+            match self.defs.name_of(f.unit) {
+                scouts::WIDOW => widows += f.metal_value,
+                "jumpbomb" => skuttles += f.metal_value,
+                _ => {}
+            }
+        }
+        (widows, (self.fac.army_value - widows - skuttles).max(0.0))
+    }
+
+    /// Whether one more Widow fits within the Widows' share of our army.
+    fn jaeger_widow_fits(&self) -> bool {
+        let one = self.defs.get(scouts::WIDOW).map_or(0.0, |d| d.cost(self.metal));
+        let (widows, rest) = self.jaeger_widow_metal();
+        widows + one <= WIDOW_ARMY_SHARE * rest
+    }
+
+    /// Cloak upkeep of our jaegers on the move, energy a second, those on
+    /// order counted (so that the store is full when they are out): the
+    /// energy reserve asked of the game holds a few seconds of it (see
+    /// `scouts_reserve`; feature `jaegerreserve`). Without it the store
+    /// runs dry while we build, and a cloak paid from it flickers out.
+    pub fn jaeger_upkeep(&self) -> f32 {
+        if self.dev_off("jaegerreserve") {
+            return 0.0;
+        }
+        let frame = self.frame;
+        let have: f32 = (self.jaegers.members.iter().filter_map(|id| self.fighters.get(id)))
+            .filter(|f| f.unit.health() > 0.0)
+            .filter_map(|f| f.unit.def())
+            .map(|d| d.cloak_cost_moving())
+            .sum();
+        let ordered: f32 = (self.jaegers.ordered.iter())
+            .filter(|o| frame - o.1 <= ORDER_TIMEOUT)
+            .filter_map(|o| self.defs.get(o.0))
+            .map(|d| d.cloak_cost_moving())
+            .sum();
+        have + ordered
     }
 
     /// A factory has been told to build jaeger `name`.
@@ -237,6 +422,20 @@ impl Ai {
 
     pub fn jaeger_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
+        self.jaegers.pounces.remove(&id);
+        if let Some((cloaked, since, _)) = self.jaegers.cloak.remove(&id)
+            && unit.health() <= 0.0
+        {
+            let p = unit.pos();
+            self.log(&format!(
+                "jaeger: a {} died at ({:.0}, {:.0}), {} for {:.1} s",
+                self.defs.name_of(unit),
+                p.x,
+                p.z,
+                if cloaked { "cloaked" } else { "shown" },
+                (self.frame - since) as f32 / 30.0
+            ));
+        }
         if self.jaegers.members.remove(&id) {
             self.jaeger_leave_squad(id);
             self.fighters.remove(&id);
@@ -263,13 +462,28 @@ impl Ai {
         if frame % 1800 < PERIOD {
             let (heavy, army) = self.jaeger_heavy_value();
             if heavy > 0.0 || !self.jaegers.members.is_empty() {
+                let (widows, rest) = self.jaeger_widow_metal();
+                let j = &self.jaegers;
+                // Cloak is paid from storage (15 energy a second moving, 5
+                // still): an empty one shows them.
+                let cloaked =
+                    (j.members.iter().filter_map(|id| self.fighters.get(id))).filter(|f| f.unit.is_cloaked()).count();
+                let e = self.cb.economy();
                 self.log(&format!(
-                    "jaeger: {heavy:.0} of {army:.0} enemy army metal seen lately is heavy; {} jaegers, {} squads, {} ordered",
-                    self.jaegers.members.len(),
-                    self.jaegers.hunts.len(),
-                    self.jaegers.ordered.len()
+                    "jaeger: {heavy:.0} of {army:.0} enemy army metal seen lately is heavy; {} jaegers ({cloaked} cloaked; energy {:.0} of {:.0}), {} squads, {} ordered; Widows {widows:.0} to {rest:.0} of the rest of our army; {} ambushes laid, {} threatened, {} dodges, {} dodge jumps",
+                    j.members.len(),
+                    e.current(self.energy),
+                    e.storage(self.energy),
+                    j.hunts.len(),
+                    j.ordered.len(),
+                    j.ambushes,
+                    j.threatened,
+                    j.dodges,
+                    j.dodge_jumps
                 ));
             }
+            let j = &mut self.jaegers;
+            (j.ambushes, j.threatened, j.dodges, j.dodge_jumps) = (0, 0, 0, 0);
         }
         if self.jaegers.members.is_empty() && self.jaegers.hunts.is_empty() {
             return;
@@ -279,6 +493,10 @@ impl Ai {
         for sid in sids {
             self.jaeger_assign(sid, frame);
         }
+        // After the squads' orders, which a pounce or a dodge overrides.
+        self.jaeger_pounce(frame);
+        self.jaeger_dodge(frame);
+        self.jaeger_watch_cloak(frame);
     }
 
     /// Keep count of the enemy's army seen lately.
@@ -311,7 +529,7 @@ impl Ai {
                 self.jaeger_leave_squad(id);
                 continue;
             }
-            if self.fighters.get(&id).is_some_and(|f| f.squad.is_some()) {
+            if self.fighters.get(&id).is_some_and(|f| f.squad.is_some()) || self.jaegers.pounces.contains_key(&id) {
                 continue;
             }
             let Some(kind) = kind_of(self.defs.name_of(unit)) else { continue };
@@ -320,7 +538,7 @@ impl Ai {
                 _ => {
                     let sid = self.squads.create(SquadKind::Jaeger, team);
                     self.jaegers.forming.insert(kind.name, sid);
-                    self.jaegers.hunts.insert(sid, Hunt { kind, phase: Phase::Forming });
+                    self.jaegers.hunts.insert(sid, Hunt { kind, phase: Phase::Forming, ambush: None });
                     sid
                 }
             };
@@ -377,9 +595,16 @@ impl Ai {
         }
         let p = e.position;
         if !kind.suicide {
-            let supported = war.get_total_friendly_power(p) > 0.0
-                || self.graph.is_ally_territory(p)
-                || army.iter().any(|&a| distance(a, p) <= SUPPORT_RANGE);
+            // Hunters that lie in wait take a heavy that may come our way
+            // (where to wait for it decides), Widows one that our army can
+            // finish where it is.
+            let supported = if kind.ambush > 0.0 && !self.dev_off("ambush") {
+                (kind.stuns && self.jaeger_finishes(p, e.def_health())) || !self.graph.is_enemy_territory(p)
+            } else {
+                war.get_total_friendly_power(p) > 0.0
+                    || self.graph.is_ally_territory(p)
+                    || army.iter().any(|&a| distance(a, p) <= SUPPORT_RANGE)
+            };
             if war.get_porc_threat(p) > 0.0 || !supported {
                 return None;
             }
@@ -439,24 +664,55 @@ impl Ai {
             Phase::Hunting(target) => {
                 let keep = target.filter(|&t| self.jaeger_cost(kind, ready, pos, t, &army).is_some());
                 let target = keep.or_else(|| self.jaeger_target(kind, ready, pos, &taken, &army));
+                let ambushing = kind.ambush > 0.0 && !self.dev_off("ambush");
                 match target.and_then(|t| Some((t, self.jaeger_heavy(t)?))) {
-                    Some((t, (at, unit, value))) if distance(pos, at) <= kind.range + STRIKE_RANGE => {
-                        self.jaeger_strike(sid, unit, true);
-                        self.log(&format!(
-                            "jaeger: {ready} {} strike a heavy ({value:.0} metal) at ({:.0}, {:.0})",
-                            kind.name, at.x, at.z
-                        ));
-                        Phase::Striking(t, frame)
-                    }
-                    Some((t, (at, ..))) => {
-                        if phase != Phase::Hunting(Some(t)) {
+                    Some((t, (at, unit, value))) => {
+                        let health = self.war.targets.get(&t).map_or(0.0, |e| e.def_health());
+                        // A stun with nothing about to finish the heavy is wasted.
+                        let finished = !ambushing || !kind.stuns || self.jaeger_finishes(at, health);
+                        // After a heavy out of the enemy's land (where our
+                        // army is, for Widows) as ever; one beyond the
+                        // enemy's lines is waited for on its way instead.
+                        let chase = !ambushing || (finished && !self.graph.is_enemy_territory(at));
+                        let ambush = if ambushing && !chase {
+                            self.jaeger_ambush(sid, kind, t, pos, frame)
+                        } else {
+                            if let Some(h) = self.jaegers.hunts.get_mut(&sid) {
+                                h.ambush = None;
+                            }
+                            None
+                        };
+                        let d = distance(pos, at);
+                        if finished && ((chase && d <= kind.range + STRIKE_RANGE) || d <= kind.range + AMBUSH_STRIKE) {
+                            self.jaeger_strike(sid, unit, true);
                             self.log(&format!(
-                                "jaeger: {} {} go after a heavy at ({:.0}, {:.0})",
-                                ready, kind.name, at.x, at.z
+                                "jaeger: {ready} {} strike a heavy ({value:.0} metal) at ({:.0}, {:.0}){}",
+                                kind.name,
+                                at.x,
+                                at.z,
+                                if ambush.is_some() { " from an ambush" } else { "" }
                             ));
+                            Phase::Striking(t, frame)
+                        } else if chase {
+                            if phase != Phase::Hunting(Some(t)) {
+                                self.log(&format!(
+                                    "jaeger: {} {} go after a heavy at ({:.0}, {:.0})",
+                                    ready, kind.name, at.x, at.z
+                                ));
+                            }
+                            self.jaeger_go(sid, at, false);
+                            Phase::Hunting(Some(t))
+                        } else if let Some(a) = ambush {
+                            self.jaeger_go(sid, a.at, false);
+                            Phase::Hunting(Some(t))
+                        } else {
+                            // Not after it into the enemy's land: by our
+                            // army, until it comes our way.
+                            let rally = self.war_get_rally_point(pos);
+                            let wait = if rally == NULLPOS { self.graph_get_closest_haven(pos) } else { rally };
+                            self.jaeger_go(sid, wait, false);
+                            Phase::Hunting(Some(t))
                         }
-                        self.jaeger_go(sid, at, false);
-                        Phase::Hunting(Some(t))
                     }
                     None => {
                         // Wait by our army, out of the way.
@@ -534,16 +790,421 @@ impl Ai {
     fn jaeger_strike(&mut self, sid: SquadId, target: Unit, all: bool) {
         let Some(s) = self.squads.get(sid) else { return };
         let frame = self.frame;
+        let suicide = self.jaegers.hunts.get(&sid).is_some_and(|h| h.kind.suicide);
         let strikers: Vec<Unit> = (s.fighters.iter().filter_map(|id| self.fighters.get(id)))
             .filter(|f| all || (f.unit.num_current_commands() == 0 && !f.is_reloading(frame)))
             .map(|f| f.unit)
             .collect();
         for unit in strikers {
             // Skuttles jump the last stretch onto it (see `jumps`).
-            if !self.jump_strike(unit, target, NULLPOS, "skuttle") {
+            if !self.jaeger_jump(unit, target, NULLPOS, "skuttle") {
                 unit.attack(target, 0);
             }
+            if suicide {
+                self.jaegers.pounces.insert(unit.id(), (target.id(), frame));
+            }
         }
+    }
+
+    /// Skuttles pounce: each that is not under way onto a heavy already
+    /// jumps (or, that close, walks) onto the best heavy worth one in reach
+    /// that the blasts under way do not kill, and not among more of our
+    /// own: its squad's mark first, then the dearest, then the nearest. It
+    /// leaves its squad for the pounce.
+    fn jaeger_pounce(&mut self, frame: i32) {
+        let targets = &self.war.targets;
+        (self.jaegers.pounces)
+            .retain(|_, p| frame - p.1 <= POUNCE_HOLD && targets.get(&p.0).is_some_and(|e| !e.is_dead));
+        // One landed with nothing to do (its attack dropped) goes on at its
+        // heavy: it goes off within 50 of it.
+        let landed: Vec<(Unit, Unit)> = (self.jaegers.pounces.iter())
+            .filter_map(|(id, p)| Some((self.fighters.get(id)?.unit, self.war.targets.get(&p.0)?.unit)))
+            .filter(|(u, _)| u.rules_param_float("is_jumping", 0.0) != 1.0 && u.num_current_commands() == 0)
+            .collect();
+        for (unit, target) in landed {
+            unit.attack(target, 0);
+        }
+        if self.dev_off("pounce") {
+            return;
+        }
+        let Some(kind) = kind_of("jumpbomb") else { return };
+        let Some(def) = self.defs.get(kind.name) else { return };
+        let alpha = kind.alpha.unwrap_or(0.0);
+        let skuttles: Vec<(i32, Unit, Option<SquadId>)> = (self.jaegers.members.iter())
+            .filter(|id| !self.jaegers.pounces.contains_key(id))
+            .filter_map(|id| self.fighters.get(id))
+            .filter(|f| self.defs.name_of(f.unit) == kind.name && f.unit.health() > 0.0 && !f.unit.is_being_built())
+            .map(|f| (f.id, f.unit, f.squad))
+            .collect();
+        for (id, unit, squad) in skuttles {
+            // (Its jump may still be in the air: a pounce's hold ran out.)
+            if unit.rules_param_float("is_jumping", 0.0) == 1.0 {
+                continue;
+            }
+            let mark = squad.and_then(|sid| self.jaegers.hunts.get(&sid)).and_then(|h| match h.phase {
+                Phase::Hunting(Some(t)) | Phase::Striking(t, _) => Some(t),
+                _ => None,
+            });
+            let jump = self.jump_ready(unit);
+            let reach = jump.map_or(POUNCE_WALK, |jd| jd.range);
+            // (A heavy coming on may be in reach where it will be.)
+            let lead = if jump.is_some() && !self.dev_off("lead") { POUNCE_LEAD } else { 0.0 };
+            let pos = unit.pos();
+            let war = &self.war;
+            let pounces = &self.jaegers.pounces;
+            let best = (war.targets.iter())
+                .filter(|(_, e)| !e.is_dead && e.position != NULLPOS && frame - e.last_seen <= POUNCE_SEEN)
+                .filter(|(_, e)| is_heavy(e, self.metal) && cost(e, self.metal) >= kind.min_value)
+                .filter(|(_, e)| distance(pos, e.position) <= reach + lead && war.can_hit(war.reach(Some(def)), e))
+                .filter(|&(&eid, e)| {
+                    let under_way = pounces.values().filter(|p| p.0 == eid).count() as f32 * alpha;
+                    e.get_health() * e.def_health() > under_way
+                })
+                .filter(|(_, e)| self.jaeger_friends_near(e.position) <= cost(e, self.metal))
+                .map(|(&eid, e)| (eid, e, mark == Some(eid), cost(e, self.metal), distance(pos, e.position)))
+                .max_by(|a, b| a.2.cmp(&b.2).then(a.3.total_cmp(&b.3)).then(b.4.total_cmp(&a.4)))
+                .map(|(eid, e, marked, value, d)| {
+                    (eid, e.unit, e.position, e.get_health() * e.def_health(), marked, value, d)
+                });
+            let Some((eid, target, at, health, marked, value, d)) = best else { continue };
+            if jump.is_none() && d > POUNCE_WALK {
+                continue;
+            }
+            // Out of its squad first: a leader leaving it is stopped, which
+            // would drop the attack queued after the jump (it flies anyway,
+            // and lands idle by the heavy).
+            self.jaeger_leave_squad(id);
+            if !(jump.is_some() && self.jaeger_jump(unit, target, at, "skuttle pounce")) {
+                if d > POUNCE_WALK {
+                    // (Back into a squad at the next muster.)
+                    continue;
+                }
+                unit.attack(target, 0);
+            }
+            self.log(&format!(
+                "jaeger: a Skuttle pounces on a heavy ({value:.0} metal, {health:.0} health{}) at ({:.0}, {:.0}){}",
+                if marked { "" } else { ", not its mark" },
+                at.x,
+                at.z,
+                if unit.is_cloaked() { "" } else { ", uncloaked" }
+            ));
+            self.jaegers.pounces.insert(id, (eid, frame));
+        }
+    }
+
+    /// A Skuttle's jump onto `target`: leading it (feature `lead`) or not.
+    fn jaeger_jump(&mut self, unit: Unit, target: Unit, known: Vec3, why: &str) -> bool {
+        if self.dev_off("lead") {
+            self.jump_strike(unit, target, known, why)
+        } else {
+            self.jump_lead(unit, target, known, why)
+        }
+    }
+
+    /// Whether our army can kill a stunned heavy of `health` at `p` before
+    /// it wakes (see [`FINISH_SHARE`]).
+    fn jaeger_finishes(&self, p: Vec3, health: f32) -> bool {
+        self.war.get_total_friendly_power(p) >= FINISH_SHARE * health / 10.0
+    }
+
+    /// The way heavy `id` goes over the ground in the next [`WAY_HORIZON`]
+    /// seconds, from where it is, with its seconds to each point: down a
+    /// travel-time field from it to the asset of ours it heads for (by the
+    /// QRF mark's rule: soon reached and ahead of it as it goes). `None`
+    /// without the QRF's ground grid or an asset of ours in its horizon.
+    fn jaeger_way(&self, id: i32) -> Option<Vec<(Vec3, f32)>> {
+        let e = self.war.targets.get(&id).filter(|e| !e.is_dead && e.position != NULLPOS)?;
+        let def = e.ud?;
+        let mobility = Mobility::of(def)?;
+        let grid = self.qrf.grid.as_ref()?;
+        let field = grid.field_within(mobility, def.speed().max(10.0), &[(e.position, 0.0)], WAY_HORIZON);
+        let v = (self.qrf.tracks.get(&id))
+            .filter(|t| self.frame - t.last_seen <= POUNCE_SEEN)
+            .map_or(Vec3::default(), |t| t.vel);
+        let speed = v.x.hypot(v.z);
+        let p = e.position;
+        let goal = (self.qrf.assets.iter())
+            .filter_map(|a| {
+                let t = field.at(a.pos);
+                if !t.is_finite() {
+                    return None;
+                }
+                let (dx, dz) = (a.pos.x - p.x, a.pos.z - p.z);
+                let ahead = if speed > 10.0 { (dx * v.x + dz * v.z) / (dx.hypot(dz).max(1.0) * speed) } else { 0.6 };
+                Some((a.pos, t * (1.6 - ahead)))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))?
+            .0;
+        let mut cells = field.descent(goal, 400);
+        cells.reverse();
+        Some(cells.into_iter().map(|c| (grid.centre(c), field.cell(c))).collect())
+    }
+
+    /// Where a squad lies in wait for heavy `t`, foreseen anew now and then
+    /// (see [`Ai::jaeger_ambush_spot`]).
+    fn jaeger_ambush(&mut self, sid: SquadId, kind: Kind, t: i32, from: Vec3, frame: i32) -> Option<Ambush> {
+        let old = self.jaegers.hunts.get(&sid).and_then(|h| h.ambush).filter(|a| a.target == t);
+        if let Some(a) = old.filter(|a| frame - a.frame < AMBUSH_PERIOD) {
+            return Some(a);
+        }
+        let new = self.jaeger_ambush_spot(kind, from, t, old, frame);
+        if let Some(a) = new
+            && old.is_none_or(|o| distance(o.at, a.at) > 200.0)
+        {
+            self.jaegers.ambushes += 1;
+            let n = self.squads.get(sid).map_or(0, |s| s.fighters.len());
+            self.log(&format!(
+                "jaeger: {n} {} lie in wait at ({:.0}, {:.0}) for a heavy {:.0} s off",
+                kind.name, a.at.x, a.at.z, a.eta
+            ));
+        }
+        if let Some(h) = self.jaegers.hunts.get_mut(&sid) {
+            h.ambush = new;
+        }
+        new
+    }
+
+    /// A place for a squad of `kind` at `from` to lie in wait for heavy `t`:
+    /// beside the first point of the heavy's way (see [`Ai::jaeger_way`])
+    /// that the squad gets to, settled, before it, on the squad's side if
+    /// it can; out of the enemy's land and defenses and out of sight of the
+    /// enemy now, and for stuns where our army can finish the heavy. The
+    /// `old` place is kept while the heavy still comes by it.
+    fn jaeger_ambush_spot(&self, kind: Kind, from: Vec3, t: i32, old: Option<Ambush>, frame: i32) -> Option<Ambush> {
+        let def = self.defs.get(kind.name)?;
+        let mobility = Mobility::of(def)?;
+        let speed = def.speed().max(10.0);
+        let health = self.war.targets.get(&t)?.def_health();
+        let grid = self.qrf.grid.as_ref()?;
+        let way = self.jaeger_way(t)?;
+        let finishes = |p: Vec3| !kind.stuns || self.jaeger_finishes(p, health);
+        if let Some(o) = old
+            && let Some(&(_, eta)) = way.iter().find(|w| distance(w.0, o.way) <= 2.0 * CELL)
+            && finishes(o.way)
+        {
+            return Some(Ambush { eta, frame, ..o });
+        }
+        let map = self.cb.map();
+        for (i, &(x, eta)) in way.iter().enumerate() {
+            let (prev, next) = (way[i.saturating_sub(1)].0, way[(i + 1).min(way.len() - 1)].0);
+            let (dx, dz) = (next.x - prev.x, next.z - prev.z);
+            let n = dx.hypot(dz);
+            if n < 1.0 || !finishes(x) {
+                continue;
+            }
+            let (px, pz) = (-dz / n, dx / n);
+            let side = if (from.x - x.x) * px + (from.z - x.z) * pz >= 0.0 { 1.0 } else { -1.0 };
+            for off in [side, -side, side * 0.5] {
+                let (ax, az) = (x.x + px * kind.ambush * off, x.z + pz * kind.ambush * off);
+                let at = Vec3::new(ax, map.elevation_at(ax, az), az);
+                if !grid.passable(at, mobility)
+                    || distance(from, at) * AMBUSH_DETOUR / speed + AMBUSH_SETTLE > eta
+                    || self.graph.is_enemy_territory(at)
+                    || self.war.get_porc_threat(at) > 0.0
+                    || self.war.get_scythe_threat(at) > 0.0
+                    || !reaches(self.reach_terrain(), def, from, at, 100.0)
+                {
+                    continue;
+                }
+                return Some(Ambush { target: t, at, way: x, eta, frame });
+            }
+        }
+        None
+    }
+
+    /// Cloaked hunters keep out of sight of what moves (see the module
+    /// doc): each that an enemy would decloak within [`DODGE_AHEAD`] frames
+    /// where it stands goes to the spot nearby that stays clearest of them
+    /// all (nearer its goal on a tie), on foot or, a Skuttle that cannot
+    /// get clear so, by a jump. Hunters striking or pouncing do not.
+    fn jaeger_dodge(&mut self, frame: i32) {
+        if self.dev_off("dodge") {
+            return;
+        }
+        let ids: Vec<i32> =
+            self.jaegers.members.iter().copied().filter(|id| !self.jaegers.pounces.contains_key(id)).collect();
+        let map = self.cb.map();
+        let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+        for id in ids {
+            let Some(f) = self.fighters.get(&id) else { continue };
+            let (unit, goal, squad) = (f.unit, f.target, f.squad);
+            let Some(kind) = kind_of(self.defs.name_of(unit)) else { continue };
+            let hunt = squad.and_then(|sid| self.jaegers.hunts.get(&sid));
+            let striking = hunt.is_some_and(|h| matches!(h.phase, Phase::Striking(..)));
+            // A Widow waits for its heavy within its range, closer than the
+            // heavy sees it (a Skuttle does not).
+            let mark = hunt.filter(|_| kind.stuns).and_then(|h| match h.phase {
+                Phase::Hunting(t) => t,
+                _ => None,
+            });
+            if kind.decloak <= 0.0
+                || striking
+                || unit.is_being_built()
+                || unit.health() <= 0.0
+                || unit.rules_param_float("is_jumping", 0.0) == 1.0
+            {
+                continue;
+            }
+            let Some(def) = unit.def() else { continue };
+            let pos = unit.pos();
+            let r = kind.decloak + DODGE_MARGIN;
+            // Enemies about, where they are and their velocity (elmos a
+            // frame): buildings decloak too.
+            let threats: Vec<(Vec3, Vec3)> = (self.war.targets.values())
+                .filter(|e| !e.is_dead && e.position != NULLPOS && distance(e.position, pos) <= r + DODGE_LOOK)
+                .filter(|e| mark != Some(e.unit_id))
+                .filter(|e| e.is_static || frame - e.last_seen <= POUNCE_SEEN)
+                .map(|e| (e.position, if e.is_static { Vec3::default() } else { e.unit.vel() }))
+                .collect();
+            if threats.is_empty() {
+                continue;
+            }
+            // How near the enemies come in the next frames to a hunter
+            // walking from here to `to` at `speed` (elmos a frame): from the
+            // next step on, which a move still changes.
+            let clear = |to: Vec3, speed: f32| -> f32 {
+                let (dx, dz) = (to.x - pos.x, to.z - pos.z);
+                let len = dx.hypot(dz).max(0.001);
+                let mut worst = f32::INFINITY;
+                for k in 1..=DODGE_AHEAD / 10 {
+                    let t = (k * 10) as f32;
+                    let s = (speed * t).min(len);
+                    let (x, z) = (pos.x + dx / len * s, pos.z + dz / len * s);
+                    for &(q, v) in &threats {
+                        worst = worst.min((x - (q.x + v.x * t)).hypot(z - (q.z + v.z * t)));
+                    }
+                }
+                worst
+            };
+            let here = clear(pos, 0.0);
+            if here >= r {
+                continue;
+            }
+            self.jaegers.threatened += 1;
+            let jump = self.jump_ready(unit);
+            let grid = self.qrf.grid.as_ref();
+            let mobility = Mobility::of(def);
+            let fits = |p: Vec3| {
+                p.x > 16.0
+                    && p.z > 16.0
+                    && p.x < w - 16.0
+                    && p.z < h - 16.0
+                    && grid.zip(mobility).is_none_or(|(g, m)| g.passable(p, m))
+            };
+            let pull = if goal == NULLPOS { pos } else { goal };
+            let around = |d: f32| {
+                (0..16).map(move |k| {
+                    let a = k as f32 * std::f32::consts::TAU / 16.0;
+                    Vec3::xz(pos.x + d * a.cos(), pos.z + d * a.sin())
+                })
+            };
+            let better = |a: &(Vec3, f32), b: &(Vec3, f32)| {
+                (a.1.min(r) - 0.05 * distance(a.0, pull)).total_cmp(&(b.1.min(r) - 0.05 * distance(b.0, pull)))
+            };
+            let speed = def.speed() / 30.0;
+            let walk = (around(speed * DODGE_STEP)).filter(|&p| fits(p)).map(|p| (p, clear(p, speed))).max_by(better);
+            let walked = walk.map_or(here, |w| w.1);
+            if walked < r
+                && let Some(jd) = jump
+            {
+                let leap = (DODGE_JUMPS.iter().flat_map(|&d| around(d).map(move |p| (p, d))))
+                    .filter(|&(p, _)| fits(p))
+                    .map(|(p, d)| {
+                        let t = Self::jump_time(jd, d);
+                        let near = threats.iter().map(|(q, v)| (p.x - (q.x + v.x * t)).hypot(p.z - (q.z + v.z * t)));
+                        (p, near.fold(f32::INFINITY, f32::min))
+                    })
+                    .max_by(better);
+                if let Some((to, c)) = leap
+                    && c > walked
+                    && self.jump_to(unit, to, "skuttle dodge")
+                {
+                    self.jaegers.dodge_jumps += 1;
+                    self.log(&format!(
+                        "jaeger: a {} jumps clear of the enemy at ({:.0}, {:.0}), {:.0} from it then",
+                        kind.name, pos.x, pos.z, c
+                    ));
+                    continue;
+                }
+            }
+            if let Some((to, c)) = walk
+                && c > here
+            {
+                unit.move_to(Vec3::new(to.x, map.elevation_at(to.x, to.z), to.z), 0);
+                self.jaegers.dodges += 1;
+            }
+        }
+    }
+
+    /// Hunters showing themselves (a diagnostic): each going from cloaked to
+    /// seen is logged with what may have shown it: energy storage (cloak
+    /// upkeep is paid from it), a hit (damage decloaks), the nearest enemy
+    /// (anything within the decloak distance shows it), the gadget's
+    /// `cannotcloak`, and what it was doing.
+    fn jaeger_watch_cloak(&mut self, frame: i32) {
+        let energy = self.cb.economy().current(self.energy);
+        let ids: Vec<i32> = self.jaegers.members.iter().copied().collect();
+        for id in ids {
+            let Some(f) = self.fighters.get(&id) else { continue };
+            let (unit, squad) = (f.unit, f.squad);
+            let Some(kind) = kind_of(self.defs.name_of(unit)) else { continue };
+            if kind.decloak <= 0.0 || unit.is_being_built() || unit.health() <= 0.0 {
+                continue;
+            }
+            let (cloaked, health) = (unit.is_cloaked(), unit.health());
+            let old = self.jaegers.cloak.get(&id).copied();
+            let since = match old {
+                Some((c, since, _)) if c == cloaked => since,
+                _ => frame,
+            };
+            self.jaegers.cloak.insert(id, (cloaked, since, health));
+            let Some((true, _, was)) = old else { continue };
+            if cloaked {
+                continue;
+            }
+            let pos = unit.pos();
+            let near = (self.war.targets.values())
+                .filter(|e| !e.is_dead && e.position != NULLPOS)
+                .map(|e| (distance(e.position, pos), e))
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            let v = unit.vel();
+            let doing = if self.jaegers.pounces.contains_key(&id) {
+                "pouncing"
+            } else {
+                match squad.and_then(|sid| self.jaegers.hunts.get(&sid)) {
+                    Some(h) => match h.phase {
+                        Phase::Forming => "forming",
+                        Phase::Hunting(_) if h.ambush.is_some() => "in wait",
+                        Phase::Hunting(Some(_)) => "hunting",
+                        Phase::Hunting(None) => "by the army",
+                        Phase::Striking(..) => "striking",
+                        Phase::Reloading => "reloading",
+                    },
+                    None => "alone",
+                }
+            };
+            self.log(&format!(
+                "jaeger: a {} shows itself at ({:.0}, {:.0}), {} and {}: energy {energy:.0}, hit {:.0}, nearest enemy {} at {:.0}, cannotcloak {}",
+                kind.name,
+                pos.x,
+                pos.z,
+                doing,
+                if v.x.hypot(v.z) > 0.1 { "moving" } else { "standing" },
+                (was - health).max(0.0),
+                near.map_or("none", |n| n.1.def_name.as_str()),
+                near.map_or(f32::INFINITY, |n| n.0),
+                unit.rules_param_float("cannotcloak", 0.0)
+            ));
+        }
+    }
+
+    /// Metal of our and allied mobile units (Skuttles but) a blast at `p`
+    /// would take.
+    fn jaeger_friends_near(&self, p: Vec3) -> f32 {
+        (self.cb.friendly_units_in(p, POUNCE_FRIENDS).iter())
+            .filter(|u| self.defs.name_of(**u) != "jumpbomb")
+            .filter_map(|u| u.def().filter(|d| d.speed() > 0.0).map(|d| d.cost(self.metal)))
+            .sum()
     }
 }
 

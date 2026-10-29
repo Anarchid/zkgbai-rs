@@ -557,7 +557,18 @@ impl Ai {
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),
-            Some("anti" | "aafort" | "fort" | "radarfort" | "shadowprobe" | "heavies" | "farm" | "snipers" | "lances")
+            Some(
+                "anti"
+                    | "aafort"
+                    | "fort"
+                    | "radarfort"
+                    | "shadowprobe"
+                    | "heavies"
+                    | "heavypush"
+                    | "farm"
+                    | "snipers"
+                    | "lances"
+            )
         ) {
             self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
             return;
