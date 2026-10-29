@@ -131,7 +131,8 @@ pub struct EconomyManager {
     reclaim_value: Cell<f32>,
     last_rc_value_frame: Cell<i32>,
     energy_reclaim: bool,
-    hard_estalled: bool,
+    /// Actual energy shortage, independent of the desired overdrive income.
+    pub(crate) hard_estalled: bool,
     pub estalled: bool,
     big_map: bool,
     water_damage: bool,
