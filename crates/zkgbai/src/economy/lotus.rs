@@ -1,11 +1,15 @@
-//! Deferred Lotus demand. A third overlapping Lotus becomes a request for
+//! Deferred Lotus demand. Any overlapping Lotus becomes a request for
 //! investment, not another turret. Distinct requests pool their metal value.
 
 use springai::{UnitDef, Vec3};
 use zk_terrain::Pos;
 
 use super::{List, WorkerTask};
-use crate::{Ai, terrain::pos, util::distance};
+use crate::{
+    Ai,
+    terrain::pos,
+    util::{distance, kgb_rand},
+};
 
 const PERIOD: i32 = 150;
 const AREA_REACH: f32 = 460.0;
@@ -25,33 +29,20 @@ pub(super) struct Demand {
     until: i32,
 }
 
-/// Three equal range circles share an interior iff a centre or one of
-/// their pairwise intersections lies in all three. This catches triangles
-/// whose centres are farther apart than one weapon range.
-fn triple_overlap(a: Pos, b: Pos, c: Pos, range: f32) -> bool {
-    let inside = |p: Pos| [a, b, c].iter().all(|q| p.distance(*q) < range - 0.01);
-    if [a, b, c].into_iter().any(inside) {
-        return true;
+/// Circles overlap even when neither turret centre is in the other's
+/// range. Tangency is allowed; any shared area rejects the new Lotus.
+fn overlaps(a: Pos, b: Pos, range: f32) -> bool {
+    a.distance(b) < 2.0 * range
+}
+
+/// Choose a turret type only after both site searches have established
+/// affordability, useful coverage and safe access. No coin flip can make
+/// an invalid choice win or stall the one valid alternative.
+fn random_upgrade<T>(stinger: Option<T>, gauss: Option<T>, roll: impl FnOnce() -> f64) -> Option<T> {
+    match (stinger, gauss) {
+        (Some(s), Some(g)) => Some(if roll() < 0.5 { s } else { g }),
+        (s, g) => s.or(g),
     }
-    for (p, q) in [(a, b), (b, c), (c, a)] {
-        let d = p.distance(q);
-        if d <= 0.01 || d >= 2.0 * range {
-            continue;
-        }
-        let h = (range * range - d * d * 0.25).sqrt();
-        let middle = Pos::new((p.x + q.x) * 0.5, (p.z + q.z) * 0.5);
-        // Shrink infinitesimally toward the pair midpoint to test interior.
-        for sign in [-1.0, 1.0] {
-            let r = Pos::new(
-                middle.x + sign * (p.z - q.z) / d * h * 0.9999,
-                middle.z + sign * (q.x - p.x) / d * h * 0.9999,
-            );
-            if inside(r) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn remember(book: &mut Vec<Demand>, demand: Demand) {
@@ -82,13 +73,7 @@ impl Ai {
         }
         let Some(lotus) = self.defs.get("turretlaser") else { return false };
         let range = lotus.max_weapon_range();
-        let nearby: Vec<_> = self
-            .eco_fire_positions()
-            .into_iter()
-            .filter(|(d, p, _)| d.id() == lotus.id() && distance(*p, at) < 2.0 * range)
-            .map(|(_, p, _)| pos(p))
-            .collect();
-        nearby.iter().enumerate().any(|(i, &a)| nearby[i + 1..].iter().any(|&b| triple_overlap(pos(at), a, b, range)))
+        self.eco_fire_positions().into_iter().any(|(d, p, _)| d.id() == lotus.id() && overlaps(pos(at), pos(p), range))
     }
 
     pub(super) fn eco_defer_lotus(&mut self, key: DemandKey, at: Vec3, targets: Vec<Pos>) {
@@ -185,11 +170,12 @@ impl Ai {
         if posture && self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize {
             return;
         }
-        let mut best: Option<(f32, UnitDef, Vec3, bool, f32)> = None;
-        for (name, income) in [("turretheavylaser", 25.0), ("turretgauss", 60.0)] {
-            if self.eco.adjusted_income < income {
-                continue;
-            }
+        if self.eco.adjusted_income < 25.0 {
+            return;
+        }
+        let mut choices = [None, None];
+        for (index, name) in ["turretheavylaser", "turretgauss"].into_iter().enumerate() {
+            let mut best: Option<(f32, UnitDef, Vec3, bool, f32)> = None;
             let Some(def) = self.defs.get(name) else { continue };
             let cost = def.cost(self.metal);
             if posture && cost > self.posture_deficit() {
@@ -217,8 +203,10 @@ impl Ai {
                     best = Some((score, def, site, point, budget));
                 }
             }
+            choices[index] = best;
         }
-        let Some((_, def, site, point, budget)) = best else { return };
+        let [stinger, gauss] = choices;
+        let Some((_, def, site, point, budget)) = random_upgrade(stinger, gauss, kgb_rand) else { return };
         let mut task = WorkerTask::construction(def, site, 0);
         let c = task.as_construction_mut().unwrap();
         c.fortification = true;
@@ -252,14 +240,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn triangle_overlap_is_capped_even_when_centres_are_outside_each_others_range() {
+    fn even_a_small_overlap_with_one_lotus_is_forbidden() {
         let a = Pos::new(0.0, 0.0);
-        let b = Pos::new(700.0, 0.0);
-        let c = Pos::new(350.0, 606.2);
-        assert!(a.distance(b) > 460.0 && b.distance(c) > 460.0);
-        assert!(triple_overlap(a, b, c, 460.0));
-        assert!(!triple_overlap(a, b, Pos::new(350.0, 900.0), 460.0));
-        assert!(triple_overlap(a, a, Pos::new(400.0, 0.0), 460.0));
+        // Both centres outside the other's range, yet their circles overlap.
+        assert!(overlaps(a, Pos::new(700.0, 0.0), 460.0));
+        assert!(overlaps(a, Pos::new(919.9, 0.0), 460.0));
+        assert!(overlaps(a, a, 460.0));
+        assert!(!overlaps(a, Pos::new(920.0, 0.0), 460.0));
+        assert!(!overlaps(a, Pos::new(921.0, 0.0), 460.0));
+    }
+
+    #[test]
+    fn upgrades_randomize_between_valid_types_without_discarding_a_valid_fallback() {
+        assert_eq!(random_upgrade(Some("stinger"), Some("gauss"), || 0.25), Some("stinger"));
+        assert_eq!(random_upgrade(Some("stinger"), Some("gauss"), || 0.75), Some("gauss"));
+        assert_eq!(random_upgrade(Some("stinger"), None, || panic!("only one eligible type")), Some("stinger"));
+        assert_eq!(random_upgrade(None, Some("gauss"), || panic!("only one eligible type")), Some("gauss"));
+        assert_eq!(random_upgrade::<&str>(None, None, || panic!("no eligible types")), None);
     }
 
     #[test]
