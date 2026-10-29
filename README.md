@@ -65,9 +65,16 @@ and blocked preparation sites are abandoned. Existing defenses can satisfy the p
 Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
 
 Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
-known and inferred enemy static metal and exceeds the **Missile silo static density** slider
-(`missile_silo_density`: default 1500, range 0–10000, step 100). Density is covered metal divided
-by the full firing disk's area in millions of square elmos, including off-map area. Static value
+known and inferred enemy static metal and observed battlefield density exceeds the
+**Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
+step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
+requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
+Density is `posture.density`: our standing metal plus known enemy metal, divided by usable
+ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
+remembered live statics remain counted. Coverage and battlefield density are separate gates;
+the missile firing disk is not the density denominator. Density and lanes are measured even
+with defense posture disabled; before lanes are available the full slider threshold applies.
+Decision logs and the operator `regime` view report the adjusted threshold. Static value
 includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
 confidence), without double-counting known mexes or assigning locations to unobserved spending.
 The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement

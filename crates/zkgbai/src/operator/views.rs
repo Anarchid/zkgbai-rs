@@ -497,6 +497,7 @@ pub fn regime(ai: &mut Ai, _: &Args) -> Out {
         })
         .collect();
     let on = ai.posture_on();
+    let siege = ai.missiles_siege_readiness();
     Ok(json!({
         "posture": on,
         "measured": !p.lanes.is_empty(),
@@ -505,6 +506,7 @@ pub fn regime(ai: &mut Ai, _: &Args) -> Out {
         "laneness": r2(p.laneness()),
         "density": p.density.round(),
         "density_ref": levers.density_ref.round(),
+        "missile_silo_density_threshold": siege.threshold.round(),
         "richness": r2(p.richness),
         "share": r2(p.share),
         "cap": r2(levers.cap),
@@ -517,14 +519,12 @@ pub fn regime(ai: &mut Ai, _: &Args) -> Out {
         "point_orders": p.stats.point_orders,
         "stale": p.stats.stale,
         "lanes": lanes,
-        "note": if on {
-            "openness: 0 closed off by narrow fronts for free, 1 no lane worth holding (perimeter and closure \
+        "note": "openness: 0 closed off by narrow fronts for free, 1 no lane worth holding (perimeter and closure \
              averaged); laneness: how much the deciding tier's openness counts as lanes; density: standing metal \
              (ours and the enemy's as known) per square kilo-elmo of usable ground (F12 label 1500); share: of our \
-             standing metal the posture keeps in its fixed defenses"
-        } else {
-            "posture is off in this game (feature posture): lanes and density are not measured"
-        },
+             standing metal the posture keeps in its fixed defenses. Density is measured with posture off; \
+             missiles also measure lanes without enabling the defense budget. Before lanes are measured, \
+             the silo uses the full density threshold.",
     }))
 }
 

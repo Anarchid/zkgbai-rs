@@ -1,9 +1,9 @@
 //! Tactical missiles. A silo (`staticmissilesilo`: four pads, 1200 metal)
 //! goes up where it is safe and within Eos range of more than one enemy
 //! building worth a missile (a Fusion and up), or of an anti-nuke in the
-//! way of our nukes. Dense coverage of more than 70% of known and inferred
-//! static value is another trigger (`missile_silo_density`, metal per million
-//! square elmos of the full firing disk). Nearby constructors rush it once
+//! way of our nukes. Coverage of more than 70% of known and inferred static
+//! value is another trigger once observed battlefield density exceeds
+//! `missile_silo_density`, discounted on lane-like terrain. Constructors rush it once
 //! threatened sites have completed their defenses (see `economy::silo`).
 //! Its Eos (`tacnuke`: 600 metal, 3502 damage,
 //! 3500 range; anti-nukes do not stop them, shields do) go at those
@@ -47,8 +47,8 @@ pub const REACH: f32 = 3450.0;
 /// Silo sites are tried at our metal and this far ahead of it, elmos.
 const SITE_STEPS: [f32; 3] = [400.0, 800.0, 1200.0];
 const STATIC_SHARE: f32 = 0.7;
-const DEFAULT_STATIC_DENSITY: f32 = 1500.0;
-const MAX_STATIC_DENSITY: f32 = 10000.0;
+const DEFAULT_SIEGE_DENSITY: f32 = 1500.0;
+const MAX_SIEGE_DENSITY: f32 = 10000.0;
 
 /// A final buildable firing position and the reasons it pays.
 pub struct SiloSite {
@@ -56,26 +56,42 @@ pub struct SiloSite {
     pub payoff: f32,
     pub targets: usize,
     pub coverage: StaticCoverage,
+    pub siege: SiegeReadiness,
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct StaticCoverage {
     pub value: f32,
     pub share: f32,
-    pub density: f32,
 }
 
 impl StaticCoverage {
-    fn warrants_silo(self, minimum: f32) -> bool {
-        self.share > STATIC_SHARE && self.density > minimum
+    fn warrants_silo(self, siege: SiegeReadiness) -> bool {
+        self.share > STATIC_SHARE && siege.density > siege.threshold
     }
 }
 
-fn static_density_option(value: Option<&str>) -> f32 {
+/// Progress towards siege, independent of the value inside a silo's range.
+/// The lane discount is a bounded tuning choice, not a fitted silo model.
+#[derive(Clone, Copy)]
+pub struct SiegeReadiness {
+    pub density: f32,
+    pub threshold: f32,
+    pub laneness: f32,
+}
+
+impl SiegeReadiness {
+    fn new(density: f32, minimum: f32, laneness: f32) -> Self {
+        let laneness = laneness.clamp(0.0, 1.0);
+        Self { density, threshold: minimum / (1.0 + 0.5 * laneness), laneness }
+    }
+}
+
+fn siege_density_option(value: Option<&str>) -> f32 {
     value
         .and_then(|s| s.parse::<f32>().ok())
         .filter(|v| v.is_finite())
-        .map_or(DEFAULT_STATIC_DENSITY, |v| v.clamp(0.0, MAX_STATIC_DENSITY))
+        .map_or(DEFAULT_SIEGE_DENSITY, |v| v.clamp(0.0, MAX_SIEGE_DENSITY))
 }
 
 const EOS_DAMAGE: f32 = 3502.0;
@@ -196,6 +212,11 @@ struct Target {
 }
 
 impl Ai {
+    pub(crate) fn missiles_siege_readiness(&self) -> SiegeReadiness {
+        let minimum = siege_density_option(self.cb.option("missile_silo_density").as_deref());
+        SiegeReadiness::new(self.posture.density, minimum, self.posture.laneness())
+    }
+
     pub fn missiles_silo(&self) -> Option<Unit> {
         self.missiles.silo.filter(|s| s.health() > 0.0)
     }
@@ -383,8 +404,7 @@ impl Ai {
         });
         let mut targets: Vec<_> = eos.iter().map(|t| (t.pos, t.value - MISSILE_COST * t.needed as f32)).collect();
         targets.extend(stun.iter().filter(|a| !eos.iter().any(|t| t.id == a.0)).map(|a| (a.1, a.2 - MISSILE_COST)));
-        let density = static_density_option(self.cb.option("missile_silo_density").as_deref());
-        choose_silo_site(sites, &targets, &statics, density, enemy)
+        choose_silo_site(sites, &targets, &statics, self.missiles_siege_readiness(), enemy)
     }
 
     /// Remembered live statics plus spatially inferred mexes. A shadowed
@@ -431,10 +451,16 @@ impl Ai {
             .reduce(f32::min)
             .map_or("none".to_owned(), |d| format!("{d:.0}"));
         let value: f32 = targets.iter().map(|t| t.value).sum();
+        let siege = self.missiles_siege_readiness();
+        let static_value: f32 = self.missiles_static_value().iter().map(|t| t.1).sum();
         self.log(&format!(
             "missiles: no silo site: {} targets worth Eos ({value:.0} metal), the nearest {nearest} from our metal \
-             (reach {REACH:.0})",
-            targets.len()
+             (reach {REACH:.0}); {static_value:.0} known/inferred static metal, coverage needs >70%; \
+             battlefield density {:.0}, needs >{:.0} metal/Melmo² (laneness {:.2})",
+            targets.len(),
+            siege.density,
+            siege.threshold,
+            siege.laneness
         ));
     }
 
@@ -710,7 +736,7 @@ fn choose_silo_site(
     sites: impl Iterator<Item = Vec3>,
     targets: &[(Vec3, f32)],
     statics: &[(Vec3, f32)],
-    minimum_density: f32,
+    siege: SiegeReadiness,
     enemy: Vec3,
 ) -> Option<SiloSite> {
     let total: f32 = statics.iter().map(|t| t.1).sum();
@@ -719,17 +745,13 @@ fn choose_silo_site(
             let (payoff, n) =
                 targets.iter().filter(|t| distance(t.0, p) <= REACH).fold((0.0, 0), |(v, n), t| (v + t.1, n + 1));
             let value: f32 = statics.iter().filter(|t| distance(t.0, p) <= REACH).map(|t| t.1).sum();
-            let coverage = StaticCoverage {
-                value,
-                share: if total > 0.0 { value / total } else { 0.0 },
-                // Density across the full firing disk, in metal per million elmos².
-                density: value * 1_000_000.0 / (std::f32::consts::PI * REACH.powi(2)),
-            };
-            (payoff >= SILO_COST || coverage.warrants_silo(minimum_density)).then_some(SiloSite {
+            let coverage = StaticCoverage { value, share: if total > 0.0 { value / total } else { 0.0 } };
+            (payoff >= SILO_COST || coverage.warrants_silo(siege)).then_some(SiloSite {
                 pos: p,
                 payoff,
                 targets: n,
                 coverage,
+                siege,
             })
         })
         .collect();
@@ -747,19 +769,21 @@ fn choose_silo_site(
 mod site_tests {
     use super::*;
 
+    // Payoff triggers must work even before the battlefield is dense.
+    const EARLY: SiegeReadiness = SiegeReadiness { density: 0.0, threshold: 1500.0, laneness: 0.0 };
+    const DENSE: SiegeReadiness = SiegeReadiness { density: 1600.0, ..EARLY };
+
     #[test]
     fn inward_build_site_adjustment_must_not_lose_the_target() {
         let target = Vec3::xz(5000.0, 1000.0);
         let seed = Vec3::xz(1600.0, 1000.0);
         let shifted = Vec3::xz(1000.0, 1000.0);
         let targets = [(target, 2400.0)];
-        assert!(choose_silo_site([seed].into_iter(), &targets, &[], DEFAULT_STATIC_DENSITY, target).is_some());
-        assert!(choose_silo_site([shifted].into_iter(), &targets, &[], DEFAULT_STATIC_DENSITY, target).is_none());
+        assert!(choose_silo_site([seed].into_iter(), &targets, &[], EARLY, target).is_some());
+        assert!(choose_silo_site([shifted].into_iter(), &targets, &[], EARLY, target).is_none());
         let fallback = Vec3::xz(1800.0, 1000.0);
         assert_eq!(
-            choose_silo_site([shifted, fallback].into_iter(), &targets, &[], DEFAULT_STATIC_DENSITY, target)
-                .unwrap()
-                .pos,
+            choose_silo_site([shifted, fallback].into_iter(), &targets, &[], EARLY, target).unwrap().pos,
             fallback
         );
     }
@@ -769,12 +793,8 @@ mod site_tests {
         let targets = [(Vec3::xz(5000.0, 1000.0), 600.0), (Vec3::xz(5000.0, 1800.0), 600.0)];
         let only_one = Vec3::xz(1550.0, 1000.0);
         let both = Vec3::xz(2000.0, 1400.0);
-        assert!(
-            choose_silo_site([only_one].into_iter(), &targets, &[], DEFAULT_STATIC_DENSITY, targets[0].0).is_none()
-        );
-        let chosen =
-            choose_silo_site([only_one, both].into_iter(), &targets, &[], DEFAULT_STATIC_DENSITY, targets[0].0)
-                .unwrap();
+        assert!(choose_silo_site([only_one].into_iter(), &targets, &[], EARLY, targets[0].0).is_none());
+        let chosen = choose_silo_site([only_one, both].into_iter(), &targets, &[], EARLY, targets[0].0).unwrap();
         assert_eq!((chosen.pos, chosen.payoff, chosen.targets), (both, 1200.0, 2));
     }
 
@@ -783,39 +803,72 @@ mod site_tests {
         let at = Vec3::xz(1000.0, 1000.0);
         let enemy = Vec3::xz(3000.0, 1000.0);
         let far = Vec3::xz(8000.0, 1000.0);
-        // No individually worthwhile Eos targets, but dense static value.
-        let statics = [(enemy, 60000.0), (far, 20000.0)];
-        let site = choose_silo_site([at].into_iter(), &[], &statics, 1500.0, enemy).unwrap();
+        // No individually worthwhile Eos targets: battlefield density,
+        // not the amount of metal inside the firing disk, enables siege.
+        let statics = [(enemy, 6000.0), (far, 2000.0)];
+        let site = choose_silo_site([at].into_iter(), &[], &statics, DENSE, enemy).unwrap();
         assert_eq!(site.targets, 0);
         assert_eq!(site.coverage.share, 0.75);
-        assert!((site.coverage.density - 1604.58).abs() < 1.0);
-        assert!(choose_silo_site([at].into_iter(), &[], &statics, 1700.0, enemy).is_none());
+        assert_eq!(site.coverage.value, 6000.0);
+        assert!(choose_silo_site([at].into_iter(), &[], &statics, EARLY, enemy).is_none());
         // Value beyond missile range belongs in the denominator, whether
         // observed or inferred. Exactly 70% is not enough.
-        let only_seventy_percent = [(enemy, 70000.0), (far, 30000.0)];
-        assert!(choose_silo_site([at].into_iter(), &[], &only_seventy_percent, 1500.0, enemy).is_none());
-        assert!(!StaticCoverage { share: 0.71, density: 1500.0, value: 1.0 }.warrants_silo(1500.0));
-        assert!(StaticCoverage { share: 0.71, density: 1500.1, value: 1.0 }.warrants_silo(1500.0));
-        assert!(choose_silo_site([at].into_iter(), &[], &[], 0.0, enemy).is_none());
+        let only_seventy_percent = [(enemy, 7000.0), (far, 3000.0)];
+        assert!(choose_silo_site([at].into_iter(), &[], &only_seventy_percent, DENSE, enemy).is_none());
+        let coverage = StaticCoverage { share: 0.71, value: 1.0 };
+        assert!(!coverage.warrants_silo(SiegeReadiness { density: 1500.0, ..EARLY }));
+        assert!(coverage.warrants_silo(SiegeReadiness { density: 1500.1, ..EARLY }));
+        assert!(choose_silo_site([at].into_iter(), &[], &[], DENSE, enemy).is_none());
     }
 
     #[test]
     fn coverage_trigger_also_uses_the_final_position() {
         let enemy = Vec3::xz(5000.0, 1000.0);
-        let statics = [(enemy, 60000.0)];
+        let statics = [(enemy, 6000.0)];
         let seed = Vec3::xz(1600.0, 1000.0);
         let shifted = Vec3::xz(1000.0, 1000.0);
-        assert!(choose_silo_site([seed].into_iter(), &[], &statics, 1500.0, enemy).is_some());
-        assert!(choose_silo_site([shifted].into_iter(), &[], &statics, 1500.0, enemy).is_none());
+        assert!(choose_silo_site([seed].into_iter(), &[], &statics, DENSE, enemy).is_some());
+        assert!(choose_silo_site([shifted].into_iter(), &[], &statics, DENSE, enemy).is_none());
+    }
+
+    #[test]
+    fn closed_terrain_enables_siege_earlier_but_does_not_bypass_progression() {
+        let coverage = StaticCoverage { share: 0.84, value: 8250.0 };
+        assert!(!coverage.warrants_silo(SiegeReadiness::new(1100.0, 1500.0, 0.0)));
+        assert!(coverage.warrants_silo(SiegeReadiness::new(1100.0, 1500.0, 1.0)));
+        assert!(!coverage.warrants_silo(SiegeReadiness::new(1000.0, 1500.0, 1.0)));
+        assert!(!coverage.warrants_silo(SiegeReadiness::new(100.0, 1500.0, 1.0)));
+        // Unknown lanes use zero laneness; out-of-range inputs cannot
+        // remove the density gate or penalise open maps beyond the slider.
+        assert_eq!(SiegeReadiness::new(0.0, 1500.0, -1.0).threshold, 1500.0);
+        assert_eq!(SiegeReadiness::new(0.0, 1500.0, 2.0).threshold, 1000.0);
+        assert!(!coverage.warrants_silo(SiegeReadiness::new(1600.0, 3000.0, 1.0)));
+    }
+
+    #[test]
+    fn ravaged_progression_passes_with_modest_static_value() {
+        // Recorded at 20:00: 5435 known static metal, battlefield D=2254.
+        // If a final buildable site reaches it all, siege should qualify.
+        let at = Vec3::xz(2000.0, 2000.0);
+        let enemy = Vec3::xz(3000.0, 3000.0);
+        let statics = [(enemy, 5435.0)];
+        let siege = SiegeReadiness::new(2254.0, 1500.0, 0.7);
+        assert!(choose_silo_site([at].into_iter(), &[], &statics, siege, enemy).is_some());
+        // Ravaged's laneness discounts the default to about 1111, not zero.
+        assert!((siege.threshold - 1111.11).abs() < 0.1);
+        assert!(
+            choose_silo_site([at].into_iter(), &[], &statics, SiegeReadiness::new(1000.0, 1500.0, 0.7), enemy)
+                .is_none()
+        );
     }
 
     #[test]
     fn density_slider_defaults_and_bounds_are_safe() {
         for value in [None, Some(""), Some("invalid"), Some("NaN"), Some("inf")] {
-            assert_eq!(static_density_option(value), 1500.0);
+            assert_eq!(siege_density_option(value), 1500.0);
         }
-        assert_eq!(static_density_option(Some("400")), 400.0);
-        assert_eq!(static_density_option(Some("-1")), 0.0);
-        assert_eq!(static_density_option(Some("20000")), 10000.0);
+        assert_eq!(siege_density_option(Some("400")), 400.0);
+        assert_eq!(siege_density_option(Some("-1")), 0.0);
+        assert_eq!(siege_density_option(Some("20000")), 10000.0);
     }
 }

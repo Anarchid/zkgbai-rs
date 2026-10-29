@@ -185,13 +185,10 @@ impl Ai {
         if frame % PERIOD != (self.offset + 13) % PERIOD {
             return;
         }
-        // Density is read beyond the posture (the spider factory's raider
-        // phase, the energy ladder), so it is measured with the posture off.
-        if !self.posture_on() {
-            self.posture_measure();
-            return;
+        // Missiles use openness even when the fixed-defense budget is off.
+        if self.posture_on() || !self.dev_off("missiles") {
+            self.posture_start();
         }
-        self.posture_start();
         if let Some(rx) = &self.posture.job
             && let Ok(lanes) = rx.try_recv()
         {
@@ -212,7 +209,12 @@ impl Ai {
             self.posture.lanes = lanes;
             self.posture_emit("lanes");
         }
-        self.posture_assess();
+        // Density is shared by missiles, the spider factory and energy ladder.
+        // Measuring the regime must not enable posture's defense spending.
+        self.posture_measure();
+        if self.posture_on() {
+            self.posture_assess();
+        }
         if frame % REPORT == (self.offset + 13) % REPORT {
             self.posture_emit("assess");
         }
@@ -246,7 +248,6 @@ impl Ai {
 
     /// Standing metal, density and the share, now.
     fn posture_assess(&mut self) {
-        self.posture_measure();
         self.posture.defense = self.posture_ledger();
         self.posture.all_defense = self.eco_defense_value();
         let levers = self.posture_levers();
