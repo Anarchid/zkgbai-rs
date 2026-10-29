@@ -956,7 +956,6 @@ impl Ai {
         self.qrf_asset_pressed(unit, attacker);
         self.strikes_unit_damaged(unit, attacker, dir, weapon);
         self.taskforce_spotter_damaged(unit);
-        self.pack_touched(unit, true);
 
         // check if the damaged unit is on fire.
         let on_fire = h.rules_param_float("on_fire", 0.0) > 0.0;

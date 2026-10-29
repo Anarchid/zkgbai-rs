@@ -790,8 +790,10 @@ impl Ai {
             Event::EnemyLeaveRadar { enemy } => self.guard("war.enemyLeaveRadar", |ai| ai.war_enemy_leave_radar(enemy)),
             Event::EnemyDamaged { enemy, attacker, damage, .. } => {
                 self.guard("impalers.enemyDamaged", |ai| ai.impalers_enemy_damaged(enemy, attacker, damage));
-                if let Some(a) = attacker {
-                    self.guard("pack.enemyDamaged", |ai| ai.pack_touched(a, false));
+            }
+            Event::WeaponFired { unit, weapon } => {
+                if weapon.is_none_or(|w| w.range() > 0.0 && !w.name().contains("fake")) {
+                    self.guard("pack.weaponFired", |ai| ai.pack_fired(unit));
                 }
             }
             Event::EnemyDestroyed { enemy, attacker } => {

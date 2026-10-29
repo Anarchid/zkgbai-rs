@@ -25,10 +25,12 @@
 //! raiders or its health are judged again (runs are for doing damage; they
 //! expect losses). Enemy porc is weighed against the pack: it takes on
 //! targets, run lines and ground under porc threat up to `porc_share` of its
-//! own (`shun_porc` off: porc is not looked at). Repositioning (neither
-//! taking nor dealing damage for `quiet` seconds) with a way home clear of
-//! threat, its members below `repair_below` health go for repairs alone, to
-//! rejoin when healed. With `judge`
+//! own (`shun_porc` off: porc is not looked at). After `quiet` seconds
+//! without firing (five by default), members below `repair_below` health
+//! leave along their own clear routes home, regardless of incoming hits.
+//! A weak pack near a haven may also rest as one when the estimated value
+//! of healing per second exceeds that of its next run; a better raid can
+//! end this discretionary rest before it is fully healed. With `judge`
 //! predictor, whether a run is worth it is the fight predictor's call
 //! instead of the threat maps': a run is a sequence of fights, one per
 //! group of enemies along its way, each asked of the predictor with the
@@ -52,6 +54,7 @@
 //! back to its screen, parks / is repaired, takes in (merges), is led from
 //! its bulk; engages and break-offs as other forces'.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use springai::{Unit, UnitDef, Vec3};
@@ -133,6 +136,10 @@ const SCREEN_REPATH: f32 = 250.0;
 /// Outweighed, a pack keeps going home this many frames (10 s) before it
 /// judges again, so it does not turn on the threat's edge.
 const BACK_FOR: i32 = 300;
+/// A weak pack may take a short detour to a nearby repair haven.
+const REST_NEAR: f32 = 450.0;
+/// Require a useful advantage before changing between resting and raiding.
+const REST_MARGIN: f32 = 1.25;
 
 /// A pass over a target: the way it goes (a unit vector on the map's
 /// axes), and how far to the left of the target the leader's line runs
@@ -184,9 +191,11 @@ pub struct Pack {
     pub back_until: i32,
     /// Falling back to its screen (from raiders) until it gets there.
     pub to_screen: bool,
-    /// When a member last took damage, and last dealt it (frames).
-    pub last_hurt: i32,
-    pub last_hit: i32,
+    /// A discretionary rest may end early when a better raid appears.
+    pub opportunistic_rest: bool,
+    /// Shots, including misses; incoming damage does not postpone repairs.
+    pub last_fired: Option<i32>,
+    reload_frames: BTreeMap<(i32, usize), i32>,
 }
 
 impl Default for Pack {
@@ -202,10 +211,49 @@ impl Default for Pack {
             parked: false,
             back_until: 0,
             to_screen: false,
-            last_hurt: 0,
-            last_hit: 0,
+            opportunistic_rest: false,
+            last_fired: None,
+            reload_frames: BTreeMap::new(),
         }
     }
+}
+
+impl Pack {
+    fn fired(&mut self, frame: i32) {
+        self.last_fired = Some(self.last_fired.map_or(frame, |old| old.max(frame)));
+    }
+
+    /// Polling also catches shots where the engine omits WeaponFired.
+    fn observe_reload(&mut self, key: (i32, usize), reload: i32, frame: i32) {
+        let previous = self.reload_frames.insert(key, reload);
+        if previous.map_or(reload > frame, |old| reload > old) {
+            self.fired(frame);
+        }
+    }
+
+    fn quiet(&self, frame: i32, seconds: f32) -> bool {
+        self.last_fired.is_none_or(|last| frame - last >= (seconds * 30.0) as i32)
+    }
+
+    fn absorb_firing(&mut self, other: Pack) {
+        if let Some(last) = other.last_fired {
+            self.fired(last);
+        }
+        self.reload_frames.extend(other.reload_frames);
+    }
+}
+
+/// Recoverable health valued as metal, per second spent on the detour and
+/// repairs. Build work is an estimate; no build power means no useful rest.
+fn repair_rate(value: f32, work: f32, bp: f32, distance: f32, speed: f32) -> f32 {
+    if value <= 0.0 || bp <= 0.0 {
+        return 0.0;
+    }
+    value / (2.0 * distance / speed.max(1.0) + work / bp).max(1.0)
+}
+
+fn rest_worthwhile(repair: f32, carnage: f32, already_resting: bool) -> bool {
+    repair > 0.0 && if already_resting { repair * REST_MARGIN >= carnage } else { repair > carnage * REST_MARGIN }
 }
 
 /// A unit's heading on the ground: where it is going, else toward `toward`
@@ -403,6 +451,19 @@ impl Ai {
             (s.trailers(&self.fighters).iter().filter_map(|id| self.fighters.get(id))).map(|f| f.unit).collect();
         let mut st = self.taskforces.packs.get(&sid).cloned().unwrap_or_default();
         let doctrine = shape.doctrine.clone();
+        // A new or reloaded pack has no five-second firing history yet.
+        if st.last_fired.is_none() && st.reload_frames.is_empty() {
+            st.fired(self.frame);
+        }
+        let members: Vec<Unit> = s.everyone().filter_map(|id| self.fighters.get(&id)).map(|f| f.unit).collect();
+        for unit in members {
+            for (index, weapon) in unit.weapons().into_iter().enumerate() {
+                if weapon.def().is_some_and(|d| d.range() > 0.0 && !d.name().contains("fake")) {
+                    st.observe_reload((unit.id(), index), weapon.reload_frame(), self.frame);
+                }
+            }
+        }
+        st.reload_frames.retain(|(id, _), _| self.fighters.get(id).is_some_and(|f| f.squad == Some(sid)));
 
         // A screen member that is hurt goes for repairs alone.
         let mut screen = Vec::new();
@@ -423,17 +484,20 @@ impl Ai {
         let running =
             shape.commit && st.target != NULLPOS && st.pass.is_some_and(|p| p.along(pos, st.target) <= PASS_OUT);
 
-        // Parked for repairs until healed.
+        // Forced retreats keep the old recovery target. Discretionary rests
+        // can end earlier when the next run offers more value per second.
         let healed = shape.heal_to.max(shape.retreat_health);
         if st.parked && health >= healed {
             st.parked = false;
+            st.opportunistic_rest = false;
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) is repaired ({:.0}%, {} cores)",
                 100.0 * health,
                 cores.len()
             ));
-        } else if !st.parked && health < shape.retreat_health && !running {
+        } else if health < shape.retreat_health && !running && (!st.parked || st.opportunistic_rest) {
             st.parked = true;
+            st.opportunistic_rest = false;
             st.target = NULLPOS;
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) parks for repairs ({:.0}%, {} cores)",
@@ -441,33 +505,77 @@ impl Ai {
                 cores.len()
             ));
         }
+        if !running && ((!st.parked && health < shape.repair_below) || st.opportunistic_rest) {
+            let was_resting = st.opportunistic_rest;
+            let mut rest = 0.0;
+            let mut carnage = 0.0;
+            if distance(pos, home) <= REST_NEAR && self.pack_way_clear(leader, home) {
+                let mut value = 0.0;
+                let mut work = 0.0;
+                for &unit in &cores {
+                    if let Some(def) = unit.def() {
+                        let missing = (healed - health_fraction(unit)).max(0.0);
+                        value += missing * def.cost(self.metal);
+                        work += missing * def.build_time();
+                    }
+                }
+                rest = repair_rate(value, work, self.war.get_bp(home), distance(pos, home), shape.pace);
+                if rest > 0.0 {
+                    carnage = self.pack_carnage_rate(sid, leader, pos, &shape, &st);
+                }
+            }
+            let take_rest = rest_worthwhile(rest, carnage, was_resting)
+                && cores.iter().all(|&u| u.id() == leader.id() || self.pack_way_clear(u, home));
+            if take_rest && !was_resting {
+                st.parked = true;
+                st.opportunistic_rest = true;
+                st.target = NULLPOS;
+                st.pass = None;
+                self.log(&format!(
+                    "taskforce: the {doctrine} pack (squad {sid}) rests near its haven ({:.0}%, {} cores): \
+                     repair {rest:.1} metal/s, further carnage {carnage:.1} metal/s",
+                    100.0 * health,
+                    cores.len()
+                ));
+            } else if !take_rest && was_resting {
+                st.parked = false;
+                st.opportunistic_rest = false;
+                self.log(&format!(
+                    "taskforce: the {doctrine} pack (squad {sid}) ends its rest ({:.0}%): \
+                     repair {rest:.1} metal/s, further carnage {carnage:.1} metal/s",
+                    100.0 * health
+                ));
+            }
+        }
         if st.parked {
             self.pack_go(sid, pos, head, home, false);
             self.pack_screen(sid, home, false);
+            let why = if st.opportunistic_rest { "opportunistic rest" } else { "parked for repairs" };
             self.taskforces.packs.insert(sid, st);
-            return (None, "parked for repairs".into());
+            return (None, why.into());
         }
 
-        // Repositioning (neither hurt nor hitting for `quiet` s) with the way
-        // home clear, the hurt go for repairs alone.
-        let quiet = (shape.quiet * 30.0) as i32;
-        if shape.repair_below > 0.0 && !running && self.frame - st.last_hurt > quiet && self.frame - st.last_hit > quiet
-        {
-            let hurt: Vec<Unit> = cores.iter().copied().filter(|&u| health_fraction(u) < shape.repair_below).collect();
-            if !hurt.is_empty() && self.pack_way_clear(leader, home) {
+        // Five seconds without firing is enough: incoming hits and a
+        // committed but quiet run do not veto an otherwise safe departure.
+        if shape.repair_below > 0.0 && st.quiet(self.frame, shape.quiet) {
+            let mut hurt = Vec::new();
+            for &unit in &cores {
+                if health_fraction(unit) < shape.repair_below {
+                    let haven = self.graph_get_closest_haven(unit.pos());
+                    if self.pack_way_clear(unit, haven) {
+                        hurt.push(unit);
+                    }
+                }
+            }
+            if !hurt.is_empty() {
                 let healths: Vec<String> =
                     hurt.iter().map(|&u| format!("{:.0}%", 100.0 * health_fraction(u))).collect();
-                // (A pack formed of members hurt in another has no fight of
-                // its own yet.)
-                let last = st.last_hurt.max(st.last_hit);
-                let quiet = if last == 0 {
-                    "it has not fought".to_owned()
-                } else {
-                    format!("quiet {:.0} s", (self.frame - last) as f32 / 30.0)
-                };
+                let quiet = st.last_fired.map_or("it has not fired".to_owned(), |last| {
+                    format!("no shots for {:.0} s", (self.frame - last) as f32 / 30.0)
+                });
                 self.log(&format!(
-                    "taskforce: the {doctrine} pack (squad {sid}) sends {} of {} cores for repairs ({}): {quiet}, the \
-                     way home clear",
+                    "taskforce: the {doctrine} pack (squad {sid}) sends {} of {} cores for repairs ({}): \
+                     {quiet}, each has a clear way home",
                     hurt.len(),
                     cores.len(),
                     healths.join(" ")
@@ -1033,29 +1141,87 @@ impl Ai {
         ));
     }
 
-    /// A unit of ours took damage (`hurt`) or dealt it: if it is in a pack,
-    /// that pack is fighting.
-    pub fn pack_touched(&mut self, unit: Unit, hurt: bool) {
-        if self.taskforces.packs.is_empty() {
-            return;
-        }
+    /// An actual shot postpones discretionary individual repair, even if
+    /// it misses. Reload polling covers engines which omit this event.
+    pub fn pack_fired(&mut self, unit: Unit) {
         let Some(sid) = self.fighters.get(&unit.id()).and_then(|f| f.squad) else { return };
-        let frame = self.frame;
         if let Some(p) = self.taskforces.packs.get_mut(&sid) {
-            if hurt {
-                p.last_hurt = frame;
-            } else {
-                p.last_hit = frame;
-            }
+            p.fired(self.frame);
         }
     }
 
-    /// Whether the way from the pack's leader to `home` (its path avoiding
-    /// enemies) crosses no enemy threat or porc.
-    fn pack_way_clear(&mut self, leader: Unit, home: Vec3) -> bool {
-        let path = self.pathfinder.find_path(&self.war, leader, home, PathCost::AvoidEnemies);
-        let view = self.war.view(leader.def());
-        path.iter().all(|&p| view.get_threat(p) <= 0.0 && view.get_porc_threat(p) <= 0.0)
+    /// The wounded unit's own complete route, sampled between waypoints.
+    /// A pathfinder fallback towards an unreachable haven is not a safe way.
+    fn pack_way_clear(&mut self, unit: Unit, home: Vec3) -> bool {
+        let start = unit.pos();
+        if start == NULLPOS || home == NULLPOS || self.incursion_imminent(home, (unit.power() + unit.health()) / 10.0) {
+            return false;
+        }
+        let reachable = self.pathfinder.is_reachable(&self.war, unit, home, PathCost::AvoidEnemies);
+        if !reachable {
+            return false;
+        }
+        let path: Vec<_> =
+            self.pathfinder.find_path(&self.war, unit, home, PathCost::AvoidEnemies).into_iter().collect();
+        let view = self.war.view(unit.def());
+        crate::military::fire_squad::repair_route_clear(start, home, &path, reachable, |p| {
+            view.get_threat(p) <= 0.0 && view.get_porc_threat(p) <= 0.0
+        })
+    }
+
+    /// The best nearby/current run's expected net metal per second,
+    /// including travel and a pass. This is a rest opportunity cost, not
+    /// a new attack gate. Without a model, use known target-cluster value.
+    fn pack_carnage_rate(&mut self, sid: SquadId, leader: Unit, pos: Vec3, shape: &Shape, st: &Pack) -> f32 {
+        let (threat, cap) = {
+            let view = self.war.view(leader.def());
+            let threat = view.get_friendly_threat(pos);
+            (threat, shape.shun_porc.then_some(shape.porc_share * threat))
+        };
+        let predictor = shape.judge != Judge::Map;
+        let shun: Vec<_> = st.shun.iter().filter(|s| s.1 > self.frame).map(|s| s.0).collect();
+        let mut targets = Vec::new();
+        if st.target != NULLPOS && self.pack_target_left(st.target).is_some() {
+            targets.push(st.target);
+        }
+        if let Some((target, _)) = self.pack_sweep(leader, pos, cap, threat, &shun, shape, predictor)
+            && !targets.iter().any(|&t| distance(t, target) < TARGET_LEFT)
+        {
+            targets.push(target);
+        }
+        if targets.is_empty() {
+            let (target, _) = self.war_best_target_shunning(leader, pos, false, cap, &shun);
+            if target != NULLPOS {
+                targets.push(target);
+            }
+        }
+        let mut best: f32 = 0.0;
+        for target in targets {
+            let route = pack_route(pos, target);
+            let worth = if shape.judge == Judge::Fates {
+                [true, false]
+                    .into_iter()
+                    .filter_map(|ram| self.pack_fates(sid, &route, ram))
+                    .map(|(j, _)| j.worth())
+                    .max_by(f32::total_cmp)
+            } else {
+                self.pack_judge(sid, &route, shape.judge == Judge::Mech).map(|(j, _)| j.worth())
+            }
+            .unwrap_or_else(|| {
+                self.war
+                    .targets
+                    .values()
+                    .filter(|e| {
+                        !e.is_dead && e.identified && !e.can_fly() && distance(e.position, target) < TARGET_LEFT
+                    })
+                    .map(|e| e.value * if e.is_static { shape.lasting } else { 1.0 })
+                    .sum()
+            });
+            let travel: f32 = route.windows(2).map(|p| distance(p[0], p[1])).sum();
+            let seconds = travel / shape.pace.max(1.0) + shape.fate_secs;
+            best = best.max(worth.max(0.0) / seconds.max(1.0));
+        }
+        best
     }
 
     /// The pack's guns for a pass: each core's place in the formation (the
@@ -1261,6 +1427,9 @@ impl Ai {
             let Some(o) = self.squads.get_mut(q) else { continue };
             let members = o.disband(&mut self.fighters);
             self.squad_handler.taskforces.retain(|&x| x != q);
+            if let Some(other) = self.taskforces.packs.remove(&q) {
+                self.taskforces.packs.entry(sid).or_default().absorb_firing(other);
+            }
             self.squad_delete_squad(q);
             self.log(&format!(
                 "taskforce: the {doctrine} pack (squad {sid}) takes in squad {q} ({} members)",
@@ -1296,6 +1465,57 @@ fn sweep_target(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_missed_shot_still_requires_five_seconds_of_quiet() {
+        let mut pack = Pack::default();
+        assert!(pack.quiet(100, 5.0));
+        // A loaded, already reloaded gun is not a new shot.
+        pack.observe_reload((1, 0), 60, 100);
+        assert!(pack.quiet(100, 5.0));
+        // Advancing reload catches a shot even without a damage/fired event.
+        pack.observe_reload((1, 0), 180, 120);
+        assert!(!pack.quiet(269, 5.0));
+        assert!(pack.quiet(270, 5.0));
+        // Finishing that reload does not keep resetting the clock.
+        pack.observe_reload((1, 0), 180, 200);
+        assert!(pack.quiet(270, 5.0));
+        // An actual shot resets it even if it misses and reload is unobserved.
+        pack.fired(280);
+        assert!(!pack.quiet(429, 5.0));
+        assert!(pack.quiet(430, 5.0));
+    }
+
+    #[test]
+    fn new_and_merged_members_preserve_the_firing_cooldown() {
+        let mut pack = Pack::default();
+        pack.observe_reload((2, 0), 240, 200);
+        assert!(!pack.quiet(349, 5.0));
+        let mut merged = Pack::default();
+        merged.fired(300);
+        merged.observe_reload((3, 0), 330, 300);
+        pack.absorb_firing(merged);
+        // Both guns may be ready; the merged pack still fired recently.
+        pack.observe_reload((3, 0), 330, 400);
+        assert!(!pack.quiet(449, 5.0));
+        assert!(pack.quiet(450, 5.0));
+    }
+
+    #[test]
+    fn haven_rest_competes_with_carnage_and_can_end_early() {
+        let rest = repair_rate(400.0, 400.0, 20.0, 0.0, 80.0);
+        assert_eq!(rest, 20.0);
+        assert!(rest_worthwhile(rest, 0.0, false));
+        assert!(rest_worthwhile(rest, 10.0, false));
+        assert!(!rest_worthwhile(rest, 30.0, false));
+        // Small changes do not toggle resting and raiding every conduct.
+        assert!(!rest_worthwhile(rest, 18.0, false));
+        assert!(rest_worthwhile(rest, 18.0, true));
+        assert!(!rest_worthwhile(rest, 30.0, true));
+        assert!(!rest_worthwhile(0.0, 0.0, true));
+        assert_eq!(repair_rate(400.0, 400.0, 0.0, 100.0, 80.0), 0.0);
+        assert!(repair_rate(400.0, 400.0, 20.0, 400.0, 80.0) < rest);
+    }
+
     #[test]
     fn sweep_cleans_nearby_clusters_before_distant_value() {
         use super::sweep_target;

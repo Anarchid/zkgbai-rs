@@ -435,9 +435,10 @@ pub struct Doctrine {
     /// not looked at).
     pub shun_porc: bool,
     pub porc_share: f32,
-    /// Packs: repositioning (neither taking nor dealing damage for `quiet`
-    /// seconds) with a way home clear of threat, members below
-    /// `repair_below` health go for repairs alone (0: never).
+    /// Packs: after `quiet` seconds without firing, members below
+    /// `repair_below` health go for repairs if their own route is clear.
+    /// Weak packs near a haven can also rest when healing beats the next run.
+    /// Zero `repair_below` disables discretionary repairs.
     pub quiet: f32,
     pub repair_below: f32,
     /// Packs: how a run is judged worth going on, and (the predictor) by how
@@ -501,7 +502,7 @@ impl Doctrine {
             commit: false,
             shun_porc: true,
             porc_share: 0.0,
-            quiet: 20.0,
+            quiet: 5.0,
             repair_below: 0.0,
             judge: Judge::Map,
             judge_margin: 0.0,
@@ -966,7 +967,7 @@ impl Default for Shape {
             commit: false,
             shun_porc: true,
             porc_share: 0.0,
-            quiet: 20.0,
+            quiet: 5.0,
             repair_below: 0.0,
             judge: Judge::Map,
             judge_margin: 0.0,
@@ -1415,7 +1416,7 @@ mod tests {
         let Value::Object(p) = json!({"sweep": 0, "sweep_min": 250}) else { panic!() };
         d.apply(&p).unwrap();
         assert_eq!((d.sweep, d.sweep_min), (0.0, 250.0));
-        assert_eq!((d.porc_share, d.quiet, d.repair_below), (0.5, 20.0, 0.6));
+        assert_eq!((d.porc_share, d.quiet, d.repair_below), (0.5, 5.0, 0.6));
         assert!(!d.regroup && !d.reinforce_engaged && !d.strays);
         assert_eq!(d.role("screen").unwrap().keep, Keep::Trail);
         let Value::Object(p) = json!({"core_keep": "orbit", "pass_reach": 0.5, "pace_slowest": 0.85}) else { panic!() };
