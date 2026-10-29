@@ -40,6 +40,10 @@ const MIN_ESCAPE: f32 = 120.0;
 /// Not worth a jump: a target this close is walked to.
 const MIN_ENGAGE: f32 = 140.0;
 
+/// Frames from a jump order to take-off: the order reaches the engine a
+/// frame later, and the gadget's jump starts the frame after.
+const TAKEOFF: f32 = 2.0;
+
 /// Steepest landing (rise over run) a bot walks off.
 const MAX_LANDING_SLOPE: f32 = 0.7;
 
@@ -73,6 +77,8 @@ pub struct JumpDef {
     pub height: f32,
     pub speed: f32,
     pub reload: i32,
+    /// Frames the gadget waits before the unit takes off.
+    pub delay: i32,
     /// Deepest water it may land in.
     max_depth: f32,
 }
@@ -130,6 +136,7 @@ impl Ai {
             height: param(ud, "jump_height").unwrap_or(200.0),
             speed: param(ud, "jump_speed").unwrap_or(6.0).max(1.0),
             reload: (param(ud, "jump_reload").unwrap_or(10.0) * 30.0) as i32,
+            delay: param(ud, "jump_delay").unwrap_or(0.0) as i32,
             max_depth: ud.max_water_depth(),
         });
         self.jumps.defs.insert(ud.id(), d);
@@ -201,6 +208,22 @@ impl Ai {
         self.jumps.total += 1;
     }
 
+    /// Where a jump of `jd` from `from` meets a target at `at` going `v`
+    /// (elmos a frame): where the target is when the jump lands there.
+    pub fn jump_lead_point(jd: JumpDef, from: Vec3, at: Vec3, v: Vec3) -> Vec3 {
+        let mut to = at;
+        for _ in 0..4 {
+            let t = Self::jump_time(jd, distance(from, to));
+            to = Vec3::new(at.x + v.x * t, at.y, at.z + v.z * t);
+        }
+        to
+    }
+
+    /// Frames from a jump order of `jd` over `dist` to the landing.
+    pub fn jump_time(jd: JumpDef, dist: f32) -> f32 {
+        TAKEOFF + jd.delay as f32 + Self::jump_flight(jd, dist)
+    }
+
     /// Flight time of a jump of `jd` over `dist`, frames.
     fn jump_flight(jd: JumpDef, dist: f32) -> f32 {
         let half = (dist * dist / 4.0 + jd.height * jd.height).sqrt();
@@ -221,6 +244,28 @@ impl Ai {
         let lead = Self::jump_flight(jd, distance(from, at)) * 0.5;
         let v = target.vel();
         let to = Vec3::new(at.x + (v.x * lead).clamp(-150.0, 150.0), at.y, at.z + (v.z * lead).clamp(-150.0, 150.0));
+        let d = distance(from, to);
+        if !(MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d) || !self.jump_clear(jd, from, to) {
+            return false;
+        }
+        self.jump_order(unit, to, why);
+        unit.attack(target, OPTION_SHIFT_KEY);
+        true
+    }
+
+    /// [`Ai::jump_strike`], landing where `target` will be: it keeps its
+    /// velocity until then (heavies are slow to speed up or stop, though
+    /// they may turn). Lands within reach or not at all.
+    pub fn jump_lead(&mut self, unit: Unit, target: Unit, known: Vec3, why: &str) -> bool {
+        let Some(jd) = self.jump_ready(unit) else { return false };
+        let seen = target.pos();
+        let unseen = seen == NULLPOS || (seen.x == 0.0 && seen.z == 0.0);
+        let (at, v) = if unseen { (known, Vec3::default()) } else { (seen, target.vel()) };
+        let from = unit.pos();
+        if at == NULLPOS {
+            return false;
+        }
+        let to = Self::jump_lead_point(jd, from, at, v);
         let d = distance(from, to);
         if !(MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d) || !self.jump_clear(jd, from, to) {
             return false;
@@ -564,11 +609,25 @@ mod tests {
 
     #[test]
     fn flights_take_longer_the_farther_and_higher() {
-        let jd = JumpDef { range: 400.0, height: 200.0, speed: 6.0, reload: 300, max_depth: 22.0 };
+        let jd = JumpDef { range: 400.0, height: 200.0, speed: 6.0, reload: 300, delay: 0, max_depth: 22.0 };
         let near = Ai::jump_flight(jd, 100.0);
         let far = Ai::jump_flight(jd, 400.0);
         assert!(near < far);
         // A full Pyro-like jump takes a couple of seconds.
         assert!((60.0..120.0).contains(&far), "{far}");
+    }
+
+    #[test]
+    fn a_lead_jump_lands_where_its_target_will_be() {
+        // A Skuttle's jumps, at a Cyclops walking 1.9 elmos a frame.
+        let jd = JumpDef { range: 400.0, height: 120.0, speed: 6.0, reload: 300, delay: 0, max_depth: 15.0 };
+        let (from, at) = (Vec3::xz(0.0, 0.0), Vec3::xz(300.0, 0.0));
+        assert_eq!(Ai::jump_lead_point(jd, from, at, Vec3::default()), at);
+        for v in [Vec3::xz(-1.9, 0.0), Vec3::xz(1.9, 0.0), Vec3::xz(0.0, 1.9)] {
+            let to = Ai::jump_lead_point(jd, from, at, v);
+            let t = Ai::jump_time(jd, distance(from, to));
+            let there = Vec3::xz(at.x + v.x * t, at.z + v.z * t);
+            assert!(distance(to, there) < 2.0, "{to:?} vs {there:?}");
+        }
     }
 }

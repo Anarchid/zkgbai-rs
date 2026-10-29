@@ -45,7 +45,8 @@
 //! directly, twice a second, ahead of all else; a Widow 5 energy a second
 //! standing, 15 walking). So the game is asked to hold a few seconds of
 //! our scouts' upkeep back from all but high-priority spending (ZK's
-//! energy reserve, where the game takes it from AIs), and should the store
+//! energy reserve, where the game takes it from AIs; the jaegers' upkeep
+//! too, see `jaeger_upkeep`), and should the store
 //! run low all the same, scouts on the enemy's ground hold still, unless
 //! something comes at them.
 
@@ -334,8 +335,11 @@ impl Ai {
                 .and_then(|_| self.defs.get(name))
                 .map_or(0.0, |d| d.cloak_cost_moving())
         };
-        let upkeep =
-            self.scouts_upkeep() + ordered(self.scouts.ordered, WIDOW) + ordered(self.scouts.ordered_scythe, SCYTHE);
+        // (And the jaegers': hunters cloak too.)
+        let upkeep = self.scouts_upkeep()
+            + ordered(self.scouts.ordered, WIDOW)
+            + ordered(self.scouts.ordered_scythe, SCYTHE)
+            + self.jaeger_upkeep();
         let want = if upkeep > 0.0 { (RESERVE_SECONDS * upkeep).max(RESERVE_MIN).round() } else { 0.0 };
         if self.scouts.reserve > 0.0 && self.scouts.reserve_taken.is_none() {
             let held = self.cb.game().team_rules_param_float(self.team_id, "energyReserve", -1.0);
