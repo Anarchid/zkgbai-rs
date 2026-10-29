@@ -33,9 +33,11 @@ gate's value; distance from home and constructor travel reduce it sharply. The p
 turret sites by uncovered gate value per metal, including shared sites between gates, and checks
 range and terrain clearance at the centre and both edges of each front. Existing and queued
 defenses reserve each sample separately, so complementary coverage counts and saturated overlap
-earns no additional value. At most two built or queued Lotus range circles may share an area.
+earns no additional value. Built or queued Lotus range circles must not overlap.
 Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
-covers them; repeated checks of one request do not add credit. Planned upgrades reserve demand,
+covers them; when both have affordable, safe sites, a fair coin chooses the type, using its best
+site. Both become eligible at 25 metal income, subject to the pooled budget. Repeated checks of
+one request do not add credit. Planned upgrades reserve demand,
 and cancelled upgrades release it. Placement still requires a safe constructor route and, when
 posture is enabled, sufficient posture budget. Lower standing-metal density and a larger share
 of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount

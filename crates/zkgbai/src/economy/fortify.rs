@@ -475,7 +475,7 @@ impl Ai {
                         }
                     }
                     // The pooled-request planner spends this budget when
-                    // it can afford a larger turret; never a third Lotus.
+                    // it can afford a larger turret; never an overlapping Lotus.
                     continue;
                 }
                 let Some(travel) = self.eco_shared_site_travel(def, site) else { continue };
