@@ -17,21 +17,22 @@
 //! health, Skuttles when their blasts do, an Ultimatum any. A stunned heavy
 //! is the army's to kill (it paints no threat while stunned, and a defense
 //! target calls our squads), so stuns and Ultimatums go only where our army
-//! or ground is near, and none of them under enemy defenses but Skuttles,
-//! which die striking anyway. Widows that have fired go back to a haven
-//! until they are reloaded. Skuttles are too frail and slow to wait for
+//! or ground is near. Widows require extra support under enemy defenses;
+//! Ultimatums avoid them, while Skuttles die striking anyway. Widows that
+//! have fired go back to a haven until they are reloaded. Skuttles are too frail and slow to wait for
 //! their squad's strike where the enemy is about: each pounces on any heavy
 //! worth one within its jump, its squad's mark or not, even one its blast
 //! alone does not kill (feature `pounce`), and jumps where the heavy will
 //! be when it lands, by its velocity (feature `lead`).
 //!
 //! Hunters lie in wait rather than go after a heavy into the enemy's land
-//! (feature `ambush`; one out of it they go after, Widows only where our
-//! army is): its way over the ground is foreseen (a travel-time
+//! (feature `ambush`; supported Widows can join our army on either side
+//! of the lines): its way over the ground is foreseen (a travel-time
 //! field from it, as the QRF's, down to the asset of ours it heads for by
 //! the QRF mark's rule), and the squad waits beside the first point of it
 //! that it gets to, settled, before the heavy: out of enemy land and
-//! defenses and out of the enemy's sight now, and for Widows only where our
+//! out of the enemy's sight now, avoiding defenses unless supported Widows
+//! can take the opportunity, and for Widows only where our
 //! army can kill the heavy while it is stunned (a stun with nothing to
 //! finish it is wasted; they strike only there). Cloaked hunters keep out
 //! of sight of what moves (feature `dodge`): one that an enemy would
@@ -131,7 +132,7 @@ const AMBUSH_DETOUR: f32 = 1.3;
 const AMBUSH_STRIKE: f32 = 100.0;
 
 /// Our army can kill a stunned heavy where our power (see
-/// `get_total_friendly_power`: our units' metal and health over ten) is
+/// `get_total_friendly_power`: our units' weapon power and health over ten) is
 /// at least this share of the heavy's health over ten: a few units by it
 /// (1.0 kept Widows from ever striking against Circuit's tanks).
 const FINISH_SHARE: f32 = 0.25;
@@ -202,6 +203,12 @@ const KINDS: [Kind; 3] = [
         ambush: 0.0,
     },
 ];
+
+/// The friendly-power grid uses raw danger; porc threat is divided by 500.
+/// Reserve support for the defenses as well as for finishing the stunned heavy.
+fn widow_support_required(health: f32, porc_threat: f32) -> f32 {
+    FINISH_SHARE * health / 10.0 + 500.0 * porc_threat
+}
 
 fn kind_of(name: &str) -> Option<Kind> {
     KINDS.iter().copied().find(|k| k.name == name)
@@ -651,7 +658,7 @@ impl Ai {
                     || self.graph.is_ally_territory(p)
                     || army.iter().any(|&a| distance(a, p) <= SUPPORT_RANGE)
             };
-            if war.get_porc_threat(p) > 0.0 || !supported {
+            if self.jaeger_defenses_too_strong(kind, p, e.def_health()) || !supported {
                 return None;
             }
         }
@@ -716,9 +723,8 @@ impl Ai {
                         let health = self.war.targets.get(&t).map_or(0.0, |e| e.def_health());
                         // A stun with nothing about to finish the heavy is wasted.
                         let finished = !ambushing || !kind.stuns || self.jaeger_finishes(at, health);
-                        // After a heavy out of the enemy's land (where our
-                        // army is, for Widows) as ever; one beyond the
-                        // enemy's lines is waited for on its way instead.
+                        // Supported Widows may join a fight on either side
+                        // of the lines; other hunters wait beyond them.
                         let chase = !ambushing || (finished && (kind.stuns || !self.graph.is_enemy_territory(at)));
                         let ambush = if ambushing && !chase {
                             self.jaeger_ambush(sid, kind, t, pos, frame)
@@ -783,7 +789,12 @@ impl Ai {
                             self.jaeger_go(sid, haven, true);
                             Phase::Reloading
                         } else if frame - since > STRIKE_TIMEOUT
-                            || (!kind.suicide && self.war.get_porc_threat(at) > 0.0)
+                            || (!kind.suicide
+                                && self.jaeger_defenses_too_strong(
+                                    kind,
+                                    at,
+                                    self.war.targets.get(&t).map_or(0.0, |e| e.def_health()),
+                                ))
                         {
                             Phase::Hunting(None)
                         } else {
@@ -951,9 +962,15 @@ impl Ai {
     }
 
     /// Whether our army can kill a stunned heavy of `health` at `p` before
-    /// it wakes (see [`FINISH_SHARE`]).
+    /// it wakes (see [`FINISH_SHARE`]), with support to spare for defenses.
     fn jaeger_finishes(&self, p: Vec3, health: f32) -> bool {
-        self.war.get_total_friendly_power(p) >= FINISH_SHARE * health / 10.0
+        self.war.get_total_friendly_power(p) >= widow_support_required(health, self.war.get_porc_threat(p))
+    }
+
+    /// Widows need enough support for the heavy and the defenses covering it.
+    /// Other surviving hunters retain their static-defense veto.
+    fn jaeger_defenses_too_strong(&self, kind: Kind, p: Vec3, health: f32) -> bool {
+        self.war.get_porc_threat(p) > 0.0 && (!kind.stuns || !self.jaeger_finishes(p, health))
     }
 
     /// The way heavy `id` goes over the ground in the next [`WAY_HORIZON`]
@@ -1016,8 +1033,8 @@ impl Ai {
     /// A place for a squad of `kind` at `from` to lie in wait for heavy `t`:
     /// beside the first point of the heavy's way (see [`Ai::jaeger_way`])
     /// that the squad gets to, settled, before it, on the squad's side if
-    /// it can; out of the enemy's land and defenses and out of sight of the
-    /// enemy now, and for stuns where our army can finish the heavy. The
+    /// it can; out of the enemy's land and out of sight of the enemy now,
+    /// avoiding defenses unless Widows have support for them and the heavy. The
     /// `old` place is kept while the heavy still comes by it.
     fn jaeger_ambush_spot(&self, kind: Kind, from: Vec3, t: i32, old: Option<Ambush>, frame: i32) -> Option<Ambush> {
         let def = self.defs.get(kind.name)?;
@@ -1049,7 +1066,7 @@ impl Ai {
                 if !grid.passable(at, mobility)
                     || distance(from, at) * AMBUSH_DETOUR / speed + AMBUSH_SETTLE > eta
                     || self.graph.is_enemy_territory(at)
-                    || self.war.get_porc_threat(at) > 0.0
+                    || self.jaeger_defenses_too_strong(kind, at, health)
                     || self.war.get_scythe_threat(at) > 0.0
                     || !reaches(self.reach_terrain(), def, from, at, 100.0)
                 {
@@ -1260,6 +1277,16 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn static_defenses_raise_widow_support_in_the_same_units() {
+        // Cyclops: 300 support alone. One Lotus paints 86 raw power.
+        assert_eq!(widow_support_required(12000.0, 0.0), 300.0);
+        assert!((widow_support_required(12000.0, 0.172) - 386.0).abs() < 0.001);
+        assert!(402.0 >= widow_support_required(12000.0, 0.172));
+        assert!(402.0 < widow_support_required(12000.0, 3.0 * 0.172));
+        assert!(644.0 >= widow_support_required(12000.0, 3.0 * 0.172));
+    }
 
     #[test]
     fn squads_take_what_their_strikes_pass() {
