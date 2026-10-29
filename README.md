@@ -249,7 +249,8 @@ MCPL hosts get it as an image block). Calls run on the AI's thread at its next f
 answered while the game runs.
 
 Optional Lobster squad equipment is on by default (`lobsters`): amphib factories aim for one
-launcher per Grizzly. Squads gather briefly for a throw when a loaded launcher is nearby,
+launcher per full 2,500 metal of non-raider armed amphib units, including those under construction
+but excluding Lobsters themselves. Squads gather briefly for a throw when a loaded launcher is nearby,
 then continue normally while it reloads and catches up; a fresh launcher may take over.
 Use `feature name=lobsters off=true` to stop new production and cancel pending throws;
 `feature name=lobsters off=false` turns it back on. Flights already underway finish.

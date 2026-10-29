@@ -8,6 +8,7 @@ use crate::Ai;
 use crate::economy::Factory;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
+use crate::military::UnitClasses;
 use crate::military::roles::Role;
 use crate::military::scouts;
 use crate::military::stakeouts::{opens_with_scouts, stakeout_unit};
@@ -19,6 +20,24 @@ const FIREWALKER_COST: f32 = 900.0;
 const FIREWALKER_SKIRMS: f32 = 1200.0;
 const JUGGLENAUT_COST: f32 = 1700.0;
 const JUGGLENAUT_BRAWLERS: f32 = 3000.0;
+
+/// One optional launcher for each full block of non-raider amphib army.
+const METAL_PER_LOBSTER: f32 = 2500.0;
+
+fn lobster_target(amph_combat_value: f32) -> i32 {
+    (amph_combat_value / METAL_PER_LOBSTER).floor().max(0.0) as i32
+}
+
+/// Armed amphib roster members, including AA and fire support. Launchers
+/// never finance more launchers; raiders keep their independent movement.
+fn lobster_cargo(name: &str, armed: bool, classes: &UnitClasses) -> bool {
+    name.starts_with("amph")
+        && name != "amphlaunch"
+        && armed
+        && !classes.small_raiders.contains(name)
+        && !classes.medium_raiders.contains(name)
+        && !classes.solo_raiders.contains(name)
+}
 
 /// Early Constables (see `fac_wants_early_constable`): for this long, at
 /// least this many, one per this much metal income, at most this many.
@@ -84,10 +103,12 @@ pub struct FactoryManager {
     /// Metal value of our mobile anti-air (including unfinished ones).
     pub aa_value: f32,
 
+    /// Non-raider armed amphib metal, excluding Lobsters; includes nanoframes.
+    pub amph_combat_value: f32,
+
     // Unit counts by type (including unfinished units).
     pub num_aas: i32,
     pub num_erasers: i32,
-    pub num_grizzlies: i32,
     pub num_lobsters: i32,
     pub num_aspis: i32,
     pub num_warriors: i32,
@@ -172,8 +193,8 @@ impl FactoryManager {
             aa_value: 0.0,
             num_aas: 0,
             num_erasers: 0,
-            num_grizzlies: 0,
             num_lobsters: 0,
+            amph_combat_value: 0.0,
             num_aspis: 0,
             num_warriors: 0,
             num_zeus: 0,
@@ -223,7 +244,6 @@ impl FactoryManager {
             "cloakraid" => &mut self.num_glaives,
             "cloakheavyraid" => &mut self.num_scythes,
             "cloakjammer" => &mut self.num_erasers,
-            "amphassault" => &mut self.num_grizzlies,
             "amphlaunch" => &mut self.num_lobsters,
             "shieldraid" => &mut self.num_bandits,
             "shieldfelon" => &mut self.num_felons,
@@ -268,7 +288,10 @@ impl FactoryManager {
 
     /// Adjust the arty and assault metal values for a unit of type `name`
     /// costing `cost` appearing (`sign` = 1) or disappearing (`sign` = -1).
-    fn count_value(&mut self, name: &str, cost: f32, sign: f32) {
+    fn count_value(&mut self, name: &str, cost: f32, sign: f32, amph_combat: bool) {
+        if amph_combat {
+            self.amph_combat_value = (self.amph_combat_value + sign * cost).max(0.0);
+        }
         match name {
             "tankheavyarty" | "hoverarty" | "spidercrabe" | "amphassault" | "striderarty" => {
                 self.arty_value += sign * cost;
@@ -345,6 +368,11 @@ impl Ai {
         let name = self.defs.name(def);
         let cost = def.cost(self.metal);
         let is_com = self.defs.is_commander(def);
+        let amph_combat = lobster_cargo(
+            name,
+            def.speed() > 0.0 && def.is_able_to_attack() && !def.is_able_to_fly(),
+            &self.unit_classes,
+        );
         let fm = &mut self.fac;
 
         if name.contains("hub") {
@@ -392,7 +420,7 @@ impl Ai {
             }
         }
 
-        fm.count_value(name, cost, 1.0);
+        fm.count_value(name, cost, 1.0, amph_combat);
         fm.count_unit(name, 1);
         if matches!(
             name,
@@ -464,6 +492,11 @@ impl Ai {
             let cost = def.cost(self.metal);
             let is_aa = self.unit_classes.aas.contains(name);
             let is_com = self.defs.is_commander(def);
+            let amph_combat = lobster_cargo(
+                name,
+                def.speed() > 0.0 && def.is_able_to_attack() && !def.is_able_to_fly(),
+                &self.unit_classes,
+            );
             let fm = &mut self.fac;
 
             if name == "striderhub" {
@@ -492,7 +525,7 @@ impl Ai {
                 fm.army_value -= cost;
             }
 
-            fm.count_value(name, cost, -1.0);
+            fm.count_value(name, cost, -1.0, amph_combat);
             fm.count_unit(name, -1);
             if name == crate::military::puppies::PUPPY && fm.num_puppies > 0 {
                 fm.num_puppies -= 1;
@@ -1126,9 +1159,10 @@ impl Ai {
             return "amphaa";
         }
 
-        // Optional squad equipment, like Iris: one launcher per Grizzly,
-        // counting nanoframes too so multiple factories do not overproduce.
-        if !self.dev_off("lobsters") && !self.dev_off("jumps") && fm.num_lobsters < fm.num_grizzlies {
+        // Optional squad equipment, like Iris: one per 2500 metal of armed
+        // non-raider amphs, counting nanoframes across all factories.
+        if !self.dev_off("lobsters") && !self.dev_off("jumps") && fm.num_lobsters < lobster_target(fm.amph_combat_value)
+        {
             return "amphlaunch";
         }
 
@@ -1792,6 +1826,34 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lobsters_cover_each_full_2500_metal_of_amph_army() {
+        for (metal, launchers) in [(0.0, 0), (2499.0, 0), (2500.0, 1), (4999.0, 1), (5000.0, 2), (7500.0, 3)] {
+            assert_eq!(lobster_target(metal), launchers);
+        }
+        // Losses shrink the target; a replacement army restores it.
+        assert_eq!(lobster_target(5000.0 - 280.0), 1);
+        assert_eq!(lobster_target(5000.0 - 280.0 + 280.0), 2);
+    }
+
+    #[test]
+    fn lobster_budget_counts_non_raider_armed_amphs_but_never_launchers() {
+        let classes = UnitClasses::new();
+        for name in ["amphfloater", "amphimpulse", "amphriot", "amphsupport", "amphassault", "amphaa"] {
+            assert!(lobster_cargo(name, true, &classes), "{name}");
+        }
+        for (name, armed) in [
+            ("amphraid", true),
+            ("amphbomb", true),
+            ("amphlaunch", true),
+            ("amphcon", false),
+            ("amphtele", false),
+            ("cloakassault", true),
+        ] {
+            assert!(!lobster_cargo(name, armed, &classes), "{name}");
+        }
+    }
 
     /// Scouts of `cost` built from none, with `raiders` raiders.
     fn wave(cost: f32, raiders: usize) -> usize {
