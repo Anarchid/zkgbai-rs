@@ -82,8 +82,14 @@ pub fn role(ai: &Ai, u: Unit) -> &'static str {
     if ai.retreat_handler.is_retreating(id) {
         return "retreating";
     }
-    // Home defense (see `qrf`): its own teams, and squads moonlighting.
+    if ai.stakeouts.contains(id) {
+        return "stakeout";
+    }
+    // Home defense (see `qrf`): garrisons, its own teams, and squads moonlighting.
     if let Some(m) = ai.qrf.members.get(&id) {
+        if ai.qrf_floor_guard(m.team) {
+            return "garrison";
+        }
         match m.squad {
             None => return "qrf",
             Some(s) if ai.qrf.drafted.contains_key(&s) => return "qrf_moonlight",
