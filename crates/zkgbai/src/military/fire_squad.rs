@@ -56,7 +56,7 @@ impl FireState {
 
 /// Anti-unit long guns, including Firewalker but excluding siege artillery.
 /// Range alone would make a Sling or an Impaler the wrong kind of core.
-fn core_type(name: &str) -> bool {
+pub(crate) fn core_type(name: &str) -> bool {
     matches!(
         name,
         "cloakskirm"
@@ -111,9 +111,29 @@ struct Member {
     speed: f32,
 }
 
+impl Contact {
+    // The spacing margin is not a range advantage. Equal-range enemies
+    // can trade with us; they cannot kite our cores without taking fire.
+    fn outranges(&self, range: f32) -> bool {
+        !self.kiteable || self.range > range
+    }
+
+    fn exposure(&self, pos: Vec3, range: f32, front: f32) -> f32 {
+        let danger = self.range + MARGIN + front;
+        // Against guns we can answer, do not buy safety by walking out
+        // of our own firing envelope. This includes equal-range mirrors.
+        let danger = if self.outranges(range) { danger } else { danger.min(firing_distance(range)) };
+        self.value * ((danger - distance(self.pos, pos)) / danger.max(1.0)).max(0.0)
+    }
+}
+
+fn firing_distance(range: f32) -> f32 {
+    range - 75.0
+}
+
 fn outranged(contacts: &[Contact], range: f32, was_evading: bool) -> bool {
     let total: f32 = contacts.iter().map(|e| e.value).sum();
-    let long: f32 = contacts.iter().filter(|e| !e.kiteable || e.range + MARGIN >= range).map(|e| e.value).sum();
+    let long: f32 = contacts.iter().filter(|e| e.outranges(range)).map(|e| e.value).sum();
     total > 0.0 && long >= total * if was_evading { 0.20 } else { 0.30 }
 }
 
@@ -264,9 +284,7 @@ impl Ai {
         let out = outranged(&contacts, range, old.mode == Mode::Evade);
         // With no contact a newly formed squad still adopts ordinary
         // assault targeting; an existing line stays together in transit.
-        if !old.active()
-            && (contacts.is_empty() || (!out && !contacts.iter().any(|e| e.kiteable && e.range + MARGIN < range)))
-        {
+        if !old.active() && (contacts.is_empty() || (!out && !contacts.iter().any(|e| !e.outranges(range)))) {
             return false;
         }
         let health = members.iter().map(|m| m.value * m.health).sum::<f32>() / total.max(1.0);
@@ -280,7 +298,7 @@ impl Ai {
         let mode = choose_mode(old.mode, hurt, recovered, out, favorable, committed);
         let target = contacts
             .iter()
-            .filter(|e| e.kiteable && (mode != Mode::Kite || e.range + MARGIN < range))
+            .filter(|e| e.kiteable && (mode != Mode::Kite || !e.outranges(range)))
             .min_by(|a, b| distance(a.pos, anchor).total_cmp(&distance(b.pos, anchor)))
             .copied();
         let target = if mode == Mode::Commit && committed {
@@ -295,7 +313,7 @@ impl Ai {
             // also accounts for guns on our flanks and behind us.
             let danger = contacts
                 .iter()
-                .filter(|e| !e.kiteable || e.range + MARGIN >= range)
+                .filter(|e| e.outranges(range))
                 .min_by(|a, b| distance(a.pos, anchor).total_cmp(&distance(b.pos, anchor)));
             danger.map_or_else(
                 || self.graph_get_closest_haven(anchor),
@@ -307,8 +325,8 @@ impl Ai {
             } else {
                 let d = distance(e.pos, anchor).max(1.0);
                 Vec3::xz(
-                    e.pos.x + (anchor.x - e.pos.x) / d * (range - 75.0),
-                    e.pos.z + (anchor.z - e.pos.z) / d * (range - 75.0),
+                    e.pos.x + (anchor.x - e.pos.x) / d * firing_distance(range),
+                    e.pos.z + (anchor.z - e.pos.z) / d * firing_distance(range),
                 )
             }
         } else {
@@ -357,15 +375,7 @@ impl Ai {
             next = anchor;
         }
         if matches!(mode, Mode::Kite | Mode::Evade) && !contacts.is_empty() {
-            let exposure = |p: Vec3| {
-                contacts
-                    .iter()
-                    .map(|e| {
-                        e.value
-                            * ((e.range + MARGIN + front - distance(e.pos, p)) / (e.range + MARGIN).max(1.0)).max(0.0)
-                    })
-                    .sum::<f32>()
-            };
+            let exposure = |p: Vec3| contacts.iter().map(|e| e.exposure(p, range, front)).sum::<f32>();
             let score = |p: Vec3| exposure(p) * 20.0 + distance(p, next);
             let mut best = anchor;
             let mut best_score = score(best);
@@ -459,6 +469,33 @@ mod tests {
         assert!(!outranged(&es, 600.0, false));
         assert!(outranged(&es, 600.0, true));
     }
+    #[test]
+    fn equal_range_trades_instead_of_evading_even_after_a_longer_threat_leaves() {
+        let mirror = Contact { id: 1, pos: Vec3::ZERO, range: 570.0, value: 1000.0, kiteable: true };
+        for was_evading in [false, true] {
+            assert!(!outranged(&[mirror], 570.0, was_evading));
+            assert!(!outranged(&[Contact { range: 540.0, ..mirror }], 570.0, was_evading));
+            assert!(outranged(&[Contact { range: 620.0, ..mirror }], 570.0, was_evading));
+        }
+        assert_eq!(choose_mode(Mode::Evade, false, true, false, false, false), Mode::Kite);
+        // The same predicate admits a mirror as a firing target. A blind
+        // spot (e.g. aircraft our guns cannot hit) still demands evasion.
+        assert!(!mirror.outranges(570.0));
+        assert!(Contact { kiteable: false, ..mirror }.outranges(570.0));
+    }
+
+    #[test]
+    fn equal_range_movement_prefers_firing_distance_over_yielding_ground() {
+        let enemy = Contact { id: 1, pos: Vec3::ZERO, range: 570.0, value: 1000.0, kiteable: true };
+        let next = Vec3::xz(firing_distance(570.0), 0.0);
+        let score = |p| enemy.exposure(p, 570.0, 100.0) * 20.0 + distance(p, next);
+        assert_eq!(enemy.exposure(next, 570.0, 100.0), 0.0);
+        assert!(score(next) < score(Vec3::xz(570.0, 0.0)));
+        assert!(score(next) < score(Vec3::xz(700.0, 0.0)));
+        assert!(enemy.exposure(Vec3::xz(300.0, 0.0), 570.0, 100.0) > 0.0);
+        assert!(Contact { range: 900.0, ..enemy }.exposure(next, 570.0, 100.0) > 0.0);
+    }
+
     #[test]
     fn commitment_finishes_before_collective_recovery() {
         assert_eq!(choose_mode(Mode::Kite, false, true, true, false, false), Mode::Evade);

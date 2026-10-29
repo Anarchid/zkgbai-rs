@@ -11,6 +11,7 @@ use springai::{Unit, UnitDef, Vec3};
 use zk_terrain::Tier;
 
 use crate::Ai;
+use crate::military::fire_squad::{self, Mode as FireMode};
 use crate::military::taskforce::{self, Aim};
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
@@ -81,6 +82,15 @@ impl Slot {
         }
     }
 
+    fn for_assault(name: &str, firesquads: bool) -> Slot {
+        // Recluses used to form alone. Fire teams need their Venoms and
+        // Redbacks in the same forming squad, as other factories do.
+        match Self::for_name(name) {
+            Self::Recluse if firesquads => Self::Spider,
+            slot => slot,
+        }
+    }
+
     fn is_air(self) -> bool {
         matches!(self, Slot::Brawler | Slot::Air)
     }
@@ -110,6 +120,27 @@ fn doctrine_role_spots(tf: &taskforce::Taskforces, doctrine: Option<&str>, role:
 /// following a leader of either goes: amphibious bots with bots).
 fn same_ways(a: Option<Tier>, b: Option<Tier>) -> bool {
     a == b || matches!((a, b), (Some(Tier::Bot), Some(Tier::Amphib)) | (Some(Tier::Amphib), Some(Tier::Bot)))
+}
+
+fn fire_escort(name: &str) -> bool {
+    matches!(
+        name,
+        "cloakriot"
+            | "amphriot"
+            | "amphimpulse"
+            | "vehriot"
+            | "hoverriot"
+            | "spiderriot"
+            | "spideremp"
+            | "tankriot"
+            | "shipriot"
+    )
+}
+
+fn escort_room(cores: f32, total: f32, extra: f32, distance: f32) -> bool {
+    // Keep the stronger entry majority, so a screen cannot make the
+    // squad stop being a fire team. Only assimilate nearby units.
+    cores > 0.0 && cores >= (total + extra) * 0.55 && distance <= 600.0
 }
 
 /// A force of a core's doctrine, as the core sees it.
@@ -230,6 +261,96 @@ impl Ai {
                 }
             }
         }
+        self.squad_recruit_fire_escorts();
+    }
+
+    /// Nearby riots from ordinary assault squads can fill a fire team's
+    /// screen after it forms. Do not split another skirmisher force or
+    /// commandeer doctrine, home-defense, retreating or operator-led units.
+    fn squad_recruit_fire_escorts(&mut self) {
+        if self.dev_off("firesquads") {
+            return;
+        }
+        let autonomous = |sid| {
+            !self.qrf_drafted(sid)
+                && self.op_squad_target(sid).is_none()
+                && !self.op.over.squad_intents.contains_key(&sid)
+        };
+        let teams: Vec<_> = self
+            .squad_handler
+            .squads
+            .iter()
+            .copied()
+            .filter(|&sid| {
+                autonomous(sid)
+                    && self.squads.get(sid).is_some_and(|s| {
+                        s.kind == SquadKind::Assault && s.status == 'a' && s.fire.mode == FireMode::Kite
+                    })
+            })
+            .collect();
+        if teams.is_empty() {
+            return;
+        }
+        let escorts: Vec<_> = self
+            .squad_handler
+            .fighters
+            .iter()
+            .copied()
+            .filter(|id| {
+                let Some(f) = self.fighters.get(id) else { return false };
+                if f.is_dead() || self.retreat_handler.is_retreating(*id) || !fire_escort(self.defs.name_of(f.unit)) {
+                    return false;
+                }
+                f.squad.is_some_and(|sid| {
+                    autonomous(sid)
+                        && self.squads.get(sid).is_some_and(|s| {
+                            s.kind == SquadKind::Assault
+                                && !s.fire.active()
+                                && s.fighters.iter().all(|m| {
+                                    self.fighters
+                                        .get(m)
+                                        .is_none_or(|f| !fire_squad::core_type(self.defs.name_of(f.unit)))
+                                })
+                        })
+                })
+            })
+            .collect();
+        for id in escorts {
+            let Some(f) = self.fighters.get(&id) else { continue };
+            let unit = f.unit;
+            let metal = f.metal_value;
+            let pos = unit.pos();
+            let target = teams
+                .iter()
+                .filter_map(|&sid| {
+                    let s = self.squads.get(sid)?;
+                    let cores: f32 = s
+                        .fire
+                        .cores
+                        .iter()
+                        .filter_map(|id| self.fighters.get(id))
+                        .filter(|f| !f.is_dead() && !self.retreat_handler.is_retreating(f.id))
+                        .map(|f| f.metal_value)
+                        .sum();
+                    let at = s.get_pos(&self.fighters);
+                    if !escort_room(cores, s.metal_value, metal, distance(pos, at)) || !self.squad_fits(sid, id) {
+                        return None;
+                    }
+                    let nav = nav!(self);
+                    nav.pathfinder
+                        .is_reachable(nav.war, unit, at, crate::kgbutil::PathCost::AssaultPath)
+                        .then_some((sid, distance(pos, at)))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|x| x.0);
+            if let Some(sid) = target {
+                self.squad_leave_squad(id);
+                let mut nav = nav!(self);
+                if let Some(s) = self.squads.get_mut(sid) {
+                    s.add_unit_nav(id, &mut self.fighters, &mut nav);
+                }
+            }
+        }
     }
 
     fn squad_delete_fighter(&mut self, id: i32) {
@@ -292,7 +413,7 @@ impl Ai {
 
     fn squad_assign_assault(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
-        let slot = Slot::for_name(self.defs.name_of(unit));
+        let slot = Slot::for_assault(self.defs.name_of(unit), !self.dev_off("firesquads"));
         let key = (slot, unit.def().and_then(tier_of));
         let tf = self.graph.territory_fraction;
         let inc = self.eco.effective_income;
@@ -1154,6 +1275,27 @@ mod tests {
         assert_eq!(Slot::for_name("gunshipheavyskirm"), Slot::Brawler);
         assert_eq!(Slot::for_name("gunshipassault"), Slot::Air);
         assert!(Slot::Air.is_air() && Slot::Brawler.is_air() && !Slot::Halberd.is_air());
+    }
+
+    #[test]
+    fn fire_squads_form_with_their_riot_screen_only_when_enabled() {
+        for screen in ["spideremp", "spiderriot", "spiderassault"] {
+            assert_eq!(Slot::for_assault("spiderskirm", true), Slot::for_assault(screen, true));
+            assert_ne!(Slot::for_assault("spiderskirm", false), Slot::for_assault(screen, false));
+        }
+        for (core, screen) in [("cloakskirm", "cloakriot"), ("hoverskirm", "hoverriot"), ("amphfloater", "amphriot")] {
+            assert_eq!(Slot::for_assault(core, true), Slot::for_assault(screen, true));
+        }
+    }
+
+    #[test]
+    fn local_riot_reinforcements_preserve_a_skirmisher_majority() {
+        assert!(fire_escort("spideremp") && fire_escort("spiderriot"));
+        assert!(!fire_escort("spiderskirm") && !fire_escort("cloakarty"));
+        assert!(escort_room(1000.0, 1200.0, 400.0, 400.0));
+        assert!(!escort_room(1000.0, 1600.0, 400.0, 400.0));
+        assert!(!escort_room(1000.0, 1200.0, 400.0, 900.0));
+        assert!(!escort_room(0.0, 1000.0, 100.0, 100.0));
     }
 
     #[test]
