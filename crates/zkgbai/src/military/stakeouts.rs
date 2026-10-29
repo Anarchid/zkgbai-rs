@@ -34,6 +34,9 @@
 //!   flip-flop at the rim of a threat disc.
 //! - **Sortie.** A defenceless constructor or mex in sight with no enemy
 //!   fire about is killed, then the picket goes back to its post.
+//! - **Home.** Parked within a Lotus's range of one of our finished
+//!   buildings, a picket joins the QRF if a raider or scout is nearby;
+//!   otherwise it leaves its old assignment and looks farther out.
 //!
 //! A picket that cloaks standing still (the Flea) moves only when an enemy
 //! would come within its decloak radius, or within its reach: moving, it
@@ -306,6 +309,10 @@ struct Stats {
 pub struct Stakeouts {
     members: BTreeMap<i32, Stakeout>,
     pub posts: Vec<Post>,
+    /// Finished buildings of ours, refreshed once a second, and a Lotus's
+    /// weapon range: stakeouts belong beyond this part of home.
+    home: Vec<Vec3>,
+    home_range: f32,
     /// Strategy frame the posts were planned from.
     posts_frame: i32,
     losses: VecDeque<i32>,
@@ -315,6 +322,10 @@ pub struct Stakeouts {
 }
 
 impl Stakeouts {
+    fn near_home(&self, p: Vec3) -> bool {
+        self.home.iter().any(|&s| distance(p, s) <= self.home_range)
+    }
+
     pub fn count(&self) -> usize {
         self.members.len()
     }
@@ -333,7 +344,7 @@ impl Stakeouts {
 
     /// Stakeouts wanted in all: a picket per post and the lookers.
     fn wanted(&self, frame: i32) -> usize {
-        self.posts.len().min(MAX_POSTS) + Self::lookers_wanted(frame)
+        self.posts.iter().filter(|post| !self.near_home(post.pos)).count().min(MAX_POSTS) + Self::lookers_wanted(frame)
     }
 
     /// Whether [`LOSS_CAP`] pickets died within [`LOSS_RECALL`]. (The
@@ -582,6 +593,11 @@ impl Ai {
         // Posts are planned before any scout exists: the factory builds
         // for them.
         if frame % 30 == (self.offset + 11) % 30 {
+            self.stakeouts.home_range = self.defs.get("turretlaser").map_or(460.0, |d| d.max_weapon_range());
+            self.stakeouts.home = (self.cb.team_units().into_iter())
+                .filter(|u| !u.is_being_built() && u.def().is_some_and(|d| d.speed() <= 0.0))
+                .map(|u| u.pos())
+                .collect();
             self.stakeouts_plan_posts(frame);
         }
         if self.stakeouts.members.is_empty() {
@@ -657,15 +673,18 @@ impl Ai {
                 covers.iter().filter(|(c, _)| !kept.contains(c)).map(|(&c, &n)| (c, n)).collect();
             rest.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
             chosen.extend(rest);
-            chosen.truncate(MAX_POSTS);
 
             let elevation = self.cb.map();
             let posts: Vec<(usize, usize, Vec3, f32)> = (chosen.into_iter())
                 .filter_map(|(c, n)| {
                     let home = a.home_side(map, c)?;
                     let p = post_position(map, c, home);
+                    if self.stakeouts.near_home(Vec3::xz(p.x, p.z)) {
+                        return None;
+                    }
                     Some((c, n, Vec3::new(p.x, elevation.elevation_at(p.x, p.z), p.z), map.chokes[c].width))
                 })
+                .take(MAX_POSTS)
                 .collect();
             (strategy.frame, posts)
         };
@@ -720,15 +739,52 @@ impl Ai {
             self.stakeouts_remove_unit(m.f.unit, None);
             return;
         }
-        let (unit, p, sight, speed, def, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.speed, m.def, m.duty);
+        let (unit, p, sight, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.duty);
         let (cloaks, look, bogey, armed_self) = (m.cloaks.then_some(m.decloak), m.look, m.bogey, m.armed);
+        let (standing, spooked) = (m.standing, frame < m.spooked_until);
         // Running, or pulled home for repairs (see `retreat`).
         if frame < m.fleeing_until || self.retreat_is_retreating(unit) {
             return;
         }
+        if standing && self.stakeouts.near_home(p) {
+            let raid = self.war.targets.values().any(|e| {
+                !e.is_dead
+                    && !e.is_static
+                    && !e.can_fly()
+                    && e.is_raider
+                    && frame - e.last_seen <= RECENT
+                    && distance(p, e.position) <= sight
+            });
+            if raid
+                && self.qrf.on
+                && self.qrf.live
+                && !self.dev_off("qrf")
+                && let Some(team) = self.qrf_draft_units(&[unit])
+            {
+                self.op_emit("stakeout", json!({"event": "qrf", "t": frame / 30, "unit": id, "team": team}));
+                return;
+            }
+            if !raid {
+                if let Some(m) = self.stakeouts.members.get_mut(&id) {
+                    if let Some(post) = m.post.take().and_then(|i| self.stakeouts.posts.get_mut(i)) {
+                        post.manned = None;
+                    }
+                    m.duty = Duty::Look;
+                    m.look = None;
+                    m.bogey = None;
+                    m.sortie = None;
+                    m.step_to = None;
+                    m.standing = false;
+                }
+                // Go straight to a fresh assignment: an unrelated enemy
+                // must not put us back into the old shadowing hold.
+                self.stakeouts_assign(id, frame);
+                self.stakeouts_go(id, frame);
+                return;
+            }
+        }
         // One that cannot cloak holds what it sees at the edge of its sight,
         // and so does a spooked one that can (counting on no cloak).
-        let spooked = frame < m.spooked_until;
         let holds = (cloaks.is_none() && !self.dev_off("edgehold")) || spooked;
         let cloaks = cloaks.filter(|_| !spooked);
         let wary = !self.dev_off("spook");
@@ -823,7 +879,12 @@ impl Ai {
         }
 
         self.stakeouts_assign(id, frame);
+        self.stakeouts_go(id, frame);
+    }
+
+    fn stakeouts_go(&mut self, id: i32, frame: i32) {
         let Some(m) = self.stakeouts.members.get(&id) else { return };
+        let (unit, p, speed, def) = (m.f.unit, m.f.get_pos(), m.speed, m.def);
         let (duty, standing, post) =
             (m.duty, m.standing, m.post.and_then(|i| self.stakeouts.posts.get(i)).map(|p| p.pos));
         match duty {
@@ -866,6 +927,7 @@ impl Ai {
         let Some(m) = self.stakeouts.members.get(&id) else { return };
         if m.duty == Duty::Post
             && m.post.is_some_and(|i| self.stakeouts.posts.get(i).is_some_and(|p| p.manned == Some(id)))
+            && m.post.is_some_and(|i| !self.stakeouts.near_home(self.stakeouts.posts[i].pos))
         {
             return;
         }
@@ -874,6 +936,7 @@ impl Ai {
         let want_post = lookers >= Stakeouts::lookers_wanted(frame);
         let post = if want_post {
             (self.stakeouts.posts.iter().enumerate())
+                .filter(|(_, post)| !self.stakeouts.near_home(post.pos))
                 .filter(|(_, post)| post.manned.is_none_or(|u| !self.stakeouts.members.contains_key(&u)))
                 .filter(|(_, post)| self.terrain_reaches(def, p, post.pos, SNAP))
                 .min_by(|a, b| distance(p, a.1.pos).total_cmp(&distance(p, b.1.pos)))
@@ -1125,7 +1188,12 @@ impl Ai {
         // stale as can be, so the opening lookers go at once.
         let age = |i: usize| if spots[i].last_seen <= 0 { i32::MAX / 2 } else { frame - spots[i].last_seen };
         // Keep the spot we are going to until it is fresh.
-        let current = self.stakeouts.members.get(&id).and_then(|m| m.look);
+        let current = self
+            .stakeouts
+            .members
+            .get(&id)
+            .and_then(|m| m.look)
+            .filter(|&i| !self.stakeouts.near_home(spots[i].position));
         let shunned_now = |i: usize| self.stakeouts.shunned.get(&i).is_some_and(|&until| until > frame);
         if let Some(i) = current.filter(|&i| pool.contains(&i) && age(i) > FRESH && !shunned_now(i)) {
             return Some(i);
@@ -1137,7 +1205,7 @@ impl Ai {
         let mut best: Option<(usize, f32)> = None;
         for &i in &pool {
             let s = &spots[i];
-            if age(i) <= FRESH || taken.contains(&i) || shunned(i) {
+            if age(i) <= FRESH || taken.contains(&i) || shunned(i) || self.stakeouts.near_home(s.position) {
                 continue;
             }
             if self.war.get_porc_threat(s.position) > 0.0 || !self.terrain_reaches(def, p, s.position, SNAP) {
@@ -1215,6 +1283,32 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_radius_includes_the_edge_and_ignores_height() {
+        let mut s = Stakeouts { home_range: 460.0, ..Default::default() };
+        assert!(!s.near_home(Vec3::ZERO));
+        s.home = vec![Vec3::new(1000.0, 1000.0, 1000.0), Vec3::xz(3000.0, 3000.0)];
+        assert!(s.near_home(Vec3::xz(1460.0, 1000.0)));
+        assert!(!s.near_home(Vec3::xz(1461.0, 1000.0)));
+        assert!(!s.near_home(Vec3::xz(1460.0, 1460.0)));
+        assert!(s.near_home(Vec3::xz(3000.0, 3460.0)));
+    }
+
+    #[test]
+    fn interior_posts_do_not_request_replacement_pickets() {
+        let s = Stakeouts {
+            home: vec![Vec3::ZERO],
+            home_range: 460.0,
+            posts: vec![
+                Post { choke: 0, pos: Vec3::xz(460.0, 0.0), covers: 1, width: 300.0, manned: None },
+                Post { choke: 1, pos: Vec3::xz(461.0, 0.0), covers: 1, width: 300.0, manned: None },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(s.wanted(0), LOOKERS_EARLY + 1);
+        assert_eq!(s.wanted(LOOK_UNTIL), LOOKERS_LATE + 1);
+    }
 
     #[test]
     fn wanted_counts_posts_and_lookers() {

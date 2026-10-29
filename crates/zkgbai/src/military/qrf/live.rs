@@ -859,6 +859,8 @@ impl Ai {
                 continue;
             }
             springai::reserved::release(self.cb, u.id());
+            self.stakeouts_forget(u);
+            self.role_left_stakeouts(u.id());
             self.raider_remove_unit(u);
             self.squad_remove_unit(u);
             self.misc_remove_unit(u);
