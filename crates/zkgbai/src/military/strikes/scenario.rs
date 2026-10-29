@@ -29,7 +29,10 @@ impl Ai {
         if test == "assassin-support" {
             for (i, name) in ["veharty", "jumparty", "staticmissilesilo", "napalmmissile"].into_iter().enumerate() {
                 if let Some(def) = self.defs.get(name) {
-                    let at = Vec3::xz(center.x + i as f32 * 100.0, center.z - 600.0);
+                    // Keep the Firewalker comfortably in range even if its
+                    // normal artillery handler moves before the strike tick.
+                    let z = if name == "jumparty" { center.z - 300.0 } else { center.z - 600.0 };
+                    let at = Vec3::xz(center.x + i as f32 * 100.0, z);
                     if let Some(u) = self.cb.cheat_new_unit(def, at) {
                         self.war_unit_finished(u);
                         self.war_unit_idle(u);
