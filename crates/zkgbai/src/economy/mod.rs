@@ -12,6 +12,7 @@ pub mod grid;
 mod lotus;
 mod planning;
 mod silo;
+mod sparrow;
 pub mod tasks;
 pub mod terraform;
 mod watchtower;
@@ -42,6 +43,8 @@ pub(super) const SITE_SLACK: f32 = 25.0;
 pub struct EconomyManager {
     cb: Callback,
     pub sparrow: Option<Unit>,
+    /// A radar built solely to morph into a Sparrow; never a coverage job.
+    sparrow_radar_task: Option<TaskId>,
     pub effective_income_metal: f32,
     pub static_income: f32,
     pub reclaim_income: f32,
@@ -277,6 +280,7 @@ impl EconomyManager {
         EconomyManager {
             cb,
             sparrow: None,
+            sparrow_radar_task: None,
             effective_income_metal: 0.0,
             static_income: 0.0,
             reclaim_income: 0.0,
@@ -485,6 +489,9 @@ impl EconomyManager {
 
     /// Destroy a task: remaining workers end it, and it leaves every list.
     fn delete_task(&mut self, id: TaskId) {
+        if self.sparrow_radar_task == Some(id) {
+            self.sparrow_radar_task = None;
+        }
         if let Some(task) = self.tasks.remove(id) {
             for w in &task.assigned_workers {
                 if let Some(worker) = self.workers.get_mut(w) {
@@ -771,7 +778,7 @@ impl Ai {
             self.eco.terraform_hold.retain(|_, &mut until| until > frame);
 
             if self.eco.effective_income > 30.0 && self.eco.sparrow.is_none() && !self.eco.has_planes {
-                self.eco_morph_sparrow();
+                self.eco_plan_sparrow();
             }
 
             /*if !self.eco.morphed_coms && self.eco.adjusted_income > 20.0 {
@@ -1192,6 +1199,11 @@ impl Ai {
             }
         }
         if let Some(id) = finished {
+            if def_name == "staticradar"
+                && let Some(scout) = self.defs.get("planelightscout")
+            {
+                self.eco.morph_sparrow_radar(id, unit, scout);
+            }
             if def_name == "staticcon" {
                 let ct_target = self.eco.tasks.get(id).and_then(|t| t.as_construction()).and_then(|c| c.ct_target);
                 match ct_target {
@@ -1319,7 +1331,10 @@ impl Ai {
                     break;
                 }
             }
-        } else if self.eco.sparrow == Some(unit) && unit.rules_param_float("wasMorphedTo", 0.0) == 0.0 {
+        }
+        // A Sparrow still morphing is a static radar. Its death must also
+        // release the slot; a successful morph replaces it with the plane.
+        if self.eco.sparrow == Some(unit) && unit.rules_param_float("wasMorphedTo", 0.0) == 0.0 {
             self.eco.sparrow = None;
         }
 

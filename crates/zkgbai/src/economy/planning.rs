@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
-use super::{List, Nanotower, TaskId, WorkerTask, erase_one};
+use super::{List, Nanotower, TaskId, WorkerTask};
 use crate::Ai;
 use crate::defs::cmd;
 use crate::military::nukes;
@@ -2450,36 +2450,6 @@ impl Ai {
             u.execute_custom_command(cmd::MISC_PRIORITY, &[3.0], 0, NO_TIMEOUT);
         }
         self.eco.morphed_coms = true;
-    }
-
-    pub(super) fn eco_morph_sparrow(&mut self) {
-        if self.fac.factories.is_empty() || self.eco.radars.is_empty() {
-            return;
-        }
-        // find the most useless radar and turn it into a sparrow
-        let mut best: Option<Unit> = None;
-        let mut bestdist = 65535.0;
-        for &r in &self.eco.radars {
-            if r.health() <= 0.0 || r.team() != self.team_id {
-                continue;
-            }
-            let rpos = r.pos();
-            let Some(f) = self.eco_get_nearest_fac(rpos) else {
-                continue;
-            };
-            let tmpdist = distance(f.get_pos(), rpos);
-            if tmpdist < bestdist {
-                bestdist = tmpdist;
-                best = Some(r);
-            }
-        }
-        let (Some(best), Some(scout)) = (best, self.defs.get("planelightscout")) else {
-            return;
-        };
-        self.eco.sparrow = Some(best);
-        erase_one(&mut self.eco.radars, &best);
-        best.execute_custom_command(cmd::MORPH, &[scout.id() as f32], 0, NO_TIMEOUT);
-        best.execute_custom_command(cmd::MISC_PRIORITY, &[3.0], 0, NO_TIMEOUT); // low prio, cause sparrows are freaking expensive.
     }
 
     fn eco_create_energy_task(&mut self, wid: i32, worker_pos: Vec3) {
