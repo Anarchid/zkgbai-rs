@@ -96,7 +96,8 @@ targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
 that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are
 worth.
-Ordinary ground assault squads automatically adopt fire-squad tactics when anti-unit skirmishers
+With `enable=firesquads` (or `ZKGBAI_ENABLE=firesquads`), ordinary ground assault squads
+automatically adopt fire-squad tactics when anti-unit skirmishers
 supply at least 55% of their metal (45% to remain in that mode). The longest range supported by
 that share defines the cores; other units screen them in a paced formation. Firewalker joins
 jumpbot assault squads; siege artillery such as Sling and Impaler cannot be cores. Against a
@@ -106,10 +107,12 @@ The prediction uses the squad alone, expects at least 15% more enemy metal lost 
 metal. A commitment suppresses individual retreats until its attack window ends or its target
 is gone. Outside that window, collective health below 60% or a core below 40% sends the whole
 formation for repairs; it returns above 85% collective health and 80% for every core.
+Fire squads are disabled by default; without the switch, Firewalker keeps its artillery role.
 `disable=firesquads` restores ordinary assault conduct. Fire-squad predictions run independently
 of the experimental `fightsim` switch for ordinary danger checks. The `squads` operator response
-exposes each squad's fire mode, cores, range and focus; mode changes appear as `firesquad` journal
-records. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
+labels active formations `fireteam` and exposes their tactic, cores, range and focus; mode changes appear as `firesquad` journal
+records. The dashboard, map labels, HUD and in-game operator widget show the fireteam label
+and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
 
 Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
 on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.

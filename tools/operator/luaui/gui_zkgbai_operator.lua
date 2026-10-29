@@ -1610,7 +1610,7 @@ local function drawWorld(inst)
 					end)
 				end
 				if cameraNear(x, z, 4500) then
-					worldText(format("S%d %s %s", q[1], q[2], q[3]), x, y + r * 0.6 + 30, z, 22, ACCENT)
+					worldText(format("S%d %s %s", q[1], q[2], type(q[10]) == "string" and q[10] or q[3]), x, y + r * 0.6 + 30, z, 22, ACCENT)
 				end
 			end
 		end

@@ -1,7 +1,7 @@
 //! Organic fire squads. Ordinary assault squads keep their membership and
 //! production, but a majority of anti-unit skirmishers can fight as a line:
 //! long guns behind a screen, a common pace, and one retreat decision.
-//! `disable=firesquads` restores ordinary assault conduct. The predictor's
+//! Opt in with `enable=firesquads`; disabled by default. The predictor's
 //! mechanics model approves commitments; missing answers mean evade.
 
 use serde_json::json;
@@ -34,6 +34,18 @@ pub struct FireState {
     pub range: f32,
     pub commit_until: i32,
     pub focus: Option<i32>,
+}
+
+impl Mode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Assault => "assault",
+            Self::Kite => "kiting",
+            Self::Evade => "evading",
+            Self::Commit => "committing",
+            Self::Recover => "recovering",
+        }
+    }
 }
 
 impl FireState {

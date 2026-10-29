@@ -8,7 +8,7 @@ use springai::{Resource, Unit, UnitDef, Vec3, reserved};
 use super::tools::Args;
 use crate::Ai;
 use crate::economy::{TaskKind, WorkerTask};
-use crate::military::{Enemy, MilitaryManager, SquadKind};
+use crate::military::{Enemy, MilitaryManager, Squad, SquadKind};
 use crate::util::NULLPOS;
 use zk_terrain::{CELL, ChokeKind, Tier};
 
@@ -53,6 +53,15 @@ fn squad_kind(k: SquadKind) -> &'static str {
         SquadKind::Hover => "hover",
         SquadKind::Jaeger => "jaeger",
     }
+}
+
+/// Display the adopted tactic without changing the squad's structural kind.
+pub(super) fn squad_label(s: &Squad) -> &'static str {
+    if squad_tactic(s).is_some() { "fireteam" } else { squad_kind(s.kind) }
+}
+
+pub(super) fn squad_tactic(s: &Squad) -> Option<&'static str> {
+    (s.kind == SquadKind::Assault && s.status == 'a' && s.fire.active()).then(|| s.fire.mode.name())
 }
 
 fn squad_status(c: char) -> &'static str {
@@ -529,6 +538,8 @@ pub fn squads(ai: &mut Ai, _: &Args) -> Out {
             json!({
                 "id": s.id,
                 "kind": squad_kind(s.kind),
+                "label": squad_label(s),
+                "tactic": squad_tactic(s),
                 "air": s.is_air_squad,
                 "status": squad_status(s.status),
                 "pos": opt_xz(s.get_pos(&ai.fighters)),
@@ -537,7 +548,7 @@ pub fn squads(ai: &mut Ai, _: &Args) -> Out {
                 "value": r1(s.metal_value),
                 "members": members,
                 "courage": r2(s.courage),
-                "fire": {"mode":format!("{:?}",s.fire.mode),"cores":s.fire.cores,"range":s.fire.range,"focus":s.fire.focus},
+                "fire": {"mode":s.fire.mode.name(),"cores":s.fire.cores,"range":s.fire.range,"focus":s.fire.focus},
                 "operator_target": ai.op_squad_target(s.id).map(xz),
                 "intent": ai.op.over.squad_intents.get(&s.id).map(|i| json!({"kind": i.kind.name(), "pos": xz(i.pos), "radius": r1(i.radius), "unit": i.unit, "seconds_left": (i.until - ai.frame) / 30})),
                 "block": ai.incursions.orders.get(&s.id).map(|b| xz(b.pos)),
@@ -1160,14 +1171,15 @@ pub fn snapshot_value(ai: &Ai) -> Value {
             let t = ai.op_squad_target(s.id).unwrap_or(s.target);
             json!([
                 s.id,
-                squad_kind(s.kind),
+                squad_label(s),
                 squad_status(s.status),
                 p.x.round() as i32,
                 p.z.round() as i32,
                 t.x.round() as i32,
                 t.z.round() as i32,
                 s.fighters.len(),
-                s.metal_value.round() as i32
+                s.metal_value.round() as i32,
+                squad_tactic(s)
             ])
         })
         .collect();
@@ -1211,7 +1223,7 @@ pub fn snapshot_value(ai: &Ai) -> Value {
             "units": ["id", "def", "x", "z", "health%", "role", "squad", "intent [x, z, what] or null"],
             "enemies": ["id", "def", "x", "z", "frames since seen", "flags", "value", "threat radius"],
             "enemy_flags": ["visible", "radar", "static", "porc", "mex", "com", "worker", "aa", "air", "identified"],
-            "squads": ["id", "kind", "status", "x", "z", "target x", "target z", "members", "value"],
+            "squads": ["id", "label", "status", "x", "z", "target x", "target z", "members", "value", "tactic"],
             "spots": ["free", "ours", "enemy", "enemy territory", "our territory"],
             "defend": ["x", "z", "weight", "predicted"],
             "resources": ["current", "income", "usage", "storage"],
@@ -1360,4 +1372,31 @@ pub fn profile_value(ai: &Ai, n: usize) -> Value {
 
 pub fn profile(ai: &mut Ai, _: &Args) -> Out {
     Ok(profile_value(ai, 40))
+}
+
+#[cfg(test)]
+mod fire_labels_tests {
+    use super::*;
+    use crate::military::fire_squad::Mode;
+    #[test]
+    fn labels_follow_adoption_and_release_without_changing_kind() {
+        let mut s = Squad::new(1, SquadKind::Assault, 0);
+        s.status = 'a';
+        assert_eq!((squad_label(&s), squad_tactic(&s)), ("assault", None));
+        for (mode, label) in [
+            (Mode::Kite, "kiting"),
+            (Mode::Evade, "evading"),
+            (Mode::Commit, "committing"),
+            (Mode::Recover, "recovering"),
+        ] {
+            s.fire.mode = mode;
+            assert_eq!((squad_label(&s), squad_tactic(&s)), ("fireteam", Some(label)));
+            assert_eq!(squad_kind(s.kind), "assault");
+        }
+        s.fire = Default::default();
+        assert_eq!((squad_label(&s), squad_tactic(&s)), ("assault", None));
+        s.kind = SquadKind::Taskforce;
+        s.fire.mode = Mode::Kite;
+        assert_eq!(squad_label(&s), "taskforce");
+    }
 }

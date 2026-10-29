@@ -41,6 +41,12 @@ impl Default for UnitClasses {
 }
 
 impl UnitClasses {
+    /// Firewalker joins ordinary jumpbot squads only for the opt-in fire
+    /// tactics; its default assignment remains the artillery handler.
+    pub fn is_assault(&self, name: &str, firesquads: bool) -> bool {
+        self.assaults.contains(name) || (firesquads && name == "jumparty")
+    }
+
     pub fn new() -> Self {
         UnitClasses {
             small_raiders: set(&[
@@ -88,7 +94,6 @@ impl UnitClasses {
                 "shipskirm",
                 "shipassault",
                 "jumpskirm",
-                "jumparty", // Firewalker fights mobile armies in organic fire squads.
                 "jumpblackhole",
                 "jumpassault",
                 "jumpsumo",
@@ -115,6 +120,7 @@ impl UnitClasses {
                 "striderarty",
                 "shiparty",
                 "shipheavyarty",
+                "jumparty",
             ]),
             aas: set(&[
                 "cloakaa",
@@ -160,5 +166,24 @@ impl UnitClasses {
             air_mobs: BTreeSet::new(),
             porc_weps: BTreeSet::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod fire_routing_tests {
+    use super::*;
+    #[test]
+    fn firewalker_routing_is_opt_in_and_siege_artillery_is_unchanged() {
+        let classes = UnitClasses::new();
+        assert!(crate::ai::OFF_BY_DEFAULT.contains(&"firesquads"));
+        assert!(!classes.is_assault("jumparty", false));
+        assert!(classes.arties.contains("jumparty"));
+        assert!(classes.is_assault("jumparty", true));
+        for name in ["cloakarty", "vehheavyarty"] {
+            assert!(!classes.is_assault(name, false));
+            assert!(!classes.is_assault(name, true));
+            assert!(classes.arties.contains(name));
+        }
+        assert!(classes.is_assault("cloakskirm", false));
     }
 }

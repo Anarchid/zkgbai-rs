@@ -16,7 +16,6 @@ use springai::reserved;
 use super::bus::Record;
 use super::views::{def_by_id, game_time};
 use crate::Ai;
-use crate::military::SquadKind;
 
 /// The HUD's sections, in rendering order, with what each shows.
 pub const SECTIONS: &[(&str, &str)] = &[
@@ -229,13 +228,7 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                     let mut s = String::from("squads:");
                     for sid in ids {
                         let Some(sq) = ai.squads.get(sid) else { continue };
-                        let kind = match sq.kind {
-                            SquadKind::Assault => "assault",
-                            SquadKind::Raider => "raider",
-                            SquadKind::Taskforce => "taskforce",
-                            SquadKind::Hover => "hover",
-                            SquadKind::Jaeger => "jaeger",
-                        };
+                        let kind = super::views::squad_label(sq);
                         let status = match sq.status {
                             'f' => "forming",
                             'r' => "rallying",
@@ -249,7 +242,7 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                             sq.id,
                             if sq.is_air_squad { "air " } else { "" },
                             kind,
-                            status,
+                            super::views::squad_tactic(sq).unwrap_or(status),
                             sq.fighters.len(),
                             xz(ai, pos),
                             if sq.target == crate::util::NULLPOS { "-".into() } else { xz(ai, sq.target) },

@@ -873,7 +873,7 @@ impl Ai {
         } else if classes.medium_raiders.contains(name) {
             unit.set_move_state(1, 0);
             self.raider_add_medium_raider(Fighter::new_raider(unit, cost, team));
-        } else if classes.assaults.contains(name) {
+        } else if classes.is_assault(name, !self.dev_off("firesquads")) {
             unit.set_move_state(1, 0);
             self.squad_add_assault(Fighter::new(unit, cost, team));
         } else if classes.mob_supports.contains(name) {

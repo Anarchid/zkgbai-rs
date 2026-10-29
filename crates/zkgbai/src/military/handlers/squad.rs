@@ -221,7 +221,9 @@ impl Ai {
             }
             if f.squad.is_none() && !retreating {
                 let candidate = self.fighters.get(&id).is_some_and(|f| f.shield_mob);
-                if !candidate && self.unit_classes.assaults.contains(self.defs.name_of(unit)) {
+                // A Firewalker already owned by this handler stays an assault
+                // after repair, including if the switch was turned off in play.
+                if !candidate && self.unit_classes.is_assault(self.defs.name_of(unit), true) {
                     self.squad_assign_assault(id);
                 } else {
                     self.squad_assign_taskforce_member(id);

@@ -727,7 +727,7 @@ function drawMap() {
       ctx.beginPath(); ctx.arc(sx, sy, ring, 0, Math.PI * 2);
       ctx.lineWidth = S.selSquad === q[0] ? 2.5 : 1.4; ctx.strokeStyle = colors.accent; ctx.stroke();
       ctx.fillStyle = colors.ink; ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'left';
-      ctx.fillText(`S${q[0]}`, sx + ring + 2, sy - ring + 4);
+      ctx.fillText(`S${q[0]}${q[1] === 'fireteam' ? ' fireteam' : ''}`, sx + ring + 2, sy - ring + 4);
       hits.push([sx, sy, 'squad', q]);
     }
   }
@@ -880,7 +880,7 @@ function tipFor(h) {
     case 'unit': return [[`#${d[0]}`, d[1]], [d[5], 'role'], [d[4] + '%', 'health'], ...(d[6] ? [['S' + d[6], 'squad']] : []),
       ...(d[7] ? [[d[7][2] || `${d[7][0]}, ${d[7][1]}`, d[7][2] ? 'task' : 'going to']] : [])];
     case 'enemy': return [[`#${d[0]}`, d[1] || 'unidentified'], [fmtNum(d[6]), 'value'], [d[4] <= 30 ? 'now' : fmtTime(d[4]) + ' ago', 'seen']];
-    case 'squad': return [[`S${d[0]}`, `${d[1]} squad`], [d[2], 'status'], [d[7], 'members'], [fmtNum(d[8]), 'value']];
+    case 'squad': return [[`S${d[0]}`, `${d[1]} squad`], [d[2], 'status'], ...(d[9] ? [[d[9], 'tactic']] : []), [d[7], 'members'], [fmtNum(d[8]), 'value']];
     case 'spot': return [['#' + d.i, 'metal spot'], [d.owner, 'owner'], [fmtNum(d.value, 2), 'value']];
     case 'defend': return [[fmtNum(d.weight), d.predicted ? 'predicted attack' : 'defend']];
     case 'front': return [[`${d.tier} lane front`, ''], [fmtNum(d.span), 'elmos across'], [d.sites, 'defense sites']];
@@ -1044,7 +1044,7 @@ function renderInspector() {
   if (S.selSquad !== null && snap) {
     const q = (snap.squads || []).find((r) => r[0] === S.selSquad);
     if (q) {
-      box.append(kvBlock([['squad', `S${q[0]} (${q[1]})`], ['status', q[2]], ['position', `${q[3]}, ${q[4]}`], ['target', `${q[5]}, ${q[6]}`], ['members', q[7]], ['value', fmtNum(q[8])]]));
+      box.append(kvBlock([['squad', `S${q[0]} (${q[1]})`], ['status', q[2]], ...(q[9] ? [['tactic', q[9]]] : []), ['position', `${q[3]}, ${q[4]}`], ['target', `${q[5]}, ${q[6]}`], ['members', q[7]], ['value', fmtNum(q[8])]]));
       const members = (snap.units || []).filter((u) => u[6] === q[0]).map((u) => u[0]);
       const b = el('button', null, `Select its ${members.length} units`);
       b.addEventListener('click', () => { S.selected = new Set(members); touch('map', 'inspector'); });
