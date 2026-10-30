@@ -912,6 +912,7 @@ impl Ai {
                     if hivemind && on(&theirs) {
                         true
                     } else {
+                        self.iq.plop_peers.insert(t);
                         self.log(&format!("Allied {AI_SHORT_NAME} on team {t} plays on its own (hivemind off)."));
                         false
                     }
