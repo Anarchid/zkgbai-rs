@@ -952,7 +952,6 @@ impl Ai {
         weapon: Option<WeaponDef>,
         paralyzer: bool,
     ) {
-        let _ = damage;
         self.raider_friendly_hit(unit, attacker, paralyzer);
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_damaged(unit, weapon);
@@ -965,6 +964,7 @@ impl Ai {
             return;
         }
         self.qrf_asset_pressed(unit, attacker);
+        self.stakeouts_economy_damaged(unit, attacker, damage);
         self.taskforce_spotter_damaged(unit);
 
         // check if the damaged unit is on fire.

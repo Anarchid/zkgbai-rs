@@ -37,6 +37,10 @@
 //! - **Home.** Parked within a Lotus's range of one of our finished
 //!   buildings, a picket joins the QRF if a raider or scout is nearby;
 //!   otherwise it leaves its old assignment and looks farther out.
+//! - **Respond.** When an enemy raider damages our economy, available
+//!   pickets within twice a Lotus's range of the victim immediately join
+//!   QRF and fight toward the attacker (`disable=stakeoutqrf` opts out).
+//!
 //! A picket displaced by a retreat rolls once after three seconds without
 //! visual contact or immediate danger: half become solo raiders, half ask
 //! for a fresh stakeout. The old post is left alone for a while.
@@ -133,6 +137,17 @@ pub(crate) fn stakeout_unit(kind: FacKind) -> Option<&'static str> {
 
 /// Frames between a stakeout's ticks.
 const PERIOD: i32 = 15;
+
+/// Economy includes constructors/commanders, factories, caretakers,
+/// income, storage and grid buildings, including their nanoframes.
+fn economy_damage_target(name: &str, build_speed: f32) -> bool {
+    name != "terraunit"
+        && (build_speed > 0.0 || name.starts_with("energy") || matches!(name, "staticmex" | "staticstorage"))
+}
+
+fn damage_response_near(picket: Vec3, victim: Vec3, lotus_range: f32) -> bool {
+    picket != NULLPOS && victim != NULLPOS && distance(picket, victim) <= 2.0 * lotus_range
+}
 
 /// Lookers wanted before this frame (the opening).
 const LOOK_UNTIL: i32 = 30 * 60 * 8;
@@ -596,6 +611,76 @@ impl Ai {
         if !m.cloaks {
             self.retreat_remove_unit(unit);
         }
+    }
+
+    /// Damage is the trigger, regardless of whether the picket is parked,
+    /// looking or shadowing. Reuse QRF's handoff so role ownership and the
+    /// old post are released before issuing an immediate combat order.
+    pub(crate) fn stakeouts_economy_damaged(&mut self, unit: Unit, attacker: Option<Unit>, damage: f32) {
+        if self.dev_off("stakeoutqrf")
+            || self.dev_off("stakeouts")
+            || self.dev_off("qrf")
+            || !self.qrf.on
+            || !self.qrf.live
+            || !damage.is_finite()
+            || damage <= 0.0
+            || unit.team() != self.team_id
+            || self.stakeouts.members.is_empty()
+        {
+            return;
+        }
+        let Some(def) = unit.def() else { return };
+        if !economy_damage_target(self.defs.name(def), def.build_speed()) {
+            return;
+        }
+        let Some(attacker) = attacker else { return };
+        if attacker.ally_team() == self.ally_team_id {
+            return;
+        }
+        // A known contact remains identifiable outside LOS. If this is
+        // its first damage event, use the same raider/scout classification
+        // as Enemy rather than waiting for the next intelligence tick.
+        let raider = self
+            .war
+            .targets
+            .get(&attacker.id())
+            .is_some_and(|e| !e.is_dead && !e.is_static && !e.can_fly() && e.is_raider)
+            || attacker.def().is_some_and(|d| {
+                let tooltip = d.tooltip();
+                d.speed() > 0.0 && !d.is_able_to_fly() && (tooltip.contains("aider") || tooltip.contains("cout"))
+            });
+        if !raider {
+            return;
+        }
+        let at = unit.pos();
+        let radius = self.defs.get("turretlaser").map_or(460.0, |d| d.max_weapon_range());
+        let units: Vec<Unit> = self
+            .stakeouts
+            .members
+            .values()
+            .filter_map(|m| {
+                let u = m.f.unit;
+                (u.team() == self.team_id
+                    && !m.f.is_dead()
+                    && !u.is_being_built()
+                    && !springai::reserved::is_reserved(self.cb, u.id())
+                    && !self.retreat_is_retreating(u)
+                    && damage_response_near(u.pos(), at, radius))
+                .then_some(u)
+            })
+            .collect();
+        let Some(team) = self.qrf_draft_units(&units) else { return };
+        let ids: Vec<i32> = units.iter().map(|u| u.id()).filter(|id| self.qrf.members.contains_key(id)).collect();
+        let enemy_pos = attacker.pos();
+        let target = if enemy_pos != NULLPOS { enemy_pos } else { at };
+        self.qrf_order_team(&ids, target, true);
+        self.op_emit(
+            "stakeout",
+            json!({
+                "event": "damage_qrf", "t": self.frame / 30, "units": ids, "team": team,
+                "victim": unit.id(), "attacker": attacker.id(), "radius": 2.0 * radius,
+            }),
+        );
     }
 
     /// Whether the stakeouts decide how many scouts a factory of this kind
@@ -1402,6 +1487,32 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raid_damage_response_covers_economy_not_turrets_or_fighters() {
+        for name in ["staticmex", "energywind", "energysolar", "energyfusion", "energypylon", "staticstorage"] {
+            assert!(economy_damage_target(name, 0.0), "{name}");
+        }
+        for name in ["cloakcon", "dyntrainer_strike_base", "factorycloak", "staticcon"] {
+            assert!(economy_damage_target(name, 10.0), "{name}");
+        }
+        for name in ["turretlaser", "cloakraid", "staticradar", "terraunit"] {
+            assert!(!economy_damage_target(name, 0.0), "{name}");
+        }
+        assert!(!economy_damage_target("terraunit", 10.0));
+    }
+
+    #[test]
+    fn raid_damage_radius_is_two_lotus_ranges_from_victim_in_horizontal_plane() {
+        let victim = Vec3::new(1000.0, 1000.0, 1000.0);
+        assert!(damage_response_near(Vec3::xz(1920.0, 1000.0), victim, 460.0));
+        assert!(!damage_response_near(Vec3::xz(1921.0, 1000.0), victim, 460.0));
+        assert!(!damage_response_near(Vec3::xz(1920.0, 1920.0), victim, 460.0));
+        // Honor a changed game definition instead of baking in 920 elmos.
+        assert!(damage_response_near(Vec3::xz(2000.0, 1000.0), victim, 500.0));
+        assert!(!damage_response_near(NULLPOS, victim, 460.0));
+        assert!(!damage_response_near(victim, NULLPOS, 460.0));
+    }
 
     #[test]
     fn displacement_waits_for_lost_sight_and_safety_then_finishes_once() {

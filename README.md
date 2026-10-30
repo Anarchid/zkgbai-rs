@@ -13,6 +13,20 @@ This is the Rust rewrite. It is a native engine AI (a plain `cdylib` speaking th
 interface), so unlike the original Java AI it needs no JVM and ships the same way CircuitAI does:
 a folder with `libSkirmishAI.so`, `SkirmishAI.dll`, `AIInfo.lua` and `AIOptions.lua`.
 
+Stakeout damage response
+------------------------
+
+`stakeoutqrf` is on by default. When an enemy ground or sea raider/scout damages one of our
+economy units, available stakeouts within twice the Lotus weapon range of the damaged unit
+(normally 920 elmos) immediately become QRF members and receive a fight order toward the attacker.
+Constructors, commanders, factories, caretakers, income, grid and storage buildings qualify,
+including unfinished buildings; combat units, turrets and terraform markers do not.
+Units retreating for repairs or reserved by the operator keep their existing orders.
+This works while looking, moving or shadowing as well as while parked. It requires QRF to be
+enabled. Use `disable=stakeoutqrf`, `ZKGBAI_DISABLE=stakeoutqrf`, or
+`feature stakeoutqrf off=true` for the control. The operator journal records `stakeout`
+events with `event=damage_qrf`, the recruited units, victim and attacker.
+
 Layout
 ------
 
