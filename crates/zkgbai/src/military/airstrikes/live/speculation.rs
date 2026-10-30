@@ -188,6 +188,12 @@ impl Ai {
                 })
                 .collect()
         };
+        // Most scout ticks have no artillery evidence. Avoid building two
+        // map-wide flight fields when there is nowhere to investigate.
+        if options.is_empty() {
+            self.bomber_handler.speculation.scouts.remove(&id);
+            return None;
+        }
         let interceptors = self.airstrike_interceptors();
         let field = self.airstrike_field(from, &interceptors);
         let sources = self.airstrike_defenses();
