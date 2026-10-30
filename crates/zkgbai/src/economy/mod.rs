@@ -13,6 +13,7 @@ mod geo;
 pub mod grid;
 mod lotus;
 mod planning;
+mod plop;
 mod safespot;
 mod silo;
 mod sparrow;
@@ -794,6 +795,7 @@ impl Ai {
             }*/
         }
 
+        self.eco_coordinate_plops();
         self.eco_assign_workers();
         self.iq_tick();
     }

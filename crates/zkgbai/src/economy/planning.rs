@@ -785,6 +785,9 @@ impl Ai {
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
         let nfac = self.fac.factories.len();
         let merged = self.merged_allies;
+        if is_plop && self.eco_wait_for_allied_plop() {
+            return;
+        }
         // The first factory waits a moment for the terrain model, to know
         // whose units can get to the metal.
         if nfac == 0 && self.terrain_pending() && self.frame < 150 {
@@ -852,12 +855,18 @@ impl Ai {
             return;
         }
 
+        // Allies reserve types only for a plop. Keep the underlying viable
+        // pool intact for retries, exhausted diversity and later factories.
+        let choices = if is_plop && self.eco.user_fac.is_empty() && self.eco.dev_pick.is_none() {
+            self.eco_plop_choices(&self.eco.potential_fac_list)
+        } else {
+            self.eco.potential_fac_list.clone()
+        };
         let mut fac_name = String::new();
         let factory: Option<UnitDef>;
-        // The opening rolled at the start (with the odds below) is binding, as
-        // allies were told of it, unless the reach check above ruled it out.
-        let opening_due =
-            nfac == 0 && self.eco.opening.as_ref().is_some_and(|f| self.eco.potential_fac_list.contains(f));
+        // Keep the announced opening unless reach or allied diversity
+        // ruled it out.
+        let opening_due = nfac == 0 && self.eco.opening.as_ref().is_some_and(|f| choices.contains(f));
 
         // Uncomment this to set the intial fac for debugging purposes.
         /*if nfac == 0 {
@@ -871,7 +880,7 @@ impl Ai {
             self.eco.potential_fac_list.remove(&user_fac);
         } else if let Some(k) = self.eco.dev_pick.filter(|_| nfac == 0) {
             // The k-th of the factories viable here (in name order).
-            fac_name = picked_factory(&self.eco.potential_fac_list, k);
+            fac_name = picked_factory(&choices, k);
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
         } else if let Some(dev_fac) = nfac.checked_sub(1).and_then(|i| self.eco.dev_facs.get(i)).cloned() {
@@ -888,11 +897,11 @@ impl Ai {
             self.eco.potential_fac_list.remove(&new_type);
             self.eco.new_fac_due = false;
             fac_name = new_type;
-        } else if !opening_due && self.eco.potential_fac_list.contains("factoryship") && kgb_rand() < 0.5 {
+        } else if !opening_due && choices.contains("factoryship") && kgb_rand() < 0.5 {
             fac_name = "factoryship".to_owned();
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
-        } else if !opening_due && is_plop && self.eco.potential_fac_list.contains("factorygunship") {
+        } else if !opening_due && is_plop && choices.contains("factorygunship") {
             fac_name = "factorygunship".to_owned();
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
@@ -904,12 +913,10 @@ impl Ai {
                 "factoryplane" => plane,
                 _ => 1.0,
             };
-            fac_name = weighted_pick(&self.eco.potential_fac_list, weight, kgb_rand()).unwrap_or_default();
+            fac_name = weighted_pick(&choices, weight, kgb_rand()).unwrap_or_default();
             self.eco_air_tempo_rolled(&fac_name, weight(&fac_name));
             // The opening rolled at the start (the commander suits it).
-            if let Some(opening) =
-                self.eco.opening.take().filter(|f| nfac == 0 && self.eco.potential_fac_list.contains(f))
-            {
+            if let Some(opening) = self.eco.opening.take().filter(|f| nfac == 0 && choices.contains(f)) {
                 fac_name = opening;
             }
             factory = self.defs.get(&fac_name);
@@ -1057,6 +1064,10 @@ impl Ai {
             let id = self.eco.tasks.insert(ct);
             self.eco.construction_tasks.push(id);
             self.eco.factory_tasks.push(id);
+            if is_plop {
+                // A late replan may follow an announcement with no factory.
+                self.iq.sent = false;
+            }
             // A requisition is an issue worth what it answers.
             if let Some((f, why)) = &asked
                 && *f == fac_name
