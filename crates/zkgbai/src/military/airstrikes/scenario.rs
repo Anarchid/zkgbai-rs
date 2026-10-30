@@ -76,7 +76,14 @@ impl Ai {
                                 | "airstrike-fencer"
                                 | "airstrike-shieldball"
                         ) {
-                            u.set_fire_state(0, 0);
+                            springai::reserved::as_owner(|| {
+                                u.stop(0);
+                                u.set_fire_state(0, 0);
+                                u.set_move_state(0, 0);
+                            });
+                            // Hold-fire alone still permits explicit attack
+                            // orders from initial unit-idle registration.
+                            springai::reserved::reserve(self.cb, u.id());
                         }
                         self.log(&format!(
                             "airstrike-test: spawned {name} {} at {:.0},{:.0}",
