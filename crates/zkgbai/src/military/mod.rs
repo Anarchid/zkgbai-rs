@@ -1106,7 +1106,7 @@ impl Ai {
         // remove units that allies captured from enemy targets
         let id = unit.id();
         if self.war.targets.contains_key(&id) {
-            self.bomber_remove_target(id);
+            self.bomber_target_destroyed(id);
             self.war.enemy_porcs.remove(&id);
             self.war.targets.remove(&id);
         }
@@ -1219,7 +1219,11 @@ impl Ai {
 
     pub fn war_enemy_enter_radar(&mut self, enemy: Unit) {
         let frame = self.war.frame;
-        let e = self.war.targets.entry(enemy.id()).or_insert_with(|| Enemy::new(enemy, 50.0));
+        // Some radar callbacks already expose the definition (e.g. Owl
+        // identification). Do not permanently price a known artillery unit
+        // as a generic 50-metal radar blip before its LOS callback arrives.
+        let cost = enemy.def().map_or(50.0, |d| d.cost(self.metal));
+        let e = self.war.targets.entry(enemy.id()).or_insert_with(|| Enemy::new(enemy, cost));
         e.is_radar_visible = true;
         e.last_seen = frame;
     }
@@ -1239,6 +1243,7 @@ impl Ai {
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
+        self.bomber_target_destroyed(enemy.id());
         self.counterbattery_destroyed(enemy.id());
         self.strikes_enemy_destroyed(enemy.id());
         self.impalers_enemy_destroyed(enemy, attacker);

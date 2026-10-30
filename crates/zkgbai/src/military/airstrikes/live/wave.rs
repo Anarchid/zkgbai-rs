@@ -167,8 +167,10 @@ impl Ai {
             .plans
             .iter()
             .filter(|p| {
-                !matches!(p.job.kind, MissionKind::Intercept | MissionKind::Shield | MissionKind::Assassinate)
-                    && !p.job.targets.iter().any(|id| covered.contains(id))
+                !matches!(
+                    p.job.kind,
+                    MissionKind::Intercept | MissionKind::Shield | MissionKind::Assassinate | MissionKind::Speculative
+                ) && !p.job.targets.iter().any(|id| covered.contains(id))
                     && !self.bomber_handler.cooldown.contains_key(&p.job.target)
                     && route_allowed(home, &p.route, |pos| self.graph.is_ally_territory(pos))
             })
@@ -232,6 +234,7 @@ mod tests {
     fn plan(kind: MissionKind, id: i32, hp: f32, value: f32) -> Plan {
         let job = Mission {
             kind,
+            inference: None,
             group: (kind == MissionKind::Group).then(|| {
                 let mut c = super::super::super::tests::enemy(id);
                 c.pos = Vec3::xz(1000.0, id as f32 * 100.0);

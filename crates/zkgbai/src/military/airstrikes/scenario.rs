@@ -1,6 +1,7 @@
 //! `airstrike-wind` versus `airstrike-farm`: real factory procurement and
 //! Phoenix bombing of a ZKGBAI wind farm. `airstrike-odin` / `airstrike-singu`
 //! exercise deep thermite procurement and optional Sparrow support.
+mod hunt;
 use super::Plane;
 use crate::Ai;
 use crate::util::get_directional_point;
@@ -9,6 +10,10 @@ use springai::Vec3;
 impl Ai {
     pub(crate) fn airstrike_scenario(&mut self, frame: i32) {
         let Some(test) = self.test.clone().filter(|s| s.starts_with("airstrike-")) else { return };
+        if test.starts_with("airstrike-hunt") {
+            self.airstrike_hunt_scenario(&test, frame);
+            return;
+        }
         let map = self.cb.map();
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
         let site = if test.starts_with("airstrike-wave") {

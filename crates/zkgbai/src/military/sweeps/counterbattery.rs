@@ -8,6 +8,8 @@ pub(crate) const FRESH: i32 = 30 * 30;
 
 #[derive(Clone)]
 pub(crate) struct BatteryFix {
+    /// Stable negative key, separate from real engine unit IDs.
+    pub id: i32,
     pub weapon: String,
     pub def: Option<String>,
     pub source: Option<i32>,
@@ -23,6 +25,7 @@ pub(crate) struct BatteryFix {
 
 #[derive(Default)]
 pub(super) struct Counterbattery {
+    serial: i32,
     fixes: Vec<BatteryFix>,
     owners: BTreeMap<i32, Option<String>>,
 }
@@ -117,7 +120,15 @@ impl Ai {
         pos.y = map.elevation_at(pos.x, pos.z);
         let report = index.is_none_or(|i| self.frame - state.fixes[i].reported >= 30);
         let reported = if report { self.frame } else { state.fixes[index.unwrap()].reported };
+        let id = index.map_or_else(
+            || {
+                state.serial += 1;
+                -state.serial
+            },
+            |i| state.fixes[i].id,
+        );
         let fix = BatteryFix {
+            id,
             weapon,
             def,
             source,
@@ -159,7 +170,7 @@ impl Ai {
         serde_json::json!(
             self.counterbattery_fixes(MEMORY)
                 .map(|f| serde_json::json!({
-                    "weapon": f.weapon, "def": f.def, "source": f.source, "pos": [f.pos.x, f.pos.z],
+                    "id": f.id, "weapon": f.weapon, "def": f.def, "source": f.source, "pos": [f.pos.x, f.pos.z],
                     "uncertainty": f.uncertainty, "range": f.range, "ground": f.ground, "age_frames": self.frame - f.last,
                 }))
                 .collect::<Vec<_>>()

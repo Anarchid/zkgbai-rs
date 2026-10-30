@@ -61,6 +61,7 @@ pub enum MissionKind {
     Interdict,
     Group,
     Heavy,
+    Speculative,
     Wind,
     Thermite,
     Assassinate,
@@ -72,6 +73,7 @@ impl MissionKind {
     fn label(self) -> &'static str {
         match self {
             Self::Heavy => "Priority strike",
+            Self::Speculative => "Artillery hunt",
             Self::Opportunistic => "Opportunistic strike",
             Self::Group => "Group strike",
             Self::Intercept => "Interception",
@@ -95,6 +97,7 @@ impl MissionKind {
             Self::Wind => 7.0,
             Self::Thermite => 7.0,
             Self::Group => 6.0,
+            Self::Speculative => 5.0,
             Self::Assassinate | Self::Opportunistic => 3.0,
             Self::Shield => 2.0,
             Self::Static => 1.0,
@@ -124,6 +127,15 @@ struct Contact {
 }
 
 #[derive(Clone)]
+struct Inference {
+    id: i32,
+    def: String,
+    pos: Vec3,
+    uncertainty: f32,
+    last: i32,
+}
+
+#[derive(Clone)]
 struct Mission {
     kind: MissionKind,
     target: i32,
@@ -131,6 +143,7 @@ struct Mission {
     hp: f32,
     value: f32,
     group: Option<GroupStrike>,
+    inference: Option<Inference>,
     /// All targets covered by this job, also used to avoid overlapping sorties.
     targets: Vec<i32>,
     seen: i32,
@@ -201,6 +214,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             jobs.push(Mission {
                 kind,
                 group: None,
+                inference: None,
                 target: e.id,
                 pos: e.pos,
                 hp,
@@ -358,6 +372,7 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         Group if clear => job.group_packages(&[Phoenix, Likho]),
         Group if unopposed => job.group_packages(&[Likho]),
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
+        Speculative if very_light => vec![vec![(Likho, salvo(2000.0))]],
         Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
         Heavy | Opportunistic if unopposed => vec![vec![(Likho, salvo(2000.0))]],
         Thermite if !risk.intercepted => vec![vec![(Odin, count(job.hp, 14000.0))]],
