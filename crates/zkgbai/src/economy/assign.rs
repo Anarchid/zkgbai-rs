@@ -227,7 +227,8 @@ impl Ai {
         // Cancel the old engine order even if no safe replacement exists.
         let blocked_construction = self.eco.workers.get(&wid).is_some_and(|w| {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
-                !self.eco_prerequisites_ready(t)
+                !self.eco.silo_work_allowed(t)
+                    || !self.eco_prerequisites_ready(t)
                     || (t.as_construction().is_some_and(|c| c.fortification)
                         && self.eco_fortify_travel(w, t.get_pos()).is_none())
             })
@@ -443,7 +444,8 @@ impl Ai {
             {
                 return false;
             }
-            self.eco_prerequisites_ready(t)
+            eco.silo_work_allowed(t)
+                && self.eco_prerequisites_ready(t)
                 && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
                 && !self.eco_worker_shuns(worker, t.get_pos())
         };
@@ -975,7 +977,7 @@ impl Ai {
             if target.is_none() && !map.is_possible_to_build_at(bt, pos, facing) {
                 //check to make sure it isn't our own nanoframe, since update is called before unitCreated
                 let radius = bt.x_size().min(bt.z_size()) as f32 * 4.0;
-                let nano = self.cb.friendly_units_in(pos, radius).into_iter().find(|u| {
+                let nano = self.cb.friendly_units_in_cylinder(pos, radius).into_iter().find(|u| {
                     u.is_being_built() && u.def().is_some_and(|d| d.id() == bt.id()) && u.team() == self.team_id
                 });
                 match nano {
