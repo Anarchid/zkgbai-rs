@@ -19,7 +19,9 @@
 //! and known enemy AA density. Sparrows provide baseline coverage; Owls are
 //! preferred in light AA, while Widows scout through heavier AA and are
 //! always wanted at high global density. Strike reconnaissance and anti-nuke
-//! bites retain their own requisitions.
+//! bites retain their own requisitions. Owl quotas round down to zero on
+//! maps below 30 square kiloelmos, so scouting alone does not request an
+//! air factory there; Sparrows retain a minimum of one.
 //!
 //! Scouts are few and dear, so they are steered closely: six times a
 //! second a look at the leg they are on, and every half second a fresh
@@ -84,11 +86,11 @@ pub(crate) struct ScoutPolicy {
 /// same standing-metal forecast as raider sizing; AA is known living metal.
 fn scout_policy(area: f32, income: f32, density: f32, aa_metal: f32) -> ScoutPolicy {
     let area = area.max(f32::EPSILON);
-    let count = (area / 30.0).floor().max(1.0) as usize;
+    let count = (area / 30.0).floor() as usize;
     let deep = density >= 500.0 || income >= 50.0;
     let light_aa = aa_metal / area < 25.0;
     ScoutPolicy {
-        sparrows: if income >= 30.0 || density >= 200.0 { count } else { 0 },
+        sparrows: if income >= 30.0 || density >= 200.0 { count.max(1) } else { 0 },
         owls: if deep && light_aa { count } else { 0 },
         widows: income >= 50.0 && (density >= 1000.0 || (deep && !light_aa)),
     }
@@ -1059,11 +1061,12 @@ mod policy_tests {
     use super::*;
 
     #[test]
-    fn both_air_scouts_use_area_over_30_rounded_down_with_a_minimum_of_one() {
+    fn air_scouts_round_down_with_a_minimum_of_one_only_for_sparrows() {
         for (area, count) in [
-            (0.1, 1),
-            (26.2144, 1),
-            (29.99, 1),
+            (0.0, 0),
+            (0.1, 0),
+            (26.2144, 0),
+            (29.99, 0),
             (30.0, 1),
             (30.01, 1),
             (59.99, 1),
@@ -1073,8 +1076,20 @@ mod policy_tests {
             (90.0, 3),
         ] {
             let policy = scout_policy(area, 50.0, 0.0, 0.0);
-            assert_eq!(policy.sparrows, count, "Sparrow quota at area {area}");
+            assert_eq!(policy.sparrows, count.max(1), "Sparrow quota at area {area}");
             assert_eq!(policy.owls, count, "Owl quota at area {area}");
+        }
+    }
+
+    #[test]
+    fn small_maps_do_not_request_owls_even_with_high_income_and_density() {
+        for area in [0.1, 26.2144, 29.99] {
+            for (income, density) in [(50.0, 0.0), (0.0, 500.0), (200.0, 2000.0)] {
+                let policy = scout_policy(area, income, density, 0.0);
+                assert_eq!(policy.owls, 0);
+                assert_eq!(policy.sparrows, 1);
+                assert_eq!(policy.widows, income >= 50.0 && density >= 1000.0);
+            }
         }
     }
 
@@ -1089,17 +1104,17 @@ mod policy_tests {
 
     #[test]
     fn deep_scouts_start_at_either_threshold_and_switch_at_exactly_25_aa() {
-        assert_eq!(scout_policy(20.0, 49.99, 499.99, 0.0), ScoutPolicy { sparrows: 1, owls: 0, widows: false });
+        assert_eq!(scout_policy(40.0, 49.99, 499.99, 0.0), ScoutPolicy { sparrows: 1, owls: 0, widows: false });
         for (income, density) in [(50.0, 0.0), (0.0, 500.0)] {
-            let light = scout_policy(20.0, income, density, 499.99);
+            let light = scout_policy(40.0, income, density, 999.99);
             assert_eq!(light.owls, 1);
             assert!(!light.widows);
-            let heavy = scout_policy(20.0, income, density, 500.0);
+            let heavy = scout_policy(40.0, income, density, 1000.0);
             assert_eq!(heavy.owls, 0);
             assert_eq!(heavy.widows, income >= 50.0);
         }
         // Changing map area changes AA density as well as scout count.
-        assert_eq!(scout_policy(40.0, 50.0, 0.0, 500.0).owls, 1);
+        assert_eq!(scout_policy(80.0, 50.0, 0.0, 1000.0).owls, 2);
     }
 
     #[test]
@@ -1112,13 +1127,13 @@ mod policy_tests {
         assert!(scout_policy(20.0, 50.0, 500.0, 500.0).widows);
         assert!(scout_policy(20.0, 50.0, 1000.0, 0.0).widows);
         // Density can still request Owls while income is below the Widow floor.
-        assert_eq!(scout_policy(20.0, 49.99, 1000.0, 0.0), ScoutPolicy { sparrows: 1, owls: 1, widows: false });
+        assert_eq!(scout_policy(40.0, 49.99, 1000.0, 0.0), ScoutPolicy { sparrows: 1, owls: 1, widows: false });
     }
 
     #[test]
     fn high_density_adds_widows_even_with_light_aa_and_owls() {
-        assert!(!scout_policy(20.0, 50.0, 999.99, 0.0).widows);
-        assert_eq!(scout_policy(20.0, 50.0, 1000.0, 0.0), ScoutPolicy { sparrows: 1, owls: 1, widows: true });
-        assert_eq!(scout_policy(20.0, 50.0, 1000.0, 500.0), ScoutPolicy { sparrows: 1, owls: 0, widows: true });
+        assert!(!scout_policy(40.0, 50.0, 999.99, 0.0).widows);
+        assert_eq!(scout_policy(40.0, 50.0, 1000.0, 0.0), ScoutPolicy { sparrows: 1, owls: 1, widows: true });
+        assert_eq!(scout_policy(40.0, 50.0, 1000.0, 1000.0), ScoutPolicy { sparrows: 1, owls: 0, widows: true });
     }
 }
