@@ -90,7 +90,7 @@ fn scout_policy(area: f32, income: f32, density: f32, aa_metal: f32) -> ScoutPol
     ScoutPolicy {
         sparrows: if income >= 30.0 || density >= 200.0 { count } else { 0 },
         owls: if deep && light_aa { count } else { 0 },
-        widows: density >= 1000.0 || (deep && !light_aa),
+        widows: income >= 50.0 && (density >= 1000.0 || (deep && !light_aa)),
     }
 }
 
@@ -1073,16 +1073,29 @@ mod policy_tests {
             assert!(!light.widows);
             let heavy = scout_policy(20.0, income, density, 500.0);
             assert_eq!(heavy.owls, 0);
-            assert!(heavy.widows);
+            assert_eq!(heavy.widows, income >= 50.0);
         }
         // Changing map area changes AA density as well as scout count.
         assert_eq!(scout_policy(40.0, 50.0, 0.0, 500.0).owls, 4);
     }
 
     #[test]
+    fn widows_need_50_income_even_in_heavy_aa_or_at_high_density() {
+        for density in [0.0, 500.0, 1000.0, 2000.0] {
+            for aa in [0.0, 500.0] {
+                assert!(!scout_policy(20.0, 49.99, density, aa).widows);
+            }
+        }
+        assert!(scout_policy(20.0, 50.0, 500.0, 500.0).widows);
+        assert!(scout_policy(20.0, 50.0, 1000.0, 0.0).widows);
+        // Density can still request Owls while income is below the Widow floor.
+        assert_eq!(scout_policy(20.0, 49.99, 1000.0, 0.0), ScoutPolicy { sparrows: 2, owls: 2, widows: false });
+    }
+
+    #[test]
     fn high_density_adds_widows_even_with_light_aa_and_owls() {
-        assert!(!scout_policy(20.0, 0.0, 999.99, 0.0).widows);
-        assert_eq!(scout_policy(20.0, 0.0, 1000.0, 0.0), ScoutPolicy { sparrows: 2, owls: 2, widows: true });
-        assert_eq!(scout_policy(20.0, 0.0, 1000.0, 500.0), ScoutPolicy { sparrows: 2, owls: 0, widows: true });
+        assert!(!scout_policy(20.0, 50.0, 999.99, 0.0).widows);
+        assert_eq!(scout_policy(20.0, 50.0, 1000.0, 0.0), ScoutPolicy { sparrows: 2, owls: 2, widows: true });
+        assert_eq!(scout_policy(20.0, 50.0, 1000.0, 500.0), ScoutPolicy { sparrows: 2, owls: 0, widows: true });
     }
 }
