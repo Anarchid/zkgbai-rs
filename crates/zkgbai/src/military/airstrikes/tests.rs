@@ -26,6 +26,12 @@ fn clear() -> Risk {
 fn job(kind: MissionKind, hp: f32) -> Mission {
     Mission {
         kind,
+        group: (kind == MissionKind::Group).then(|| {
+            let mut c = enemy(1);
+            c.hp = hp;
+            c.value = 1000.0;
+            GroupStrike::new(&[&c])
+        }),
         target: 1,
         pos: Vec3::xz(2000.0, 2000.0),
         hp,
@@ -263,4 +269,62 @@ fn route_sampling_checks_between_waypoints_not_just_the_endpoints() {
     assert!(risk.exposure > 0.0);
     assert!(risk.intercepted);
     assert_eq!(risk.aa, 0.0);
+}
+
+fn ravager_group(spacing: f32, hp: f32) -> Mission {
+    let contacts: Vec<_> = (0..3)
+        .map(|id| {
+            let mut c = enemy(id);
+            c.pos.x += (id - 1) as f32 * spacing;
+            c.hp = hp;
+            c.max_hp = 2200.0;
+            c.value = 250.0;
+            c
+        })
+        .collect();
+    missions(&contacts, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Group).unwrap()
+}
+
+#[test]
+fn one_likho_can_damage_a_ravager_pack_without_killing_it() {
+    let job = ravager_group(40.0, 2200.0);
+    assert_eq!(job.target, 1); // aim at the middle, not the first contact
+    let value = job.damage_value(&[(Plane::Likho, 1)]);
+    assert!((440.0..460.0).contains(&value));
+    let options = packages(&job, clear(), 800.0);
+    assert!(options.contains(&vec![(Plane::Likho, 1)]));
+    assert!(options.contains(&vec![(Plane::Phoenix, 1)]));
+    assert_eq!(purchase(&options, &std::collections::BTreeMap::from([(Plane::Likho, 1)]), |_| 2000.0), None);
+}
+
+#[test]
+fn group_packages_require_useful_marginal_damage_and_cap_overkill() {
+    let job = ravager_group(40.0, 2200.0);
+    let options = job.group_packages(&[Plane::Likho]);
+    assert_eq!(options, vec![vec![(Plane::Likho, 2)], vec![(Plane::Likho, 1)]]);
+    assert_eq!(job.damage_value(&[(Plane::Likho, 24)]), 750.0);
+    let wounded = ravager_group(40.0, 400.0);
+    assert_eq!(wounded.damage_value(&[(Plane::Likho, 1)]), 750.0);
+    assert_eq!(wounded.group_packages(&[Plane::Likho]), vec![vec![(Plane::Likho, 1)]]);
+}
+
+#[test]
+fn splash_geometry_and_live_weapon_profile_limit_group_value() {
+    let mut job = ravager_group(160.0, 2200.0);
+    assert!(job.damage_value(&[(Plane::Likho, 1)]) < 200.0);
+    assert!(job.group_packages(&[Plane::Likho]).is_empty());
+    job.aim_group(Blast { damage: 4000.0, radius: 400.0, edge: 0.5 });
+    assert_eq!(job.target, 1);
+    assert!(job.damage_value(&[(Plane::Likho, 1)]) > 700.0);
+    assert_eq!(job.group_packages(&[Plane::Likho]), vec![vec![(Plane::Likho, 1)]]);
+}
+
+#[test]
+fn worthwhile_group_damage_still_respects_air_cover() {
+    let job = ravager_group(40.0, 2200.0);
+    let light = packages(&job, Risk { aa: 0.3, ..clear() }, 800.0);
+    assert!(light.contains(&vec![(Plane::Likho, 1)]));
+    assert!(light.iter().flatten().all(|(k, _)| *k == Plane::Likho));
+    assert!(packages(&job, Risk { aa: 1.3, ..clear() }, 800.0).is_empty());
+    assert!(packages(&job, Risk { intercepted: true, ..clear() }, 800.0).is_empty());
 }

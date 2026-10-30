@@ -314,10 +314,28 @@ impl Ai {
         let defense_air = self.airstrike_field(home, &[]);
         let contacts = self.airstrike_contacts();
         self.bomber_handler.refresh_priority_memory(&contacts, frame);
+        let blast = self
+            .defs
+            .get(Plane::Likho.name())
+            .into_iter()
+            .flat_map(|d| d.weapon_mounts())
+            .filter_map(|m| m.weapon_def())
+            .filter(|w| !w.name().contains("fake"))
+            .filter_map(|w| {
+                w.damage_types().first().copied().map(|damage| Blast {
+                    damage,
+                    radius: w.area_of_effect(),
+                    edge: w.edge_effectiveness(),
+                })
+            })
+            .filter(|b| b.damage > 0.0 && b.radius > 0.0)
+            .max_by(|a, b| a.damage.total_cmp(&b.damage))
+            .unwrap_or_default();
         let jobs = missions(&contacts, home, frame);
         let had_jobs = !jobs.is_empty();
         let mut plans = Vec::new();
         for mut job in jobs {
+            job.aim_group(blast);
             if job.kind == MissionKind::Thermite && air.length(job.pos).unwrap_or(f32::INFINITY) >= 3000.0 {
                 job.deep = true;
             }
@@ -862,6 +880,8 @@ fn mission_view(
         "route": route.iter().map(|p| [p.x, p.z]).collect::<Vec<_>>(),
         "members": sortie.map(|s| s.members.as_slice()).unwrap_or(&[]),
         "launched": sortie.map(|s| s.launched),
+        "package_damage_values": (job.kind == MissionKind::Group).then(||
+            packages.iter().map(|p| job.damage_value(p)).collect::<Vec<_>>()),
         "packages": packages.iter().map(|pkg| pkg.iter().map(|(k,n)| json!({
             "unit": k.name(), "name": format!("{k:?}"), "count": n
         })).collect::<Vec<_>>()).collect::<Vec<_>>()
@@ -918,6 +938,7 @@ mod operator_tests {
     fn snapshots_show_candidate_then_active_then_available_without_duplicate_targets() {
         let job = Mission {
             kind: MissionKind::Thermite,
+            group: None,
             target: 5,
             targets: vec![5],
             pos: Vec3::xz(1200.0, 300.0),

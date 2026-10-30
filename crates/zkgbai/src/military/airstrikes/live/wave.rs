@@ -110,7 +110,8 @@ fn allocate(plans: &[Plan], have: &BTreeMap<Plane, usize>, available: &[Vec<Pack
                     continue;
                 }
                 let threat = 1.0 + plan.risk.aa;
-                let score = plan.length * threat - plan.job.value / threat + preference(&plan.job, package);
+                let score =
+                    plan.length * threat - plan.job.damage_value(package) / threat + preference(&plan.job, package);
                 options.push((score, package.iter().map(|(_, n)| n).sum::<usize>(), i, package));
             }
         }
@@ -231,6 +232,13 @@ mod tests {
     fn plan(kind: MissionKind, id: i32, hp: f32, value: f32) -> Plan {
         let job = Mission {
             kind,
+            group: (kind == MissionKind::Group).then(|| {
+                let mut c = super::super::super::tests::enemy(id);
+                c.pos = Vec3::xz(1000.0, id as f32 * 100.0);
+                c.hp = hp;
+                c.value = value;
+                GroupStrike::new(&[&c])
+            }),
             target: id,
             targets: vec![id],
             pos: Vec3::xz(1000.0, id as f32 * 100.0),
