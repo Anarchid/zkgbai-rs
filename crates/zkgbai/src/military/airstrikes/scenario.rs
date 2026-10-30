@@ -26,7 +26,9 @@ impl Ai {
         } else {
             Vec3::xz(center.x, center.z + 400.0)
         };
-        if frame == 60 {
+        // Spawn close targets just before release, so the ordinary friendly
+        // commander/army cannot clear the fixture during the held-fleet period.
+        if frame == if test == "airstrike-wave-targets" { 870 } else { 60 } {
             self.cb.cheats_set_enabled(true);
             let base = self.graph.get_ally_center();
             let mut spawn = Vec::new();

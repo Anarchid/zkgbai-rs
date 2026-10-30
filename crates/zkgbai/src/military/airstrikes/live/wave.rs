@@ -151,7 +151,8 @@ impl Ai {
             if bomber(a.kind) && (!healthy || !armed) {
                 recovering += 1;
             }
-            if healthy && armed && !a.returning && distance(a.unit.pos(), home) < 450.0 {
+            let away = distance(a.unit.pos(), home);
+            if healthy && armed && away < 1200.0 && (away < 450.0 || self.graph.is_ally_territory(a.unit.pos())) {
                 ready.entry(a.kind).or_default().push(id);
             }
         }
@@ -194,6 +195,11 @@ impl Ai {
             })
             .collect();
         let assignments = allocate(&plans, &have, &available);
+        let assigned_bombers: usize =
+            assignments.iter().flat_map(|(_, p)| p).filter(|(kind, _)| bomber(*kind)).map(|(_, n)| n).sum();
+        if assigned_bombers < MIN_FLOCK {
+            return;
+        }
         let mut sent = 0;
         for (i, package) in assignments {
             let members: Vec<_> = package.iter().flat_map(|(k, n)| ready[k].iter().take(*n).copied()).collect();
