@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 
-use springai::{NO_TIMEOUT, Unit, Vec3};
+use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
 use crate::Ai;
 use crate::terrain::HELD_POWER;
@@ -273,7 +273,28 @@ fn inferno_cluster_candidates(light: &[LightTarget], worth: f32) -> Vec<(Vec3, f
     clusters
 }
 
+/// Allied nanoframes count as commitments too. Our own silos must never
+/// suppress our targets; destroyed or transferred silos cease to cover them.
+fn allied_silos(units: impl Iterator<Item = Unit>, team: i32, silo: UnitDef, own: Option<Unit>) -> Vec<Vec3> {
+    units
+        .filter(|u| u.health() > 0.0 && u.team() != team && u.def() == Some(silo))
+        // Once both bots have silos, the lower unit id owns overlapping
+        // targets. Otherwise both would defer forever to each other.
+        .filter(|u| own.is_none_or(|s| u.id() < s.id()))
+        .map(|u| u.pos())
+        .collect()
+}
+
+fn ally_covers(silos: &[Vec3], target: Vec3) -> bool {
+    silos.iter().any(|&p| distance(p, target) <= REACH)
+}
+
 impl Ai {
+    fn missiles_allied_silos(&self, own: Option<Unit>) -> Vec<Vec3> {
+        let Some(silo) = self.defs.get(SILO) else { return Vec::new() };
+        allied_silos(self.cb.friendly_units().into_iter(), self.team_id, silo, own)
+    }
+
     pub(crate) fn missiles_note_loss(&mut self, pos: Vec3) {
         self.missiles.note_loss(pos, self.frame);
         self.log(&format!(
@@ -328,9 +349,11 @@ impl Ai {
     /// Enemy buildings worth Eos: unshielded, not struck lately (unless
     /// seen standing since).
     fn missiles_eos_targets(&self) -> Vec<Target> {
+        let allies = self.missiles_allied_silos(self.missiles_silo());
         let struck = |id: i32, seen: i32| self.missiles.struck.get(&id).is_some_and(|&t| seen < t + LOOK_AFTER);
         (self.war.targets.values())
             .filter(|e| e.identified && e.is_static && !e.is_dead && !struck(e.unit_id, e.last_seen))
+            .filter(|e| !ally_covers(&allies, e.position))
             .filter_map(|e| {
                 let needed = (e.ud?.health() / EOS_DAMAGE).ceil().max(1.0) as usize;
                 let shielded = match self.missiles_shield(e.position) {
@@ -351,8 +374,10 @@ impl Ai {
         if !self.misc_has_nuke() {
             return Vec::new();
         }
+        let allies = self.missiles_allied_silos(self.missiles_silo());
         (self.war.targets.values())
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
+            .filter(|e| !ally_covers(&allies, e.position))
             .filter(|e| e.ud.is_some_and(|ud| e.value > ud.cost(self.metal)))
             .filter(|e| self.missiles_shield(e.position) != Some(true))
             .map(|e| (e.unit_id, e.position, e.value))
@@ -386,6 +411,8 @@ impl Ai {
                 targets.push((pos, count as f32 * cost, count));
             }
         }
+        let allies = self.missiles_allied_silos(self.missiles_silo());
+        targets.retain(|t| !ally_covers(&allies, t.0));
         targets.sort_by(|a, b| b.1.total_cmp(&a.1));
         targets
     }
@@ -481,6 +508,7 @@ impl Ai {
     pub fn missiles_site(&self) -> Option<SiloSite> {
         let eos = self.missiles_eos_targets();
         let stun = self.missiles_stun_targets();
+        let allies = self.missiles_allied_silos(None);
         let statics = self.missiles_static_value();
         if eos.is_empty() && stun.is_empty() && statics.is_empty() {
             return None;
@@ -506,7 +534,7 @@ impl Ai {
         });
         let mut targets: Vec<_> = eos.iter().map(|t| (t.pos, t.value - MISSILE_COST * t.needed as f32)).collect();
         targets.extend(stun.iter().filter(|a| !eos.iter().any(|t| t.id == a.0)).map(|a| (a.1, a.2 - MISSILE_COST)));
-        choose_silo_site(sites, &targets, &statics, self.missiles_siege_readiness(), enemy)
+        choose_silo_site(&allies, sites, &targets, &statics, self.missiles_siege_readiness(), enemy)
     }
 
     /// Remembered live statics plus spatially inferred mexes. A shadowed
@@ -791,6 +819,10 @@ impl Ai {
     /// Fire a Shockley at each of `antis` (stunning them through a nuke's
     /// flight), if there are enough on the pads; whether it did.
     pub fn missiles_stun(&mut self, antis: &[(i32, Vec3)]) -> bool {
+        let allies = self.missiles_allied_silos(self.missiles_silo());
+        if antis.iter().any(|a| ally_covers(&allies, a.1)) {
+            return false;
+        }
         let ready = self.missiles_ready(SHOCKLEY);
         let fits = |a: &(i32, Vec3)| ready.iter().filter(|m| distance(m.pos(), a.1) <= REACH).count();
         if ready.len() < antis.len() || antis.iter().any(|a| fits(a) == 0) {
@@ -808,7 +840,8 @@ impl Ai {
 
     /// Whether Shockleys on the pads reach the anti-nuke at `p`.
     pub fn missiles_can_stun(&self, p: Vec3) -> bool {
-        self.missiles_ready(SHOCKLEY).iter().any(|m| distance(m.pos(), p) <= REACH)
+        !ally_covers(&self.missiles_allied_silos(self.missiles_silo()), p)
+            && self.missiles_ready(SHOCKLEY).iter().any(|m| distance(m.pos(), p) <= REACH)
     }
 
     /// Note a strike at `p` (a Bertha shelling, say) on an anti-nuke
@@ -855,12 +888,16 @@ impl Ai {
 /// Score only final buildable positions, never the seeds passed to the
 /// engine's build-site search. Keep the safest of the similarly good sites.
 fn choose_silo_site(
+    allies: &[Vec3],
     sites: impl Iterator<Item = Vec3>,
     targets: &[(Vec3, f32)],
     statics: &[(Vec3, f32)],
     siege: SiegeReadiness,
     enemy: Vec3,
 ) -> Option<SiloSite> {
+    // Score only work not already claimed by an ally, for both triggers.
+    let targets: Vec<_> = targets.iter().filter(|t| !ally_covers(allies, t.0)).collect();
+    let statics: Vec<_> = statics.iter().filter(|t| !ally_covers(allies, t.0)).collect();
     let total: f32 = statics.iter().map(|t| t.1).sum();
     let scored: Vec<_> = sites
         .filter_map(|p| {
@@ -952,7 +989,7 @@ mod site_tests {
         let enemy = Vec3::xz(4000.0, 4000.0);
         let targets = [(enemy, 5000.0)];
         let candidates = [lost, shifted, other].into_iter().filter(|&p| !missiles.shuns(p, when + 1));
-        let chosen = choose_silo_site(candidates, &targets, &[], EARLY, enemy).unwrap();
+        let chosen = choose_silo_site(&[], candidates, &targets, &[], EARLY, enemy).unwrap();
         assert_eq!(chosen.pos, other);
         assert!(missiles.shuns(lost, when + LOSS_MEMORY - 1));
         assert!(!missiles.shuns(lost, when + LOSS_MEMORY));
@@ -963,16 +1000,82 @@ mod site_tests {
     }
 
     #[test]
+    fn allied_coverage_suppresses_both_silo_triggers_but_leaves_uncovered_work() {
+        let at = Vec3::xz(1000.0, 1000.0);
+        let enemy = Vec3::xz(3000.0, 1000.0);
+        let targets = [(enemy, 2400.0)];
+        let statics = [(enemy, 60000.0)];
+        assert!(choose_silo_site(&[], [at].into_iter(), &targets, &statics, DENSE, enemy).is_some());
+        assert!(choose_silo_site(&[at], [at].into_iter(), &targets, &statics, DENSE, enemy).is_none());
+        let boundary = Vec3::xz(enemy.x + REACH, enemy.z);
+        assert!(choose_silo_site(&[boundary], [at].into_iter(), &targets, &statics, DENSE, enemy).is_none());
+        let outside = Vec3::xz(boundary.x + 1.0, boundary.z);
+        assert!(choose_silo_site(&[outside], [at].into_iter(), &targets, &statics, DENSE, enemy).is_some());
+        // An ally covering one side of the map must not block a silo on
+        // another side, nor make its covered value count toward our payoff.
+        let uncovered = Vec3::xz(9000.0, 1000.0);
+        let targets = [(enemy, 2400.0), (uncovered, 600.0)];
+        assert!(choose_silo_site(&[at], [uncovered].into_iter(), &targets, &[], DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[at], [uncovered].into_iter(), &[], &[(uncovered, 60000.0)], DENSE, enemy).is_some());
+    }
+
+    #[test]
+    fn allied_silos_include_nanoframes_but_exclude_ours_dead_and_other_buildings() {
+        use springai::Callback;
+        unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
+            if id == 3 { 0.0 } else { 100.0 }
+        }
+        unsafe extern "C" fn team(_: i32, id: i32) -> i32 {
+            if id == 0 || id == 5 { 1 } else { 2 }
+        }
+        unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
+            if id == 4 { 11 } else { 10 }
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            id == 2
+        }
+        unsafe extern "C" fn pos(_: i32, id: i32, out: *mut f32) {
+            unsafe {
+                std::ptr::copy_nonoverlapping([id as f32 * 10000.0, 500.0, 1000.0].as_ptr(), out, 3);
+            }
+        }
+        let table = springai::ffi::SSkirmishAICallback {
+            Unit_getHealth: Some(health),
+            Unit_getTeam: Some(team),
+            Unit_getDef: Some(def),
+            Unit_isBeingBuilt: Some(building),
+            Unit_getPos: Some(pos),
+            ..Default::default()
+        };
+        let cb = unsafe { Callback::from_raw(0, Box::leak(Box::new(table))) };
+        let silo = UnitDef::from_id(cb, 10).unwrap();
+        // 0 ours, 1 completed ally, 2 allied nanoframe, 3 dead,
+        // 4 another building, 5 transferred to us.
+        let allies = allied_silos((0..6).map(|id| Unit::from_id(cb, id).unwrap()), 1, silo, None);
+        assert_eq!(allies.len(), 2);
+        // Two bots with overlapping operational silos must not both defer.
+        let first = Unit::from_id(cb, 0).unwrap();
+        let later = Unit::from_id(cb, 5).unwrap();
+        assert!(allied_silos((0..6).map(|id| Unit::from_id(cb, id).unwrap()), 1, silo, Some(first)).is_empty());
+        assert_eq!(allied_silos((0..6).map(|id| Unit::from_id(cb, id).unwrap()), 1, silo, Some(later)), allies);
+        assert!(ally_covers(&allies, Vec3::xz(10000.0, 1000.0)));
+        assert!(ally_covers(&allies, Vec3::xz(20000.0, 1000.0)));
+        for x in [0.0, 30000.0, 40000.0, 50000.0] {
+            assert!(!ally_covers(&allies, Vec3::xz(x, 1000.0)));
+        }
+    }
+
+    #[test]
     fn inward_build_site_adjustment_must_not_lose_the_target() {
         let target = Vec3::xz(5000.0, 1000.0);
         let seed = Vec3::xz(1600.0, 1000.0);
         let shifted = Vec3::xz(1000.0, 1000.0);
         let targets = [(target, 2400.0)];
-        assert!(choose_silo_site([seed].into_iter(), &targets, &[], EARLY, target).is_some());
-        assert!(choose_silo_site([shifted].into_iter(), &targets, &[], EARLY, target).is_none());
+        assert!(choose_silo_site(&[], [seed].into_iter(), &targets, &[], EARLY, target).is_some());
+        assert!(choose_silo_site(&[], [shifted].into_iter(), &targets, &[], EARLY, target).is_none());
         let fallback = Vec3::xz(1800.0, 1000.0);
         assert_eq!(
-            choose_silo_site([shifted, fallback].into_iter(), &targets, &[], EARLY, target).unwrap().pos,
+            choose_silo_site(&[], [shifted, fallback].into_iter(), &targets, &[], EARLY, target).unwrap().pos,
             fallback
         );
     }
@@ -982,8 +1085,8 @@ mod site_tests {
         let targets = [(Vec3::xz(5000.0, 1000.0), 600.0), (Vec3::xz(5000.0, 1800.0), 600.0)];
         let only_one = Vec3::xz(1550.0, 1000.0);
         let both = Vec3::xz(2000.0, 1400.0);
-        assert!(choose_silo_site([only_one].into_iter(), &targets, &[], EARLY, targets[0].0).is_none());
-        let chosen = choose_silo_site([only_one, both].into_iter(), &targets, &[], EARLY, targets[0].0).unwrap();
+        assert!(choose_silo_site(&[], [only_one].into_iter(), &targets, &[], EARLY, targets[0].0).is_none());
+        let chosen = choose_silo_site(&[], [only_one, both].into_iter(), &targets, &[], EARLY, targets[0].0).unwrap();
         assert_eq!((chosen.pos, chosen.payoff, chosen.targets), (both, 1200.0, 2));
     }
 
@@ -995,19 +1098,19 @@ mod site_tests {
         // No individually worthwhile Eos targets: battlefield density,
         // not the amount of metal inside the firing disk, enables siege.
         let statics = [(enemy, 6000.0), (far, 2000.0)];
-        let site = choose_silo_site([at].into_iter(), &[], &statics, DENSE, enemy).unwrap();
+        let site = choose_silo_site(&[], [at].into_iter(), &[], &statics, DENSE, enemy).unwrap();
         assert_eq!(site.targets, 0);
         assert_eq!(site.coverage.share, 0.75);
         assert_eq!(site.coverage.value, 6000.0);
-        assert!(choose_silo_site([at].into_iter(), &[], &statics, EARLY, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, EARLY, enemy).is_none());
         // Value beyond missile range belongs in the denominator, whether
         // observed or inferred. Exactly 70% is not enough.
         let only_seventy_percent = [(enemy, 7000.0), (far, 3000.0)];
-        assert!(choose_silo_site([at].into_iter(), &[], &only_seventy_percent, DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &only_seventy_percent, DENSE, enemy).is_none());
         let coverage = StaticCoverage { share: 0.71, value: 1.0 };
         assert!(!coverage.warrants_silo(SiegeReadiness { density: 1500.0, ..EARLY }));
         assert!(coverage.warrants_silo(SiegeReadiness { density: 1500.1, ..EARLY }));
-        assert!(choose_silo_site([at].into_iter(), &[], &[], DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &[], DENSE, enemy).is_none());
     }
 
     #[test]
@@ -1016,8 +1119,8 @@ mod site_tests {
         let statics = [(enemy, 6000.0)];
         let seed = Vec3::xz(1600.0, 1000.0);
         let shifted = Vec3::xz(1000.0, 1000.0);
-        assert!(choose_silo_site([seed].into_iter(), &[], &statics, DENSE, enemy).is_some());
-        assert!(choose_silo_site([shifted].into_iter(), &[], &statics, DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [seed].into_iter(), &[], &statics, DENSE, enemy).is_some());
+        assert!(choose_silo_site(&[], [shifted].into_iter(), &[], &statics, DENSE, enemy).is_none());
     }
 
     #[test]
@@ -1042,11 +1145,11 @@ mod site_tests {
         let enemy = Vec3::xz(3000.0, 3000.0);
         let statics = [(enemy, 5435.0)];
         let siege = SiegeReadiness::new(2254.0, 1500.0, 0.7);
-        assert!(choose_silo_site([at].into_iter(), &[], &statics, siege, enemy).is_some());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, siege, enemy).is_some());
         // Ravaged's laneness discounts the default to about 1111, not zero.
         assert!((siege.threshold - 1111.11).abs() < 0.1);
         assert!(
-            choose_silo_site([at].into_iter(), &[], &statics, SiegeReadiness::new(1000.0, 1500.0, 0.7), enemy)
+            choose_silo_site(&[], [at].into_iter(), &[], &statics, SiegeReadiness::new(1000.0, 1500.0, 0.7), enemy)
                 .is_none()
         );
     }

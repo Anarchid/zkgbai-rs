@@ -5,7 +5,7 @@ use springai::{Callback, NO_TIMEOUT, Unit, UnitDef, Vec3};
 use zk_terrain::occupancy::Occupancy;
 
 use super::tasks::BuildPrerequisite;
-use super::{List, SITE_SLACK, TaskId, WorkerTask};
+use super::{EconomyManager, List, SITE_SLACK, TaskId, TaskKind, WorkerTask};
 use crate::Ai;
 use crate::defs::cmd;
 use crate::military::missiles;
@@ -43,6 +43,55 @@ fn prerequisite_unit(cb: Callback, team: i32, required: &BuildPrerequisite) -> O
 fn prerequisites_ready(cb: Callback, team: i32, requirements: &[BuildPrerequisite], threatened: bool) -> bool {
     (!threatened || !requirements.is_empty())
         && requirements.iter().all(|p| prerequisite_unit(cb, team, p).is_some_and(|u| !u.is_being_built()))
+}
+
+/// Prefer the furthest-along live nanoframe, breaking ties deterministically.
+fn silo_to_finish(units: impl Iterator<Item = Unit>) -> Option<Unit> {
+    units
+        .filter(|u| u.is_being_built())
+        .max_by(|a, b| a.build_progress().total_cmp(&b.build_progress()).then_with(|| b.id().cmp(&a.id())))
+}
+
+impl EconomyManager {
+    /// A dropped job does not destroy its nanoframe. Reattach to the live
+    /// building, preserving its guard prerequisites, and stop competing jobs.
+    fn reconcile_silo(&mut self, def: UnitDef, finish: Option<Unit>) {
+        let jobs: Vec<_> = self
+            .construction_tasks
+            .iter()
+            .copied()
+            .filter(|&id| self.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type == def))
+            .collect();
+        let keep = finish.and_then(|u| {
+            jobs.iter()
+                .copied()
+                .find(|&id| self.tasks.get(id).is_some_and(|t| distance(t.position, u.pos()) < SITE_SLACK))
+        });
+        for id in jobs {
+            if Some(id) != keep {
+                self.drop_construction_task(id);
+            }
+        }
+        if let Some(unit) = finish {
+            let id = keep.unwrap_or_else(|| {
+                // This is already a live building: a fresh build-site check
+                // would reject its occupied footprint.
+                let task = WorkerTask::construction(def, unit.pos(), unit.building_facing());
+                let id = self.tasks.insert(task);
+                self.construction_tasks.push(id);
+                id
+            });
+            self.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().target = Some(unit);
+        }
+    }
+
+    /// Nanoframes must use the single construction job, including its guard
+    /// gate and rush priority. Generic repairs would split the crew again.
+    pub(super) fn silo_work_allowed(&self, task: &WorkerTask) -> bool {
+        !matches!(&task.kind, TaskKind::Repair(r)
+            if r.target.is_being_built()
+                && r.target.def().is_some_and(|d| d.id() == self.build_ids.missile_silo_id))
+    }
 }
 
 impl Ai {
@@ -252,6 +301,34 @@ impl Ai {
 
     pub(super) fn eco_plan_missile_silo(&mut self) {
         let Some(silo) = self.defs.get(missiles::SILO) else { return };
+        // Live units are authoritative, even after threat cleanup dropped
+        // their jobs or before unitCreated attached them to a task.
+        let existing: Vec<_> = self
+            .cb
+            .team_units()
+            .into_iter()
+            .filter(|u| u.health() > 0.0 && u.team() == self.team_id && u.def() == Some(silo))
+            .collect();
+        if !existing.is_empty() {
+            let completed = existing.iter().any(|u| !u.is_being_built());
+            let finish = (!completed)
+                .then(|| {
+                    silo_to_finish(
+                        existing
+                            .iter()
+                            .copied()
+                            .filter(|u| self.war.get_porc_threat(u.pos()) <= 0.0 && !self.missiles_shuns_site(u.pos())),
+                    )
+                })
+                .flatten();
+            self.eco.reconcile_silo(silo, finish);
+            self.eco_update_silo_preparation();
+            // Wait for an unsafe surviving silo to become usable, rather
+            // than spending another 1200 metal at a replacement site.
+            // Preparation may drop the recovered job too. The live
+            // nanoframe still prevents commissioning a replacement.
+            return;
+        }
         if self.eco_silo_plan().is_some() {
             return;
         }
@@ -338,6 +415,7 @@ mod tests {
         pos: Vec3,
         health: f32,
         building: bool,
+        progress: f32,
     }
 
     thread_local! {
@@ -376,7 +454,28 @@ mod tests {
                 std::ptr::copy_nonoverlapping([p.x, p.y, p.z].as_ptr(), out, 3);
             }
         }
+        unsafe extern "C" fn progress(_: i32, id: i32) -> f32 {
+            GUARDS.with(|g| g.borrow()[id as usize].progress)
+        }
+        unsafe extern "C" fn facing(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn size(_: i32) -> i32 {
+            1
+        }
+        unsafe extern "C" fn water(_: i32) -> f32 {
+            0.0
+        }
+        unsafe extern "C" fn heights(_: i32, _: *mut f32, _: i32) -> i32 {
+            0
+        }
         let table = springai::ffi::SSkirmishAICallback {
+            Unit_getBuildProgress: Some(progress),
+            Unit_getBuildingFacing: Some(facing),
+            Map_getWidth: Some(size),
+            Map_getHeight: Some(size),
+            Map_getWaterDamage: Some(water),
+            Map_getHeightMap: Some(heights),
             getFriendlyUnitsIn: Some(friendly),
             Unit_getDef: Some(def),
             Unit_getHealth: Some(health),
@@ -386,6 +485,77 @@ mod tests {
             ..Default::default()
         };
         unsafe { Callback::from_raw(0, Box::leak(Box::new(table))) }
+    }
+
+    #[test]
+    fn orphaned_silos_resume_one_nanoframe_and_reuse_its_guard_gate() {
+        let cb = callback();
+        let def = UnitDef::from_id(cb, 10).unwrap();
+        GUARDS.with(|g| {
+            *g.borrow_mut() = [0.2, 0.6, 0.2]
+                .into_iter()
+                .enumerate()
+                .map(|(i, progress)| Guard {
+                    def: 10,
+                    pos: Vec3::xz(1000.0 * (i + 1) as f32, 1000.0),
+                    health: 100.0,
+                    building: true,
+                    progress,
+                })
+                .collect()
+        });
+        let units: Vec<_> = (0..3).map(|id| Unit::from_id(cb, id).unwrap()).collect();
+        let mut eco = EconomyManager::new(cb);
+        eco.build_ids.missile_silo_id = def.id();
+        // The most advanced nanoframe has lost its construction job; a
+        // replacement is already queued somewhere else.
+        let pending = eco.tasks.insert(WorkerTask::construction(def, Vec3::xz(5000.0, 1000.0), 0));
+        eco.construction_tasks.push(pending);
+        let finish = silo_to_finish(units.iter().copied()).unwrap();
+        assert_eq!(finish, units[1]);
+        eco.reconcile_silo(def, Some(finish));
+        assert!(eco.tasks.get(pending).is_none());
+        assert_eq!(eco.construction_tasks.len(), 1);
+        let id = eco.construction_tasks[0];
+        let task = eco.tasks.get_mut(id).unwrap();
+        assert_eq!(task.as_construction().unwrap().target, Some(finish));
+        assert_eq!(task.position, finish.pos());
+        task.as_construction_mut().unwrap().prerequisites.push(BuildPrerequisite { def, pos: Vec3::ZERO });
+        // Repeated planning preserves the same job and its defenses.
+        eco.reconcile_silo(def, Some(finish));
+        assert_eq!(eco.construction_tasks, vec![id]);
+        assert_eq!(eco.tasks.get(id).unwrap().as_construction().unwrap().prerequisites.len(), 1);
+        assert!(eco.silo_work_allowed(eco.tasks.get(id).unwrap()));
+        for &target in &units {
+            let repair = WorkerTask {
+                id: 0,
+                position: target.pos(),
+                assigned_workers: Vec::new(),
+                kind: TaskKind::Repair(super::super::tasks::RepairTask {
+                    target,
+                    is_shield_mob: false,
+                    is_tank: false,
+                }),
+            };
+            assert!(!eco.silo_work_allowed(&repair));
+        }
+        // Completion permits normal damage repair and ends competing builds.
+        GUARDS.with(|g| g.borrow_mut()[1].building = false);
+        eco.reconcile_silo(def, None);
+        assert!(eco.construction_tasks.is_empty());
+        let repair = WorkerTask {
+            id: 0,
+            position: finish.pos(),
+            assigned_workers: Vec::new(),
+            kind: TaskKind::Repair(super::super::tasks::RepairTask {
+                target: finish,
+                is_shield_mob: false,
+                is_tank: false,
+            }),
+        };
+        assert!(eco.silo_work_allowed(&repair));
+        assert_eq!(silo_to_finish(units.iter().copied()), Some(units[0]));
+        assert_eq!(silo_to_finish(units.iter().rev().copied()), Some(units[0]));
     }
 
     #[test]
@@ -406,6 +576,7 @@ mod tests {
                     pos: Vec3::new(p.pos.x, 200.0, p.pos.z),
                     health: 100.0,
                     building: true,
+                    progress: 0.2,
                 })
                 .collect()
         });
