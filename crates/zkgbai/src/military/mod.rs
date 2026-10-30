@@ -1239,6 +1239,7 @@ impl Ai {
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
+        self.counterbattery_destroyed(enemy.id());
         self.strikes_enemy_destroyed(enemy.id());
         self.impalers_enemy_destroyed(enemy, attacker);
         self.taskforce_enemy_destroyed(enemy, attacker);
@@ -1958,6 +1959,13 @@ impl Ai {
     pub fn war_get_arty_target(&mut self, origin: Vec3, defend: bool) -> Vec3 {
         let mut target = NULLPOS;
         let mut cost = NO_COST;
+        // Firing evidence is useful even without a targetable LOS contact.
+        // Ordinary artillery can approach the battery; area weapons may fire
+        // at the ground estimate through the strike support-fire path.
+        for fix in self.counterbattery_fixes(sweeps::counterbattery::FRESH).filter(|f| f.ground) {
+            let score = distance(origin, fix.pos) - fix.range;
+            if score < cost { target = fix.pos; cost = score; }
+        }
         let war = &self.war;
 
         // first check defense targets

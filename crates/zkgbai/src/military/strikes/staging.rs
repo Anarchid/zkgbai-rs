@@ -39,7 +39,8 @@ pub(super) fn line_point(center: Vec3, target: Vec3, origin: Vec3, i: usize, n: 
 
 impl Ai {
     pub(super) fn strike_stage_clear(&self, u: Unit, from: Vec3, p: Vec3) -> bool {
-        !self.graph.is_enemy_territory(p)
+        self.strike_waiting_risk(p, 40.0) <= 0.0
+            && !self.graph.is_enemy_territory(p)
             && self.war.get_porc_threat(p) <= 0.0
             && self.war.get_effective_threat(p) <= 0.0
             && u.def().is_some_and(|d| reaches(self.reach_terrain(), d, from, p, 80.0))
@@ -72,6 +73,25 @@ impl Ai {
                 candidates.push(p);
             }
         }
+        let radius = muster_radius(w.tactic, w.needed);
+        let risk = |p| {
+            self.strike_waiting_risk(p, radius)
+                + if phantom_range > 0.0 { evasion::coverage(p, w.job.pos, phantom_range + radius) } else { 0.0 }
+        };
+        let home_risk = risk(w.home);
+        let unsafe_home = home_risk > 0.0;
+        if unsafe_home {
+            // Safety takes precedence over the usual 1000-elmo frontline leash.
+            // Include lateral exits, and a retreat if the entire front is shelled.
+            for back in [400.0_f32, 800.0, 1400.0, 2200.0] {
+                let p = get_directional_point(w.home, ally, back.min(distance(w.home, ally)));
+                for side in [-500.0, 0.0, 500.0] {
+                    candidates.push(Vec3::xz(p.x + side, p.z));
+                }
+            }
+            candidates.push(ally);
+        }
+        candidates.push(w.home);
         let map = self.cb.map();
         candidates
             .into_iter()
@@ -80,14 +100,22 @@ impl Ai {
                     && p.z > 0.0
                     && p.x < (map.width() * 8) as f32
                     && p.z < (map.height() * 8) as f32
-                    && (phantom_range == 0.0
+                    && (unsafe_home
+                        || phantom_range == 0.0
                         || outside_target_fire(p, w.job.pos, phantom_range, muster_radius(w.tactic, w.needed)))
                     && !self.graph.is_enemy_territory(p)
                     && self.war.get_porc_threat(p) <= 0.0
-                    && self.war.get_effective_threat(p) <= 0.0
+                    && (unsafe_home || self.war.get_effective_threat(p) <= 0.0)
                     && reaches(self.reach_terrain(), def, w.home, p, 80.0)
             })
-            .min_by(|a, b| distance(*a, w.job.pos).total_cmp(&distance(*b, w.job.pos)))
+            .filter_map(|p| {
+                let danger = risk(p);
+                (danger <= 0.0 || unsafe_home && danger < home_risk).then_some((p, danger))
+            })
+            .min_by(|(a, ar), (b, br)| {
+                ar.total_cmp(br).then_with(|| distance(*a, w.job.pos).total_cmp(&distance(*b, w.job.pos)))
+            })
+            .map(|(p, _)| p)
     }
 }
 
