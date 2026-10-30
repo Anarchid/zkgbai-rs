@@ -30,7 +30,7 @@ impl Ai {
             .values()
             .filter(|e| !e.is_dead && e.position != NULLPOS && (e.is_static || self.frame - e.last_seen < JOB_MEMORY))
             .filter(|e| {
-                // A dedicated AA formation does not defend itself against Fleas.
+                // A dedicated AA formation does not defend itself against light swarms.
                 // Unknown contacts and ground-capable escorts do, including ones
                 // temporarily stunned/disarmed or under construction.
                 !e.identified || e.ud.is_none_or(|d| !self.strike_defenseless(d))

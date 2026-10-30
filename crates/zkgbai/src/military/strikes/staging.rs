@@ -8,6 +8,10 @@ const FRONT_LIMIT: f32 = 1000.0;
 const SCREEN_HALF: f32 = 800.0;
 const ANTICIPATION: i32 = 30 * 45;
 
+fn outside_target_fire(point: Vec3, target: Vec3, range: f32, muster: f32) -> bool {
+    distance(point, target) > range + muster
+}
+
 pub(super) fn waiting_phase(tactic: Tactic, age: i32, widow_expected: bool) -> Phase {
     if tactic == Tactic::Halberd || age < ANTICIPATION || widow_expected { Phase::Forming } else { Phase::Screening }
 }
@@ -46,6 +50,10 @@ impl Ai {
     pub(super) fn strike_stage(&self, w: &Wave) -> Option<Vec3> {
         let def = self.defs.get(w.tactic.name())?;
         let ally = self.graph.get_ally_center();
+        // Inferred sniper fixes may not have a tracked unit/threat-map entry.
+        // Keep the whole muster outside its weapon reach before committing.
+        let phantom_range =
+            if w.job.phantom() { self.defs.get("cloaksnipe").map_or(1200.0, |d| d.max_weapon_range()) } else { 0.0 };
         let front = self
             .graph
             .get_front_line_spots()
@@ -72,6 +80,8 @@ impl Ai {
                     && p.z > 0.0
                     && p.x < (map.width() * 8) as f32
                     && p.z < (map.height() * 8) as f32
+                    && (phantom_range == 0.0
+                        || outside_target_fire(p, w.job.pos, phantom_range, muster_radius(w.tactic, w.needed)))
                     && !self.graph.is_enemy_territory(p)
                     && self.war.get_porc_threat(p) <= 0.0
                     && self.war.get_effective_threat(p) <= 0.0
@@ -85,10 +95,20 @@ impl Ai {
 mod tests {
     use super::*;
     #[test]
+    fn phantom_staging_keeps_even_the_nearest_member_out_of_range() {
+        let target = Vec3::xz(2000.0, 2000.0);
+        let radius = muster_radius(Tactic::Dart, 20);
+        assert!(!outside_target_fire(Vec3::xz(2000.0, 1050.0), target, 1100.0, radius));
+        assert!(!outside_target_fire(Vec3::xz(2000.0, 800.0), target, 1100.0, radius));
+        assert!(outside_target_fire(Vec3::xz(2000.0, 400.0), target, 1100.0, radius));
+    }
+    #[test]
     fn activity_musters_before_the_launch_window_and_quiet_units_screen() {
         assert_eq!(waiting_phase(Tactic::Flea, 30 * 30, false), Phase::Forming);
         assert_eq!(waiting_phase(Tactic::Flea, 30 * 60, false), Phase::Screening);
         assert_eq!(waiting_phase(Tactic::Flea, 30 * 60, true), Phase::Forming);
+        assert_eq!(waiting_phase(Tactic::Dart, 30 * 60, false), Phase::Screening);
+        assert_eq!(waiting_phase(Tactic::Dart, 30 * 30, false), Phase::Forming);
         assert_eq!(waiting_phase(Tactic::Dirtbag, 30 * 60, false), Phase::Screening);
         assert_eq!(waiting_phase(Tactic::Halberd, 30 * 60, false), Phase::Forming);
     }
