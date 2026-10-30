@@ -812,7 +812,7 @@ function drawMap() {
   drawSelectionBox();
 }
 
-function missionName(m) { return String(m.kind || 'Mission').replace(/([a-z])([A-Z])/g, '$1 $2'); }
+function missionName(m) { return String(m.label || (m.kind === 'Heavy' ? 'Priority strike' : m.kind) || 'Mission').replace(/([a-z])([A-Z])/g, '$1 $2'); }
 function missionPackage(m) {
   return (m.packages || []).map(p => p.map(u => `${u.count} ${u.name || u.unit}`).join(' + ')).join(' or ');
 }
@@ -822,6 +822,9 @@ function renderMissions(snap) {
   const a = snap?.airstrikes;
   if (!a) { node.append(el('div', 'empty', 'No mission telemetry in this snapshot.')); return; }
   node.append(el('div', 'detail', `${a.available || 0} available · ${a.in_progress || 0} in progress`));
+  const fleet = {};
+  for (const u of a.fleet || []) { const key = `${u.name}: ${u.state.replaceAll('_', ' ')}`; fleet[key] = (fleet[key] || 0) + 1; }
+  for (const [state, count] of Object.entries(fleet)) node.append(el('div', 'detail', `${count} ${state}`));
   if (a.grounded) node.append(el('div', 'empty', 'Production grounded: unsafe airspace.'));
   for (const m of a.missions || []) {
     const active = m.state === 'in_progress';

@@ -14,6 +14,13 @@ pub use live::BomberHandler;
 pub const MEMORY: i32 = 30 * 90;
 pub const FRESH: i32 = 30 * 5;
 pub const MAX_WING: usize = 24;
+const MIN_PRIORITY_METAL: f32 = 600.0;
+// Structural fragility drives procurement. Damage opens short-lived secondary
+// opportunities instead of ordering a new fleet after a retreating target.
+const MAX_PRIORITY_HP_PER_METAL: f32 = 3.0;
+fn priority_target(value: f32, max_hp: f32) -> bool {
+    value >= MIN_PRIORITY_METAL && max_hp / value <= MAX_PRIORITY_HP_PER_METAL
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Plane {
@@ -54,12 +61,28 @@ pub enum MissionKind {
     Wind,
     Thermite,
     Assassinate,
+    Opportunistic,
     Static,
     Shield,
 }
 impl MissionKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Heavy => "Priority strike",
+            Self::Opportunistic => "Opportunistic strike",
+            Self::Group => "Group strike",
+            Self::Intercept => "Interception",
+            Self::Interdict => "Interdiction",
+            Self::Wind => "Wind farm strike",
+            Self::Thermite => "Thermite strike",
+            Self::Assassinate => "Assassination",
+            Self::Static => "Static strike",
+            Self::Shield => "Shield drop",
+        }
+    }
+
     fn primary(self) -> bool {
-        !matches!(self, Self::Assassinate | Self::Static | Self::Shield)
+        !matches!(self, Self::Assassinate | Self::Opportunistic | Self::Static | Self::Shield)
     }
     fn priority(self) -> f32 {
         match self {
@@ -69,7 +92,7 @@ impl MissionKind {
             Self::Wind => 7.0,
             Self::Thermite => 7.0,
             Self::Group => 6.0,
-            Self::Assassinate => 3.0,
+            Self::Assassinate | Self::Opportunistic => 3.0,
             Self::Shield => 2.0,
             Self::Static => 1.0,
         }
@@ -114,7 +137,13 @@ impl Mission {
         (self.kind, self.target)
     }
     fn score(&self) -> f32 {
-        self.kind.priority() * 10000.0 + self.value.min(9000.0)
+        let reward = if matches!(self.kind, MissionKind::Heavy | MissionKind::Opportunistic | MissionKind::Assassinate)
+        {
+            self.value / self.hp.max(1.0) * 3000.0
+        } else {
+            self.value
+        };
+        self.kind.priority() * 10000.0 + reward.min(9000.0)
     }
 }
 
@@ -190,7 +219,12 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             add(MissionKind::Static, vec![e.id], e.hp, e.value);
         } else {
             if e.heavy {
-                add(MissionKind::Heavy, vec![e.id], e.hp, e.value);
+                add(
+                    if priority_target(e.value, e.max_hp) { MissionKind::Heavy } else { MissionKind::Opportunistic },
+                    vec![e.id],
+                    e.hp,
+                    e.value,
+                );
             }
             if e.value >= 700.0 && e.hp < e.max_hp * 0.55 {
                 add(MissionKind::Assassinate, vec![e.id], e.hp, e.value);
@@ -251,18 +285,21 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     use MissionKind::*;
     use Plane::*;
     let count = |hp: f32, damage: f32| (hp / damage.max(1.0)).ceil().max(1.0) as usize;
-    let raven = count(job.hp * 1.2, raven_damage) + 1;
+    // Apply the margin in f64 so exact multiples do not round just above
+    // a bomb boundary and demand another aircraft (e.g. 12000 HP / 800).
+    let salvo = |damage: f32| (f64::from(job.hp) * 1.2 / f64::from(damage.max(1.0))).ceil().max(1.0) as usize;
+    let raven = salvo(raven_damage) + 1;
     let clear = risk.aa <= 0.02 && !risk.intercepted;
     let very_light = risk.aa <= 0.15 && !risk.intercepted;
     let light = risk.aa <= 1.25 && !risk.intercepted;
     let choices = match job.kind {
         Intercept if risk.aa <= 0.4 => vec![vec![(Magpie, 1), (Raptor, count(job.hp, 700.0).max(2))]],
         Interdict if clear => vec![vec![(Phoenix, count(job.hp, 1000.0))], vec![(Magpie, count(job.hp, 350.0).max(2))]],
-        Group if clear => vec![vec![(Phoenix, count(job.hp, 1800.0))]],
+        Group if clear => vec![vec![(Phoenix, count(job.hp, 1800.0))], vec![(Likho, count(job.hp, 3500.0))]],
         Group if light => vec![vec![(Likho, count(job.hp, 3500.0))]],
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
-        Heavy if very_light => vec![vec![(Raven, raven)]],
-        Heavy if light => vec![vec![(Likho, count(job.hp * 1.2, 2000.0))]],
+        Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
+        Heavy | Opportunistic if light => vec![vec![(Likho, salvo(2000.0))]],
         Thermite if !risk.intercepted => {
             let n = count(job.hp, 14000.0);
             let mut package = vec![(Odin, n)];
@@ -278,12 +315,17 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     choices.into_iter().filter(|p| p.iter().map(|(_, n)| n).sum::<usize>() <= MAX_WING).collect()
 }
 
-/// One purchase toward the cheapest deficit in aircraft count. A completed
+/// One purchase toward the cheapest deficit in metal. A completed
 /// alternative wins over every incomplete one. Inventory includes reservations
 /// from other factories, nanoframes, rearming aircraft and active sorties.
-fn purchase(packages: &[Vec<(Plane, usize)>], have: &std::collections::BTreeMap<Plane, usize>) -> Option<Plane> {
-    let package = packages
-        .iter()
-        .min_by_key(|p| p.iter().map(|(k, n)| n.saturating_sub(*have.get(k).unwrap_or(&0))).sum::<usize>())?;
+fn purchase(
+    packages: &[Vec<(Plane, usize)>],
+    have: &std::collections::BTreeMap<Plane, usize>,
+    cost: impl Fn(Plane) -> f32,
+) -> Option<Plane> {
+    let deficit = |p: &Vec<(Plane, usize)>| {
+        p.iter().map(|(k, n)| n.saturating_sub(*have.get(k).unwrap_or(&0)) as f32 * cost(*k)).sum::<f32>()
+    };
+    let package = packages.iter().min_by(|a, b| deficit(a).total_cmp(&deficit(b)))?;
     package.iter().find(|(k, n)| have.get(k).copied().unwrap_or(0) < *n).map(|(k, _)| *k)
 }

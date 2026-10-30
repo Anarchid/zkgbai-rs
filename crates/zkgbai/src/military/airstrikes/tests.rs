@@ -38,7 +38,7 @@ fn job(kind: MissionKind, hp: f32) -> Mission {
 #[test]
 fn ravens_have_twenty_percent_margin_and_one_spare() {
     for (hp, n) in [(800.0, 3), (2000.0, 4), (4000.0, 7)] {
-        assert_eq!(packages(&job(MissionKind::Heavy, hp), clear(), 800.0), vec![vec![(Plane::Raven, n)]]);
+        assert_eq!(packages(&job(MissionKind::Heavy, hp), clear(), 800.0)[0], vec![(Plane::Raven, n)]);
     }
 }
 #[test]
@@ -141,17 +141,17 @@ fn reservations_prevent_duplicate_purchases_and_complete_alternatives_win() {
     use std::collections::BTreeMap;
     let packages = vec![vec![(Plane::Phoenix, 1)], vec![(Plane::Magpie, 3)]];
     let mut have = BTreeMap::new();
-    assert_eq!(purchase(&packages, &have), Some(Plane::Phoenix));
+    assert_eq!(purchase(&packages, &have, |_| 1.0), Some(Plane::Phoenix));
     have.insert(Plane::Phoenix, 1); // queued by the first factory
-    assert_eq!(purchase(&packages, &have), None); // second factory pauses
+    assert_eq!(purchase(&packages, &have, |_| 1.0), None); // second factory pauses
     have.clear();
     have.insert(Plane::Magpie, 3);
-    assert_eq!(purchase(&packages, &have), None);
+    assert_eq!(purchase(&packages, &have, |_| 1.0), None);
     let deep = vec![vec![(Plane::Odin, 1), (Plane::Sparrow, 1)]];
     have.insert(Plane::Odin, 1);
-    assert_eq!(purchase(&deep, &have), Some(Plane::Sparrow));
+    assert_eq!(purchase(&deep, &have, |_| 1.0), Some(Plane::Sparrow));
     have.insert(Plane::Sparrow, 1);
-    assert_eq!(purchase(&deep, &have), None);
+    assert_eq!(purchase(&deep, &have, |_| 1.0), None);
 }
 
 #[test]
@@ -162,4 +162,68 @@ fn assassination_deadline_accounts_for_a_fleeing_target() {
     assert!(intercept_time(Vec3::ZERO, target, toward, 250.0).unwrap() < 12.0);
     assert!(intercept_time(Vec3::ZERO, target, away, 250.0).unwrap() > 12.0);
     assert!(intercept_time(Vec3::ZERO, target, Vec3::xz(300.0, 0.0), 250.0).is_none());
+}
+
+#[test]
+fn cheap_artillery_is_secondary_but_groups_of_cheap_units_remain_primary() {
+    let mut fencer = enemy(1);
+    fencer.heavy = true;
+    fencer.value = 300.0;
+    let js = missions(&[fencer.clone()], Vec3::ZERO, 300);
+    assert!(!js.iter().any(|j| j.kind.primary()));
+    assert!(js.iter().any(|j| j.kind == MissionKind::Opportunistic));
+    for (cost, primary) in [(599.0, false), (600.0, true), (1000.0, true)] {
+        fencer.value = cost;
+        assert_eq!(missions(&[fencer.clone()], Vec3::ZERO, 300).iter().any(|j| j.kind == MissionKind::Heavy), primary);
+    }
+    let group: Vec<_> = (0..4).map(enemy).collect();
+    assert!(missions(&group, Vec3::ZERO, 300).iter().any(|j| j.kind == MissionKind::Group && j.kind.primary()));
+}
+
+#[test]
+fn existing_likhos_can_alpha_priority_targets_and_groups_in_clear_air() {
+    use std::collections::BTreeMap;
+    for kind in [MissionKind::Heavy, MissionKind::Group, MissionKind::Opportunistic] {
+        let choices = packages(&job(kind, 3000.0), clear(), 800.0);
+        assert!(choices.iter().any(|p| p.iter().any(|(k, _)| *k == Plane::Likho)));
+        let have = BTreeMap::from([(Plane::Likho, 2)]);
+        assert_eq!(purchase(&choices, &have, |_| 1000.0), None);
+    }
+    assert!(!MissionKind::Opportunistic.primary());
+}
+
+#[test]
+fn procurement_compares_metal_not_airframe_count() {
+    use std::collections::BTreeMap;
+    let choices = vec![vec![(Plane::Raven, 3)], vec![(Plane::Likho, 1)]];
+    let cost = |k| if k == Plane::Likho { 2000.0 } else { 300.0 };
+    assert_eq!(purchase(&choices, &BTreeMap::new(), cost), Some(Plane::Raven));
+    assert_eq!(purchase(&choices, &BTreeMap::from([(Plane::Likho, 1)]), cost), None);
+}
+
+#[test]
+fn assassination_procurement_favors_fragility_and_tough_units_use_existing_fleets() {
+    assert!(priority_target(1100.0, 1000.0)); // Lance
+    assert!(priority_target(900.0, 1250.0)); // Firewalker
+    assert!(priority_target(1600.0, 2045.0)); // Tremor
+    assert!(!priority_target(2200.0, 12000.0)); // Cyclops
+    assert!(priority_target(600.0, 1800.0));
+    assert!(!priority_target(600.0, 1801.0));
+    let mut cyclops = enemy(1);
+    cyclops.heavy = true;
+    cyclops.value = 2200.0;
+    cyclops.hp = 12000.0;
+    cyclops.max_hp = 12000.0;
+    let js = missions(&[cyclops.clone()], Vec3::ZERO, 300);
+    assert!(js.iter().all(|j| !j.kind.primary()));
+    let choice = packages(&js[0], clear(), 800.0);
+    assert!(choice.contains(&vec![(Plane::Raven, 19)]));
+    cyclops.hp = 2000.0;
+    let damaged = missions(&[cyclops], Vec3::ZERO, 300);
+    assert!(damaged.iter().all(|j| !j.kind.primary()));
+    assert!(damaged.iter().any(|j| j.kind == MissionKind::Assassinate));
+    let lance = job(MissionKind::Heavy, 1000.0);
+    let mut tougher = lance.clone();
+    tougher.hp = 3000.0;
+    assert!(lance.score() > tougher.score());
 }

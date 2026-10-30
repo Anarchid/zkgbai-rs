@@ -10,11 +10,17 @@ Idle plants reconsider every two seconds, so they resume without an idle event.
 
 Primary missions:
 
-- Groups of at least three medium ground units: Phoenix in clear air, Likho with
-  light AA. Package size scales with the group's health.
-- Artillery, commanders and heavy units: Ravens in clear/very light AA, Likhos
-  with more AA. Raven count is `ceil(1.2 * HP / bomb damage) + 1`; damage comes
-  from the installed game definition.
+- Groups of at least three medium ground units: Phoenix or existing Likhos in
+  clear air, Likhos with light AA. Package size scales with group health.
+- Priority strikes target mobile units costing at least 600 metal with at most
+  3 maximum HP per metal (including artillery and commanders meeting those
+  thresholds). Ravens or existing Likhos can strike in clear/very light AA;
+  Likhos can also strike through light AA. Within this category, metal removed
+  per current HP determines preference. Raven count is
+  `ceil(1.2 * HP / bomb damage) + 1`; damage comes from the installed definition.
+  Procurement compares missing metal cost across alternatives, counting aircraft
+  already owned or ordered. A ready Likho is usable even where Ravens would be
+  cheaper to buy.
 - At least five nearby wind generators: Phoenix, with an approach clear of
   known interceptors.
 - Aircraft on LOS/radar inbound to our territory: one Magpie and at least two
@@ -28,8 +34,11 @@ Primary missions:
 
 Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
-and an Odin shield cluster over friendly ground troops in an ongoing fight.
-Available primary missions reserve their aircraft types first. Overlapping jobs
+cheap artillery such as Fencers and tough targets such as Cyclops for a sufficient
+existing Raven/Likho fleet, and an Odin shield cluster over friendly ground troops in an ongoing fight.
+Launchable primary missions take ready aircraft first. Unfillable primary
+packages do not reserve every aircraft of a type; spare aircraft may take
+secondary opportunities while the remaining package is built. Overlapping jobs
 cannot launch duplicate sorties against the same group. There are at most four
 simultaneous sorties and 24 aircraft in a package; oversized jobs are rejected,
 not silently reduced. Mobile fixes must be live and at most five seconds old.
@@ -51,7 +60,11 @@ candidates that overlap their targets. Snapshot journals preserve these states
 for replay. The browser dashboard and in-game operator widget show available
 missions as diamonds with broken routes and active missions as double rings
 with solid routes; the dashboard card and in-game Intel list include aircraft
-requirements. The operator HUD and map board expose the same distinction. `disable=airstrikes` disables the policy.
+requirements. `fleet` distinguishes ready, in-progress, rearming, repairing,
+returning and operator-held aircraft; `utilization` accumulates aircraft-seconds
+per state, aircraft launches, observed spent payloads and abort reasons. Spent
+payloads indicate releases, not confirmed hits or kills. Aircraft still gather
+within 450 elmos of home and require 95% health before launch. The operator HUD and map board expose the same distinction. `disable=airstrikes` disables the policy.
 
 ## Verification
 

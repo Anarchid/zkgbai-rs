@@ -1656,7 +1656,7 @@ local function drawWorld(inst)
 					end
 				end)
 				if cameraNear(p[1], p[2], 6000) then
-					worldText((active and "mission in progress: " or "mission available: ") .. tostring(m.kind),
+					worldText((active and "mission in progress: " or "mission available: ") .. tostring(m.label or (m.kind == "Heavy" and "Priority strike") or m.kind),
 						p[1], groundY(p[1], p[2]) + 75, p[2], 16, color)
 				end
 			end
@@ -2119,11 +2119,17 @@ local function intelLines(inst, add)
 	local air = (inst.snap or {}).airstrikes or m.airstrikes
 	if air then
 		add(WHITE .. format("Air missions: %d available · %d in progress", air.available or 0, air.in_progress or 0))
+		local fleet = {}
+		for _, u in ipairs(air.fleet or {}) do
+			local key = tostring(u.name) .. ": " .. tostring(u.state):gsub("_", " ")
+			fleet[key] = (fleet[key] or 0) + 1
+		end
+		for state, count in pairs(fleet) do add(GREY .. tostring(count) .. " " .. state) end
 		if air.grounded then add(RED .. "Production grounded: unsafe airspace") end
 		for idx, job in ipairs(air.missions or {}) do
 			if idx > 12 then add(GREY .. "More missions shown on map…"); break end
 			local active = job.state == "in_progress"
-			add((active and GREEN or WHITE) .. (active and "In progress: " or "Available: ") .. tostring(job.kind)
+			add((active and GREEN or WHITE) .. (active and "In progress: " or "Available: ") .. tostring(job.label or (job.kind == "Heavy" and "Priority strike") or job.kind)
 				.. " #" .. tostring(job.target) .. (job.deep and " · deep strike" or ""))
 			local packages = {}
 			for _, package in ipairs(job.packages or {}) do

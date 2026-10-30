@@ -275,7 +275,7 @@ pub fn render(ai: &mut Ai, cfg: &HudConfig) -> String {
                             s,
                             " | {} {} target #{} at {}: {}",
                             if m["state"] == "in_progress" { "in progress" } else { "available" },
-                            m["kind"].as_str().unwrap_or("?"),
+                            m["label"].as_str().unwrap_or("?"),
                             m["target"],
                             m["pos"],
                             m["packages"]
