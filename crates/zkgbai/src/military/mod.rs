@@ -1518,10 +1518,15 @@ impl Ai {
                         }
                         // paint enemy threat for mobiles
                         if t.is_aa || t.is_flex_aa {
-                            war.aa_threat_graphics.paint_circle(
+                            let aa_radius = (r as f32 * 1.25).round() as i32;
+                            war.aa_threat_graphics.paint_circle(x, y, aa_radius, effective_power);
+                            // A mobile AA unit can close this distance during
+                            // three seconds of a plane's approach or escape.
+                            war.aa_threat_graphics.paint_soft_band(
                                 x,
                                 y,
-                                (r as f32 * 1.25).round() as i32,
+                                aa_radius as f32,
+                                t.def_speed() * 3.0 / 64.0,
                                 effective_power,
                             );
                         } else if surface {

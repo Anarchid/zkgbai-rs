@@ -577,6 +577,7 @@ impl Ai {
                     | "lances"
                     | "assassin-target"
                     | "assassin-target2"
+                    | "airstrike-wave-targets"
                     | "airstrike-farm"
                     | "airstrike-singu"
                     | "airstrike-aa"

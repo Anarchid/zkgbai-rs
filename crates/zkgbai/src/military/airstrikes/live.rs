@@ -7,6 +7,8 @@ use crate::{Ai, defs::cmd};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod wave;
+
 const PERIOD: i32 = 30;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
 const COOLDOWN: i32 = 30 * 15;
@@ -49,14 +51,35 @@ struct Plan {
     risk: Risk,
     length: f32,
     route: Vec<Vec3>,
+    return_route: Vec<Vec3>,
 }
+impl Plan {
+    fn score(&self) -> f32 {
+        // Preserve primary-before-secondary dispatch, but favor value reachable
+        // in a shorter flight within each tier. Interceptions remain urgent.
+        if self.job.kind == MissionKind::Intercept {
+            self.job.score()
+        } else {
+            self.job.score() / (1.0 + self.length / 1200.0)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct WaveFlight {
+    id: i32,
+    target: Vec3,
+}
+
 struct Sortie {
+    wave: Option<WaveFlight>,
     job: Mission,
     members: Vec<i32>,
     launched: i32,
     last_order: i32,
     last_route: i32,
     route: Vec<Vec3>,
+    return_route: Vec<Vec3>,
     package: Vec<(Plane, usize)>,
 }
 
@@ -72,6 +95,10 @@ pub struct BomberHandler {
     building: BTreeMap<i32, Plane>,
     pub grounded: bool,
     last_report: i32,
+    last_wave_check: i32,
+    wave_checks: usize,
+    waves_launched: usize,
+    last_wave_launch: i32,
     launched: usize,
     raven_damage: Option<f32>,
     utilization: BTreeMap<Plane, Utilization>,
@@ -156,7 +183,7 @@ impl Ai {
             *have.entry(p).or_default() += 1;
         }
         let mut plans: Vec<_> = h.recent.values().filter(|p| self.frame - p.job.seen <= MEMORY).collect();
-        plans.sort_by(|a, b| b.job.score().total_cmp(&a.job.score()));
+        plans.sort_by(|a, b| b.score().total_cmp(&a.score()));
         for plan in plans {
             if let Some(kind) = purchase(&plan.packages, &have, |k| {
                 self.defs.get(k.name()).map_or(f32::INFINITY, |d| d.cost(self.metal))
@@ -233,9 +260,24 @@ impl Ai {
         })
     }
 
-    fn airstrike_risk(&self, air: &AirField, pos: Vec3, interceptors: &[(Vec3, f32, f32)]) -> Risk {
-        let intercepted = air.route(pos).iter().any(|p| interceptors.iter().any(|(at, r, _)| distance(*p, *at) < *r));
-        Risk { aa: self.war.get_aa_threat(pos), exposure: air.exposure(pos).unwrap_or(f32::INFINITY), intercepted }
+    fn airstrike_path_risk(&self, from: Vec3, route: &[Vec3], interceptors: &[(Vec3, f32, f32)]) -> Risk {
+        route_risk(
+            from,
+            route,
+            |p| {
+                self.war.get_aa_threat(p)
+                    + interceptors.iter().filter(|(at, r, _)| distance(*at, p) < *r).map(|(_, _, t)| t).sum::<f32>()
+            },
+            |p| interceptors.iter().any(|(at, r, _)| distance(*at, p) < *r),
+        )
+    }
+
+    fn airstrike_risk(&self, air: &AirField, from: Vec3, pos: Vec3, interceptors: &[(Vec3, f32, f32)]) -> Risk {
+        let route = air.route(pos);
+        round_trip(
+            self.airstrike_path_risk(from, &route, interceptors),
+            self.airstrike_path_risk(pos, &return_route(from, &route), interceptors),
+        )
     }
 
     pub fn bomber_update(&mut self, frame: i32) {
@@ -290,6 +332,7 @@ impl Ai {
             let field = if job.kind == MissionKind::Intercept { &defense_air } else { &air };
             let risk = self.airstrike_risk(
                 field,
+                home,
                 job.pos,
                 if job.kind == MissionKind::Intercept { &[] } else { &interceptors },
             );
@@ -307,7 +350,8 @@ impl Ai {
             }
             let length = field.length(job.pos).unwrap_or(f32::INFINITY);
             let route = field.route(job.pos);
-            let plan = Plan { job, packages: choices, risk, length, route };
+            let return_route = return_route(home, &route);
+            let plan = Plan { job, packages: choices, risk, length, route, return_route };
             if plan.job.kind.primary() {
                 self.bomber_handler.recent.insert(plan.job.key(), plan.clone());
             }
@@ -325,6 +369,7 @@ impl Ai {
                 let defensive = p.job.kind == MissionKind::Intercept;
                 let r = self.airstrike_risk(
                     if defensive { &defense_air } else { &air },
+                    home,
                     p.job.pos,
                     if defensive { &[] } else { &interceptors },
                 );
@@ -344,9 +389,18 @@ impl Ai {
         self.bomber_handler.grounded = self.dev_off("airstrikes")
             || (had_jobs && plans.is_empty() && self.bomber_handler.recent.is_empty())
             || self.war.get_aa_threat(home) > 1.25;
+        plans.sort_by(|a, b| {
+            b.job
+                .kind
+                .primary()
+                .cmp(&a.job.kind.primary())
+                .then_with(|| b.score().total_cmp(&a.score()))
+                .then_with(|| a.job.key().cmp(&b.job.key()))
+        });
         self.bomber_handler.plans = plans;
         self.airstrike_fly(frame, home, &air, &defense_air, &interceptors);
-        self.airstrike_launch(frame, home, &air, &defense_air);
+        self.airstrike_wave(frame, home);
+        self.airstrike_launch(frame, home);
         let busy: BTreeSet<_> = self.bomber_handler.sorties.iter().flat_map(|s| s.members.iter().copied()).collect();
         for (&id, a) in &self.bomber_handler.units {
             let state = readiness(
@@ -405,15 +459,25 @@ impl Ai {
                 .map(|a| a.unit.pos())
                 .unwrap_or(home);
             let approach = self.airstrike_field(from, enemies);
-            let mut risk = self.airstrike_risk(&approach, pos, enemies);
-            // Remaining ingress plus the planned egress to home, not twice the
-            // now-shorter ingress. Replan live approaches as new AA is seen.
-            risk.exposure = (risk.exposure + field.exposure(pos).unwrap_or(f32::INFINITY)) * 0.5;
+            let exit = return_route(home, &field.route(pos));
+            let risk = round_trip(
+                self.airstrike_path_risk(from, &approach.route(pos), enemies),
+                self.airstrike_path_risk(pos, &exit, enemies),
+            );
+            sortie.return_route = exit;
             let reroute = frame - sortie.last_route >= 150 && distance(from, pos) > 800.0;
             let route = if reroute { approach.route(pos) } else { Vec::new() };
             let still_job = self.bomber_handler.plans.iter().any(|p| p.job.key() == sortie.job.key());
             let disabled = self.dev_off("airstrikes");
-            let done = disabled || !valid || !still_job || frame - sortie.launched > SORTIE_TIMEOUT;
+            let wave_safe = sortie.wave.is_none_or(|w| {
+                distance(w.target, pos) <= wave::MAX_PURSUIT
+                    && wave::route_allowed(from, &approach.route(pos), |p| self.graph.is_ally_territory(p))
+            });
+            let done = disabled
+                || !valid
+                || (!still_job && sortie.wave.is_none())
+                || !wave_safe
+                || frame - sortie.launched > SORTIE_TIMEOUT;
             let mut keep = Vec::new();
             for id in sortie.members {
                 let Some(a) = self.bomber_handler.units.get_mut(&id) else { continue };
@@ -439,7 +503,9 @@ impl Ai {
                     } else {
                         let reason = if !valid {
                             "target_lost"
-                        } else if !still_job {
+                        } else if !wave_safe {
+                            "wave_depth"
+                        } else if !still_job && sortie.wave.is_none() {
                             "mission_changed"
                         } else if !safe {
                             "unsafe_route"
@@ -556,7 +622,7 @@ impl Ai {
         }
     }
 
-    fn airstrike_launch(&mut self, frame: i32, home: Vec3, air: &AirField, defense_air: &AirField) {
+    fn airstrike_launch(&mut self, frame: i32, home: Vec3) {
         if self.dev_off("airstrikes") {
             return;
         }
@@ -625,92 +691,102 @@ impl Ai {
                     continue;
                 }
             }
-            // Napalm and implosion blasts should not carpet our own troops.
-            if matches!(
-                job.kind,
-                MissionKind::Group
-                    | MissionKind::Wind
-                    | MissionKind::Heavy
-                    | MissionKind::Opportunistic
-                    | MissionKind::Interdict
-            ) && members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
-                && self
-                    .cb
-                    .friendly_units_in(job.pos, 220.0)
-                    .iter()
-                    .any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
-            {
-                continue;
+            if self.airstrike_dispatch(&plan, &members, &package, frame, None) {
+                busy.extend(members);
+                covered.extend(job.targets.iter().copied());
             }
-            let route = if job.kind == MissionKind::Intercept { defense_air } else { air }.route(job.pos);
-            if route.is_empty() {
-                continue;
-            }
-            let odins: Vec<_> =
-                members.iter().copied().filter(|id| self.bomber_handler.units[id].kind == Plane::Odin).collect();
-            let escorts: Vec<_> =
-                members.iter().copied().filter(|id| self.bomber_handler.units[id].kind == Plane::Sparrow).collect();
-            let mut formed = true;
-            for (&escort, &odin) in escorts.iter().zip(&odins) {
-                let leader = self.bomber_handler.units[&odin].unit;
-                let a = self.bomber_handler.units.get_mut(&escort).unwrap();
-                a.escort = Some(odin);
-                let radius = a.unit.def().map_or(540.0, |d| d.jammer_radius() as f32);
-                if distance(a.unit.pos(), leader.pos()) > radius * 0.75 {
-                    a.unit.guard(leader, 0);
-                    a.last_order = frame;
-                    formed = false;
-                }
-            }
-            if !formed {
-                continue;
-            }
-            for &id in &members {
-                let leader = self.bomber_handler.units[&id]
-                    .escort
-                    .and_then(|id| self.bomber_handler.units.get(&id))
-                    .map(|a| a.unit);
-                let a = self.bomber_handler.units.get_mut(&id).unwrap();
-                a.returning = false;
-                a.last_order = frame;
-                if a.kind == Plane::Sparrow {
-                    if let Some(leader) = leader {
-                        a.unit.guard(leader, 0);
-                    }
-                } else {
-                    Self::airstrike_route(a.unit, &route, true);
-                    Self::airstrike_attack(
-                        a.unit,
-                        job,
-                        self.war.targets.get(&job.target).map(|e| e.unit),
-                        job.pos,
-                        OPTION_SHIFT_KEY,
-                    );
-                }
-                self.bomber_handler.utilization.entry(a.kind).or_default().launched += 1;
-                busy.insert(id);
-            }
-            covered.extend(job.targets.iter().copied());
-            self.log(&format!(
-                "airstrikes: launch {:?} target={} package={} value={:.0} AA={:.2} exposure={:.2}",
-                job.kind,
-                job.target,
-                members.len(),
-                job.value,
-                plan.risk.aa,
-                plan.risk.exposure
-            ));
-            self.bomber_handler.launched += 1;
-            self.bomber_handler.sorties.push(Sortie {
-                job: job.clone(),
-                members,
-                launched: frame,
-                last_order: frame,
-                last_route: frame,
-                route,
-                package,
-            });
         }
+    }
+
+    fn airstrike_dispatch(
+        &mut self,
+        plan: &Plan,
+        members: &[i32],
+        package: &[(Plane, usize)],
+        frame: i32,
+        wave: Option<WaveFlight>,
+    ) -> bool {
+        let job = &plan.job;
+        if members.iter().any(|id| {
+            let a = &self.bomber_handler.units[id];
+            !a.unit.def().is_some_and(|d| plan.risk.survives(a.unit.health(), d.speed()))
+        }) {
+            return false;
+        }
+        // Napalm and implosion blasts should not carpet our own troops.
+        if members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
+            && self.cb.friendly_units_in(job.pos, 220.0).iter().any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
+        {
+            return false;
+        }
+        let route = plan.route.clone();
+        if route.is_empty() {
+            return false;
+        }
+        let odins: Vec<_> =
+            members.iter().copied().filter(|id| self.bomber_handler.units[id].kind == Plane::Odin).collect();
+        let escorts: Vec<_> =
+            members.iter().copied().filter(|id| self.bomber_handler.units[id].kind == Plane::Sparrow).collect();
+        let mut formed = true;
+        for (&escort, &odin) in escorts.iter().zip(&odins) {
+            let leader = self.bomber_handler.units[&odin].unit;
+            let a = self.bomber_handler.units.get_mut(&escort).unwrap();
+            a.escort = Some(odin);
+            let radius = a.unit.def().map_or(540.0, |d| d.jammer_radius() as f32);
+            if distance(a.unit.pos(), leader.pos()) > radius * 0.75 {
+                a.unit.guard(leader, 0);
+                a.last_order = frame;
+                formed = false;
+            }
+        }
+        if !formed {
+            return false;
+        }
+        for &id in members {
+            let leader =
+                self.bomber_handler.units[&id].escort.and_then(|id| self.bomber_handler.units.get(&id)).map(|a| a.unit);
+            let a = self.bomber_handler.units.get_mut(&id).unwrap();
+            a.returning = false;
+            a.last_order = frame;
+            if a.kind == Plane::Sparrow {
+                if let Some(leader) = leader {
+                    a.unit.guard(leader, 0);
+                }
+            } else {
+                Self::airstrike_route(a.unit, &route, true);
+                Self::airstrike_attack(
+                    a.unit,
+                    job,
+                    self.war.targets.get(&job.target).map(|e| e.unit),
+                    job.pos,
+                    OPTION_SHIFT_KEY,
+                );
+            }
+            self.bomber_handler.utilization.entry(a.kind).or_default().launched += 1;
+        }
+
+        self.log(&format!(
+            "airstrikes: launch {:?} target={} package={} value={:.0} AA={:.2} exposure={:.2}",
+            job.kind,
+            job.target,
+            members.len(),
+            job.value,
+            plan.risk.aa,
+            plan.risk.exposure
+        ));
+        self.bomber_handler.launched += 1;
+        self.bomber_handler.sorties.push(Sortie {
+            wave,
+            job: job.clone(),
+            members: members.to_vec(),
+            launched: frame,
+            last_order: frame,
+            last_route: frame,
+            route,
+            return_route: plan.return_route.clone(),
+            package: package.to_vec(),
+        });
+        true
     }
 
     fn airstrike_route(u: Unit, route: &[Vec3], attacking: bool) {
@@ -765,6 +841,7 @@ impl Ai {
 fn mission_view(
     job: &Mission,
     route: &[Vec3],
+    return_route: &[Vec3],
     packages: &[Vec<(Plane, usize)>],
     sortie: Option<&Sortie>,
 ) -> serde_json::Value {
@@ -773,6 +850,8 @@ fn mission_view(
         "id": format!("{:?}:{}", job.kind, job.target),
         "kind": format!("{:?}", job.kind), "label": job.kind.label(), "target": job.target, "targets": job.targets,
         "state": if sortie.is_some() { "in_progress" } else { "available" },
+        "return_route": return_route.iter().map(|p| [p.x,p.z]).collect::<Vec<_>>(),
+        "wave": sortie.and_then(|s| s.wave.map(|w| w.id)),
         "primary": job.kind.primary(), "deep": job.deep, "value": job.value,
         "pos": [job.pos.x, job.pos.z], "seen": job.seen,
         "route": route.iter().map(|p| [p.x, p.z]).collect::<Vec<_>>(),
@@ -791,13 +870,13 @@ impl BomberHandler {
         let mut missions: Vec<_> = self
             .sorties
             .iter()
-            .map(|s| mission_view(&s.job, &s.route, std::slice::from_ref(&s.package), Some(s)))
+            .map(|s| mission_view(&s.job, &s.route, &s.return_route, std::slice::from_ref(&s.package), Some(s)))
             .collect();
         for p in &self.plans {
             if !p.job.kind.primary() || p.job.targets.iter().any(|id| covered.contains(id)) {
                 continue;
             }
-            let mut v = mission_view(&p.job, &p.route, &p.packages, None);
+            let mut v = mission_view(&p.job, &p.route, &p.return_route, &p.packages, None);
             v["aa"] = json!(p.risk.aa);
             v["exposure"] = json!(p.risk.exposure);
             missions.push(v);
@@ -806,6 +885,8 @@ impl BomberHandler {
             "ordered": self.orders.len(), "building": self.building.len(),
             "available": missions.len() - self.sorties.len(), "in_progress": self.sorties.len(),
             "missions": missions,
+            "combined_strikes": {"checks": self.wave_checks, "last_check": self.last_wave_check,
+                "launched": self.waves_launched, "last_launch": self.last_wave_launch},
             "utilization": self.utilization.iter().map(|(k, u)| json!({"unit": k.name(), "name": format!("{k:?}"),
                 "aircraft_seconds": u.state_frames.iter().map(|(s, f)| (*s, *f as f64 / 30.0)).collect::<BTreeMap<_,_>>(),
                 "aircraft_launched": u.launched, "payload_spent": u.payload_spent, "aborted": u.aborted})).collect::<Vec<_>>(),
@@ -845,6 +926,7 @@ mod operator_tests {
         let mut h = BomberHandler::default();
         h.plans.push(Plan {
             job: job.clone(),
+            return_route: return_route(Vec3::ZERO, &route),
             route: route.clone(),
             packages: vec![package.clone()],
             risk: Risk { aa: 0.0, exposure: 0.0, intercepted: false },
@@ -870,7 +952,9 @@ mod operator_tests {
         assert_eq!(candidate["missions"][0]["pos"], serde_json::json!([1200.0, 300.0]));
         assert_eq!(candidate["missions"][0]["packages"][0][1]["name"], "Sparrow");
         h.sorties.push(Sortie {
+            wave: None,
             job,
+            return_route: return_route(Vec3::ZERO, &route),
             route,
             package,
             members: vec![11, 12],

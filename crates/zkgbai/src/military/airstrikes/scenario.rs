@@ -1,6 +1,7 @@
 //! `airstrike-wind` versus `airstrike-farm`: real factory procurement and
 //! Phoenix bombing of a ZKGBAI wind farm. `airstrike-odin` / `airstrike-singu`
 //! exercise a deep thermite strike and its dedicated Sparrow escort.
+use super::Plane;
 use crate::Ai;
 use crate::util::get_directional_point;
 use springai::Vec3;
@@ -10,12 +11,55 @@ impl Ai {
         let Some(test) = self.test.clone().filter(|s| s.starts_with("airstrike-")) else { return };
         let map = self.cb.map();
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
-        let site = Vec3::xz(center.x, center.z + 400.0);
+        let site = if test.starts_with("airstrike-wave") {
+            Vec3::xz(center.x * 0.3, center.z * 1.5)
+        } else {
+            Vec3::xz(center.x, center.z + 400.0)
+        };
         if frame == 60 {
             self.cb.cheats_set_enabled(true);
             let base = self.graph.get_ally_center();
             let mut spawn = Vec::new();
             match test.as_str() {
+                "airstrike-wave" => {
+                    for (i, name) in [
+                        "bomberprec",
+                        "bomberprec",
+                        "bomberprec",
+                        "bomberprec",
+                        "bomberprec",
+                        "bomberheavy",
+                        "bomberheavy",
+                        "bomberriot",
+                        "bomberassault",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        spawn.push((name, Vec3::xz(base.x + (i % 3) as f32 * 60.0, base.z + (i / 3) as f32 * 60.0)));
+                    }
+                    spawn.extend([
+                        ("staticrearm", get_directional_point(base, center, 400.0)),
+                        ("energyfusion", get_directional_point(base, center, -300.0)),
+                    ]);
+                }
+                "airstrike-wave-targets" => {
+                    spawn.push(("hoverarty", site));
+                    for i in 0..4 {
+                        spawn.push((
+                            "shieldassault",
+                            Vec3::xz(site.x + 600.0 + (i % 2) as f32 * 70.0, site.z + (i / 2) as f32 * 70.0),
+                        ));
+                    }
+                    for i in 0..8 {
+                        spawn.push((
+                            "energywind",
+                            Vec3::xz(site.x + 1200.0 + (i % 4) as f32 * 60.0, site.z + (i / 4) as f32 * 60.0),
+                        ));
+                    }
+                    spawn.push(("energyfusion", Vec3::xz(site.x + 600.0, site.z + 700.0)));
+                    spawn.push(("staticradar", Vec3::xz(site.x, site.z + 700.0)));
+                }
                 "airstrike-farm" => {
                     for i in 0..12 {
                         spawn.push((
@@ -70,7 +114,8 @@ impl Ai {
                         // close observer radar against a Lance or Fencer.
                         if matches!(
                             test.as_str(),
-                            "airstrike-priority-target"
+                            "airstrike-wave-targets"
+                                | "airstrike-priority-target"
                                 | "airstrike-tough-target"
                                 | "airstrike-fencer"
                                 | "airstrike-shieldball"
@@ -82,6 +127,9 @@ impl Ai {
                             });
                             // Hold-fire alone still permits explicit attack
                             // orders from initial unit-idle registration.
+                            springai::reserved::reserve(self.cb, u.id());
+                        }
+                        if test == "airstrike-wave" && Plane::of(name).is_some() {
                             springai::reserved::reserve(self.cb, u.id());
                         }
                         self.log(&format!(
@@ -101,7 +149,11 @@ impl Ai {
             && frame % 30 == 0
             && matches!(
                 test.as_str(),
-                "airstrike-priority-target" | "airstrike-tough-target" | "airstrike-fencer" | "airstrike-shieldball"
+                "airstrike-wave-targets"
+                    | "airstrike-priority-target"
+                    | "airstrike-tough-target"
+                    | "airstrike-fencer"
+                    | "airstrike-shieldball"
             )
         {
             for u in self.cb.team_units() {
@@ -111,6 +163,20 @@ impl Ai {
                         u.set_fire_state(0, 0);
                         u.set_move_state(0, 0);
                     });
+                }
+            }
+        }
+        if test == "airstrike-wave" && frame == 899 {
+            for u in self.cb.team_units() {
+                if Plane::of(self.defs.name_of(u)).is_some() {
+                    springai::reserved::release(self.cb, u.id());
+                }
+            }
+        }
+        if test == "airstrike-wave" && frame == 150 {
+            if let Some(d) = self.defs.get("staticradar") {
+                for (x, z) in [(300.0, -300.0), (900.0, 1000.0), (1500.0, 0.0)] {
+                    self.cb.cheat_new_unit(d, Vec3::xz(site.x + x, site.z + z));
                 }
             }
         }
@@ -126,7 +192,8 @@ impl Ai {
             }
             if matches!(
                 test.as_str(),
-                "airstrike-farm"
+                "airstrike-wave-targets"
+                    | "airstrike-farm"
                     | "airstrike-singu"
                     | "airstrike-aa"
                     | "airstrike-priority-target"
@@ -141,7 +208,9 @@ impl Ai {
                     .filter(|u| {
                         matches!(
                             self.defs.name_of(**u),
-                            "energywind"
+                            "energyfusion"
+                                | "staticradar"
+                                | "energywind"
                                 | "energysingu"
                                 | "tankassault"
                                 | "hoverarty"

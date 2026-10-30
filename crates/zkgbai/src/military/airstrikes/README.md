@@ -37,15 +37,41 @@ Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
 cheap artillery such as Fencers and still-tough targets such as healthy Cyclops for a sufficient
 existing Raven/Likho fleet, and an Odin shield cluster over friendly ground troops in an ongoing fight.
-Launchable primary missions take ready aircraft first. Unfillable primary
+Ordinary dispatch takes launchable primary missions before secondary ones.
+Within each tier, mission score is discounted by actual route length
+(`score / (1 + length / 1200)`); defensive interception keeps its urgency.
+Procurement uses the same distance discount. Unfillable primary
 packages do not reserve every aircraft of a type; spare aircraft may take
 secondary opportunities while the remaining package is built. Overlapping jobs
 cannot launch duplicate sorties against the same group. There are at most four
-simultaneous sorties and 24 aircraft in a package; oversized jobs are rejected,
+ordinary simultaneous sorties and 24 aircraft in a package; oversized jobs are rejected,
 not silently reduced. Mobile fixes must be live and at most five seconds old.
 
+Every 30 seconds, before ordinary dispatch, a combined-strike fallback checks
+legacy flock readiness: at least eight ready bombers, with no idle bomber still
+rearming or repairing. Operator-held planes and active sorties are excluded;
+fighters and Sparrows do not count toward eight. It assigns the available fleet
+in one update using the old distance/AA/value ranking, with a modest preference
+for Ravens on individuals, Phoenixes on groups/wind, Likhos on groups or valuable
+units, and Odins on expensive statics. Partial Raven/Likho wings can combine to
+meet the kill margin. Only assigned aircraft launch; surplus planes are not
+spent on redundant bombs. This fallback never buys aircraft.
+
+Wave targets stay within 1800 elmos of their first target. Routes must not exceed
+1.5 times straight-line distance plus 384 elmos, or traverse more than 1800
+continuous elmos outside friendly territory. A moving target more than 600 elmos
+from its original fix ends that wave assignment. Waves bypass the ordinary
+four-sortie cap, but retain per-package size, payload, freshness, friendly-fire,
+escort and survival checks. Overlapping victims are reserved across the wave.
+
 Approach routes use the shared air threat grid, inferred unseen AA and a local
-interceptor envelope. The controller estimates exposure for ingress, egress and
+interceptor envelope. Mobile AA adds a tapered band outside its existing hard
+coverage, as wide as three seconds of its movement speed; it inherits the normal
+sighting-age threat decay. Both the ordinary air pathfinder and strike planner
+see this shared buffer. An explicit return corridor retraces ingress to home;
+both legs are sampled every 32 elmos, including between waypoints, before launch.
+Active sorties recheck ingress and return corridors against current threats.
+The controller estimates exposure for ingress, egress and
 six seconds at the target, requiring damage below 55% of aircraft health. This
 is a conservative, **uncalibrated heuristic**, not a combat simulation or a
 survival guarantee. Sparrow jamming never discounts LOS AA or known fighters;
@@ -56,7 +82,9 @@ damaged aircraft return via threat-aware routes and rearm. Odin shield drops use
 
 Inspect `military.airstrikes` or the snapshot's `airstrikes` for mission IDs,
 `available` / `in_progress` states, positions, packages, planned routes, assigned
-members, exposure, production and grounded state. Only primary candidates are
+members, exposure, production and grounded state. `return_route` records the
+escape corridor; active combined strikes carry a shared `wave` frame ID, and
+`combined_strikes` reports check and launch counters. Only primary candidates are
 shown as available; all active sorties remain visible, including secondary
 missions. This display filter does not affect secondary dispatch. Active missions suppress
 candidates that overlap their targets. Snapshot journals preserve these states
@@ -75,7 +103,14 @@ within 450 elmos of home and require 95% health before launch. The operator HUD 
 motion, AA-dependent packages, casualty margins, exposure rejection, production
 reservations and deep-strike escorts.
 
-Staged headless games exercise real factory production and flight commands:
+Staged headless games exercise real factory production and flight commands.
+`airstrike-wave` versus `airstrike-wave-targets` holds a nine-bomber mixed fleet
+until the first 30-second wave check, against a Lance, Thugs, wind generators,
+a fusion and radar near the attacker. Logs expose `combined wave=...`, assigned
+packages, payload releases and target survival. Keep match output and Cargo
+artifacts in a disk-backed `target/` directory, and run games sequentially.
+
+Examples:
 
 ```
 cargo build -p zkgbai --offline
