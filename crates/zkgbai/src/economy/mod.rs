@@ -43,7 +43,8 @@ pub(super) const SITE_SLACK: f32 = 25.0;
 
 pub struct EconomyManager {
     cb: Callback,
-    pub sparrow: Option<Unit>,
+    /// Scouting Sparrows, including radars currently morphing into them.
+    pub sparrows: Vec<Unit>,
     /// A radar built solely to morph into a Sparrow; never a coverage job.
     sparrow_radar_task: Option<TaskId>,
     pub effective_income_metal: f32,
@@ -280,7 +281,7 @@ impl EconomyManager {
         let map_diag = (w * w + h * h).sqrt();
         EconomyManager {
             cb,
-            sparrow: None,
+            sparrows: Vec::new(),
             sparrow_radar_task: None,
             effective_income_metal: 0.0,
             static_income: 0.0,
@@ -778,7 +779,7 @@ impl Ai {
             self.eco_plan_geo(frame);
             self.eco.terraform_hold.retain(|_, &mut until| until > frame);
 
-            if self.eco.effective_income > 30.0 && self.eco.sparrow.is_none() && !self.eco.has_planes {
+            if self.scouts_air_needed(crate::military::scouts::SPARROW, self.scouts_policy().sparrows) {
                 self.eco_plan_sparrow();
             }
 
@@ -905,10 +906,6 @@ impl Ai {
         };
         let def_name = self.defs.name(def).to_owned();
         let def_name = def_name.as_str();
-
-        if def_name == "planescout" {
-            self.eco.sparrow = Some(unit);
-        }
 
         if def.speed() > 0.0 && !def.build_options().is_empty() && !self.defs.is_commander(def) {
             unit.set_move_state(0, 0);
@@ -1128,8 +1125,8 @@ impl Ai {
             self.eco.radars.push(unit);
         }
 
-        if def_name == "planelightscout" && !self.airstrike_claims(unit.id()) {
-            self.eco.sparrow = Some(unit);
+        if def_name == "planelightscout" && !self.airstrike_claims(unit.id()) && !self.eco.sparrows.contains(&unit) {
+            self.eco.sparrows.push(unit);
         }
 
         if def_name == "staticstorage" {
@@ -1335,9 +1332,7 @@ impl Ai {
         }
         // A Sparrow still morphing is a static radar. Its death must also
         // release the slot; a successful morph replaces it with the plane.
-        if self.eco.sparrow == Some(unit) && unit.rules_param_float("wasMorphedTo", 0.0) == 0.0 {
-            self.eco.sparrow = None;
-        }
+        erase_one(&mut self.eco.sparrows, &unit);
 
         if matches!(self.defs.name_of(unit), "staticnuke" | "zenith" | "raveparty") {
             self.eco.has_super_wep = false;
@@ -1423,6 +1418,9 @@ impl Ai {
                 unit.self_destruct(0);
             }
             "staticmex" => self.eco.mexes.push(unit),
+            "planelightscout" if !self.airstrike_claims(unit.id()) && !self.eco.sparrows.contains(&unit) => {
+                self.eco.sparrows.push(unit);
+            }
             "energysolar" => self.eco.solars.push(unit),
             "energywind" => self.eco.windgens.push(unit),
             "energygeo" | "energyheavygeo" if !unit.is_being_built() => self.eco.geos.push(unit),

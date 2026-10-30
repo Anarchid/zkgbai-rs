@@ -364,6 +364,13 @@ impl Ai {
 
     pub fn fac_unit_created(&mut self, unit: Unit, builder: Option<Unit>) {
         self.airstrike_created(unit, builder);
+        self.scouts_air_created(unit, builder);
+        if self.defs.name_of(unit) == scouts::SPARROW
+            && !self.airstrike_claims(unit.id())
+            && !self.eco.sparrows.contains(&unit)
+        {
+            self.eco.sparrows.push(unit);
+        }
         let Some(def) = unit.def() else { return };
         let name = self.defs.name(def);
         let cost = def.cost(self.metal);
@@ -598,6 +605,9 @@ impl Ai {
 impl Ai {
     /// Queue the next unit for factory (or strider hub) `fac_id`.
     fn fac_assign_factory_task(&mut self, fac_id: i32) {
+        // A new production decision means any uncreated prior scout order
+        // was canceled; unfinished aircraft are counted from the team roster.
+        self.scouts_air_idle(fac_id);
         // A staged strike builds its Widows itself (see `strike_test`); the
         // `hijack` and `impalerwar` tests play the economy as usual.
         // The staged raid game builds only firefighters (see `raid_test`).
@@ -683,6 +693,7 @@ impl Ai {
         let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy")
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
+            || choice == scouts::OWL
             || self.firefighters_order(kind) == Some(choice)
             || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
         let picked = choice;
@@ -735,6 +746,7 @@ impl Ai {
         match choice {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
+            scouts::OWL => self.scouts_air_ordered(fac_id, scouts::OWL),
             scouts::WIDOW if self.scouts_want_widow() => self.scouts_ordered(),
             scouts::WIDOW | "striderantiheavy" => self.jaeger_ordered(choice),
             // (Then asked for by the scouts: the factory builds no other
@@ -784,6 +796,7 @@ impl Ai {
         match self.defs.name(def) {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
+            scouts::OWL => self.scouts_air_ordered(fac_id, scouts::OWL),
             scouts::WIDOW => self.scouts_ordered(),
             _ => {}
         }
@@ -1768,8 +1781,8 @@ impl Ai {
         if let Some(name) = self.firefighters_order(FacKind::Plane) {
             return name;
         }
-        if self.eco.sparrow.is_none() {
-            return "planescout";
+        if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
+            return scouts::OWL;
         }
         // Primary missions buy aircraft; secondary missions only use the fleet.
         self.airstrike_production().unwrap_or("")

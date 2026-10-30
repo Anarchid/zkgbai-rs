@@ -41,8 +41,8 @@ pub struct RaiderHandler {
     pub medium_raiders: BTreeSet<i32>,
     pub raider_squads: VecDeque<SquadId>,
     pub scout_tasks: ScoutTasks,
-    /// Fighter-store id of the scout plane.
-    sparrow: Option<i32>,
+    /// Fighter-store ids of all scouting Sparrows and Owls.
+    air_scouts: BTreeSet<i32>,
     pub(crate) next_squads: [Option<SquadId>; NUM_SQUAD_SLOTS],
     /// The original's `scoutTasks`: used by raider squads and the sparrow.
     scout_task_ids: Vec<ScoutTaskId>,
@@ -202,11 +202,7 @@ fn raid_cost(war: &MilitaryManager, defs: &Defs, e: &Enemy, pos: Vec3, ethreat: 
 
 impl Ai {
     pub fn raider_add_sparrow(&mut self, r: Fighter) {
-        if let Some(old) = self.raider_handler.sparrow.take() {
-            self.raider_clear_task(old);
-            self.raider_drop_fighter(old);
-        }
-        self.raider_handler.sparrow = Some(r.id);
+        self.raider_handler.air_scouts.insert(r.id);
         self.fighters.insert(r.id, r);
     }
 
@@ -296,8 +292,7 @@ impl Ai {
         }
         // port: the original never released a dead sparrow; with a shared
         // fighter store its id could be reused by another unit.
-        if self.raider_handler.sparrow == Some(id) {
-            self.raider_handler.sparrow = None;
+        if self.raider_handler.air_scouts.remove(&id) {
             self.raider_clear_task(id);
             self.raider_drop_fighter(id);
         }
@@ -381,12 +376,15 @@ impl Ai {
                 }
             }
 
-            let sparrow = self
-                .raider_handler
-                .sparrow
-                .filter(|s| self.fighters.get(s).is_some_and(|f| !f.is_dead() && !self.retreat_is_retreating(f.unit)));
-            if let Some(s) = sparrow {
-                self.raider_assign_sparrow(s);
+            let scouts: Vec<_> = self.raider_handler.air_scouts.iter().copied().collect();
+            for id in scouts {
+                if self.raider_is_lost(id) {
+                    self.raider_handler.air_scouts.remove(&id);
+                    self.raider_clear_task(id);
+                    self.raider_drop_fighter(id);
+                } else if self.fighters.get(&id).is_some_and(|f| !self.retreat_is_retreating(f.unit)) {
+                    self.raider_assign_sparrow(id);
+                }
             }
 
             self.raider_create_scout_tasks();
@@ -1064,7 +1062,7 @@ impl Ai {
         // A Sparrow (not an Owl) sweeps where unseen snipers shoot from, and
         // whether anti-nukes we struck are gone: it flies at them and, near
         // enough, detonates.
-        let sweeps = self.defs.name_of(unit) == "planelightscout";
+        let sweeps = self.defs.name_of(unit) == "planelightscout" && self.sweeps.detonating.is_none();
         let sniper = if sweeps { self.sweeps_sniper_target(pos) } else { None };
         let sweep = sniper.map(|p| (p, true)).or_else(|| self.missiles_scout_target(pos).map(|p| (p, false)));
         if let Some((p, fight)) = sweep.filter(|_| sweeps) {
@@ -1084,19 +1082,33 @@ impl Ai {
             self.raider_raid(sparrow, p);
             return;
         }
+        // Share the cloaked scouts' stale-building/cell targets, spreading
+        // aircraft apart and retaining their AA-safe reachability check.
+        let taken: Vec<_> = self
+            .raider_handler
+            .air_scouts
+            .iter()
+            .filter(|&&id| id != sparrow)
+            .filter_map(|id| self.fighters.get(id))
+            .filter(|f| !f.is_dead() && !self.retreat_is_retreating(f.unit) && f.target != NULLPOS)
+            .map(|f| f.target)
+            .collect();
+        let reach = self.pathfinder.raider_reachability(&self.war, unit, 0.0);
+        if let Some(target) =
+            self.scouts_air_deep_target(pos, &taken, |p| self.war.get_aa_threat(p) <= 0.0 && reach.reaches(p))
+        {
+            self.raider_clear_task(sparrow);
+            self.raider_raid(sparrow, target);
+            return;
+        }
         let mut cost = f32::MAX; // port: 65535 in the C++, see raider_assign_solo_raider
         let mut best_task = None;
-        let mut reach = None;
         let h = &self.raider_handler;
         for &tid in &h.scout_task_ids {
             let Some(s) = h.scout_tasks.get(&tid) else {
                 continue;
             };
-            if self.war.get_aa_threat(s.target) > 0.0
-                || !reach
-                    .get_or_insert_with(|| self.pathfinder.raider_reachability(&self.war, unit, 0.0))
-                    .reaches(s.target)
-            {
+            if self.war.get_aa_threat(s.target) > 0.0 || !reach.reaches(s.target) {
                 continue;
             }
             let tmpcost = sparrow_cost(s, &self.graph.metal_spots, self.frame, sparrow, pos);
