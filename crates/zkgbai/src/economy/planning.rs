@@ -1457,16 +1457,18 @@ impl Ai {
         if let Some(r) = self.eco_air_fire() {
             return Some(r);
         }
-        // (A cloak factory builds Scythes for it instead.)
-        if !owned("factoryspider") && !owned("factorycloak") && self.scouts_deep_wanted() && !self.scouts_have_scout() {
-            let (income, spare) = self.scouts_energy();
+        let scouts = self.scouts_policy();
+        if !self.dev_off("scouts") && scouts.owls > 0 && !owned("factoryplane") {
+            return Some((
+                "factoryplane".to_owned(),
+                format!("light global enemy AA: maintain {} Owls for deep scouting", scouts.owls),
+                self.intel.unaccounted().max(0.0),
+            ));
+        }
+        if !owned("factoryspider") && self.scouts_deep_wanted() && self.scouts_want_widow() {
             return Some((
                 "factoryspider".to_owned(),
-                format!(
-                    "{income:.0} energy income, {spare:.0} past spending all metal{}: a Widow to scout the enemy's \
-                     land deep",
-                    if self.misc_has_nuke() || self.missiles_silo().is_some() { ", a silo" } else { "" }
-                ),
+                "global metal/AA density calls for Widows to scout deep".to_owned(),
                 self.intel.unaccounted().max(0.0),
             ));
         }

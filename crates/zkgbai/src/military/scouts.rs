@@ -15,12 +15,11 @@
 //! alone guard, a Widow waits by each of them, and bites when `nukes` says
 //! the missile is ready; it flies once they are stunned.
 //!
-//! Past that, once we have energy to spare for a cloak (an overdrive
-//! economy), or a silo of either kind, a scout scouts deep for good: it goes
-//! where the enemy's ground has gone unseen longest, its valuable buildings
-//! first — where anti-nukes, superweapons and Fusions stand that our
-//! strikes want to know of — and a spider factory is asked for to build a
-//! Widow for it, unless a cloak factory can build a Scythe.
+//! Persistent deep scouting follows income, projected global metal density,
+//! and known enemy AA density. Sparrows provide baseline coverage; Owls are
+//! preferred in light AA, while Widows scout through heavier AA and are
+//! always wanted at high global density. Strike reconnaissance and anti-nuke
+//! bites retain their own requisitions.
 //!
 //! Scouts are few and dear, so they are steered closely: six times a
 //! second a look at the leg they are on, and every half second a fresh
@@ -50,7 +49,11 @@
 //! run low all the same, scouts on the enemy's ground hold still, unless
 //! something comes at them.
 
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
+
+mod density;
+use density::DensityMap;
 
 use springai::{Unit, Vec3};
 
@@ -63,15 +66,33 @@ use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance, get_directional_point};
 pub const WIDOW: &str = "spiderantiheavy";
 pub const SCYTHE: &str = "cloakheavyraid";
 
-/// Scouts wanted at most: one to look, one to scout deep, the rest
-/// (Widows) to bite.
+pub const SPARROW: &str = "planelightscout";
+pub const OWL: &str = "planescout";
+
+/// Cloaked scouts wanted at most: one to look, one to scout deep, the rest
+/// (Widows) to bite. The area-based air-scout quotas are separate.
 const MAX_SCOUTS: usize = 4;
 
-/// Deep scouting is wanted with energy to spare for a cloak: an income this
-/// much beyond what spending all our metal takes (building takes as much
-/// energy as metal), or this much in all; or with a silo.
-const SPARE_ENERGY: f32 = 30.0;
-const RICH_ENERGY: f32 = 100.0;
+#[derive(Debug, PartialEq)]
+pub(crate) struct ScoutPolicy {
+    pub sparrows: usize,
+    pub owls: usize,
+    pub widows: bool,
+}
+
+/// Area is the whole map rectangle in square kiloelmos. Density uses the
+/// same standing-metal forecast as raider sizing; AA is known living metal.
+fn scout_policy(area: f32, income: f32, density: f32, aa_metal: f32) -> ScoutPolicy {
+    let area = area.max(f32::EPSILON);
+    let count = (area / 10.0).ceil().max(1.0) as usize;
+    let deep = density >= 300.0 || income >= 50.0;
+    let light_aa = aa_metal / area < 25.0;
+    ScoutPolicy {
+        sparrows: if income >= 30.0 || density >= 200.0 { count } else { 0 },
+        owls: if deep && light_aa { count } else { 0 },
+        widows: density >= 500.0 || (deep && !light_aa),
+    }
+}
 
 /// The game is asked to hold back this many seconds of our scouts' cloak
 /// upkeep on the move (those on order counted), and this much at least.
@@ -247,6 +268,7 @@ enum Keep {
 
 #[derive(Default)]
 pub struct Scouts {
+    density_map: OnceCell<DensityMap>,
     scouts: BTreeMap<i32, Scout>,
     /// Where scouts lost their cloak with nothing we know of near, and when.
     hidden: Vec<(Vec3, i32)>,
@@ -261,6 +283,8 @@ pub struct Scouts {
     /// When a Widow, and a Scythe, was queued at a factory.
     ordered: Option<i32>,
     ordered_scythe: Option<i32>,
+    /// Factory orders until creation, so several factories cannot overbuy.
+    air_orders: BTreeMap<i32, (&'static str, i32)>,
     /// The energy reserve last asked of the game, and whether the game
     /// took it (once asked).
     reserve: f32,
@@ -280,8 +304,9 @@ impl Ai {
         looks
     }
 
-    /// How many scouts there is work for that Scythes can do too: looking
-    /// and scouting deep.
+    /// Cloaked scouts wanted for strike looks and persistent deep scouting.
+    /// Scythes can cover strike looks; the policy explicitly requests a
+    /// Widow for persistent deep scouting.
     fn scouts_eyes_needed(&self) -> usize {
         usize::from(!self.scouts_looks().is_empty()) + usize::from(self.scouts_deep_wanted())
     }
@@ -292,22 +317,66 @@ impl Ai {
         (self.scouts_eyes_needed() + bites).min(MAX_SCOUTS)
     }
 
-    /// Our energy income, and what is left of it once all our metal is
-    /// spent (building takes as much energy as metal).
-    pub fn scouts_energy(&self) -> (f32, f32) {
-        let e = self.eco.effective_income_energy;
-        (e, e - self.eco.effective_income_metal - self.eco.reclaim_income)
+    pub(crate) fn scouts_policy(&self) -> ScoutPolicy {
+        let map = self.cb.map();
+        let area = map.width().max(0) as f32 * map.height().max(0) as f32 * 64.0 / 1_000_000.0;
+        let aa_metal = self
+            .war
+            .targets
+            .values()
+            .filter(|e| !e.is_dead && e.identified && (e.is_aa || e.is_flex_aa))
+            .map(|e| e.value)
+            .sum();
+        let density = self
+            .scouts
+            .density_map
+            .get_or_init(|| {
+                let players = 1 + self.allies.len() + self.get_enemy_team_ids().len();
+                DensityMap::new(self.cb, &self.graph.metal_spots, players)
+            })
+            .at_frame(self.frame);
+        scout_policy(area, self.eco.effective_income, density, aa_metal)
     }
 
-    /// Whether a scout should always be scouting the enemy's land deep: we
-    /// have energy to spare for its cloak (see [`SPARE_ENERGY`]), or a silo.
+    /// Widows for persistent deep scouting, independent of strike look jobs.
     pub fn scouts_deep_wanted(&self) -> bool {
-        let (income, spare) = self.scouts_energy();
-        !self.dev_off("scouts")
-            && (spare >= SPARE_ENERGY
-                || income >= RICH_ENERGY
-                || self.misc_has_nuke()
-                || self.missiles_silo().is_some())
+        !self.dev_off("scouts") && self.scouts_policy().widows
+    }
+
+    pub(crate) fn scouts_air_idle(&mut self, factory: i32) {
+        self.scouts.air_orders.remove(&factory);
+    }
+
+    pub(crate) fn scouts_air_ordered(&mut self, factory: i32, name: &'static str) {
+        self.scouts.air_orders.insert(factory, (name, self.frame));
+    }
+
+    pub(crate) fn scouts_air_created(&mut self, unit: Unit, builder: Option<Unit>) {
+        if let Some(builder) = builder {
+            if self.scouts.air_orders.get(&builder.id()).is_some_and(|&(name, _)| name == self.defs.name_of(unit)) {
+                self.scouts.air_orders.remove(&builder.id());
+            }
+        }
+    }
+
+    pub(crate) fn scouts_air_needed(&self, name: &str, wanted: usize) -> bool {
+        if self.dev_off("scouts") || wanted == 0 {
+            return false;
+        }
+        let have = if name == SPARROW {
+            self.eco.sparrows.len()
+        } else {
+            self.cb.team_units().into_iter().filter(|&u| self.defs.name_of(u) == name).count()
+        };
+        let ordered = self
+            .scouts
+            .air_orders
+            .iter()
+            .filter(|&(factory, &(n, f))| {
+                self.fac.factories.contains_key(factory) && n == name && self.frame - f <= ORDER_TIMEOUT
+            })
+            .count();
+        have + ordered < wanted
     }
 
     /// Our scouts' cloak upkeep on the move, energy a second.
@@ -358,11 +427,6 @@ impl Ai {
         }
     }
 
-    /// Whether we have a scout.
-    pub fn scouts_have_scout(&self) -> bool {
-        !self.scouts.scouts.is_empty()
-    }
-
     /// Whether we have a spider factory to build Widows.
     fn scouts_spider_factory(&self) -> bool {
         self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == "factoryspider")
@@ -373,6 +437,24 @@ impl Ai {
     /// [`DEEP_STALE`] and not near `taken`, the longest unseen (buildings by
     /// their value), the nearer the better.
     fn scouts_deep_target(&self, from: Vec3, taken: &[Vec3]) -> Option<(Vec3, i32)> {
+        self.scouts_deep_target_where(from, taken, |_| true)
+    }
+
+    pub(crate) fn scouts_air_deep_target(
+        &self,
+        from: Vec3,
+        taken: &[Vec3],
+        reachable: impl Fn(Vec3) -> bool,
+    ) -> Option<Vec3> {
+        self.scouts_deep_target_where(from, taken, reachable).map(|(p, _)| p)
+    }
+
+    fn scouts_deep_target_where(
+        &self,
+        from: Vec3,
+        taken: &[Vec3],
+        reachable: impl Fn(Vec3) -> bool,
+    ) -> Option<(Vec3, i32)> {
         let frame = self.frame;
         let spots = self.graph.get_enemy_territory().into_iter().map(|m| (m.position, m.last_seen, 1.0));
         let cells = self.scouts_unseen_cells();
@@ -386,6 +468,7 @@ impl Ai {
             .filter(|&(p, seen, _)| frame - seen >= DEEP_STALE && !self.los.is_in_los(p))
             .filter(|&(p, ..)| taken.iter().all(|&t| distance(t, p) >= SPREAD))
             .filter(|&(p, ..)| self.scouts.tried.iter().all(|t| distance(t.0, p) >= SEEN_CELL))
+            .filter(|&(p, ..)| reachable(p))
             .max_by(|a, b| score(a).total_cmp(&score(b)))
             .map(|(p, seen, _)| (p, frame - seen))
     }
@@ -444,18 +527,17 @@ impl Ai {
         let widows = s.scouts.len() - scythes;
         !self.dev_off("scouts")
             && s.ordered.is_none_or(|f| self.frame - f > ORDER_TIMEOUT)
-            && widows + scythes.min(self.scouts_eyes_needed()) < self.scouts_needed()
+            && widows + scythes.min(usize::from(!self.scouts_looks().is_empty())) < self.scouts_needed()
     }
 
-    /// Whether a cloak factory should build a Scythe now: there is looking
-    /// or deep scouting to do, more than our scouts do, and no spider
-    /// factory to build Widows for it.
+    /// A cloak factory can cover strike looks with a Scythe when no spider
+    /// factory can build a Widow. Persistent deep requisitions ask for Widows.
     pub fn scouts_want_scythe(&self) -> bool {
         let s = &self.scouts;
         !self.dev_off("scouts")
             && s.ordered_scythe.is_none_or(|f| self.frame - f > ORDER_TIMEOUT)
             && !self.scouts_spider_factory()
-            && s.scouts.len() < self.scouts_eyes_needed()
+            && s.scouts.len() < usize::from(!self.scouts_looks().is_empty())
     }
 
     /// Whether to have a spider factory for Widows: how much they would
@@ -966,5 +1048,41 @@ impl Ai {
         for &p in rest {
             kgb_move_to(unit, p, OPTION_SHIFT_KEY, frame);
         }
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn sparrows_start_at_either_threshold_and_round_up_whole_map_area() {
+        assert_eq!(scout_policy(20.0, 29.99, 199.99, 0.0).sparrows, 0);
+        assert_eq!(scout_policy(20.0, 30.0, 0.0, 0.0).sparrows, 2);
+        assert_eq!(scout_policy(20.0, 0.0, 200.0, 0.0).sparrows, 2);
+        assert_eq!(scout_policy(20.01, 30.0, 0.0, 0.0).sparrows, 3);
+        assert_eq!(scout_policy(0.1, 30.0, 0.0, 0.0).sparrows, 1);
+    }
+
+    #[test]
+    fn deep_scouts_start_at_either_threshold_and_switch_at_exactly_25_aa() {
+        assert_eq!(scout_policy(20.0, 49.99, 299.99, 0.0), ScoutPolicy { sparrows: 2, owls: 0, widows: false });
+        for (income, density) in [(50.0, 0.0), (0.0, 300.0)] {
+            let light = scout_policy(20.0, income, density, 499.99);
+            assert_eq!(light.owls, 2);
+            assert!(!light.widows);
+            let heavy = scout_policy(20.0, income, density, 500.0);
+            assert_eq!(heavy.owls, 0);
+            assert!(heavy.widows);
+        }
+        // Changing map area changes AA density as well as scout count.
+        assert_eq!(scout_policy(40.0, 50.0, 0.0, 500.0).owls, 4);
+    }
+
+    #[test]
+    fn high_density_adds_widows_even_with_light_aa_and_owls() {
+        assert!(!scout_policy(20.0, 0.0, 499.99, 0.0).widows);
+        assert_eq!(scout_policy(20.0, 0.0, 500.0, 0.0), ScoutPolicy { sparrows: 2, owls: 2, widows: true });
+        assert_eq!(scout_policy(20.0, 0.0, 500.0, 500.0), ScoutPolicy { sparrows: 2, owls: 0, widows: true });
     }
 }

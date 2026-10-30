@@ -27,7 +27,9 @@ fn best_site(candidates: impl Iterator<Item = (Vec3, Vec3)>, builders: &[BuildPo
 
 impl Ai {
     pub(super) fn eco_plan_sparrow(&mut self) {
-        if self.eco.sparrow_radar_task.is_some() || self.eco.sparrow.is_some() {
+        if self.eco.sparrow_radar_task.is_some()
+            || self.eco.sparrows.iter().any(|u| self.defs.name_of(*u) == "staticradar")
+        {
             return;
         }
         let (Some(radar), Some(_)) = (self.defs.get("staticradar"), self.defs.get("planelightscout")) else {
@@ -96,14 +98,14 @@ impl Ai {
 impl EconomyManager {
     /// Only the completed radar belonging to our dedicated job may morph.
     pub(super) fn morph_sparrow_radar(&mut self, task: TaskId, radar: Unit, scout: UnitDef) {
-        if self.sparrow.is_some()
+        if self.sparrows.contains(&radar)
             || self.sparrow_radar_task != Some(task)
             || !self.tasks.get(task).and_then(|t| t.as_construction()).is_some_and(|c| c.target == Some(radar))
         {
             return;
         }
         if radar.execute_custom_command(cmd::MORPH, &[scout.id() as f32], 0, NO_TIMEOUT) {
-            self.sparrow = Some(radar);
+            self.sparrows.push(radar);
             erase_one(&mut self.radars, &radar);
             radar.execute_custom_command(cmd::MISC_PRIORITY, &[3.0], 0, NO_TIMEOUT);
         }
@@ -170,13 +172,13 @@ mod tests {
 
         eco.morph_sparrow_radar(coverage_job, coverage, scout);
         eco.morph_sparrow_radar(dedicated_job, coverage, scout);
-        assert!(eco.sparrow.is_none());
+        assert!(eco.sparrows.is_empty());
         ORDERS.with(|o| assert!(o.borrow().is_empty()));
         eco.delete_task(coverage_job);
         assert_eq!(eco.sparrow_radar_task, Some(dedicated_job));
 
         eco.morph_sparrow_radar(dedicated_job, dedicated, scout);
-        assert_eq!(eco.sparrow, Some(dedicated));
+        assert_eq!(eco.sparrows, vec![dedicated]);
         assert_eq!(eco.radars, vec![coverage]);
         ORDERS.with(|o| assert_eq!(*o.borrow(), [(11, cmd::MORPH), (11, cmd::MISC_PRIORITY)]));
         // Repeated completion cannot issue another morph.
@@ -184,7 +186,22 @@ mod tests {
         ORDERS.with(|o| assert_eq!(o.borrow().len(), 2));
         eco.delete_task(dedicated_job);
         assert!(eco.sparrow_radar_task.is_none());
-        assert_eq!(eco.sparrow, Some(dedicated));
+        assert_eq!(eco.sparrows, vec![dedicated]);
+    }
+
+    #[test]
+    fn additional_sparrows_can_morph_without_replacing_existing_scouts() {
+        let (mut eco, cb) = economy();
+        let first = Unit::from_id(cb, 10).unwrap();
+        let radar = Unit::from_id(cb, 11).unwrap();
+        let scout = UnitDef::from_id(cb, 2).unwrap();
+        let job = radar_task(&mut eco, cb, radar);
+        eco.sparrows.push(first);
+        eco.sparrow_radar_task = Some(job);
+        eco.morph_sparrow_radar(job, radar, scout);
+        assert_eq!(eco.sparrows, vec![first, radar]);
+        eco.morph_sparrow_radar(job, radar, scout);
+        ORDERS.with(|o| assert_eq!(o.borrow().len(), 2));
     }
 
     #[test]
@@ -195,7 +212,7 @@ mod tests {
         eco.sparrow_radar_task = Some(job);
         eco.drop_construction_task(job);
         assert!(eco.sparrow_radar_task.is_none());
-        assert!(eco.sparrow.is_none());
+        assert!(eco.sparrows.is_empty());
         assert!(eco.tasks.get(job).is_none());
         assert!(eco.radar_tasks.is_empty());
     }
