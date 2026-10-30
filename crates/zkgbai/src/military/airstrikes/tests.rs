@@ -1,5 +1,5 @@
 use super::*;
-fn enemy(id: i32) -> Contact {
+pub(super) fn enemy(id: i32) -> Contact {
     Contact {
         id,
         pos: Vec3::xz(2000.0, 2000.0),
@@ -176,6 +176,9 @@ fn cheap_artillery_is_secondary_but_groups_of_cheap_units_remain_primary() {
         fencer.value = cost;
         assert_eq!(missions(&[fencer.clone()], Vec3::ZERO, 300).iter().any(|j| j.kind == MissionKind::Heavy), primary);
     }
+    fencer.value = 300.0;
+    fencer.hp = 1.0;
+    assert!(!missions(&[fencer], Vec3::ZERO, 300).iter().any(|j| j.kind.primary()));
     let group: Vec<_> = (0..4).map(enemy).collect();
     assert!(missions(&group, Vec3::ZERO, 300).iter().any(|j| j.kind == MissionKind::Group && j.kind.primary()));
 }
@@ -202,7 +205,7 @@ fn procurement_compares_metal_not_airframe_count() {
 }
 
 #[test]
-fn assassination_procurement_favors_fragility_and_tough_units_use_existing_fleets() {
+fn priority_strikes_follow_current_health_and_tough_units_use_existing_fleets() {
     assert!(priority_target(1100.0, 1000.0)); // Lance
     assert!(priority_target(900.0, 1250.0)); // Firewalker
     assert!(priority_target(1600.0, 2045.0)); // Tremor
@@ -218,9 +221,17 @@ fn assassination_procurement_favors_fragility_and_tough_units_use_existing_fleet
     assert!(js.iter().all(|j| !j.kind.primary()));
     let choice = packages(&js[0], clear(), 800.0);
     assert!(choice.contains(&vec![(Plane::Raven, 19)]));
+    for (hp, primary) in [(6601.0, false), (6600.0, true), (2000.0, true), (12000.0, false)] {
+        cyclops.hp = hp;
+        let js = missions(&[cyclops.clone()], Vec3::ZERO, 300);
+        assert_eq!(js.iter().any(|j| j.kind == MissionKind::Heavy), primary);
+        assert_eq!(js.iter().any(|j| j.kind == MissionKind::Opportunistic), !primary);
+    }
     cyclops.hp = 2000.0;
     let damaged = missions(&[cyclops], Vec3::ZERO, 300);
-    assert!(damaged.iter().all(|j| !j.kind.primary()));
+    assert_eq!(damaged[0].kind, MissionKind::Heavy);
+    assert!(packages(&damaged[0], clear(), 800.0).contains(&vec![(Plane::Raven, 4)]));
+    assert!(packages(&damaged[0], clear(), 800.0).contains(&vec![(Plane::Likho, 2)]));
     assert!(damaged.iter().any(|j| j.kind == MissionKind::Assassinate));
     let lance = job(MissionKind::Heavy, 1000.0);
     let mut tougher = lance.clone();
