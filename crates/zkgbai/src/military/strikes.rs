@@ -13,6 +13,7 @@ use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod opportunities;
 mod prediction;
 mod scenario;
 mod staging;
@@ -270,11 +271,18 @@ impl Ai {
                 prey,
             });
         }
+        // "Defenseless" includes the surroundings, not just the victim's
+        // weapons. Defended economy cannot fund opportunistic procurement.
+        let threats = self.strike_opportunity_threats();
+        jobs.retain(|j| j.prey != Prey::Defenseless || opportunities::clear(j.pos, j.pos, &threats));
         // Value AA formations and other defenseless clusters together; do not
         // build a whole wave for a lone cheap mex. Existing waves can still raid it.
         let soft: Vec<_> = jobs.iter().filter(|j| j.prey == Prey::Defenseless).map(|j| (j.pos, j.value)).collect();
         for j in jobs.iter_mut().filter(|j| j.prey == Prey::Defenseless) {
-            let nearby: Vec<_> = soft.iter().filter(|(p, _)| distance(*p, j.pos) < 600.0).collect();
+            let nearby: Vec<_> = soft
+                .iter()
+                .filter(|(p, _)| distance(*p, j.pos) < 600.0 && opportunities::clear(j.pos, *p, &threats))
+                .collect();
             j.count = nearby.len();
             j.value = nearby.iter().map(|(_, value)| value).sum();
         }
@@ -302,6 +310,7 @@ impl Ai {
         if let Some(w) = self.strikes.wave.as_ref().filter(|w| {
             matches!(w.phase, Phase::Forming | Phase::Screening)
                 && w.tactic.factory() == kind
+                && (w.job.prey != Prey::Defenseless || self.strike_opportunity_clear(w.home, w.job.pos))
                 && w.job.production_pays(
                     w.tactic,
                     self.defs.get(w.tactic.name()).map_or(f32::INFINITY, |d| d.cost(self.metal)),
@@ -374,6 +383,7 @@ impl Ai {
             || name != w.tactic.name()
             || w.members.len() >= w.needed
             || !self.strike_preparable(w.tactic, &w.job)
+            || (w.job.prey == Prey::Defenseless && !self.strike_opportunity_clear(w.home, w.job.pos))
         {
             return false;
         }
@@ -521,6 +531,9 @@ impl Ai {
         let Some(def) = self.defs.get(tactic.name()) else { return false };
         if self.missiles_ground_burning(j.pos) || !reaches(self.reach_terrain(), def, from, j.pos, 80.0) {
             return false;
+        }
+        if j.prey == Prey::Defenseless {
+            return self.strike_opportunity_clear(from, j.pos);
         }
         if tactic != Tactic::Flea {
             return true;
@@ -774,6 +787,11 @@ impl Ai {
                     }
                 }
             }
+            if w.job.prey == Prey::Defenseless && !self.strike_opportunity_clear(w.home, w.job.pos) {
+                self.log("strikes: release opportunistic wave; approach is defended");
+                self.strikes_release(w);
+                return;
+            }
             let expected = w.job.id.is_some_and(|id| self.jaeger_stun_expected(id));
             w.phase = staging::waiting_phase(w.tactic, frame - w.job.last, expected);
             if w.phase == Phase::Screening {
@@ -789,6 +807,7 @@ impl Ai {
                 && frame - w.job.last < SNIPER_MEMORY
                 && self.strike_target_allowed(w.tactic, &w.job)
                 && self.strike_suitable(w.tactic, &w.job, w.home)
+                && (w.job.prey != Prey::Defenseless || self.strike_opportunity_wave_clear(&w, w.job.pos))
             {
                 self.strike_predict(&mut w);
             }
@@ -802,13 +821,16 @@ impl Ai {
             if w.job.phantom() {
                 w.job.count = w.job.count.saturating_sub(killed.len());
             }
-            let next_soft = if dead && w.job.prey == Prey::Defenseless {
+            let end = target.filter(|e| e.visible || e.is_radar_visible).map_or(w.job.pos, |e| e.position);
+            let defended = w.job.prey == Prey::Defenseless && !self.strike_opportunity_wave_clear(&w, end);
+            let next_soft = if dead && !defended && w.job.prey == Prey::Defenseless {
                 self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
                     j.prey == Prey::Defenseless
                         && j.id != w.job.id
                         && distance(j.pos, w.job.pos) < 600.0
                         && !self.strike_cooling(j.pos)
                         && self.strike_suitable(w.tactic, j, w.job.pos)
+                        && self.strike_opportunity_wave_clear(&w, j.pos)
                 })
             } else {
                 None
@@ -820,6 +842,7 @@ impl Ai {
             } else if dead && w.job.phantom() && w.job.count > 0 {
                 w.job.id = None; // Sweep for the next Phantom with the surviving wave.
             } else if dead
+                || defended
                 || !self.strike_target_allowed(w.tactic, &w.job)
                 || frame - w.since > DIVE_TIMEOUT
                 || w.members.is_empty()
@@ -829,6 +852,8 @@ impl Ai {
                     w.tactic.name(),
                     if dead {
                         "target killed"
+                    } else if defended {
+                        "opportunity now defended"
                     } else if !self.strike_target_allowed(w.tactic, &w.job) {
                         "stun window closed"
                     } else {
