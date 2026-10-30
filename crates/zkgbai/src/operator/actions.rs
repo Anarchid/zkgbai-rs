@@ -73,6 +73,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "the home defense's floor: a guard per few naked mexes, posted ahead of its sector's first mex",
     ),
     ("stakeouts", "Defense", "scout pickets on the raid lanes"),
+    (
+        "stakeoutqrf",
+        "Defense",
+        "pickets within two Lotus ranges of raider damage to our economy immediately join QRF (default on)",
+    ),
     ("anyscout", "Defense", "stakeouts take any factory's scout"),
     (
         "openscouts",
