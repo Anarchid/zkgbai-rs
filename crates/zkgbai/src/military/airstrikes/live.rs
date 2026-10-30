@@ -11,6 +11,30 @@ const PERIOD: i32 = 30;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
 const COOLDOWN: i32 = 30 * 15;
 
+#[derive(Default)]
+struct Utilization {
+    state_frames: BTreeMap<&'static str, u64>,
+    launched: usize,
+    payload_spent: usize,
+    aborted: BTreeMap<&'static str, usize>,
+}
+
+fn readiness(reserved: bool, active: bool, empty: bool, healthy: bool, at_home: bool) -> &'static str {
+    if reserved {
+        "operator"
+    } else if active {
+        "in_progress"
+    } else if empty {
+        "rearming"
+    } else if !healthy {
+        "repairing"
+    } else if !at_home {
+        "returning"
+    } else {
+        "ready"
+    }
+}
+
 struct Aircraft {
     unit: Unit,
     kind: Plane,
@@ -50,6 +74,7 @@ pub struct BomberHandler {
     last_report: i32,
     launched: usize,
     raven_damage: Option<f32>,
+    utilization: BTreeMap<Plane, Utilization>,
 }
 impl BomberHandler {
     pub fn new() -> Self {
@@ -61,6 +86,10 @@ impl BomberHandler {
 }
 
 impl Ai {
+    pub(crate) fn airstrike_manages(&self, id: i32) -> bool {
+        self.bomber_handler.units.contains_key(&id)
+    }
+
     pub(crate) fn airstrike_claims(&self, id: i32) -> bool {
         self.bomber_handler.building.contains_key(&id) || self.bomber_handler.units.contains_key(&id)
     }
@@ -121,7 +150,9 @@ impl Ai {
         let mut plans: Vec<_> = h.recent.values().filter(|p| self.frame - p.job.seen <= MEMORY).collect();
         plans.sort_by(|a, b| b.job.score().total_cmp(&a.job.score()));
         for plan in plans {
-            if let Some(kind) = purchase(&plan.packages, &have) {
+            if let Some(kind) = purchase(&plan.packages, &have, |k| {
+                self.defs.get(k.name()).map_or(f32::INFINITY, |d| d.cost(self.metal))
+            }) {
                 return Some(kind.name());
             }
         }
@@ -155,7 +186,7 @@ impl Ai {
                     live,
                     air,
                     static_: e.is_static,
-                    heavy: e.is_com || e.is_arty || e.is_major_cancer || (!e.is_static && e.value >= 1000.0),
+                    heavy: e.is_com || e.is_arty || e.is_major_cancer || (!e.is_static && e.value >= 600.0),
                     raider: e.is_raider
                         || self.unit_classes.small_raiders.contains(e.def_name.as_str())
                         || self.unit_classes.medium_raiders.contains(e.def_name.as_str()),
@@ -307,6 +338,18 @@ impl Ai {
         self.bomber_handler.plans = plans;
         self.airstrike_fly(frame, home, &air, &defense_air, &interceptors);
         self.airstrike_launch(frame, home, &air, &defense_air);
+        let busy: BTreeSet<_> = self.bomber_handler.sorties.iter().flat_map(|s| s.members.iter().copied()).collect();
+        for (&id, a) in &self.bomber_handler.units {
+            let state = readiness(
+                springai::reserved::is_reserved(self.cb, id),
+                busy.contains(&id),
+                a.unit.rules_param_float("noammo", 0.0) > 0.0,
+                a.unit.health() >= a.unit.max_health() * 0.95,
+                distance(a.unit.pos(), home) < 450.0,
+            );
+            *self.bomber_handler.utilization.entry(a.kind).or_default().state_frames.entry(state).or_default() +=
+                PERIOD as u64;
+        }
         if frame - self.bomber_handler.last_report >= 30 * 30 {
             self.bomber_handler.last_report = frame;
             self.log(&format!(
@@ -360,14 +403,46 @@ impl Ai {
             let reroute = frame - sortie.last_route >= 150 && distance(from, pos) > 800.0;
             let route = if reroute { approach.route(pos) } else { Vec::new() };
             let still_job = self.bomber_handler.plans.iter().any(|p| p.job.key() == sortie.job.key());
-            let done = self.dev_off("airstrikes") || !valid || !still_job || frame - sortie.launched > SORTIE_TIMEOUT;
+            let disabled = self.dev_off("airstrikes");
+            let done = disabled || !valid || !still_job || frame - sortie.launched > SORTIE_TIMEOUT;
             let mut keep = Vec::new();
             for id in sortie.members {
                 let Some(a) = self.bomber_handler.units.get_mut(&id) else { continue };
                 let u = a.unit;
                 let spent = u.rules_param_float("noammo", 0.0) > 0.0;
                 let safe = u.def().is_some_and(|d| risk.survives(u.health(), d.speed()));
+                if springai::reserved::is_reserved(self.cb, id) {
+                    *self
+                        .bomber_handler
+                        .utilization
+                        .entry(a.kind)
+                        .or_default()
+                        .aborted
+                        .entry("operator")
+                        .or_default() += 1;
+                    a.returning = true;
+                    continue;
+                }
                 if done || spent || !safe || u.health() < u.max_health() * 0.5 {
+                    let stats = self.bomber_handler.utilization.entry(a.kind).or_default();
+                    if spent {
+                        stats.payload_spent += 1;
+                    } else {
+                        let reason = if !valid {
+                            "target_lost"
+                        } else if !still_job {
+                            "mission_changed"
+                        } else if !safe {
+                            "unsafe_route"
+                        } else if frame - sortie.launched > SORTIE_TIMEOUT {
+                            "timeout"
+                        } else if disabled {
+                            "disabled"
+                        } else {
+                            "damage"
+                        };
+                        *stats.aborted.entry(reason).or_default() += 1;
+                    }
                     // Cancel queued attacks even if already over the rally
                     // point (the recovery loop may have no move to issue).
                     u.stop(0);
@@ -425,6 +500,9 @@ impl Ai {
         // FIND_PAD order would throw away the safe egress route.
         let ids: Vec<_> = self.bomber_handler.units.keys().copied().filter(|id| !active.contains(id)).collect();
         for id in ids {
+            if springai::reserved::is_reserved(self.cb, id) {
+                continue;
+            }
             let a = &self.bomber_handler.units[&id];
             let u = a.unit;
             let hurt = u.health() < u.max_health() * 0.95;
@@ -478,11 +556,9 @@ impl Ai {
         let mut covered: BTreeSet<_> =
             self.bomber_handler.sorties.iter().flat_map(|s| s.job.targets.iter().copied()).collect();
         let plans = self.bomber_handler.plans.clone();
-        let primary_kinds: BTreeSet<_> = plans
-            .iter()
-            .filter(|p| p.job.kind.primary())
-            .flat_map(|p| p.packages.iter().flatten().map(|(k, _)| *k))
-            .collect();
+        // Plans are ordered primary first. Only aircraft actually committed
+        // to a sortie are reserved: an unfillable package must not immobilize
+        // every aircraft of that type while secondary opportunities expire.
         for plan in plans {
             if self.bomber_handler.sorties.len() >= 4 {
                 break;
@@ -495,9 +571,6 @@ impl Ai {
             }
             let mut selected = None;
             for package in &plan.packages {
-                if !job.kind.primary() && package.iter().any(|(k, _)| primary_kinds.contains(k)) {
-                    continue;
-                }
                 let mut members = Vec::new();
                 for &(kind, n) in package {
                     let candidates: Vec<_> = self
@@ -506,6 +579,7 @@ impl Ai {
                         .iter()
                         .filter(|(id, a)| {
                             !busy.contains(id)
+                                && !springai::reserved::is_reserved(self.cb, **id)
                                 && a.kind == kind
                                 && !a.returning
                                 && a.unit.rules_param_float("noammo", 0.0) == 0.0
@@ -543,8 +617,14 @@ impl Ai {
                 }
             }
             // Napalm and implosion blasts should not carpet our own troops.
-            if matches!(job.kind, MissionKind::Group | MissionKind::Wind | MissionKind::Heavy | MissionKind::Interdict)
-                && members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
+            if matches!(
+                job.kind,
+                MissionKind::Group
+                    | MissionKind::Wind
+                    | MissionKind::Heavy
+                    | MissionKind::Opportunistic
+                    | MissionKind::Interdict
+            ) && members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
                 && self
                     .cb
                     .friendly_units_in(job.pos, 220.0)
@@ -598,6 +678,7 @@ impl Ai {
                         OPTION_SHIFT_KEY,
                     );
                 }
+                self.bomber_handler.utilization.entry(a.kind).or_default().launched += 1;
                 busy.insert(id);
             }
             covered.extend(job.targets.iter().copied());
@@ -654,7 +735,19 @@ impl Ai {
     }
 
     pub fn airstrikes_status(&self) -> serde_json::Value {
-        self.bomber_handler.status(self.frame, self.airstrike_production())
+        use serde_json::json;
+        let mut status = self.bomber_handler.status(self.frame, self.airstrike_production());
+        let busy: BTreeSet<_> = self.bomber_handler.sorties.iter().flat_map(|s| s.members.iter().copied()).collect();
+        let home = self.graph.get_ally_center();
+        status["fleet"] = json!(self.bomber_handler.units.iter().map(|(&id, a)| {
+            let empty = a.unit.rules_param_float("noammo", 0.0) > 0.0;
+            let health = a.unit.health() / a.unit.max_health().max(1.0);
+            let away = distance(a.unit.pos(), home);
+            json!({"id": id, "unit": a.kind.name(), "name": format!("{:?}", a.kind),
+                "state": readiness(springai::reserved::is_reserved(self.cb, id), busy.contains(&id), empty, health >= 0.95, away < 450.0),
+                "health": health, "noammo": empty, "home_distance": away})
+        }).collect::<Vec<_>>());
+        status
     }
 }
 
@@ -669,7 +762,7 @@ fn mission_view(
     use serde_json::json;
     json!({
         "id": format!("{:?}:{}", job.kind, job.target),
-        "kind": format!("{:?}", job.kind), "target": job.target, "targets": job.targets,
+        "kind": format!("{:?}", job.kind), "label": job.kind.label(), "target": job.target, "targets": job.targets,
         "state": if sortie.is_some() { "in_progress" } else { "available" },
         "primary": job.kind.primary(), "deep": job.deep, "value": job.value,
         "pos": [job.pos.x, job.pos.z], "seen": job.seen,
@@ -704,6 +797,9 @@ impl BomberHandler {
             "ordered": self.orders.len(), "building": self.building.len(),
             "available": missions.len() - self.sorties.len(), "in_progress": self.sorties.len(),
             "missions": missions,
+            "utilization": self.utilization.iter().map(|(k, u)| json!({"unit": k.name(), "name": format!("{k:?}"),
+                "aircraft_seconds": u.state_frames.iter().map(|(s, f)| (*s, *f as f64 / 30.0)).collect::<BTreeMap<_,_>>(),
+                "aircraft_launched": u.launched, "payload_spent": u.payload_spent, "aborted": u.aborted})).collect::<Vec<_>>(),
             "sorties": self.sorties.iter().map(|s| json!({"kind": format!("{:?}",s.job.kind),
                 "target": s.job.target, "members": s.members, "launched": s.launched
             })).collect::<Vec<_>>()})
@@ -713,6 +809,16 @@ impl BomberHandler {
 #[cfg(test)]
 mod operator_tests {
     use super::*;
+    #[test]
+    fn readiness_distinguishes_payload_repair_return_and_operator_control() {
+        assert_eq!(readiness(false, false, false, true, true), "ready");
+        assert_eq!(readiness(false, false, true, true, true), "rearming");
+        assert_eq!(readiness(false, false, false, false, true), "repairing");
+        assert_eq!(readiness(false, false, false, true, false), "returning");
+        assert_eq!(readiness(false, true, false, true, false), "in_progress");
+        assert_eq!(readiness(true, true, false, true, false), "operator");
+    }
+
     #[test]
     fn snapshots_show_candidate_then_active_then_available_without_duplicate_targets() {
         let job = Mission {

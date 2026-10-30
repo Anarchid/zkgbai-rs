@@ -96,6 +96,9 @@ pub fn role(ai: &Ai, u: Unit) -> &'static str {
             _ => {}
         }
     }
+    if ai.airstrike_manages(id) {
+        return "airstrike";
+    }
     if let Some(w) = ai.eco.workers.get(&id) {
         return if w.is_com { "commander" } else { "worker" };
     }

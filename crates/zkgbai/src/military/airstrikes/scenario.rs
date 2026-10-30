@@ -24,6 +24,28 @@ impl Ai {
                         ));
                     }
                 }
+                "airstrike-priority-target" => spawn.push(("hoverarty", site)),
+                "airstrike-tough-target" => spawn.push(("tankassault", site)),
+                "airstrike-fencer" => spawn.push(("vehsupport", site)),
+                "airstrike-shieldball" => {
+                    spawn.push(("shieldshield", site));
+                    for i in 0..4 {
+                        spawn.push((
+                            "shieldassault",
+                            Vec3::xz(site.x + 70.0 * (i % 2) as f32, site.z + 70.0 * (i / 2) as f32),
+                        ));
+                    }
+                }
+                "airstrike-likhos" | "airstrike-likho-fencer" => {
+                    for i in 0..if test == "airstrike-likho-fencer" { 1 } else { 5 } {
+                        spawn.push(("bomberheavy", Vec3::xz(base.x + 40.0 * i as f32, base.z + 100.0)));
+                    }
+                    spawn.extend([
+                        ("staticrearm", get_directional_point(base, center, 400.0)),
+                        ("staticradar", Vec3::xz(site.x - 300.0, site.z)),
+                        ("energyfusion", get_directional_point(base, center, -300.0)),
+                    ]);
+                }
                 "airstrike-singu" => spawn.push(("energysingu", site)),
                 "airstrike-aa" => {
                     spawn.push(("energysingu", site));
@@ -45,6 +67,17 @@ impl Ai {
                 if let Some(d) = self.defs.get(name) {
                     let p = map.find_closest_build_site(d, pos, 250.0, 1, 0);
                     if let Some(u) = self.cb.cheat_new_unit(d, if p.x >= 0.0 { p } else { pos }) {
+                        // These fixtures exercise delivery, not survival of the
+                        // close observer radar against a Lance or Fencer.
+                        if matches!(
+                            test.as_str(),
+                            "airstrike-priority-target"
+                                | "airstrike-tough-target"
+                                | "airstrike-fencer"
+                                | "airstrike-shieldball"
+                        ) {
+                            u.set_fire_state(0, 0);
+                        }
                         self.log(&format!(
                             "airstrike-test: spawned {name} {} at {:.0},{:.0}",
                             u.id(),
@@ -59,12 +92,32 @@ impl Ai {
             for r in [self.metal, self.energy] {
                 self.cb.cheat_resource(r, 20000.0);
             }
-            if matches!(test.as_str(), "airstrike-farm" | "airstrike-singu" | "airstrike-aa") {
+            if matches!(
+                test.as_str(),
+                "airstrike-farm"
+                    | "airstrike-singu"
+                    | "airstrike-aa"
+                    | "airstrike-priority-target"
+                    | "airstrike-tough-target"
+                    | "airstrike-fencer"
+                    | "airstrike-shieldball"
+            ) {
                 let alive = self
                     .cb
                     .team_units()
                     .iter()
-                    .filter(|u| matches!(self.defs.name_of(**u), "energywind" | "energysingu"))
+                    .filter(|u| {
+                        matches!(
+                            self.defs.name_of(**u),
+                            "energywind"
+                                | "energysingu"
+                                | "tankassault"
+                                | "hoverarty"
+                                | "vehsupport"
+                                | "shieldshield"
+                                | "shieldassault"
+                        )
+                    })
                     .count();
                 self.log(&format!("airstrike-test: targets remaining={alive}"));
             }
