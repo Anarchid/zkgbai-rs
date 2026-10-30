@@ -54,6 +54,11 @@ impl Ai {
             }
             return;
         }
+        if test == "assassin-aa-late-guard" && frame == 450 {
+            let map = self.cb.map();
+            self.strikes_scenario_guard(Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0 + 300.0));
+            return;
+        }
         if !test.starts_with("assassin-") || frame != 60 {
             return;
         }
@@ -61,14 +66,21 @@ impl Ai {
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
         let pos = Vec3::xz(center.x, center.z + 300.0);
         self.cb.cheats_set_enabled(true);
-        if test == "assassin-aa" {
+        if matches!(test, "assassin-aa" | "assassin-aa-guarded" | "assassin-aa-late-guard") {
             if let Some(def) = self.defs.get("vehaa") {
                 for i in 0..4 {
                     if let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + i as f32 * 70.0, pos.z)) {
                         u.set_move_state(0, 0);
+                        u.set_fire_state(0, 0); // Keep the LOS observer alive.
+                        // Keep the fixture beside its guard instead of letting
+                        // normal AA retreat orders change the test conditions.
+                        springai::reserved::reserve(self.cb, u.id());
                         self.log(&format!("assassin-test: AA {} awaits the swarm", u.id()));
                     }
                 }
+            }
+            if test == "assassin-aa-guarded" {
+                self.strikes_scenario_guard(pos);
             }
             return;
         }
@@ -200,5 +212,16 @@ impl Ai {
             self.cb.cheat_new_unit(scout, Vec3::xz(pos.x + 150.0, pos.z));
         }
         self.log(&format!("assassin-test: {count} {} assembled", tactic.name()));
+    }
+    fn strikes_scenario_guard(&self, pos: Vec3) {
+        if let Some(def) = self.defs.get("turretlaser")
+            && let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x, pos.z + 250.0))
+        {
+            // Observe the policy decision without the guard destroying the
+            // wave or its scout before the next controller tick.
+            u.set_fire_state(0, 0);
+            springai::reserved::reserve(self.cb, u.id());
+            self.log(&format!("assassin-test: Lotus {} guards the AA formation", u.id()));
+        }
     }
 }

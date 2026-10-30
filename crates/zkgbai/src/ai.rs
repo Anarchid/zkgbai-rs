@@ -582,6 +582,8 @@ impl Ai {
                     | "airstrike-aa"
                     | "assassin-lance"
                     | "assassin-aa"
+                    | "assassin-aa-guarded"
+                    | "assassin-aa-late-guard"
                     | "assassin-heavy"
                     | "assassin-commander"
             )

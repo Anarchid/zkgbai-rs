@@ -99,11 +99,18 @@ a line, converging to focus a revealed target; Halberds retain pack pacing.
 Widow EMP and an existing 20-Flea force through the normal selector.
 `assassin-no-widow` versus `assassin-commander` checks the unstunned commander veto,
 and versus `assassin-aa` exercises dedicated-AA target masks and the swarm attack.
+`assassin-aa-guarded` adds a Lotus beside that same formation: it must not
+produce an opportunistic strike job or dive. `assassin-aa-late-guard` adds the
+Lotus after launch and must end that dive when the new threat is observed.
 
 Defenseless ground targets, including dedicated AA formations and unarmed economy,
-are Flea opportunities without a stun. Classification uses real weapon mount
-masks against the Flea category, not an AA tooltip; flex-AA and ground weapons
-are still dangerous. Nearby soft targets share a value budget: an existing wave
+are Flea opportunities without a stun only when both the target area and the
+approach have no known threats. Classification uses real weapon mount masks
+against the Flea category, not an AA tooltip; flex-AA and ground weapons are
+still dangerous. Even one escort, turret covering the route, unidentified nearby
+contact or inferred Phantom excludes an opportunistic job. Friendly superiority
+does not cancel enemy threat. Dedicated Phantom/artillery assassination rules
+remain separate. Nearby soft targets share a value budget: an existing wave
 can raid a cheap target, but production requires at least the whole wave's cost
 in target value. Twenty Fleas sweep a soft formation, continuing to nearby
 eligible targets after each kill. Enemy snapshot weapons use the same target
@@ -130,3 +137,11 @@ kill/death-evidence rules apply. The predictor still checks escorts conservative
 without assuming a perfectly cloaked approach. `assassin-scythe` versus
 `assassin-target`, and `assassin-scythe-lance` versus `assassin-lance`, exercise
 these paths in the engine.
+
+Opportunistic cluster budgets exclude guarded targets and unsafe connections.
+The controller checks threat before procurement and launch, while mustering,
+and throughout the dive. A newly observed escort ends the opportunistic dive;
+subsequent targets in a formation must pass the same checks. Checks use remembered
+weapons/ranges plus a clearance margin around the direct approach, and are
+repeated from actual member positions during movement; unseen threats and engine
+pathing detours cannot be ruled out in advance.
