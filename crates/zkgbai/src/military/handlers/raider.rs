@@ -376,7 +376,9 @@ impl Ai {
                 }
             }
 
-            let scouts: Vec<_> = self.raider_handler.air_scouts.iter().copied().collect();
+            let mut scouts: Vec<_> = self.raider_handler.air_scouts.iter().copied().collect();
+            scouts
+                .sort_by_key(|id| self.fighters.get(id).is_none_or(|f| self.defs.name_of(f.unit) != "planelightscout"));
             for id in scouts {
                 if self.raider_is_lost(id) {
                     self.raider_handler.air_scouts.remove(&id);
@@ -1058,7 +1060,7 @@ impl Ai {
         let Some((unit, pos)) = self.fighters.get(&sparrow).map(|f| (f.unit, f.get_pos())) else {
             return;
         };
-        if self.sweeps.detonating == Some(sparrow) {
+        if springai::reserved::is_reserved(self.cb, sparrow) || self.sweeps.detonating == Some(sparrow) {
             return;
         }
         // A Sparrow (not an Owl) sweeps where unseen snipers shoot from, and
@@ -1082,6 +1084,16 @@ impl Ai {
         if let Some(p) = look.or_else(|| self.missiles_scout_target(pos)) {
             self.raider_clear_task(sparrow);
             self.raider_raid(sparrow, p);
+            return;
+        }
+        if let Some(route) = self.airstrike_scout_route(unit) {
+            self.raider_clear_task(sparrow);
+            if let Some(f) = self.fighters.get_mut(&sparrow) {
+                f.target = *route.last().unwrap();
+            }
+            for (i, p) in route.iter().enumerate() {
+                unit.move_to(*p, if i == 0 { 0 } else { crate::util::OPTION_SHIFT_KEY });
+            }
             return;
         }
         // Share the cloaked scouts' stale-building/cell targets, spreading

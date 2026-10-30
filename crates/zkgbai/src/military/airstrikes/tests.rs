@@ -26,6 +26,7 @@ fn clear() -> Risk {
 fn job(kind: MissionKind, hp: f32) -> Mission {
     Mission {
         kind,
+        inference: None,
         group: (kind == MissionKind::Group).then(|| {
             let mut c = enemy(1);
             c.hp = hp;
@@ -346,4 +347,17 @@ fn sacrificial_jammer_cannot_veto_odin_but_odin_still_needs_to_survive() {
     assert!(!mission.flight_safe(Plane::Odin, Risk { aa: 5.0, ..clear() }, 5200.0, 5200.0, 185.0));
     mission.kind = MissionKind::Shield;
     assert!(!mission.flight_safe(Plane::Sparrow, risk, 50.0, 350.0, 210.0));
+}
+
+#[test]
+fn speculative_hunts_use_likhos_only_under_weak_aa() {
+    let hunt = job(MissionKind::Speculative, 1500.0);
+    assert_eq!(packages(&hunt, clear(), 800.0), vec![vec![(Plane::Likho, 1)]]);
+    let mut risk = clear();
+    risk.aa = 0.16;
+    assert!(packages(&hunt, risk, 800.0).is_empty());
+    risk.aa = 0.0;
+    risk.intercepted = true;
+    assert!(packages(&hunt, risk, 800.0).is_empty());
+    assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"airspeculate"));
 }
