@@ -273,18 +273,19 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
     jobs
 }
 
-/// Threat is the existing AA map's scale, not DPS. Exposure is integrated
-/// over 64-elmo cells. Convert conservatively for a round trip plus six seconds
-/// turning/releasing at the target. This is a tunable survival heuristic.
+/// Incoming fire is normalized to 500 DPS; exposure integrates it over
+/// 64-elmo cells. Include approach/egress, a 1500-elmo release/turn allowance
+/// flown at this aircraft's speed, and ready volleys from encountered weapons.
 #[derive(Clone, Copy)]
 struct Risk {
     aa: f32,
     exposure: f32,
     intercepted: bool,
+    burst: f32,
 }
 impl Risk {
     fn damage(self, speed: f32) -> f32 {
-        (2.0 * self.exposure * 64.0 / speed.max(1.0) + 6.0 * self.aa) * 500.0
+        (2.0 * self.exposure * 64.0 + 1500.0 * self.aa) * 500.0 / speed.max(1.0) + self.burst
     }
     fn survives(self, health: f32, speed: f32) -> bool {
         self.damage(speed).is_finite() && self.damage(speed) < health * 0.55
@@ -300,11 +301,17 @@ fn return_route(home: Vec3, outbound: &[Vec3]) -> Vec<Vec3> {
     outbound.iter().rev().skip(1).copied().chain(std::iter::once(home)).collect()
 }
 
-fn route_risk(from: Vec3, route: &[Vec3], threat: impl Fn(Vec3) -> f32, intercepted: impl Fn(Vec3) -> bool) -> Risk {
+fn route_risk(
+    from: Vec3,
+    route: &[Vec3],
+    mut threat: impl FnMut(Vec3) -> f32,
+    intercepted: impl Fn(Vec3) -> bool,
+) -> Risk {
     let Some(&end) = route.last() else {
-        return Risk { aa: 0.0, exposure: f32::INFINITY, intercepted: false };
+        return Risk { aa: 0.0, exposure: f32::INFINITY, intercepted: false, burst: 0.0 };
     };
     let mut previous = from;
+    let _ = threat(from); // account for a ready volley at the start of a leg
     let mut exposure = 0.0;
     let mut blocked = intercepted(from);
     for &next in route {
@@ -318,7 +325,7 @@ fn route_risk(from: Vec3, route: &[Vec3], threat: impl Fn(Vec3) -> f32, intercep
         blocked |= intercepted(next);
         previous = next;
     }
-    Risk { aa: threat(end), exposure, intercepted: blocked }
+    Risk { aa: threat(end), exposure, intercepted: blocked, burst: 0.0 }
 }
 
 fn round_trip(ingress: Risk, egress: Risk) -> Risk {
@@ -326,6 +333,7 @@ fn round_trip(ingress: Risk, egress: Risk) -> Risk {
         aa: ingress.aa.max(egress.aa),
         exposure: (ingress.exposure + egress.exposure) * 0.5,
         intercepted: ingress.intercepted || egress.intercepted,
+        burst: ingress.burst + egress.burst,
     }
 }
 
@@ -340,15 +348,17 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     let raven = salvo(raven_damage) + 1;
     let clear = risk.aa <= 0.02 && !risk.intercepted;
     let very_light = risk.aa <= 0.15 && !risk.intercepted;
-    let light = risk.aa <= 1.25 && !risk.intercepted;
+    // Likho/Odin tolerance comes from each aircraft's round-trip survival
+    // check, not a Raven-derived local-AA band. Packages remain provisional.
+    let unopposed = !risk.intercepted;
     let choices = match job.kind {
         Intercept if risk.aa <= 0.4 => vec![vec![(Magpie, 1), (Raptor, count(job.hp, 700.0).max(2))]],
         Interdict if clear => vec![vec![(Phoenix, count(job.hp, 1000.0))], vec![(Magpie, count(job.hp, 350.0).max(2))]],
         Group if clear => job.group_packages(&[Phoenix, Likho]),
-        Group if light => job.group_packages(&[Likho]),
+        Group if unopposed => job.group_packages(&[Likho]),
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
         Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
-        Heavy | Opportunistic if light => vec![vec![(Likho, salvo(2000.0))]],
+        Heavy | Opportunistic if unopposed => vec![vec![(Likho, salvo(2000.0))]],
         Thermite if !risk.intercepted => {
             let n = count(job.hp, 14000.0);
             let mut package = vec![(Odin, n)];
