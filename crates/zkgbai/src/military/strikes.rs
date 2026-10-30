@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod fragile;
 mod opportunities;
 mod prediction;
+mod raiders;
 mod scenario;
 mod staging;
 
@@ -153,6 +154,9 @@ pub struct Strikes {
     cooldowns: Vec<(Vec3, i32)>,
     predictor: Option<prediction::Predictor>,
     model_failed: bool,
+    raiders: BTreeMap<crate::military::wrappers::SquadId, raiders::Mission>,
+    raider_retry: BTreeMap<crate::military::wrappers::SquadId, i32>,
+    raider_predictor: Option<prediction::Predictor>,
     killed: BTreeSet<i32>,
     serial: u64,
     last_halberd_order: Option<i32>,
@@ -210,7 +214,7 @@ impl Ai {
                 "prediction_pending": w.query.is_some(),
             })
         });
-        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave })
+        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "raider_missions": self.raider_strikes_status() })
     }
 
     /// Merge seen Phantoms with impact estimates by max, not addition: a
@@ -576,6 +580,7 @@ impl Ai {
 
     fn strike_can_recruit(&self, f: &Fighter, name: &str) -> bool {
         self.defs.name_of(f.unit) == name
+            && !self.raider_strike_owns(f.id)
             && !springai::reserved::is_reserved(self.cb, f.id)
             && !self.retreat_handler.is_retreating(f.id)
             && !self.qrf_claims(f.id)
@@ -596,6 +601,7 @@ impl Ai {
         if (frame + self.offset) % PERIOD != 0 {
             return;
         }
+        self.raider_strikes_maintain();
         self.strikes_support_fire();
         self.strikes.orders.retain(|_, (_, f, _)| frame - *f < JOB_MEMORY);
         self.strikes.cooldowns.retain(|(_, f)| frame - *f < COOLDOWN);

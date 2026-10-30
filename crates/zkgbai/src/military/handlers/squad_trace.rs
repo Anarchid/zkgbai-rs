@@ -45,6 +45,8 @@ pub enum Branch {
     Haven,
     /// Active, at an enemy (or a sniper sighting).
     Target,
+    /// Committed assassination or waiting for its mechanics assessment.
+    Strike,
     /// Active, on a scouting task.
     Task,
     /// Active with nothing to do: to the raider rally.
@@ -61,6 +63,7 @@ impl Branch {
             Branch::HavenForming => "haven_forming",
             Branch::Haven => "haven",
             Branch::Target => "target",
+            Branch::Strike => "strike",
             Branch::Task => "task",
             Branch::Idle => "idle",
         }

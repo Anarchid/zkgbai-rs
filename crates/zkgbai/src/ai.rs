@@ -584,6 +584,8 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "assassin-raider-lance"
+                    | "assassin-raider-guarded"
                     | "assassin-lance"
                     | "assassin-aa"
                     | "assassin-aa-guarded"
