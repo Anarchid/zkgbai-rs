@@ -12,7 +12,17 @@ impl Ai {
         let map = self.cb.map();
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
         let site = if test.starts_with("airstrike-wave") {
-            Vec3::xz(center.x * 0.3, center.z * 1.5)
+            // Comet can swap the teams' start corners. Both sides infer the
+            // attacker's corner from their own commander, so this remains a
+            // shallow-wave fixture instead of accidentally testing deep vetoes.
+            let base = self
+                .cb
+                .team_units()
+                .into_iter()
+                .find(|u| self.defs.name_of(*u).starts_with("dyn"))
+                .map_or(self.graph.get_ally_center(), |u| u.pos());
+            let west = if test == "airstrike-wave" { base.x < center.x } else { base.x > center.x };
+            if west { Vec3::xz(center.x * 0.3, center.z * 1.5) } else { Vec3::xz(center.x * 2.0 - 2000.0, 1000.0) }
         } else {
             Vec3::xz(center.x, center.z + 400.0)
         };
