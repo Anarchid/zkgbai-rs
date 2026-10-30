@@ -135,27 +135,29 @@ fn expensive_statics_and_home_raiders_create_primary_jobs() {
 }
 
 #[test]
-fn deep_odin_strikes_require_a_jammer_per_bomber() {
+fn deep_odin_strikes_can_launch_without_jammers() {
     let mut j = job(MissionKind::Thermite, 20000.0);
     assert_eq!(packages(&j, clear(), 800.0), vec![vec![(Plane::Odin, 2)]]);
     j.deep = true;
-    assert_eq!(packages(&j, clear(), 800.0), vec![vec![(Plane::Odin, 2), (Plane::Sparrow, 2)]]);
+    assert_eq!(packages(&j, clear(), 800.0), vec![vec![(Plane::Odin, 2)]]);
 }
 
 #[test]
 fn reservations_prevent_duplicate_purchases_and_complete_alternatives_win() {
     use std::collections::BTreeMap;
-    let packages = vec![vec![(Plane::Phoenix, 1)], vec![(Plane::Magpie, 3)]];
+    let alternatives = vec![vec![(Plane::Phoenix, 1)], vec![(Plane::Magpie, 3)]];
     let mut have = BTreeMap::new();
-    assert_eq!(purchase(&packages, &have, |_| 1.0), Some(Plane::Phoenix));
+    assert_eq!(purchase(&alternatives, &have, |_| 1.0), Some(Plane::Phoenix));
     have.insert(Plane::Phoenix, 1); // queued by the first factory
-    assert_eq!(purchase(&packages, &have, |_| 1.0), None); // second factory pauses
+    assert_eq!(purchase(&alternatives, &have, |_| 1.0), None); // second factory pauses
     have.clear();
     have.insert(Plane::Magpie, 3);
-    assert_eq!(purchase(&packages, &have, |_| 1.0), None);
-    let deep = vec![vec![(Plane::Odin, 1), (Plane::Sparrow, 1)]];
+    assert_eq!(purchase(&alternatives, &have, |_| 1.0), None);
+    let mut mission = job(MissionKind::Thermite, 10000.0);
+    mission.deep = true;
+    let deep = packages(&mission, clear(), 800.0);
     have.insert(Plane::Odin, 1);
-    assert_eq!(purchase(&deep, &have, |_| 1.0), Some(Plane::Sparrow));
+    assert_eq!(purchase(&deep, &have, |_| 1.0), None);
     have.insert(Plane::Sparrow, 1);
     assert_eq!(purchase(&deep, &have, |_| 1.0), None);
 }
@@ -330,4 +332,18 @@ fn worthwhile_group_damage_still_respects_air_cover() {
     assert!(!packages(&job, intense, 800.0).is_empty());
     assert!(!intense.survives(2360.0, 270.0));
     assert!(packages(&job, Risk { intercepted: true, ..clear() }, 800.0).is_empty());
+}
+
+#[test]
+fn sacrificial_jammer_cannot_veto_odin_but_odin_still_needs_to_survive() {
+    let mut mission = job(MissionKind::Thermite, 10000.0);
+    mission.deep = true;
+    let risk = Risk { aa: 0.2, exposure: 1.0, ..clear() };
+    assert!(!risk.survives(350.0, 210.0));
+    assert!(mission.flight_safe(Plane::Sparrow, risk, 50.0, 350.0, 210.0));
+    assert!(mission.flight_safe(Plane::Odin, risk, 5200.0, 5200.0, 185.0));
+    assert!(!mission.flight_safe(Plane::Odin, risk, 1000.0, 5200.0, 185.0));
+    assert!(!mission.flight_safe(Plane::Odin, Risk { aa: 5.0, ..clear() }, 5200.0, 5200.0, 185.0));
+    mission.kind = MissionKind::Shield;
+    assert!(!mission.flight_safe(Plane::Sparrow, risk, 50.0, 350.0, 210.0));
 }

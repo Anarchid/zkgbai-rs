@@ -1,6 +1,7 @@
 //! Mission-driven airplane production and sorties. Policy is independent of
 //! engine handles so target selection and procurement can be exercised offline.
 
+mod escort;
 mod group;
 mod live;
 mod scenario;
@@ -359,14 +360,7 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
         Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
         Heavy | Opportunistic if unopposed => vec![vec![(Likho, salvo(2000.0))]],
-        Thermite if !risk.intercepted => {
-            let n = count(job.hp, 14000.0);
-            let mut package = vec![(Odin, n)];
-            if job.deep {
-                package.push((Sparrow, n));
-            }
-            vec![package]
-        }
+        Thermite if !risk.intercepted => vec![vec![(Odin, count(job.hp, 14000.0))]],
         Assassinate | Static if very_light => vec![vec![(Raven, raven)]],
         Shield if !risk.intercepted => vec![vec![(Odin, 1)]],
         _ => vec![],
