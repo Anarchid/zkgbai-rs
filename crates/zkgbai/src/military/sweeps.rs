@@ -6,6 +6,8 @@
 //! snipers shooting at us unseen (they are where the shots come from; the
 //! army is called there to kill what the sweep shows).
 
+pub(crate) mod counterbattery;
+
 use springai::{NO_TIMEOUT, Unit, Vec3, WeaponDef};
 
 use crate::Ai;
@@ -19,9 +21,6 @@ const CMD_ONECLICK_WEAPON: i32 = 35000;
 /// A Sparrow detonates this close to where it is to sweep: it gets there
 /// within its three-second sprint.
 pub const DETONATE_RANGE: f32 = 2500.0;
-
-/// How far from what it hits a sniper (the Phantom, range 700) stands.
-const SNIPER_RANGE: f32 = 650.0;
 
 /// Shots from unseen snipers are remembered this long, and shots this
 /// close together come from the same ones; this many of them call for a
@@ -37,13 +36,20 @@ const SNIPER_SHOTS: u32 = 2;
 pub struct Sweeps {
     /// Where unseen snipers shot from lately, when last, and how often.
     snipers: Vec<Snipers>,
+    counterbattery: counterbattery::Counterbattery,
     /// The Sparrow sprinting to its sweep.
     pub detonating: Option<i32>,
 }
 
 impl Ai {
-    /// One of our units was hit: by an unseen sniper, note where from.
+    /// Retain long-gun firing evidence and, for Phantoms, impact cadence.
     pub fn sweeps_unit_damaged(&mut self, unit: Unit, attacker: Option<Unit>, dir: Vec3, weapon: Option<WeaponDef>) {
+        if attacker.is_some_and(|a| a.ally_team() == self.ally_team_id) {
+            return;
+        }
+        if let Some(w) = weapon {
+            self.counterbattery_damaged(unit, attacker, dir, w);
+        }
         let Some(weapon) = weapon.filter(|w| w.name().starts_with("cloaksnipe")) else { return };
         let p = unit.pos();
         let len = dir.x.hypot(dir.z);
@@ -51,8 +57,17 @@ impl Ai {
         if known.is_none() && (!len.is_finite() || len < 0.01) {
             return;
         }
-        let at =
-            known.unwrap_or_else(|| Vec3::new(p.x + dir.x / len * SNIPER_RANGE, p.y, p.z + dir.z / len * SNIPER_RANGE));
+        let approximate = known.unwrap_or_else(|| {
+            Vec3::new(p.x + dir.x / len * weapon.range() * 0.8, p.y, p.z + dir.z / len * weapon.range() * 0.8)
+        });
+        // Cadence still counts Phantoms separately, but shares the improved
+        // position evidence instead of assuming a historical 650-elmo range.
+        let name = weapon.name();
+        let at = self
+            .counterbattery_fixes(counterbattery::FRESH)
+            .filter(|f| f.weapon == name && f.last == self.frame)
+            .min_by(|a, b| distance(a.pos, approximate).total_cmp(&distance(b.pos, approximate)))
+            .map_or(approximate, |f| f.pos);
         self.sweeps_note_sniper(at, (weapon.reload() * 30.0).round().max(1.0) as i32);
     }
 

@@ -575,6 +575,9 @@ impl Ai {
                     | "farm"
                     | "snipers"
                     | "lances"
+                    | "assassin-battery-observer"
+                    | "assassin-battery-tremor"
+                    | "assassin-battery-emissary"
                     | "assassin-target"
                     | "assassin-target2"
                     | "airstrike-wave-targets"
@@ -783,6 +786,7 @@ impl Ai {
                 self.guard("eco.unitDamaged", |ai| ai.eco_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("war.unitDamaged", |ai| ai.war_unit_damaged(unit, attacker, damage, dir, weapon, paralyzer));
                 self.guard("sweeps.unitDamaged", |ai| ai.sweeps_unit_damaged(unit, attacker, dir, weapon));
+                self.guard("strikes.unitDamaged", |ai| ai.strikes_unit_damaged(unit, attacker, dir));
                 self.guard("airIntel.unitDamaged", |ai| ai.air_intel_unit_damaged(unit, attacker, dir, weapon));
                 self.guard("impalers.unitDamaged", |ai| ai.impalers_unit_damaged(unit, attacker, damage, weapon));
             }

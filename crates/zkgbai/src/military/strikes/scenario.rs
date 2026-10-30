@@ -6,6 +6,10 @@ impl Ai {
     pub(crate) fn strikes_scenario(&mut self, frame: i32) {
         let Some(test) = self.test.clone() else { return };
         let test = test.as_str();
+        if test.starts_with("assassin-battery-") {
+            self.strikes_battery_scenario(test, frame);
+            return;
+        }
         if test == "assassin-raiders" && frame == 90 {
             let units: Vec<_> =
                 self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "cloakraid").collect();
@@ -296,6 +300,126 @@ impl Ai {
         }
         self.log(&format!("assassin-test: {count} {} assembled", tactic.name()));
     }
+    /// Real artillery fires at a durable witness; an intentionally incomplete
+    /// Flea wave nearby exercises the same staging and command routines.
+    fn strikes_battery_scenario(&mut self, test: &str, frame: i32) {
+        let map = self.cb.map();
+        let home = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
+        if frame == 60 {
+            self.cb.cheats_set_enabled(true);
+            if test == "assassin-battery-observer" {
+                if let Some(def) = self.defs.get("striderbantha") {
+                    if let Some(u) = self.cb.cheat_new_unit(def, home) {
+                        u.set_fire_state(0, 0);
+                        springai::reserved::reserve(self.cb, u.id());
+                    }
+                }
+                if let Some(def) = self.defs.get("spiderscout") {
+                    for i in 0..8 {
+                        self.cb.cheat_new_unit(
+                            def,
+                            Vec3::xz(home.x - 180.0 + (i % 4) as f32 * 60.0, home.z - 150.0 + (i / 4) as f32 * 60.0),
+                        );
+                    }
+                }
+            } else {
+                let name = if test == "assassin-battery-tremor" { "tankheavyarty" } else { "tankarty" };
+                if let Some(def) = self.defs.get(name) {
+                    let at = Vec3::xz(home.x, home.z + def.max_weapon_range() * 0.85);
+                    if let Some(u) = self.cb.cheat_new_unit(def, at) {
+                        u.set_move_state(0, 0);
+                        u.attack_area(home, 0.0, 0);
+                        springai::reserved::reserve(self.cb, u.id());
+                        self.log(&format!(
+                            "battery-test: {name} {} fires from {:.0},{:.0} range={}",
+                            u.id(),
+                            at.x,
+                            at.z,
+                            def.max_weapon_range()
+                        ));
+                    }
+                }
+            }
+        }
+        if test != "assassin-battery-observer" {
+            return;
+        }
+        if frame == 90 {
+            self.strikes.wave = Some(Wave {
+                tactic: Tactic::Flea,
+                job: Job {
+                    id: None,
+                    pos: Vec3::xz(home.x, home.z + 2000.0),
+                    last: frame,
+                    count: 1,
+                    value: 750.0,
+                    name: "cloaksnipe".into(),
+                    prey: Prey::GlassCannon,
+                },
+                needed: 20,
+                members: Vec::new(),
+                phase: Phase::Forming,
+                since: frame,
+                home,
+                query: None,
+            });
+            for u in self
+                .cb
+                .friendly_units()
+                .into_iter()
+                .filter(|u| self.defs.name_of(*u) == "spiderscout")
+                .collect::<Vec<_>>()
+            {
+                // UnitFinished assigned these fixture Fleas to pickets. Offer
+                // ordinary raiders, just as the real recruitment path requires.
+                self.assign_role(u, super::super::roles::Role::SoloRaider);
+                self.strikes_adopt(u);
+            }
+        }
+        if frame >= 90 && frame % 30 == 0 {
+            if let Some(mut w) = self.strikes.wave.take() {
+                w.members.retain(|id| self.fighters.get(id).is_some_and(|f| f.unit.health() > 0.0));
+                if let Some(stage) = self.strike_stage(&w) {
+                    w.home = stage;
+                }
+                self.strike_command(&w);
+                self.strikes.wave = Some(w);
+            }
+        }
+        // Deterministically exercise a nonlethal damage callback on an
+        // incomplete wave too; real shells often kill a Flea outright.
+        if frame == 120 {
+            let unit = self
+                .strikes
+                .wave
+                .as_ref()
+                .and_then(|w| w.members.first())
+                .and_then(|id| self.fighters.get(id))
+                .map(|f| f.unit);
+            if let Some(u) = unit {
+                self.log("battery-test: inject nonlethal hit to test incomplete-wave evasion ownership");
+                self.strikes_unit_damaged(u, None, Vec3::xz(0.0, 1.0));
+            }
+        }
+        if frame == 150 {
+            for (&id, &(goal, until)) in &self.strikes.evasion {
+                if until <= frame {
+                    continue;
+                }
+                if let Some(f) = self.fighters.get(&id) {
+                    let kept = f.unit.current_commands().iter().any(|cmd| {
+                        let p = cmd.params();
+                        p.len() >= 3 && distance(Vec3::xz(p[0], p[2]), goal) < 5.0
+                    });
+                    self.log(&format!("battery-test: evasion survives muster command unit={id} kept={kept}"));
+                }
+            }
+        }
+        if frame >= 150 && frame % 150 == 0 {
+            self.log(&format!("battery-test: {}", self.strikes_status()));
+        }
+    }
+
     fn strikes_scenario_guard(&self, pos: Vec3) {
         if let Some(def) = self.defs.get("turretlaser")
             && let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x, pos.z + 250.0))

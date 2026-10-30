@@ -7,12 +7,13 @@ use crate::defs::cmd;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
 use crate::military::Fighter;
-use crate::military::sweeps::{PHANTOM_FIX_RADIUS, SNIPER_MEMORY};
+use crate::military::sweeps::{PHANTOM_FIX_RADIUS, SNIPER_MEMORY, counterbattery::FRESH as FIRE_MEMORY};
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod evasion;
 mod fragile;
 mod opportunities;
 mod prediction;
@@ -163,10 +164,12 @@ pub struct Strikes {
     /// Firewalker forced ground salvos: position, end, next permitted burst.
     firewalkers: BTreeMap<i32, (Vec3, i32, i32)>,
     badgers: BTreeSet<i32>,
+    hits: Vec<(Vec3, i32)>,
+    evasion: BTreeMap<i32, (Vec3, i32)>,
 }
 
 fn glass_cannon(name: &str) -> bool {
-    matches!(name, "cloaksnipe" | "hoverarty" | "jumparty" | "striderarty" | "tankheavyarty")
+    matches!(name, "cloaksnipe" | "hoverarty" | "jumparty" | "striderarty" | "tankheavyarty" | "tankarty")
 }
 
 /// Keep a modest assault force available while Phantoms remain implied,
@@ -212,9 +215,10 @@ impl Ai {
                 "gathered": w.members.iter().filter(|id| self.fighters.get(id).is_some_and(|f|
                     distance(f.get_pos(), w.home) < staging::muster_radius(w.tactic, w.members.len()))).count(),
                 "prediction_pending": w.query.is_some(),
+                "evading": w.members.iter().filter(|id| self.strike_evasion_goal(**id).is_some()).count(),
             })
         });
-        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "raider_missions": self.raider_strikes_status() })
+        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "raider_missions": self.raider_strikes_status(), "counterbattery": self.counterbattery_status() })
     }
 
     /// Merge seen Phantoms with impact estimates by max, not addition: a
@@ -283,6 +287,28 @@ impl Ai {
                 value: e.ud.map_or(e.value, |d| d.cost(self.metal)),
                 name: e.def_name.clone(),
                 prey,
+            });
+        }
+        // Weapon identity can reveal artillery without a LOS contact. Keep
+        // very broad single-bearing estimates for scouting/counterbattery only.
+        for fix in self.counterbattery_fixes(age.min(FIRE_MEMORY)) {
+            let Some(name) = fix.def.as_deref().filter(|name| glass_cannon(name) && *name != "cloaksnipe") else {
+                continue;
+            };
+            if fix.uncertainty > PHANTOM_FIX_RADIUS
+                || jobs.iter().any(|j| j.name == name && distance(j.pos, fix.pos) < PHANTOM_FIX_RADIUS)
+            {
+                continue;
+            }
+            let Some(def) = self.defs.get(name) else { continue };
+            jobs.push(Job {
+                id: fix.source.filter(|id| self.war.targets.contains_key(id)),
+                pos: fix.pos,
+                last: fix.last,
+                count: 1,
+                value: def.cost(self.metal),
+                name: name.into(),
+                prey: Prey::GlassCannon,
             });
         }
         // "Defenseless" includes the surroundings, not just the victim's
@@ -462,6 +488,7 @@ impl Ai {
         self.strikes.orders.retain(|factory, (_, _, built)| *factory != unit.id() && *built != Some(unit.id()));
         self.strikes.firewalkers.remove(&unit.id());
         self.strikes.badgers.remove(&unit.id());
+        self.strikes.evasion.remove(&unit.id());
     }
 
     fn strikes_release(&mut self, w: Wave) {
@@ -473,6 +500,7 @@ impl Ai {
     fn strikes_release_members(&mut self, members: Vec<i32>) {
         for id in members {
             self.strikes.members.remove(&id);
+            self.strikes.evasion.remove(&id);
             if let Some(f) = self.fighters.remove(&id) {
                 let u = f.unit;
                 if u.health() <= 0.0 || u.team() != self.team_id {
@@ -601,6 +629,7 @@ impl Ai {
         if (frame + self.offset) % PERIOD != 0 {
             return;
         }
+        self.strikes.evasion.retain(|id, (_, until)| frame < *until && self.fighters.contains_key(id));
         self.raider_strikes_maintain();
         self.strikes_support_fire();
         self.strikes.orders.retain(|_, (_, f, _)| frame - *f < JOB_MEMORY);
@@ -823,7 +852,9 @@ impl Ai {
                 w.query = None;
             }
             let radius = staging::muster_radius(w.tactic, w.members.len());
-            let gathered = w.members.len() >= w.needed
+            let gathered = self.strike_waiting_risk(w.home, radius) <= 0.0
+                && w.members.iter().all(|id| self.strike_evasion_goal(*id).is_none())
+                && w.members.len() >= w.needed
                 && w.members
                     .iter()
                     .all(|id| self.fighters.get(id).is_some_and(|f| distance(f.get_pos(), w.home) < radius));
@@ -956,6 +987,12 @@ impl Ai {
         for (i, id) in w.members.iter().enumerate() {
             let Some(f) = self.fighters.get(id) else { continue };
             let u = f.unit;
+            if matches!(w.phase, Phase::Forming | Phase::Screening)
+                && let Some(goal) = self.strike_evasion_goal(*id)
+            {
+                kgb_move_to(u, goal, 0, self.frame);
+                continue;
+            }
             if w.phase == Phase::Diving
                 && let Some(t) = visible
                 && distance(u.pos(), t.pos()) <= u.max_range().max(80.0) * 0.9
@@ -1028,7 +1065,14 @@ impl Ai {
     }
 
     fn strikes_support_fire(&mut self) {
-        let fixes = if self.dev_off("strikes") { Vec::new() } else { self.strikes_phantom_targets() };
+        let mut fixes = if self.dev_off("strikes") { Vec::new() } else { self.strikes_phantom_targets() };
+        if !self.dev_off("strikes") {
+            fixes.extend(
+                self.counterbattery_fixes(FIRE_MEMORY)
+                    .filter(|f| f.ground && f.uncertainty <= 400.0)
+                    .map(|f| (f.pos, 1)),
+            );
+        }
         let implied = !self.dev_off("strikes") && self.strike_jobs(JOB_MEMORY).iter().any(Job::phantom);
         let units: Vec<Unit> = self.fighters.values().map(|f| f.unit).collect();
         for u in units {
