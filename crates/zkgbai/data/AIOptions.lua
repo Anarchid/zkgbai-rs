@@ -11,6 +11,14 @@
 
 local options = {
 	{
+		key = 'colonize_policy',
+		name = 'Colonization policy',
+		desc = 'combined (default): discount colony value toward the enemy centroid and scale job utility by global standing metal per usable square kiloelmo / 400, capped at 1. enemy_distance or density: use only that adjustment. baseline: original colony scoring and bonus.',
+		type = 'string',
+		def = 'combined',
+		maxlen = 16,
+	},
+	{
 		key    = 'missile_silo_density',
 		name   = 'Missile silo siege density',
 		desc   = 'Also build a tactical missile silo when it reaches more than 70% of known and inferred enemy static metal and battlefield density exceeds this threshold divided by (1 + 0.5 * laneness). Density counts our standing metal plus known enemy metal per million square elmos of usable ground. The default requires 1500 on open terrain, falling to 1000 on fully lane-like terrain. Income and construction safety requirements still apply.',

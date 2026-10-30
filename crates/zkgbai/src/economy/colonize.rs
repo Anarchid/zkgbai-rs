@@ -9,7 +9,10 @@
 //! far through the enemy's land, they die). With none of these, our gunship
 //! or plane factories build an air constructor. The colonist's jobs at the colony's spots count as
 //! near ones until they are taken, it is lost, or it has been at it long
-//! enough.
+//! enough. By default cluster value is discounted toward the enemy centroid,
+//! and the job bonus is multiplied by that discount and global standing-metal
+//! density / 400 (capped at one). `colonize_policy` retains either adjustment
+//! alone or the original baseline for comparisons.
 
 use springai::Vec3;
 use zk_terrain::occupancy::Occupancy;
@@ -17,7 +20,7 @@ use zk_terrain::paths::SNAP;
 
 use crate::Ai;
 use crate::terrain::{pos, tier_of};
-use crate::util::distance;
+use crate::util::{NULLPOS, distance};
 
 /// Free spots this far from all our constructors are left alone, elmos;
 /// a colony is those within this of one another, this many at least.
@@ -39,6 +42,58 @@ const MIN_INCOME: f32 = 15.0;
 /// A walking colonist's strength: any enemy in a region closes it.
 const UNARMED: f32 = 1.0;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum Policy {
+    Baseline,
+    EnemyDistance,
+    Density,
+    #[default]
+    Combined,
+}
+
+impl Policy {
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("enemy_distance") => Self::EnemyDistance,
+            Some("density") => Self::Density,
+            Some("baseline") => Self::Baseline,
+            _ => Self::Combined,
+        }
+    }
+
+    fn uses_density(self) -> bool {
+        matches!(self, Self::Density | Self::Combined)
+    }
+
+    fn uses_enemy_distance(self) -> bool {
+        matches!(self, Self::EnemyDistance | Self::Combined)
+    }
+
+    fn utility_scale(self, distance: f32, density: f32) -> f32 {
+        let distance = if self.uses_enemy_distance() { distance } else { 1.0 };
+        let density = if self.uses_density() { density_scale(density) } else { 1.0 };
+        distance * density
+    }
+}
+
+fn density_scale(density: f32) -> f32 {
+    (density / 400.0).clamp(0.0, 1.0)
+}
+
+/// Full value at least as far from the enemy as home; linear discount
+/// toward the enemy. Missing/degenerate centroids preserve the baseline.
+fn enemy_distance_scale(center: Vec3, enemy: Vec3, home: Vec3) -> f32 {
+    if enemy == NULLPOS || home == NULLPOS || distance(home, enemy) < 1.0 {
+        return 1.0;
+    }
+    (distance(center, enemy) / distance(home, enemy)).clamp(0.0, 1.0)
+}
+
+fn cluster_center(spots: &[(Vec3, f32)]) -> Vec3 {
+    let n = spots.len() as f32;
+    spots.iter().fold(Vec3::ZERO, |c, s| Vec3::xz(c.x + s.0.x / n, c.z + s.0.z / n))
+}
+
 /// A colony being taken.
 pub struct Colony {
     center: Vec3,
@@ -47,13 +102,15 @@ pub struct Colony {
     colonist: i32,
     ferried: bool,
     since: i32,
+    policy: Policy,
+    scale: f32,
 }
 
 impl Ai {
     /// Whether the colonist's job at `p` is a colony's.
     pub(super) fn eco_colony_bonus(&self, wid: i32, p: Vec3, mex: bool) -> f32 {
         match &self.eco.colony {
-            Some(c) if mex && c.colonist == wid && distance(p, c.center) <= CLUSTER => COLONY_BONUS,
+            Some(c) if mex && c.colonist == wid && distance(p, c.center) <= CLUSTER => COLONY_BONUS * c.scale,
             _ => 0.0,
         }
     }
@@ -64,6 +121,15 @@ impl Ai {
             return;
         }
         let frame = self.frame;
+        // Refresh active utilities as the global estimate or enemy centroid
+        // changes. The baseline does not initialize or consult the estimator.
+        if let Some(c) = &self.eco.colony {
+            let scale = c.policy.utility_scale(
+                enemy_distance_scale(c.center, self.graph.get_enemy_center(), self.graph.get_start_pos()),
+                self.posture.density,
+            );
+            self.eco.colony.as_mut().unwrap().scale = scale;
+        }
         if let Some(c) = &self.eco.colony {
             let free = self.graph.get_neutral_spots();
             let left = c.spots.iter().filter(|&&p| free.iter().any(|s| distance(s.get_pos(), p) < 50.0)).count();
@@ -91,6 +157,13 @@ impl Ai {
         if frame < self.eco.colony_after || self.eco.adjusted_income < MIN_INCOME || self.eco.estalled {
             return;
         }
+        let policy = Policy::parse(self.cb.option("colonize_policy").as_deref());
+        // Use the same global standing-metal / usable-area estimate as
+        // missile-silo eligibility, refreshed even when posture is disabled.
+        let density = policy.uses_density().then_some(self.posture.density);
+        let distance_at =
+            |center| enemy_distance_scale(center, self.graph.get_enemy_center(), self.graph.get_start_pos());
+        let scale_at = |center| policy.utility_scale(distance_at(center), self.posture.density);
         let workers: Vec<Vec3> = self.eco.workers.values().map(|w| w.get_pos()).collect();
         let near = |p: Vec3| workers.iter().map(|&w| distance(w, p)).fold(f32::INFINITY, f32::min);
         let free: Vec<(Vec3, f32)> = (self.graph.get_neutral_spots().iter())
@@ -103,17 +176,21 @@ impl Ai {
                     && near(p) >= FAR
             })
             .collect();
-        // The richest cluster.
+        // Density affects job utility only; enemy distance also reranks sites.
+        let score = |c: &Vec<(Vec3, f32)>| {
+            let value = c.iter().map(|s| s.1).sum::<f32>();
+            if policy.uses_enemy_distance() { value * distance_at(cluster_center(c)) } else { value }
+        };
         let Some(spots) = (free.iter())
             .map(|&(p, _)| free.iter().filter(|q| distance(q.0, p) <= CLUSTER).copied().collect::<Vec<_>>())
             .filter(|c| c.len() >= MIN_SPOTS)
-            .max_by(|a, b| a.iter().map(|s| s.1).sum::<f32>().total_cmp(&b.iter().map(|s| s.1).sum::<f32>()))
+            .max_by(|a, b| score(a).total_cmp(&score(b)))
         else {
             self.eco.colony_after = frame + RETRY;
             return;
         };
-        let n = spots.len() as f32;
-        let center = spots.iter().fold(Vec3::ZERO, |c, s| Vec3::xz(c.x + s.0.x / n, c.z + s.0.z / n));
+        let center = cluster_center(&spots);
+        let scale = scale_at(center);
         let spots: Vec<Vec3> = spots.into_iter().map(|s| s.0).collect();
         // The nearest constructor that flies, else the nearest that walks.
         let pick = |fly: bool| {
@@ -156,7 +233,12 @@ impl Ai {
             near(center),
             self.defs.name_of(unit)
         ));
-        self.eco.colony = Some(Colony { center, spots, colonist: wid, ferried, since: frame });
+        self.log(&format!(
+            "economy: colony policy={policy:?} utility_scale={scale:.4} density={} enemy_distance={:.0}",
+            density.map_or_else(|| "unused".to_owned(), |d| format!("{d:.1}")),
+            distance(center, self.graph.get_enemy_center()),
+        ));
+        self.eco.colony = Some(Colony { center, spots, colonist: wid, ferried, since: frame, policy, scale });
     }
 
     /// Whether `unit` can walk to `to` through regions of its movement tier
@@ -180,5 +262,45 @@ impl Ai {
     /// be given jobs).
     pub(super) fn eco_in_transit(&self, wid: i32) -> bool {
         self.eco.colony.as_ref().is_some_and(|c| c.ferried && c.colonist == wid) && self.drops_ferrying(wid)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distance_discount_prefers_flanks_to_forward_colonies() {
+        let home = Vec3::xz(1000.0, 1000.0);
+        let enemy = Vec3::xz(9000.0, 1000.0);
+        let forward = enemy_distance_scale(Vec3::xz(5000.0, 1000.0), enemy, home);
+        let flank = enemy_distance_scale(Vec3::xz(1000.0, 5000.0), enemy, home);
+        assert_eq!(forward, 0.5);
+        assert_eq!(flank, 1.0);
+        assert_eq!(enemy_distance_scale(enemy, enemy, home), 0.0);
+        assert_eq!(enemy_distance_scale(home, NULLPOS, home), 1.0);
+        assert_eq!(enemy_distance_scale(home, home, home), 1.0);
+    }
+
+    #[test]
+    fn both_discounts_apply_by_default_and_each_can_be_disabled() {
+        assert_eq!(Policy::default().utility_scale(0.5, 200.0), 0.25);
+        assert_eq!(Policy::default().utility_scale(0.5, 400.0), 0.5);
+        assert_eq!(Policy::default().utility_scale(1.0, 800.0), 1.0);
+        assert_eq!(Policy::default().utility_scale(1.0, 0.0), 0.0);
+        assert_eq!(Policy::parse(Some("baseline")).utility_scale(0.5, 200.0), 1.0);
+        assert_eq!(Policy::parse(Some("enemy_distance")).utility_scale(0.5, 200.0), 0.5);
+        assert_eq!(Policy::parse(Some("density")).utility_scale(0.5, 200.0), 0.5);
+    }
+
+    #[test]
+    fn density_reaches_current_utility_at_400_and_never_boosts_it() {
+        for (density, expected) in [(-1.0, 0.0), (0.0, 0.0), (200.0, 0.5), (400.0, 1.0), (800.0, 1.0)] {
+            assert_eq!(density_scale(density), expected);
+        }
+        for value in [None, Some(""), Some("invalid"), Some("combined")] {
+            assert_eq!(Policy::parse(value), Policy::Combined);
+        }
+        assert_eq!(Policy::parse(Some("baseline")), Policy::Baseline);
     }
 }
