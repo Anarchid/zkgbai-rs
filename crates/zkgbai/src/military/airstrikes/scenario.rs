@@ -82,9 +82,12 @@ impl Ai {
                 }
                 "airstrike-priority-target" => spawn.push(("hoverarty", site)),
                 "airstrike-tough-target" => spawn.push(("tankassault", site)),
-                "airstrike-ravagers" => {
+                "airstrike-ravagers" | "airstrike-ravagers-aa" => {
                     for dx in [-40.0, 0.0, 40.0] {
                         spawn.push(("vehassault", Vec3::xz(site.x + dx, site.z)));
+                    }
+                    if test == "airstrike-ravagers-aa" {
+                        spawn.push(("turretaalaser", get_directional_point(site, base, 900.0)));
                     }
                 }
                 "airstrike-fencer" => spawn.push(("vehsupport", site)),
@@ -97,8 +100,8 @@ impl Ai {
                         ));
                     }
                 }
-                "airstrike-likhos" | "airstrike-likho-fencer" => {
-                    for i in 0..if test == "airstrike-likho-fencer" { 1 } else { 5 } {
+                "airstrike-likhos" | "airstrike-likho-fencer" | "airstrike-likho-aa" => {
+                    for i in 0..if test == "airstrike-likhos" { 5 } else { 1 } {
                         spawn.push(("bomberheavy", Vec3::xz(base.x + 40.0 * i as f32, base.z + 100.0)));
                     }
                     spawn.extend([
@@ -137,7 +140,9 @@ impl Ai {
                                 | "airstrike-fencer"
                                 | "airstrike-shieldball"
                                 | "airstrike-ravagers"
-                        ) {
+                                | "airstrike-ravagers-aa"
+                        ) && name != "turretaalaser"
+                        {
                             springai::reserved::as_owner(|| {
                                 u.stop(0);
                                 u.set_fire_state(0, 0);
@@ -179,6 +184,7 @@ impl Ai {
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
                     | "airstrike-ravagers"
+                    | "airstrike-ravagers-aa"
             )
         {
             for u in self.cb.team_units() {
@@ -206,10 +212,13 @@ impl Ai {
             }
         }
         if frame == 150
-            && matches!(test.as_str(), "airstrike-likhos" | "airstrike-likho-fencer")
+            && matches!(test.as_str(), "airstrike-likhos" | "airstrike-likho-fencer" | "airstrike-likho-aa")
             && let Some(d) = self.defs.get("staticradar")
         {
             self.cb.cheat_new_unit(d, Vec3::xz(site.x - 300.0, site.z));
+            if test == "airstrike-likho-aa" {
+                self.cb.cheat_new_unit(d, get_directional_point(site, self.graph.get_ally_center(), -600.0));
+            }
         }
         if frame % 300 == 0 {
             for r in [self.metal, self.energy] {
@@ -226,6 +235,7 @@ impl Ai {
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
                     | "airstrike-ravagers"
+                    | "airstrike-ravagers-aa"
             ) {
                 let alive = self
                     .cb

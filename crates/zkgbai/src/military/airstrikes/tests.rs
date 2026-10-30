@@ -21,7 +21,7 @@ pub(super) fn enemy(id: i32) -> Contact {
     }
 }
 fn clear() -> Risk {
-    Risk { aa: 0.0, exposure: 0.0, intercepted: false }
+    Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 }
 }
 fn job(kind: MissionKind, hp: f32) -> Mission {
     Mission {
@@ -49,7 +49,7 @@ fn ravens_have_twenty_percent_margin_and_one_spare() {
 }
 #[test]
 fn group_and_heavy_switch_to_likho_with_aa() {
-    let r = Risk { aa: 0.3, exposure: 0.5, intercepted: false };
+    let r = Risk { aa: 0.3, exposure: 0.5, intercepted: false, burst: 0.0 };
     assert_eq!(packages(&job(MissionKind::Group, 2500.0), clear(), 800.0)[0][0].0, Plane::Phoenix);
     for kind in [MissionKind::Group, MissionKind::Heavy] {
         assert_eq!(packages(&job(kind, 2500.0), r, 800.0)[0][0].0, Plane::Likho);
@@ -111,9 +111,9 @@ fn secondary_jobs_never_become_primary() {
 }
 #[test]
 fn exposure_includes_return_and_rejects_lethal_or_missing_routes() {
-    assert!(!Risk { aa: 0.0, exposure: f32::INFINITY, intercepted: false }.survives(5200.0, 185.0));
-    assert!(!Risk { aa: 0.0, exposure: 20.0, intercepted: false }.survives(5200.0, 185.0));
-    assert!(Risk { aa: 0.1, exposure: 1.0, intercepted: false }.survives(5200.0, 185.0));
+    assert!(!Risk { aa: 0.0, exposure: f32::INFINITY, intercepted: false, burst: 0.0 }.survives(5200.0, 185.0));
+    assert!(!Risk { aa: 0.0, exposure: 20.0, intercepted: false, burst: 0.0 }.survives(5200.0, 185.0));
+    assert!(Risk { aa: 0.1, exposure: 1.0, intercepted: false, burst: 0.0 }.survives(5200.0, 185.0));
     assert!(packages(&job(MissionKind::Wind, 100.0), Risk { intercepted: true, ..clear() }, 800.0).is_empty());
 }
 #[test]
@@ -325,6 +325,9 @@ fn worthwhile_group_damage_still_respects_air_cover() {
     let light = packages(&job, Risk { aa: 0.3, ..clear() }, 800.0);
     assert!(light.contains(&vec![(Plane::Likho, 1)]));
     assert!(light.iter().flatten().all(|(k, _)| *k == Plane::Likho));
-    assert!(packages(&job, Risk { aa: 1.3, ..clear() }, 800.0).is_empty());
+    let intense = Risk { aa: 1.3, ..clear() };
+    // Structural candidates are filtered by the airframe's survival budget.
+    assert!(!packages(&job, intense, 800.0).is_empty());
+    assert!(!intense.survives(2360.0, 270.0));
     assert!(packages(&job, Risk { intercepted: true, ..clear() }, 800.0).is_empty());
 }

@@ -11,7 +11,7 @@ Idle plants reconsider every two seconds, so they resume without an idle event.
 Primary missions:
 
 - Groups of at least three medium ground units: Phoenix or existing Likhos in
-  clear air, Likhos with light AA. Passes are valued by `metal * min(predicted
+  clear air, Likhos where their own survival budget permits. Passes are valued by `metal * min(predicted
   damage / current HP, 1)` per victim rather than requiring the whole clump to
   die. Likho uses the installed weapon's blast radius and falloff, a 20% damage
   reserve, and the best member to aim at; center-distance sampling conservatively
@@ -27,7 +27,7 @@ Primary missions:
   3 current HP per metal (including artillery and commanders meeting those
   thresholds). Wounded heavies can qualify as their health drops; fresh
   sightings of healed targets remove obsolete priority demand. Ravens or existing Likhos can strike in clear/very light AA;
-  Likhos can also strike through light AA. Within this category, metal removed
+  Likhos can also strike through AA when their own survival estimate permits. Within this category, metal removed
   per current HP determines preference. Raven count is
   `ceil(1.2 * HP / bomb damage) + 1`; damage comes from the installed definition.
   Procurement compares missing metal cost across alternatives, counting aircraft
@@ -86,10 +86,19 @@ sighting-age threat decay. Both the ordinary air pathfinder and strike planner
 see this shared buffer. An explicit return corridor retraces ingress to home;
 both legs are sampled every 32 elmos, including between waypoints, before launch.
 Active sorties recheck ingress and return corridors against current threats.
-The controller estimates exposure for ingress, egress and
-six seconds at the target, requiring damage below 55% of aircraft health. This
-is a conservative, **uncalibrated heuristic**, not a combat simulation or a
-survival guarantee. Sparrow jamming never discounts LOS AA or known fighters;
+Corridor selection retains the shared strategic threat map. Survival uses a
+separate estimate: known ground AA weapon damage against plane armor, projectile
+and salvo counts, and reload time. Enemy HP and splash weighting do not count
+as DPS. Each encountered weapon contributes a ready volley on each leg, plus
+sustained fire integrated along ingress and egress. A 1500-elmo allowance for
+release/turning is also flown at the individual aircraft's speed. The estimate
+must stay below 55% of that aircraft's health (current health on active flights).
+Likho has no additional fixed local-AA ceiling. All members, including the
+350-HP Sparrow, must qualify; deep Odin missions can still be escort-limited.
+Unseen AA retains its conservative inferred power estimate until identified.
+The forecast remains a heuristic, not a combat simulation or survival guarantee.
+`aa` now reports incoming DPS divided by 500, `exposure` integrates that rate,
+and candidate snapshots also expose `incoming_dps` and `ready_volley_damage`. Sparrow jamming never discounts LOS AA or known fighters;
 the escort must pass its own survival check. New AA invalidates procurement
 memory and causes active sorties to abort or update their approaches. Spent or
 damaged aircraft return via threat-aware routes and rearm. Odin shield drops use
@@ -121,6 +130,8 @@ reservations and deep-strike escorts.
 Staged headless games exercise real factory production and flight commands.
 `airstrike-likho-fencer` (one Likho) versus `airstrike-ravagers` (three healthy
 Ravagers) exercises launching a valuable partial-damage group strike.
+`airstrike-likho-aa` versus `airstrike-ravagers-aa` adds an armed Razor behind
+the pack, observed before launch, to exercise aircraft-specific survival.
 `airstrike-wave` versus `airstrike-wave-targets` holds a nine-bomber mixed fleet
 until the first 30-second wave check, against a Lance, Thugs, wind generators,
 a fusion and radar near the attacker. Logs expose `combined wave=...`, assigned

@@ -7,7 +7,9 @@ use crate::{Ai, defs::cmd};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod defense;
 mod wave;
+use defense::FireSource;
 
 const PERIOD: i32 = 30;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
@@ -101,6 +103,7 @@ pub struct BomberHandler {
     last_wave_launch: i32,
     launched: usize,
     raven_damage: Option<f32>,
+    defenses: Vec<FireSource>,
     utilization: BTreeMap<Plane, Utilization>,
 }
 impl BomberHandler {
@@ -261,15 +264,7 @@ impl Ai {
     }
 
     fn airstrike_path_risk(&self, from: Vec3, route: &[Vec3], interceptors: &[(Vec3, f32, f32)]) -> Risk {
-        route_risk(
-            from,
-            route,
-            |p| {
-                self.war.get_aa_threat(p)
-                    + interceptors.iter().filter(|(at, r, _)| distance(*at, p) < *r).map(|(_, _, t)| t).sum::<f32>()
-            },
-            |p| interceptors.iter().any(|(at, r, _)| distance(*at, p) < *r),
-        )
+        defense::forecast(from, route, &self.bomber_handler.defenses, interceptors)
     }
 
     fn airstrike_risk(&self, air: &AirField, from: Vec3, pos: Vec3, interceptors: &[(Vec3, f32, f32)]) -> Risk {
@@ -307,6 +302,7 @@ impl Ai {
                 .fold(0.0, f32::max);
             self.bomber_handler.raven_damage = Some(if damage > 0.0 { damage } else { 800.0 });
         }
+        self.bomber_handler.defenses = self.airstrike_defenses();
         let interceptors = self.airstrike_interceptors();
         // Defensive interception accepts the target fighter itself; ground AA
         // still gates the mission and its route.
@@ -904,6 +900,8 @@ impl BomberHandler {
             let mut v = mission_view(&p.job, &p.route, &p.return_route, &p.packages, None);
             v["aa"] = json!(p.risk.aa);
             v["exposure"] = json!(p.risk.exposure);
+            v["incoming_dps"] = json!(p.risk.aa * 500.0);
+            v["ready_volley_damage"] = json!(p.risk.burst);
             missions.push(v);
         }
         json!({"frame": frame, "grounded": self.grounded, "next": next, "aircraft": self.units.len(),
@@ -955,7 +953,7 @@ mod operator_tests {
             return_route: return_route(Vec3::ZERO, &route),
             route: route.clone(),
             packages: vec![package.clone()],
-            risk: Risk { aa: 0.0, exposure: 0.0, intercepted: false },
+            risk: Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 },
             length: 1400.0,
         });
         for (id, kind) in [

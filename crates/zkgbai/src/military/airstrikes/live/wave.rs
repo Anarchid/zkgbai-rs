@@ -247,7 +247,7 @@ mod tests {
             seen: 0,
             deep: false,
         };
-        let risk = Risk { aa: 0.0, exposure: 0.0, intercepted: false };
+        let risk = Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 };
         Plan {
             packages: packages(&job, risk, 800.0),
             route: vec![job.pos],
