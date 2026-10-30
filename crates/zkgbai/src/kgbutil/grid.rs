@@ -63,6 +63,26 @@ impl ArrayGraphics {
         });
     }
 
+    /// Add a linear falloff outside an existing hard circle, without raising
+    /// threat inside it. Radii are in grid cells; width may be fractional.
+    pub fn paint_soft_band(&mut self, cx: i32, cy: i32, inner: f32, width: f32, intensity: i32) {
+        if width <= 0.0 || !width.is_finite() || intensity <= 0 {
+            return;
+        }
+        let outer = inner + width;
+        let grid_width = self.width;
+        let data = &mut self.data;
+        for_circle(self.width, self.height, data.len(), cx, cy, outer.ceil() as i32, |i| {
+            let dx = (i as i32 % grid_width - cx) as f32;
+            let dy = (i as i32 / grid_width - cy) as f32;
+            let distance = (dx * dx + dy * dy).sqrt();
+            if distance > inner && distance < outer {
+                let amount = (intensity as f32 * (outer - distance) / width).round() as i32;
+                data[i] = data[i].saturating_add(amount).min(32767);
+            }
+        });
+    }
+
     pub fn unpaint_circle(&mut self, cx: i32, cy: i32, radius: i32, intensity: i32) {
         if intensity <= 0 {
             return;
@@ -133,6 +153,23 @@ mod tests {
         assert_eq!(g.get_value(0, 0), 0.0);
         g.unpaint_circle(10, 10, 3, 5);
         assert_eq!(g.get_value(10, 10), 0.0);
+    }
+
+    #[test]
+    fn mobile_aa_band_tapers_without_inflating_the_hard_circle() {
+        let mut g = ArrayGraphics::new(30, 30);
+        g.paint_circle(12, 12, 4, 100);
+        g.paint_soft_band(12, 12, 4.0, 6.0, 100);
+        assert_eq!(g.get_value(12, 12), 100.0);
+        assert_eq!(g.get_value(15, 12), 100.0);
+        assert!(g.get_value(17, 12) > g.get_value(20, 12));
+        assert!(g.get_value(20, 12) > 0.0);
+        assert_eq!(g.get_value(22, 12), 0.0);
+        g.clear();
+        g.paint_soft_band(0, 0, 4.0, 0.0, 100);
+        assert_eq!(g.get_value(5, 0), 0.0);
+        g.paint_soft_band(0, 0, 4.0, 3.0, 100);
+        assert!(g.get_value(5, 0) > 0.0); // clipped map edge
     }
 
     #[test]

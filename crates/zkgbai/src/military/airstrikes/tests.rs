@@ -238,3 +238,29 @@ fn priority_strikes_follow_current_health_and_tough_units_use_existing_fleets() 
     tougher.hp = 3000.0;
     assert!(lance.score() > tougher.score());
 }
+
+#[test]
+fn explicit_egress_preserves_bends_and_missing_or_dangerous_return_blocks_launch() {
+    let home = Vec3::xz(10.0, 10.0);
+    let outbound = vec![Vec3::xz(10.0, 1000.0), Vec3::xz(1000.0, 1000.0)];
+    assert_eq!(return_route(home, &outbound), vec![outbound[0], home]);
+    let missing = route_risk(outbound[1], &[], |_| 0.0, |_| false);
+    assert!(!round_trip(clear(), missing).survives(3000.0, 200.0));
+    let unsafe_exit = route_risk(outbound[1], &[home], |_| 10.0, |_| false);
+    assert!(!round_trip(clear(), unsafe_exit).survives(3000.0, 200.0));
+    let safe_exit = route_risk(outbound[1], &return_route(home, &outbound), |_| 0.0, |_| false);
+    assert!(round_trip(clear(), safe_exit).survives(3000.0, 200.0));
+}
+
+#[test]
+fn route_sampling_checks_between_waypoints_not_just_the_endpoints() {
+    let risk = route_risk(
+        Vec3::ZERO,
+        &[Vec3::xz(384.0, 0.0)],
+        |p| if (100.0..160.0).contains(&p.x) { 2.0 } else { 0.0 },
+        |p| (100.0..160.0).contains(&p.x),
+    );
+    assert!(risk.exposure > 0.0);
+    assert!(risk.intercepted);
+    assert_eq!(risk.aa, 0.0);
+}

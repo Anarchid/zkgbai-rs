@@ -280,6 +280,44 @@ impl Risk {
     }
 }
 
+/// Retrace the outbound corridor, including the exact home position. The
+/// threat sampler checks this explicit egress independently of ingress.
+fn return_route(home: Vec3, outbound: &[Vec3]) -> Vec<Vec3> {
+    if outbound.is_empty() {
+        return Vec::new();
+    }
+    outbound.iter().rev().skip(1).copied().chain(std::iter::once(home)).collect()
+}
+
+fn route_risk(from: Vec3, route: &[Vec3], threat: impl Fn(Vec3) -> f32, intercepted: impl Fn(Vec3) -> bool) -> Risk {
+    let Some(&end) = route.last() else {
+        return Risk { aa: 0.0, exposure: f32::INFINITY, intercepted: false };
+    };
+    let mut previous = from;
+    let mut exposure = 0.0;
+    let mut blocked = intercepted(from);
+    for &next in route {
+        let leg = distance(previous, next);
+        let steps = (leg / 32.0).ceil().max(1.0) as usize;
+        for step in 0..steps {
+            let p = previous + (next - previous) * ((step as f32 + 0.5) / steps as f32);
+            exposure += threat(p) * leg / steps as f32 / 64.0;
+            blocked |= intercepted(p);
+        }
+        blocked |= intercepted(next);
+        previous = next;
+    }
+    Risk { aa: threat(end), exposure, intercepted: blocked }
+}
+
+fn round_trip(ingress: Risk, egress: Risk) -> Risk {
+    Risk {
+        aa: ingress.aa.max(egress.aa),
+        exposure: (ingress.exposure + egress.exposure) * 0.5,
+        intercepted: ingress.intercepted || egress.intercepted,
+    }
+}
+
 /// Alternatives in preference order; interception is a joint package.
 fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usize)>> {
     use MissionKind::*;
