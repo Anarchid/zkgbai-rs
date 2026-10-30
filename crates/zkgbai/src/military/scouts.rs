@@ -327,15 +327,18 @@ impl Ai {
             .filter(|e| !e.is_dead && e.identified && (e.is_aa || e.is_flex_aa))
             .map(|e| e.value)
             .sum();
-        let density = self
-            .scouts
+        scout_policy(area, self.eco.effective_income, self.projected_metal_density(), aa_metal)
+    }
+
+    /// Estimated global standing metal per million square elmos of usable land.
+    pub(crate) fn projected_metal_density(&self) -> f32 {
+        self.scouts
             .density_map
             .get_or_init(|| {
                 let players = 1 + self.allies.len() + self.get_enemy_team_ids().len();
                 DensityMap::new(self.cb, &self.graph.metal_spots, players)
             })
-            .at_frame(self.frame);
-        scout_policy(area, self.eco.effective_income, density, aa_metal)
+            .at_frame(self.frame)
     }
 
     /// Widows for persistent deep scouting, independent of strike look jobs.
