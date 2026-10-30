@@ -140,6 +140,11 @@ impl Ai {
                             springai::reserved::reserve(self.cb, u.id());
                         }
                         if test == "airstrike-wave" && Plane::of(name).is_some() {
+                            springai::reserved::as_owner(|| {
+                                u.stop(0);
+                                u.set_fire_state(0, 0);
+                                u.set_move_state(0, 0);
+                            });
                             springai::reserved::reserve(self.cb, u.id());
                         }
                         self.log(&format!(
@@ -159,7 +164,8 @@ impl Ai {
             && frame % 30 == 0
             && matches!(
                 test.as_str(),
-                "airstrike-wave-targets"
+                "airstrike-wave"
+                    | "airstrike-wave-targets"
                     | "airstrike-priority-target"
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
