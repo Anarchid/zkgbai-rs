@@ -187,14 +187,16 @@ impl Ai {
         }
         let mut plans: Vec<_> = h.recent.values().filter(|p| self.frame - p.job.seen <= MEMORY).collect();
         plans.sort_by(|a, b| b.score().total_cmp(&a.score()));
-        for plan in plans {
+        for plan in &plans {
             if let Some(kind) = purchase(&plan.packages, &have, |k| {
                 self.defs.get(k.name()).map_or(f32::INFINITY, |d| d.cost(self.metal))
             }) {
                 return Some(kind.name());
             }
         }
-        None
+        // An optional jammer is a fleet extra, behind all combat-aircraft
+        // demand. Its absence never blocks an Odin mission.
+        escort::want_spare(plans.iter().any(|p| p.job.optional_escort()), &have).then_some(Plane::Sparrow.name())
     }
 
     fn airstrike_contacts(&self) -> Vec<Contact> {
@@ -497,7 +499,9 @@ impl Ai {
                 let Some(a) = self.bomber_handler.units.get_mut(&id) else { continue };
                 let u = a.unit;
                 let spent = u.rules_param_float("noammo", 0.0) > 0.0;
-                let safe = u.def().is_some_and(|d| risk.survives(u.health(), d.speed()));
+                let safe = u
+                    .def()
+                    .is_some_and(|d| sortie.job.flight_safe(a.kind, risk, u.health(), u.max_health(), d.speed()));
                 if springai::reserved::is_reserved(self.cb, id) {
                     *self
                         .bomber_handler
@@ -510,7 +514,7 @@ impl Ai {
                     a.returning = true;
                     continue;
                 }
-                if done || spent || !safe || u.health() < u.max_health() * 0.5 {
+                if done || spent || !safe {
                     let stats = self.bomber_handler.utilization.entry(a.kind).or_default();
                     if spent {
                         stats.payload_spent += 1;
@@ -522,7 +526,7 @@ impl Ai {
                         } else if !still_job && sortie.wave.is_none() {
                             "mission_changed"
                         } else if !safe {
-                            "unsafe_route"
+                            if u.health() < u.max_health() * 0.5 { "damage" } else { "unsafe_route" }
                         } else if frame - sortie.launched > SORTIE_TIMEOUT {
                             "timeout"
                         } else if disabled {
@@ -742,26 +746,43 @@ impl Ai {
         if route.is_empty() {
             return false;
         }
-        let odins: Vec<_> =
-            members.iter().copied().filter(|id| self.bomber_handler.units[id].kind == Plane::Odin).collect();
-        let escorts: Vec<_> =
-            members.iter().copied().filter(|id| self.bomber_handler.units[id].kind == Plane::Sparrow).collect();
-        let mut formed = true;
-        for (&escort, &odin) in escorts.iter().zip(&odins) {
-            let leader = self.bomber_handler.units[&odin].unit;
-            let a = self.bomber_handler.units.get_mut(&escort).unwrap();
-            a.escort = Some(odin);
-            let radius = a.unit.def().map_or(540.0, |d| d.jammer_radius() as f32);
-            if distance(a.unit.pos(), leader.pos()) > radius * 0.75 {
-                a.unit.guard(leader, 0);
-                a.last_order = frame;
-                formed = false;
+        let mut members = members.to_vec();
+        let mut package = package.to_vec();
+        if job.optional_escort() {
+            let busy: BTreeSet<_> =
+                self.bomber_handler.sorties.iter().flat_map(|s| s.members.iter().copied()).collect();
+            let odins: Vec<_> = members
+                .iter()
+                .filter_map(|id| {
+                    let a = &self.bomber_handler.units[id];
+                    (a.kind == Plane::Odin).then_some((*id, a.unit.pos()))
+                })
+                .collect();
+            let escorts: Vec<_> = self
+                .bomber_handler
+                .units
+                .iter()
+                .filter(|(id, a)| {
+                    a.kind == Plane::Sparrow
+                        && !busy.contains(id)
+                        && !a.returning
+                        && !springai::reserved::is_reserved(self.cb, **id)
+                        && a.unit.health() >= a.unit.max_health() * 0.95
+                        && a.unit.rules_param_float("noammo", 0.0) == 0.0
+                })
+                .map(|(&id, a)| (id, a.unit.pos(), a.unit.def().map_or(0.0, |d| d.jammer_radius() as f32)))
+                .collect();
+            let pairs = escort::pairs(&odins, &escorts);
+            let count = pairs.len().min(MAX_WING.saturating_sub(members.len()));
+            for (escort, odin) in pairs.into_iter().take(count) {
+                self.bomber_handler.units.get_mut(&escort).unwrap().escort = Some(odin);
+                members.push(escort);
+            }
+            if count > 0 {
+                package.push((Plane::Sparrow, count));
             }
         }
-        if !formed {
-            return false;
-        }
-        for &id in members {
+        for &id in &members {
             let leader =
                 self.bomber_handler.units[&id].escort.and_then(|id| self.bomber_handler.units.get(&id)).map(|a| a.unit);
             let a = self.bomber_handler.units.get_mut(&id).unwrap();
@@ -872,6 +893,7 @@ fn mission_view(
         "return_route": return_route.iter().map(|p| [p.x,p.z]).collect::<Vec<_>>(),
         "wave": sortie.and_then(|s| s.wave.map(|w| w.id)),
         "primary": job.kind.primary(), "deep": job.deep, "value": job.value,
+        "optional_escort": job.optional_escort().then_some(Plane::Sparrow.name()),
         "pos": [job.pos.x, job.pos.z], "seen": job.seen,
         "route": route.iter().map(|p| [p.x, p.z]).collect::<Vec<_>>(),
         "members": sortie.map(|s| s.members.as_slice()).unwrap_or(&[]),

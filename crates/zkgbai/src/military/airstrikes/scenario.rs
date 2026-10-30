@@ -1,6 +1,6 @@
 //! `airstrike-wind` versus `airstrike-farm`: real factory procurement and
 //! Phoenix bombing of a ZKGBAI wind farm. `airstrike-odin` / `airstrike-singu`
-//! exercise a deep thermite strike and its dedicated Sparrow escort.
+//! exercise deep thermite procurement and optional Sparrow support.
 use super::Plane;
 use crate::Ai;
 use crate::util::get_directional_point;

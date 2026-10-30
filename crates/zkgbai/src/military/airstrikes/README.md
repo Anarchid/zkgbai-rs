@@ -38,10 +38,14 @@ Primary missions:
 - Aircraft on LOS/radar inbound to our territory: one Magpie and at least two
   Raptors. Unidentified radar contacts can count when clearly above terrain.
 - Statics worth at least 1000 metal: Odin thermite; Singularities get a bonus.
-  A route of at least 3000 elmos, or any Singularity mission, also requires one
-  dedicated Sparrow per Odin. They gather within 75% of the live jammer radius,
-  then the Sparrow guards its Odin through approach and egress. The economy's
-  scout is not borrowed, replaced or sent to detonate.
+  A route of at least 3000 elmos, or any Singularity mission, may take a ready
+  Sparrow already within 75% of its jammer radius of an Odin. Escorts are
+  optional and expendable: no rendezvous wait, no Sparrow survival veto, and
+  losing the jammer does not abort Odin. Each escort guards one Odin until its
+  payload is spent or its mission ends. After all combat-aircraft deficits are
+  filled, the factory may maintain one spare escort for recent deep missions;
+  this includes queued/building/active Sparrows. The economy's scout is not
+  borrowed or sent to detonate.
 - Raiders on our territory: Phoenix or Magpies.
 
 Secondary missions use existing assets and cannot cause purchases: damaged
@@ -93,13 +97,14 @@ as DPS. Each encountered weapon contributes a ready volley on each leg, plus
 sustained fire integrated along ingress and egress. A 1500-elmo allowance for
 release/turning is also flown at the individual aircraft's speed. The estimate
 must stay below 55% of that aircraft's health (current health on active flights).
-Likho has no additional fixed local-AA ceiling. All members, including the
-350-HP Sparrow, must qualify; deep Odin missions can still be escort-limited.
+Likho has no additional fixed local-AA ceiling. Combat aircraft must qualify;
+optional sacrificial Sparrows are added after these checks and keep escorting
+through damage. Odin still needs its own safe ingress and return path.
 Unseen AA retains its conservative inferred power estimate until identified.
 The forecast remains a heuristic, not a combat simulation or survival guarantee.
 `aa` now reports incoming DPS divided by 500, `exposure` integrates that rate,
 and candidate snapshots also expose `incoming_dps` and `ready_volley_damage`. Sparrow jamming never discounts LOS AA or known fighters;
-the escort must pass its own survival check. New AA invalidates procurement
+New AA invalidates procurement
 memory and causes active sorties to abort or update their approaches. Spent or
 damaged aircraft return via threat-aware routes and rearm. Odin shield drops use
 `AIR_MANUALFIRE` (38571); normal attack releases thermite.
@@ -115,7 +120,8 @@ candidates that overlap their targets. Snapshot journals preserve these states
 for replay. The browser dashboard and in-game operator widget show available
 missions as diamonds with broken routes and active missions as double rings
 with solid routes; the dashboard card and in-game Intel list include aircraft
-requirements. `fleet` distinguishes ready, in-progress, rearming, repairing,
+requirements; `optional_escort` identifies optional Sparrow support for deep
+thermite candidates. Active packages list only escorts actually assigned. `fleet` distinguishes ready, in-progress, rearming, repairing,
 returning and operator-held aircraft; `utilization` accumulates aircraft-seconds
 per state, aircraft launches, observed spent payloads and abort reasons. Spent
 payloads indicate releases, not confirmed hits or kills. Aircraft still gather
