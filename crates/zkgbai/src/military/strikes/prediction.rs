@@ -1,6 +1,6 @@
 //! The mechanics model runs off the simulation thread. Engine handles are
 //! resolved into plain snapshots before submission; stale answers never launch.
-use super::{COOLDOWN, DIVE_TIMEOUT, Phase, Wave, launchable};
+use super::{COOLDOWN, DIVE_TIMEOUT, Job, Phase, Wave, launchable};
 use crate::Ai;
 use crate::military::fightsim::{FateMode, FightSnapshot, Model, SnapUnit, UnitSpec, WeaponSpec};
 use crate::util::distance;
@@ -10,28 +10,28 @@ use std::sync::{
     mpsc::{self, Receiver, SyncSender},
 };
 
-struct Request {
-    key: u64,
+pub(super) struct Request {
+    pub(super) key: u64,
     snapshot: FightSnapshot,
     target: usize,
-    pos: springai::Vec3,
-    members: Vec<i32>,
+    pub(super) pos: springai::Vec3,
+    pub(super) members: Vec<i32>,
     paralysis: Option<f32>,
     stun_required: bool,
 }
-struct Answer {
-    key: u64,
-    kill_frames: Option<i32>,
-    probability: f32,
-    pos: springai::Vec3,
-    members: Vec<i32>,
+pub(super) struct Answer {
+    pub(super) key: u64,
+    pub(super) kill_frames: Option<i32>,
+    pub(super) probability: f32,
+    pub(super) pos: springai::Vec3,
+    pub(super) members: Vec<i32>,
 }
 pub(super) struct Predictor {
-    tx: SyncSender<Request>,
-    rx: Receiver<Answer>,
+    pub(super) tx: SyncSender<Request>,
+    pub(super) rx: Receiver<Answer>,
 }
 impl Predictor {
-    fn start() -> Result<Self, String> {
+    pub(super) fn start() -> Result<Self, String> {
         let model = Model::load()?;
         let (tx, requests) = mpsc::sync_channel::<Request>(1);
         let (answers, rx) = mpsc::sync_channel(1);
@@ -156,10 +156,38 @@ impl Ai {
         if w.query.is_some_and(|(_, at)| self.frame - at < 90) {
             return;
         }
+        self.strikes.serial += 1;
+        let key = self.strikes.serial;
+        let Some(request) = self.strike_prediction_request(
+            key,
+            &w.job,
+            &w.members,
+            w.home,
+            self.defs.get(w.tactic.name()),
+            w.job.prey.needs_stun(w.tactic),
+        ) else {
+            return;
+        };
+        if self.strikes.predictor.as_ref().unwrap().tx.try_send(request).is_ok() {
+            w.query = Some((key, self.frame));
+        }
+    }
+
+    /// Both recruited waves and ordinary raider squads use the same target-death
+    /// model, with their actual health, weapons, positions and nearby defenders.
+    pub(super) fn strike_prediction_request(
+        &self,
+        key: u64,
+        job: &Job,
+        members: &[i32],
+        home: springai::Vec3,
+        ground_target: Option<UnitDef>,
+        stun_required: bool,
+    ) -> Option<Request> {
         let mut snapshot = FightSnapshot::default();
-        for id in &w.members {
-            let Some(f) = self.fighters.get(id) else { return };
-            let Some(def) = f.unit.def() else { return };
+        for id in members {
+            let Some(f) = self.fighters.get(id) else { return None };
+            let Some(def) = f.unit.def() else { return None };
             let pos = f.get_pos();
             snapshot.units.push(SnapUnit {
                 side: 0,
@@ -170,36 +198,35 @@ impl Ai {
             });
         }
         let Some(def) =
-            w.job.id.and_then(|id| self.war.targets.get(&id)).and_then(|e| e.ud).or_else(|| self.defs.get(&w.job.name))
+            job.id.and_then(|id| self.war.targets.get(&id)).and_then(|e| e.ud).or_else(|| self.defs.get(&job.name))
         else {
-            return;
+            return None;
         };
         let hp =
-            w.job.id.and_then(|id| self.war.targets.get(&id)).map_or(def.health(), |e| e.get_health() * e.def_health());
+            job.id.and_then(|id| self.war.targets.get(&id)).map_or(def.health(), |e| e.get_health() * e.def_health());
         let target = snapshot.units.len();
-        let seen = w.job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible);
-        let ground_target = self.defs.get(w.tactic.name());
+        let seen = job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible);
         let mut spec = self.strike_spec(def, ground_target);
         if let Some(e) = seen {
             Arc::make_mut(&mut spec).health = e.unit.max_health().max(1.0);
         }
         let hp = seen.map_or(hp, |e| e.unit.health());
-        snapshot.units.push(SnapUnit { side: 1, spec, hp, x: w.job.pos.x, z: w.job.pos.z });
+        snapshot.units.push(SnapUnit { side: 1, spec, hp, x: job.pos.x, z: job.pos.z });
         // Inferred extra Phantoms also shoot; never treat a three-Phantom fix as
         // just one defender merely because the current focus is one of them.
-        if w.job.phantom() {
-            for i in 1..w.job.count {
+        if job.phantom() {
+            for i in 1..job.count {
                 snapshot.units.push(SnapUnit {
                     side: 1,
                     spec: self.strike_spec(def, ground_target),
                     hp: def.health(),
-                    x: w.job.pos.x + i as f32 * 80.0,
-                    z: w.job.pos.z,
+                    x: job.pos.x + i as f32 * 80.0,
+                    z: job.pos.z,
                 });
             }
         }
-        let start = w.home;
-        let end = w.job.pos;
+        let start = home;
+        let end = job.pos;
         let dx = end.x - start.x;
         let dz = end.z - start.z;
         for e in self.war.targets.values().filter(|e| {
@@ -207,10 +234,10 @@ impl Ai {
                 && e.identified
                 && e.can_attack()
                 && (e.is_static || self.frame - e.last_seen < 30 * 30)
-                && Some(e.unit_id) != w.job.id
+                && Some(e.unit_id) != job.id
         }) {
             // Already represented by the cadence/seen max above.
-            if w.job.phantom() && e.def_name == "cloaksnipe" && distance(e.position, end) < 400.0 {
+            if job.phantom() && e.def_name == "cloaksnipe" && distance(e.position, end) < 400.0 {
                 continue;
             }
             let t = (((e.position.x - start.x) * dx + (e.position.z - start.z) * dz) / (dx * dx + dz * dz).max(1.0))
@@ -221,7 +248,7 @@ impl Ai {
             }
             let Some(def) = e.ud else { continue };
             if snapshot.units.len() >= 192 {
-                return;
+                return None;
             } // Fail closed for unbounded fronts.
             snapshot.units.push(SnapUnit {
                 side: 1,
@@ -231,32 +258,11 @@ impl Ai {
                 z: e.position.z,
             });
         }
-        let paralysis = self.strike_stun(&w.job).map(|(ratio, _)| ratio);
-        let stun_required = w.job.prey.needs_stun(w.tactic);
+        let paralysis = self.strike_stun(job).map(|(ratio, _)| ratio);
         if stun_required && paralysis.is_none() {
-            return;
+            return None;
         }
-        self.strikes.serial += 1;
-        let key = self.strikes.serial;
-        if self
-            .strikes
-            .predictor
-            .as_ref()
-            .unwrap()
-            .tx
-            .try_send(Request {
-                key,
-                snapshot,
-                target,
-                pos: w.job.pos,
-                members: w.members.clone(),
-                paralysis,
-                stun_required,
-            })
-            .is_ok()
-        {
-            w.query = Some((key, self.frame));
-        }
+        Some(Request { key, snapshot, target, pos: job.pos, members: members.to_vec(), paralysis, stun_required })
     }
 }
 

@@ -6,6 +6,41 @@ impl Ai {
     pub(crate) fn strikes_scenario(&mut self, frame: i32) {
         let Some(test) = self.test.clone() else { return };
         let test = test.as_str();
+        if test == "assassin-raiders" && frame == 90 {
+            let units: Vec<_> =
+                self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "cloakraid").collect();
+            let mut fighters = Vec::new();
+            for u in units {
+                self.raider_remove_unit(u);
+                self.retreat_remove_unit(u);
+                fighters.push(Fighter::new_raider(u, u.def().unwrap().cost(self.metal), self.team_id));
+            }
+            self.raider_add_squad(fighters, 's');
+            let sid = *self.raider_handler.raider_squads.back().unwrap();
+            self.squads.get_mut(sid).unwrap().status = 'a';
+            let map = self.cb.map();
+            let pos = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0 + 300.0);
+            if let Some(def) = self.defs.get("planescout") {
+                self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 150.0, pos.z));
+            }
+            self.log(&format!("assassin-test: ordinary raider squad {sid} ready with a mex lure"));
+            return;
+        }
+        if test.starts_with("assassin-raider") && frame % 150 == 0 && frame >= 150 {
+            let counts: Vec<_> = ["cloakraid", "hoverarty", "staticmex", "hoverriot"]
+                .iter()
+                .map(|name| {
+                    let n = self
+                        .cb
+                        .friendly_units()
+                        .iter()
+                        .filter(|u| self.defs.name_of(**u) == *name && u.health() > 0.0)
+                        .count();
+                    format!("{name}={n}")
+                })
+                .collect();
+            self.log(&format!("assassin-test: raider fixture {}", counts.join(" ")));
+        }
         if test.starts_with("assassin-") && frame == 1500 {
             let orphaned = self
                 .cb
@@ -69,6 +104,40 @@ impl Ai {
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
         let pos = Vec3::xz(center.x, center.z + 300.0);
         self.cb.cheats_set_enabled(true);
+        if test == "assassin-raiders" {
+            if let Some(def) = self.defs.get("cloakraid") {
+                for i in 0..8 {
+                    self.cb.cheat_new_unit(
+                        def,
+                        Vec3::xz(center.x + (i % 4) as f32 * 75.0 - 100.0, center.z - 500.0 + (i / 4) as f32 * 75.0),
+                    );
+                }
+            }
+            return;
+        }
+        if matches!(test, "assassin-raider-lance" | "assassin-raider-guarded") {
+            for (name, at) in [("hoverarty", pos), ("staticmex", Vec3::xz(center.x + 600.0, center.z - 500.0))] {
+                if let Some(def) = self.defs.get(name) {
+                    if let Some(u) = self.cb.cheat_new_unit(def, at) {
+                        u.set_move_state(0, 0);
+                        u.set_fire_state(2, 0);
+                        springai::reserved::reserve(self.cb, u.id());
+                        self.log(&format!("assassin-test: {name} {} bait at {},{}", u.id(), at.x, at.z));
+                    }
+                }
+            }
+            if test == "assassin-raider-guarded" {
+                if let Some(def) = self.defs.get("hoverriot") {
+                    if let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z)) {
+                        u.set_move_state(0, 0);
+                        u.set_fire_state(0, 0);
+                        springai::reserved::reserve(self.cb, u.id());
+                        self.log(&format!("assassin-test: Mace {} guards Lance", u.id()));
+                    }
+                }
+            }
+            return;
+        }
         if matches!(test, "assassin-aa" | "assassin-aa-guarded" | "assassin-aa-late-guard") {
             if let Some(def) = self.defs.get("vehaa") {
                 for i in 0..4 {
