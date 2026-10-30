@@ -194,6 +194,16 @@ modeled target-death probability; the older `strike_margin` setting no longer co
 See [assassination waves](crates/zkgbai/src/military/strikes/README.md) for tactic rules and isolated engine scenarios.
 `ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
 
+
+Colonization discounts a candidate's metal value by its distance from the enemy
+centroid relative to the distance from our start to that centroid (capped at one).
+Its constructor job bonus also gets that discount, multiplied by
+`clamp(posture.density / 400, 0, 1)`. This is the same global standing-metal per
+usable square kiloelmo estimate used for missile-silo eligibility. Both adjustments
+are on by default: `colonize_policy=combined`. Use `enemy_distance` or `density`
+to keep only one, or `baseline` for the original scoring and bonus.
+`disable=colonize` still disables colonization entirely.
+
 Operator API and run journal
 ----------------------------
 
