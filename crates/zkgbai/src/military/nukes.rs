@@ -166,6 +166,11 @@ const ON_LINE: f32 = 400.0;
 const DAMAGE: f32 = 11501.0;
 const EDGE: f32 = 0.3;
 
+/// Whether one strike kills a target at this distance, including blast falloff.
+fn blast_kills(health: f32, distance: f32) -> bool {
+    distance < BLAST && health > 0.0 && health <= DAMAGE * (BLAST - distance) / (BLAST - distance * EDGE)
+}
+
 /// A target that known anti-nukes alone guard, to stun for a nuke's
 /// flight (with Shockleys or Widows).
 pub struct Combo {
@@ -217,7 +222,16 @@ impl Ai {
         let frame = self.frame;
         let (mut all, mut buildings) = (0.0, 0.0);
         for e in self.war.targets.values() {
-            if !e.identified || e.is_dead || e.can_fly() || distance(e.position, at) > BLAST {
+            if !e.identified || e.is_dead || e.can_fly() {
+                continue;
+            }
+            let d = distance(e.position, at);
+            if d >= BLAST {
+                continue;
+            }
+            // For a silo still to build, assume targets have time to repair.
+            let health = e.def_health() * if purpose == Purpose::Fire { e.get_health() } else { 1.0 };
+            if !blast_kills(health, d) {
                 continue;
             }
             if e.is_static {
@@ -494,7 +508,8 @@ impl Ai {
         silo.execute_custom_command(CMD_ATTACK, &[target.x, target.y, target.z], 0, NO_TIMEOUT);
         let due = self.frame + (30.0 * (distance(silo.pos(), target) / MISSILE_SPEED + FLIGHT_EXTRA)) as i32;
         let buildings = (self.war.targets.values())
-            .filter(|e| e.identified && e.is_static && !e.is_dead && distance(e.position, target) <= BLAST)
+            .filter(|e| e.identified && e.is_static && !e.is_dead)
+            .filter(|e| blast_kills(e.get_health() * e.def_health(), distance(e.position, target)))
             .map(|e| (e.unit_id, e.value))
             .collect();
         let fired = self.frame;
@@ -682,12 +697,9 @@ impl Ai {
         }
         // Buildings too frail for the blast where they stand are gone.
         let dead: Vec<(springai::Unit, f32)> = (self.war.targets.values())
-            .filter(|e| e.is_static && !e.is_dead && distance(e.position, at) < BLAST)
-            .filter_map(|e| {
-                let d = distance(e.position, at);
-                let damage = DAMAGE * (BLAST - d) / (BLAST - d * EDGE);
-                e.ud.filter(|ud| ud.health() < damage).map(|_| (e.unit, e.value))
-            })
+            .filter(|e| e.is_static && !e.is_dead && e.ud.is_some())
+            .filter(|e| blast_kills(e.def_health(), distance(e.position, at)))
+            .map(|e| (e.unit, e.value))
             .collect();
         let value: f32 = dead.iter().map(|d| d.1).sum();
         for (u, _) in &dead {
@@ -1016,6 +1028,19 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_lethal_blasts_count() {
+        // A healthy Detriment survives even a direct hit; a damaged one may not.
+        assert!(!blast_kills(86000.0, 0.0));
+        assert!(blast_kills(10000.0, 0.0));
+        // The same target survives farther out, while lighter targets still die.
+        assert!(!blast_kills(10000.0, BLAST / 2.0));
+        assert!(blast_kills(600.0, BLAST / 2.0));
+        assert!(!blast_kills(600.0, BLAST));
+        assert!(!blast_kills(600.0, BLAST + 1.0));
+        assert!(!blast_kills(0.0, 0.0));
+    }
 
     #[test]
     fn distance_to_a_flight_line() {
