@@ -84,7 +84,7 @@ pub(crate) struct ScoutPolicy {
 /// same standing-metal forecast as raider sizing; AA is known living metal.
 fn scout_policy(area: f32, income: f32, density: f32, aa_metal: f32) -> ScoutPolicy {
     let area = area.max(f32::EPSILON);
-    let count = (area / 25.0).ceil().max(1.0) as usize;
+    let count = (area / 30.0).floor().max(1.0) as usize;
     let deep = density >= 500.0 || income >= 50.0;
     let light_aa = aa_metal / area < 25.0;
     ScoutPolicy {
@@ -1056,8 +1056,19 @@ mod policy_tests {
     use super::*;
 
     #[test]
-    fn both_air_scouts_use_one_per_25_square_kiloelmos_rounded_up() {
-        for (area, count) in [(0.1, 1), (24.99, 1), (25.0, 1), (25.01, 2), (26.2144, 2), (50.0, 2), (50.01, 3)] {
+    fn both_air_scouts_use_area_over_30_rounded_down_with_a_minimum_of_one() {
+        for (area, count) in [
+            (0.1, 1),
+            (26.2144, 1),
+            (29.99, 1),
+            (30.0, 1),
+            (30.01, 1),
+            (59.99, 1),
+            (60.0, 2),
+            (60.01, 2),
+            (89.99, 2),
+            (90.0, 3),
+        ] {
             let policy = scout_policy(area, 50.0, 0.0, 0.0);
             assert_eq!(policy.sparrows, count, "Sparrow quota at area {area}");
             assert_eq!(policy.owls, count, "Owl quota at area {area}");
@@ -1065,11 +1076,11 @@ mod policy_tests {
     }
 
     #[test]
-    fn sparrows_start_at_either_threshold_and_round_up_whole_map_area() {
+    fn sparrows_start_at_either_threshold_and_use_the_area_quota() {
         assert_eq!(scout_policy(20.0, 29.99, 199.99, 0.0).sparrows, 0);
         assert_eq!(scout_policy(20.0, 30.0, 0.0, 0.0).sparrows, 1);
         assert_eq!(scout_policy(20.0, 0.0, 200.0, 0.0).sparrows, 1);
-        assert_eq!(scout_policy(25.01, 30.0, 0.0, 0.0).sparrows, 2);
+        assert_eq!(scout_policy(60.0, 30.0, 0.0, 0.0).sparrows, 2);
         assert_eq!(scout_policy(0.1, 30.0, 0.0, 0.0).sparrows, 1);
     }
 
@@ -1085,7 +1096,7 @@ mod policy_tests {
             assert_eq!(heavy.widows, income >= 50.0);
         }
         // Changing map area changes AA density as well as scout count.
-        assert_eq!(scout_policy(40.0, 50.0, 0.0, 500.0).owls, 2);
+        assert_eq!(scout_policy(40.0, 50.0, 0.0, 500.0).owls, 1);
     }
 
     #[test]
