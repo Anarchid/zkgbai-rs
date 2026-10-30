@@ -1651,6 +1651,8 @@ impl Ai {
         }
 
         let metal = self.metal;
+        // Commander drones should not prompt early AA, even across a large enemy team.
+        let count_commander_drones = self.projected_metal_density() >= 500.0;
         let war = &mut self.war;
         war.sniper_sightings.retain(|d| frame - d.frame_issued <= 900);
         war.defense_targets.retain(|d| frame - d.frame_issued <= 300);
@@ -1718,7 +1720,9 @@ impl Ai {
                 }
                 _ if t.can_fly() && !t.is_nano_spam => {
                     if matches!(name, "dronelight" | "droneheavyslow" | "dronecarry") {
-                        enemy_air_value += 25.0;
+                        if count_commander_drones || name == "dronecarry" {
+                            enemy_air_value += 25.0;
+                        }
                     } else {
                         enemy_air_value += cost;
                     }
