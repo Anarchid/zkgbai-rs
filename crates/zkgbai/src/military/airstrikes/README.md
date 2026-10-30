@@ -50,7 +50,11 @@ not silently reduced. Mobile fixes must be live and at most five seconds old.
 Every 30 seconds, before ordinary dispatch, a combined-strike fallback checks
 legacy flock readiness: at least eight ready bombers, with no idle bomber still
 rearming or repairing. Operator-held planes and active sorties are excluded;
-fighters and Sparrows do not count toward eight. It assigns the available fleet
+fighters and Sparrows do not count toward eight. Healthy planes within 1200
+elmos of home can join from friendly territory even while circling back to the
+rally; their actual approach is checked before committing. At least eight
+bombers must have viable assignments, so a token sortie is left to ordinary
+dispatch. It assigns the available fleet
 in one update using the old distance/AA/value ranking, with a modest preference
 for Ravens on individuals, Phoenixes on groups/wind, Likhos on groups or valuable
 units, and Odins on expensive statics. Partial Raven/Likho wings can combine to

@@ -707,9 +707,14 @@ impl Ai {
         wave: Option<WaveFlight>,
     ) -> bool {
         let job = &plan.job;
+        let interceptors = if job.kind == MissionKind::Intercept { Vec::new() } else { self.airstrike_interceptors() };
+        let exit = self.airstrike_path_risk(job.pos, &plan.return_route, &interceptors);
         if members.iter().any(|id| {
             let a = &self.bomber_handler.units[id];
-            !a.unit.def().is_some_and(|d| plan.risk.survives(a.unit.health(), d.speed()))
+            // A healthy aircraft may be circling near the rally rather than
+            // exactly at home. Check its actual first leg, not an assumed start.
+            let risk = round_trip(self.airstrike_path_risk(a.unit.pos(), &plan.route, &interceptors), exit);
+            risk.intercepted || !a.unit.def().is_some_and(|d| risk.survives(a.unit.health(), d.speed()))
         }) {
             return false;
         }
