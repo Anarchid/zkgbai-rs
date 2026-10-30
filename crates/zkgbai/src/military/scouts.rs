@@ -85,12 +85,12 @@ pub(crate) struct ScoutPolicy {
 fn scout_policy(area: f32, income: f32, density: f32, aa_metal: f32) -> ScoutPolicy {
     let area = area.max(f32::EPSILON);
     let count = (area / 10.0).ceil().max(1.0) as usize;
-    let deep = density >= 300.0 || income >= 50.0;
+    let deep = density >= 500.0 || income >= 50.0;
     let light_aa = aa_metal / area < 25.0;
     ScoutPolicy {
         sparrows: if income >= 30.0 || density >= 200.0 { count } else { 0 },
         owls: if deep && light_aa { count } else { 0 },
-        widows: density >= 500.0 || (deep && !light_aa),
+        widows: density >= 1000.0 || (deep && !light_aa),
     }
 }
 
@@ -1066,8 +1066,8 @@ mod policy_tests {
 
     #[test]
     fn deep_scouts_start_at_either_threshold_and_switch_at_exactly_25_aa() {
-        assert_eq!(scout_policy(20.0, 49.99, 299.99, 0.0), ScoutPolicy { sparrows: 2, owls: 0, widows: false });
-        for (income, density) in [(50.0, 0.0), (0.0, 300.0)] {
+        assert_eq!(scout_policy(20.0, 49.99, 499.99, 0.0), ScoutPolicy { sparrows: 2, owls: 0, widows: false });
+        for (income, density) in [(50.0, 0.0), (0.0, 500.0)] {
             let light = scout_policy(20.0, income, density, 499.99);
             assert_eq!(light.owls, 2);
             assert!(!light.widows);
@@ -1081,8 +1081,8 @@ mod policy_tests {
 
     #[test]
     fn high_density_adds_widows_even_with_light_aa_and_owls() {
-        assert!(!scout_policy(20.0, 0.0, 499.99, 0.0).widows);
-        assert_eq!(scout_policy(20.0, 0.0, 500.0, 0.0), ScoutPolicy { sparrows: 2, owls: 2, widows: true });
-        assert_eq!(scout_policy(20.0, 0.0, 500.0, 500.0), ScoutPolicy { sparrows: 2, owls: 0, widows: true });
+        assert!(!scout_policy(20.0, 0.0, 999.99, 0.0).widows);
+        assert_eq!(scout_policy(20.0, 0.0, 1000.0, 0.0), ScoutPolicy { sparrows: 2, owls: 2, widows: true });
+        assert_eq!(scout_policy(20.0, 0.0, 1000.0, 500.0), ScoutPolicy { sparrows: 2, owls: 0, widows: true });
     }
 }
