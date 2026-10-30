@@ -80,6 +80,14 @@ impl BomberHandler {
     pub fn new() -> Self {
         Self::default()
     }
+    fn refresh_priority_memory(&mut self, contacts: &[Contact], frame: i32) {
+        // Fresh observations replace remembered priority demand, including when
+        // healing demotes a target. Unseen targets retain the normal memory.
+        for e in contacts.iter().filter(|e| e.known && !e.static_ && e.live && frame - e.seen <= FRESH) {
+            self.recent.remove(&(MissionKind::Heavy, e.id));
+        }
+    }
+
     pub fn get_bomber_size(&self) -> usize {
         self.units.values().filter(|a| !matches!(a.kind, Plane::Sparrow | Plane::Raptor)).count()
     }
@@ -263,6 +271,7 @@ impl Ai {
         let air = self.airstrike_field(home, &interceptors);
         let defense_air = self.airstrike_field(home, &[]);
         let contacts = self.airstrike_contacts();
+        self.bomber_handler.refresh_priority_memory(&contacts, frame);
         let jobs = missions(&contacts, home, frame);
         let had_jobs = !jobs.is_empty();
         let mut plans = Vec::new();
@@ -785,7 +794,7 @@ impl BomberHandler {
             .map(|s| mission_view(&s.job, &s.route, std::slice::from_ref(&s.package), Some(s)))
             .collect();
         for p in &self.plans {
-            if p.job.targets.iter().any(|id| covered.contains(id)) {
+            if !p.job.kind.primary() || p.job.targets.iter().any(|id| covered.contains(id)) {
                 continue;
             }
             let mut v = mission_view(&p.job, &p.route, &p.packages, None);
@@ -841,7 +850,22 @@ mod operator_tests {
             risk: Risk { aa: 0.0, exposure: 0.0, intercepted: false },
             length: 1400.0,
         });
+        for (id, kind) in [
+            (6, MissionKind::Static),
+            (7, MissionKind::Opportunistic),
+            (8, MissionKind::Assassinate),
+            (9, MissionKind::Shield),
+        ] {
+            let mut secondary = h.plans[0].clone();
+            secondary.job.kind = kind;
+            secondary.job.target = id;
+            secondary.job.targets = vec![id];
+            h.plans.push(secondary);
+        }
         let candidate = h.status(30, Some("bomberassault"));
+        assert_eq!(candidate["available"], 1);
+        assert_eq!(candidate["missions"].as_array().unwrap().len(), 1);
+        assert_eq!(h.plans.len(), 5); // filtering readouts must not remove launch opportunities
         assert_eq!(candidate["missions"][0]["state"], "available");
         assert_eq!(candidate["missions"][0]["pos"], serde_json::json!([1200.0, 300.0]));
         assert_eq!(candidate["missions"][0]["packages"][0][1]["name"], "Sparrow");
@@ -861,8 +885,28 @@ mod operator_tests {
         assert_eq!(active["missions"][0]["state"], "in_progress");
         assert_eq!(active["missions"][0]["members"], serde_json::json!([11, 12]));
         assert_eq!(active["missions"][0]["id"], candidate["missions"][0]["id"]);
+        h.sorties[0].job.kind = MissionKind::Static;
+        let active_secondary = h.status(100, None);
+        assert_eq!(active_secondary["missions"].as_array().unwrap().len(), 1);
+        assert_eq!(active_secondary["missions"][0]["primary"], false);
+        assert_eq!(active_secondary["missions"][0]["state"], "in_progress");
+        assert_eq!(active_secondary["in_progress"], 1);
+        assert_eq!(active_secondary["available"], 0);
         h.sorties.clear();
         assert_eq!(h.status(120, None)["missions"][0]["state"], "available");
+        let mut priority = h.plans[0].clone();
+        priority.job.kind = MissionKind::Heavy;
+        let key = priority.job.key();
+        h.recent.insert(key, priority);
+        let mut contact = super::super::tests::enemy(5);
+        contact.live = false;
+        h.refresh_priority_memory(&[contact.clone()], 300);
+        assert!(h.recent.contains_key(&key));
+        contact.live = true;
+        h.refresh_priority_memory(&[contact.clone()], 1000);
+        assert!(h.recent.contains_key(&key));
+        h.refresh_priority_memory(&[contact], 300);
+        assert!(!h.recent.contains_key(&key));
         h.plans.clear();
         h.grounded = true;
         assert!(h.status(150, None)["missions"].as_array().unwrap().is_empty());

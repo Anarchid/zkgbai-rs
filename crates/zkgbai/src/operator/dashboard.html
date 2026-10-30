@@ -835,7 +835,7 @@ function renderMissions(snap) {
     row.append(el('div', 'detail', `Target #${m.target}` + (active ? ` · ${m.members.length} aircraft assigned` : ' · awaiting available aircraft')));
     node.append(row);
   }
-  if (!a.missions?.length) node.append(el('div', 'empty', 'No feasible missions.'));
+  if (!a.missions?.length) node.append(el('div', 'empty', 'No primary candidates or active sorties.'));
 }
 
 let box = null; // [sx0, sy0, sx1, sy1] while shift-dragging

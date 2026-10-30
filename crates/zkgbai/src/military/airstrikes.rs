@@ -15,11 +15,11 @@ pub const MEMORY: i32 = 30 * 90;
 pub const FRESH: i32 = 30 * 5;
 pub const MAX_WING: usize = 24;
 const MIN_PRIORITY_METAL: f32 = 600.0;
-// Structural fragility drives procurement. Damage opens short-lived secondary
-// opportunities instead of ordering a new fleet after a retreating target.
+// Current fragility drives procurement, so wounded expensive units can become
+// priority targets even when their undamaged counterparts are too tough.
 const MAX_PRIORITY_HP_PER_METAL: f32 = 3.0;
-fn priority_target(value: f32, max_hp: f32) -> bool {
-    value >= MIN_PRIORITY_METAL && max_hp / value <= MAX_PRIORITY_HP_PER_METAL
+fn priority_target(value: f32, hp: f32) -> bool {
+    value >= MIN_PRIORITY_METAL && hp / value <= MAX_PRIORITY_HP_PER_METAL
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -220,7 +220,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
         } else {
             if e.heavy {
                 add(
-                    if priority_target(e.value, e.max_hp) { MissionKind::Heavy } else { MissionKind::Opportunistic },
+                    if priority_target(e.value, e.hp) { MissionKind::Heavy } else { MissionKind::Opportunistic },
                     vec![e.id],
                     e.hp,
                     e.value,

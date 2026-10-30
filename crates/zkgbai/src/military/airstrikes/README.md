@@ -13,8 +13,9 @@ Primary missions:
 - Groups of at least three medium ground units: Phoenix or existing Likhos in
   clear air, Likhos with light AA. Package size scales with group health.
 - Priority strikes target mobile units costing at least 600 metal with at most
-  3 maximum HP per metal (including artillery and commanders meeting those
-  thresholds). Ravens or existing Likhos can strike in clear/very light AA;
+  3 current HP per metal (including artillery and commanders meeting those
+  thresholds). Wounded heavies can qualify as their health drops; fresh
+  sightings of healed targets remove obsolete priority demand. Ravens or existing Likhos can strike in clear/very light AA;
   Likhos can also strike through light AA. Within this category, metal removed
   per current HP determines preference. Raven count is
   `ceil(1.2 * HP / bomb damage) + 1`; damage comes from the installed definition.
@@ -34,7 +35,7 @@ Primary missions:
 
 Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
-cheap artillery such as Fencers and tough targets such as Cyclops for a sufficient
+cheap artillery such as Fencers and still-tough targets such as healthy Cyclops for a sufficient
 existing Raven/Likho fleet, and an Odin shield cluster over friendly ground troops in an ongoing fight.
 Launchable primary missions take ready aircraft first. Unfillable primary
 packages do not reserve every aircraft of a type; spare aircraft may take
@@ -55,7 +56,9 @@ damaged aircraft return via threat-aware routes and rearm. Odin shield drops use
 
 Inspect `military.airstrikes` or the snapshot's `airstrikes` for mission IDs,
 `available` / `in_progress` states, positions, packages, planned routes, assigned
-members, exposure, production and grounded state. Active missions suppress
+members, exposure, production and grounded state. Only primary candidates are
+shown as available; all active sorties remain visible, including secondary
+missions. This display filter does not affect secondary dispatch. Active missions suppress
 candidates that overlap their targets. Snapshot journals preserve these states
 for replay. The browser dashboard and in-game operator widget show available
 missions as diamonds with broken routes and active missions as double rings
