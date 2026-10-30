@@ -82,6 +82,11 @@ impl Ai {
                 }
                 "airstrike-priority-target" => spawn.push(("hoverarty", site)),
                 "airstrike-tough-target" => spawn.push(("tankassault", site)),
+                "airstrike-ravagers" => {
+                    for dx in [-40.0, 0.0, 40.0] {
+                        spawn.push(("vehassault", Vec3::xz(site.x + dx, site.z)));
+                    }
+                }
                 "airstrike-fencer" => spawn.push(("vehsupport", site)),
                 "airstrike-shieldball" => {
                     spawn.push(("shieldshield", site));
@@ -131,6 +136,7 @@ impl Ai {
                                 | "airstrike-tough-target"
                                 | "airstrike-fencer"
                                 | "airstrike-shieldball"
+                                | "airstrike-ravagers"
                         ) {
                             springai::reserved::as_owner(|| {
                                 u.stop(0);
@@ -172,6 +178,7 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "airstrike-ravagers"
             )
         {
             for u in self.cb.team_units() {
@@ -218,6 +225,7 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "airstrike-ravagers"
             ) {
                 let alive = self
                     .cb
@@ -235,6 +243,7 @@ impl Ai {
                                 | "vehsupport"
                                 | "shieldshield"
                                 | "shieldassault"
+                                | "vehassault"
                         )
                     })
                     .count();

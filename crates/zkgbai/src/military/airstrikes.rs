@@ -1,12 +1,14 @@
 //! Mission-driven airplane production and sorties. Policy is independent of
 //! engine handles so target selection and procurement can be exercised offline.
 
+mod group;
 mod live;
 mod scenario;
 #[cfg(test)]
 mod tests;
 
 use crate::util::distance;
+use group::{Blast, GroupStrike};
 use springai::Vec3;
 
 pub use live::BomberHandler;
@@ -127,6 +129,7 @@ struct Mission {
     pos: Vec3,
     hp: f32,
     value: f32,
+    group: Option<GroupStrike>,
     /// All targets covered by this job, also used to avoid overlapping sorties.
     targets: Vec<i32>,
     seen: i32,
@@ -140,6 +143,8 @@ impl Mission {
         let reward = if matches!(self.kind, MissionKind::Heavy | MissionKind::Opportunistic | MissionKind::Assassinate)
         {
             self.value / self.hp.max(1.0) * 3000.0
+        } else if self.kind == MissionKind::Group {
+            self.damage_value(&[(Plane::Likho, 1)]).max(self.damage_value(&[(Plane::Phoenix, 1)]))
         } else {
             self.value
         };
@@ -194,6 +199,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
         let mut add = |kind, targets: Vec<i32>, hp, value| {
             jobs.push(Mission {
                 kind,
+                group: None,
                 target: e.id,
                 pos: e.pos,
                 hp,
@@ -254,6 +260,11 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                     group.iter().map(|c| c.hp).sum(),
                     value,
                 );
+                if !e.wind {
+                    let job = jobs.last_mut().unwrap();
+                    job.group = Some(GroupStrike::new(&group));
+                    job.aim_group(Blast::default());
+                }
             }
         }
     }
@@ -333,8 +344,8 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     let choices = match job.kind {
         Intercept if risk.aa <= 0.4 => vec![vec![(Magpie, 1), (Raptor, count(job.hp, 700.0).max(2))]],
         Interdict if clear => vec![vec![(Phoenix, count(job.hp, 1000.0))], vec![(Magpie, count(job.hp, 350.0).max(2))]],
-        Group if clear => vec![vec![(Phoenix, count(job.hp, 1800.0))], vec![(Likho, count(job.hp, 3500.0))]],
-        Group if light => vec![vec![(Likho, count(job.hp, 3500.0))]],
+        Group if clear => job.group_packages(&[Phoenix, Likho]),
+        Group if light => job.group_packages(&[Likho]),
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
         Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
         Heavy | Opportunistic if light => vec![vec![(Likho, salvo(2000.0))]],

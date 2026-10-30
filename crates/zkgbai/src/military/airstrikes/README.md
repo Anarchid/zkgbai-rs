@@ -11,7 +11,18 @@ Idle plants reconsider every two seconds, so they resume without an idle event.
 Primary missions:
 
 - Groups of at least three medium ground units: Phoenix or existing Likhos in
-  clear air, Likhos with light AA. Package size scales with group health.
+  clear air, Likhos with light AA. Passes are valued by `metal * min(predicted
+  damage / current HP, 1)` per victim rather than requiring the whole clump to
+  die. Likho uses the installed weapon's blast radius and falloff, a 20% damage
+  reserve, and the best member to aim at; center-distance sampling conservatively
+  ignores collision-volume extent. Phoenix retains a heuristic 1800 total HP
+  damage budget spread across the group. Every additional Likho/Phoenix must
+  add at least 250/150 metal of damage value. Smaller worthwhile packages remain
+  eligible, so one ready Likho need not wait for a lethal fleet. These are damage
+  estimates, not predictions of kills; shields, movement, and napalm placement
+  can change realized damage. Candidate ranking and combined-wave allocation
+  use damage value for groups; operator snapshots expose `package_damage_values`
+  alongside the unchanged full target `value`.
 - Priority strikes target mobile units costing at least 600 metal with at most
   3 current HP per metal (including artillery and commanders meeting those
   thresholds). Wounded heavies can qualify as their health drops; fresh
@@ -108,6 +119,8 @@ motion, AA-dependent packages, casualty margins, exposure rejection, production
 reservations and deep-strike escorts.
 
 Staged headless games exercise real factory production and flight commands.
+`airstrike-likho-fencer` (one Likho) versus `airstrike-ravagers` (three healthy
+Ravagers) exercises launching a valuable partial-damage group strike.
 `airstrike-wave` versus `airstrike-wave-targets` holds a nine-bomber mixed fleet
 until the first 30-second wave check, against a Lance, Thugs, wind generators,
 a fusion and radar near the attacker. Logs expose `combined wave=...`, assigned
