@@ -42,7 +42,6 @@ impl Ai {
                     }
                     spawn.extend([
                         ("staticrearm", get_directional_point(base, center, 400.0)),
-                        ("staticradar", Vec3::xz(site.x - 300.0, site.z)),
                         ("energyfusion", get_directional_point(base, center, -300.0)),
                     ]);
                 }
@@ -94,6 +93,32 @@ impl Ai {
                     }
                 }
             }
+        }
+        // Cheats create units before their ordinary initialization callbacks
+        // settle. Apply passive state after creation, and add the observer only
+        // afterwards so a Lance cannot begin charging at it on its spawn frame.
+        if frame >= 90
+            && frame % 30 == 0
+            && matches!(
+                test.as_str(),
+                "airstrike-priority-target" | "airstrike-tough-target" | "airstrike-fencer" | "airstrike-shieldball"
+            )
+        {
+            for u in self.cb.team_units() {
+                if springai::reserved::is_reserved(self.cb, u.id()) {
+                    springai::reserved::as_owner(|| {
+                        u.stop(0);
+                        u.set_fire_state(0, 0);
+                        u.set_move_state(0, 0);
+                    });
+                }
+            }
+        }
+        if frame == 150
+            && matches!(test.as_str(), "airstrike-likhos" | "airstrike-likho-fencer")
+            && let Some(d) = self.defs.get("staticradar")
+        {
+            self.cb.cheat_new_unit(d, Vec3::xz(site.x - 300.0, site.z));
         }
         if frame % 300 == 0 {
             for r in [self.metal, self.energy] {
