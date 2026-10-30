@@ -1,6 +1,7 @@
 //! Economy: workers and construction/reclaim/repair tasks, energy and
 //! overdrive grid, static defenses, superweapons.
 
+mod army_support;
 mod assign;
 pub mod build_ids;
 mod colonize;
@@ -47,6 +48,7 @@ pub struct EconomyManager {
     pub sparrows: Vec<Unit>,
     /// A radar built solely to morph into a Sparrow; never a coverage job.
     sparrow_radar_task: Option<TaskId>,
+    army_support: army_support::ArmySupport,
     pub effective_income_metal: f32,
     pub static_income: f32,
     pub reclaim_income: f32,
@@ -283,6 +285,7 @@ impl EconomyManager {
             cb,
             sparrows: Vec::new(),
             sparrow_radar_task: None,
+            army_support: army_support::ArmySupport::default(),
             effective_income_metal: 0.0,
             static_income: 0.0,
             reclaim_income: 0.0,
@@ -491,6 +494,7 @@ impl EconomyManager {
 
     /// Destroy a task: remaining workers end it, and it leaves every list.
     fn delete_task(&mut self, id: TaskId) {
+        self.army_support.forget_task(id);
         if self.sparrow_radar_task == Some(id) {
             self.sparrow_radar_task = None;
         }
@@ -742,6 +746,7 @@ impl Ai {
 
             // remove finished or invalidated tasks
             self.eco_clean_orders();
+            self.eco_plan_army_support();
 
             for u in &self.eco.screamers {
                 if u.stockpile_queued() < 2 {
@@ -1197,6 +1202,7 @@ impl Ai {
             }
         }
         if let Some(id) = finished {
+            self.army_support_finished(id, unit);
             if def_name == "staticradar"
                 && let Some(scout) = self.defs.get("planelightscout")
             {

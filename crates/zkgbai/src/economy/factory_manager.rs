@@ -365,6 +365,7 @@ impl Ai {
     pub fn fac_unit_created(&mut self, unit: Unit, builder: Option<Unit>) {
         self.airstrike_created(unit, builder);
         self.scouts_air_created(unit, builder);
+        self.army_support_created(unit, builder);
         if self.defs.name_of(unit) == scouts::SPARROW
             && !self.airstrike_claims(unit.id())
             && !self.eco.sparrows.contains(&unit)
@@ -690,7 +691,7 @@ impl Ai {
         // in place of a plain fighter. (Not of the scouts of the factories
         // that open with a wave of them: the QRF floor took a jump opening's
         // second Puppy for a Pyro guard.)
-        let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy")
+        let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy" | "shieldshield" | "cloakjammer")
             || choice == scouts::WIDOW
             || choice == scouts::SCYTHE
             || choice == scouts::OWL
@@ -773,8 +774,8 @@ impl Ai {
         if kind == FacKind::StriderHub {
             let site = self.fac.cb.map().find_closest_build_site(def, pos, 250.0, 3, 0);
             unit.build(def, site, 0, 0);
-        } else {
-            unit.build(def, pos, 0, 0);
+        } else if unit.build(def, pos, 0, 0) {
+            self.army_support_ordered(fac_id, def);
         }
     }
 
@@ -804,8 +805,8 @@ impl Ai {
             unit.stop(0);
             let site = self.fac.cb.map().find_closest_build_site(def, pos, 250.0, 3, 0);
             unit.build(def, site, 0, 0);
-        } else {
-            unit.build(def, pos, 0, 0);
+        } else if unit.build(def, pos, 0, 0) {
+            self.army_support_ordered(fac_id, def);
         }
     }
 
@@ -885,6 +886,10 @@ impl Ai {
             return "cloakcon";
         }
 
+        if let Some(support) = self.army_support_factory(fac) {
+            return support;
+        }
+
         if war.slasher_spam as f32 * 280.0 > fm.assault_value {
             return "cloakassault";
         }
@@ -909,16 +914,6 @@ impl Ai {
 
         if self.fac_aa_roll() {
             return "cloakaa";
-        }
-
-        // Talas (C++ port): bumped required fighter value up from 2000 and squad count up from >1.
-        if fm.has_fusion
-            && fm.num_erasers == 0
-            && fm.fighter_value > 9000.0
-            && self.squad_handler.squads.len() > 2
-            && kgb_rand() > 0.75
-        {
-            return "cloakjammer";
         }
 
         if income > 15.0 && kgb_rand() > 0.95 - f64::from(tf / 20.0) {
@@ -1050,6 +1045,10 @@ impl Ai {
             return "shieldcon";
         }
 
+        if let Some(support) = self.army_support_factory(fac) {
+            return support;
+        }
+
         let slasher_value = war.slasher_spam as f32 * 140.0;
         if slasher_value > fm.assault_value && slasher_value > war.enemy_porc_value {
             return "shieldassault";
@@ -1101,17 +1100,6 @@ impl Ai {
                 || kgb_rand() < f64::from(tf * (1.0 - (fm.num_rackets as f32 * 350.0) / war.enemy_heavy_porc_value)))
         {
             return "shieldarty";
-        }
-
-        if fm.has_fusion
-            && fm.num_felons > 0
-            && ((fm.num_aspis < fm.num_felons && kgb_rand() > 0.5)
-                || (fm.num_aspis >= fm.num_felons && fm.num_aspis < 2 * fm.num_felons && kgb_rand() > 0.8))
-        {
-            fac.add_scout_allowance(2);
-            fac.raider_spam -= 4.0;
-            fac.expensive_raider_spam -= 2.0;
-            return "shieldshield";
         }
 
         if income > 20.0 && fm.num_felons < ((income / 20.0).floor() as i32).min(4) && kgb_rand() > 0.5 {
