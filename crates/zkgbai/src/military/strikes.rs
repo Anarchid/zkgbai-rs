@@ -1,4 +1,4 @@
-//! Dedicated assassination waves. Halberds, Dirtbags, Fleas and Scythes qualify.
+//! Dedicated assassination waves. Halberds, Dirtbags, Fleas, Darts and Scythes qualify.
 //! Halberds are borrowed from normal assault squads and returned when jobs end.
 //! Kill probability, not winning the escort fight, is the launch criterion.
 
@@ -13,6 +13,7 @@ use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod fragile;
 mod opportunities;
 mod prediction;
 mod scenario;
@@ -32,6 +33,7 @@ enum Tactic {
     Scythe,
     Dirtbag,
     Flea,
+    Dart,
 }
 impl Tactic {
     fn name(self) -> &'static str {
@@ -40,7 +42,11 @@ impl Tactic {
             Self::Scythe => "cloakheavyraid",
             Self::Dirtbag => "shieldscout",
             Self::Flea => "spiderscout",
+            Self::Dart => "vehscout",
         }
+    }
+    fn light_swarm(self) -> bool {
+        matches!(self, Self::Flea | Self::Dart)
     }
     fn fire_state(self) -> i32 {
         if matches!(self, Self::Halberd | Self::Scythe) { 0 } else { 2 }
@@ -51,6 +57,7 @@ impl Tactic {
             Self::Scythe => FacKind::Cloak,
             Self::Dirtbag => FacKind::Shield,
             Self::Flea => FacKind::Spider,
+            Self::Dart => FacKind::Veh,
         }
     }
     fn size(self, targets: usize, value: f32, cost: f32) -> usize {
@@ -59,6 +66,7 @@ impl Tactic {
             Self::Scythe => 3 * targets,
             Self::Dirtbag => (value / cost.max(1.0)).ceil() as usize,
             Self::Flea => (15 * targets).max(20),
+            Self::Dart => 20 * targets.max(1),
         }
     }
 }
@@ -66,25 +74,24 @@ impl Tactic {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Prey {
     GlassCannon,
+    Fragile,
     Defenseless,
     Commander,
     Heavy,
 }
 impl Prey {
     fn needs_stun(self, tactic: Tactic) -> bool {
-        tactic == Tactic::Flea && matches!(self, Self::Commander | Self::Heavy)
+        tactic.light_swarm() && matches!(self, Self::Commander | Self::Heavy)
     }
     fn can_requisition(self, tactic: Tactic) -> bool {
         self != Self::Commander && self.allows(tactic, true) && !self.needs_stun(tactic)
     }
     fn allows(self, tactic: Tactic, stunned: bool) -> bool {
         match self {
-            Self::GlassCannon => true,
-            Self::Defenseless => tactic == Tactic::Flea,
-            Self::Commander => {
-                matches!(tactic, Tactic::Halberd | Tactic::Dirtbag) || (tactic == Tactic::Flea && stunned)
-            }
-            Self::Heavy => tactic == Tactic::Flea && stunned,
+            Self::GlassCannon | Self::Fragile => true,
+            Self::Defenseless => tactic.light_swarm(),
+            Self::Commander => matches!(tactic, Tactic::Halberd | Tactic::Dirtbag) || (tactic.light_swarm() && stunned),
+            Self::Heavy => tactic.light_swarm() && stunned,
         }
     }
 }
@@ -187,6 +194,7 @@ impl Ai {
                     "value": j.value, "age_frames": self.frame - j.last, "cooldown": self.strike_cooling(j.pos),
                     "fresh": self.frame - j.last < SNIPER_MEMORY,
                     "flea_requires_stun": j.prey.needs_stun(Tactic::Flea),
+                    "fragile": j.prey == Prey::Fragile,
                     "stun_frames": self.strike_stun(j).map(|(_, frames)| frames),
                 })
             })
@@ -202,7 +210,7 @@ impl Ai {
                 "prediction_pending": w.query.is_some(),
             })
         });
-        serde_json::json!({ "enabled": !self.dev_off("strikes"), "jobs": jobs, "wave": wave })
+        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave })
     }
 
     /// Merge seen Phantoms with impact estimates by max, not addition: a
@@ -229,6 +237,8 @@ impl Ai {
                 Prey::Commander
             } else if glass_cannon(&e.def_name) {
                 Prey::GlassCannon
+            } else if self.strike_fragile(e) {
+                Prey::Fragile
             } else if e.ud.is_some_and(|d| self.strike_defenseless(d)) {
                 Prey::Defenseless
             } else if super::jaeger::is_heavy(e, self.metal)
@@ -310,6 +320,7 @@ impl Ai {
         if let Some(w) = self.strikes.wave.as_ref().filter(|w| {
             matches!(w.phase, Phase::Forming | Phase::Screening)
                 && w.tactic.factory() == kind
+                && self.strike_preparable(w.tactic, &w.job)
                 && (w.job.prey != Prey::Defenseless || self.strike_opportunity_clear(w.home, w.job.pos))
                 && w.job.production_pays(
                     w.tactic,
@@ -469,7 +480,7 @@ impl Ai {
                 if !self.unit_classes.no_retreat.contains(self.defs.name_of(u)) {
                     self.retreat_add_coward(u);
                 }
-                if matches!(self.defs.name_of(u), "spiderscout" | "shieldscout") {
+                if matches!(self.defs.name_of(u), "spiderscout" | "shieldscout" | "vehscout") {
                     self.assign_role(u, super::roles::Role::SoloRaider);
                 } else {
                     self.war.new_units.insert(id);
@@ -482,10 +493,16 @@ impl Ai {
     /// Mount target masks distinguish dedicated AA from flex-AA and exclude
     /// fake/shield-only weapons. Unknown masks/definitions fail closed.
     fn strike_defenseless(&self, def: springai::UnitDef) -> bool {
-        let Some(flea) = self.defs.get("spiderscout") else { return false };
-        let category = flea.category();
-        if category == 0 {
-            return false;
+        // Opportunities are shared by Fleas and Darts. A weapon capable of
+        // hitting either scout is a threat, even if their target masks differ.
+        let mut category = 0;
+        for name in [Tactic::Flea.name(), Tactic::Dart.name()] {
+            let Some(scout) = self.defs.get(name) else { return false };
+            let mask = scout.category();
+            if mask == 0 {
+                return false;
+            }
+            category |= mask;
         }
         for mount in def.weapon_mounts() {
             let Some(w) = mount.weapon_def() else { return false };
@@ -517,6 +534,8 @@ impl Ai {
 
     fn strike_target_allowed(&self, tactic: Tactic, j: &Job) -> bool {
         j.prey.allows(tactic, self.strike_stun(j).is_some())
+            && (j.prey != Prey::Fragile
+                || j.id.and_then(|id| self.war.targets.get(&id)).is_some_and(|e| self.strike_fragile(e)))
     }
 
     fn strike_preparable(&self, tactic: Tactic, j: &Job) -> bool {
@@ -535,11 +554,11 @@ impl Ai {
         if j.prey == Prey::Defenseless {
             return self.strike_opportunity_clear(from, j.pos);
         }
-        if tactic != Tactic::Flea {
+        if !tactic.light_swarm() {
             return true;
         }
         // A lone riot is sporadic cover; overlapping riots or unknown screens
-        // are not a reason to feed another twenty Fleas every update.
+        // are not a reason to feed another light swarm every update.
         self.war
             .targets
             .values()
@@ -591,7 +610,7 @@ impl Ai {
                 if self.strike_cooling(j.pos) {
                     continue;
                 }
-                for tactic in [Tactic::Scythe, Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea] {
+                for tactic in [Tactic::Scythe, Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea, Tactic::Dart] {
                     let base = self
                         .fac
                         .factories
@@ -665,7 +684,7 @@ impl Ai {
                 }
             }
         }
-        // A waiting/returning Flea wave may exploit a freshly stunned heavy.
+        // A waiting/returning light swarm may exploit a freshly stunned heavy.
         // No new procurement for this short window; keep the full-wave rule.
         if let Some(mut w) = self.strikes.wave.take() {
             if matches!(w.phase, Phase::Forming | Phase::Screening) {
@@ -693,7 +712,7 @@ impl Ai {
                     w.query = None;
                 }
             }
-            if w.tactic == Tactic::Flea && w.phase != Phase::Diving {
+            if w.tactic.light_swarm() && w.phase != Phase::Diving {
                 let positions: Vec<_> = w
                     .members
                     .iter()
@@ -710,11 +729,11 @@ impl Ai {
                     j.prey.needs_stun(w.tactic)
                         && j.id != w.job.id
                         && !self.strike_cooling(j.pos)
-                        && positions.len() >= j.size(Tactic::Flea, 1.0)
+                        && positions.len() >= j.size(w.tactic, 1.0)
                         && self.strike_suitable(w.tactic, j, from)
                 }) {
-                    self.log(&format!("strikes: Flea wave pounces on stunned {}", j.name));
-                    w.needed = j.size(Tactic::Flea, 1.0);
+                    self.log(&format!("strikes: {} wave pounces on stunned {}", w.tactic.name(), j.name));
+                    w.needed = j.size(w.tactic, 1.0);
                     w.job = j;
                     w.home = from;
                     w.phase = Phase::Forming;
@@ -836,7 +855,11 @@ impl Ai {
                 None
             };
             if let Some(next) = next_soft {
-                self.log(&format!("strikes: Fleas continue through defenseless formation onto {}", next.name));
+                self.log(&format!(
+                    "strikes: {} continue through defenseless formation onto {}",
+                    w.tactic.name(),
+                    next.name
+                ));
                 w.job = next;
                 w.since = frame;
             } else if dead && w.job.phantom() && w.job.count > 0 {
@@ -854,6 +877,8 @@ impl Ai {
                         "target killed"
                     } else if defended {
                         "opportunity now defended"
+                    } else if w.job.prey == Prey::Fragile && !self.strike_target_allowed(w.tactic, &w.job) {
+                        "fragile target no longer eligible"
                     } else if !self.strike_target_allowed(w.tactic, &w.job) {
                         "stun window closed"
                     } else {
@@ -953,7 +978,7 @@ impl Ai {
             let sweep_radius = if w.tactic == Tactic::Scythe { 400.0 } else { 200.0 };
             let sweep = if searching { (angle.cos() * sweep_radius, angle.sin() * sweep_radius) } else { (0.0, 0.0) };
             // Once it is revealed, every member must enter firing range; a
-            // permanent wide grid would leave the outside Fleas/Dirtbags idle.
+            // permanent wide grid would leave the outside swarm members idle.
             let spacing = if w.tactic != Tactic::Halberd && matches!(w.phase, Phase::Forming | Phase::Returning) {
                 staging::MUSTER_SPACING
             } else if w.phase == Phase::Diving && visible.is_some() {
@@ -1090,7 +1115,7 @@ mod tests {
             name: "dyntrainer_recon_base".into(),
             prey: Prey::Commander,
         };
-        for tactic in [Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea, Tactic::Scythe] {
+        for tactic in [Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea, Tactic::Dart, Tactic::Scythe] {
             assert!(!Prey::Commander.can_requisition(tactic));
             assert!(!commander.production_pays(tactic, 30.0));
             assert!(Prey::GlassCannon.can_requisition(tactic));
@@ -1120,6 +1145,36 @@ mod tests {
     }
 
     #[test]
+    fn darts_can_spend_more_than_a_phantom_but_not_procure_for_stuns_or_cheap_raids() {
+        let mut job = Job {
+            id: None,
+            pos: Vec3::ZERO,
+            last: 0,
+            count: 1,
+            value: 750.0,
+            name: "cloaksnipe".into(),
+            prey: Prey::GlassCannon,
+        };
+        assert_eq!(Tactic::Dart.factory(), FacKind::Veh);
+        assert_eq!(job.size(Tactic::Dart, 40.0), 20);
+        assert!(job.production_pays(Tactic::Dart, 40.0)); // 800 metal is acceptable.
+        job.count = 2;
+        assert_eq!(job.size(Tactic::Dart, 40.0), 40);
+        for prey in [Prey::Commander, Prey::Heavy] {
+            assert!(!prey.allows(Tactic::Dart, false));
+            assert!(prey.allows(Tactic::Dart, true));
+            assert!(prey.needs_stun(Tactic::Dart));
+            assert!(!prey.can_requisition(Tactic::Dart));
+        }
+        job.name = "vehaa".into();
+        job.prey = Prey::Defenseless;
+        assert!(job.prey.allows(Tactic::Dart, false));
+        assert!(!job.production_pays(Tactic::Dart, 40.0));
+        job.value = 800.0;
+        assert!(job.production_pays(Tactic::Dart, 40.0));
+    }
+
+    #[test]
     fn inferred_phantom_death_is_recognized_before_acquisition() {
         let mut job = Job {
             id: None,
@@ -1145,6 +1200,7 @@ mod tests {
         assert_eq!(Tactic::Halberd.fire_state(), 0);
         assert_eq!(Tactic::Scythe.fire_state(), 0);
         assert_eq!(Tactic::Flea.fire_state(), 2);
+        assert_eq!(Tactic::Dart.fire_state(), 2);
         assert_eq!(Tactic::Dirtbag.fire_state(), 2);
     }
 

@@ -1,6 +1,6 @@
 # Assassination waves
 
-The controller accepts Halberds, Dirtbags, Fleas and Scythes. It flags commanders,
+The controller accepts Halberds, Dirtbags, Fleas, Darts and Scythes. It flags commanders,
 Phantoms, Lances, Firewalkers, Merlins and Tremors, and remembered Phantom firing
 areas. It borrows eligible existing units from ordinary handlers, requests only
 missing units from an existing factory, gathers the full wave, dives, searches,
@@ -12,7 +12,7 @@ ordinary retreat handler while committed.
 Commanders never requisition strike units, regardless of tactic or paralysis.
 They are opportunities for an already available full wave only; neither an early
 sighting nor a waiting/returning wave can start commander-driven production.
-Halberds and Dirtbags can use such opportunities without a stun; Fleas still
+Halberds and Dirtbags can use such opportunities without a stun; Fleas and Darts
 require one.
 
 While Phantom evidence remains within the three-minute memory, an existing hover
@@ -23,9 +23,12 @@ These units join ordinary assault squads until a strike needs them. Active wave
 shortfalls retain their immediate procurement priority.
 
 Sizing uses live definitions: 5–10 Halberds; the targets' metal cost in Dirtbags
-(25 for one 750-metal Phantom with 30-metal Dirtbags); `max(20, 15 * count)` Fleas.
+(25 for one 750-metal Phantom with 30-metal Dirtbags); `max(20, 15 * count)` Fleas; 20 Darts per estimated Phantom (20 for other targets).
+The 800-metal Dart wave may exceed one Phantom's metal cost: killing it justifies
+that expense. Darts borrow ordinary raiders or requisition from an existing Rover
+factory, fire at will, and return to solo-raider duty after a job.
 There is one active wave, bounded to 128 members. Larger jobs are skipped rather
-than sent with an undersized wave. Fleas require at most one known riot/unknown
+than sent with an undersized wave. Fleas and Darts require at most one known riot/unknown
 screen within 600 elmos. A completed attempt gives the area a 90-second cooldown.
 
 `Sweeps` estimates count from the maximum number of impacts within a reload,
@@ -65,18 +68,33 @@ simulation and the inherited model's Python parity fixtures.
 
 The headless scenarios use an explicit approximate fix, an actually cloaked
 Phantom, and actual engine movement and firing. Run `tools/arena/match.sh` with
-`test=assassin-halberd`, `assassin-dirtbag`, or `assassin-flea` against
+`test=assassin-halberd`, `assassin-dirtbag`, `assassin-flea`, or `assassin-dart` against
 `test=assassin-target`; `assassin-support` against `assassin-target2` exercises
 Badger, Firewalker and Inferno support. These isolate controller behavior; they
 do not measure noisy bearing accuracy, escorted dives or economic performance.
 
-## Flea finishers and forward readiness
+## Wounded valuable targets
 
-Fleas still attack glass cannons directly. Commanders require a currently visible,
+`strikefragile` is on by default; `disable=strikefragile` or the operator toggle
+turns this additional target class off. A visible non-riot ground unit worth at
+least 600 metal qualifies when its current HP / metal is at most half the full-health
+Lance's HP / metal. Both the target cost and Lance reference come from live unit
+definitions. The normal assassination predictor still decides whether to dive;
+qualifying wounded heavies do not require paralysis. All five tactics may recruit
+for these jobs. Commanders keep their existing rules and never drive procurement.
+
+The controller rechecks eligibility before procurement and launch, and during the
+dive. Repair above the threshold, lost LOS or disabling the switch ends this
+opportunity. Existing named artillery jobs and stun-dependent jobs retain their
+own eligibility rules. The operator's strike status marks these jobs as `fragile`.
+
+## Light-swarm finishers and forward readiness
+
+Fleas and Darts attack glass cannons directly. Commanders require a currently visible,
 paralyzed target, and other mobile heavies (the jaeger classification) become
-Flea-only opportunities during paralysis. A Widow hunt/ambush warns an existing
-Flea wave to muster before the stun lands. These transient jobs require a full
-existing wave; they do not order new Fleas. Waiting or returning Flea waves may
+light-swarm opportunities during paralysis even if they do not meet the fragile threshold. A Widow hunt/ambush warns an existing
+Flea or Dart wave to muster before the stun lands. These transient jobs require a full
+existing wave; they do not order new Fleas or Darts. Waiting or returning Flea or Dart waves may
 switch to one, but committed dives keep their target. Any observed EMP qualifies;
 the AI does not need to attribute the stun to a particular Widow.
 
@@ -89,10 +107,12 @@ not assumed permanently disabled.
 Waves stage toward the nearest friendly front, normally 250–900 elmos behind it,
 and prefer a point 600–950 from the job where both constraints permit it. Threat
 and terrain checks can retain the previous staging point when no safe forward
-point exists. Fleas and Dirtbags screen in a tangent line up to 1600 elmos wide
+point exists. Phantom staging keeps the muster outside weapon range around the
+estimated fix, even when only an inferred fix exists and the threat map has no
+contact. Fleas, Darts and Dirtbags screen in a tangent line up to 1600 elmos wide
 while evidence is quiet. Fresh activity (45 seconds) or a Widow hunt brings them
 into a compact muster before a call; launching still requires a fresh fix (20
-seconds), all members gathered and a successful prediction. Bot dives advance as
+seconds), all members gathered and a successful prediction. Swarm dives advance as
 a line, converging to focus a revealed target; Halberds retain pack pacing.
 
 `assassin-widow` versus `assassin-heavy` or `assassin-commander` exercises a real
@@ -104,15 +124,15 @@ produce an opportunistic strike job or dive. `assassin-aa-late-guard` adds the
 Lotus after launch and must end that dive when the new threat is observed.
 
 Defenseless ground targets, including dedicated AA formations and unarmed economy,
-are Flea opportunities without a stun only when both the target area and the
+are Flea and Dart opportunities without a stun only when both the target area and the
 approach have no known threats. Classification uses real weapon mount masks
-against the Flea category, not an AA tooltip; flex-AA and ground weapons are
+against both scout categories, not an AA tooltip; flex-AA and ground weapons are
 still dangerous. Even one escort, turret covering the route, unidentified nearby
 contact or inferred Phantom excludes an opportunistic job. Friendly superiority
 does not cancel enemy threat. Dedicated Phantom/artillery assassination rules
 remain separate. Nearby soft targets share a value budget: an existing wave
 can raid a cheap target, but production requires at least the whole wave's cost
-in target value. Twenty Fleas sweep a soft formation, continuing to nearby
+in target value. Twenty Fleas or Darts sweep a soft formation, continuing to nearby
 eligible targets after each kill. Enemy snapshot weapons use the same target
 masks; escorts remain in the prediction and riot-cover checks.
 
@@ -145,3 +165,9 @@ subsequent targets in a formation must pass the same checks. Checks use remember
 weapons/ranges plus a clearance margin around the direct approach, and are
 repeated from actual member positions during movement; unseen threats and engine
 pathing detours cannot be ruled out in advance.
+
+`assassin-dart-opportunity` offers 20 ordinary Darts to the selector. Against
+`assassin-aa` it exercises recruitment, firing and release; against
+`assassin-aa-guarded` it checks the same threat-free policy as Fleas.
+
+The Phantom fixture stays at its seeded firing source, cloaked and firing normally.

@@ -1,5 +1,5 @@
 //! Reproducible controller smoke test: `test=assassin-halberd` (or dirtbag,
-//! flea) versus `test=assassin-target` on a flat map. A single approximate
+//! flea or dart) versus `test=assassin-target` on a flat map. A single approximate
 //! fix is seeded; the target must actually be found, decloaked and killed.
 use super::*;
 impl Ai {
@@ -12,23 +12,26 @@ impl Ai {
                 .friendly_units()
                 .iter()
                 .filter(|u| {
-                    self.defs.name_of(**u) == "spiderscout"
+                    matches!(self.defs.name_of(**u), "spiderscout" | "vehscout")
                         && u.health() > 0.0
                         && !self.fighters.contains_key(&u.id())
                         && !self.war.new_units.contains(&u.id())
                         && self.role_of(u.id()).is_none()
                 })
                 .count();
-            self.log(&format!("assassin-test: orphaned Fleas={orphaned}; {}", self.strikes_status()));
+            self.log(&format!("assassin-test: orphaned swarm scouts={orphaned}; {}", self.strikes_status()));
         }
-        if matches!(test, "assassin-widow" | "assassin-no-widow") && frame == 90 {
+        if matches!(test, "assassin-widow" | "assassin-no-widow" | "assassin-dart-opportunity") && frame == 90 {
             // UnitFinished has now run: detach the staged Fleas from automatic
             // picket claims and offer a real ordinary raider force to strikes.
             for u in self
                 .cb
                 .friendly_units()
                 .into_iter()
-                .filter(|u| self.defs.name_of(*u) == "spiderscout")
+                .filter(|u| {
+                    self.defs.name_of(*u)
+                        == if test == "assassin-dart-opportunity" { "vehscout" } else { "spiderscout" }
+                })
                 .collect::<Vec<_>>()
             {
                 self.assign_role(u, super::super::roles::Role::SoloRaider);
@@ -98,9 +101,10 @@ impl Ai {
             }
             return;
         }
-        if test == "assassin-widow" || test == "assassin-no-widow" {
+        if matches!(test, "assassin-widow" | "assassin-no-widow" | "assassin-dart-opportunity") {
             let home = Vec3::xz(center.x, center.z - 350.0);
-            if let Some(def) = self.defs.get("spiderscout") {
+            let scout = if test == "assassin-dart-opportunity" { "vehscout" } else { "spiderscout" };
+            if let Some(def) = self.defs.get(scout) {
                 for i in 0..20 {
                     let at = Vec3::xz(home.x + (i % 5) as f32 * 35.0, home.z + (i / 5) as f32 * 35.0);
                     if let Some(u) = self.cb.cheat_new_unit(def, at) {
@@ -131,7 +135,7 @@ impl Ai {
                 u.set_fire_state(0, 0);
                 u.set_move_state(0, 0);
             }
-            self.log("assassin-test: 20 ordinary Fleas await a stunned finisher target");
+            self.log(&format!("assassin-test: 20 ordinary {scout} await a strike opportunity"));
             return;
         }
         if matches!(test, "assassin-target" | "assassin-target2" | "assassin-lance") {
@@ -144,6 +148,12 @@ impl Ai {
                     if let Some(other) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z)) {
                         other.set_move_state(0, 0);
                     }
+                }
+                if name == "cloaksnipe" {
+                    // Keep the firing source at the seeded fix; normal initial
+                    // idle orders must not walk the fixture back to its base.
+                    u.set_fire_state(2, 0);
+                    springai::reserved::reserve(self.cb, u.id());
                 }
                 self.log(&format!("assassin-test: {name} {} at {:.0},{:.0}", u.id(), pos.x, pos.z));
             }
@@ -172,10 +182,14 @@ impl Ai {
             "assassin-scythe" | "assassin-scythe-lance" => Tactic::Scythe,
             "assassin-dirtbag" => Tactic::Dirtbag,
             "assassin-flea" => Tactic::Flea,
+            "assassin-dart" => Tactic::Dart,
             _ => return,
         };
         let Some(def) = self.defs.get(tactic.name()) else { return };
-        let home = Vec3::xz(center.x, center.z - 700.0);
+        // Start the Dart muster outside sniper reach; entering that range is
+        // the committed dive, not part of assembling the test force.
+        let back = if tactic == Tactic::Dart { 1500.0 } else { 700.0 };
+        let home = Vec3::xz(center.x, center.z - back);
         let target_name = if test == "assassin-scythe-lance" { "hoverarty" } else { "cloaksnipe" };
         let cost = self.defs.get(target_name).map_or(750.0, |d| d.cost(self.metal));
         let count = tactic.size(1, cost, def.cost(self.metal));

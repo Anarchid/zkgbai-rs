@@ -118,6 +118,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("dodge", "Army", "cloaked jaegers step (Skuttles jump) out of sight of enemies coming their way"),
     ("jaegerreserve", "Army", "the energy reserve asked of the game covers the jaegers' cloaks"),
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
+    (
+        "strikefragile",
+        "Army",
+        "strike non-riots worth at least 600 metal at half a healthy Lance HP/metal or less; default on",
+    ),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     ("firesquads", "Army", "skirmisher-heavy assault squads keep formation and range, evade or commit together"),
     ("fightsim", "Army", "the fight predictor drives squads"),
