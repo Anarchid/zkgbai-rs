@@ -27,6 +27,12 @@ Layout
 | `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. `luaui/gui_zkgbai_operator.lua`: the same in the game, as a LuaUI widget. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
 
+Above 2000 projected metal per square kiloelmo, each full 2000 metal of completed ground
+combat units allows one Aspis or Iris (a shared allowance). Existing shield/cloak factories
+supply them; otherwise constructors build dedicated Aegis/Cornea statics and morph them.
+Support units do not contribute to the army budget. Nanoframes, pending factory orders,
+construction jobs and active morphs reserve slots; ordinary static defenses are left in place.
+
 Gate fortification scores the direct route and equidistant frontier using ground travel between
 our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
 gate's value; distance from home and constructor travel reduce it sharply. The planner compares
