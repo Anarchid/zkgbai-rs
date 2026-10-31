@@ -182,6 +182,7 @@ pub struct Ai {
     pub qrf: crate::military::qrf::Qrf,
     pub firefighters: crate::military::firefighters::Firefighters,
     pub raid_test: crate::military::raid_test::RaidTest,
+    pub stomp_test: crate::military::stomp_test::StompTest,
     pub jumps: Jumps,
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
@@ -304,6 +305,7 @@ impl SkirmishAi for Ai {
             qrf: Default::default(),
             firefighters: Default::default(),
             raid_test: Default::default(),
+            stomp_test: Default::default(),
             jumps: Jumps::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
