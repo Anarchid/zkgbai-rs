@@ -47,7 +47,15 @@ impl Ai {
             for u in self.cb.team_units() {
                 if springai::reserved::is_reserved(self.cb, u.id()) {
                     springai::reserved::as_owner(|| {
-                        u.stop(0);
+                        if matches!(self.defs.name_of(u), "planescout" | "gunshipheavyskirm") {
+                            // A stopped Owl lands and loses its airborne observation.
+                            // Keep both observer and quarry aloft during this test.
+                            u.set_idle_mode(0, 0);
+                            let dx = if (frame / 150) % 2 == 0 { -200.0 } else { 200.0 };
+                            u.move_to(Vec3::xz(site.x + dx, site.z), 0);
+                        } else {
+                            u.stop(0);
+                        }
                         u.set_fire_state(0, 0);
                     });
                 } else if matches!(frame, 90 | 930) && matches!(self.defs.name_of(u), "bomberprec" | "bomberheavy") {
@@ -63,7 +71,14 @@ impl Ai {
                     .team_units()
                     .into_iter()
                     .filter(|u| matches!(self.defs.name_of(*u), "staticmex" | "energysolar" | "gunshipheavyskirm"))
-                    .map(|u| (u.id(), self.defs.name_of(u).to_owned(), u.health()))
+                    .map(|u| {
+                        (
+                            u.id(),
+                            self.defs.name_of(u).to_owned(),
+                            u.health(),
+                            u.pos().y - map.height_at(u.pos().x, u.pos().z),
+                        )
+                    })
                     .collect();
                 self.log(&format!("targeting-test: targets {targets:?}"));
             } else {
