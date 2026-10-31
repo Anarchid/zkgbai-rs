@@ -149,14 +149,14 @@ struct Stats {
 }
 
 /// One or more raids a team marks.
-struct Target {
+pub(super) struct Target {
     /// Indices into `qrf.groups`.
-    groups: Vec<usize>,
-    center: Vec3,
-    power: f32,
+    pub(super) groups: Vec<usize>,
+    pub(super) center: Vec3,
+    pub(super) power: f32,
     /// Threatened assets: index into `qrf.assets`, the raid's seconds.
-    threatened: Vec<(usize, f32)>,
-    urgency: f32,
+    pub(super) threatened: Vec<(usize, f32)>,
+    pub(super) urgency: f32,
 }
 
 /// The assignment of rows (teams) to distinct columns (targets), one per
@@ -311,7 +311,10 @@ impl Ai {
             targets.push(Target { groups: vec![gi], center: g.center, power: g.power, threatened, urgency });
         }
         // More raids than teams: pair the closest raids up.
-        while targets.len() > teams.len() && targets.len() >= 2 {
+        let predict_small = !self.dev_off("qrfpredict")
+            && teams.len() <= super::predict::MAX_TEAMS
+            && targets.len() <= super::predict::MAX_RAIDS;
+        while !predict_small && targets.len() > teams.len() && targets.len() >= 2 {
             let mut best = (f32::INFINITY, 0, 1);
             for i in 0..targets.len() {
                 for j in i + 1..targets.len() {
@@ -414,33 +417,57 @@ impl Ai {
                 }
             }
         }
-        let mut plan: Vec<(usize, usize)> =
-            (best_match(&cost).into_iter()).filter(|&(a, b)| allowed[a][b]).map(|(a, b)| (team_ids[a], b)).collect();
+        let prediction = if predict_small {
+            self.qrf_predict_plan(&teams, &team_ids, &targets, &fields, &allowed)
+        } else {
+            super::predict::Plan::Legacy
+        };
+        let predicted = matches!(prediction, super::predict::Plan::Ready(_));
+        let plan = match prediction {
+            super::predict::Plan::Pending => return,
+            super::predict::Plan::Ready(plan) => plan,
+            super::predict::Plan::Legacy => {
+                let mut legacy: Vec<(usize, usize)> = (best_match(&cost).into_iter())
+                    .filter(|&(a, b)| allowed[a][b])
+                    .map(|(a, b)| (team_ids[a], b))
+                    .collect();
+                let mut free: BTreeSet<usize> = all_teams.keys().copied().collect();
+                for (team, _) in &legacy {
+                    free.remove(team);
+                }
+                for (ti, t) in targets.iter().enumerate() {
+                    let mine: f32 =
+                        legacy.iter().filter(|p| p.1 == ti).map(|p| self.qrf_team_power(&teams[&p.0])).sum();
+                    if free.is_empty() || t.power < DOUBLE_RATIO * mine {
+                        continue;
+                    }
+                    let cooling = |f: usize, ai: &Ai| {
+                        f >= MOON
+                            && (ai.qrf.draft_released.get(&((f - MOON) as SquadId)))
+                                .is_some_and(|r| frame - r < DRAFT_COOLDOWN)
+                    };
+                    let Some(team) = (free.iter().copied())
+                        .filter(|&f| {
+                            teams.contains_key(&f) && self.qrf_mark_allows(f, t) && (f < MOON || !cooling(f, self))
+                        })
+                        .min_by(|&a, &b| {
+                            let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
+                            let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);
+                            da.total_cmp(&db)
+                        })
+                    else {
+                        break;
+                    };
+                    free.remove(&team);
+                    legacy.push((team, ti));
+                }
+
+                legacy
+            }
+        };
         let mut free: BTreeSet<usize> = all_teams.keys().copied().collect();
         for (team, _) in &plan {
             free.remove(team);
-        }
-        for (ti, t) in targets.iter().enumerate() {
-            let mine: f32 = plan.iter().filter(|p| p.1 == ti).map(|p| self.qrf_team_power(&teams[&p.0])).sum();
-            if free.is_empty() || t.power < DOUBLE_RATIO * mine {
-                continue;
-            }
-            let cooling = |f: usize, ai: &Ai| {
-                f >= MOON
-                    && (ai.qrf.draft_released.get(&((f - MOON) as SquadId))).is_some_and(|r| frame - r < DRAFT_COOLDOWN)
-            };
-            let Some(team) = (free.iter().copied())
-                .filter(|&f| teams.contains_key(&f) && self.qrf_mark_allows(f, t) && (f < MOON || !cooling(f, self)))
-                .min_by(|&a, &b| {
-                    let da = distance(self.qrf_team_pos(&teams[&a]).0, t.center);
-                    let db = distance(self.qrf_team_pos(&teams[&b]).0, t.center);
-                    da.total_cmp(&db)
-                })
-            else {
-                break;
-            };
-            free.remove(&team);
-            plan.push((team, ti));
         }
 
         // Just enough for each raid: a team keeps its members nearest the
@@ -448,7 +475,7 @@ impl Ai {
         // rest split off, free for the next raid or the screen (user,
         // 2026-10-26: four Pyros chased one Flea, and the next Flea found
         // the whole force deciding where to go).
-        if !self.dev_off("justenough") {
+        if !predicted && !self.dev_off("justenough") {
             for &(team, ti) in &plan {
                 if team >= MOON || self.qrf.roles.contains_key(&team) {
                     continue;
@@ -540,7 +567,7 @@ impl Ai {
                     .min_by(|a, b| distance(a.center, pos).total_cmp(&distance(b.center, pos)))
                     .map(|g| g.center + g.vel * 1.5)
             });
-            let strong = tune.strike > 0.0 && power >= tune.strike * t.power;
+            let strong = tune.strike > 0.0 && (predicted || power >= tune.strike * t.power);
             // Stronger, and ahead of the raid on its way: meet it there.
             let near = near.or_else(|| {
                 if !tune.intercept || !strong {
@@ -553,6 +580,19 @@ impl Ai {
                 })?;
                 let gf = group_fields[g].as_ref()?;
                 self.qrf_mark_intercept(&self.qrf.groups[g], gf, tf, &t.threatened)
+            });
+            // Match the conduct evaluated by the defense rollout: approach
+            // the assigned raid even when it is outside the old strike leash.
+            let near = near.or_else(|| {
+                predicted.then(|| {
+                    let g = t
+                        .groups
+                        .iter()
+                        .map(|&g| &self.qrf.groups[g])
+                        .min_by(|a, b| distance(a.center, pos).total_cmp(&distance(b.center, pos)))
+                        .unwrap();
+                    g.center + g.vel
+                })
             });
             let raid_power = t.power;
             match near {
