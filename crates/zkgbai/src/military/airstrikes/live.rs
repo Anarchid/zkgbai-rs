@@ -8,6 +8,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod defense;
+mod retarget;
 mod speculation;
 mod wave;
 use defense::FireSource;
@@ -92,6 +93,7 @@ impl TargetMemory {
 struct Sortie {
     memory: TargetMemory,
     searched_since: Option<i32>,
+    retargeted: bool,
     wave: Option<WaveFlight>,
     job: Mission,
     members: Vec<i32>,
@@ -305,6 +307,25 @@ impl Ai {
         )
     }
 
+    fn airstrike_blast(&self) -> Blast {
+        self.defs
+            .get(Plane::Likho.name())
+            .into_iter()
+            .flat_map(|d| d.weapon_mounts())
+            .filter_map(|m| m.weapon_def())
+            .filter(|w| !w.name().contains("fake"))
+            .filter_map(|w| {
+                w.damage_types().first().copied().map(|damage| Blast {
+                    damage,
+                    radius: w.area_of_effect(),
+                    edge: w.edge_effectiveness(),
+                })
+            })
+            .filter(|b| b.damage > 0.0 && b.radius > 0.0)
+            .max_by(|a, b| a.damage.total_cmp(&b.damage))
+            .unwrap_or_default()
+    }
+
     pub fn bomber_update(&mut self, frame: i32) {
         if frame % PERIOD != self.offset % PERIOD {
             return;
@@ -340,23 +361,7 @@ impl Ai {
         let defense_air = self.airstrike_field(home, &[]);
         let contacts = self.airstrike_contacts();
         self.bomber_handler.refresh_priority_memory(&contacts, frame);
-        let blast = self
-            .defs
-            .get(Plane::Likho.name())
-            .into_iter()
-            .flat_map(|d| d.weapon_mounts())
-            .filter_map(|m| m.weapon_def())
-            .filter(|w| !w.name().contains("fake"))
-            .filter_map(|w| {
-                w.damage_types().first().copied().map(|damage| Blast {
-                    damage,
-                    radius: w.area_of_effect(),
-                    edge: w.edge_effectiveness(),
-                })
-            })
-            .filter(|b| b.damage > 0.0 && b.radius > 0.0)
-            .max_by(|a, b| a.damage.total_cmp(&b.damage))
-            .unwrap_or_default();
+        let blast = self.airstrike_blast();
         let mut jobs = missions(&contacts, home, frame);
         jobs.extend(self.airstrike_speculative_jobs());
         let had_jobs = !jobs.is_empty();
@@ -384,7 +389,8 @@ impl Ai {
             let choices: Vec<_> = packages(&job, risk, self.bomber_handler.raven_damage.unwrap_or(800.0))
                 .into_iter()
                 .filter(|p| {
-                    p.iter().all(|(k, _)| self.defs.get(k.name()).is_some_and(|d| risk.survives(d.health(), d.speed())))
+                    p.iter()
+                        .all(|(k, _)| self.defs.get(k.name()).is_some_and(|d| k.survives(risk, d.health(), d.speed())))
                 })
                 .collect();
             // Seeing a still-existing job become unsafe invalidates its memory
@@ -424,7 +430,7 @@ impl Ai {
                     allowed.contains(pkg)
                         && pkg
                             .iter()
-                            .all(|(k, _)| self.defs.get(k.name()).is_some_and(|d| r.survives(d.health(), d.speed())))
+                            .all(|(k, _)| self.defs.get(k.name()).is_some_and(|d| k.survives(r, d.health(), d.speed())))
                 })
             })
             .map(|(k, _)| *k)
@@ -489,6 +495,8 @@ impl Ai {
         let aircraft: BTreeMap<_, _> = self.bomber_handler.units.iter().map(|(&id, a)| (id, a.unit)).collect();
         for mut sortie in sorties {
             let acquired = self.airstrike_acquire(&mut sortie, &occupied);
+            let retargeted = self.airstrike_retarget(&mut sortie, home, air, interceptors, &occupied);
+            let acquired = acquired || retargeted;
             occupied.extend(sortie.job.targets.iter().copied());
             let hunting = sortie.job.kind == MissionKind::Speculative;
             let target = self.war.targets.get(&sortie.job.target);
@@ -510,7 +518,7 @@ impl Ai {
                 .members
                 .iter()
                 .filter_map(|id| self.bomber_handler.units.get(id))
-                .find(|a| a.kind != Plane::Sparrow)
+                .find(|a| a.kind != Plane::Sparrow && a.unit.rules_param_float("noammo", 0.0) == 0.0)
                 .map(|a| a.unit.pos())
                 .unwrap_or(home);
             let approach = self.airstrike_field(from, enemies);
@@ -771,7 +779,7 @@ impl Ai {
             // A healthy aircraft may be circling near the rally rather than
             // exactly at home. Check its actual first leg, not an assumed start.
             let risk = round_trip(self.airstrike_path_risk(a.unit.pos(), &plan.route, &interceptors), exit);
-            risk.intercepted || !a.unit.def().is_some_and(|d| risk.survives(a.unit.health(), d.speed()))
+            risk.intercepted || !a.unit.def().is_some_and(|d| a.kind.survives(risk, a.unit.health(), d.speed()))
         }) {
             return false;
         }
@@ -860,6 +868,7 @@ impl Ai {
         self.bomber_handler.sorties.push(Sortie {
             memory: TargetMemory { last_contact: frame, destroyed: false },
             searched_since: None,
+            retargeted: false,
             wave,
             job: job.clone(),
             members: members.to_vec(),
@@ -946,6 +955,7 @@ fn mission_view(
         "inference": job.inference.as_ref().map(|f| json!({"id": f.id, "def": f.def,
             "pos": [f.pos.x, f.pos.z], "uncertainty": f.uncertainty, "last": f.last})),
         "last_contact": sortie.map(|s| s.memory.last_contact),
+        "retargeted": sortie.is_some_and(|s| s.retargeted),
         "seeking_contact": job.kind == MissionKind::Speculative,
         "optional_escort": job.optional_escort().then_some(Plane::Sparrow.name()),
         "pos": [job.pos.x, job.pos.z], "seen": job.seen,
@@ -1068,6 +1078,7 @@ mod operator_tests {
         h.sorties.push(Sortie {
             memory: TargetMemory::default(),
             searched_since: None,
+            retargeted: false,
             wave: None,
             job,
             return_route: return_route(Vec3::ZERO, &route),

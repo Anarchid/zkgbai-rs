@@ -39,6 +39,13 @@ pub enum Plane {
 impl Plane {
     pub const ALL: [Self; 7] =
         [Self::Raven, Self::Phoenix, Self::Likho, Self::Magpie, Self::Raptor, Self::Odin, Self::Sparrow];
+    /// Odin's heavy airframe accepts twice the AA exposure budget. Apply
+    /// the same discount during procurement, dispatch and active flight.
+    fn survives(self, risk: Risk, health: f32, speed: f32) -> bool {
+        let damage = risk.damage(speed) * if self == Self::Odin { 0.5 } else { 1.0 };
+        damage.is_finite() && damage < health * 0.55
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Raven => "bomberprec",

@@ -7,12 +7,13 @@ impl Ai {
     pub(super) fn airstrike_hunt_scenario(&mut self, test: &str, frame: i32) {
         let map = self.cb.map();
         let site = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0 + 400.0);
+        let defender = matches!(test, "airstrike-hunt-target" | "airstrike-hunt-decoy");
         if frame == 60 {
             self.cb.cheats_set_enabled(true);
             let base = self.graph.get_ally_center();
             let mut spawn = Vec::new();
-            if test == "airstrike-hunt-target" {
-                spawn.push(("tankarty", site));
+            if defender {
+                spawn.push((if test == "airstrike-hunt-decoy" { "vehsupport" } else { "tankarty" }, site));
             } else {
                 let scout = match test {
                     "airstrike-hunt-sparrow" => Some("planelightscout"),
@@ -20,7 +21,13 @@ impl Ai {
                     _ => None,
                 };
                 let bomber = if scout.is_some() { "bomberprec" } else { "bomberheavy" };
-                for i in 0..if scout.is_some() { 4 } else { 2 } {
+                for i in 0..if scout.is_some() {
+                    4
+                } else if test == "airstrike-hunt-retarget" {
+                    1
+                } else {
+                    2
+                } {
                     spawn.push((bomber, Vec3::xz(base.x + i as f32 * 50.0, base.z + 100.0)));
                 }
                 if let Some(scout) = scout {
@@ -37,7 +44,7 @@ impl Ai {
                 if let Some(d) = self.defs.get(name) {
                     let p = map.find_closest_build_site(d, pos, 100.0, 1, 0);
                     if let Some(u) = self.cb.cheat_new_unit(d, if p.x >= 0.0 { p } else { pos }) {
-                        if name == "tankarty" || name == "staticstorage" {
+                        if matches!(name, "tankarty" | "vehsupport" | "staticstorage") {
                             u.set_fire_state(0, 0);
                             u.set_move_state(0, 0);
                             springai::reserved::reserve(self.cb, u.id());
@@ -47,9 +54,14 @@ impl Ai {
                 }
             }
         }
-        if test == "airstrike-hunt-target" {
+        if defender {
             if frame % 30 == 0 {
-                for u in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "tankarty") {
+                for u in self
+                    .cb
+                    .team_units()
+                    .into_iter()
+                    .filter(|u| matches!(self.defs.name_of(*u), "tankarty" | "vehsupport"))
+                {
                     springai::reserved::as_owner(|| {
                         u.stop(0);
                         u.set_fire_state(0, 0);
@@ -57,6 +69,12 @@ impl Ai {
                 }
             }
             return;
+        }
+        if test == "airstrike-hunt-retarget" && frame == 90 {
+            // Require an explicit planner retarget, not incidental auto-fire.
+            for u in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "bomberheavy") {
+                u.set_fire_state(0, 0);
+            }
         }
         if frame == 180 {
             let weapon = self

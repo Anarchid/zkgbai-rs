@@ -23,7 +23,7 @@ pub(super) fn enemy(id: i32) -> Contact {
 fn clear() -> Risk {
     Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 }
 }
-fn job(kind: MissionKind, hp: f32) -> Mission {
+pub(super) fn job(kind: MissionKind, hp: f32) -> Mission {
     Mission {
         kind,
         inference: None,
@@ -360,4 +360,17 @@ fn speculative_hunts_use_likhos_only_under_weak_aa() {
     risk.intercepted = true;
     assert!(packages(&hunt, risk, 800.0).is_empty());
     assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"airspeculate"));
+}
+
+#[test]
+fn odin_halves_aa_damage_without_removing_retreat_or_route_limits() {
+    let risk = Risk { burst: 4000.0, ..clear() };
+    assert!(!risk.survives(5200.0, 185.0));
+    assert!(Plane::Odin.survives(risk, 5200.0, 185.0));
+    for plane in [Plane::Raven, Plane::Likho, Plane::Phoenix, Plane::Magpie, Plane::Raptor] {
+        assert!(!plane.survives(risk, 5200.0, 185.0));
+    }
+    assert!(!Plane::Odin.survives(Risk { burst: 6000.0, ..clear() }, 5200.0, 185.0));
+    assert!(!Plane::Odin.survives(Risk { exposure: f32::INFINITY, ..clear() }, 5200.0, 185.0));
+    assert!(!job(MissionKind::Thermite, 1000.0).flight_safe(Plane::Odin, clear(), 2400.0, 5200.0, 185.0));
 }

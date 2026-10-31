@@ -580,6 +580,7 @@ impl Ai {
                     | "assassin-target"
                     | "assassin-target2"
                     | "airstrike-hunt-target"
+                    | "airstrike-hunt-decoy"
                     | "airstrike-wave-targets"
                     | "airstrike-farm"
                     | "airstrike-singu"
