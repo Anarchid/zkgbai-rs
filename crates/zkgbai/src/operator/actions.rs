@@ -76,7 +76,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "stakeoutqrf",
         "Defense",
-        "pickets within two Lotus ranges of raider damage to our economy immediately join QRF (default on)",
+        "pickets that can arrive and kill an economic attacker before its victim dies join QRF (default on)",
     ),
     ("anyscout", "Defense", "stakeouts take any factory's scout"),
     (
