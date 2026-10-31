@@ -890,13 +890,31 @@ impl Ai {
             let v = if v.trim().is_empty() { env.as_str() } else { v };
             matches!(v.trim().to_ascii_lowercase().as_str(), "on" | "1" | "true" | "yes")
         };
+        // Ours comes with its AIOptions.lua default filled in by the engine.
         let hivemind = on(&self.cb.option("hivemind").unwrap_or_default());
         for t in self.allies.clone() {
             let in_group = match ingroup(&script, t, "hivemind") {
-                Some(theirs) if hivemind && on(&theirs) => true,
-                Some(_) => {
-                    self.log(&format!("Allied {AI_SHORT_NAME} on team {t} plays on its own (hivemind off)."));
-                    false
+                Some(ally) => {
+                    // The script holds only what the lobby set: an ally's
+                    // option left unset takes the default in its own
+                    // AIOptions.lua, as ours did, so both sides agree.
+                    let theirs = if ally.value.trim().is_empty() {
+                        let def = self.option_default(&ally.version, "hivemind").unwrap_or_default();
+                        if !def.trim().is_empty() {
+                            self.log(&format!(
+                                "Allied {AI_SHORT_NAME} on team {t}: hivemind '{def}' by its AIOptions.lua default."
+                            ));
+                        }
+                        def
+                    } else {
+                        ally.value
+                    };
+                    if hivemind && on(&theirs) {
+                        true
+                    } else {
+                        self.log(&format!("Allied {AI_SHORT_NAME} on team {t} plays on its own (hivemind off)."));
+                        false
+                    }
                 }
                 None => false,
             };
@@ -914,6 +932,32 @@ impl Ai {
                 self.unmerged_allies += 1;
             }
         }
+    }
+
+    /// The default of option `key` in the AIOptions.lua of this AI's
+    /// `version` (ours when empty): what the engine gives an instance of
+    /// that version whose start script leaves `key` unset. Other versions
+    /// are looked for beside ours, by the version their AIInfo.lua declares
+    /// (as the engine knows them, whatever their directory is called).
+    fn option_default(&self, version: &str, key: &str) -> Option<String> {
+        use std::path::{Path, PathBuf};
+        let read = |dir: &Path, file: &str| std::fs::read_to_string(dir.join(file)).ok();
+        let declares = |dir: &Path| {
+            read(dir, "AIInfo.lua").and_then(|info| lua_def_field(&info, "version", "value")).as_deref()
+                == Some(version)
+        };
+        let ours = PathBuf::from(self.cb.config_dir()?);
+        let dir = if version.is_empty() || declares(&ours) {
+            Some(ours)
+        } else {
+            let beside = ours.parent().and_then(|p| std::fs::read_dir(p).ok());
+            beside.into_iter().flatten().filter_map(|e| Some(e.ok()?.path())).find(|p| p.is_dir() && declares(p))
+        };
+        let Some(dir) = dir else {
+            self.log(&format!("No {AI_SHORT_NAME} {version} found beside this one: its {key} option counts as unset."));
+            return None;
+        };
+        read(&dir, "AIOptions.lua").and_then(|o| lua_def_field(&o, key, "def"))
     }
 
     fn choose_start_pos(&mut self) {
@@ -1084,56 +1128,208 @@ impl Ai {
     }
 }
 
+/// Another instance of this AI, as its start-script `[AI*]` section sets it.
+#[derive(Debug, PartialEq)]
+struct Instance {
+    /// The option asked for, lowercased; empty when the script leaves it
+    /// unset (the engine then applies that version's AIOptions.lua default,
+    /// which the script does not show).
+    value: String,
+    /// Its `Version`, as written; empty when not given.
+    version: String,
+}
+
 /// Whether team `team` is controlled by another instance of this AI,
 /// according to the start script's `[AI*]` sections, and if so its option
-/// `key` (lowercased, empty when unset).
-fn ingroup(script: &str, team: i32, key: &str) -> Option<String> {
+/// `key` and version.
+fn ingroup(script: &str, team: i32, key: &str) -> Option<Instance> {
     let team_key = format!("team={team}");
     let name_key = format!("shortname={}", AI_SHORT_NAME.to_ascii_lowercase());
     let option_key = format!("{}=", key.to_ascii_lowercase());
     let mut depth = 0;
     let mut in_ai = false;
+    // The depth of the `[AI*]` header: the section's own keys sit one
+    // level in, its `[Options]` deeper.
+    let mut top = 0;
     let (mut right_id, mut right_ai) = (false, false);
-    let mut value = String::new();
+    let mut found = Instance { value: String::new(), version: String::new() };
     for raw in script.lines() {
-        let line: String = raw.trim().to_ascii_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+        let compact: String = raw.chars().filter(|c| !c.is_whitespace()).collect();
+        let line = compact.to_ascii_lowercase();
         if line.starts_with("[ai") {
             in_ai = true;
+            top = depth;
             (right_id, right_ai) = (false, false);
-            value.clear();
+            found = Instance { value: String::new(), version: String::new() };
         }
         depth += line.matches('{').count() as i32;
         depth -= line.matches('}').count() as i32;
         if in_ai {
             let kv = line.trim_end_matches(';');
-            right_id |= kv == team_key;
-            right_ai |= kv == name_key;
-            if let Some(v) = kv.strip_prefix(&option_key) {
-                value = v.to_owned();
+            if depth == top + 1 {
+                right_id |= kv == team_key;
+                right_ai |= kv == name_key;
+                if kv.starts_with("version=") {
+                    found.version = compact.trim_end_matches(';')["version=".len()..].to_owned();
+                }
+            } else if let Some(v) = kv.strip_prefix(&option_key) {
+                found.value = v.to_owned();
             }
             // The options may follow the team, so read the whole section.
-            if line.contains('}') && depth <= 1 {
+            if line.contains('}') && depth <= top {
                 if right_id && right_ai {
-                    return Some(value);
+                    return Some(found);
                 }
                 in_ai = false;
             }
         }
     }
-    (in_ai && right_id && right_ai).then_some(value)
+    (in_ai && right_id && right_ai).then_some(found)
+}
+
+/// Field `field` of the entry whose `key` is `key` in a Lua definition
+/// table such as AIOptions.lua or AIInfo.lua (`{ { key = 'k', def = 'v',
+/// ... }, ... }`): strings unquoted, numbers and booleans as written. Reads
+/// the literal tables these files hold, not Lua code.
+fn lua_def_field(lua: &str, key: &str, field: &str) -> Option<String> {
+    enum Tok {
+        Str(String),
+        Word(String),
+        Open,
+        Close,
+        Eq,
+    }
+    let b = lua.as_bytes();
+    let find = |from: usize, pat: &[u8]| b[from.min(b.len())..].windows(pat.len()).position(|w| w == pat);
+    let mut toks = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'-' if b.get(i + 1) == Some(&b'-') => {
+                // A comment: a --[[ ]] block, or to the end of the line.
+                i = if b[i + 2..].starts_with(b"[[") {
+                    find(i + 4, b"]]").map_or(b.len(), |p| i + 4 + p + 2)
+                } else {
+                    find(i, b"\n").map_or(b.len(), |p| i + p + 1)
+                };
+            }
+            q @ (b'\'' | b'"') => {
+                let mut s = Vec::new();
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' && i + 1 < b.len() {
+                        i += 1;
+                        s.push(match b[i] {
+                            b'n' => b'\n',
+                            b't' => b'\t',
+                            c => c,
+                        });
+                    } else {
+                        s.push(b[i]);
+                    }
+                    i += 1;
+                }
+                i += 1;
+                toks.push(Tok::Str(String::from_utf8_lossy(&s).into_owned()));
+            }
+            b'{' | b'}' | b'=' => {
+                toks.push(match b[i] {
+                    b'{' => Tok::Open,
+                    b'}' => Tok::Close,
+                    _ => Tok::Eq,
+                });
+                i += 1;
+            }
+            c if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' => {
+                let start = i;
+                i += 1;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || matches!(b[i], b'_' | b'.')) {
+                    i += 1;
+                }
+                toks.push(Tok::Word(lua[start..i].to_owned()));
+            }
+            _ => i += 1,
+        }
+    }
+    // The `name = value` fields of each table open at this point.
+    let mut open: Vec<Vec<(&str, &str)>> = Vec::new();
+    let mut t = 0;
+    while t < toks.len() {
+        match (&toks[t], toks.get(t + 1), toks.get(t + 2)) {
+            (Tok::Open, ..) => open.push(Vec::new()),
+            (Tok::Close, ..) => {
+                let fields = open.pop().unwrap_or_default();
+                let get = |n: &str| fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|&(_, v)| v);
+                if get("key").is_some_and(|k| k.eq_ignore_ascii_case(key))
+                    && let Some(v) = get(field)
+                {
+                    return Some(v.to_owned());
+                }
+            }
+            (Tok::Word(name), Some(Tok::Eq), Some(Tok::Str(v) | Tok::Word(v))) => {
+                if let Some(fields) = open.last_mut() {
+                    fields.push((name, v));
+                }
+                t += 3;
+                continue;
+            }
+            _ => {}
+        }
+        t += 1;
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ingroup;
+    use super::{Instance, ingroup, lua_def_field};
 
-    const SCRIPT: &str = "[GAME]\n{\n  [AI0]\n  {\n    Name=a;\n    ShortName=ZKGBAI;\n    Team=1;\n  }\n  [AI1]\n  {\n    ShortName=CircuitAI;\n    Team=2;\n  }\n  [AI2]\n  {\n    ShortName=ZKGBAI;\n    [Options]\n    {\n      Hivemind=On;\n    }\n    Team=3;\n  }\n  [TEAM1]\n  {\n    TeamLeader=0;\n  }\n}\n";
+    const SCRIPT: &str = "[GAME]\n{\n  [AI0]\n  {\n    Name=a;\n    ShortName=ZKGBAI;\n    Team=1;\n  }\n  [AI1]\n  {\n    ShortName=CircuitAI;\n    Team=2;\n  }\n  [AI2]\n  {\n    ShortName=ZKGBAI;\n    [Options]\n    {\n      Hivemind=On;\n      version=2;\n    }\n    Team=3;\n    Version=WIP-1;\n  }\n  [TEAM1]\n  {\n    TeamLeader=0;\n  }\n}\n";
+
+    fn instance(value: &str, version: &str) -> Option<Instance> {
+        Some(Instance { value: value.into(), version: version.into() })
+    }
 
     #[test]
     fn finds_teams_run_by_this_ai() {
-        assert_eq!(ingroup(SCRIPT, 1, "hivemind").as_deref(), Some(""));
+        assert_eq!(ingroup(SCRIPT, 1, "hivemind"), instance("", ""));
         assert_eq!(ingroup(SCRIPT, 2, "hivemind"), None);
-        assert_eq!(ingroup(SCRIPT, 3, "hivemind").as_deref(), Some("on"));
+        // The version keeps its case; an option of the same name is not it.
+        assert_eq!(ingroup(SCRIPT, 3, "hivemind"), instance("on", "WIP-1"));
         assert_eq!(ingroup(SCRIPT, 4, "hivemind"), None);
+    }
+
+    /// The start script Chobby writes for a skirmish: tables first, tabs.
+    #[test]
+    fn reads_chobby_scripts() {
+        let script = "[Game]\n{\n\n\t[ai0]\n\t{\n\t\t[options]\n\t\t{\n\t\t\thivemind = on;\n\t\t}\n\t\tName = ZKGBAI;\n\t\tTeam = 1;\n\t\tShortName = ZKGBAI;\n\t\tVersion = 0.5.1;\n\t}\n\n\t[ai1]\n\t{\n\t\tTeam = 2;\n\t\tShortName = ZKGBAI;\n\t\tVersion = wip;\n\t}\n\n\tmapname = Comet Catcher Redux v3.1;\n}";
+        assert_eq!(ingroup(script, 1, "hivemind"), instance("on", "0.5.1"));
+        assert_eq!(ingroup(script, 2, "hivemind"), instance("", "wip"));
+    }
+
+    #[test]
+    fn reads_option_defaults() {
+        let options = include_str!("../data/AIOptions.lua");
+        assert_eq!(lua_def_field(options, "hivemind", "def").as_deref(), Some(""));
+        assert_eq!(lua_def_field(options, "missile_silo_density", "def").as_deref(), Some("1500"));
+        // Escaped quotes in the descriptions are skipped over.
+        assert_eq!(lua_def_field(options, "colonize_policy", "def").as_deref(), Some("combined"));
+        assert_eq!(lua_def_field(options, "nosuch", "def"), None);
+        // The edit a player makes to switch it on for every instance.
+        let at = options.find("key    = 'hivemind',").expect("hivemind is declared");
+        let (head, entry) = options.split_at(at);
+        let entry = entry.replacen("key    = 'hivemind',", "key = \"hivemind\", --[[ edited ]]", 1).replacen(
+            "def    = '',",
+            "def    = 'on', -- was ''",
+            1,
+        );
+        let edited = format!("{head}{entry}");
+        assert_eq!(lua_def_field(&edited, "hivemind", "def").as_deref(), Some("on"));
+        assert_eq!(lua_def_field(&edited, "missile_silo_density", "def").as_deref(), Some("1500"));
+        // List items (nested tables with keys of their own) are not options.
+        let list = "local o = { { key = 'mode', type = 'list', def = 'b', items = { { key = 'a', name = 'A' }, { key = 'mode', name = 'M' } } } }";
+        assert_eq!(lua_def_field(list, "mode", "def").as_deref(), Some("b"));
+        let info = "local infos = {\n\t{\n\t\tkey    = 'version',\n\t\tvalue  = 'wip', -- AI version - !This comment is used for parsing!\n\t},\n}";
+        assert_eq!(lua_def_field(info, "version", "value").as_deref(), Some("wip"));
     }
 }

@@ -67,7 +67,9 @@ impl Callback {
     }
 
     /// This AI's start-script option `key` (its `[AIn] { [Options] }`
-    /// block), if set.
+    /// block). The engine fills options the script leaves unset with their
+    /// default from this AI's AIOptions.lua, so this is `None` only for
+    /// keys that file does not declare.
     pub fn option(&self, key: &str) -> Option<String> {
         let k = c_string(key);
         let v = ffi!(self, SkirmishAI_OptionValues_getValueByKey, k.as_ptr());
@@ -84,6 +86,13 @@ impl Callback {
         }
         let mut buf = vec![0u8; size as usize];
         ffi!(self, File_getContent, p.as_ptr(), buf.as_mut_ptr().cast(), size).then_some(buf)
+    }
+
+    /// The directory this AI was installed in (where its library, AIInfo.lua
+    /// and AIOptions.lua are), if the engine names one.
+    pub fn config_dir(&self) -> Option<String> {
+        let d = owned_str(ffi!(self, DataDirs_getConfigDir));
+        (!d.is_empty()).then_some(d)
     }
 
     /// This AI's own writable data directory (under the engine's write dir,
