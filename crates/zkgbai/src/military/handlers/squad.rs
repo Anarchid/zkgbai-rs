@@ -1113,21 +1113,20 @@ impl Ai {
                 let friendly = view.get_total_friendly_threat(pos);
                 let flat = view.get_effective_threat(pos) / courage > tolerance(friendly);
                 let porc = view.get_porc_threat(pos) / courage > tolerance(friendly);
-                // The fight predictor's verdict where it is on and has a
-                // fresh answer (see `fightsim::live`); the threat map's else.
-                let danger = self.fight_verdict(sid, pos, courage, flat);
-                if danger && (!self.graph.is_ally_territory(pos) || porc) {
+                let flat = flat && (!self.graph.is_ally_territory(pos) || porc);
+                let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return };
+                let block = self.incursion_block(sid);
+                let target = block.unwrap_or_else(|| self.war_best_target(leader, leader.pos(), true).0);
+                // The narrow veto also applies on home ground; it never cancels
+                // a retreat already required by the ordinary threat rule.
+                if self.fight_verdict(sid, pos, target, courage, flat) {
                     let haven = self.graph_get_closest_haven(pos);
                     self.squad_retreat_to(sid, haven);
                     return;
                 }
-                // Sent to block an incursion's way.
-                if let Some(block) = self.incursion_block(sid) {
-                    self.squad_set_target(sid, block);
-                    return;
+                if block.is_none() && target != NULLPOS {
+                    self.war_mark_target(target);
                 }
-                let Some(leader) = self.squads.get(sid).and_then(|s| s.get_leader(&self.fighters)) else { return };
-                let target = self.war_get_target(leader, true);
                 self.squad_set_target(sid, target);
             }
             _ => {}

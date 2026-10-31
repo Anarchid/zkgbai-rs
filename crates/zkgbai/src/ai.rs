@@ -40,11 +40,6 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// losing fewer; `currency` (the danger of a job on an issue's crew priced
 /// as the worker's expected loss, and the crew holding where it pays) lost
 /// its mirrors 17-23 twice where the issue clients alone won 25-15.
-/// `fightsim`: attacking squads fall back on the fight predictor's verdict
-/// (`military::fightsim`) instead of the threat map's; its first arm pending.
-/// The predictor itself runs in shadow in every game (its verdicts logged,
-/// not acted on) unless `fightshadow` is disabled; `fightmech` (on) runs
-/// its mechanics model beside it, logged only.
 /// `permanence` (the interception planner keeps unseen enemy groups 45 s,
 /// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
 /// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
@@ -64,14 +59,13 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
 /// better than both, each taking up the metal the other left.
 /// The experimental Ravager, Minotaur, raider packs and organic fire squads remain opt-in.
-pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 14] = [
     "pairs",
     "currency",
     "permanence",
     "mexporc",
     "airtempo",
     "airfire",
-    "fightsim",
     "posture",
     "ecoladder",
     "ravager",

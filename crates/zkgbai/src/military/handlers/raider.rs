@@ -1407,6 +1407,9 @@ impl Ai {
         }
         // Sent to block an incursion's way.
         if let Some(block) = self.incursion_block(sid) {
+            if self.raider_fight_veto(sid, pos, block, courage) {
+                return;
+            }
             self.raider_squad_raid(sid, block);
             self.squad_note(sid, Branch::Block, block, pos, None);
             return;
@@ -1505,6 +1508,10 @@ impl Ai {
 
         drop(engage);
         let best_task = best_task.and_then(|tid| self.raider_handler.scout_tasks.get(&tid).map(|t| (tid, t.target)));
+        let proposed = if best_target != NULLPOS { best_target } else { best_task.map_or(NULLPOS, |(_, p)| p) };
+        if self.raider_fight_veto(sid, pos, proposed, courage) {
+            return;
+        }
         if best_target != NULLPOS {
             if self.fighters.get(&leader).is_some_and(|f| f.task.is_some()) {
                 self.raider_clear_task(leader);
@@ -1529,6 +1536,22 @@ impl Ai {
             self.raider_squad_sneak(sid, rally);
             self.squad_note(sid, Branch::Idle, rally, pos, None);
         }
+    }
+
+    /// Ordinary raids only: operator orders and strike missions returned above.
+    fn raider_fight_veto(&mut self, sid: SquadId, pos: Vec3, target: Vec3, courage: f32) -> bool {
+        use super::squad_trace::Branch;
+        if !self.fight_verdict(sid, pos, target, courage, false) {
+            return false;
+        }
+        // Clearing a scout task issues STOP; do it before the regroup order.
+        if let Some(leader) = self.squads.get(sid).and_then(|s| s.leader) {
+            self.raider_clear_task(leader);
+        }
+        let haven = self.graph_get_closest_raider_haven(pos);
+        self.raider_squad_sneak(sid, haven);
+        self.squad_note(sid, Branch::Haven, haven, pos, None);
+        true
     }
 
     /// Where the raider squad led by `leader` walks to attack `target`: the
