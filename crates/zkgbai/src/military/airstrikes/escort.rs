@@ -7,7 +7,7 @@ impl Mission {
         self.kind == MissionKind::Thermite && self.deep
     }
     pub(super) fn flight_safe(&self, plane: Plane, risk: Risk, hp: f32, max_hp: f32, speed: f32) -> bool {
-        (self.optional_escort() && plane == Plane::Sparrow) || (risk.survives(hp, speed) && hp >= max_hp * 0.5)
+        (self.optional_escort() && plane == Plane::Sparrow) || (plane.survives(risk, hp, speed) && hp >= max_hp * 0.5)
     }
 }
 

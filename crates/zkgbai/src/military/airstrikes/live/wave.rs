@@ -55,7 +55,7 @@ fn preference(job: &Mission, package: &[(Plane, usize)]) -> f32 {
     }
 }
 
-fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: f32) -> Vec<Package> {
+pub(super) fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: f32) -> Vec<Package> {
     let mut choices = plan.packages.clone();
     // Precision bombers can help with statics instead of waiting for a primary
     // job of their own. Keep the same AA gates and reliable kill margin.
@@ -190,7 +190,7 @@ impl Ai {
                         !(friendlies && matches!(kind, Plane::Phoenix | Plane::Likho))
                             && ready[kind].iter().all(|id| {
                                 let u = self.bomber_handler.units[id].unit;
-                                u.def().is_some_and(|d| p.risk.survives(u.health(), d.speed()))
+                                u.def().is_some_and(|d| kind.survives(p.risk, u.health(), d.speed()))
                             })
                     })
                 });
