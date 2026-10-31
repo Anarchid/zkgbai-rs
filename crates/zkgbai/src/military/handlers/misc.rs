@@ -12,6 +12,7 @@ use crate::military::Fighter;
 use crate::nav;
 use crate::util::{NULLPOS, distance, get_radial_point};
 
+mod cloaks;
 mod sappers;
 mod supports;
 
@@ -19,6 +20,7 @@ mod supports;
 pub struct MiscHandler {
     /// Fighter-store ids.
     pub supports: BTreeSet<i32>,
+    cloaks: cloaks::CloakPlanner,
     /// Fighter-store ids.
     pub loners: BTreeSet<i32>,
     /// Fighter-store ids.
