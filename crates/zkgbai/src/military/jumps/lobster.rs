@@ -125,11 +125,14 @@ pub(crate) struct StrikeThrow {
 }
 
 fn strike_landing(from: Vec3, target: Vec3, throw_range: f32, gun_range: f32) -> Option<Vec3> {
+    // Adding a fractional reach to map coordinates can round a maximum
+    // throw just outside the controller's range check. Leave one elmo spare.
+    let reach = throw_range - 1.0;
     let d = distance(from, target);
-    if d < MIN_THROW || d > throw_range + gun_range * 0.95 {
+    if reach < MIN_THROW || d < MIN_THROW || d > reach + gun_range * 0.95 {
         return None;
     }
-    let travel = (d - gun_range * 0.75).max(MIN_THROW).min(throw_range);
+    let travel = (d - gun_range * 0.75).max(MIN_THROW).min(reach);
     Some(Vec3::xz(from.x + (target.x - from.x) * travel / d, from.z + (target.z - from.z) * travel / d))
 }
 
@@ -732,6 +735,9 @@ mod tests {
         assert!(distance(aim, target) <= 450.0 * 0.95);
         assert!(strike_landing(from, Vec3::xz(1200.0, 100.0), 570.0, 450.0).is_none());
         assert!(strike_landing(from, from, 570.0, 450.0).is_none());
+        let from = Vec3::xz(3072.0, 3406.0);
+        let aim = strike_landing(from, Vec3::xz(3072.0, 4396.0), 620.0 * 0.92, 450.0).unwrap();
+        assert!(throw_in_range(from, aim, 620.0 * 0.92));
     }
 
     #[test]

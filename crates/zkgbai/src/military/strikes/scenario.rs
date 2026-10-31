@@ -363,7 +363,14 @@ impl Ai {
                 }
             }
         }
-        if frame == 90 {
+        if frame == 90 && test == "assassin-lobster" {
+            if let Some(def) = self.defs.get("planescout") {
+                self.cb.cheat_new_unit(def, Vec3::xz(center.x + 100.0, center.z + 300.0));
+            }
+        }
+        // Let normal intelligence ingest LOS before releasing the squad;
+        // otherwise its first ordinary move can spend the launcher reload.
+        if frame == 150 {
             let units: Vec<_> =
                 self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "amphfloater").collect();
             for u in &units {
@@ -382,8 +389,6 @@ impl Ai {
             }
             if test == "assassin-lobster-phantom" {
                 self.sweeps_seed_phantom_fix(Vec3::xz(center.x, center.z + 300.0), 1);
-            } else if let Some(def) = self.defs.get("planescout") {
-                self.cb.cheat_new_unit(def, Vec3::xz(center.x + 100.0, center.z + 300.0));
             }
             self.log(&format!("assassin-test: Buoy squad {sid} with attached Lobster, no preseeded mission"));
         }
