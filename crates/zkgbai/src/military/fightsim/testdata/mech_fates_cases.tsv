@@ -1,4 +1,4 @@
-# Python mech.simulate_mech fates (no hazard), opts six + heatray: units side:def:hp:x:z; pass = the pass line's offset from B's statics, empty for the a-move; fates per unit dead:death frame (-1 alive):hp left:pdead
+# Python mech.simulate_mech fates (no hazard), opts six + heatray + slow2d: units side:def:hp:x:z; pass = the pass line's offset from B's statics, empty for the a-move; fates per unit dead:death frame (-1 alive):hp left:pdead
 case	units	pass	horizon	fates
 amove_mirror	0:cloakraid:230:0:0;0:cloakraid:230:-20:7;0:cloakraid:230:-40:14;0:cloakraid:230:0:46;0:cloakriot:574:-20:53;1:shieldraid:350:303.7:0;1:shieldraid:350:323.7:7;1:shieldraid:350:343.7:14;1:shieldraid:350:303.7:46;1:shieldassault:768:323.7:53		300	1:123:0:0.9894911958;1:111:0:1;1:63:0:1;0:-1:138.4624753:0.03771948099;0:-1:574:0;1:39:0:1;1:84:0:1;1:114:0:1;1:57:0:1;1:294:0:0.6032560593
 amove_eco	0:cloakraid:230:0:0;0:cloakraid:230:-20:7;1:staticmex:560:260.3:0;1:staticmex:560:280.3:7;1:staticmex:560:300.3:14		450	0:-1:230:0;0:-1:230:0;1:123:0:1;1:213:0:1;1:288:0:1

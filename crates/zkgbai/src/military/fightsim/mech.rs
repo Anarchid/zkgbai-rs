@@ -1,6 +1,7 @@
 //! Mechanics on the fight predictor: a port of the frozen mechanics model
-//! (tools/predictor/mech.py with the round-1 six and the round-3 heatray,
-//! zkgbai-runs/predictor/mech1..mech3) onto the same one-dimensional fight:
+//! (tools/predictor/mech.py with the round-1 six, the round-3 heatray and
+//! the round-6 slow2d, zkgbai-runs/predictor/mech1..mech6) onto the same
+//! one-dimensional fight:
 //!
 //! - air: a weapon skips targets it cannot shoot (aircraft, or ground);
 //! - burn: fire weapons leave their fitted damage over time on what they hit;
@@ -10,7 +11,10 @@
 //!   paralysed past its health neither moves nor fires; pure EMP weapons
 //!   fire too (no health damage);
 //! - slow: slow damage cuts speed and rate of fire by up to half, wearing
-//!   off half a second after the last slowing hit;
+//!   off half a second after the last slowing hit; it scales with the damage
+//!   landed and is capped at half the target's health plus the weapon's
+//!   overslow (unit_timeslow.lua); slow-only weapons (Cyclops slowbeam) do
+//!   not fire;
 //! - engage: each unit fires at all with a fitted probability (its nearest
 //!   enemy over its range, short range, static, commander, builder, own
 //!   units in its line of fire, crowding, enemies), a weight on every shot;
@@ -47,7 +51,8 @@ pub(crate) fn paralysis_frames(ratio: f32) -> i32 {
 
 /// Most a unit is slowed (timeslow_defs.lua).
 const SLOW_MAX: f64 = 0.5;
-/// Slow damage wearing off per second, as a share of health.
+/// Slow damage wearing off per second, as a share of health (overslow
+/// allowance wears off at the same rate).
 const SLOW_DECAY: f64 = 0.04;
 /// Frames after a slowing hit before the slow starts wearing off.
 const SLOW_GRACE: i32 = 15;
@@ -82,6 +87,8 @@ struct WeaponMech {
     emp: f64,
     /// Slow damage per point of health damage.
     slow: f64,
+    /// How far past the slow cap a hit may push (share of health).
+    overslow: f64,
     /// Pure EMP: no health damage.
     paralyzer: bool,
     /// Damage landed over nominal by range band (heatrays).
@@ -95,6 +102,7 @@ const PLAIN: WeaponMech = WeaponMech {
     burn_frames: 0,
     emp: 0.0,
     slow: 0.0,
+    overslow: 0.0,
     paralyzer: false,
     dyn_frac: None,
 };
@@ -154,6 +162,7 @@ impl MechTables {
                         emp: num(6)?,
                         slow: num(7)?,
                         paralyzer: num(8)? != 0.0,
+                        overslow: if f.len() > 9 { num(9)? } else { 0.0 },
                         dyn_frac: None,
                     };
                     weapons.insert(name, w);
@@ -218,6 +227,8 @@ pub(super) struct MechUnit {
     para: f64,
     slowdmg: f64,
     slow_last: i32,
+    /// Overslow allowance: slow damage may reach (SLOW_MAX + this) x health.
+    ovs: f64,
     /// (last frame, damage per frame).
     burns: Vec<(i32, f64)>,
     /// Lateral coordinate: 0 except in a fates query's pass mode.
@@ -231,6 +242,12 @@ impl MechUnit {
 
     fn slowed(&self) -> f64 {
         if self.slowdmg > 0.0 { SLOW_MAX.min(self.slowdmg / self.u.hp.max(1.0)) } else { 0.0 }
+    }
+
+    /// unit_timeslow.lua: slow damage never exceeds (0.5 + overslow) x
+    /// current health.
+    fn cap_slow(&mut self) {
+        self.slowdmg = self.slowdmg.min((SLOW_MAX + self.ovs) * self.u.hp.max(1.0));
     }
 }
 
@@ -506,6 +523,7 @@ impl Model {
                     para: 0.0,
                     slowdmg: 0.0,
                     slow_last: -1_000_000_000,
+                    ovs: 0.0,
                     burns: Vec::new(),
                     lat: 0.0,
                 }
@@ -762,6 +780,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             if m.slowdmg > 0.0 && f - m.slow_last > SLOW_GRACE {
                 m.slowdmg = (m.slowdmg - SLOW_DECAY * m.u.hp.max(1.0) * dt / 30.0).max(0.0);
             }
+            if m.ovs > 0.0 {
+                m.ovs = (m.ovs - SLOW_DECAY * dt / 30.0).max(0.0);
+            }
+            if m.slowdmg > 0.0 {
+                m.cap_slow();
+            }
         }
         alive.retain(|&i| us[i].u.alive);
         // Movement towards the nearest enemy alive at the top of the step
@@ -916,6 +940,8 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 }
                 if m.slow > 0.0 {
                     t.slowdmg += m.slow * nominal * frac * hit.p_tgt * shots * eff;
+                    t.ovs = t.ovs.max(m.overslow);
+                    t.cap_slow();
                     t.slow_last = f;
                 }
                 if dmg > 0.0 {
@@ -1144,6 +1170,12 @@ mod tests {
         // falls off with range, Angler cannot shoot the ground.
         assert!(t.weapon("tankraid_napalm_bomblet").burn > 0.0);
         assert!(t.weapon("hoverheavyraid_disruptor").slow > 0.0);
+        // Slow from the fixed def dump (round 6): Buoy and Moderator slow,
+        // Moderator pushes past the cap; slow-only beams are left out.
+        assert!(t.weapon("amphfloater_cannon").slow > 0.0);
+        let moderator = t.weapon("jumpskirm_disruptor_beam");
+        assert!(moderator.slow > 0.0 && moderator.overslow > 0.0);
+        assert_eq!(t.weapon("tankheavyassault_slowbeam").slow, 0.0);
         assert!(t.weapon("turretemp_arm_det_weapon").paralyzer);
         let heat = t.weapon("vehraid_heatray").dyn_frac.unwrap();
         assert!(heat[0].unwrap() > heat[4].unwrap());
