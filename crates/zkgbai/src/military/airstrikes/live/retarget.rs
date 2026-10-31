@@ -116,12 +116,14 @@ impl Ai {
             self.airstrike_path_risk(from, &old_route, interceptors),
             self.airstrike_path_risk(anchor, &old_exit, interceptors),
         );
-        let unsafe_route = old_risk.intercepted
-            || loaded.iter().any(|a| {
-                a.unit.def().is_none_or(|d| {
-                    !sortie.job.flight_safe(a.kind, old_risk, a.unit.health(), a.unit.max_health(), d.speed())
-                })
-            });
+        let committed = loaded.iter().any(|a| sortie.release.active(a.unit.id(), self.frame));
+        let unsafe_route = !committed
+            && (old_risk.intercepted
+                || loaded.iter().any(|a| {
+                    a.unit.def().is_none_or(|d| {
+                        !sortie.job.flight_safe(a.kind, old_risk, a.unit.health(), a.unit.max_health(), d.speed())
+                    })
+                }));
         if !fallback_due(
             sortie.job.kind == MissionKind::Speculative,
             observed,
@@ -219,6 +221,7 @@ impl Ai {
         sortie.memory = TargetMemory { last_contact: self.frame, destroyed: false };
         sortie.searched_since = None;
         sortie.retargeted = true;
+        sortie.release = release::State::default();
         sortie.last_order = -1000;
         sortie.last_route = -1000;
         true
