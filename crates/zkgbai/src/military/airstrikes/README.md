@@ -47,6 +47,22 @@ Primary missions:
   this includes queued/building/active Sparrows. The economy's scout is not
   borrowed or sent to detonate.
 - Raiders on our territory: Phoenix or Magpies.
+- Carpet bombing (`carpet`, priority 8): an unseen cloaker worth a priority
+  strike (in practice the Phantom) that shot us within the last 20 seconds.
+  Zero-K decloaks any unit that takes damage for three seconds, and Phoenix
+  napalm keeps it burning (and so visible) for 8-12 s more. The engine starts a
+  bomber's salvo half a salvo length before its aim point, so each Phoenix
+  flies two lead-in waypoints on the shot's bearing and lays its ~390-elmo
+  line along it, centred at 0.85 of the weapon's range from the victim (or on
+  a bearing intersection when two impacts crossed). Three lines 110 elmos
+  apart for a single bearing, two for an intersection; one fewer still flies.
+  Very light AA only. Like the artillery hunt this is evidence, not a unit
+  handle: it uses Phoenixes already built and never buys any. New impacts
+  re-aim a carpet still more than 900 elmos out; a sniper seen near the fix
+  turns the sortie into an attack on the unit. Each line's strip must be clear
+  of our and allied ground units at launch and again within 1500 elmos of the
+  aim (abort reason `friendly_fire`). Carpets never join combined waves or
+  local retargeting. `disable=carpet` switches it off.
 
 Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
@@ -143,6 +159,16 @@ until the first 30-second wave check, against a Lance, Thugs, wind generators,
 a fusion and radar near the attacker. Logs expose `combined wave=...`, assigned
 packages, payload releases and target survival. Keep match output and Cargo
 artifacts in a disk-backed `target/` directory, and run games sequentially.
+
+`airstrike-carpet` versus `airstrike-carpet-target` gives three Phoenixes,
+a pad and two storages near a cloaked, hold-fire Phantom, and one synthetic
+impact bearing at frame 180; `airstrike-carpet-live` versus
+`airstrike-carpet-shooter` lets the Phantom shoot the storages itself (a
+radar tower beside it lends sight). The defender logs `carpet-test: phantom
+... hp=... cloaked=... on_fire=...` every second. On Comet Catcher Redux
+v3.1 (2026-10-31) both variants launched within a second of the bearing and
+killed the Phantom with one three-line pass, all Phoenixes returning; with
+`disable=carpet` nothing launched and the Phantom stayed at full health.
 
 Examples:
 

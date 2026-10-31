@@ -90,7 +90,10 @@ impl Ai {
         if sortie.retargeted
             || self.dev_off("airstrikes")
             || self.frame - sortie.launched > SORTIE_TIMEOUT
-            || matches!(sortie.job.kind, MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield)
+            || matches!(
+                sortie.job.kind,
+                MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield | MissionKind::Carpet
+            )
             || (sortie.job.kind == MissionKind::Speculative && self.dev_off("airspeculate"))
         {
             return false;

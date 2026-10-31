@@ -18,8 +18,8 @@ pub(crate) struct BatteryFix {
     pub range: f32,
     pub last: i32,
     pub ground: bool,
-    origin: Vec3,
-    direction: Vec3,
+    pub origin: Vec3,
+    pub direction: Vec3,
     reported: i32,
 }
 

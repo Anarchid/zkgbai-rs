@@ -179,7 +179,11 @@ impl Ai {
             .filter(|p| {
                 !matches!(
                     p.job.kind,
-                    MissionKind::Intercept | MissionKind::Shield | MissionKind::Assassinate | MissionKind::Speculative
+                    MissionKind::Intercept
+                        | MissionKind::Shield
+                        | MissionKind::Assassinate
+                        | MissionKind::Speculative
+                        | MissionKind::Carpet
                 ) && !p.job.targets.iter().any(|id| covered.contains(id))
                     && !self.bomber_handler.cooldown.contains_key(&p.job.target)
                     && route_allowed(home, &p.route, |pos| self.graph.is_ally_territory(pos))

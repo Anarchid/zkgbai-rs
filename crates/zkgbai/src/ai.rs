@@ -581,6 +581,8 @@ impl Ai {
                     | "airstrike-targeting-targets"
                     | "airstrike-hunt-target"
                     | "airstrike-hunt-decoy"
+                    | "airstrike-carpet-target"
+                    | "airstrike-carpet-shooter"
                     | "airstrike-wave-targets"
                     | "airstrike-farm"
                     | "airstrike-singu"
