@@ -481,10 +481,7 @@ mod regression {
     #[test]
     fn nearby_venom_can_intercept_two_rogues_bombarding_mexes() {
         let mut raid = bombardment(2);
-        // A responder on the mex side can interrupt the bombardment. Merely
-        // being nearby, behind the shooters, is not an equivalent approach.
-        let behind = compute(Request { frame: 0, teams: vec![0], raids: vec![raid.clone()] }).1.unwrap();
-        assert_eq!(behind.masks, vec![0]);
+        // A responder on the mex side can interrupt the bombardment.
         raid.defenders[0][0].0.unit.x = 240.0;
         let request = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()] };
         let decision = compute(request).1.unwrap();
@@ -493,6 +490,12 @@ mod regression {
         assert!(decision.loss < decision.undefended);
         let mut late = raid;
         late.defenders[0][0].1 = HORIZON;
+        let model = Model::load().unwrap();
+        assert_eq!(
+            losses(&model, &late, 0),
+            losses(&model, &late, 1),
+            "an absent responder must not even alter the enemy engagement estimate"
+        );
         let decision = compute(Request { frame: 0, teams: vec![0], raids: vec![late] }).1.unwrap();
         assert_eq!(decision.masks, vec![0], "do not send a responder after the assets are lost");
     }

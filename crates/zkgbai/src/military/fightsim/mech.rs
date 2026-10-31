@@ -274,6 +274,7 @@ pub struct Defense {
 
 struct Run<'a> {
     defense: Option<&'a Defense>,
+    defense_engagement: Option<(&'a FightSnapshot, &'a [f64; 13])>,
     hazard: Option<&'a Hazard>,
     withdraw: bool,
     /// A's mobile units drive through B (fates' pass mode).
@@ -434,8 +435,17 @@ impl Model {
             FateMode::Assassinate { target } => Some(target),
             _ => None,
         };
-        let mut run =
-            Run { defense, hazard: None, withdraw: false, pass, focus, insertion, horizon, track: Some(track) };
+        let mut run = Run {
+            defense,
+            defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
+            hazard: None,
+            withdraw: false,
+            pass,
+            focus,
+            insertion,
+            horizon,
+            track: Some(track),
+        };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let Some(tr) = run.track else { return Vec::new() };
         let c = &self.mech.fate;
@@ -617,6 +627,7 @@ pub(super) fn simulate_mech(
 ) -> (f64, f64) {
     let mut run = Run {
         defense: None,
+        defense_engagement: None,
         hazard,
         withdraw,
         pass: false,
@@ -647,6 +658,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut sides: [Vec<usize>; 2] = [Vec::with_capacity(n), Vec::with_capacity(n)];
     let mut foes: Vec<usize> = Vec::with_capacity(n);
     let mut raid_focus = vec![None; n];
+    let mut engagement_members = Vec::new();
     while f < run.horizon {
         if let Some(hz) = hazard
             && f > 0
@@ -663,6 +675,37 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             .extend((0..n).filter(|&i| {
                 us[i].u.alive && run.defense.is_none_or(|d| d.arrivals.get(i).copied().unwrap_or(0) <= f)
             }));
+        // A delayed defender must not change the fitted firing probability
+        // before it arrives. Refresh on arrivals/deaths, using only active
+        // units at their current positions. Ordinary fights retain parity.
+        if let Some((snap, weights)) = run.defense_engagement
+            && engagement_members != alive
+        {
+            let active = FightSnapshot {
+                units: alive
+                    .iter()
+                    .map(|&i| {
+                        let mut u = snap.units[i].clone();
+                        u.x = us[i].u.x as f32;
+                        u.z = us[i].lat as f32;
+                        u.hp = us[i].u.hp as f32;
+                        u
+                    })
+                    .collect(),
+            };
+            for (index, &i) in alive.iter().enumerate() {
+                if us[i].u.armed && us[i].u.max_range > 0.0 {
+                    us[i].engage = expit(
+                        engage_features(&active, index, us[i].u.max_range)
+                            .iter()
+                            .zip(weights)
+                            .map(|(a, b)| a * b)
+                            .sum(),
+                    );
+                }
+            }
+            engagement_members.clone_from(&alive);
+        }
         for (s, side) in sides.iter_mut().enumerate() {
             side.clear();
             side.extend(alive.iter().copied().filter(|&i| us[i].u.side as usize == s));
