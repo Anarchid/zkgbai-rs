@@ -524,11 +524,21 @@ impl Ai {
             && self.siege_way_clear(leader.pos(), p, leader)
     }
 
+    /// Small tops need two terrain cells per axis: the gadget removes
+    /// thinner areas. Align their centre like a basic radar's build site,
+    /// so a 24-elmo request always produces a 32-elmo top, even when the
+    /// mobile core stops between grid points.
+    fn siege_perch_square(site: Vec3, top: f32) -> [Vec3; 4] {
+        let center =
+            if top < 32.0 { Vec3::xz((site.x / 16.0).round() * 16.0, (site.z / 16.0).round() * 16.0) } else { site };
+        let h = top / 2.0;
+        [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(center.x + dx, center.z + dz))
+    }
+
     /// Whether a perch can go up at `p`: the top square flat enough.
     fn siege_perch_site_ok(&self, p: Vec3, perch: &Perch) -> bool {
         let map = self.cb.map();
-        let h = perch.top / 2.0;
-        let corners = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| map.elevation_at(p.x + dx, p.z + dz));
+        let corners = Self::siege_perch_square(p, perch.top).map(|c| map.elevation_at(c.x, c.z));
         let (lo, hi) = corners.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &c| (lo.min(c), hi.max(c)));
         hi - lo <= PERCH_FLAT && map.elevation_at(p.x, p.z) > 0.0
     }
@@ -1382,8 +1392,7 @@ impl Ai {
             .get(&sid)
             .and_then(|f| f.perch.as_ref())
             .map_or(Vec::new(), |p| p.raisers.clone());
-        let h = perch.top / 2.0;
-        let square = [(-h, -h), (h, -h), (h, h), (-h, h)].map(|(dx, dz)| Vec3::xz(site.x + dx, site.z + dz));
+        let square = Self::siege_perch_square(site, perch.top);
         let top = square.iter().map(|c| map.elevation_at(c.x, c.z)).fold(ground, f32::max);
         let standing = now - ground >= perch.height - UP_SLACK;
         if standing || raise < UP_SLACK {
@@ -1966,6 +1975,25 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn small_perch_survives_grid_rounding_and_contains_the_core() {
+        // The gadget floors the polygon to 16-elmo cells, then includes
+        // the next row/column. Its thickness check needs two cells per axis.
+        for x in 0..64 {
+            for z in 0..64 {
+                let core = Vec3::xz(1000.25 + x as f32, 1000.75 + z as f32);
+                let square = Ai::siege_perch_square(core, 24.0);
+                let min_x = (square[0].x / 16.0).floor() * 16.0;
+                let min_z = (square[0].z / 16.0).floor() * 16.0;
+                let max_x = (square[2].x / 16.0).floor() * 16.0 + 16.0;
+                let max_z = (square[2].z / 16.0).floor() * 16.0 + 16.0;
+                assert_eq!((max_x - min_x, max_z - min_z), (32.0, 32.0));
+                assert!(core.x >= min_x + 8.0 && core.x <= max_x - 8.0);
+                assert!(core.z >= min_z + 8.0 && core.z <= max_z - 8.0);
+            }
+        }
+    }
 
     fn s(x: f32, z: f32, range: f32, worth: f32) -> Static {
         Static { pos: Vec3::xz(x, z), range, raised: range, nominal: range, worth, visible: true }
