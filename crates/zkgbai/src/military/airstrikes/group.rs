@@ -72,6 +72,11 @@ impl Mission {
         }
     }
     pub(super) fn damage_value(&self, package: &[(Plane, usize)]) -> f32 {
+        if self.kind == MissionKind::HeavyAir {
+            let damage =
+                package.iter().filter(|(p, _)| *p == Plane::Likho).map(|(_, n)| *n as f32 * 1600.0).sum::<f32>();
+            return self.value * (damage / self.hp.max(1.0)).clamp(0.0, 1.0);
+        }
         self.group.as_ref().map_or(self.value, |g| g.value(self.pos, package))
     }
     pub(super) fn group_packages(&self, planes: &[Plane]) -> Vec<Vec<(Plane, usize)>> {

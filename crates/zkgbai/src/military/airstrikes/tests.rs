@@ -11,6 +11,9 @@ pub(super) fn enemy(id: i32) -> Contact {
         known: true,
         live: true,
         air: false,
+        heavy_air: false,
+        submerged: false,
+        mex: false,
         static_: false,
         heavy: false,
         raider: false,
@@ -25,6 +28,7 @@ fn clear() -> Risk {
 }
 pub(super) fn job(kind: MissionKind, hp: f32) -> Mission {
     Mission {
+        submerged: false,
         kind,
         inference: None,
         group: (kind == MissionKind::Group).then(|| {
@@ -229,7 +233,7 @@ fn priority_strikes_follow_current_health_and_tough_units_use_existing_fleets() 
     let js = missions(&[cyclops.clone()], Vec3::ZERO, 300);
     assert!(js.iter().all(|j| !j.kind.primary()));
     let choice = packages(&js[0], clear(), 800.0);
-    assert!(choice.contains(&vec![(Plane::Raven, 19)]));
+    assert!(choice.contains(&vec![(Plane::Raven, 18)]));
     for (hp, primary) in [(6601.0, false), (6600.0, true), (2000.0, true), (12000.0, false)] {
         cyclops.hp = hp;
         let js = missions(&[cyclops.clone()], Vec3::ZERO, 300);
@@ -373,4 +377,91 @@ fn odin_halves_aa_damage_without_removing_retreat_or_route_limits() {
     assert!(!Plane::Odin.survives(Risk { burst: 6000.0, ..clear() }, 5200.0, 185.0));
     assert!(!Plane::Odin.survives(Risk { exposure: f32::INFINITY, ..clear() }, 5200.0, 185.0));
     assert!(!job(MissionKind::Thermite, 1000.0).flight_safe(Plane::Odin, clear(), 2400.0, 5200.0, 185.0));
+}
+
+#[test]
+fn secondary_static_strikes_spend_only_the_lethal_raven_payload() {
+    for (hp, n) in [(560.0, 1), (600.0, 1), (800.0, 1), (801.0, 2), (1600.0, 2)] {
+        assert_eq!(packages(&job(MissionKind::Static, hp), clear(), 800.0), vec![vec![(Plane::Raven, n)]]);
+    }
+    assert_eq!(packages(&job(MissionKind::Opportunistic, 600.0), clear(), 800.0)[0], vec![(Plane::Raven, 1)]);
+    // Priority strikes still buy the requested margin and spare.
+    assert_eq!(packages(&job(MissionKind::Heavy, 600.0), clear(), 800.0)[0], vec![(Plane::Raven, 2)]);
+}
+
+#[test]
+fn extraction_denial_has_value_without_changing_cost_eligibility() {
+    let mut mex = enemy(1);
+    mex.static_ = true;
+    mex.mex = true;
+    mex.value = 85.0;
+    mex.hp = 560.0;
+    let mut solar = mex.clone();
+    solar.id = 2;
+    solar.mex = false;
+    solar.value = 70.0;
+    solar.hp = 600.0;
+    let jobs = missions(&[solar, mex], Vec3::ZERO, 300);
+    assert_eq!(jobs[0].target, 1);
+    assert_eq!(jobs[0].value, 340.0);
+    assert!(jobs[0].score() > jobs[1].score() * 4.0);
+    assert!(jobs.iter().all(|j| j.kind == MissionKind::Static));
+}
+
+#[test]
+fn submerged_contacts_do_not_buy_interdictors_or_enter_surface_groups() {
+    let mut wet = enemy(1);
+    wet.submerged = true;
+    wet.raider = true;
+    wet.home = true;
+    wet.heavy = true;
+    let wet2 = Contact { id: 2, ..wet.clone() };
+    let surface = Contact { id: 3, submerged: false, ..wet.clone() };
+    let jobs = missions(&[wet, wet2, surface], Vec3::ZERO, 300);
+    assert!(!jobs.iter().any(|j| j.kind == MissionKind::Group));
+    assert!(jobs.iter().filter(|j| j.kind == MissionKind::Interdict).all(|j| j.target == 3));
+    let underwater = jobs.iter().find(|j| j.target == 1).unwrap();
+    let choices = packages(underwater, clear(), 800.0);
+    assert!(!choices.is_empty()); // Raven has an underwater-capable payload.
+    assert!(choices.iter().flatten().all(|(p, _)| *p == Plane::Raven));
+    for plane in Plane::ALL {
+        assert_eq!(can_hit_submerged(plane, true), plane == Plane::Raven);
+        assert!(can_hit_submerged(plane, false));
+    }
+}
+
+#[test]
+fn heavy_air_is_confirmed_likho_only_and_allows_partial_krow_strikes() {
+    for name in ["gunshipheavyskirm", "gunshipkrow", "bomberassault"] {
+        assert!(anti_air::heavy_air_target(name));
+    }
+    for name in ["planefighter", "planeheavyfighter", "gunshipraid", "bomberheavy"] {
+        assert!(!anti_air::heavy_air_target(name));
+    }
+    let krow = Contact { air: true, heavy_air: true, value: 4200.0, hp: 16000.0, ..enemy(1) };
+    let jobs = missions(&[krow.clone()], Vec3::ZERO, 300);
+    let mission = jobs.iter().find(|j| j.kind == MissionKind::HeavyAir).unwrap();
+    assert!(mission.kind.primary());
+    let choices = packages(mission, clear(), 800.0);
+    assert!(choices.contains(&vec![(Plane::Likho, 1)]));
+    assert!(choices.iter().flatten().all(|(p, _)| *p == Plane::Likho));
+    assert_eq!(mission.damage_value(&[(Plane::Likho, 1)]), 420.0);
+    assert_eq!(mission.damage_value(&[(Plane::Raven, 20)]), 0.0);
+    assert_eq!(mission.damage_value(&[(Plane::Likho, 24)]), 4200.0);
+    assert!(packages(mission, Risk { intercepted: true, ..clear() }, 800.0).is_empty());
+    assert!(
+        !missions(&[Contact { known: false, ..krow.clone() }], Vec3::ZERO, 300)
+            .iter()
+            .any(|j| j.kind == MissionKind::HeavyAir)
+    );
+    assert!(
+        !missions(&[Contact { live: false, ..krow }], Vec3::ZERO, 300).iter().any(|j| j.kind == MissionKind::HeavyAir)
+    );
+}
+
+#[test]
+fn value_scoring_preserves_urgent_air_defense() {
+    let incoming = job(MissionKind::Intercept, 1000.0);
+    let wounded = job(MissionKind::Heavy, 1.0);
+    assert!(incoming.score() > wounded.score());
 }

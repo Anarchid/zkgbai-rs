@@ -136,6 +136,14 @@ impl BomberHandler {
     fn refresh_priority_memory(&mut self, contacts: &[Contact], frame: i32) {
         // Fresh observations replace remembered priority demand, including when
         // healing demotes a target. Unseen targets retain the normal memory.
+        self.recent.retain(|_, p| {
+            !contacts.iter().any(|e| {
+                e.id == p.job.target
+                    && e.live
+                    && e.submerged
+                    && !p.packages.iter().any(|pkg| pkg.iter().all(|(k, _)| can_hit_submerged(*k, true)))
+            })
+        });
         for e in contacts.iter().filter(|e| e.known && !e.static_ && e.live && frame - e.seen <= FRESH) {
             self.recent.remove(&(MissionKind::Heavy, e.id));
         }
@@ -257,6 +265,9 @@ impl Ai {
                     known: e.identified,
                     live,
                     air,
+                    heavy_air: e.identified && anti_air::heavy_air_target(&e.def_name),
+                    submerged: e.is_submerged(),
+                    mex: e.is_mex,
                     static_: e.is_static,
                     heavy: e.is_com || e.is_arty || e.is_major_cancer || (!e.is_static && e.value >= 600.0),
                     raider: e.is_raider
@@ -274,12 +285,15 @@ impl Ai {
             .collect()
     }
 
-    fn airstrike_interceptors(&self) -> Vec<(Vec3, f32, f32)> {
+    // A HeavyAir mission deliberately engages its quarry. Only that aircraft
+    // is exempt: accompanying fighters and other AA still gate the route.
+    fn airstrike_interceptors_except(&self, quarry: Option<i32>) -> Vec<(Vec3, f32, f32)> {
         self.war
             .targets
             .values()
             .filter(|e| {
                 !e.is_dead
+                    && Some(e.unit_id) != quarry
                     && e.can_fly()
                     && (e.is_aa
                         || e.is_flex_aa
@@ -356,7 +370,7 @@ impl Ai {
             self.bomber_handler.raven_damage = Some(if damage > 0.0 { damage } else { 800.0 });
         }
         self.bomber_handler.defenses = self.airstrike_defenses();
-        let interceptors = self.airstrike_interceptors();
+        let interceptors = self.airstrike_interceptors_except(None);
         // Defensive interception accepts the target fighter itself; ground AA
         // still gates the mission and its route.
         let air = self.airstrike_field(home, &interceptors);
@@ -381,13 +395,17 @@ impl Ai {
                 let Some(ally) = ally else { continue };
                 job.pos = ally.pos();
             }
-            let field = if job.kind == MissionKind::Intercept { &defense_air } else { &air };
-            let risk = self.airstrike_risk(
-                field,
-                home,
-                job.pos,
-                if job.kind == MissionKind::Intercept { &[] } else { &interceptors },
-            );
+            let quarry_enemies =
+                (job.kind == MissionKind::HeavyAir).then(|| self.airstrike_interceptors_except(Some(job.target)));
+            let enemies = if job.kind == MissionKind::Intercept {
+                &[][..]
+            } else {
+                quarry_enemies.as_deref().unwrap_or(&interceptors)
+            };
+            let quarry_field = quarry_enemies.as_ref().map(|_| self.airstrike_field(home, enemies));
+            let field =
+                if job.kind == MissionKind::Intercept { &defense_air } else { quarry_field.as_ref().unwrap_or(&air) };
+            let risk = self.airstrike_risk(field, home, job.pos, enemies);
             let choices: Vec<_> = packages(&job, risk, self.bomber_handler.raven_damage.unwrap_or(800.0))
                 .into_iter()
                 .filter(|p| {
@@ -421,11 +439,15 @@ impl Ai {
             .iter()
             .filter(|(_, p)| {
                 let defensive = p.job.kind == MissionKind::Intercept;
+                let quarry_enemies = (p.job.kind == MissionKind::HeavyAir)
+                    .then(|| self.airstrike_interceptors_except(Some(p.job.target)));
+                let enemies = if defensive { &[][..] } else { quarry_enemies.as_deref().unwrap_or(&interceptors) };
+                let quarry_field = quarry_enemies.as_ref().map(|_| self.airstrike_field(home, enemies));
                 let r = self.airstrike_risk(
-                    if defensive { &defense_air } else { &air },
+                    if defensive { &defense_air } else { quarry_field.as_ref().unwrap_or(&air) },
                     home,
                     p.job.pos,
-                    if defensive { &[] } else { &interceptors },
+                    enemies,
                 );
                 let allowed = packages(&p.job, r, self.bomber_handler.raven_damage.unwrap());
                 !p.packages.iter().any(|pkg| {
@@ -518,8 +540,19 @@ impl Ai {
             } else {
                 target.filter(|_| observed).map_or(sortie.job.pos, |e| e.position)
             };
-            let field = if sortie.job.kind == MissionKind::Intercept { defense_air } else { air };
-            let enemies = if sortie.job.kind == MissionKind::Intercept { &[][..] } else { interceptors };
+            let quarry_enemies = (sortie.job.kind == MissionKind::HeavyAir)
+                .then(|| self.airstrike_interceptors_except(Some(sortie.job.target)));
+            let enemies = if sortie.job.kind == MissionKind::Intercept {
+                &[][..]
+            } else {
+                quarry_enemies.as_deref().unwrap_or(interceptors)
+            };
+            let quarry_field = quarry_enemies.as_ref().map(|_| self.airstrike_field(home, enemies));
+            let field = if sortie.job.kind == MissionKind::Intercept {
+                defense_air
+            } else {
+                quarry_field.as_ref().unwrap_or(air)
+            };
             let from = sortie
                 .members
                 .iter()
@@ -556,7 +589,9 @@ impl Ai {
                 let forecast_safe = !risk.intercepted
                     && u.def()
                         .is_some_and(|d| sortie.job.flight_safe(a.kind, risk, u.health(), u.max_health(), d.speed()));
-                let safe = sortie.release.allows(id, frame, forecast_safe, u.health(), u.max_health());
+                let reachable = sortie.job.kind == MissionKind::Shield
+                    || can_hit_submerged(a.kind, target.is_some_and(|e| e.is_submerged()));
+                let safe = reachable && sortie.release.allows(id, frame, forecast_safe, u.health(), u.max_health());
                 if springai::reserved::is_reserved(self.cb, id) {
                     *self
                         .bomber_handler
@@ -578,6 +613,8 @@ impl Ai {
                             "target_lost"
                         } else if !wave_safe {
                             "wave_depth"
+                        } else if !reachable {
+                            "submerged_target"
                         } else if !safe {
                             if u.health() < u.max_health() * 0.5 { "damage" } else { "unsafe_route" }
                         } else if frame - sortie.launched > SORTIE_TIMEOUT {
@@ -750,15 +787,16 @@ impl Ai {
             let Some((members, package)) = selected else { continue };
             // An opportunistic assassination must arrive while the observed
             // window still exists; no procurement or long cross-map pursuit.
-            if job.kind == MissionKind::Assassinate {
+            if matches!(job.kind, MissionKind::Assassinate | MissionKind::HeavyAir) {
                 let speed = members
                     .iter()
                     .filter_map(|id| self.bomber_handler.units[id].unit.def())
                     .map(|d| d.speed())
                     .fold(f32::INFINITY, f32::min);
                 let velocity = self.war.targets.get(&job.target).map_or(Vec3::ZERO, |e| e.unit.vel() * 30.0);
-                if plan.length / speed.max(1.0) > 12.0
-                    || intercept_time(home, job.pos, velocity, speed).is_none_or(|t| t > 12.0)
+                let window = if job.kind == MissionKind::HeavyAir { 25.0 } else { 12.0 };
+                if plan.length / speed.max(1.0) > window
+                    || intercept_time(home, job.pos, velocity, speed).is_none_or(|t| t > window)
                 {
                     continue;
                 }
@@ -779,7 +817,11 @@ impl Ai {
         wave: Option<WaveFlight>,
     ) -> bool {
         let job = &plan.job;
-        let interceptors = if job.kind == MissionKind::Intercept { Vec::new() } else { self.airstrike_interceptors() };
+        let interceptors = if job.kind == MissionKind::Intercept {
+            Vec::new()
+        } else {
+            self.airstrike_interceptors_except((job.kind == MissionKind::HeavyAir).then_some(job.target))
+        };
         let exit = self.airstrike_path_risk(job.pos, &plan.return_route, &interceptors);
         if members.iter().any(|id| {
             let a = &self.bomber_handler.units[id];
@@ -959,6 +1001,7 @@ fn mission_view(
         "state": if sortie.is_some() { "in_progress" } else { "available" },
         "return_route": return_route.iter().map(|p| [p.x,p.z]).collect::<Vec<_>>(),
         "wave": sortie.and_then(|s| s.wave.map(|w| w.id)),
+        "submerged": job.submerged,
         "primary": job.kind.primary(), "deep": job.deep, "value": job.value,
         "inference": job.inference.as_ref().map(|f| json!({"id": f.id, "def": f.def,
             "pos": [f.pos.x, f.pos.z], "uncertainty": f.uncertainty, "last": f.last})),
@@ -1042,6 +1085,7 @@ mod operator_tests {
     #[test]
     fn snapshots_show_candidate_then_active_then_available_without_duplicate_targets() {
         let job = Mission {
+            submerged: false,
             kind: MissionKind::Thermite,
             group: None,
             inference: None,

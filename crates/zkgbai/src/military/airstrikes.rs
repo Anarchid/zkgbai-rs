@@ -1,6 +1,7 @@
 //! Mission-driven airplane production and sorties. Policy is independent of
 //! engine handles so target selection and procurement can be exercised offline.
 
+mod anti_air;
 mod escort;
 mod group;
 mod live;
@@ -65,6 +66,7 @@ impl Plane {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MissionKind {
     Intercept,
+    HeavyAir,
     Interdict,
     Group,
     Heavy,
@@ -84,6 +86,7 @@ impl MissionKind {
             Self::Opportunistic => "Opportunistic strike",
             Self::Group => "Group strike",
             Self::Intercept => "Interception",
+            Self::HeavyAir => "Heavy air strike",
             Self::Interdict => "Interdiction",
             Self::Wind => "Wind farm strike",
             Self::Thermite => "Thermite strike",
@@ -100,7 +103,7 @@ impl MissionKind {
         match self {
             Self::Intercept => 10.0,
             Self::Interdict => 9.0,
-            Self::Heavy => 8.0,
+            Self::Heavy | Self::HeavyAir => 8.0,
             Self::Wind => 7.0,
             Self::Thermite => 7.0,
             Self::Group => 6.0,
@@ -124,6 +127,9 @@ struct Contact {
     known: bool,
     live: bool,
     air: bool,
+    heavy_air: bool,
+    submerged: bool,
+    mex: bool,
     static_: bool,
     heavy: bool,
     raider: bool,
@@ -131,6 +137,14 @@ struct Contact {
     singu: bool,
     home: bool,
     fighting: bool,
+}
+
+impl Contact {
+    fn strike_value(&self) -> f32 {
+        // Destroying extraction denies recurring income and a contested spot.
+        // Keep this separate from raw metal for eligibility/cost thresholds.
+        self.value * if self.mex { 4.0 } else { 1.0 }
+    }
 }
 
 #[derive(Clone)]
@@ -145,6 +159,7 @@ struct Inference {
 #[derive(Clone)]
 struct Mission {
     kind: MissionKind,
+    submerged: bool,
     target: i32,
     pos: Vec3,
     hp: f32,
@@ -164,12 +179,17 @@ impl Mission {
         let reward = if matches!(self.kind, MissionKind::Heavy | MissionKind::Opportunistic | MissionKind::Assassinate)
         {
             self.value / self.hp.max(1.0) * 3000.0
+        } else if self.kind == MissionKind::HeavyAir {
+            self.damage_value(&[(Plane::Likho, 1)])
         } else if self.kind == MissionKind::Group {
             self.damage_value(&[(Plane::Likho, 1)]).max(self.damage_value(&[(Plane::Phoenix, 1)]))
         } else {
             self.value
         };
-        self.kind.priority() * 10000.0 + reward.min(9000.0)
+        // Keep inbound-air defense urgent; offensive mission value must not
+        // disappear beneath a large flat tier bonus.
+        let reward = reward.clamp(0.0, 9000.0);
+        if self.kind == MissionKind::Intercept { 100000.0 + reward } else { self.kind.priority() * reward }
     }
 }
 
@@ -220,6 +240,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
         let mut add = |kind, targets: Vec<i32>, hp, value| {
             jobs.push(Mission {
                 kind,
+                submerged: e.submerged,
                 group: None,
                 inference: None,
                 target: e.id,
@@ -232,6 +253,9 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             })
         };
         if e.air {
+            if fresh && e.known && e.heavy_air {
+                add(MissionKind::HeavyAir, vec![e.id], e.hp, e.value);
+            }
             if fresh && inbound(e.pos, e.vel, home, e.home) {
                 add(MissionKind::Intercept, vec![e.id], e.hp.max(1000.0), e.value);
             }
@@ -244,7 +268,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             if e.value >= 1000.0 {
                 add(MissionKind::Thermite, vec![e.id], e.hp, e.value + if e.singu { 4000.0 } else { 0.0 });
             }
-            add(MissionKind::Static, vec![e.id], e.hp, e.value);
+            add(MissionKind::Static, vec![e.id], e.hp, e.strike_value());
         } else {
             if e.heavy {
                 add(
@@ -257,15 +281,21 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             if e.value >= 700.0 && e.hp < e.max_hp * 0.55 {
                 add(MissionKind::Assassinate, vec![e.id], e.hp, e.value);
             }
-            if e.raider && e.home {
+            if e.raider && e.home && !e.submerged {
                 add(MissionKind::Interdict, vec![e.id], e.hp, e.value);
             }
-            if e.fighting {
+            if e.fighting && !e.submerged {
                 add(MissionKind::Shield, vec![e.id], e.hp, e.value);
             }
         }
         let medium = |c: &Contact| {
-            !c.air && !c.static_ && c.known && c.live && frame - c.seen <= FRESH && (150.0..=1200.0).contains(&c.value)
+            !c.air
+                && !c.submerged
+                && !c.static_
+                && c.known
+                && c.live
+                && frame - c.seen <= FRESH
+                && (150.0..=1200.0).contains(&c.value)
         };
         if (e.wind || medium(e)) && !clustered.contains(&e.id) {
             let group: Vec<_> = contacts
@@ -290,7 +320,13 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             }
         }
     }
-    jobs.sort_by(|a, b| b.score().total_cmp(&a.score()).then_with(|| a.key().cmp(&b.key())));
+    jobs.sort_by(|a, b| {
+        b.kind
+            .primary()
+            .cmp(&a.kind.primary())
+            .then_with(|| b.score().total_cmp(&a.score()))
+            .then_with(|| a.key().cmp(&b.key()))
+    });
     jobs.truncate(128);
     jobs
 }
@@ -367,13 +403,14 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     // Apply the margin in f64 so exact multiples do not round just above
     // a bomb boundary and demand another aircraft (e.g. 12000 HP / 800).
     let salvo = |damage: f32| (f64::from(job.hp) * 1.2 / f64::from(damage.max(1.0))).ceil().max(1.0) as usize;
-    let raven = salvo(raven_damage) + 1;
+    let raven = job.ravens(raven_damage);
     let clear = risk.aa <= 0.02 && !risk.intercepted;
     let very_light = risk.aa <= 0.15 && !risk.intercepted;
     // Likho/Odin tolerance comes from each aircraft's round-trip survival
     // check, not a Raven-derived local-AA band. Packages remain provisional.
     let unopposed = !risk.intercepted;
     let choices = match job.kind {
+        HeavyAir if unopposed => job.heavy_air_packages(),
         Intercept if risk.aa <= 0.4 => vec![vec![(Magpie, 1), (Raptor, count(job.hp, 700.0).max(2))]],
         Interdict if clear => vec![vec![(Phoenix, count(job.hp, 1000.0))], vec![(Magpie, count(job.hp, 350.0).max(2))]],
         Group if clear => job.group_packages(&[Phoenix, Likho]),
@@ -387,7 +424,29 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         Shield if !risk.intercepted => vec![vec![(Odin, 1)]],
         _ => vec![],
     };
-    choices.into_iter().filter(|p| p.iter().map(|(_, n)| n).sum::<usize>() <= MAX_WING).collect()
+    choices
+        .into_iter()
+        .filter(|p| {
+            p.iter().map(|(_, n)| n).sum::<usize>() <= MAX_WING
+                && p.iter().all(|(k, _)| can_hit_submerged(*k, job.submerged))
+        })
+        .collect()
+}
+
+fn can_hit_submerged(plane: Plane, submerged: bool) -> bool {
+    !submerged || plane == Plane::Raven
+}
+
+impl Mission {
+    fn ravens(&self, damage: f32) -> usize {
+        if self.kind == MissionKind::Static {
+            // Stationary secondary targets need the lethal payload, no spare.
+            (self.hp / damage.max(1.0)).ceil().max(1.0) as usize
+        } else {
+            let salvo = (f64::from(self.hp) * 1.2 / f64::from(damage.max(1.0))).ceil().max(1.0) as usize;
+            salvo + usize::from(matches!(self.kind, MissionKind::Heavy | MissionKind::Assassinate))
+        }
+    }
 }
 
 /// One purchase toward the cheapest deficit in metal. A completed

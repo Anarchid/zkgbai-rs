@@ -75,6 +75,7 @@ impl Ai {
             // A Likho must be able to reveal the search area on one pass.
             .filter(|(f, _, _)| f.uncertainty <= (sight * 0.8).min(600.0))
             .map(|(f, value, hp)| Mission {
+                submerged: false,
                 kind: MissionKind::Speculative,
                 target: f.id,
                 pos: f.pos,
@@ -194,7 +195,7 @@ impl Ai {
             self.bomber_handler.speculation.scouts.remove(&id);
             return None;
         }
-        let interceptors = self.airstrike_interceptors();
+        let interceptors = self.airstrike_interceptors_except(None);
         let field = self.airstrike_field(from, &interceptors);
         let sources = self.airstrike_defenses();
         let home = self.graph.get_ally_center();
