@@ -407,7 +407,7 @@ impl Ai {
         // waiting out a blast of ours).
         if frame % 30 == (offset + 1) % 30 {
             let mut small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
-            small.retain(|id| !self.raider_strike_owns(*id));
+            small.retain(|id| !self.squad_strike_owns(*id));
             small.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in small {
                 if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
@@ -418,7 +418,7 @@ impl Ai {
 
         if frame % 30 == (offset + 5) % 30 {
             let mut medium: Vec<i32> = self.raider_handler.medium_raiders.iter().copied().collect();
-            medium.retain(|id| !self.raider_strike_owns(*id));
+            medium.retain(|id| !self.squad_strike_owns(*id));
             medium.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in medium {
                 let Some(f) = self.fighters.get_mut(&id) else {
@@ -468,7 +468,7 @@ impl Ai {
     /// Dodge away from an attacker that just damaged raider `h`.
     pub fn raider_avoid_enemies(&mut self, h: Unit, attacker: Option<Unit>, dir: Vec3) {
         let id = h.id();
-        if !self.raider_handler.small_raiders.contains(&id) || self.raider_strike_owns(id) {
+        if !self.raider_handler.small_raiders.contains(&id) || self.squad_strike_owns(id) {
             return;
         }
         let frame = self.frame;
@@ -1274,18 +1274,18 @@ impl Ai {
         let here = self.squads.get(sid).map_or(NULLPOS, |rs| rs.get_pos(&self.fighters));
         // Moonlighting at home against a raid (see `qrf::live`).
         if self.qrf_drafted(sid) {
-            self.raider_strike_cancel(sid);
+            self.squad_strike_cancel(sid);
             self.squad_note(sid, Branch::Drafted, here, here, None);
             return;
         }
         // Sent somewhere by the operator.
         if let Some(target) = self.op_squad_target(sid) {
-            self.raider_strike_cancel(sid);
+            self.squad_strike_cancel(sid);
             self.raider_squad_raid(sid, target);
             self.squad_note(sid, Branch::Operator, target, here, None);
             return;
         }
-        if let Some(target) = self.raider_strike(sid) {
+        if let Some(target) = self.squad_strike(sid) {
             self.squad_note(sid, Branch::Strike, target, here, None);
             return;
         }

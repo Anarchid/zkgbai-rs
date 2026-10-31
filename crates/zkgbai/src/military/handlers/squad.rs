@@ -237,7 +237,8 @@ impl Ai {
                 .squad
                 .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some())
                 || self.blasts_waiting(unit.pos())
-                || self.fire_controls(id);
+                || self.fire_controls(id)
+                || self.squad_strike_owns(id);
             if !retreating && !flies && !held && self.fighters.get_mut(&id).is_some_and(|f| f.is_stuck(frame)) {
                 self.squad_leave_squad(id);
                 self.eco_add_combat_reclaim_task(unit);
@@ -881,12 +882,13 @@ impl Ai {
     /// The Java original's `Squad.isDead()` housekeeping, which the C++ port
     /// reduced to a `cutoff()` call before checking ground squads.
     fn squad_refresh(&mut self, sid: SquadId) {
+        let striking = self.squad_strike_active(sid);
         let Some(s) = self.squads.get_mut(sid) else { return };
         // port: the C++ cut off forming squads too, dissolving every new
         // squad below 3 units and re-adding its units (inflating its metal
         // value) until it filled up; Java only cuts off finished squads.
         // It also dropped the cutoff for air squads and the leader choice.
-        if s.status != 'f' {
+        if s.status != 'f' && !striking {
             s.cutoff(&mut self.fighters);
         }
         s.select_leader(&self.fighters);
@@ -978,13 +980,19 @@ impl Ai {
     fn squad_assign_squad(&mut self, sid: SquadId) {
         // Moonlighting at home against a raid (see `qrf::live`).
         if self.qrf_drafted(sid) {
+            self.squad_strike_cancel(sid);
             self.fire_release(sid);
             return;
         }
         // Sent somewhere by the operator.
         if let Some(target) = self.op_squad_target(sid) {
+            self.squad_strike_cancel(sid);
             self.fire_release(sid);
             self.squad_set_target(sid, target);
+            return;
+        }
+        if self.squad_strike(sid).is_some() {
+            self.fire_release(sid);
             return;
         }
         if self.squads.get(sid).is_some_and(|s| s.status != 'a') {

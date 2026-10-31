@@ -43,15 +43,17 @@ impl Ai {
     }
 
     pub(crate) fn strikes_unit_damaged(&mut self, u: Unit, attacker: Option<Unit>, dir: Vec3) {
-        let Some(w) = self
+        let Some(fire) = self
             .strikes
             .wave
             .as_ref()
             .filter(|w| matches!(w.phase, Phase::Forming | Phase::Screening) && w.members.contains(&u.id()))
+            .map(|w| w.tactic.fire_state())
+            .or_else(|| self.squad_strike_waiting_fire(u.id()))
         else {
             return;
         };
-        let fire = w.tactic.fire_state();
+
         let p = u.pos();
         self.strikes.hits.retain(|(_, at)| self.frame - *at < HIT_MEMORY);
         if let Some(hit) = self.strikes.hits.iter_mut().find(|(at, _)| distance(*at, p) < 100.0) {
@@ -108,6 +110,7 @@ impl Ai {
             ));
         }
         self.strikes.evasion.insert(u.id(), (goal, self.frame + EVADE_FOR));
+        self.squad_strike_evade(u.id(), goal);
         if let Some(w) = self.strikes.wave.as_mut() {
             w.query = None;
         }

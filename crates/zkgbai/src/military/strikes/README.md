@@ -171,3 +171,22 @@ pathing detours cannot be ruled out in advance.
 `assassin-aa-guarded` it checks the same threat-free policy as Fleas.
 
 The Phantom fixture stays at its seeded firing source, cloaked and firing normally.
+
+## Existing Halberd assault squads
+
+Ready, exclusively Halberd squads (the ordinary `Hover` kind, or pure `Assault`
+squads) can take nearby assassination jobs without waiting for the dedicated
+wave slot. They gather their actual surviving membership, ask the same target-death
+predictor, then use the wide, hold-fire Halberd pack movement and search pattern.
+Fresh inferred Phantom/artillery fixes qualify as well as seen targets. Escorts
+are included in the prediction; Halberds do not inherit the raiders' hard riot veto.
+These squad missions never requisition units and retain their normal squad identity.
+QRF and operator orders take priority. Target death, expired evidence or a search
+timeout releases the survivors to ordinary assault behavior. `squad_missions`
+reports gathering, assessing and diving (also exposed through the legacy
+`raider_missions` status key).
+
+`test=assassin-halberd-squad` versus `test=assassin-raider-lance` exercises normal
+Halberd squad formation and mission selection, with no preseeded strike wave.
+`test=assassin-halberd-squad-phantom` versus `test=assassin-target` adds a seeded
+approximate firing fix and a genuinely cloaked victim.
