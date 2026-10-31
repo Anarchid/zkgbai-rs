@@ -24,18 +24,21 @@ for file in p:lines() do
 					if not wd then
 						for k, v in pairs(wdefs) do if tostring(k):lower() == key then wd = v end end
 					end
-					local cp = wd and wd.customParams or {}
+					-- raw unit files spell it either way (the engine lowercases keys later)
+					local cp = wd and (wd.customParams or wd.customparams) or {}
 					weps[#weps + 1] = string.format("%s_%s:%s:%s:%s:%s", name, key or "?",
 						s(wd and wd.range), s(wd and wd.reloadtime), s(cp.slot or ""), s(wd and wd.damage and wd.damage.default))
 				end
 				local wx = {}
 				for _, k in ipairs(wkeys) do
 					local wd = wdefs[k]
-					local cp = wd.customParams or {}
-					wx[#wx + 1] = string.format("%s_%s:%s:%s:%s:%s:%s:%s:%s:%s", name, tostring(k):lower(),
+					local cp = wd.customParams or wd.customparams or {}
+					-- slots 9-11 (unit_timeslow.lua): slow-only flag, absolute slow per hit, overslow frames
+					wx[#wx + 1] = string.format("%s_%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s", name, tostring(k):lower(),
 						s(wd.projectiles or 1), s(wd.burst or 1), s(wd.paralyzer and 1 or 0),
 						s(wd.areaOfEffect or wd.damageAreaOfEffect or 0), s(cp.extra_damage or ""), s(cp.impulse or ""),
-						s(cp.timeslow_damagefactor or ""), s((cp.disarmdamageonly or cp.disarmDamageOnly) and 1 or (cp.setunitsonfire and 2 or 0)))
+						s(cp.timeslow_damagefactor or ""), s((cp.disarmdamageonly or cp.disarmDamageOnly) and 1 or (cp.setunitsonfire and 2 or 0)),
+						s(cp.timeslow_onlyslow and 1 or ""), s(cp.timeslow_damage or ""), s(cp.timeslow_overslow_frames or ""))
 				end
 				local sh = ""
 				local shregen = ""
