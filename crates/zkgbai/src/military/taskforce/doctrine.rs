@@ -384,6 +384,12 @@ pub struct Natural {
     pub weight: f32,
 }
 
+impl Default for Perch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Perch {
     pub fn new() -> Perch {
         Perch {
@@ -871,7 +877,7 @@ impl Doctrine {
                     self.perch = match v {
                         Value::Null => None,
                         Value::Object(p) => {
-                            let mut perch = self.perch.clone().unwrap_or_else(Perch::new);
+                            let mut perch = self.perch.clone().unwrap_or_default();
                             perch.apply(p)?;
                             Some(perch)
                         }

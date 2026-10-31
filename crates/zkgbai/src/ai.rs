@@ -95,8 +95,8 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
     "stayveto",
     "chatcommands",
 ];
-/// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
-/// Both can still be disabled with `disable=siege,crab`.
+// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
+// Both can still be disabled with `disable=siege,crab`.
 
 /// A lost game (`resignvalue`): the alliance holds under half the spots we
 /// hold hostile, and the enemy is estimated worth at least four times what
