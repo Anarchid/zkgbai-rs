@@ -39,7 +39,7 @@ fn eligible_kind(kind: SquadKind, all_halberds: bool) -> bool {
     kind == SquadKind::Raider || (matches!(kind, SquadKind::Assault | SquadKind::Hover) && all_halberds)
 }
 
-fn same_job(a: &Job, b: &Job) -> bool {
+pub(super) fn same_job(a: &Job, b: &Job) -> bool {
     match (a.id, b.id) {
         (Some(a), Some(b)) => a == b,
         _ => a.name == b.name && distance(a.pos, b.pos) < 500.0,
@@ -48,7 +48,7 @@ fn same_job(a: &Job, b: &Job) -> bool {
 
 impl Ai {
     pub(super) fn squad_strike_job_taken(&self, job: &Job) -> bool {
-        self.strikes.missions.values().any(|m| same_job(&m.job, job))
+        self.lobster_strike_job_taken(job) || self.strikes.missions.values().any(|m| same_job(&m.job, job))
     }
 
     pub(super) fn squad_strike_waiting_fire(&self, id: i32) -> Option<i32> {
@@ -69,7 +69,7 @@ impl Ai {
     }
 
     pub(crate) fn squad_strike_active(&self, sid: SquadId) -> bool {
-        self.strikes.missions.contains_key(&sid)
+        self.lobster_strike_active(sid) || self.strikes.missions.contains_key(&sid)
     }
 
     pub(crate) fn squad_strike_halberds(&self, sid: SquadId) -> bool {
@@ -113,11 +113,13 @@ impl Ai {
             .all(|id| self.fighters.get(id).is_some_and(|f| self.strike_suitable(Tactic::Halberd, job, f.get_pos())))
     }
     pub(crate) fn squad_strike_owns(&self, id: i32) -> bool {
-        self.fighters
-            .get(&id)
-            .and_then(|f| f.squad)
-            .and_then(|sid| self.strikes.missions.get(&sid))
-            .is_some_and(|m| m.members.contains(&id))
+        self.lobster_strike_owns(id)
+            || self
+                .fighters
+                .get(&id)
+                .and_then(|f| f.squad)
+                .and_then(|sid| self.strikes.missions.get(&sid))
+                .is_some_and(|m| m.members.contains(&id))
     }
 
     fn squad_strike_job(&self, id: i32) -> Option<Job> {
@@ -191,6 +193,7 @@ impl Ai {
     }
 
     pub(crate) fn squad_strike_cancel(&mut self, sid: SquadId) {
+        self.lobster_strike_cancel(sid);
         let Some(m) = self.strikes.missions.remove(&sid) else { return };
         self.squad_strike_release(sid, m);
     }
@@ -242,6 +245,9 @@ impl Ai {
     /// Runs before normal danger/mex scoring. A pending answer briefly holds
     /// the squad; a committed answer owns its orders until the job ends.
     pub(crate) fn squad_strike(&mut self, sid: SquadId) -> Option<Vec3> {
+        if let Some(goal) = self.lobster_strike(sid) {
+            return Some(goal);
+        }
         if !self.squad_strike_available(sid) {
             self.squad_strike_cancel(sid);
             return None;
@@ -356,7 +362,7 @@ impl Ai {
             .filter(|j| {
                 distance(from, j.pos) < SEARCH_RADIUS
                     && !self.strike_cooling(j.pos)
-                    && !self.strikes.missions.values().any(|m| same_job(&m.job, j))
+                    && !self.squad_strike_job_taken(j)
                     && !self.strikes.wave.as_ref().is_some_and(|w| w.phase == Phase::Diving && same_job(&w.job, j))
             })
             .collect();

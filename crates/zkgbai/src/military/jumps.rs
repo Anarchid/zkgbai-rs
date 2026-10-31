@@ -30,7 +30,7 @@ use crate::kgbutil::pathfinder::JumpPlan;
 use crate::kgbutil::{PathCost, kgb_move_to};
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 
-mod lobster;
+pub(crate) mod lobster;
 
 /// Frames between engagement checks.
 const PERIOD: i32 = 10;

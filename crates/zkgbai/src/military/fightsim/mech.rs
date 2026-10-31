@@ -241,6 +241,25 @@ fn apart(a: &MechUnit, b: &MechUnit) -> f64 {
     if dy == 0.0 { (a.u.x - b.u.x).abs() } else { (a.u.x - b.u.x).hypot(dy) }
 }
 
+/// A Lobster carries the first `count` snapshot units by one displacement.
+/// They remain exposed to enemy fire, and cannot walk or shoot until landing.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Insertion {
+    pub count: usize,
+    pub dx: f32,
+    pub dz: f32,
+    pub wait: i32,
+    pub flight: i32,
+}
+
+#[derive(Clone, Copy)]
+struct Flight {
+    count: usize,
+    displacement: f64,
+    wait: i32,
+    end: i32,
+}
+
 /// What a run of the mechanics fight answers.
 struct Run<'a> {
     hazard: Option<&'a Hazard>,
@@ -248,6 +267,7 @@ struct Run<'a> {
     /// A's mobile units drive through B (fates' pass mode).
     pass: bool,
     focus: Option<usize>,
+    insertion: Option<Flight>,
     horizon: i32,
     /// Per-unit bookkeeping for a fates query; the fight then goes on to
     /// the horizon while one side has an armed unit and the other anything.
@@ -324,7 +344,33 @@ impl Model {
         mode: FateMode,
         paralysis: &[(usize, f32)],
     ) -> Vec<UnitFate> {
+        self.fates_with_insertion(snap, horizon, mode, paralysis, None)
+    }
+
+    pub(crate) fn fates_with_insertion(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        mode: FateMode,
+        paralysis: &[(usize, f32)],
+        insertion: Option<Insertion>,
+    ) -> Vec<UnitFate> {
         let mut units = self.mech_units(snap);
+        // Project the displacement on the same original fight axis. Reprojecting
+        // a second snapshot would rotate/recenter the battle halfway through it.
+        let center = |side| {
+            let us: Vec<_> = snap.units.iter().filter(|u| u.side == side).collect();
+            let n = us.len().max(1) as f64;
+            (us.iter().map(|u| u.x as f64).sum::<f64>() / n, us.iter().map(|u| u.z as f64).sum::<f64>() / n)
+        };
+        let (a, b) = (center(0), center(1));
+        let len = (b.0 - a.0).hypot(b.1 - a.1).max(1.0);
+        let insertion = insertion.map(|p| Flight {
+            count: p.count.min(units.len()),
+            displacement: (p.dx as f64 * (b.0 - a.0) + p.dz as f64 * (b.1 - a.1)) / len,
+            wait: p.wait.max(0),
+            end: p.wait.max(0) + p.flight.max(1),
+        });
         for &(index, ratio) in paralysis {
             if ratio.is_finite()
                 && ratio >= 0.0
@@ -348,7 +394,7 @@ impl Model {
             FateMode::Assassinate { target } => Some(target),
             _ => None,
         };
-        let mut run = Run { hazard: None, withdraw: false, pass, focus, horizon, track: Some(track) };
+        let mut run = Run { hazard: None, withdraw: false, pass, focus, insertion, horizon, track: Some(track) };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let Some(tr) = run.track else { return Vec::new() };
         let c = &self.mech.fate;
@@ -528,7 +574,7 @@ pub(super) fn simulate_mech(
     hazard: Option<&Hazard>,
     withdraw: bool,
 ) -> (f64, f64) {
-    let mut run = Run { hazard, withdraw, pass: false, focus: None, horizon: HORIZON, track: None };
+    let mut run = Run { hazard, withdraw, pass: false, focus: None, insertion: None, horizon: HORIZON, track: None };
     run_mech(template, hits, stun_cap_s, &mut run).0
 }
 
@@ -600,6 +646,15 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         let mut moved = false;
         for &i in &alive {
             us[i].u.moving = false;
+            if let Some(p) = run.insertion.filter(|p| i < p.count && f < p.end + DT) {
+                let t = ((f - p.wait) as f64 / (p.end - p.wait) as f64).clamp(0.0, 1.0);
+                us[i].u.x = template[i].u.x + p.displacement * t;
+                if f < p.end {
+                    us[i].u.moving = f >= p.wait;
+                    moved |= us[i].u.moving;
+                    continue;
+                }
+            }
             if !us[i].u.mobile || us[i].u.speed <= 0.0 || us[i].stunned() {
                 continue;
             }
@@ -662,7 +717,11 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         // of engaging at all, with burn, paralysis and slow riding along.
         let mut shot_fired = false;
         for &i in &alive {
-            if !us[i].u.armed || !us[i].u.alive || us[i].stunned() {
+            if !us[i].u.armed
+                || !us[i].u.alive
+                || us[i].stunned()
+                || run.insertion.is_some_and(|p| i < p.count && f < p.end)
+            {
                 continue;
             }
             let side = us[i].u.side as usize;
@@ -828,6 +887,113 @@ mod tests {
                 (f[0].to_owned(), snapshot(f[1], &specs), want)
             })
             .collect()
+    }
+
+    #[test]
+    fn insertion_cannot_fire_early_and_keeps_incoming_damage() {
+        let model = Model::load().unwrap();
+        let defs = specs();
+        let mut snap = FightSnapshot {
+            units: vec![
+                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0 },
+                SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 820.0, x: 100.0, z: 0.0 },
+            ],
+        };
+        // Only the passenger has a weapon in the first comparison.
+        Arc::make_mut(&mut snap.units[1].spec).weapons.clear();
+        let mode = FateMode::Assassinate { target: 1 };
+        let insertion = Insertion { count: 1, dx: 50.0, dz: 0.0, wait: 45, flight: 155 };
+        let early = model.fates_with_insertion(&snap, 198, mode, &[], Some(insertion));
+        assert_eq!(early[1].hp_left, 820.0);
+        let landed = model.fates_with_insertion(&snap, 600, mode, &[], Some(insertion));
+        assert!(landed[1].hp_left < 820.0);
+        assert!(model.fates(&snap, 198, mode)[1].hp_left < 820.0);
+        snap.units[1].spec = defs["cloakriot"].clone();
+        let exposed = model.fates_with_insertion(&snap, 198, mode, &[], Some(insertion));
+        assert!(exposed[0].hp_left < 1450.0, "transport must not grant invulnerability");
+        assert_eq!(exposed[1].hp_left, 820.0, "no passenger damage before landing");
+    }
+
+    #[test]
+    fn insertion_crosses_a_gap_that_walking_cannot_cross_in_time() {
+        let model = Model::load().unwrap();
+        let defs = specs();
+        let snap = FightSnapshot {
+            units: vec![
+                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0 },
+                SnapUnit { side: 1, spec: defs["cloakcon"].clone(), hp: 600.0, x: 1000.0, z: 0.0 },
+            ],
+        };
+        let mode = FateMode::Assassinate { target: 1 };
+        let walk = model.fates(&snap, 210, mode);
+        let fly = model.fates_with_insertion(
+            &snap,
+            210,
+            mode,
+            &[],
+            Some(Insertion { count: 1, dx: 850.0, dz: 0.0, wait: 0, flight: 100 }),
+        );
+        assert_eq!(walk[1].hp_left, 600.0);
+        assert!(fly[1].hp_left < walk[1].hp_left);
+    }
+
+    #[test]
+    fn buoy_throw_can_kill_lance_but_a_ruined_payload_is_refused() {
+        let model = Model::load().unwrap();
+        // Live unit/weapon values; the opening gap exceeds Lance range.
+        let buoy = Arc::new(UnitSpec {
+            def: "amphfloater".into(),
+            cost: 280.0,
+            health: 1250.0,
+            speed: 51.0 / 30.0,
+            mobile: true,
+            air: false,
+            builder: false,
+            com: false,
+            radius: 20.0,
+            weapons: vec![WeaponSpec {
+                name: "amphfloater_cannon".into(),
+                range: 450.0,
+                reload: 1.8,
+                salvo: 1,
+                damage: 150.1,
+                weapon_type: "Cannon".into(),
+            }],
+        });
+        let lance = Arc::new(UnitSpec {
+            def: "hoverarty".into(),
+            cost: 1100.0,
+            health: 1000.0,
+            speed: 49.5 / 30.0,
+            mobile: true,
+            air: false,
+            builder: false,
+            com: false,
+            radius: 24.0,
+            weapons: vec![WeaponSpec {
+                name: "hoverarty_ata".into(),
+                range: 980.0,
+                reload: 23.0,
+                salvo: 1,
+                damage: 3000.1,
+                weapon_type: "BeamLaser".into(),
+            }],
+        });
+        let mut snap = FightSnapshot {
+            units: (0..4)
+                .map(|i| SnapUnit { side: 0, spec: buoy.clone(), hp: 1250.0, x: i as f32 * 30.0 - 45.0, z: 0.0 })
+                .collect(),
+        };
+        snap.units.push(SnapUnit { side: 1, spec: lance, hp: 1000.0, x: 0.0, z: 1000.0 });
+        let mode = FateMode::Assassinate { target: 4 };
+        let flight = Insertion { count: 4, dx: 0.0, dz: 570.4, wait: 45, flight: 155 };
+        let healthy = model.fates_with_insertion(&snap, 1350, mode, &[], Some(flight));
+        assert!(healthy[4].p_dead >= 0.55, "healthy Buoys: {:?}", healthy[4]);
+        for u in &mut snap.units[..4] {
+            u.hp = 1.0;
+        }
+        let damaged = model.fates_with_insertion(&snap, 1350, mode, &[], Some(flight));
+        assert!(damaged[4].p_dead < 0.55, "nearly dead Buoys: {:?}", damaged[4]);
     }
 
     #[test]

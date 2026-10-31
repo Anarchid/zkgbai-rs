@@ -274,6 +274,7 @@ impl Ai {
         }
         let autonomous = |sid| {
             !self.qrf_drafted(sid)
+                && !self.squad_strike_active(sid)
                 && self.op_squad_target(sid).is_none()
                 && !self.op.over.squad_intents.contains_key(&sid)
         };
