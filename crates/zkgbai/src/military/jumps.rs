@@ -7,11 +7,13 @@
 //! the jump, as does a landing too steep to walk; a unit waiting for its
 //! reload stands still, so a jump is only ordered when it can go at once.
 //!
-//! Uses: escapes (a retreating unit or a fleeing constructor jumps the
-//! first stretch of its way home: over the chasers, often over a cliff),
-//! Jacks jumping onto a target worth it, Pyros into a clump of light
-//! units, Jugglenauts into a crowd (the landing hits 1000 in 340), and
-//! Skuttles onto their heavy (see `jaeger`). A Skuttle shown against its
+//! Uses: escapes (a retreating unit or a fleeing constructor jumps toward
+//! home, over the chasers, often over a cliff, as far beyond their guns as
+//! its reach allows: see [`Ai::escape_landing`]), Jacks jumping onto a
+//! target worth it, Pyros into a clump of light units, Jugglenauts into a
+//! crowd (the landing hits 1000 in 340), and Skuttles onto their heavy (see
+//! `jaeger`). Jumps at enemies land where they will be by then (`lead`;
+//! off, onto where they are). A Skuttle shown against its
 //! will (an enemy near, or hit) jumps at once: onto the best blast in
 //! reach, or else away from what shows it. Skuttles never walk up to
 //! their mark: the blast (90) is short of the decloak (180), so one
@@ -136,6 +138,86 @@ const SKUTTLE_CLEAR: f32 = 600.0;
 /// flight (about 2.5 s), the cloak's 1.5 s linger after the last enemy,
 /// and some.
 const SKUTTLE_HOLD: i32 = 30 * 6;
+
+/// Led jumps: enemies this much beyond reach (and the splash) may move into
+/// it by the landing.
+const LEAD_LOOK: f32 = 200.0;
+/// A velocity above this share of the def's top speed is a push or a throw,
+/// not a walk: it is cut back to the top speed.
+const LEAD_TOP: f32 = 1.2;
+
+/// Escapes land up to this far beyond the guns of the enemies about: farther
+/// is no better than nearer home.
+const ESCAPE_CLEAR: f32 = 400.0;
+/// Each elmo an escape lands nearer home is worth this much of that.
+const ESCAPE_HOMEWARD: f32 = 0.5;
+/// A landing inside the threat map (enemies unseen or unknown, radar dots)
+/// is worth this much less.
+const ESCAPE_THREAT: f32 = 200.0;
+/// Escapes are tried around the unit, in this many directions, at these
+/// shares of reach.
+const ESCAPE_DIRS: usize = 16;
+const ESCAPE_RING: [f32; 2] = [1.0, 0.8];
+/// A landing off the walking way home walks home no more than this share of
+/// reach farther than from where the unit stands.
+const ESCAPE_DETOUR: f32 = 0.5;
+/// Landings off the way whose walk home is checked, per escape at most.
+const ESCAPE_WALKS: usize = 4;
+/// Mobile enemies seen this long ago (frames) still count where they were.
+const ESCAPE_SEEN: i32 = 90;
+
+/// An enemy about: where it is (live while in sight or on radar), where it
+/// goes (elmos a frame; none out of sight, or with `lead` off), its metal
+/// and health.
+#[derive(Clone, Copy, Debug)]
+struct Seen {
+    id: i32,
+    pos: Vec3,
+    vel: Vec3,
+    metal: f32,
+    health: f32,
+}
+
+impl Seen {
+    /// Where it is `t` frames from now, going on as it goes.
+    fn at(&self, t: f32) -> Vec3 {
+        ahead(self.pos, self.vel, t)
+    }
+}
+
+/// `p` moved `t` frames at `v` (on the ground plane).
+fn ahead(p: Vec3, v: Vec3, t: f32) -> Vec3 {
+    Vec3::new(p.x + v.x * t, p.y, p.z + v.z * t)
+}
+
+/// Where a jump from `from` meets what is at `at` going `v`: where it is
+/// when a jump there lands, `land(d)` frames after the order for a jump
+/// over `d`.
+fn lead_point(from: Vec3, at: Vec3, v: Vec3, land: impl Fn(f32) -> f32) -> Vec3 {
+    let mut to = at;
+    for _ in 0..4 {
+        to = ahead(at, v, land(distance(from, to)));
+    }
+    to
+}
+
+/// What an escape landing at `p` is worth, `t` frames after the order from
+/// `from` toward `home`: how far it lands beyond the guns of `danger`
+/// (where, going where, reach; up to [`ESCAPE_CLEAR`]), less
+/// [`ESCAPE_THREAT`] inside the threat map, plus [`ESCAPE_HOMEWARD`] for
+/// each elmo nearer home.
+fn escape_worth(p: Vec3, from: Vec3, home: Vec3, danger: &[(Vec3, Vec3, f32)], t: f32, threatened: bool) -> f32 {
+    let beyond = (danger.iter()).map(|&(q, v, r)| distance(p, ahead(q, v, t)) - r).fold(ESCAPE_CLEAR, f32::min);
+    let threat = if threatened { ESCAPE_THREAT } else { 0.0 };
+    beyond - threat + ESCAPE_HOMEWARD * (distance(from, home) - distance(p, home))
+}
+
+/// The middle of `group` and its mean velocity (where the middle goes).
+fn middle(group: &[Seen]) -> (Vec3, Vec3) {
+    let n = group.len().max(1) as f32;
+    let mean = |f: fn(&Seen) -> f32| group.iter().map(f).sum::<f32>() / n;
+    (Vec3::xz(mean(|e| e.pos.x), mean(|e| e.pos.z)), Vec3::xz(mean(|e| e.vel.x), mean(|e| e.vel.z)))
+}
 
 /// What a def's jumps are like (from its custom params).
 #[derive(Clone, Copy, Debug)]
@@ -378,12 +460,25 @@ impl Ai {
     /// Where a jump of `jd` from `from` meets a target at `at` going `v`
     /// (elmos a frame): where the target is when the jump lands there.
     pub fn jump_lead_point(jd: JumpDef, from: Vec3, at: Vec3, v: Vec3) -> Vec3 {
-        let mut to = at;
-        for _ in 0..4 {
-            let t = Self::jump_time(jd, distance(from, to));
-            to = Vec3::new(at.x + v.x * t, at.y, at.z + v.z * t);
+        lead_point(from, at, v, |d| Self::jump_time(jd, d))
+    }
+
+    /// Where enemy `e` is now (live while in sight or on radar, else where
+    /// it was last seen) and its velocity (elmos a frame on the ground
+    /// plane; none out of sight or with `lead` off), cut back to its top
+    /// speed (a faster one is pushed or thrown).
+    fn enemy_motion(&self, e: &super::enemy::Enemy) -> (Vec3, Vec3) {
+        let live = e.unit.pos();
+        if live == NULLPOS || (live.x == 0.0 && live.z == 0.0) {
+            return (e.position, Vec3::default());
         }
-        to
+        if self.dev_off("lead") {
+            return (live, Vec3::default());
+        }
+        let v = e.unit.vel();
+        let (speed, top) = (v.x.hypot(v.z), e.def_speed() / 30.0 * LEAD_TOP);
+        let k = if top > 0.0 && speed > top { top / speed } else { 1.0 };
+        (live, Vec3::xz(v.x * k, v.z * k))
     }
 
     /// Frames from a jump order of `jd` over `dist` to the landing.
@@ -506,8 +601,8 @@ impl Ai {
         true
     }
 
-    /// A unit on its way to `home` jumps the first stretch of the way, if
-    /// it can and enemies reach it here. (The way is found anew: the retreat
+    /// A unit on its way to `home` jumps clear (see [`Ai::escape_landing`]),
+    /// if it can and enemies reach it here. (The way is found anew: the retreat
     /// orders just given reach the engine a frame later, so the unit's queue
     /// still holds what it did before, a raider's way to its target, say.)
     pub fn jump_escape(&mut self, unit: Unit, home: Vec3) {
@@ -520,16 +615,135 @@ impl Ai {
             return;
         }
         let Some(jd) = self.jump_ready(unit) else { return };
-        let Some((to, way)) = self.jump_path(unit, home, jd.range * REACH, |ai, p| ai.jump_clear(jd, pos, p)) else {
+        let kept = self.pathfinder.jump_plans.get(&unit.id()).copied();
+        let land = |d: f32| Self::jump_time(jd, d);
+        let Some((to, way)) =
+            self.escape_landing(unit, pos, home, jd.range * REACH, land, |ai, p| ai.jump_clear(jd, pos, p))
+        else {
+            // (The way's own jump, if any, still stands.)
+            if let Some(p) = kept {
+                self.pathfinder.jump_plans.insert(unit.id(), p);
+            }
             return;
         };
         let why = format!("escape {}", self.defs.name(def));
+        self.log(&format!(
+            "jumps: {} {} escapes {:.0} of its {:.0} reach from ({:.0}, {:.0}) to ({:.0}, {:.0}), home ({:.0}, {:.0}) {:.0} \
+             off",
+            self.defs.name(def),
+            unit.id(),
+            distance(pos, to),
+            jd.range * REACH,
+            pos.x,
+            pos.z,
+            to.x,
+            to.z,
+            home.x,
+            home.z,
+            distance(pos, home)
+        ));
         self.jump_order(unit, to, &why);
         for wp in way {
             if distance(to, wp) > 16.0 {
                 kgb_move_to(unit, wp, OPTION_SHIFT_KEY, self.frame);
             }
         }
+    }
+
+    /// Where an escape from `from` (`reach`; landing `land(d)` frames after
+    /// the order for a throw or jump over `d`) toward `home` lands, and the
+    /// way on from there: of the landings `clear` lets through, along
+    /// `walker`'s walking way home and round about at full reach, the one
+    /// farthest beyond the guns of the enemies about (where they will be by
+    /// then; up to [`ESCAPE_CLEAR`] beyond), nearer home on a tie (see
+    /// [`ESCAPE_HOMEWARD`]). Off the way, only where the walk home is not
+    /// much longer than from here (no pits, no far side of a river).
+    ///
+    /// (The closest haven is just out of the threat, so the way there alone
+    /// landed the unit just out of reach of its chasers.)
+    fn escape_landing(
+        &mut self,
+        walker: Unit,
+        from: Vec3,
+        home: Vec3,
+        reach: f32,
+        land: impl Fn(f32) -> f32,
+        clear: impl Fn(&Self, Vec3) -> bool,
+    ) -> Option<(Vec3, Vec<Vec3>)> {
+        let def = walker.def()?;
+        let start = walker.pos();
+        // The walking way (a jumper's own way jumps would end it at the
+        // take-off, short of what a jump reaches).
+        self.pathfinder.walk_only = true;
+        let way: Vec<Vec3> =
+            self.pathfinder.find_path(&self.war, walker, home, PathCost::AvoidEnemies).into_iter().collect();
+        self.pathfinder.walk_only = false;
+        // A rim a shade inside reach (the order's own range check rounds).
+        let reach = reach - 1.0;
+        let mut spots: Vec<(Vec3, Option<usize>)> = Vec::new();
+        let (mut prev, mut along) = (start, 0.0);
+        for (i, &wp) in way.iter().enumerate() {
+            let seg = distance(prev, wp);
+            let n = (seg / 32.0).ceil().max(1.0) as i32;
+            for k in 1..=n {
+                let t = k as f32 / n as f32;
+                let p = Vec3::xz(prev.x + (wp.x - prev.x) * t, prev.z + (wp.z - prev.z) * t);
+                if along + seg * t >= MIN_ESCAPE && distance(from, p) <= reach {
+                    spots.push((p, Some(i)));
+                }
+            }
+            along += seg;
+            prev = wp;
+            if along > 3.0 * reach {
+                break;
+            }
+        }
+        for k in 0..ESCAPE_DIRS {
+            let a = k as f32 * std::f32::consts::TAU / ESCAPE_DIRS as f32;
+            for frac in ESCAPE_RING {
+                let r = reach * frac;
+                spots.push((Vec3::xz(from.x + a.cos() * r, from.z + a.sin() * r), None));
+            }
+        }
+        // The enemies about that shoot, where they will be when it lands.
+        let frame = self.frame;
+        let danger: Vec<(Vec3, Vec3, f32)> = (self.war.targets.values())
+            .filter(|e| !e.is_dead && e.can_attack() && e.position != NULLPOS)
+            .filter(|e| e.is_static || frame - e.last_seen <= ESCAPE_SEEN)
+            .filter(|e| distance(e.position, from) <= reach + e.def_max_weapon_range() + ESCAPE_CLEAR + LEAD_LOOK)
+            .map(|e| {
+                let (p, v) = self.enemy_motion(e);
+                (p, v, e.def_max_weapon_range())
+            })
+            .collect();
+        let view = self.war.view(Some(def));
+        let mut ranked: Vec<(f32, Vec3, Option<usize>)> = (spots.into_iter())
+            .map(|(p, i)| {
+                let t = land(distance(from, p));
+                (escape_worth(p, from, home, &danger, t, view.get_threat(p) > 0.0), p, i)
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut walk_here: Option<f32> = None;
+        let mut walks = 0;
+        for (_, p, i) in ranked {
+            if !clear(self, p) {
+                continue;
+            }
+            if let Some(i) = i {
+                return Some((p, way[i..].to_vec()));
+            }
+            if walks >= ESCAPE_WALKS {
+                continue;
+            }
+            walks += 1;
+            let here = *walk_here.get_or_insert_with(|| self.pathfinder.get_path_cost(&self.war, start, home, def));
+            let there = self.pathfinder.get_path_cost(&self.war, p, home, def);
+            if there >= 0.0 && (here < 0.0 || there <= here + ESCAPE_DETOUR * reach) {
+                return Some((p, vec![home]));
+            }
+        }
+        None
     }
 
     /// Farthest safe landing along the walking route. Lobsters use the
@@ -772,15 +986,19 @@ impl Ai {
     }
 
     /// Enemies (ground, armed or worth killing) seen lately within `r` of
-    /// `p`: (id, position, metal, health).
-    fn jumps_enemies_near(&self, p: Vec3, r: f32) -> Vec<(i32, Vec3, f32, f32)> {
+    /// `p`, where they are and go.
+    fn jumps_enemies_near(&self, p: Vec3, r: f32) -> Vec<Seen> {
         let frame = self.frame;
         self.war
             .targets
             .values()
             .filter(|e| !e.is_dead && e.identified && !e.can_fly() && !e.is_static)
             .filter(|e| frame - e.last_seen <= FRESH && distance(e.position, p) <= r)
-            .map(|e| (e.unit_id, e.position, e.ud.map_or(e.value, |d| d.cost(self.metal)), e.current_health()))
+            .map(|e| {
+                let (pos, vel) = self.enemy_motion(e);
+                let metal = e.ud.map_or(e.value, |d| d.cost(self.metal));
+                Seen { id: e.unit_id, pos, vel, metal, health: e.current_health() }
+            })
             .collect()
     }
 
@@ -834,7 +1052,12 @@ impl Ai {
         if let Some((worth, target, at)) = best
             && worth >= 100.0
         {
-            self.jump_strike(unit, target, at, "jack");
+            // Onto where it will be (`lead` off: half the flight's lead).
+            if self.dev_off("lead") {
+                self.jump_strike(unit, target, at, "jack");
+            } else {
+                self.jump_lead(unit, target, at, "jack");
+            }
         }
     }
 
@@ -847,7 +1070,8 @@ impl Ai {
         let (own_dps, own_range) = self.jumps_gun(def);
         let pos = unit.pos();
         let mine = self.war.get_total_friendly_power(pos) + (unit.power() + unit.health()) / 10.0;
-        if let Some(to) = self.jumps_pyro_target(pos, jd.range, mine, own_dps, own_range)
+        let land = |d: f32| Self::jump_time(jd, d);
+        if let Some((to, _)) = self.jumps_pyro_target(pos, jd.range, mine, own_dps, own_range, land)
             && self.jump_clear(jd, pos, to)
         {
             self.jump_order(unit, to, "pyro");
@@ -855,52 +1079,67 @@ impl Ai {
         }
     }
 
-    /// Pyros and equipped squads share target selection and brawler safety.
-    fn jumps_pyro_target(&mut self, pos: Vec3, range: f32, mine: f32, own_dps: f32, own_range: f32) -> Option<Vec3> {
-        let light: Vec<(i32, Vec3, f32, f32)> = self
-            .jumps_enemies_near(pos, range * REACH + PYRO_SPLASH)
-            .into_iter()
-            .filter(|e| e.3 <= LIGHT_HEALTH)
+    /// Pyros and equipped squads share target selection and brawler safety:
+    /// the landing on a clump of light enemies, where the clump will be by
+    /// then (landing `land(d)` frames after the order for a jump over `d`),
+    /// and the clump.
+    fn jumps_pyro_target(
+        &mut self,
+        pos: Vec3,
+        range: f32,
+        mine: f32,
+        own_dps: f32,
+        own_range: f32,
+        land: impl Fn(f32) -> f32,
+    ) -> Option<(Vec3, Vec<i32>)> {
+        let reach = range * REACH;
+        let light: Vec<Seen> = (self.jumps_enemies_near(pos, reach + PYRO_SPLASH + LEAD_LOOK).into_iter())
+            .filter(|e| e.health <= LIGHT_HEALTH)
             .collect();
         if light.len() < PYRO_CLUMP {
             return None;
         }
-        let mut best: Option<(usize, f32, Vec3)> = None;
-        for &(_, p, _, _) in &light {
-            let d = distance(pos, p);
-            if !(MIN_ENGAGE..=range * REACH).contains(&d) {
-                continue;
-            }
-            let near: Vec<&(i32, Vec3, f32, f32)> = light.iter().filter(|e| distance(e.1, p) <= PYRO_SPLASH).collect();
+        let frame = self.frame;
+        let mut best: Option<(usize, f32, Vec3, Vec<i32>)> = None;
+        for seed in &light {
+            let near: Vec<Seen> = light.iter().filter(|e| distance(e.pos, seed.pos) <= PYRO_SPLASH).copied().collect();
             if near.len() < PYRO_CLUMP {
                 continue;
             }
-            let n = near.len() as f32;
-            let c = Vec3::new(
-                near.iter().map(|e| e.1.x).sum::<f32>() / n,
-                0.0,
-                near.iter().map(|e| e.1.z).sum::<f32>() / n,
-            );
-            let metal: f32 = near.iter().map(|e| e.2).sum();
-            if distance(pos, c) > range * REACH || self.war.get_porc_threat(c) > 0.0 {
+            // Where the clump's middle will be when the jump lands.
+            let (c, v) = middle(&near);
+            let to = lead_point(pos, c, v, &land);
+            let d = distance(pos, to);
+            if !(MIN_ENGAGE..=reach).contains(&d) || self.war.get_porc_threat(to) > 0.0 {
                 continue;
             }
-            // Those that the Pyro outranges, within its reach of the landing.
+            let t = land(d);
+            let metal: f32 = near.iter().map(|e| e.metal).sum();
+            // Those that the Pyro outranges, within its reach of the landing
+            // by then.
             let brawlers: Vec<UnitDef> = (self.war.targets.values())
-                .filter(|e| !e.is_dead && e.identified && !e.can_fly() && self.frame - e.last_seen <= FRESH)
-                .filter(|e| e.def_max_weapon_range() < own_range && distance(e.position, c) <= own_range)
+                .filter(|e| !e.is_dead && e.identified && !e.can_fly() && frame - e.last_seen <= FRESH)
+                .filter(|e| e.def_max_weapon_range() < own_range)
+                // (Cheaply first: as far as it can walk by then.)
+                .filter(|e| {
+                    distance(e.position, to) <= own_range + LEAD_TOP * e.speed() * (t + (frame - e.last_seen) as f32)
+                })
+                .filter(|e| {
+                    let (p, v) = self.enemy_motion(e);
+                    distance(ahead(p, v, t), to) <= own_range
+                })
                 .filter_map(|e| e.ud)
                 .collect();
             let brawl: f32 = brawlers.into_iter().map(|d| self.jumps_gun(d).0).sum();
             let edge = if brawl > own_dps { PYRO_EDGE_BRAWL } else { PYRO_EDGE };
-            if self.war.get_enemy_power(c) > edge * mine {
+            if self.war.get_enemy_power(c).max(self.war.get_enemy_power(to)) > edge * mine {
                 continue;
             }
-            if best.is_none_or(|b| (near.len(), metal) > (b.0, b.1)) {
-                best = Some((near.len(), metal, c));
+            if best.as_ref().is_none_or(|b| (near.len(), metal) > (b.0, b.1)) {
+                best = Some((near.len(), metal, to, near.iter().map(|e| e.id).collect()));
             }
         }
-        best.map(|(_, _, to)| to)
+        best.map(|(_, _, to, clump)| (to, clump))
     }
 
     /// A Jugglenaut jumps into the thick of a crowd (its landing hits all
@@ -908,14 +1147,17 @@ impl Ai {
     fn jumps_sumo(&mut self, unit: Unit) {
         let Some(jd) = self.jump_ready(unit) else { return };
         let pos = unit.pos();
-        let near = self.jumps_enemies_near(pos, jd.range * REACH + SUMO_SPLASH);
+        let near = self.jumps_enemies_near(pos, jd.range * REACH + SUMO_SPLASH + LEAD_LOOK);
         let mut best: Option<(f32, Vec3)> = None;
-        for &(_, p, _, _) in &near {
+        for seed in &near {
+            // Onto where it will be, and the crowd about it by then.
+            let p = Self::jump_lead_point(jd, pos, seed.pos, seed.vel);
             let d = distance(pos, p);
             if !(MIN_ENGAGE..=jd.range * REACH).contains(&d) || self.war.get_porc_threat(p) > 0.0 {
                 continue;
             }
-            let metal: f32 = near.iter().filter(|e| distance(e.1, p) <= SUMO_SPLASH).map(|e| e.2).sum();
+            let t = Self::jump_time(jd, d);
+            let metal: f32 = near.iter().filter(|e| distance(e.at(t), p) <= SUMO_SPLASH).map(|e| e.metal).sum();
             if metal >= SUMO_CROWD
                 && best.is_none_or(|b| metal > b.0)
                 && self.jumps_friends_near(p, 170.0) <= SUMO_FRIENDS
@@ -1149,6 +1391,53 @@ mod tests {
             let there = Vec3::xz(at.x + v.x * t, at.z + v.z * t);
             assert!(distance(to, there) < 2.0, "{to:?} vs {there:?}");
         }
+    }
+
+    #[test]
+    fn a_throw_of_fixed_flight_leads_by_the_whole_flight() {
+        // A Lobster throw lands 150 frames on, however far: a raider clump
+        // walking 2 elmos a frame is 300 on by then.
+        let (from, at, v) = (Vec3::xz(0.0, 0.0), Vec3::xz(400.0, 0.0), Vec3::xz(0.0, 2.0));
+        let to = lead_point(from, at, v, |_| 150.0);
+        assert!(distance(to, Vec3::xz(400.0, 300.0)) < 0.01, "{to:?}");
+        // Standing still: onto it.
+        assert_eq!(lead_point(from, at, Vec3::default(), |_| 150.0), at);
+    }
+
+    #[test]
+    fn a_clump_goes_where_its_members_go_on_average() {
+        let seen =
+            |x: f32, vx: f32| Seen { id: 0, pos: Vec3::xz(x, 0.0), vel: Vec3::xz(vx, 1.0), metal: 0.0, health: 0.0 };
+        let (c, v) = middle(&[seen(0.0, 2.0), seen(100.0, 0.0)]);
+        assert_eq!((c, v), (Vec3::xz(50.0, 0.0), Vec3::xz(1.0, 1.0)));
+        assert_eq!(seen(10.0, 2.0).at(5.0), Vec3::xz(20.0, 5.0));
+    }
+
+    #[test]
+    fn escapes_land_far_beyond_chasers_but_no_farther_than_need_be() {
+        // A Pyro (reach 368) at the origin, home 150 east (the closest haven,
+        // just out of the threat), a Glaive (range 185) 100 west chasing at
+        // 2.5 elmos a frame; the landing ~70 frames on.
+        let (from, home, reach) = (Vec3::xz(0.0, 0.0), Vec3::xz(150.0, 0.0), 368.0);
+        let chaser = [(Vec3::xz(-100.0, 0.0), Vec3::xz(2.5, 0.0), 185.0)];
+        let worth = |p: Vec3, danger: &[(Vec3, Vec3, f32)]| escape_worth(p, from, home, danger, 70.0, false);
+        let at_home = worth(home, &chaser);
+        let full = worth(Vec3::xz(reach, 0.0), &chaser);
+        assert!(full > at_home, "full reach {full} vs the haven {at_home}");
+        // Full reach beats most of it too.
+        assert!(full > worth(Vec3::xz(0.8 * reach, 0.0), &chaser));
+        // Over the chasers toward home beats away from home when they come
+        // from home's side.
+        let ahead_of_home = [(Vec3::xz(100.0, 0.0), Vec3::xz(-2.5, 0.0), 185.0)];
+        let home = Vec3::xz(600.0, 0.0);
+        let worth = |p: Vec3| escape_worth(p, from, home, &ahead_of_home, 70.0, false);
+        assert!(worth(Vec3::xz(reach, 0.0)) > worth(Vec3::xz(-reach, 0.0)));
+        // Nobody about: home, not past it.
+        let home = Vec3::xz(150.0, 0.0);
+        let worth = |p: Vec3| escape_worth(p, from, home, &[], 70.0, false);
+        assert!(worth(home) > worth(Vec3::xz(reach, 0.0)));
+        // A landing in the threat map is worth less.
+        assert!(escape_worth(home, from, home, &[], 70.0, true) < worth(home));
     }
 
     #[test]
