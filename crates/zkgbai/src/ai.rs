@@ -632,6 +632,7 @@ impl Ai {
                     | "radarfort"
                     | "shadowprobe"
                     | "heavies"
+                    | "veto-scalpels"
                     | "heavypush"
                     | "paladin"
                     | "farm"

@@ -204,6 +204,7 @@ impl Ai {
     pub fn strike_test_update(&mut self, frame: i32) {
         self.airstrike_scenario(frame);
         self.strikes_scenario(frame);
+        self.veto_scenario(frame);
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_update(frame);
         }
@@ -353,6 +354,19 @@ impl Ai {
                     units.push(("turretlaser", get_directional_point(s, toward, 120.0)));
                     units.push(("staticradar", get_directional_point(s, toward, 270.0)));
                 }
+                units
+            }
+            // The veto's case (see `fightsim::scenario`): five Scalpels in a
+            // row across the way, halfway; a factory keeps the team alive.
+            ("veto-scalpels", 60) => {
+                let mid = get_directional_point(base, enemy, distance(base, enemy) / 2.0);
+                let mut units: Vec<(&str, Vec3)> = (0..5)
+                    .map(|k| {
+                        let s = (k as f32 - 2.0) * 40.0;
+                        (crate::military::fightsim::scenario::SCALPEL, Vec3::xz(mid.x - dz / n * s, mid.z + dx / n * s))
+                    })
+                    .collect();
+                units.push(("factorycloak", get_directional_point(base, enemy, -300.0)));
                 units
             }
             ("heavies", 60) => {
@@ -543,14 +557,14 @@ impl Ai {
         // (it would shoot the probes; losing it ends the game).
         if matches!(
             test.as_str(),
-            "fort" | "radarfort" | "heavies" | "heavypush" | "paladin" | "farm" | "snipers" | "lances"
+            "fort" | "radarfort" | "heavies" | "heavypush" | "paladin" | "farm" | "snipers" | "lances" | "veto-scalpels"
         ) && frame == 300
         {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
                 c.set_move_state(0, 0);
                 // Out of the way of the heavies' fight.
-                if matches!(test.as_str(), "heavies" | "heavypush" | "paladin") {
+                if matches!(test.as_str(), "heavies" | "heavypush" | "paladin" | "veto-scalpels") {
                     c.move_to(get_directional_point(base, enemy, -600.0), 0);
                 }
             }
