@@ -166,6 +166,15 @@ impl Ai {
                 added.push(w.unit);
             }
         }
+        if !added.is_empty() {
+            let ids: Vec<_> = added.iter().map(|u| u.id()).collect();
+            self.op_emit(
+                "crab-escort",
+                json!({"event": "joined", "squad": sid, "crab": leader.id(), "units": ids,
+                "have": have + added.len(), "want": want}),
+            );
+            self.log(&format!("taskforce: the crab force (squad {sid}) recruits Weavers {ids:?}; {} of {want} escorts, joining on the move", have + added.len()));
+        }
         let f = self.taskforces.siege.forces.get_mut(&sid).unwrap();
         f.support.units.extend(added);
         let escorts = f.support.units.clone();
@@ -216,6 +225,9 @@ impl Ai {
             .is_some_and(|p| !p.started && !p.abandoned);
         for (index, &u) in escorts.iter().enumerate() {
             if self.eco.workers.get(&u.id()).is_some_and(|w| w.is_chicken) {
+                // Retreat owns the commands for now. Reassert the escort's
+                // order when it returns instead of trusting a stale cache.
+                self.taskforces.siege.forces.get_mut(&sid).unwrap().support.orders.remove(&u.id());
                 continue;
             }
             let eligible: Vec<_> = candidates.iter().copied().filter(|(_, class, _)| index > 0 || *class < 2).collect();
@@ -255,6 +267,9 @@ impl Ai {
             }
             self.taskforces.siege.forces.get_mut(&sid).unwrap().support.paused.remove(&u.id());
             if staged {
+                self.crab_support_order(sid, u, 25, leader.id(), false, |u| {
+                    u.guard(leader, 0);
+                });
                 continue;
             }
             // At least one engineer guards the Crab whenever others forage.
@@ -304,7 +319,14 @@ impl Ai {
                 .entry(u.id())
                 .or_insert_with(|| u.current_commands().iter().map(|c| (c.id(), c.params())).collect());
         }
-        if f.support.orders.get(&u.id()) != Some(&(kind, target)) || u.num_current_commands() == 0 {
+        // An economy/event handler or retreat may have replaced our order.
+        // Repair and guard carry unit IDs; reclaim's engine parameter is an
+        // encoded feature ID, so compare its kind and our cached target only.
+        let live_order = u
+            .current_commands()
+            .iter()
+            .any(|c| c.id() == kind && (kind == 90 || c.params().first().is_some_and(|&p| p as i32 == target)));
+        if f.support.orders.get(&u.id()) != Some(&(kind, target)) || !live_order {
             f.support.orders.insert(u.id(), (kind, target));
             send(u);
         }

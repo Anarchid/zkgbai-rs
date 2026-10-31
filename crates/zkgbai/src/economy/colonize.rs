@@ -196,6 +196,7 @@ impl Ai {
         let pick = |fly: bool| {
             (self.eco.workers.values())
                 .filter(|w| !w.is_com && !w.is_chicken && !w.assigned_plop && !w.unit.is_being_built())
+                .filter(|w| !self.eco_worker_held(w.id))
                 .filter(|w| w.unit.def().is_some_and(|d| d.is_able_to_fly() == fly))
                 .min_by(|a, b| distance(a.get_pos(), center).total_cmp(&distance(b.get_pos(), center)))
                 .map(|w| (w.id, w.unit))

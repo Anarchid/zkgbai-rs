@@ -284,19 +284,16 @@ impl Squad {
         }
     }
 
-    /// Taskforces: the share of members within 350 of the leader (none
-    /// without a leader or members).
+    /// Taskforces: the share of formation members within 350 of the leader.
+    /// A lone leader is assembled; only a missing leader has no fraction.
     pub fn rally_fraction(&self, fighters: &FighterStore) -> Option<f32> {
         let lpos = self.leader_fighter(fighters)?.get_pos();
-        if self.fighters.is_empty() {
-            return None;
-        }
         // Spotters and trailing screens go their own ways.
         let members: Vec<_> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
             .filter(|f| !self.shape.own_way(def_id(f.unit)))
             .collect();
         if members.is_empty() {
-            return None;
+            return Some(1.0);
         }
         let rallied = members.iter().filter(|f| distance(f.get_pos(), lpos) < 350.0).count() as f32;
         Some(rallied / members.len() as f32)
@@ -1224,7 +1221,7 @@ pub(crate) mod fake_engine {
     use springai::{Callback, Unit, Vec3};
 
     pub const TEAM: i32 = 0;
-    pub const DEF_NAMES: [&CStr; 8] = [
+    pub const DEF_NAMES: [&CStr; 9] = [
         c"shieldfelon",
         c"shieldshield",
         c"vehcapture",
@@ -1233,6 +1230,7 @@ pub(crate) mod fake_engine {
         c"cloakraid",
         c"cloakbomb",
         c"cloakassault",
+        c"spidercrabe",
     ];
 
     #[derive(Clone, Copy)]
@@ -1471,6 +1469,42 @@ mod tests {
         assert_eq!(members, vec![31, 33]);
         assert!(s.is_dead(&fighters));
         assert!(members.iter().all(|id| fighters[id].squad.is_none()));
+    }
+
+    #[test]
+    fn lone_crab_is_rallied_without_waiting_for_economy_escorts() {
+        let (cb, defs, mut fighters) = setup();
+        let crab = seeds().into_iter().find(|d| d.name == "crab").unwrap();
+        let classes = crate::military::taskforce::Classes::default();
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        s.shape = Arc::new(crab.shape(&defs, &classes));
+        assert_eq!(s.rally_fraction(&fighters), None);
+        add(cb, &mut fighters, 90, 8, 1600.0);
+        s.add_unit(90, &mut fighters, 0);
+        assert_eq!(s.leader, Some(90));
+        assert!(s.fighters.is_empty(), "Weavers are economy escorts, not formation members");
+        assert_eq!(s.cores(&fighters), 1);
+        assert!(s.rally_fraction(&fighters).unwrap() > s.shape.rallied);
+        let force = crab.force([("spidercrabe", 1600.0)], &classes);
+        assert!(s.metal_value > s.shape.engage.as_ref().unwrap().eval(&force));
+        assert!(!s.shape.engage_screen && !s.shape.wait_army);
+    }
+
+    #[test]
+    fn missing_formation_member_still_prevents_rallying() {
+        let (cb, defs, mut fighters) = setup();
+        let felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        let classes = crate::military::taskforce::Classes::default();
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        s.shape = Arc::new(felon.shape(&defs, &classes));
+        add(cb, &mut fighters, 91, FELON, 600.0);
+        add(cb, &mut fighters, 92, THUG, 300.0);
+        s.add_unit(91, &mut fighters, 0);
+        s.add_unit(92, &mut fighters, 0);
+        fake_engine::UNITS.with_borrow_mut(|u| u.get_mut(&92).unwrap().pos = Vec3::xz(5000.0, 0.0));
+        assert_eq!(s.rally_fraction(&fighters), Some(0.0));
+        fake_engine::UNITS.with_borrow_mut(|u| u.get_mut(&92).unwrap().pos = Vec3::xz(100.0, 100.0));
+        assert_eq!(s.rally_fraction(&fighters), Some(1.0));
     }
 
     #[test]

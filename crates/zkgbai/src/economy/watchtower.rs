@@ -255,6 +255,7 @@ impl Ai {
     fn eco_raise_spike(&mut self, site: Vec3) -> Option<Unit> {
         let mut near: Vec<(f32, i32)> = (self.eco.workers.values())
             .filter(|w| !w.is_chicken && !w.assigned_plop && !w.unit.is_being_built())
+            .filter(|w| !self.eco_worker_held(w.id))
             .map(|w| (distance(w.get_pos(), site), w.id))
             .filter(|&(d, _)| d <= WORKER_RANGE)
             .collect();

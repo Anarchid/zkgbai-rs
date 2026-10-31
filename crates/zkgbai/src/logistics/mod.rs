@@ -514,6 +514,7 @@ impl Ai {
     fn logistics_hands(&self, pos: Vec3, crew: &[i32]) -> Vec<Hand> {
         let mut hands: Vec<Hand> = (self.eco.workers.values())
             .filter(|w| !w.is_chicken && w.bp > 0.0)
+            .filter(|w| crew.contains(&w.id) || !self.eco_worker_held(w.id))
             .filter_map(|w| {
                 let d = w.unit.def()?;
                 let speed = d.speed();

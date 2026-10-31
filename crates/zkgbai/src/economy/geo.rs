@@ -400,6 +400,7 @@ impl Ai {
         let mut near: Vec<(f32, i32)> = (self.eco.workers.values())
             // (`assigned_plop` stays set once the plop is used.)
             .filter(|w| !(w.is_chicken || w.unit.is_being_built() || (w.assigned_plop && w.has_plop())))
+            .filter(|w| !self.eco_worker_held(w.id))
             .map(|w| (distance(w.get_pos(), mid), w.id))
             .filter(|&(d, _)| d <= WORKER_RANGE)
             .collect();

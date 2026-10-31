@@ -89,6 +89,9 @@
 //! fort every four minutes: its Crab should park beyond the fort's reach,
 //! have a spike raised under it and shell the fort from up there (`siege-perch`
 //! journal records, `perches at` / `is perched` / `shells a` lines).
+//! `test=crabprogress` instead gives one Crab at minute 1, three Weavers
+//! at minute 2 and two more at minute 3: departure must precede the escorts,
+//! which join progressively without taking economy jobs away from the Crab.
 
 use springai::{Unit, Vec3};
 
@@ -303,6 +306,13 @@ impl Ai {
                 units.push(("staticradar", get_directional_point(enemy, base, 2200.0)));
                 units
             }
+            // Progressive assembly regression: the Crab must leave before
+            // its first Weavers exist, and accept later reinforcements.
+            ("crabprogress", CRAB_FRAME) => {
+                vec![("spidercrabe", ahead(-100.0)), ("staticradar", get_directional_point(enemy, base, 2200.0))]
+            }
+            ("crabprogress", f) if f == CRAB_FRAME + 30 * 60 => vec![("spidercon", ahead(-200.0)); 3],
+            ("crabprogress", f) if f == CRAB_FRAME + 30 * 120 => vec![("spidercon", ahead(-200.0)); 2],
             ("crab", f) if f >= CRAB_FRAME && (f - CRAB_FRAME) % CRAB_ROUND == 0 => {
                 let mut units = vec![("spidercrabe", ahead(-100.0))];
                 units.extend([("spidercon", ahead(-200.0)); 3]);
@@ -459,7 +469,7 @@ impl Ai {
         // Impaler tests cheat only to spawn (and `impaler` to top up): the
         // engine shows a cheating AI every unit's true place and health,
         // which would make light of what batteries must know by sight.
-        let quiet = matches!(test.as_str(), "impaler" | "impalerwar" | "siege" | "crab");
+        let quiet = matches!(test.as_str(), "impaler" | "impalerwar" | "siege" | "crab" | "crabprogress");
         let topped = frame % 300 == 0 && test != "impalerwar";
         if frame == 60 || (quiet && (topped || !spawn.is_empty())) {
             self.cb.cheats_set_enabled(true);
