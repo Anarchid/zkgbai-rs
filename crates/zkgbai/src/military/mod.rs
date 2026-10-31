@@ -1970,7 +1970,10 @@ impl Ai {
         // at the ground estimate through the strike support-fire path.
         for fix in self.counterbattery_fixes(sweeps::counterbattery::FRESH).filter(|f| f.ground) {
             let score = distance(origin, fix.pos) - fix.range;
-            if score < cost { target = fix.pos; cost = score; }
+            if score < cost {
+                target = fix.pos;
+                cost = score;
+            }
         }
         let war = &self.war;
 
