@@ -123,6 +123,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "optional Lobster squad throws and one launcher per 2500 metal of non-raider armed amphs; default on",
     ),
     ("jumppath", "Army", "jumpjets' ways jump cliffs they would walk round"),
+    ("stomp", "Army", "Jugglenauts escape and jump cliffs only where their landing spares our and allied units"),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
     ("escorts", "Army", "escorts for Impaler batteries (the impaler doctrine)"),
