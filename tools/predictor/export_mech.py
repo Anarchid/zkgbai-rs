@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the mechanics model (round-1 six + heatray) for the Rust port.
+"""Export the mechanics model (round-1 six + heatray + round-6 slow2d) for the Rust port.
 
 usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity]
   <refit2-dir>  zkgbai-runs/predictor/refit2: mech.pkl (fitted mechanics), empcap/hitcells.pkl
@@ -10,7 +10,8 @@ usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity]
 The sim runs on the crate's own base tables (refit-1 hit cells and hazard, the ones in
 data/fightsim_hits.tsv and fightsim_coef.tsv): predict._init on ~/.../refit1/empcap with
 PRED_HAZARD=refit1/hazard.pkl, so the calibration and the parity numbers match what Rust runs.
-Opts: air, burn, death, emp, slow, engage, heatray (mech.py).
+Opts: air, burn, death, emp, slow, engage, heatray, slow2d (mech.py): slow per hit from the fixed unit-def
+dump (mech6/slowhits.pkl, slow_hits.py), capped at (0.5 + overslow) x health; slow-only weapons left out.
 """
 import datetime
 import math
@@ -32,7 +33,8 @@ BASE = os.path.join(ROOT, "refit1", "empcap")           # the crate's hit tables
 HAZARD = os.path.join(ROOT, "refit1", "hazard.pkl")     # the crate's hazard
 SHIELD = os.path.join(ROOT, "mech2", "shield.json")      # _dyn_weapons for heatray
 FATES_CAL = os.path.join(ROOT, "fates", "cal.tsv")       # score_fates.py: the p_dead recalibration
-OPTS = {"air": 1, "burn": 1, "death": 1, "emp": 1, "slow": 1, "engage": 1, "heatray": 1}
+SLOW = os.path.join(ROOT, "mech6", "slowhits.pkl")       # slow_hits.py: the slow2 table (fixed dump)
+OPTS = {"air": 1, "burn": 1, "death": 1, "emp": 1, "slow": 1, "engage": 1, "heatray": 1, "slow2d": 1}
 G = {}
 
 
@@ -41,6 +43,7 @@ def init(rdir):
     predict._init(BASE, os.path.join(BASE, "cache"))
     mech.load(os.path.join(rdir, "mech.pkl"))
     mech.load_shield(SHIELD, os.path.join(rdir, "empcap", "hitcells.pkl"))
+    mech.load_slow(SLOW)  # the slow2 table; its inferred slow-only hit cells are not used (slow2d)
     G["hz"] = predict.G["hazard"]
 
 
@@ -56,23 +59,27 @@ def header(fh, what):
 def export_tables(out, cal):
     M = mech.M
     names = set(M.get("air", {})) | set(M.get("burn", {}))
-    names |= {k for k, v in M.get("udw", {}).items() if v["paralyzer"] or v["extra_damage"] > 0 or v["slow"] > 0}
+    names |= {k for k, v in M.get("udw", {}).items() if v["paralyzer"] or v["extra_damage"] > 0}
+    # slow2d: slow per point of damage landed (absolute slow per hit over damage per hit) and the overslow
+    # cap bonus; slow-only weapons do not fire
+    slow2 = {k: (v[0] / v[3], v[2]) for k, v in M["slow2"].items() if not v[1] and v[3] > 0}
+    names |= set(slow2)
     rows = 0
     with open(out, "w") as fh:
         header(fh, "mechanics")
-        fh.write("kind\tname\tvalues\n")
+        fh.write("kind\tname\tvalues (weapon: can_air can_ground burn burn_frames emp slow paralyzer overslow)\n")
         for n in sorted(names):
             air = M.get("air", {}).get(n, (True, True))
             burn = M.get("burn", {}).get(n, (0.0, 0))
             u = M.get("udw", {}).get(n)
             emp = 0.0
-            slow = 0.0
+            slow, ovs = slow2.get(n, (0.0, 0.0))
             para = 0
             if u is not None:
                 para = int(u["paralyzer"])
                 emp = u["damage"] if u["paralyzer"] else (u["extra_damage"] if u["extra_damage"] > 0 else 0.0)
-                slow = u["slow"]
-            fh.write(f"weapon\t{n}\t{int(air[0])}\t{int(air[1])}\t{burn[0]:.10g}\t{int(burn[1])}\t{emp:.10g}\t{slow:.10g}\t{para}\n")
+            fh.write(f"weapon\t{n}\t{int(air[0])}\t{int(air[1])}\t{burn[0]:.10g}\t{int(burn[1])}\t{emp:.10g}\t{slow:.10g}\t{para}"
+                     f"\t{ovs:.10g}\n")
             rows += 1
         for d, (dmg, aoe, edge, para) in sorted(M.get("death", {}).items()):
             fh.write(f"death\t{d}\t{dmg:.10g}\t{aoe:.10g}\t{edge:.10g}\t{int(bool(para))}\n")
@@ -124,6 +131,9 @@ CASES = {
     "emp_faraday": ([("turretemp", 1.0)], [("cloakraid", 1.0)] * 3, 380),
     "imp_death": ([("cloakbomb", 1.0), ("cloakraid", 1.0)], [("shieldraid", 1.0)] * 3, 150.7),
     "slow_bolas": ([("hoverheavyraid", 1.0)] * 3, [("tankassault", 1.0)], 301.1),
+    # slow2d: Moderators slow to the cap (and past it by their overslow), Sunlance's absolute slow per hit
+    "slow_moderator": ([("jumpskirm", 1.0)] * 3, [("tankassault", 1.0)] * 2, 430.7),
+    "slow_sunlance": ([("turretsunlance", 1.0)], [("tankassault", 1.0), ("tankheavyraid", 1.0)], 340.9),
     "aa_vs_air": ([("gunshipraid", 1.0)] * 2, [("shieldraid", 1.0)] * 3, 301.9),
     "kamikaze_skuttle": ([("jumpbomb", 1.0)], [("amphassault", 0.6)], 250),
     "heatray_short": ([("vehraid", 1.0)] * 2, [("shieldassault", 1.0)] * 2, 60),
@@ -183,7 +193,7 @@ def export_parity(tdir):
             fh.write(f"{name}\t{d.cost:.10g}\t{d.health:.10g}\t{d.speed:.10g}\t{int(d.canmove)}\t{int(d.canfly)}\t{int(d.builder)}\t0\t"
                      f"{d.radius:.10g}\t{'|'.join(ws)}\n")
     with open(os.path.join(tdir, "mech_parity_cases.tsv"), "w") as fh:
-        fh.write("# Python mech.simulate_mech, opts six + heatray: units side:def:hp:x:z; dps = no hazard, stop = with the hazard,"
+        fh.write("# Python mech.simulate_mech, opts six + heatray + slow2d: units side:def:hp:x:z; dps = no hazard, stop = with the hazard,"
                  " wd = A withdraws, with the hazard\n")
         fh.write("case\tunits\tdps_A\tdps_B\tstop_A\tstop_B\twd_A\twd_B\n")
         for name, (a, b, d0) in CASES.items():
@@ -195,7 +205,7 @@ def export_parity(tdir):
             fh.write(f"{name}\t{us}\t{dps[0]:.10g}\t{dps[1]:.10g}\t{stop[0]:.10g}\t{stop[1]:.10g}\t{wd[0]:.10g}\t{wd[1]:.10g}\n")
             print(f"{name:18} dps {dps[0]:.3f} {dps[1]:.3f}  stop {stop[0]:.3f} {stop[1]:.3f}  wd {wd[0]:.3f} {wd[1]:.3f}")
     with open(os.path.join(tdir, "mech_fates_cases.tsv"), "w") as fh:
-        fh.write("# Python mech.simulate_mech fates (no hazard), opts six + heatray: units side:def:hp:x:z; pass = the pass line's"
+        fh.write("# Python mech.simulate_mech fates (no hazard), opts six + heatray + slow2d: units side:def:hp:x:z; pass = the pass line's"
                  " offset from B's statics, empty for the a-move; fates per unit dead:death frame (-1 alive):hp left:pdead\n")
         fh.write("case\tunits\tpass\thorizon\tfates\n")
         for name, (a, b, d0, offset, horizon) in FATE_CASES.items():

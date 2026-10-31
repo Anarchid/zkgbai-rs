@@ -11,6 +11,8 @@ usage: mech_eval.py <pdir> <fights.pkl> <mech.pkl> <out-dir> <variants> [workers
   "pair:..." = base and the full set only; "base=a,b:c,d" = that set as the base, plus it with each
   of c, d alone and with all of them (mechanics round 2).
   MECH_TACAI: tacai.json for the tacai switch; MECH_HAZARD_MOB: the hazard used by hazmob variants.
+  MECH_SLOW: slow_hits.py output for the slow2 switch (mechanics round 6). MECH_SUBSET=<name>:<defs>:
+  also score the fights with one of these defs on either side; per-fight predictions go to preds.pkl.
 Each variant gets its own calibration (ZOIBeta per side, Logit1 on decided fights) fitted on a
 sample of train fights; scored on all dev fights. Writes scores.tsv, bootstrap.tsv,
 owner_bias.tsv and RESULTS.md into <out-dir>.
@@ -45,6 +47,8 @@ TAGS = {
     "slow": {"shieldriot", "amphfloater", "hoverheavyraid", "jumpskirm", "gunshipskirm", "tankheavyassault", "vehscout", "subraider", "planesupport"},
     "shield": {"shieldassault", "shieldfelon", "shieldshield", "staticshield", "shieldcon", "striderfunnelweb"},
     "dagger": {"hoverraid"},
+    # mechanics round 6: defs whose slow the def dump lost (lowercase customparams, slow-only, absolute slow)
+    "slowfix": {"amphfloater", "jumpskirm", "subraider", "gunshipskirm", "jumpcon", "tankheavyassault", "turretsunlance", "raveparty"},
 }
 RELEVANT = {"fire": "burn", "kamikaze": "death", "outlaw": "pulse", "emp": "emp", "slow": "slow", "air": "air", "dagger": "desync 2"}
 
@@ -94,6 +98,13 @@ def init(pdir, mech_path, variants):
         mech.load_shield(os.environ["MECH_SHIELD"], os.path.join(pdir, "hitcells.pkl"))
         cells = pickle.load(open(os.environ["MECH_HITS_SHIELD"], "rb"))["train"]
         predict.G["hits_shield"] = predict.HitModel(cells, predict.G["ud"])
+    if os.environ.get("MECH_SLOW"):  # mechanics round 6: slow2 table + inferred hit cells of slow-only weapons
+        extra = mech.load_slow(os.environ["MECH_SLOW"])
+        base_cells = pickle.load(open(os.path.join(pdir, "hitcells.pkl"), "rb"))["train"]
+        predict.G["hits"] = predict.HitModel(mech.with_slow_cells(base_cells, extra), predict.G["ud"])
+        if "hits_shield" in predict.G:
+            sh_cells = pickle.load(open(os.environ["MECH_HITS_SHIELD"], "rb"))["train"]
+            predict.G["hits_shield"] = predict.HitModel(mech.with_slow_cells(sh_cells, extra), predict.G["ud"])
     if os.environ.get("MECH_HAZARD_MOB"):  # mechanics round 2: variants with hazmob use this hazard
         import disengage
         hd = pickle.load(open(os.environ["MECH_HAZARD_MOB"], "rb"))
@@ -195,10 +206,16 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
     names = [n for n, _ in variants]
     big = ((d["nA"] >= 3) & (d["nB"] >= 3)).values
     sets = []
+    # MECH_SUBSET=<name>:<def,def,...>: also score the fights with one of these defs on either side (round 6)
+    sub_name, _, sub_defs = os.environ.get("MECH_SUBSET", "").partition(":")
+    sub_defs = set(x for x in sub_defs.split(",") if x)
+    has = (d["defsA"].map(lambda v: bool(sub_defs & set(v.split()))) | d["defsB"].map(lambda v: bool(sub_defs & set(v.split())))).values
     for sp in score_splits:
         inb = (d["split"] == sp).values
         if inb.any():
             sets += [(f"{sp} >=3 armed/side", inb & big), (f"{sp} all", inb)]
+            if sub_defs and (inb & has).any():
+                sets += [(f"{sp} {sub_name} >=3 armed/side", inb & big & has), (f"{sp} {sub_name} all", inb & has)]
     sc = []
     for sub, m in sets:
         s = d[m]
@@ -207,6 +224,7 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
             sc.append({"set": sub, "variant": n, "n": len(s), "n_decided": int((s["win"] >= 0).sum()), "games": s["game"].nunique(),
                        "logloss": np.nanmean(ma["logloss"]), "brier": np.nanmean(ma["brier"]), "crps": np.nanmean(ma["crps"])})
     sc = pd.DataFrame(sc)
+    d.to_pickle(os.path.join(out, "preds.pkl"))  # per-fight predictions, for later reads
     boots = []
     for sub, m in sets:
         if d[m]["game"].nunique() < 10:
@@ -247,7 +265,9 @@ def main(pdir, fights_path, mech_path, out, spec, workers=3, n_cal=12000):
                         ("all-static side", lambda r: static_side(r.defsA), lambda r: static_side(r.defsB)),
                         ("shield side", lambda r: bool(SHIELDS & set(r.defsA.split())), lambda r: bool(SHIELDS & set(r.defsB.split()))),
                         ("Felon side", lambda r: "shieldfelon" in r.defsA.split(), lambda r: "shieldfelon" in r.defsB.split()),
-                        ("sub side", lambda r: bool(SUBS & set(r.defsA.split())), lambda r: bool(SUBS & set(r.defsB.split())))):
+                        ("sub side", lambda r: bool(SUBS & set(r.defsA.split())), lambda r: bool(SUBS & set(r.defsB.split()))),
+                        ("slowfix side", lambda r: bool(TAGS["slowfix"] & set(r.defsA.split())), lambda r: bool(TAGS["slowfix"] & set(r.defsB.split()))),
+                        ("Cyclops side", lambda r: "tankheavyassault" in r.defsA.split(), lambda r: "tankheavyassault" in r.defsB.split())):
         tA = d.apply(fa, axis=1).values; tB = d.apply(fb, axis=1).values
         one = tA ^ tB
         for n in names:
