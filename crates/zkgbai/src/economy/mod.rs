@@ -13,6 +13,7 @@ mod geo;
 pub mod grid;
 mod lotus;
 mod planning;
+mod safespot;
 mod silo;
 mod sparrow;
 pub mod tasks;
