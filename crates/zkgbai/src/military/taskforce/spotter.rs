@@ -33,7 +33,9 @@
 //! but for one Sparrow a game from a standing plane factory (see
 //! `handlers::squad::squad_produce`). One just finished is claimed too,
 //! before the handlers that would take it; a spotter no force wants goes
-//! back to them.
+//! back to them. Widow spotters may take a short bite at a nearby visible
+//! heavy under friendly threat, keeping their place in the force and returning
+//! to spotting as soon as the shot fires or the opportunity ends.
 //!
 //! Any doctrine of the squad handler may have the role (a siege doctrine as
 //! a lance one): the squad handler calls [`Ai::taskforce_spot`] after each
@@ -518,6 +520,7 @@ impl Ai {
 
     /// A spotter no force wants goes back to its usual handler, for good.
     pub(crate) fn taskforce_spotter_release(&mut self, id: i32) {
+        self.widow_forget_bite(id);
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let watching = self.taskforces.spotters.by_unit.remove(&id).is_some_and(|sp| sp.watch);
         self.taskforces.spotters.released.insert(id);
@@ -719,6 +722,18 @@ impl Ai {
                 };
                 self.taskforces.spotters.by_unit.insert(id, sp);
             }
+            match self.widow_opportunistic_bite(unit, health_share(unit) >= spot.repair()) {
+                crate::military::jaeger::BiteAction::Active => continue,
+                crate::military::jaeger::BiteAction::Resume => {
+                    if let Some(sp) = self.taskforces.spotters.by_unit.get_mut(&id) {
+                        sp.job = Job::Escorting;
+                        sp.sent_at = i32::MIN / 2;
+                        sp.sent = NULLPOS;
+                        sp.orbiting = false;
+                    }
+                }
+                crate::military::jaeger::BiteAction::Idle => {}
+            }
             if health_share(unit) < spot.repair() {
                 lines.push(format!(
                     "taskforce: a {name} spotter of the {} force (squad {sid}, {state}) goes for repairs at {:.0}% \
@@ -827,6 +842,7 @@ impl Ai {
 
     /// Spotter `id` goes for repairs, or flees: out of its force for good.
     fn taskforce_spotter_away(&mut self, id: i32, unit: Unit) {
+        self.widow_forget_bite(id);
         if let Some(sp) = self.taskforces.spotters.by_unit.get_mut(&id) {
             sp.job = Job::Repairing;
             sp.since = self.frame;
