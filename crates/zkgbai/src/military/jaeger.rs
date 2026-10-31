@@ -49,7 +49,7 @@ use crate::Ai;
 use crate::military::jumps::SKUTTLE_PRESS;
 use crate::military::qrf::field::CELL;
 use crate::military::qrf::field::Mobility;
-use crate::military::{DefenseTarget, Enemy, Fighter, SquadId, SquadKind, scouts};
+use crate::military::{DefenseTarget, Enemy, Fighter, FighterStore, SquadId, SquadKind, Squads, scouts};
 use crate::nav;
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance, get_directional_point};
@@ -306,6 +306,40 @@ pub struct Jaegers {
     held: BTreeMap<i32, i32>,
 }
 
+impl Jaegers {
+    /// A completed hunter may be diverted to spotting before jaeger_claims.
+    /// Consume that order then, so it cannot claim a later scouting Widow.
+    pub(crate) fn order_filled(&mut self, name: &str, frame: i32) -> bool {
+        self.ordered.retain(|o| frame - o.1 <= ORDER_TIMEOUT);
+        if let Some(k) = self.ordered.iter().position(|o| o.0 == name) {
+            self.ordered.remove(k);
+            return true;
+        }
+        false
+    }
+
+    fn forget_empty(&mut self, sid: SquadId, squads: &mut Squads, fighters: &FighterStore) {
+        if squads.get(sid).is_none_or(|s| s.is_dead(fighters)) {
+            self.hunts.remove(&sid);
+            self.forming.retain(|_, f| *f != sid);
+            squads.remove(sid);
+        }
+    }
+
+    fn set_phase(&mut self, sid: SquadId, phase: Phase, squads: &mut Squads) {
+        if let Some(h) = self.hunts.get_mut(&sid) {
+            h.phase = phase;
+        }
+        if let Some(s) = squads.get_mut(sid) {
+            s.status = match phase {
+                Phase::Forming => 'f',
+                Phase::Hunting(None) | Phase::Reloading => 'r',
+                Phase::Hunting(Some(_)) | Phase::Striking(..) => 'a',
+            };
+        }
+    }
+}
+
 impl Ai {
     /// A Widow hunt is a warning to nearby finishers to gather before EMP lands.
     pub(crate) fn jaeger_stun_expected(&self, target: i32) -> bool {
@@ -411,10 +445,7 @@ impl Ai {
     /// a Widow we ordered, or a Skuttle while heavies are about.
     pub fn jaeger_claims(&mut self, name: &str) -> bool {
         let Some(kind) = kind_of(name) else { return false };
-        let frame = self.frame;
-        self.jaegers.ordered.retain(|o| frame - o.1 <= ORDER_TIMEOUT);
-        if let Some(k) = self.jaegers.ordered.iter().position(|o| o.0 == kind.name) {
-            self.jaegers.ordered.remove(k);
+        if self.jaegers.order_filled(name, self.frame) {
             return true;
         }
         match kind.name {
@@ -493,6 +524,9 @@ impl Ai {
         if let Some(s) = self.squads.get_mut(sid) {
             s.remove_unit_nav(id, &mut self.fighters, &mut nav);
         }
+        // Recruitment can move the last hunter into a taskforce immediately.
+        // Retire its old squad before that fighter id is reused there.
+        self.jaegers.forget_empty(sid, &mut self.squads, &self.fighters);
     }
 
     pub fn jaeger_update(&mut self, frame: i32) {
@@ -823,9 +857,7 @@ impl Ai {
                 }
             }
         };
-        if let Some(h) = self.jaegers.hunts.get_mut(&sid) {
-            h.phase = next;
-        }
+        self.jaegers.set_phase(sid, next, &mut self.squads);
     }
 
     /// Where a heavy (enemy id) is, its unit and its metal, while it lives.
@@ -1286,6 +1318,61 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recruited_hunter_cannot_leave_an_order_for_the_next_scout() {
+        let mut j = Jaegers::default();
+        j.ordered = vec![("spiderantiheavy", 0), ("jumpbomb", 0)];
+        assert!(j.order_filled("spiderantiheavy", 30));
+        assert!(!j.order_filled("spiderantiheavy", 60));
+        assert_eq!(j.ordered, [("jumpbomb", 0)]);
+        assert!(!j.order_filled("jumpbomb", ORDER_TIMEOUT + 1));
+        assert!(j.ordered.is_empty());
+    }
+
+    #[test]
+    fn recruiting_last_hunter_retires_its_squad_before_reusing_fighter() {
+        use crate::military::wrappers::squad::fake_engine::{TEAM, callback, spawn};
+        let cb = callback();
+        let mut fighters = FighterStore::new();
+        let mut squads = Squads::new();
+        let mut j = Jaegers::default();
+        let sid = squads.create(SquadKind::Jaeger, TEAM);
+        let kind = kind_of("spiderantiheavy").unwrap();
+        j.forming.insert(kind.name, sid);
+        j.hunts.insert(sid, Hunt { kind, phase: Phase::Forming, ambush: None });
+        for id in [10, 11] {
+            fighters.insert(id, Fighter::new(spawn(cb, id, 5), 280.0, TEAM));
+            squads.get_mut(sid).unwrap().add_unit(id, &mut fighters, 0);
+        }
+        squads.get_mut(sid).unwrap().remove_unit(10, &mut fighters, 0);
+        j.forget_empty(sid, &mut squads, &fighters);
+        assert!(squads.contains(sid));
+        squads.get_mut(sid).unwrap().remove_unit(11, &mut fighters, 0);
+        j.forget_empty(sid, &mut squads, &fighters);
+        let other = squads.create(SquadKind::Assault, TEAM);
+        squads.get_mut(other).unwrap().add_unit(11, &mut fighters, 0);
+        assert!(!squads.contains(sid));
+        assert!(j.hunts.is_empty() && j.forming.is_empty());
+        assert_eq!(fighters[&11].squad, Some(other));
+    }
+
+    #[test]
+    fn displayed_status_tracks_hunt_phase() {
+        let mut j = Jaegers::default();
+        let mut squads = Squads::new();
+        let sid = squads.create(SquadKind::Jaeger, 0);
+        for (phase, status) in [
+            (Phase::Forming, 'f'),
+            (Phase::Hunting(None), 'r'),
+            (Phase::Hunting(Some(42)), 'a'),
+            (Phase::Striking(42, 100), 'a'),
+            (Phase::Reloading, 'r'),
+        ] {
+            j.set_phase(sid, phase, &mut squads);
+            assert_eq!(squads.get(sid).unwrap().status, status);
+        }
+    }
 
     #[test]
     fn static_defenses_raise_widow_support_in_the_same_units() {

@@ -1,6 +1,7 @@
 //! Above 2000 metal per square kiloelmo, buy one Aspis OR Iris per 2000 metal
 //! of completed ground army. Factories and dedicated static morph jobs
-//! share the allowance, including production already in flight.
+//! share the allowance, including production already in flight. Full Lance
+//! batteries require one Iris each even below the general density threshold.
 
 use std::collections::BTreeMap;
 
@@ -108,6 +109,17 @@ fn preferred(count: [usize; 2]) -> [Support; 2] {
     if count[0] <= count[1] { [Support::Shield, Support::Cloak] } else { [Support::Cloak, Support::Shield] }
 }
 
+/// Battery cloaks take precedence and cannot be substituted with shields.
+fn demand(density: f32, army: f32, count: [usize; 2], cloaks_required: usize) -> Vec<Support> {
+    if count[Support::Cloak.index()] < cloaks_required {
+        vec![Support::Cloak]
+    } else if count.iter().sum::<usize>() < allowance(density, army) {
+        preferred(count).to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 fn request_morph(unit: Unit, mobile: UnitDef) {
     if !unit.is_being_built() && unit.rules_param_float("morphing", 0.0) == 0.0 {
         unit.execute_custom_command(cmd::MORPH, &[mobile.id() as f32], 0, NO_TIMEOUT);
@@ -117,12 +129,10 @@ fn request_morph(unit: Unit, mobile: UnitDef) {
 impl Ai {
     /// Completed combat metal excludes the support itself, constructors,
     /// aircraft and buildings: buying support cannot unlock more support.
-    fn army_support_demand(&self) -> Option<[usize; 2]> {
+    fn army_support_demand(&self) -> Vec<Support> {
         let density = self.projected_metal_density();
-        if density <= 2000.0 || !density.is_finite() {
-            return None;
-        }
         let mut army = 0.0;
+        let mut other_cloaks = 0;
         let mut count = self.eco.army_support.pending();
         for unit in self.cb.team_units() {
             if unit.health() <= 0.0 || unit.team() != self.team_id {
@@ -131,6 +141,22 @@ impl Ai {
             let Some(def) = unit.def() else { continue };
             if let Some(support) = Support::from_mobile(self.defs.name(def)) {
                 count[support.index()] += 1;
+                // A cloaker committed to another taskforce, or a battery
+                // reduced below four guns, cannot cover a new full battery.
+                // Ordinary support followers can be recalled, so exclude them.
+                if support == Support::Cloak
+                    && !self.misc_handler.supports.contains(&unit.id())
+                    && self
+                        .fighters
+                        .get(&unit.id())
+                        .and_then(|f| f.squad)
+                        .and_then(|sid| self.squads.get(sid))
+                        .is_some_and(|s| {
+                            s.is_taskforce() && (s.shape.doctrine != "lance" || s.cores(&self.fighters) < 4)
+                        })
+                {
+                    other_cloaks += 1;
+                }
             } else if !unit.is_being_built()
                 && def.speed() > 0.0
                 && def.build_speed() <= 0.0
@@ -140,7 +166,14 @@ impl Ai {
                 army += def.cost(self.metal);
             }
         }
-        (count.iter().sum::<usize>() < allowance(density, army)).then_some(count)
+        let batteries = self
+            .squad_handler
+            .taskforces
+            .iter()
+            .filter_map(|&sid| self.squads.get(sid))
+            .filter(|s| s.shape.doctrine == "lance" && s.cores(&self.fighters) >= 4)
+            .count();
+        demand(density, army, count, batteries + other_cloaks)
     }
 
     fn army_support_can_build(&self, factory: &Factory, support: Support) -> bool {
@@ -154,8 +187,7 @@ impl Ai {
     }
 
     pub(super) fn army_support_factory(&self, factory: &Factory) -> Option<&'static str> {
-        let count = self.army_support_demand()?;
-        preferred(count).into_iter().find(|&s| self.army_support_can_build(factory, s)).map(Support::mobile)
+        self.army_support_demand().into_iter().find(|&s| self.army_support_can_build(factory, s)).map(Support::mobile)
     }
 
     pub(super) fn army_support_ordered(&mut self, factory: i32, def: UnitDef) {
@@ -203,21 +235,18 @@ impl Ai {
                             .is_some_and(|d| f.unit.current_commands().iter().any(|c| c.id() == -d.id())))
             })
         });
-        let Some(count) = self.army_support_demand() else {
+        let wanted = self.army_support_demand();
+        if wanted.is_empty() {
             return;
-        };
+        }
         // Prefer existing production capacity. No new factory is needed
         // just to gain access to an Aspis or Iris.
-        if self
-            .fac
-            .factories
-            .values()
-            .any(|f| [Support::Shield, Support::Cloak].into_iter().any(|s| self.army_support_can_build(f, s)))
+        if self.fac.factories.values().any(|f| wanted.iter().any(|&s| self.army_support_can_build(f, s)))
             || !self.eco.army_support.tasks.is_empty()
         {
             return;
         }
-        for support in preferred(count) {
+        for support in wanted {
             let (Some(building), Some(_)) = (self.defs.get(support.building()), self.defs.get(support.mobile())) else {
                 continue;
             };
@@ -312,6 +341,17 @@ mod tests {
         MORPHING.with(|m| m.set(0.0));
         request_morph(unit, mobile);
         ORDERS.with(|o| assert_eq!(o.borrow().len(), 2));
+    }
+
+    #[test]
+    fn batteries_require_cloak_even_below_general_support_density() {
+        assert_eq!(demand(1000.0, 4000.0, [0, 0], 0), []);
+        assert_eq!(demand(1000.0, 4000.0, [0, 0], 1), [Support::Cloak]);
+        assert_eq!(demand(3000.0, 8000.0, [4, 0], 1), [Support::Cloak]);
+        // Pending orders and morphs count just like existing cloakers.
+        assert_eq!(demand(1000.0, 8000.0, [0, 1], 1), []);
+        assert_eq!(demand(1000.0, 8000.0, [0, 1], 2), [Support::Cloak]);
+        assert_eq!(demand(3000.0, 8000.0, [0, 1], 1), [Support::Shield, Support::Cloak]);
     }
 
     #[test]

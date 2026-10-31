@@ -20,8 +20,8 @@
 //!   sight, past its decloak distance;
 //! - `air`: a plane (a Sparrow) overflies the target at the volley and
 //!   waits over the force; fired on, it flees home.
-//! - `watch`: a standing ground spotter per gun, as used by Phantoms,
-//!   Lances and Emissaries. It continuously holds the nearest known enemy
+//! - `watch`: a standing ground spotter per gun for Phantoms and Emissaries,
+//!   or one shared by a battery of up to four Lances. It continuously holds the nearest known enemy
 //!   just inside its own sight, on the gun's side. Cloakers keep clear of
 //!   enemies along the path and at the destination; Halberds hold fire
 //!   throughout, retaining their armour, and repair below 60% health.
@@ -511,6 +511,7 @@ impl Ai {
         if unit.def().is_some_and(|d| d.is_able_to_fly()) {
             unit.set_idle_mode(0, 0);
         }
+        self.jaegers.order_filled(name, self.frame);
         self.squad_add_taskforce_member(Fighter::new(unit, cost, self.team_id));
         true
     }
