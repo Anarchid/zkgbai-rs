@@ -411,8 +411,24 @@ impl Ai {
         if spots(id) {
             return true;
         }
+        // An Iris can follow a land battery despite its different movement
+        // tier. It must actually reach the leader; water batteries cannot
+        // recruit a landlocked cloaker. Do not let the Iris reject later
+        // hover escorts merely because it is already in the force.
+        let cloaker = |m: i32| {
+            s.shape.doctrine == "lance"
+                && self.fighters.get(&m).is_some_and(|f| self.defs.name_of(f.unit) == "cloakjammer")
+        };
+        if cloaker(id) {
+            return self.fighters.get(&id).is_some_and(|f| {
+                f.unit
+                    .def()
+                    .zip(s.get_leader(&self.fighters))
+                    .is_some_and(|(def, leader)| self.terrain_reaches(def, f.get_pos(), leader.pos(), 100.0))
+            });
+        }
         let tier = self.squad_tier(id);
-        s.fighters.iter().filter(|&&m| !spots(m)).all(|&m| same_ways(self.squad_tier(m), tier))
+        s.fighters.iter().filter(|&&m| !spots(m) && !cloaker(m)).all(|&m| same_ways(self.squad_tier(m), tier))
     }
 
     fn squad_assign_assault(&mut self, id: i32) {
@@ -776,6 +792,17 @@ impl Ai {
                     self.taskforce_spotter_release(id);
                     return;
                 }
+                // Spare cloakers retain the ordinary support controller;
+                // they can be called when a battery fills or loses its Iris.
+                if name == "cloakjammer" {
+                    self.squad_handler.fighters.remove(&id);
+                    if let Some(mut f) = self.fighters.remove(&id) {
+                        f.squad = None;
+                        self.misc_add_support(f);
+                    }
+                    self.retreat_add_coward(unit);
+                    return;
+                }
                 // No force to join: fight as an assault.
                 self.retreat_add_coward(unit);
                 self.squad_assign_assault(id);
@@ -804,6 +831,9 @@ impl Ai {
         let mut nav = nav!(self);
         if let Some(s) = self.squads.get_mut(sid) {
             s.add_unit_nav(id, &mut self.fighters, &mut nav);
+        }
+        if is_core && dname.as_deref() == Some("lance") {
+            self.squad_call_taskforce_mobs(sid);
         }
     }
 
@@ -898,13 +928,16 @@ impl Ai {
     /// (in assault squads, or alone) and go where it goes, while it is short
     /// of them.
     fn squad_call_taskforce_mobs(&mut self, sid: SquadId) {
-        let ids: Vec<i32> = self.squad_handler.fighters.iter().copied().collect();
+        let ids: Vec<i32> = self.squad_handler.fighters.iter().chain(&self.misc_handler.supports).copied().collect();
         for id in ids {
             let Some(f) = self.fighters.get(&id) else { continue };
-            if !f.shield_mob {
+            let spare_cloaker = self.misc_handler.supports.contains(&id) && self.defs.name_of(f.unit) == "cloakjammer";
+            if !f.shield_mob && !spare_cloaker {
                 continue;
             }
-            if f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_taskforce()) || !self.squad_fits(sid, id) {
+            if (!spare_cloaker && f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_taskforce()))
+                || !self.squad_fits(sid, id)
+            {
                 continue;
             }
             let unit = f.unit;
@@ -923,7 +956,14 @@ impl Ai {
             if !wanted {
                 continue;
             }
-            if f.squad.is_some() {
+            if spare_cloaker {
+                self.misc_handler.supports.remove(&id);
+                self.squad_handler.fighters.insert(id);
+                if let Some(f) = self.fighters.get_mut(&id) {
+                    f.squad = None;
+                    f.shield_mob = true;
+                }
+            } else if f.squad.is_some() {
                 self.squad_leave_squad(id);
                 if let Some(f) = self.fighters.get_mut(&id) {
                     f.squad = None;
@@ -1185,6 +1225,11 @@ impl Ai {
     /// the doctrine says to); else keep out of threat, at the rally point.
     fn squad_assign_taskforces(&mut self) {
         while let Some(sid) = self.squad_handler.taskforces.pop_front() {
+            if self.squads.get(sid).is_some_and(|s| {
+                s.shape.doctrine == "lance" && self.frame - s.last_assignment_frame >= 30 && s.cores(&self.fighters) > 0
+            }) {
+                self.squad_call_taskforce_mobs(sid);
+            }
             let Some(s) = self.squads.get_mut(sid) else { continue };
             if s.is_dead(&self.fighters) || s.cores(&self.fighters) == 0 {
                 // Disband coreless forces: their members join other forces
@@ -1471,6 +1516,18 @@ mod tests {
         assert_eq!(core_room(&forces, false, true, 3), Some(2));
         assert_eq!(core_room(&forces, false, true, 2), Some(2));
         assert_eq!(core_room(&forces, false, true, 1), None);
+    }
+
+    #[test]
+    fn active_lance_batteries_fill_to_four_then_start_another() {
+        let d = taskforce::doctrine::seeds().into_iter().find(|d| d.name == "lance").unwrap();
+        for n in 1..=4 {
+            let forces = [Opening { id: 7, cores: n, engaging: true, formed: 0, value: n as f32 * 1000.0 }];
+            assert_eq!(
+                core_room(&forces, d.pool_with_allies, d.reinforce_engaged, d.cores_per_force as usize),
+                (n < 4).then_some(7)
+            );
+        }
     }
 
     #[test]

@@ -1268,7 +1268,8 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.reinforce_engaged = true;
 
     let mut lance = Doctrine::new("lance");
-    lance.note = "Lances (980 range, 3000 a shot) with a Mace, or two Bolas, against the raiders that pick \
+    lance.note = "Up to four Lances share one standing spotter, with an Iris once the battery is full. \
+                  Each Lance (980 range, 3000 a shot) has a Mace, or two Bolas, against the raiders that pick \
                   them off alone, guarding it (beside it, striking back at what hits it) rather than \
                   circling it; firing at will, each set on the best target in reach one shot kills. On \
                   since the 2026-10-24 Circuit read (ab16: army@15 +1402, 15-3-2 against 12-7-1); \
@@ -1283,6 +1284,16 @@ pub fn seeds() -> Vec<Doctrine> {
         },
         Role::spotter(),
     ];
+    lance.roles[2].want = Some(Expr::parse("cores > 0").expect("seed want"));
+    lance.roles.push(Role {
+        keep: Keep::Guard,
+        switch_on: true,
+        gauge: false,
+        ..Role::escort("cloaker", &["cloakjammer"], "cores >= 4", 80.0, 0.0)
+    });
+    lance.cores_per_force = 4;
+    lance.core_keep = Keep::Guard;
+    lance.reinforce_engaged = true;
     lance.marksman = true;
     lance.engage_value = 1400.0;
     lance.muster = 0.0;
@@ -1534,7 +1545,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gun_doctrines_draw_one_hold_fire_spotter_per_core() {
+    fn gun_doctrines_draw_hold_fire_spotters() {
         let classes = Classes::default();
         for (name, core) in [("lance", "hoverarty"), ("phantom", "cloaksnipe"), ("emissary", "tankarty")] {
             let d = seeds().into_iter().find(|d| d.name == name).unwrap();
@@ -1542,7 +1553,7 @@ mod tests {
             let role = d.role("spotter").unwrap();
             assert_eq!((role.spot, role.fire_state, role.produce), (Some(Spot::Watch), Some(0), 0.0));
             let force = d.force([(core, 1000.0), (core, 1000.0)], &classes);
-            assert_eq!(role.want(&force), Some(2));
+            assert_eq!(role.want(&force), Some(if name == "lance" { 1 } else { 2 }));
             for unit in ["hoverassault", "spiderantiheavy", "cloakheavyraid", "cloakaa"] {
                 assert!(role.units.iter().any(|u| u == unit));
                 assert_eq!(d.role_of(unit, &classes), d.roles.iter().position(|r| r.name == "spotter"));
@@ -1640,6 +1651,24 @@ mod tests {
         assert!(shape.low_shields(false, 0.4));
         assert!(shape.low_shields(true, 0.7));
         assert!(!shape.low_shields(true, 0.85));
+    }
+
+    #[test]
+    fn lance_battery_shares_a_spotter_and_adds_cloak_at_four() {
+        let classes = Classes::default();
+        let d = seeds().into_iter().find(|d| d.name == "lance").unwrap();
+        assert_eq!(d.cores_per_force, 4);
+        assert!(d.reinforce_engaged);
+        assert_eq!(d.core_keep, Keep::Guard);
+        let spotter = d.role("spotter").unwrap();
+        let cloak = d.role("cloaker").unwrap();
+        assert!(cloak.switch_on && !cloak.gauge);
+        assert_eq!(cloak.units, ["cloakjammer"]);
+        for n in 0..=4 {
+            let f = d.force(std::iter::repeat_n(("hoverarty", 1000.0), n), &classes);
+            assert_eq!(spotter.want(&f), Some(usize::from(n > 0)));
+            assert_eq!(cloak.want(&f), Some(usize::from(n == 4)));
+        }
     }
 
     #[test]
