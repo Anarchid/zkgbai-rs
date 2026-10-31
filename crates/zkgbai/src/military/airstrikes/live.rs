@@ -8,6 +8,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod defense;
+mod release;
 mod retarget;
 mod speculation;
 mod wave;
@@ -94,6 +95,7 @@ struct Sortie {
     memory: TargetMemory,
     searched_since: Option<i32>,
     retargeted: bool,
+    release: release::State,
     wave: Option<WaveFlight>,
     job: Mission,
     members: Vec<i32>,
@@ -495,7 +497,11 @@ impl Ai {
         let aircraft: BTreeMap<_, _> = self.bomber_handler.units.iter().map(|(&id, a)| (id, a.unit)).collect();
         for mut sortie in sorties {
             let acquired = self.airstrike_acquire(&mut sortie, &occupied);
+            self.airstrike_commitments(&mut sortie, frame);
             let retargeted = self.airstrike_retarget(&mut sortie, home, air, interceptors, &occupied);
+            if retargeted {
+                self.airstrike_commitments(&mut sortie, frame);
+            }
             let acquired = acquired || retargeted;
             occupied.extend(sortie.job.targets.iter().copied());
             let hunting = sortie.job.kind == MissionKind::Speculative;
@@ -547,9 +553,10 @@ impl Ai {
                 let Some(a) = self.bomber_handler.units.get_mut(&id) else { continue };
                 let u = a.unit;
                 let spent = u.rules_param_float("noammo", 0.0) > 0.0;
-                let safe = !risk.intercepted
+                let forecast_safe = !risk.intercepted
                     && u.def()
                         .is_some_and(|d| sortie.job.flight_safe(a.kind, risk, u.health(), u.max_health(), d.speed()));
+                let safe = sortie.release.allows(id, frame, forecast_safe, u.health(), u.max_health());
                 if springai::reserved::is_reserved(self.cb, id) {
                     *self
                         .bomber_handler
@@ -869,6 +876,7 @@ impl Ai {
             memory: TargetMemory { last_contact: frame, destroyed: false },
             searched_since: None,
             retargeted: false,
+            release: release::State::default(),
             wave,
             job: job.clone(),
             members: members.to_vec(),
@@ -1079,6 +1087,7 @@ mod operator_tests {
             memory: TargetMemory::default(),
             searched_since: None,
             retargeted: false,
+            release: release::State::default(),
             wave: None,
             job,
             return_route: return_route(Vec3::ZERO, &route),
