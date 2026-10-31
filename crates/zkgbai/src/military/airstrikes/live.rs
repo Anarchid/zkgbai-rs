@@ -623,9 +623,10 @@ impl Ai {
             });
             let done = disabled || !valid || !wave_safe || troops_gone || frame - sortie.launched > SORTIE_TIMEOUT;
             let mut keep = Vec::new();
+            let mut friendly_release = Vec::new();
             for (index, id) in sortie.members.into_iter().enumerate() {
                 let line = lines.get(index).copied();
-                // Napalm must not land on our troops walking toward the sniper.
+                // With `carpetspare`, napalm must not land on our troops.
                 let clear = line.is_none_or(|l| {
                     self.bomber_handler.units.get(&id).is_none_or(|a| distance(a.unit.pos(), l.aim) > 1500.0)
                         || self.carpet_clear(l)
@@ -651,6 +652,9 @@ impl Ai {
                         .or_default() += 1;
                     a.returning = true;
                     continue;
+                }
+                if let Some(l) = line.filter(|_| spent) {
+                    friendly_release.push(l);
                 }
                 if done || spent || !safe {
                     let stats = self.bomber_handler.utilization.entry(a.kind).or_default();
@@ -721,6 +725,13 @@ impl Ai {
                 }
                 active.insert(id);
                 keep.push(id);
+            }
+            for l in friendly_release {
+                let (n, metal) = self.carpet_exposure(l);
+                self.log(&format!(
+                    "airstrikes: carpet released at ({:.0}, {:.0}) over {n} friendly ground units ({metal:.0} metal)",
+                    l.aim.x, l.aim.z
+                ));
             }
             if !keep.is_empty() {
                 sortie.members = keep;
@@ -906,7 +917,9 @@ impl Ai {
             return false;
         }
         // Napalm and implosion blasts should not carpet our own troops.
-        if members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
+        // A carpet weighs its own strips (see `carpet`).
+        if job.kind != MissionKind::Carpet
+            && members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
             && self.cb.friendly_units_in(job.pos, 220.0).iter().any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
         {
             return false;
@@ -1001,8 +1014,9 @@ impl Ai {
             plan.risk.exposure
         ));
         for l in &lines {
+            let (n, metal) = self.carpet_exposure(*l);
             self.log(&format!(
-                "airstrikes: carpet line ({:.0}, {:.0}) -> ({:.0}, {:.0}) for {}",
+                "airstrikes: carpet line ({:.0}, {:.0}) -> ({:.0}, {:.0}) for {}; {n} friendly ground units under it ({metal:.0} metal)",
                 l.near.x,
                 l.near.z,
                 l.aim.x,

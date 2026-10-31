@@ -10,6 +10,10 @@
 //! bearing lays its ~390-elmo line centred on the aim, along the line on
 //! which the sniper must stand.
 //!
+//! Phantoms sit in contested ground, so by default a carpet does not spare
+//! friendly units under its lines (`enable=carpetspare` does); each release
+//! logs who was under it.
+//!
 //! Like the artillery hunt, this is evidence, never an engine handle: only
 //! aircraft already built fly it, and a real sighting of the sniper turns the
 //! sortie into an ordinary attack on the unit.
@@ -161,15 +165,28 @@ impl Ai {
             .collect()
     }
 
-    /// No ground unit of ours or our allies under the napalm.
+    /// Ground units of ours and our allies under a line's napalm: how many,
+    /// and their metal.
+    pub(super) fn carpet_exposure(&self, line: Line) -> (usize, f32) {
+        let mut under = BTreeMap::new();
+        for p in strip(line) {
+            for u in self.cb.friendly_units_in_cylinder(p, FRIENDLY_CLEAR) {
+                if let Some(d) = u.def().filter(|d| !d.is_able_to_fly()) {
+                    under.insert(u.id(), d.cost(self.metal));
+                }
+            }
+        }
+        (under.len(), under.values().sum())
+    }
+
+    /// Phantoms sit in contested ground: by default a carpet burns whoever is
+    /// under it. `enable=carpetspare` holds it off friendly ground units.
+    pub(super) fn carpet_spares(&self) -> bool {
+        !self.dev_off("carpetspare")
+    }
+
     pub(super) fn carpet_clear(&self, line: Line) -> bool {
-        strip(line).all(|p| {
-            !self
-                .cb
-                .friendly_units_in_cylinder(p, FRIENDLY_CLEAR)
-                .iter()
-                .any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
-        })
+        !self.carpet_spares() || self.carpet_exposure(line).0 == 0
     }
 
     /// Fly the threat-aware route to the far lead-in, along the bearing,
@@ -277,5 +294,7 @@ mod tests {
         assert!(MissionKind::Carpet.primary());
         assert!(MissionKind::Carpet.priority() > MissionKind::Group.priority());
         assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"carpet"));
+        // Friendly fire is accepted unless asked otherwise.
+        assert!(crate::ai::OFF_BY_DEFAULT.contains(&"carpetspare"));
     }
 }

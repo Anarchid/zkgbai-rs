@@ -5,6 +5,9 @@
 //! `airstrike-carpet-shooter` (the Phantom fires at the storages, a radar
 //! tower beside it lends sight). The defender logs its Phantom's health,
 //! cloak and burning every second: `carpet-test: phantom ...`.
+//! `airstrike-carpet-crowd` is `airstrike-carpet` with four held Glaives of
+//! ours on the line, 220-280 elmos short of the Phantom (friendly fire is
+//! accepted by default; `enable=carpetspare` should hold the carpet).
 use crate::{Ai, util::get_directional_point};
 use springai::Vec3;
 
@@ -34,12 +37,21 @@ impl Ai {
                 for x in [-400.0, 400.0] {
                     spawn.push(("staticstorage", Vec3::xz(site.x + x, site.z - range * 0.7)));
                 }
+                if test == "airstrike-carpet-crowd" {
+                    // The synthetic bearing comes from the first storage.
+                    let from = Vec3::xz(site.x - 400.0, site.z - range * 0.7);
+                    for (i, d) in [220.0, 240.0, 260.0, 280.0].into_iter().enumerate() {
+                        let p = get_directional_point(site, from, d);
+                        let side = if i % 2 == 0 { 40.0 } else { -40.0 };
+                        spawn.push(("cloakraid", Vec3::xz(p.x + side, p.z)));
+                    }
+                }
             }
             for (name, pos) in spawn {
                 if let Some(d) = self.defs.get(name) {
                     let p = map.find_closest_build_site(d, pos, 100.0, 1, 0);
                     if let Some(u) = self.cb.cheat_new_unit(d, if p.x >= 0.0 { p } else { pos }) {
-                        if matches!(name, SNIPER | "staticstorage") {
+                        if matches!(name, SNIPER | "staticstorage" | "cloakraid") {
                             u.set_fire_state(if test == "airstrike-carpet-shooter" { 2 } else { 0 }, 0);
                             u.set_move_state(0, 0);
                             springai::reserved::reserve(self.cb, u.id());
@@ -80,7 +92,18 @@ impl Ai {
             }
             return;
         }
-        if frame == 180 && test == "airstrike-carpet" {
+        if test == "airstrike-carpet-crowd" && frame % 30 == 0 {
+            for u in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u) == "cloakraid") {
+                springai::reserved::as_owner(|| {
+                    u.stop(0);
+                    u.set_fire_state(0, 0);
+                });
+                if frame % 150 == 0 {
+                    self.log(&format!("carpet-test: glaive {} hp={:.0}/{:.0}", u.id(), u.health(), u.max_health()));
+                }
+            }
+        }
+        if frame == 180 && matches!(test, "airstrike-carpet" | "airstrike-carpet-crowd") {
             let weapon = self
                 .defs
                 .get(SNIPER)

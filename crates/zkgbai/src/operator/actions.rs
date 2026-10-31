@@ -92,6 +92,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("carpet", "Military", "napalm unseen Phantoms along their shots' bearings with available Phoenixes (default on)"),
     (
+        "carpetspare",
+        "Military",
+        "carpets hold off when friendly ground units are under a line (off by default: Phantoms are worth the friendly fire)",
+    ),
+    (
         "odinfactories",
         "Military",
         "Odins burn enemy factories and strider hubs, valued at 3x cost, 4x for the last one (default on)",
