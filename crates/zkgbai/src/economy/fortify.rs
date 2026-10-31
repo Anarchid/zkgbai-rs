@@ -186,6 +186,7 @@ impl Ai {
             || worker.unit.is_being_built()
             || worker.unit.health() <= 0.0
             || self.eco_in_transit(worker.id)
+            || self.crab_escort(worker.id)
         {
             return None;
         }

@@ -222,6 +222,11 @@ impl Ai {
 
     pub(super) fn eco_assign_worker(&mut self, wid: i32) {
         let frame = self.frame;
+        // Idle, completion, move-failed and retreat-finished callbacks also
+        // enter here directly, bypassing the round-robin reservation check.
+        if self.crab_escort(wid) || self.eco.terraform_hold.get(&wid).is_some_and(|&until| until > frame) {
+            return;
+        }
         if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some() || self.jump_in_progress(w.unit)) {
             return;
         }

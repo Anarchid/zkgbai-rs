@@ -199,7 +199,7 @@ impl Ai {
                     self.eco
                         .workers
                         .values()
-                        .filter(|w| !is_terraforming(w.unit))
+                        .filter(|w| !self.eco_worker_held(w.id) && !is_terraforming(w.unit))
                         .filter_map(|w| {
                             let travel = self.eco_fortify_travel(w, *mid)?;
                             let price = travel / 4.0 - DITCH_SPOT_PRICE * worth[i];
@@ -238,6 +238,7 @@ impl Ai {
                 // it beats the present job of by most.
                 let eligible = (self.eco.workers.values())
                     .filter(|w| !w.is_chicken && !w.assigned_plop && !w.unit.is_being_built())
+                    .filter(|w| !self.eco_worker_held(w.id))
                     .map(|w| (distance(w.get_pos(), mid), w))
                     .filter(|&(d, _)| d <= DITCH_WORKER_RANGE);
                 let worker = if detour {
@@ -327,7 +328,8 @@ impl Ai {
     }
 
     pub(crate) fn eco_worker_held(&self, id: i32) -> bool {
-        self.eco.terraform_hold.get(&id).is_some_and(|&until| until > self.frame)
+        self.crab_escort(id)
+            || self.eco.terraform_hold.get(&id).is_some_and(|&until| until > self.frame)
             || self.eco_in_transit(id)
             || self.logistics_holds(id)
     }

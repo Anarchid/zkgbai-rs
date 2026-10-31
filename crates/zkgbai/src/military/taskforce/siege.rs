@@ -680,7 +680,18 @@ impl Ai {
         // there; else the force stands flat (and says so).
         let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone());
         if self.squads.get(sid).is_some_and(|q| q.shape.doctrine == "crab") {
-            if let Some(ref perch) = perch
+            // Keep fighting flat until at least one engineer has caught up.
+            // Selecting a pedestal earlier enters the legacy staging state
+            // and parks the Crab while constructors are still crossing the map.
+            let builder_near = self.taskforces.siege.forces.get(&sid).is_some_and(|f| {
+                f.support.units.iter().any(|u| {
+                    u.health() > 0.0
+                        && !self.eco.workers.get(&u.id()).is_some_and(|w| w.is_chicken)
+                        && distance(u.pos(), from) <= RAISE_NEAR
+                })
+            });
+            if builder_near
+                && let Some(ref perch) = perch
                 && let Some(p) = self.crab_site(leader, perch, statics)
             {
                 let (k, v) = in_reach(p, reach, statics);
@@ -1714,14 +1725,9 @@ impl Ai {
     pub(crate) fn siege_wait_raisers(&mut self, sid: SquadId, leader: Unit, fallback: Vec3) -> Option<(Vec3, String)> {
         let frame = self.frame;
         if self.squads.get(sid).is_some_and(|q| q.shape.doctrine == "crab") {
-            let nearby = self.taskforces.siege.forces.get(&sid).map_or(0, |f| {
-                f.support
-                    .units
-                    .iter()
-                    .filter(|u| u.health() > 0.0 && distance(u.pos(), leader.pos()) <= RAISE_FAR)
-                    .count()
-            });
-            return (nearby < 2).then(|| (fallback, format!("waits for Weaver escorts ({nearby}/2 nearby)")));
+            // Escorts join progressively. Their number and travel time must
+            // never prevent a healthy Crab from leaving home or advancing.
+            return None;
         }
         let is_site =
             self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).is_some_and(|s| s.perch_site);
