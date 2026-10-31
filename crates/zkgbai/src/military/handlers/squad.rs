@@ -16,7 +16,7 @@ use crate::military::taskforce::{self, Aim};
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
 use crate::terrain::tier_of;
-use crate::util::{NULLPOS, distance, kgb_rand};
+use crate::util::{NULLPOS, distance, get_directional_point, kgb_rand};
 
 #[derive(Default)]
 pub struct SquadHandler {
@@ -357,6 +357,7 @@ impl Ai {
     fn squad_delete_fighter(&mut self, id: i32) {
         self.fighters.remove(&id);
         self.squad_handler.fighters.remove(&id);
+        self.siege_remove(id);
     }
 
     /// Let go of fighter `id` altogether (out of its squad and the store),
@@ -389,6 +390,7 @@ impl Ai {
                 g.squad = None;
             }
         }
+        self.siege_forget(sid);
         self.squads.remove(sid);
         self.taskforces.packs.remove(&sid);
     }
@@ -524,6 +526,13 @@ impl Ai {
         r.want(&force).is_some_and(|w| force.roles.get(role).is_some_and(|x| x.1 < w))
     }
 
+    /// Whether every role of force `sid` named `screen` is at its want.
+    fn squad_screen_full(&self, sid: SquadId) -> bool {
+        let Some(q) = self.squads.get(sid) else { return true };
+        let Some(d) = self.taskforces.doctrine(&q.shape.doctrine) else { return true };
+        (d.roles.iter().enumerate()).filter(|(_, r)| r.name == "screen").all(|(i, _)| !self.squad_short_of(sid, i))
+    }
+
     /// The metal force `sid` must be worth to go in: its doctrine's `engage`
     /// over the force and our income (as assault squads count it), else
     /// its `engage_value`.
@@ -543,7 +552,11 @@ impl Ai {
     /// How far `p` lies along the line from our start to the enemy's start
     /// box (0 ours, 1 theirs; see `taskforce: depth axis` in the log).
     fn taskforce_depth(&self, p: Vec3) -> Option<f32> {
-        let (a, b) = (self.graph.get_start_pos(), self.graph.get_enemy_base()?);
+        // After a save is loaded the start position is not set (the
+        // loaded-game guard skips the opening): the ally center stands in.
+        let start = self.graph.get_start_pos();
+        let a = if start == NULLPOS { self.graph.get_ally_center() } else { start };
+        let b = self.graph.get_enemy_base()?;
         let (dx, dz) = (b.x - a.x, b.z - a.z);
         let len2 = dx * dx + dz * dz;
         (len2 > 0.0 && a != NULLPOS).then(|| ((p.x - a.x) * dx + (p.z - a.z) * dz) / len2)
@@ -568,8 +581,38 @@ impl Ai {
     /// for a role with `produce`: rolled at its `produce` chance, the first
     /// that comes up; with the doctrine and role, for the log.
     pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
+        if let Some(def) = self.crab_support_produce(options) {
+            return Some((def, "crab".into(), "Weaver escort".into()));
+        }
         let tf = &self.taskforces;
         for d in tf.doctrines.iter().filter(|d| d.enabled && taskforce::squad_aim(d.aim)) {
+            // A core, while a force of the doctrine has room for one (or it
+            // has no force at all), once the economy carries it: a 700-metal
+            // gun as a factory's second unit lost the opening.
+            if d.produce > 0.0
+                && self.eco.adjusted_income >= taskforce::CORE_PRODUCE_INCOME
+                && let Some(&def) = options.iter().find(|o| d.is_core(self.defs.name(**o), &tf.classes))
+            {
+                let forces: Vec<&crate::military::wrappers::squad::Squad> = (self.squad_handler.taskforces.iter())
+                    .filter_map(|&sid| self.squads.get(sid))
+                    .filter(|q| q.shape.doctrine == d.name)
+                    .collect();
+                let room = if d.produce_cores > 0 {
+                    // Only to fill a forming force up to `produce_cores`.
+                    forces
+                        .iter()
+                        .any(|q| !q.engaging && q.engaged == 0 && q.cores(&self.fighters) < d.produce_cores as usize)
+                } else {
+                    forces.is_empty()
+                        || forces.iter().any(|q| {
+                            !q.engaging
+                                && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
+                        })
+                };
+                if room && kgb_rand() < f64::from(d.produce) {
+                    return Some((def, d.name.clone(), "core".to_owned()));
+                }
+            }
             for (ri, r) in d.roles.iter().enumerate().filter(|(_, r)| r.produce > 0.0) {
                 let Some(&def) = options.iter().find(|o| r.units.iter().any(|u| u == self.defs.name(**o))) else {
                     continue;
@@ -604,6 +647,32 @@ impl Ai {
         None
     }
 
+    /// The doctrine a unit of type `name` goes to: the first switched on
+    /// (of those the squad handler runs) taking it as a core; else, of
+    /// those taking it as a role, the first with a force that takes members
+    /// now and is short of the role (an Ogre goes to whichever of the
+    /// Tremor and Emissary forces lacks its screen), else the first.
+    fn squad_doctrine_for(&self, name: &str) -> Option<String> {
+        let tf = &self.taskforces;
+        let takers: Vec<&taskforce::Doctrine> =
+            (tf.doctrines.iter()).filter(|d| d.enabled && taskforce::squad_aim(d.aim)).collect();
+        if let Some(d) = takers.iter().find(|d| d.is_core(name, &tf.classes)) {
+            return Some(d.name.clone());
+        }
+        let roles: Vec<(&taskforce::Doctrine, usize)> =
+            takers.iter().filter_map(|d| d.role_of(name, &tf.classes).map(|r| (*d, r))).collect();
+        let short = roles.iter().find(|(d, r)| {
+            (self.squad_handler.taskforces.iter()).any(|&sid| {
+                self.squads.get(sid).is_some_and(|q| {
+                    q.shape.doctrine == d.name
+                        && (!q.engaging || q.shape.reinforce_engaged)
+                        && self.squad_short_of(sid, *r)
+                })
+            })
+        });
+        short.or(roles.first()).map(|(d, _)| d.name.clone())
+    }
+
     /// Place a unit in a taskforce (see `military::taskforce`), by the
     /// doctrine that takes its type. A core starts a force of its own
     /// unless one not engaged has room for more cores (see `core_room`;
@@ -621,6 +690,7 @@ impl Ai {
         }
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
+        let dname = self.squad_doctrine_for(&name);
         let tf = &self.taskforces;
         // Shared spotter types join a doctrine that actually has a vacancy.
         let doctrine = tf
@@ -637,7 +707,7 @@ impl Ai {
                             })
                     })
             })
-            .or_else(|| tf.squad_doctrine(&name));
+            .or_else(|| dname.as_deref().and_then(|d| tf.doctrine(d)));
         let dname = doctrine.map(|d| d.name.clone());
         let is_core = doctrine.is_some_and(|d| d.is_core(&name, &tf.classes));
         let role = doctrine.and_then(|d| d.role_of(&name, &tf.classes));
@@ -756,11 +826,14 @@ impl Ai {
             None => "no leader".to_owned(),
         };
         let spotter = self.taskforce_spotter_doing(unit.id()).map_or(String::new(), |j| format!(", spotter {j}"));
-        let line = format!(
+        let mut line = format!(
             "taskforce: a {} of the {} force (squad {sid}, {state}) dies to a {by}, depth {depth} ({far}){spotter}",
             self.defs.name_of(unit),
             s.shape.doctrine
         );
+        if let Some(note) = self.siege_death_note(sid, unit.id()) {
+            line.push_str(&note);
+        }
         self.log(&line);
     }
 
@@ -1161,42 +1234,124 @@ impl Ai {
             // Being rallied lets it go in; engaged, only a doctrine that
             // regroups breaks off when its members scatter.
             let rallied = self.squad_is_rallied(sid) || (engaging && !shape.regroup);
+            // Siege dials (see `taskforce::siege`): with the screen at its
+            // want, and beside the main body (our army's median depth up to
+            // the station's, less a tenth), unless already in.
+            let screened = !shape.engage_screen || engaging || self.squad_screen_full(sid);
+            // The army's depth against the station's (`wait_army`) is tested
+            // once the station is picked, inside the engage branch below: a
+            // force's first sortie picks its station on the way, so a test
+            // before it never gated one (the first re-run: 7 forces waited).
+            let army_depth = self.squad_army_depth(sid).map(|(d, _)| d);
 
+            // A perched siege force (see `taskforce::siege`) stays where it
+            // is: its core cannot come down.
+            let perched = shape.aim == Aim::Siege
+                && shape.perch.is_some()
+                && self.siege_perched(sid)
+                && !self.siege_leaves_hurt(sid, health);
             // Where it engages, if it does; else why not.
             let mut engage_at = None;
-            let why = if low_shields {
+            let raiser_wait: String;
+            // A siege force falls back toward home: the haven nearest the
+            // force itself may lie beside a far constructor on the flank or
+            // the map edge (an Emissary force deep in the enemy's base went
+            // that way and died chased); the guns are slow, the way home is
+            // the only safe one.
+            let home = self.graph.get_start_pos();
+            let fallback = if shape.aim == Aim::Siege && home != NULLPOS && distance(pos, home) > 1200.0 {
+                self.graph_get_closest_haven(get_directional_point(pos, home, 1200.0))
+            } else {
+                self.graph_get_closest_haven(pos)
+            };
+            let why = if perched && let Some(leader) = led {
+                // What would have called it off, for the record.
+                if low_shields {
+                    self.siege_stranded(sid, "low shields");
+                } else if health < shape.retreat_health {
+                    self.siege_stranded(sid, "hurt");
+                }
+                let (target, go) = self.siege_conduct(sid, leader);
+                if go {
+                    self.squad_set_target(sid, target);
+                }
+                engage_at = Some(target);
+                ""
+            } else if low_shields {
                 let haven = self.graph_get_closest_raider_haven(pos);
                 self.squad_retreat_to(sid, haven);
                 "low shields"
             } else if health < shape.retreat_health {
-                let haven = self.graph_get_closest_haven(pos);
-                self.squad_retreat_to(sid, haven);
+                self.squad_retreat_to(sid, fallback);
                 "hurt"
-            } else if let Some(leader) = led.filter(|_| worth && rallied) {
+            } else if let Some(leader) = led.filter(|_| worth && rallied && screened) {
                 let view = self.war.view(leader.def());
                 let tolerance = (courage - 1.0).max(0.0) * view.get_total_friendly_threat(pos);
                 if shape.flee_threat && view.get_effective_threat(pos) / courage > tolerance {
-                    let haven = self.graph_get_closest_haven(pos);
-                    self.squad_retreat_to(sid, haven);
+                    self.squad_retreat_to(sid, fallback);
                     "threat"
                 } else {
-                    let target = match shape.aim {
-                        Aim::Artillery => self.war_get_arty_target(pos, false),
+                    // Siege forces park at a station (see `taskforce::siege`):
+                    // once there, no more orders move the guns.
+                    let (target, go) = match shape.aim {
+                        Aim::Artillery => (self.war_get_arty_target(pos, false), true),
                         Aim::Standoff => {
                             let at = self.war_get_arty_target(pos, false);
-                            self.graph_get_closest_haven(at)
+                            (self.graph_get_closest_haven(at), true)
                         }
-                        _ => self.war_get_target(leader, false),
+                        Aim::Siege => self.siege_conduct(sid, leader),
+                        _ => (self.war_get_target(leader, false), true),
                     };
-                    self.squad_set_target(sid, target);
-                    engage_at = Some(target);
-                    ""
+                    // Beside the main body (`wait_army`): with the station
+                    // picked, a force not yet engaged holds at its haven until
+                    // the army's median depth reaches the station's, less a
+                    // tenth (unknown depths do not hold it).
+                    let station_depth = if shape.aim == Aim::Siege { self.taskforce_depth(target) } else { None };
+                    let army_wait = shape.aim == Aim::Siege
+                        && shape.wait_army
+                        && !engaging
+                        && matches!((army_depth, station_depth), (Some(a), Some(s)) if a < s - 0.1);
+                    let waits = format!(
+                        "waits for the army (army depth {}, station depth {})",
+                        army_depth.map_or("-".to_owned(), |d| format!("{d:.2}")),
+                        station_depth.map_or("-".to_owned(), |d| format!("{d:.2}"))
+                    );
+                    // A perching force walks with its raisers: borrowed when
+                    // the station is picked, it waits at a haven out of the
+                    // enemy's reach until they are with it (see
+                    // `siege_wait_raisers`).
+                    let wait = if army_wait {
+                        self.siege_note_wait(sid, &waits);
+                        Some((fallback, waits.clone()))
+                    } else if shape.aim == Aim::Siege && shape.perch.is_some() && (go || shape.doctrine == "crab") {
+                        self.siege_wait_raisers(sid, leader, fallback)
+                    } else {
+                        None
+                    };
+                    match wait {
+                        Some((haven, why)) => {
+                            self.squad_retreat_to(sid, haven);
+                            raiser_wait = why;
+                            raiser_wait.as_str()
+                        }
+                        None => {
+                            if go {
+                                self.squad_set_target(sid, target);
+                            }
+                            engage_at = Some(target);
+                            ""
+                        }
+                    }
                 }
             } else {
-                let short = if !worth {
+                let short: &str = if !worth {
                     "worth too little"
                 } else if led.is_none() {
                     "led by no core"
+                } else if !rallied {
+                    "scattered"
+                } else if !screened {
+                    "no screen"
                 } else {
                     "scattered"
                 };
@@ -1207,7 +1362,13 @@ impl Ai {
                     self.squad_handler.taskforces.push_back(sid);
                     return;
                 }
-                let rally = self.war_get_rally_point(pos);
+                // Siege forces form at a haven, not the army's forward
+                // rally point, where a slow gun forming alone dies.
+                let rally = if shape.aim == Aim::Siege {
+                    self.graph_get_closest_haven(pos)
+                } else {
+                    self.war_get_rally_point(pos)
+                };
                 self.squad_set_target(sid, rally);
                 short
             };
@@ -1224,9 +1385,20 @@ impl Ai {
         if self.squads.get(sid).is_some_and(|s| s.shape.marksman) {
             self.taskforce_mark(sid);
         }
+        if self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege) {
+            self.siege_tick(sid, engage_at.is_some(), why);
+        }
         if self.squads.get(sid).is_some_and(|s| s.shape.roles.iter().any(|r| r.spot.is_some())) {
             self.taskforce_spot(sid);
         }
+        // How long a siege force was held for the army before this sortie
+        // (taken as the sortie begins; 0 on a break-off or no change).
+        let waited =
+            if engage_at.is_some() && self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege && !s.engaging) {
+                self.siege_take_wait(sid)
+            } else {
+                0
+            };
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
         s.keep_pace(&self.fighters, engage_at.is_some());
@@ -1262,8 +1434,10 @@ impl Ai {
         let line = match engage_at {
             Some(t) => format!(
                 "taskforce: the {doctrine} force (squad {sid}) engages{}: {line}; pace {pace}; to go {threshold:.0}; \
-                 depth {depth}, our army {army}; target ({:.0}, {:.0})",
+                 depth {depth}, our army {army}, target depth {}; {}; target ({:.0}, {:.0})",
                 if first { " first" } else { " again" },
+                self.taskforce_depth(t).map_or("-".to_owned(), |d| format!("{d:.2}")),
+                if waited > 0 { format!("after {waited} s waiting") } else { "no wait".to_owned() },
                 t.x,
                 t.z
             ),

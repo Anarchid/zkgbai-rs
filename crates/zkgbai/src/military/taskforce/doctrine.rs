@@ -340,6 +340,124 @@ impl Role {
     }
 }
 
+/// A siege force's perch (the Crab spire, see `siege`): once its leading
+/// core has parked, constructors borrowed from the economy raise a spike
+/// under it, `height` elmos up with a flat top `top` wide, so a cannon's
+/// ballistic reach grows; the station is picked for the reach from up there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Perch {
+    pub height: f32,
+    pub top: f32,
+    /// Constructor types borrowed to raise it, how many (an expression
+    /// over the force), for at most `borrow_s` seconds, from within `range`.
+    pub raisers: Vec<String>,
+    pub count: Expr,
+    pub borrow_s: f32,
+    pub range: f32,
+    /// A perch site must put this many known enemy statics in the perched
+    /// reach, else the force stands flat; and, with `refuse_if_reached`, no
+    /// known enemy gun may reach the aim point up there.
+    pub min_reach: u32,
+    pub refuse_if_reached: bool,
+    /// Natural perches: sites are scored by their existing height over the
+    /// nearest defense, those at least `min_height` up are preferred by
+    /// `weight`, and the raise asks only the remainder up to `height` (none
+    /// when the ground is that high already). None: every perch is raised
+    /// from the ground it stands on.
+    pub natural: Option<Natural>,
+    /// No perch while the enemy is known to field what climbs a pillar
+    /// (spiders, jumpers: a factory of theirs seen) or what outranges it
+    /// (artillery, anti-heavy statics in reach of the site); the force then
+    /// stands flat. False: the raise goes up whatever they field.
+    pub refuse_climbers: bool,
+    /// A perched core below this share of its health leaves the pillar
+    /// while it can (the force breaks off hurt); 0: it never comes down.
+    pub leave_health: f32,
+}
+
+/// See [`Perch::natural`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Natural {
+    pub min_height: f32,
+    pub weight: f32,
+}
+
+impl Perch {
+    pub fn new() -> Perch {
+        Perch {
+            height: 200.0,
+            top: 48.0,
+            raisers: Vec::new(),
+            count: Expr::parse("2").expect("perch count"),
+            borrow_s: 150.0,
+            range: 4000.0,
+            min_reach: 3,
+            refuse_if_reached: true,
+            natural: None,
+            refuse_climbers: false,
+            leave_health: 0.0,
+        }
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "height": self.height,
+            "top": self.top,
+            "raisers": self.raisers,
+            "count": self.count.source(),
+            "borrow_s": self.borrow_s,
+            "range": self.range,
+            "min_reach": self.min_reach,
+            "refuse_if_reached": self.refuse_if_reached,
+            "natural": self.natural.as_ref().map(|n| json!({"min_height": n.min_height, "weight": n.weight})),
+            "refuse_climbers": self.refuse_climbers,
+            "leave_health": self.leave_health,
+        })
+    }
+
+    pub fn apply(&mut self, patch: &Map<String, Value>) -> Result<(), String> {
+        for (k, v) in patch {
+            match k.as_str() {
+                "height" => self.height = num(k, v, 16.0, 600.0)?,
+                "top" => self.top = num(k, v, 16.0, 200.0)?,
+                "raisers" => self.raisers = names(k, v)?,
+                "count" => {
+                    self.count = match v {
+                        Value::String(s) => Expr::parse(s).map_err(|e| format!("perch count: {e}"))?,
+                        Value::Number(n) => Expr::parse(&n.to_string())?,
+                        _ => return Err("perch 'count' must be an expression or a number".into()),
+                    }
+                }
+                "borrow_s" => self.borrow_s = num(k, v, 0.0, 3600.0)?,
+                "range" => self.range = num(k, v, 0.0, 20000.0)?,
+                "min_reach" => self.min_reach = num(k, v, 0.0, 1000.0)? as u32,
+                "refuse_if_reached" => self.refuse_if_reached = flag(k, v)?,
+                "refuse_climbers" => self.refuse_climbers = flag(k, v)?,
+                "leave_health" => self.leave_health = num(k, v, 0.0, 1.0)?,
+                "natural" => {
+                    self.natural = match v {
+                        Value::Null => None,
+                        Value::Object(n) => {
+                            let mut nat = self.natural.clone().unwrap_or(Natural { min_height: 100.0, weight: 1.0 });
+                            for (nk, nv) in n {
+                                match nk.as_str() {
+                                    "min_height" => nat.min_height = num(nk, nv, 0.0, 600.0)?,
+                                    "weight" => nat.weight = num(nk, nv, 0.0, 100.0)?,
+                                    _ => return Err(format!("a natural perch has no field '{nk}' (see doctrines)")),
+                                }
+                            }
+                            Some(nat)
+                        }
+                        _ => return Err("perch 'natural' must be an object or null".into()),
+                    }
+                }
+                _ => return Err(format!("a perch has no field '{k}' (see doctrines)")),
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Doctrine {
     pub name: String,
@@ -352,6 +470,11 @@ pub struct Doctrine {
     /// [`Role::fire_state`]).
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
+    /// The chance a factory pick that could build a core builds it instead,
+    /// while the doctrine has a force with room for one (or none at all)
+    /// and our income carries it (see `taskforce::CORE_PRODUCE_INCOME`);
+    /// 0: cores come as the factory's own picks (Felons, Lances).
+    pub produce: f32,
     pub roles: Vec<Role>,
     /// Cores a force takes before a new core starts its own (0: no limit,
     /// a composition grown without end). Only a force that is not engaged
@@ -472,6 +595,26 @@ pub struct Doctrine {
     /// this share of the armed ground units on the map are not raiders: the
     /// game's middle (0: awake from the start; see `taskforce_wake`).
     pub wake_share: f32,
+    /// Cores are produced on purpose (`produce`) only to fill a forming
+    /// force (never yet engaged) up to this many cores, and never to start
+    /// one; 0: up to `cores_per_force`, and to start a force when none is,
+    /// or when none that is not engaged has room (the first siege arm's
+    /// dose). Siege forces.
+    pub produce_cores: u32,
+    /// Siege forces: a force goes in only once our army's median depth has
+    /// reached its station's (less a tenth): it goes in beside the main
+    /// body, waiting at its haven else.
+    pub wait_army: bool,
+    /// Siege forces: a force goes in only with every role named `screen`
+    /// at its want.
+    pub engage_screen: bool,
+    /// Siege forces: the perch raised under the leading core once parked
+    /// (the Crab spire); none for guns that stand on the ground.
+    pub perch: Option<Perch>,
+    /// Siege forces with a perch: a new core is claimed only while a perch
+    /// site is known for it (else it fights as the army would have it, a
+    /// loner, until one is); false: every core is claimed.
+    pub claim_with_site: bool,
 }
 
 impl Doctrine {
@@ -483,6 +626,7 @@ impl Doctrine {
             core: Vec::new(),
             fire_state: None,
             fire_at_radar: None,
+            produce: 0.0,
             roles: Vec::new(),
             cores_per_force: 1,
             pool_with_allies: false,
@@ -528,6 +672,11 @@ impl Doctrine {
             fate_secs: 5.0,
             lasting: 1.0,
             wake_share: 0.0,
+            produce_cores: 0,
+            wait_army: false,
+            engage_screen: false,
+            perch: None,
+            claim_with_site: false,
         }
     }
 
@@ -573,6 +722,7 @@ impl Doctrine {
             "core": self.core,
             "fire_state": self.fire_state,
             "fire_at_radar": self.fire_at_radar,
+            "produce": self.produce,
             "roles": self.roles.iter().map(Role::to_json).collect::<Vec<_>>(),
             "cores_per_force": self.cores_per_force,
             "pool_with_allies": self.pool_with_allies,
@@ -601,6 +751,11 @@ impl Doctrine {
         });
         // Packs' fields (one json! with all of them overflows its recursion).
         let pack = json!({
+            "produce_cores": self.produce_cores,
+            "wait_army": self.wait_army,
+            "engage_screen": self.engage_screen,
+            "perch": self.perch.as_ref().map(Perch::to_json),
+            "claim_with_site": self.claim_with_site,
             "core_keep": self.core_keep.name(),
             "core_orbit": self.core_orbit,
             "cores_to_go": self.cores_to_go,
@@ -643,6 +798,7 @@ impl Doctrine {
                 "core" => self.core = names(k, v)?,
                 "fire_state" => self.fire_state = optional(v, |v| Ok(num(k, v, 0.0, 2.0)? as i32))?,
                 "fire_at_radar" => self.fire_at_radar = optional(v, |v| flag(k, v))?,
+                "produce" => self.produce = num(k, v, 0.0, 1.0)?,
                 "roles" => {
                     let Value::Array(list) = v else { return Err("'roles' must be a list of roles".into()) };
                     let mut roles = Vec::new();
@@ -705,6 +861,21 @@ impl Doctrine {
                 "fate_secs" => self.fate_secs = num(k, v, 1.0, 30.0)?,
                 "lasting" => self.lasting = num(k, v, 0.0, 10.0)?,
                 "wake_share" => self.wake_share = num(k, v, 0.0, 1.0)?,
+                "produce_cores" => self.produce_cores = num(k, v, 0.0, 1000.0)? as u32,
+                "wait_army" => self.wait_army = flag(k, v)?,
+                "engage_screen" => self.engage_screen = flag(k, v)?,
+                "claim_with_site" => self.claim_with_site = flag(k, v)?,
+                "perch" => {
+                    self.perch = match v {
+                        Value::Null => None,
+                        Value::Object(p) => {
+                            let mut perch = self.perch.clone().unwrap_or_else(Perch::new);
+                            perch.apply(p)?;
+                            Some(perch)
+                        }
+                        _ => return Err("'perch' must be an object or null".into()),
+                    }
+                }
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -780,6 +951,24 @@ impl Doctrine {
         if self.shields_low > self.shields_ok {
             return Err(format!("doctrine {}: shields_low above shields_ok", self.name));
         }
+        if let Some(p) = &self.perch {
+            if self.aim != Aim::Siege {
+                return Err(format!("doctrine {}: a perch needs aim siege", self.name));
+            }
+            if p.raisers.is_empty() {
+                return Err(format!("doctrine {}: a perch needs raisers", self.name));
+            }
+            for u in &p.raisers {
+                if !defs.get(u).is_some_and(|d| d.speed() > 0.0 && d.build_speed() > 0.0) {
+                    return Err(format!("doctrine {}: perch raiser '{u}' is no mobile constructor", self.name));
+                }
+            }
+            for n in p.count.names() {
+                if !role_names.contains(n) {
+                    return Err(format!("doctrine {}: the perch count reads '{n}', no role", self.name));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -835,6 +1024,9 @@ impl Doctrine {
             mark_wait_ratio: self.mark_wait_ratio,
             mark_hold_for: self.mark_hold_for,
             mark_move: self.mark_move,
+            wait_army: self.wait_army,
+            engage_screen: self.engage_screen,
+            perch: self.perch.clone(),
             fire_state: self.fire_state,
             fire_at_radar: self.fire_at_radar,
             core_keep: self.core_keep,
@@ -911,6 +1103,10 @@ pub struct Shape {
     pub mark_wait_ratio: f32,
     pub mark_hold_for: f32,
     pub mark_move: f32,
+    /// Siege forces (see [`Doctrine`]).
+    pub wait_army: bool,
+    pub engage_screen: bool,
+    pub perch: Option<Perch>,
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
     pub core_keep: Keep,
@@ -971,6 +1167,9 @@ impl Default for Shape {
             mark_wait_ratio: 0.0,
             mark_hold_for: 3.0,
             mark_move: 150.0,
+            wait_army: false,
+            engage_screen: false,
+            perch: None,
             fire_state: None,
             fire_at_radar: None,
             core_keep: Keep::Orbit,
@@ -1115,11 +1314,14 @@ pub fn seeds() -> Vec<Doctrine> {
     envoy.retreat_health = 0.6;
 
     let mut tremor = Doctrine::new("tremor");
-    tremor.note = "A siege detachment: Tremors stand where they reach the most and fire at everything, an \
-                   Ogre per two against raiders, Minotaurs as the line, an Ettin past 3000 metal."
+    tremor.note = "A siege detachment (see `siege`): Tremors park beyond the enemy statics' reach where they \
+                   reach the most and fire at everything, an Ogre per two against raiders, Minotaurs as the \
+                   line, an Ettin past 3000 metal. Tank factories build a Tremor on 6% of picks while a force \
+                   has room."
         .into();
     tremor.enabled = false;
     tremor.core = vec!["tankheavyarty".into()];
+    tremor.produce = 0.06;
     tremor.cores_per_force = 3;
     tremor.roles = vec![
         Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),
@@ -1127,25 +1329,30 @@ pub fn seeds() -> Vec<Doctrine> {
         Role::escort("aa", &["tankaa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
     ];
     tremor.aim = Aim::Siege;
+    // Two guns at least go in (one Tremor with an Ogre clears 2000 alone),
+    // and never on time alone.
     tremor.engage_value = 2000.0;
-    tremor.muster = 90.0;
+    tremor.engage = Some(Expr::parse("cores >= 2 ? 2000 : 1000000").expect("seed engage"));
+    tremor.muster = 0.0;
 
     let mut emissary = Doctrine::new("emissary");
-    emissary.note = "An artillery detachment: Emissaries advance into range and fire at everything, \
-                     Ogres against raiders, an Ettin past 3000 metal, and a standing spotter per gun."
+    emissary.note = "A siege detachment (see `siege`): Emissaries park beyond the enemy statics' reach where \
+                     they reach the most and fire at everything, Ogres against raiders, an Ettin past 3000 \
+                     metal. Tank factories build an Emissary on 12% of picks while a force has room."
         .into();
     emissary.enabled = false;
     emissary.core = vec!["tankarty".into()];
+    emissary.produce = 0.12;
     emissary.cores_per_force = 4;
     emissary.roles = vec![
         Role::escort("screen", &["tankriot"], "ceil(0.5 * cores)", 140.0, 0.5),
         Role::escort("aa", &["tankaa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
         Role::spotter(),
     ];
-    // Use the implemented artillery conduct; siege stations remain a seed.
-    emissary.aim = Aim::Artillery;
+    emissary.aim = Aim::Siege;
     emissary.engage_value = 1500.0;
-    emissary.muster = 90.0;
+    emissary.engage = Some(Expr::parse("cores >= 2 ? 1500 : 1000000").expect("seed engage"));
+    emissary.muster = 0.0;
 
     let mut impaler = Doctrine::new("impaler");
     impaler.note = "Impaler batteries (see `military::impalers`): a Leveler per two guns against raiders, a \
@@ -1239,6 +1446,29 @@ pub fn seeds() -> Vec<Doctrine> {
     let dagger = raiders("dagger", "hoverraid", 130.0, 45.0, 4);
     let blitz = raiders("blitz", "tankheavyraid", 88.0, 55.0, 3);
 
+    let mut crab = Doctrine::new("crab");
+    crab.note = "A survival-first Crab with 2-4 dedicated Weavers: repair each other, the Crab, nearby allies, then reclaim wreckage. Raise a protective pedestal when facing 1500 nearby enemy metal; add small turrets when idle.".into();
+    crab.enabled = true;
+    crab.core = vec!["spidercrabe".into()];
+    crab.fire_state = Some(2);
+    crab.fire_at_radar = Some(false);
+    crab.cores_per_force = 1;
+    // Weavers remain economy workers, reserved and commanded by siege support.
+    crab.roles = Vec::new();
+    crab.aim = Aim::Siege;
+    crab.engage_value = 1.0;
+    crab.engage = Some(Expr::parse("cores >= 1 ? 1 : 1000000").expect("seed engage"));
+    crab.muster = 0.0;
+    crab.retreat_health = 0.5;
+    crab.flee_threat = false;
+    crab.perch = Some(Perch {
+        raisers: vec!["spidercon".into()],
+        count: Expr::parse("min(4, max(2, 2 * cores))").expect("perch count"),
+        min_reach: 0,
+        leave_health: 0.5,
+        ..Perch::new()
+    });
+
     let mut ghostbombs = Doctrine::new("ghostbombs");
     ghostbombs.note = "An Iris cloaking bombs (orbiting within its 350 cloak, holding fire) unseen to a \
                        valuable target, where they charge in."
@@ -1253,7 +1483,8 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.muster = 90.0;
 
     vec![
-        felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger, blitz, ghostbombs,
+        felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger, blitz, crab,
+        ghostbombs,
     ]
 }
 
@@ -1496,6 +1727,84 @@ mod tests {
             assert_eq!((d.core[0].as_str(), d.cores_to_go, d.wake_share), (unit, go, 0.0));
             assert!(d.roles.is_empty() && d.aim == Aim::Pack && d.core_keep == Keep::Formation);
         }
+    }
+
+    #[test]
+    fn siege_forces_go_in_with_two_guns() {
+        let classes = Classes::default();
+        for (name, gun, escort) in [("tremor", "tankheavyarty", 2100.0), ("emissary", "tankarty", 1500.0)] {
+            let d = seeds().into_iter().find(|d| d.name == name).unwrap();
+            assert_eq!((d.aim, d.muster), (Aim::Siege, 0.0));
+            assert!(d.produce > 0.0 && !d.enabled);
+            let e = d.engage.as_ref().unwrap();
+            let one = d.force([(gun, 1600.0), ("tankriot", 500.0)], &classes);
+            let two = d.force([(gun, 1600.0), (gun, 1600.0), ("tankriot", 500.0)], &classes);
+            assert!(e.eval(&one) > escort + 1600.0, "{name}: one gun goes in");
+            assert_eq!(e.eval(&two), d.engage_value, "{name}");
+        }
+    }
+
+    #[test]
+    fn siege_dials_default_to_the_first_arm() {
+        let mut d = seeds().into_iter().find(|d| d.name == "tremor").unwrap();
+        assert_eq!((d.produce_cores, d.wait_army, d.engage_screen), (0, false, false));
+        let Value::Object(p) = json!({"produce_cores": 2, "wait_army": true, "engage_screen": "on"}) else { panic!() };
+        d.apply(&p).unwrap();
+        assert_eq!((d.produce_cores, d.wait_army, d.engage_screen), (2, true, true));
+        let Value::Object(p) = d.to_json() else { panic!() };
+        let mut back = Doctrine::new("tremor");
+        back.apply(&p).unwrap();
+        assert_eq!(back, d);
+        assert!(!Shape::default().wait_army && !Shape::default().engage_screen);
+    }
+
+    #[test]
+    fn the_crab_perches() {
+        let d = seeds().into_iter().find(|d| d.name == "crab").unwrap();
+        assert!(d.enabled && d.aim == Aim::Siege && !d.flee_threat);
+        assert_eq!(d.cores_per_force, 1);
+        assert!(d.roles.is_empty());
+        let p = d.perch.as_ref().unwrap();
+        assert_eq!((p.height, p.top, p.min_reach, p.refuse_if_reached), (200.0, 48.0, 0, true));
+        assert_eq!(p.raisers, vec!["spidercon"]);
+        let classes = Classes::default();
+        let two = d.force([("spidercrabe", 1600.0), ("spidercrabe", 1600.0)], &classes);
+        assert_eq!(p.count.want(&two), 4);
+        let one = d.force([("spidercrabe", 1600.0)], &classes);
+        assert_eq!(p.count.want(&one), 2);
+        assert!(d.engage.as_ref().unwrap().eval(&one) < one.core_value);
+        // A patch changes one field of the perch and keeps the rest; null drops it.
+        let mut e = d.clone();
+        let Value::Object(patch) = json!({"perch": {"height": 150}}) else { panic!() };
+        e.apply(&patch).unwrap();
+        assert_eq!((e.perch.as_ref().unwrap().height, e.perch.as_ref().unwrap().top), (150.0, 48.0));
+        let Value::Object(patch) = json!({"perch": null}) else { panic!() };
+        e.apply(&patch).unwrap();
+        assert!(e.perch.is_none());
+        let Value::Object(bad) = json!({"perch": {"size": 1}}) else { panic!() };
+        assert!(d.clone().apply(&bad).is_err());
+        // The natural and claim dials, one change each: off in the seed, on by a patch.
+        assert!(d.perch.as_ref().unwrap().natural.is_none() && !d.claim_with_site);
+        let p0 = d.perch.as_ref().unwrap();
+        assert!(!p0.refuse_climbers && p0.leave_health == 0.5);
+        let mut h = d.clone();
+        let Value::Object(patch) = json!({"perch": {"refuse_climbers": true, "leave_health": 0.4}}) else { panic!() };
+        h.apply(&patch).unwrap();
+        let ph = h.perch.as_ref().unwrap();
+        assert!(ph.refuse_climbers && ph.leave_health == 0.4);
+        let mut c = d.clone();
+        let Value::Object(patch) = json!({"claim_with_site": true}) else { panic!() };
+        c.apply(&patch).unwrap();
+        assert!(c.claim_with_site);
+        let mut n = d.clone();
+        let Value::Object(patch) = json!({"perch": {"natural": {"min_height": 120}}}) else { panic!() };
+        n.apply(&patch).unwrap();
+        let nat = n.perch.as_ref().unwrap().natural.as_ref().unwrap();
+        assert_eq!((nat.min_height, nat.weight), (120.0, 1.0));
+        let Value::Object(p) = n.to_json() else { panic!() };
+        let mut back = Doctrine::new("crab");
+        back.apply(&p).unwrap();
+        assert_eq!(back, n);
     }
 
     #[test]
