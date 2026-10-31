@@ -120,7 +120,9 @@ fn a_second_taunt_calls_back_and_the_limit_holds() {
     let distinct: std::collections::BTreeSet<_> = texts.iter().collect();
     assert_eq!(distinct.len(), 3, "{texts:?}");
     assert!(
-        texts[1..].iter().all(|id| ["taunt.count", "taunt.norush", "taunt.still", "taunt.stilltime"].contains(&id.as_str())),
+        texts[1..]
+            .iter()
+            .all(|id| ["taunt.count", "taunt.norush", "taunt.still", "taunt.stilltime"].contains(&id.as_str())),
         "{texts:?}"
     );
 }
