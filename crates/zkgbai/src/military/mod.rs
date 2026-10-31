@@ -529,6 +529,7 @@ impl Ai {
         self.guard("teleport.update", |ai| ai.teleport_update(frame));
         self.guard("drops.update", |ai| ai.drops_update(frame));
         self.guard("intel.update", |ai| ai.intel_update(frame));
+        self.guard("sitzkrieg.update", |ai| ai.sitzkrieg_update(frame));
         self.guard("nukes.update", |ai| ai.nukes_update(frame));
         self.guard("blasts.update", |ai| ai.blasts_update(frame));
         self.guard("missiles.update", |ai| ai.missiles_update(frame));
@@ -871,7 +872,7 @@ impl Ai {
         // Units a doctrine takes form taskforces (see `taskforce`): the
         // shield ball, and the forces other doctrines make.
         self.taskforce_load();
-        if self.taskforces.routes(name) {
+        if self.taskforces.routes(name) && self.siege_claims(unit, name) {
             let mut f = Fighter::new(unit, cost, team);
             f.shield_mob = true;
             self.squad_add_taskforce_member(f);

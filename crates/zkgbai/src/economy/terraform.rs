@@ -317,6 +317,27 @@ impl Ai {
         self.terraform(builders, area, true, LEVEL, height, queue);
     }
 
+    /// Keep `builders` out of the economy's assignment for `frames` more
+    /// (a raise borrowed for longer than the order's own hold: the Crab
+    /// spire's).
+    pub(crate) fn eco_hold_terraform(&mut self, builders: &[Unit], frames: i32) {
+        for b in builders {
+            self.eco.terraform_hold.insert(b.id(), self.frame + frames);
+        }
+    }
+
+    pub(crate) fn eco_worker_held(&self, id: i32) -> bool {
+        self.eco.terraform_hold.get(&id).is_some_and(|&until| until > self.frame)
+            || self.eco_in_transit(id)
+            || self.logistics_holds(id)
+    }
+
+    pub(crate) fn eco_release_terraform(&mut self, builders: &[Unit]) {
+        for b in builders {
+            self.eco.terraform_hold.remove(&b.id());
+        }
+    }
+
     fn terraform(&mut self, builders: &[Unit], line: &[Vec3], area: bool, kind: f32, height: f32, queue: bool) {
         let Some(&first) = builders.first() else { return };
         if line.len() < 2 {

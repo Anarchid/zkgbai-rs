@@ -6,6 +6,8 @@
 //! (packs, see `pack`) is off by default (`enable=ravager`), `phantom` and
 //! `envoy` are seeded off; the rest wait for conducts of their own. The
 //! `disable` option switches off doctrines it names (`disable=lance`).
+//! Siege artillery unlocks after a stable dense front (see `sitzkrieg`).
+//! Crab ownership unlocks its protective pedestal and persistent Weaver escort.
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -22,6 +24,8 @@ pub mod doctrine;
 pub mod expr;
 pub mod marksman;
 pub mod pack;
+pub mod siege;
+pub mod sitzkrieg;
 pub mod spotter;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -120,8 +124,8 @@ pub struct Taskforces {
     pub classes: Classes,
     shapes: BTreeMap<String, Arc<Shape>>,
     loaded: bool,
-    /// Marksmen's marks by gun, and what their volleys kill by gun type
-    /// (see `marksman`).
+    /// Marksmen's marks by gun (siege guns' targets are kept here too), and
+    /// what their volleys kill by gun type (see `marksman`).
     pub marks: BTreeMap<i32, marksman::Mark>,
     pub volleys: marksman::Volleys,
     /// Spotters (see `spotter`).
@@ -134,6 +138,10 @@ pub struct Taskforces {
     /// Doctrines switched on that sleep until their `wake_share` (see
     /// `taskforce_wake`).
     pub asleep: Vec<String>,
+    /// Siege forces' stations and how their guns stand (see `siege`).
+    pub siege: siege::Siege,
+    pub sitzkrieg: sitzkrieg::Sitzkrieg,
+    automatic_siege: BTreeSet<String>,
 }
 
 /// A sleeping doctrine wakes only once the map holds this many armed ground
@@ -142,10 +150,14 @@ const WAKE_MIN: usize = 12;
 /// ...of them this many the enemy's.
 const WAKE_MIN_ENEMY: usize = 6;
 
+/// A doctrine's cores are produced on purpose (its `produce`) only from
+/// this adjusted income on: before, the factory's own picks stand.
+pub const CORE_PRODUCE_INCOME: f32 = 25.0;
+
 /// Aims whose forces are squads of the squad handler (see
 /// `handlers::squad`); the others have modules of their own.
 pub fn squad_aim(aim: Aim) -> bool {
-    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff | Aim::Pack)
+    matches!(aim, Aim::Assault | Aim::Artillery | Aim::Standoff | Aim::Pack | Aim::Siege)
 }
 
 impl Taskforces {
@@ -314,10 +326,17 @@ impl Ai {
         self.taskforces.loaded = true;
         let classes = Classes::build(&self.unit_classes, &self.defs);
         let mut doctrines = seeds();
+        // Crab conduct starts with ownership of a Crab; artillery waits for sitzkrieg.
+        if self.dev_off("crab") {
+            doctrines.iter_mut().filter(|d| d.name == "crab").for_each(|d| d.enabled = false);
+        }
+        self.taskforces.automatic_siege =
+            doctrines.iter().filter(|d| d.aim == Aim::Siege && d.perch.is_none()).map(|d| d.name.clone()).collect();
         for d in &mut doctrines {
             if let Err(e) = d.check(&self.defs, &classes) {
                 self.cb.log(&format!("doctrines: seed {e}; switched off"));
                 d.enabled = false;
+                self.taskforces.automatic_siege.remove(&d.name);
             }
         }
         let option = (self.cb.option("doctrines").filter(|v| !v.trim().is_empty()))
@@ -330,7 +349,21 @@ impl Ai {
             };
             let said = match text.and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| format!("doctrines: {e}")))
             {
-                Ok(patches) => patch(&mut doctrines, &patches, &self.defs, &classes),
+                Ok(patches) => {
+                    // Explicit enabled patches retain control over automatic unlocks.
+                    if let Some(patches) = patches.as_object() {
+                        for (name, patch) in patches {
+                            if patch.get("enabled").is_some()
+                                && let Some(fields) = patch.as_object()
+                                && let Some(mut candidate) = doctrines.iter().find(|d| &d.name == name).cloned()
+                                && candidate.apply(fields).and_then(|()| candidate.check(&self.defs, &classes)).is_ok()
+                            {
+                                self.taskforces.automatic_siege.remove(name);
+                            }
+                        }
+                    }
+                    patch(&mut doctrines, &patches, &self.defs, &classes)
+                }
                 Err(e) => vec![e],
             };
             for line in said {
@@ -339,9 +372,10 @@ impl Ai {
         }
         // The `disable` option switches off the doctrines it names, whatever
         // the seeds and patches say.
-        for d in doctrines.iter_mut().filter(|d| d.enabled) {
+        for d in &mut doctrines {
             if self.dev_off(&d.name) {
                 d.enabled = false;
+                self.taskforces.automatic_siege.remove(&d.name);
                 self.cb.log(&format!("doctrines: {} switched off (disable)", d.name));
             }
         }
