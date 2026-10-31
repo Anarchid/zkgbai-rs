@@ -216,3 +216,14 @@ phase. `test=assassin-lobster` versus `test=assassin-raider-lance`, and
 `test=assassin-lobster-phantom` versus `test=assassin-target`, exercise ordinary
 squads without a preseeded mission. The existing `strikes`, `lobsters` and `jumps`
 switches all gate this tactic.
+
+## Terrain during strikes
+
+Terrain is checked throughout a committed pursuit, using each member's movement
+class. Commands require a passable, connected destination; being within the
+terrain model's snapping distance of land does not make a water destination
+legal. A target near shore can be attacked from a reachable firing position.
+When it moves beyond weapon reach of connected ground, the wave returns or the
+ordinary squad releases its strike mission. Waiting waves also stop procuring
+for inaccessible targets. Screen, muster, search and evasion endpoints use the
+same ground checks, including actual water-depth limits while analysis is pending.

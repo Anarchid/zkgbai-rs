@@ -8,7 +8,6 @@ use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
 use crate::military::Fighter;
 use crate::military::sweeps::{PHANTOM_FIX_RADIUS, SNIPER_MEMORY, counterbattery::FRESH as FIRE_MEMORY};
-use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod evasion;
 mod fragile;
 mod lobsters;
+mod navigation;
 mod opportunities;
 mod prediction;
 mod scenario;
@@ -353,6 +353,7 @@ impl Ai {
             matches!(w.phase, Phase::Forming | Phase::Screening)
                 && w.tactic.factory() == kind
                 && self.strike_preparable(w.tactic, &w.job)
+                && self.strike_tactic_reaches(w.tactic, w.home, w.job.pos)
                 && (w.job.prey != Prey::Defenseless || self.strike_opportunity_clear(w.home, w.job.pos))
                 && w.job.production_pays(
                     w.tactic,
@@ -431,7 +432,7 @@ impl Ai {
             return false;
         }
         let home = w.home;
-        if !unit.def().is_some_and(|d| reaches(self.reach_terrain(), d, unit.pos(), home, 100.0)) {
+        if !unit.def().is_some_and(|d| self.strike_point_reachable(d, unit.pos(), home)) {
             return false;
         }
         self.strikes_adopt(unit);
@@ -508,6 +509,7 @@ impl Ai {
                 if u.health() <= 0.0 || u.team() != self.team_id {
                     continue;
                 }
+                u.stop(0);
                 u.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
                 u.set_fire_state(2, 0);
                 u.set_move_state(1, 0);
@@ -582,7 +584,7 @@ impl Ai {
             return false;
         }
         let Some(def) = self.defs.get(tactic.name()) else { return false };
-        if self.missiles_ground_burning(j.pos) || !reaches(self.reach_terrain(), def, from, j.pos, 80.0) {
+        if self.missiles_ground_burning(j.pos) || self.strike_target_point(def, from, j.pos).is_none() {
             return false;
         }
         if j.prey == Prey::Defenseless {
@@ -830,6 +832,12 @@ impl Ai {
                 self.strikes_release(w);
                 return;
             }
+            if !self.strike_tactic_reaches(w.tactic, w.home, w.job.pos)
+                || (!w.members.is_empty() && !self.strike_members_reach(&w.members, w.job.pos))
+            {
+                self.strikes_release(w);
+                return;
+            }
             let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
             w.needed = w.job.size(w.tactic, cost);
             if w.members.len() > w.needed {
@@ -890,6 +898,7 @@ impl Ai {
                 w.job.count = w.job.count.saturating_sub(killed.len());
             }
             let end = target.filter(|e| e.visible || e.is_radar_visible).map_or(w.job.pos, |e| e.position);
+            let unreachable = !self.strike_members_reach(&w.members, end);
             let defended = w.job.prey == Prey::Defenseless && !self.strike_opportunity_wave_clear(&w, end);
             let next_soft = if dead && !defended && w.job.prey == Prey::Defenseless {
                 self.strike_jobs(SNIPER_MEMORY).into_iter().find(|j| {
@@ -914,6 +923,7 @@ impl Ai {
             } else if dead && w.job.phantom() && w.job.count > 0 {
                 w.job.id = None; // Sweep for the next Phantom with the surviving wave.
             } else if dead
+                || unreachable
                 || defended
                 || !self.strike_target_allowed(w.tactic, &w.job)
                 || frame - w.since > DIVE_TIMEOUT
@@ -924,6 +934,8 @@ impl Ai {
                     w.tactic.name(),
                     if dead {
                         "target killed"
+                    } else if unreachable {
+                        "target left reachable terrain"
                     } else if defended {
                         "opportunity now defended"
                     } else if w.job.prey == Prey::Fragile && !self.strike_target_allowed(w.tactic, &w.job) {
@@ -1070,6 +1082,11 @@ impl Ai {
             p.x = p.x.clamp(1.0, (map.width() * 8 - 1).max(1) as f32);
             p.z = p.z.clamp(1.0, (map.height() * 8 - 1).max(1) as f32);
             p.y = map.elevation_at(p.x, p.z);
+            let range = if w.phase == Phase::Diving { u.max_range().max(0.0) } else { 100.0 };
+            let Some(p) = self.strike_move_point(u, p, center, range) else {
+                u.stop(0); // Cancel an older chase; never reuse an illegal endpoint.
+                continue;
+            };
             // RAW_MOVE uses the engine's terrain pathing, with no random
             // dispersion or enemy-avoidance detours that would undo the dive.
             kgb_move_to(u, p, 0, self.frame);
