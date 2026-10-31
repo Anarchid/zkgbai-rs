@@ -19,6 +19,7 @@ pub(super) fn enemy(id: i32) -> Contact {
         raider: false,
         wind: false,
         singu: false,
+        factory: false,
         home: false,
         fighting: false,
     }
@@ -464,4 +465,26 @@ fn value_scoring_preserves_urgent_air_defense() {
     let incoming = job(MissionKind::Intercept, 1000.0);
     let wounded = job(MissionKind::Heavy, 1.0);
     assert!(incoming.score() > wounded.score());
+}
+#[test]
+fn factories_get_thermite_priced_above_cost_and_the_last_one_most() {
+    let mut fac = enemy(1);
+    fac.static_ = true;
+    fac.factory = true;
+    fac.value = 700.0;
+    fac.hp = 4000.0;
+    fac.max_hp = 4000.0;
+    let thermite = |es: &[Contact]| {
+        missions(es, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Thermite && j.target == 1)
+    };
+    assert_eq!(thermite(&[fac.clone()]).map(|j| j.value), Some(2800.0));
+    let other = Contact { id: 2, pos: Vec3::xz(4000.0, 4000.0), ..fac.clone() };
+    assert_eq!(thermite(&[fac.clone(), other]).map(|j| j.value), Some(2100.0));
+    // One Odin burns a factory down, and the job buys it.
+    let job = thermite(&[fac.clone()]).unwrap();
+    assert!(job.kind.primary());
+    assert_eq!(packages(&job, clear(), 800.0), vec![vec![(Plane::Odin, 1)]]);
+    // An unidentified radar dot is not a factory job; cheap statics stay Raven work.
+    assert!(thermite(&[Contact { known: false, ..fac.clone() }]).is_none());
+    assert!(thermite(&[Contact { factory: false, ..fac }]).is_none());
 }

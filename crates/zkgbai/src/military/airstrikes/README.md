@@ -37,7 +37,12 @@ Primary missions:
   known interceptors.
 - Aircraft on LOS/radar inbound to our territory: one Magpie and at least two
   Raptors. Unidentified radar contacts can count when clearly above terrain.
-- Statics worth at least 1000 metal: Odin thermite; Singularities get a bonus.
+- Statics worth at least 1000 metal, and every identified factory or strider
+  hub: Odin thermite. Singularities get a bonus; a factory counts three times
+  its cost (it is where the army comes from, and the rebuild costs time), four
+  times when it is the only enemy factory we know of. One Odin's thermite
+  (14000 damage) burns a 4000-HP factory down. `disable=odinfactories` leaves
+  factories to Ravens' ordinary static strikes.
   A route of at least 3000 elmos, or any Singularity mission, may take a ready
   Sparrow already within 75% of its jammer radius of an Odin. Escorts are
   optional and expendable: no rendezvous wait, no Sparrow survival veto, and
@@ -67,7 +72,9 @@ Primary missions:
 Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
 cheap artillery such as Fencers and still-tough targets such as healthy Cyclops for a sufficient
-existing Raven/Likho fleet, and an Odin shield cluster over friendly ground troops in an ongoing fight.
+existing Raven/Likho fleet, and an Odin shield cluster over friendly ground troops in an ongoing fight. The
+drop point follows those troops (our mobile ground fighter nearest the enemy,
+within 600 elmos) and the sortie is called off (`no_troops`) once none are left.
 Ordinary dispatch takes launchable primary missions before secondary ones.
 Within each tier, mission score is discounted by actual route length
 (`score / (1 + length / 1200)`); defensive interception keeps its urgency.
@@ -133,7 +140,24 @@ The forecast remains a heuristic, not a combat simulation or survival guarantee.
 and candidate snapshots also expose `incoming_dps` and `ready_volley_damage`. Sparrow jamming never discounts LOS AA or known fighters;
 New AA invalidates procurement
 memory and causes active sorties to abort or update their approaches. Spent or
-damaged aircraft return via threat-aware routes and rearm. Odin shield drops use
+damaged aircraft return via threat-aware routes and rearm.
+
+Every route an aircraft is given skips the waypoints it cannot turn onto from
+its current flight (`turns.rs`, `disable=airturns` restores the old routes).
+The engine completes a move only within `max(turnRadius + 16, 128)` elmos, far
+less than the circle a heavy airframe really turns on: full rudder yaws the
+nose by `maxRudder` times speed per frame, `frontToSpeed`/`speedToFront` make
+the velocity follow at a fixed fraction, so the radius is about
+`2.6 / (maxRudder + maxElevator * max(maxBank, 0.4))` elmos regardless of
+speed (the engine banks past `maxBank` in a hard turn). Measured in
+`airstrike-turns`: Odin 401 (model 404), Likho 194, Phoenix 155, Raven 100,
+fighters and Sparrow 70-90. A waypoint deeper inside that circle (which
+starts about half a second ahead, the control lag) than the arrival radius is
+orbited until the next order, and one behind the plane nearer than the turn's
+diameter costs most of a loop; both are skipped, with half the arrival radius
+as margin. Before this an Odin, re-routed home every ten
+seconds with a first waypoint beside or behind it, circled over an enemy
+factory until AA killed it. Odin shield drops use
 `AIR_MANUALFIRE` (38571); normal attack releases thermite.
 
 Inspect `military.airstrikes` or the snapshot's `airstrikes` for mission IDs,
@@ -192,6 +216,12 @@ tools/arena/match.sh -t 180 -f 14400 -s 20 \
   "ZKGBAI:airstrike@$PWD/target/debug/libzkgbai.so?test=airstrike-odin" \
   "ZKGBAI:airstrike@$PWD/target/debug/libzkgbai.so?test=airstrike-singu"
 ```
+
+`airstrike-odin` versus `airstrike-factory` adds a Shieldbot factory at the
+same site: the thermite target, with `airstrike-track:` flight lines for the
+Odin's way out and home (compare with `?disable=airturns`). `airstrike-turns`
+(against any passive defender) flies one of each airplane out and back home
+and logs its turn every five frames, for fits against the turn model.
 
 Use `airstrike-aa` as the defender to surround the Singularity with four
 Artemises; the attacker should report `grounded=true`, no purchase and no sortie.

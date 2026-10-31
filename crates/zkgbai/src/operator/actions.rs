@@ -91,6 +91,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "scout inferred artillery and hunt it with available Likhos under weak AA (default on)",
     ),
     ("carpet", "Military", "napalm unseen Phantoms along their shots' bearings with available Phoenixes (default on)"),
+    (
+        "odinfactories",
+        "Military",
+        "Odins burn enemy factories and strider hubs, valued at 3x cost, 4x for the last one (default on)",
+    ),
+    (
+        "airturns",
+        "Military",
+        "aircraft skip route waypoints inside their real turning circle instead of orbiting them (default on)",
+    ),
     ("firefighters", "Defense", "airborne quick-reaction squads against raids on our eco"),
     ("airfire", "Defense", "an air factory for the firefighters"),
     ("airtempo", "Army", "an air factory weighed up by the clock and the map's size"),

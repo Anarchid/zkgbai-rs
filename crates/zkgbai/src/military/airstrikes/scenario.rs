@@ -1,7 +1,10 @@
 //! `airstrike-wind` versus `airstrike-farm`: real factory procurement and
 //! Phoenix bombing of a ZKGBAI wind farm. `airstrike-odin` / `airstrike-singu`
-//! exercise deep thermite procurement and optional Sparrow support.
+//! exercise deep thermite procurement and optional Sparrow support;
+//! `airstrike-odin` / `airstrike-factory` burns a factory and tracks the
+//! Odin's flight home. `airstrike-turns` measures real turning circles.
 mod carpet;
+mod flight;
 mod hunt;
 mod opportunity;
 mod targeting;
@@ -28,6 +31,26 @@ impl Ai {
         if test.starts_with("airstrike-hunt") {
             self.airstrike_hunt_scenario(&test, frame);
             return;
+        }
+        if test == "airstrike-turns" {
+            self.airstrike_turns_scenario(frame);
+            return;
+        }
+        if test == "airstrike-odin" && frame % 10 == 0 {
+            self.airstrike_track(frame);
+        }
+        if test == "airstrike-factory" && frame % 150 == 0 {
+            for u in self.cb.team_units() {
+                let name = self.defs.name_of(u);
+                if name.starts_with("factory") {
+                    self.log(&format!(
+                        "airstrike-test: factory {name} {} hp={:.0}/{:.0}",
+                        u.id(),
+                        u.health(),
+                        u.max_health()
+                    ));
+                }
+            }
         }
         let map = self.cb.map();
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
@@ -130,6 +153,7 @@ impl Ai {
                     ]);
                 }
                 "airstrike-singu" => spawn.push(("energysingu", site)),
+                "airstrike-factory" => spawn.push(("factoryshield", site)),
                 "airstrike-aa" => {
                     spawn.push(("energysingu", site));
                     for (dx, dz) in [(-240.0, 0.0), (240.0, 0.0), (0.0, -240.0), (0.0, 240.0)] {
