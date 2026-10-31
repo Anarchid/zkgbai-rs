@@ -978,17 +978,22 @@ impl Doctrine {
     pub fn shape(&self, defs: &Defs, classes: &Classes) -> Shape {
         let mut by_def = BTreeMap::new();
         let mut core = BTreeSet::new();
+        let mut cloakers = BTreeSet::new();
         for d in defs.all() {
             let name = defs.name(d);
             if self.is_core(name, classes) {
                 core.insert(d.id());
             } else if let Some(i) = self.role_of(name, classes) {
                 by_def.insert(d.id(), i);
+                if name == "cloakjammer" {
+                    cloakers.insert(d.id());
+                }
             }
         }
         Shape {
             doctrine: self.name.clone(),
             core,
+            cloakers,
             roles: (self.roles.iter())
                 .map(|r| RoleShape {
                     orbit: r.orbit,
@@ -1071,6 +1076,8 @@ pub struct RoleShape {
 pub struct Shape {
     pub doctrine: String,
     pub core: BTreeSet<i32>,
+    /// Area-cloak escorts place their fields through the support handler.
+    pub cloakers: BTreeSet<i32>,
     pub roles: Vec<RoleShape>,
     /// Def id to role index.
     pub by_def: BTreeMap<i32, usize>,
@@ -1142,6 +1149,7 @@ impl Default for Shape {
         Shape {
             doctrine: String::new(),
             core: BTreeSet::new(),
+            cloakers: BTreeSet::new(),
             roles: Vec::new(),
             by_def: BTreeMap::new(),
             pace: 0.0,
@@ -1221,11 +1229,14 @@ impl Shape {
         self.role(def).map_or(self.core_keep, |r| r.keep)
     }
 
-    /// Whether members of this type go their own ways rather than keep
-    /// with the leader (spotters, trailing screens): not straggling, not
-    /// counted as rallied, not in the force's health.
+    /// Whether the support handler places this member's cloak field.
+    pub fn cloaks(&self, def: Option<i32>) -> bool {
+        def.is_some_and(|id| self.cloakers.contains(&id))
+    }
+
+    /// Independently positioned members do not straggle or hold up rallying.
     pub fn own_way(&self, def: Option<i32>) -> bool {
-        self.spot(def).is_some() || self.keep(def) == Keep::Trail
+        self.spot(def).is_some() || self.keep(def) == Keep::Trail || self.cloaks(def)
     }
 
     /// A member's fire orders by its doctrine: the core's, or its role's.

@@ -110,11 +110,14 @@ fn preferred(count: [usize; 2]) -> [Support; 2] {
 }
 
 /// Battery cloaks take precedence and cannot be substituted with shields.
-fn demand(density: f32, army: f32, count: [usize; 2], cloaks_required: usize) -> Vec<Support> {
+fn demand(density: f32, army: f32, count: [usize; 2], cloaks_required: usize, cloak_limit: usize) -> Vec<Support> {
     if count[Support::Cloak.index()] < cloaks_required {
         vec![Support::Cloak]
     } else if count.iter().sum::<usize>() < allowance(density, army) {
-        preferred(count).to_vec()
+        preferred(count)
+            .into_iter()
+            .filter(|s| *s != Support::Cloak || count[Support::Cloak.index()] < cloak_limit.max(cloaks_required))
+            .collect()
     } else {
         Vec::new()
     }
@@ -173,7 +176,8 @@ impl Ai {
             .filter_map(|&sid| self.squads.get(sid))
             .filter(|s| s.shape.doctrine == "lance" && s.cores(&self.fighters) >= 4)
             .count();
-        demand(density, army, count, batteries + other_cloaks)
+        let cloak_limit = self.support_ground_squads().len().max(batteries + other_cloaks);
+        demand(density, army, count, batteries + other_cloaks, cloak_limit)
     }
 
     fn army_support_can_build(&self, factory: &Factory, support: Support) -> bool {
@@ -345,13 +349,34 @@ mod tests {
 
     #[test]
     fn batteries_require_cloak_even_below_general_support_density() {
-        assert_eq!(demand(1000.0, 4000.0, [0, 0], 0), []);
-        assert_eq!(demand(1000.0, 4000.0, [0, 0], 1), [Support::Cloak]);
-        assert_eq!(demand(3000.0, 8000.0, [4, 0], 1), [Support::Cloak]);
+        assert_eq!(demand(1000.0, 4000.0, [0, 0], 0, 2), []);
+        assert_eq!(demand(1000.0, 4000.0, [0, 0], 1, 2), [Support::Cloak]);
+        assert_eq!(demand(3000.0, 8000.0, [4, 0], 1, 2), [Support::Cloak]);
         // Pending orders and morphs count just like existing cloakers.
-        assert_eq!(demand(1000.0, 8000.0, [0, 1], 1), []);
-        assert_eq!(demand(1000.0, 8000.0, [0, 1], 2), [Support::Cloak]);
-        assert_eq!(demand(3000.0, 8000.0, [0, 1], 1), [Support::Shield, Support::Cloak]);
+        assert_eq!(demand(1000.0, 8000.0, [0, 1], 1, 2), []);
+        assert_eq!(demand(1000.0, 8000.0, [0, 1], 2, 2), [Support::Cloak]);
+        assert_eq!(demand(3000.0, 8000.0, [0, 1], 1, 2), [Support::Shield, Support::Cloak]);
+    }
+
+    #[test]
+    fn cloaks_stop_at_squad_count_but_shields_keep_stacking() {
+        assert_eq!(demand(3000.0, 20000.0, [3, 2], 0, 2), [Support::Shield]);
+        assert_eq!(demand(3000.0, 20000.0, [3, 2], 0, 3), [Support::Cloak, Support::Shield]);
+        assert_eq!(demand(3000.0, 20000.0, [0, 0], 0, 0), [Support::Shield]);
+        // Explicit battery requirements survive a temporarily empty squad census.
+        assert_eq!(demand(1000.0, 2000.0, [0, 0], 1, 0), [Support::Cloak]);
+    }
+
+    #[test]
+    fn queued_and_morphing_cloakers_fill_the_cap_before_they_finish() {
+        let mut plan = ArmySupport::default();
+        plan.tasks.insert(1, Support::Cloak);
+        plan.orders.insert(10, (Support::Cloak, 0));
+        assert_eq!(demand(3000.0, 20000.0, plan.pending(), 0, 2), [Support::Shield]);
+        plan.completed(1, unit(20), "staticjammer");
+        assert_eq!(demand(3000.0, 20000.0, plan.pending(), 0, 2), [Support::Shield]);
+        plan.orders.remove(&10);
+        assert!(demand(3000.0, 20000.0, plan.pending(), 0, 2).contains(&Support::Cloak));
     }
 
     #[test]

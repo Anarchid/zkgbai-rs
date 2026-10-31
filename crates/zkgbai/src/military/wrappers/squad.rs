@@ -1004,6 +1004,9 @@ impl Squad {
     /// trailing screens get none: their force's conduct moves them.
     fn keep_order(&self, unit: Unit, leader: Unit, opts: i16) {
         let def = def_id(unit);
+        if self.shape.cloaks(def) {
+            return; // Field placement owns movement; guard would pack Irises together.
+        }
         let lid = leader.id() as f32;
         let radius = self.shape.orbit(def);
         match self.shape.keep(def) {
@@ -1221,7 +1224,7 @@ pub(crate) mod fake_engine {
     use springai::{Callback, Unit, Vec3};
 
     pub const TEAM: i32 = 0;
-    pub const DEF_NAMES: [&CStr; 9] = [
+    pub const DEF_NAMES: [&CStr; 10] = [
         c"shieldfelon",
         c"shieldshield",
         c"vehcapture",
@@ -1231,6 +1234,7 @@ pub(crate) mod fake_engine {
         c"cloakbomb",
         c"cloakassault",
         c"spidercrabe",
+        c"cloakjammer",
     ];
 
     #[derive(Clone, Copy)]
@@ -1370,6 +1374,29 @@ mod tests {
 
     fn add(cb: springai::Callback, fighters: &mut FighterStore, id: i32, def: i32, metal: f32) {
         fighters.insert(id, Fighter::new(spawn(cb, id, def), metal, TEAM));
+    }
+
+    #[test]
+    fn battery_cloaker_uses_field_placement_instead_of_guard_or_orbit() {
+        let (cb, defs, mut fighters) = setup();
+        let mut doctrine = seeds().into_iter().find(|d| d.name == "lance").unwrap();
+        doctrine.core = vec!["shieldfelon".into()]; // Available core in the fake engine.
+        let classes = crate::military::taskforce::Classes::default();
+        let mut squad = Squad::new(1, SquadKind::Taskforce, TEAM);
+        squad.shape = Arc::new(doctrine.shape(&defs, &classes));
+        assert!(squad.shape.cloaks(Some(9)) && squad.shape.own_way(Some(9)));
+        add(cb, &mut fighters, 80, FELON, 620.0);
+        add(cb, &mut fighters, 81, 9, 600.0);
+        squad.add_unit(80, &mut fighters, 0);
+        take_orders();
+        squad.add_unit(81, &mut fighters, 0);
+        let orders = take_orders();
+        assert!(!orders.iter().any(|&(id, topic, custom)| id == 81 &&
+            (topic == CommandTopic::COMMAND_UNIT_GUARD || custom == cmd::ORBIT)));
+        assert_eq!(fighters[&81].squad, Some(1));
+        // A doctrine deliberately led by an Iris retains its core controller.
+        doctrine.core = vec!["cloakjammer".into()];
+        assert!(!doctrine.shape(&defs, &classes).cloaks(Some(9)));
     }
 
     #[test]

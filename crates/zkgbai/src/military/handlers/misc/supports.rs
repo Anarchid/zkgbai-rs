@@ -41,8 +41,8 @@ fn escort_position(pos: Vec3, heading: Vec3) -> Vec3 {
     if heading == NULLPOS || distance(pos, heading) < 1.0 { pos } else { get_directional_point(pos, heading, -125.0) }
 }
 
-fn escort_score(metal: f32, escorts: usize, travel: f32) -> f32 {
-    metal / (escorts + 1) as f32 / (1.0 + travel / 2000.0)
+fn escort_score(metal: f32, travel: f32) -> f32 {
+    metal / (1.0 + travel / 2000.0)
 }
 
 /// Frontline defenses first, then other frontline assets, then rear
@@ -70,8 +70,8 @@ impl Ai {
         self.terrain_reaches(support.def()?, support.pos(), target, 0.0).then_some((target, metal))
     }
 
-    fn support_fallback(&self, support: Unit, friendly: &[Unit]) -> Option<Vec3> {
-        let def = support.def()?;
+    pub(super) fn support_fallbacks(&self, support: Unit, friendly: &[Unit]) -> Vec<(u8, Vec3, Vec3, f32)> {
+        let Some(def) = support.def() else { return Vec::new() };
         let pos = support.pos();
         friendly
             .iter()
@@ -100,18 +100,34 @@ impl Ai {
                 } else {
                     at
                 };
-                self.terrain_reaches(def, pos, target, 0.0).then_some((priority, distance(pos, target), target))
+                self.terrain_reaches(def, pos, target, 0.0).then_some((priority, at, target, ud.cost(self.metal)))
             })
-            .min_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)))
-            .map(|(_, _, pos)| pos)
+            .collect()
+    }
+
+    pub(crate) fn support_ground_squads(&self) -> Vec<SquadId> {
+        self.squad_handler
+            .squads
+            .iter()
+            .chain(&self.squad_handler.taskforces)
+            .copied()
+            .filter(|&sid| {
+                self.squads.get(sid).is_some_and(|s| {
+                    combat_anchor(s, &self.fighters, &self.defs, &self.unit_classes, |id| {
+                        !self.retreat_handler.is_retreating(id)
+                            && self.fighters.get(&id).and_then(|f| f.unit.def()).is_some_and(|d| !d.is_able_to_fly())
+                    })
+                    .is_some()
+                })
+            })
+            .collect()
     }
 
     pub(super) fn misc_update_supports(&mut self) {
-        if self.misc_handler.supports.is_empty() {
-            return;
-        }
-        // Fetch once, even when many supports need a fallback.
+        // Dedicated taskforce cloakers also need field placement, even if
+        // there are no spare supports in the miscellaneous handler.
         let friendly = self.cb.friendly_units();
+        self.misc_update_cloakers(&friendly);
         let ids: Vec<_> = self.misc_handler.supports.iter().copied().collect();
         for id in ids {
             if self.lobster_support(id) || self.retreat_handler.is_retreating(id) {
@@ -119,55 +135,56 @@ impl Ai {
             }
             let Some(f) = self.fighters.get(&id) else { continue };
             let unit = f.unit;
-            let name = self.defs.name_of(unit);
-            let mut squad = f.squad.filter(|&sid| self.support_squad_anchor(sid, unit).is_some());
-            if squad.is_none() {
-                // Divide new escorts between squads by combat value and
-                // existing escorts of the same kind. Keep valid assignments
-                // so moving squads do not make supports oscillate.
-                squad = self
-                    .squad_handler
+            if self.defs.name_of(unit) == "cloakjammer" {
+                continue;
+            }
+            let old_squad = f.squad;
+            let squad = {
+                // Shield capacity stacks. Do not penalize a valuable squad
+                // for already having shields; a small loyalty bonus avoids jitter.
+                self.squad_handler
                     .squads
                     .iter()
                     .chain(&self.squad_handler.taskforces)
                     .filter_map(|&sid| {
                         let (target, metal) = self.support_squad_anchor(sid, unit)?;
-                        let escorts = self
-                            .misc_handler
-                            .supports
-                            .iter()
-                            .filter(|&&other| {
-                                other != id
-                                    && self.fighters.get(&other).is_some_and(|f| {
-                                        f.squad == Some(sid) && !f.is_dead() && self.defs.name_of(f.unit) == name
-                                    })
-                            })
-                            .count();
-                        Some((sid, escort_score(metal, escorts, distance(unit.pos(), target))))
+                        let loyalty = if old_squad == Some(sid) { 1.2 } else { 1.0 };
+                        Some((sid, loyalty * escort_score(metal, distance(unit.pos(), target))))
                     })
                     .max_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(sid, _)| sid);
-            }
+                    .map(|(sid, _)| sid)
+            };
             self.fighters.get_mut(&id).unwrap().squad = squad;
             let target = squad
                 .and_then(|sid| self.support_squad_anchor(sid, unit).map(|a| a.0))
-                .or_else(|| self.support_fallback(unit, &friendly))
+                .or_else(|| {
+                    self.support_fallbacks(unit, &friendly)
+                        .into_iter()
+                        .min_by(|a, b| {
+                            a.0.cmp(&b.0).then_with(|| distance(unit.pos(), a.2).total_cmp(&distance(unit.pos(), b.2)))
+                        })
+                        .map(|(_, _, target, _)| target)
+                })
                 .unwrap_or_else(|| self.graph_get_closest_haven(unit.pos()));
-            // No attack/fight orders and no random wandering around an
-            // anchor: hold coverage once in place.
-            if target == NULLPOS || distance(unit.pos(), target) < 60.0 {
-                unit.stop(0);
-                continue;
-            }
-            let mut path = self.pathfinder.find_path(&self.war, unit, target, PathCost::AvoidEnemies);
+            self.support_move(unit, target);
+        }
+    }
+
+    pub(super) fn support_move(&mut self, unit: Unit, target: Vec3) {
+        // No attack/fight orders and no random wandering around an
+        // anchor: hold coverage once in place.
+        if target == NULLPOS || distance(unit.pos(), target) < 60.0 {
+            unit.stop(0);
+            return;
+        }
+        let mut path = self.pathfinder.find_path(&self.war, unit, target, PathCost::AvoidEnemies);
+        if let Some(wp) = next_waypoint(&mut path, 1) {
+            kgb_move_to(unit, wp, 0, self.frame);
             if let Some(wp) = next_waypoint(&mut path, 1) {
-                kgb_move_to(unit, wp, 0, self.frame);
-                if let Some(wp) = next_waypoint(&mut path, 1) {
-                    kgb_move_to(unit, wp, OPTION_SHIFT_KEY, self.frame);
-                }
-            } else {
-                unit.stop(0);
+                kgb_move_to(unit, wp, OPTION_SHIFT_KEY, self.frame);
             }
+        } else {
+            unit.stop(0);
         }
     }
 }
@@ -239,7 +256,7 @@ mod tests {
         assert_eq!(fallback_priority(false, true, true, true), Some(2));
         assert_eq!(fallback_priority(false, false, false, true), None);
         assert_eq!(fallback_priority(true, false, false, false), None);
-        assert!(escort_score(2000.0, 0, 100.0) > escort_score(2000.0, 1, 100.0));
-        assert!(escort_score(2000.0, 0, 100.0) > escort_score(2000.0, 0, 1000.0));
+        assert!(escort_score(2000.0, 100.0) > escort_score(1000.0, 100.0));
+        assert!(escort_score(2000.0, 100.0) > escort_score(2000.0, 1000.0));
     }
 }
