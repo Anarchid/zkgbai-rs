@@ -54,6 +54,9 @@ use crate::nav;
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance, get_directional_point};
 
+mod opportunistic;
+pub(crate) use opportunistic::BiteAction;
+
 /// Frames between updates.
 const PERIOD: i32 = 15;
 
@@ -280,6 +283,7 @@ struct Ambush {
 
 #[derive(Default)]
 pub struct Jaegers {
+    opportunistic: opportunistic::Bites,
     /// Enemy army units seen lately, by enemy id.
     seen: BTreeMap<i32, Seen>,
     /// Fighter-store ids of our jaegers.
@@ -473,6 +477,7 @@ impl Ai {
 
     pub fn jaeger_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
+        self.jaegers.opportunistic.forget(id);
         self.jaegers.held.remove(&id);
         self.jaegers.pounces.remove(&id);
         if let Some((cloaked, since, _)) = self.jaegers.cloak.remove(&id)

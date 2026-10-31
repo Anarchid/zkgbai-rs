@@ -8,6 +8,8 @@
 //! factory, a cloak factory builds Scythes (`cloakheavyraid`: cloaked
 //! raider bots, 250 metal) to look and scout deep instead; they hold their
 //! fire like the Widows, and cannot stun.
+//! Looking and deep-scout Widows briefly bite nearby visible heavies under
+//! friendly threat, then resume their look; anti-nuke jobs keep priority.
 //!
 //! A Widow's Electro-Stunner (8000 stun damage, range 120) holds an
 //! anti-nuke (3300 health) for 30 s, longer than a nuke's flight (20-25 s):
@@ -574,6 +576,7 @@ impl Ai {
     /// Let go of scout `id` (a force calls it to spot, see
     /// `taskforce::spotter`): whether it was one.
     pub fn scouts_release(&mut self, id: i32) -> bool {
+        self.widow_forget_bite(id);
         self.scouts.scouts.remove(&id).is_some()
     }
 
@@ -627,6 +630,10 @@ impl Ai {
             if let Some(w) = self.scouts.scouts.values_mut().find(|w| w.job == Job::Wait(id)) {
                 w.unit.attack(anti, 0);
                 (w.job, w.since) = (Job::Bite(id), frame);
+                let widow = w.unit.id();
+                // The anti-nuke attack replaces any opportunistic command;
+                // its next steering tick must not cancel this reserved bite.
+                self.widow_forget_bite(widow);
             }
         }
     }
@@ -901,6 +908,19 @@ impl Ai {
         let keepouts = self.scouts_keepouts();
         let ids: Vec<i32> = self.scouts.scouts.keys().copied().collect();
         for id in ids {
+            let Some(w) = self.scouts.scouts.get(&id) else { continue };
+            let allowed = matches!(w.job, Job::Look(_) | Job::Deep(_)) && w.unit.health() >= HURT * w.unit.max_health();
+            match self.widow_opportunistic_bite(w.unit, allowed) {
+                super::jaeger::BiteAction::Active => continue,
+                super::jaeger::BiteAction::Resume => {
+                    if let Some(w) = self.scouts.scouts.get_mut(&id) {
+                        w.leg.clear();
+                        w.moved = i32::MIN / 2;
+                        w.held = false;
+                    }
+                }
+                super::jaeger::BiteAction::Idle => {}
+            }
             self.scouts_move(id, &keepouts);
         }
     }
