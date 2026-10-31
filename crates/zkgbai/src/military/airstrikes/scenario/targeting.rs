@@ -1,11 +1,13 @@
 //! `airstrike-targeting` vs `airstrike-targeting-targets`: first economical
 //! Raven releases on a mex/solar pair, then a real Likho anti-air pass.
+//! `airstrike-targeting-flock` brings a clump of four Nimbus instead of one.
 use crate::{Ai, util::get_directional_point};
 use springai::Vec3;
 
 impl Ai {
     pub(super) fn airstrike_targeting_scenario(&mut self, test: &str, frame: i32) {
-        let defender = test == "airstrike-targeting-targets";
+        let defender = test.starts_with("airstrike-targeting-");
+        let flock = test == "airstrike-targeting-flock";
         let map = self.cb.map();
         let site = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0 + 400.0);
         let base = self.graph.get_ally_center();
@@ -26,7 +28,12 @@ impl Ai {
         }
         if frame == 900 {
             if defender {
-                spawn.push(("gunshipheavyskirm", site));
+                for i in 0..if flock { 4 } else { 1 } {
+                    spawn.push((
+                        "gunshipheavyskirm",
+                        Vec3::xz(site.x + 70.0 * (i % 2) as f32, site.z + 70.0 * (i / 2) as f32),
+                    ));
+                }
             } else {
                 spawn.extend([("bomberheavy", base), ("bomberheavy", Vec3::xz(base.x + 80.0, base.z))]);
             }

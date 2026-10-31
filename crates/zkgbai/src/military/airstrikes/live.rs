@@ -142,7 +142,7 @@ impl BomberHandler {
                 e.id == p.job.target
                     && e.live
                     && e.submerged
-                    && !p.packages.iter().any(|pkg| pkg.iter().all(|(k, _)| can_hit_submerged(*k, true)))
+                    && !p.packages.iter().any(|pkg| pkg.iter().all(|(k, _)| can_hit_submerged(*k, p.job.kind, true)))
             })
         });
         for e in contacts.iter().filter(|e| e.known && !e.static_ && e.live && frame - e.seen <= FRESH) {
@@ -245,7 +245,17 @@ impl Ai {
         self.war
             .targets
             .values()
-            .filter(|e| !e.is_dead && !e.is_nano_spam)
+            // `is_nano_spam` is refreshed only when a unit enters LOS, so a
+            // strider frame watched from 10% to done would stay "spam": read
+            // frames in sight live.
+            .filter(|e| {
+                !e.is_dead
+                    && !if e.visible {
+                        e.unit.is_being_built() && e.unit.build_progress() < 0.25
+                    } else {
+                        e.is_nano_spam
+                    }
+            })
             .map(|e| {
                 let live = e.visible || e.is_radar_visible;
                 let v = if live { e.unit.vel() * 30.0 } else { Vec3::ZERO };
@@ -280,6 +290,8 @@ impl Ai {
                     factory: e.is_static
                         && (e.def_name.starts_with("factory") || e.def_name == "striderhub")
                         && !self.dev_off("odinfactories"),
+                    frame: e.visible && e.unit.is_being_built(),
+                    progress: if e.visible { e.unit.build_progress() } else { 1.0 },
                     home: self.graph.is_ally_territory(e.position),
                     fighting: !e.is_static
                         && e.can_attack()
@@ -302,15 +314,20 @@ impl Ai {
             .min_by(|a, b| distance(*a, fight).total_cmp(&distance(*b, fight)))
     }
 
-    // A HeavyAir mission deliberately engages its quarry. Only that aircraft
-    // is exempt: accompanying fighters and other AA still gate the route.
+    // A HeavyAir mission deliberately engages its quarry, and the heavy
+    // flock around it: Nimbus fly in clumps, and each would otherwise veto
+    // every other one's strike (see `anti_air::flock_mate`). Escorting
+    // fighters and other AA still gate the route.
     fn airstrike_interceptors_except(&self, quarry: Option<i32>) -> Vec<(Vec3, f32, f32)> {
+        let flock =
+            quarry.filter(|_| !self.dev_off("heavyflock")).and_then(|id| self.war.targets.get(&id)).map(|q| q.position);
         self.war
             .targets
             .values()
             .filter(|e| {
                 !e.is_dead
                     && Some(e.unit_id) != quarry
+                    && !flock.is_some_and(|at| e.identified && super::anti_air::flock_mate(at, e.position, &e.def_name))
                     && e.can_fly()
                     && (e.is_aa
                         || e.is_flex_aa
@@ -574,6 +591,9 @@ impl Ai {
                 self.airstrike_shield_point(target.filter(|_| observed).map_or(sortie.job.pos, |e| e.position))
             });
             let troops_gone = matches!(shield_drop, Some(None));
+            // A strider frame that got finished walks out of the burn.
+            let hatched = sortie.job.kind == MissionKind::Thermite
+                && target.is_some_and(|e| !e.is_static && e.visible && !e.unit.is_being_built());
             let pos = match shield_drop {
                 Some(drop) => drop.unwrap_or(sortie.job.pos),
                 None => target.filter(|_| observed).map_or(sortie.job.pos, |e| e.position),
@@ -621,7 +641,8 @@ impl Ai {
                 distance(w.target, pos) <= wave::MAX_PURSUIT
                     && wave::route_allowed(from, &approach.route(pos), |p| self.graph.is_ally_territory(p))
             });
-            let done = disabled || !valid || !wave_safe || troops_gone || frame - sortie.launched > SORTIE_TIMEOUT;
+            let done =
+                disabled || !valid || !wave_safe || troops_gone || hatched || frame - sortie.launched > SORTIE_TIMEOUT;
             let mut keep = Vec::new();
             let mut friendly_release = Vec::new();
             for (index, id) in sortie.members.into_iter().enumerate() {
@@ -638,7 +659,7 @@ impl Ai {
                     && u.def()
                         .is_some_and(|d| sortie.job.flight_safe(a.kind, risk, u.health(), u.max_health(), d.speed()));
                 let reachable = sortie.job.kind == MissionKind::Shield
-                    || can_hit_submerged(a.kind, target.is_some_and(|e| e.is_submerged()));
+                    || can_hit_submerged(a.kind, sortie.job.kind, target.is_some_and(|e| e.is_submerged()));
                 let safe =
                     reachable && clear && sortie.release.allows(id, frame, forecast_safe, u.health(), u.max_health());
                 if springai::reserved::is_reserved(self.cb, id) {
@@ -675,6 +696,8 @@ impl Ai {
                             "timeout"
                         } else if troops_gone {
                             "no_troops"
+                        } else if hatched {
+                            "hatched"
                         } else if disabled {
                             "disabled"
                         } else {

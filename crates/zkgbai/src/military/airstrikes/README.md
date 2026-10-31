@@ -42,7 +42,12 @@ Primary missions:
   its cost (it is where the army comes from, and the rebuild costs time), four
   times when it is the only enemy factory we know of. One Odin's thermite
   (14000 damage) burns a 4000-HP factory down. `disable=odinfactories` leaves
-  factories to Ravens' ordinary static strikes.
+  factories to Ravens' ordinary static strikes. Nanoframes in sight of mobile
+  units costing at least 2000 metal (every strider) are thermite jobs too:
+  they cannot move until done, and count twice the metal already in them. A
+  frame seen finished calls its sortie off (`hatched`). Thermite is a water
+  weapon, so submerged targets are Odin work as well as Ravens'; every other
+  mission against them stays Raven-only.
   A route of at least 3000 elmos, or any Singularity mission, may take a ready
   Sparrow already within 75% of its jammer radius of an Odin. Escorts are
   optional and expendable: no rendezvous wait, no Sparrow survival veto, and
@@ -52,6 +57,12 @@ Primary missions:
   this includes queued/building/active Sparrows. The economy's scout is not
   borrowed or sent to detonate.
 - Raiders on our territory: Phoenix or Magpies.
+- Heavy aircraft in sight (Nimbus, Krow, Odin): Likhos, as many as each adds
+  250 metal of damage value, when the target can be reached within 25 seconds.
+  The quarry and the heavy aircraft within 600 elmos of it (its flock: Nimbus
+  fly in clumps and cover each other) are the target, not interceptors; other
+  fighters and AA still gate the route (`disable=heavyflock` makes every flock
+  mate an interceptor again, which vetoed every strike on a clump).
 - Carpet bombing (`carpet`, priority 8): an unseen cloaker worth a priority
   strike (in practice the Phantom) that shot us within the last 20 seconds.
   Zero-K decloaks any unit that takes damage for three seconds, and Phoenix

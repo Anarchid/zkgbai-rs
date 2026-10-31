@@ -80,7 +80,9 @@ fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, rave
                 | MissionKind::Thermite
         )
         && !have.is_empty()
-        && have.keys().all(|k| matches!(k, Plane::Raven | Plane::Likho) && can_hit_submerged(*k, job.submerged))
+        && have
+            .keys()
+            .all(|k| matches!(k, Plane::Raven | Plane::Likho) && can_hit_submerged(*k, job.kind, job.submerged))
         && (!have.contains_key(&Plane::Raven) || risk.aa <= 0.15)
         && have
             .iter()
@@ -169,7 +171,7 @@ impl Ai {
             && (old_risk.intercepted
                 || loaded.iter().any(|a| {
                     a.unit.def().is_none_or(|d| {
-                        !can_hit_submerged(a.kind, old.is_some_and(|e| e.is_submerged()))
+                        !can_hit_submerged(a.kind, sortie.job.kind, old.is_some_and(|e| e.is_submerged()))
                             || !sortie.job.flight_safe(
                                 a.kind,
                                 old_risk,

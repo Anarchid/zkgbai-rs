@@ -140,6 +140,9 @@ struct Contact {
     singu: bool,
     /// A factory or strider hub: what the enemy's army comes out of.
     factory: bool,
+    /// A nanoframe in sight, and how far it is built: it cannot move yet.
+    frame: bool,
+    progress: f32,
     home: bool,
     fighting: bool,
 }
@@ -157,13 +160,24 @@ impl Contact {
 const FACTORY_WORTH: f32 = 3.0;
 const LAST_FACTORY_WORTH: f32 = 4.0;
 
-/// Thermite value of a static: superweapon-class statics of at least 1000
-/// metal (Singularities with a bonus) and every factory, priced above cost.
+/// An unfinished strider (or anything else mobile at least this dear) sits
+/// still until it is done. Its worth is the metal already in it, twice: it
+/// was paid for, and it cannot run from the burn.
+const FRAME_MIN_COST: f32 = 2000.0;
+const FRAME_WORTH: f32 = 2.0;
+
+/// Thermite value: superweapon-class statics of at least 1000 metal
+/// (Singularities with a bonus), every factory, priced above cost, and frames
+/// of expensive mobile units. Submerged ones too: thermite burns underwater.
 fn thermite_value(e: &Contact, factories: usize) -> Option<f32> {
     if e.factory {
         Some(e.value * if factories <= 1 { LAST_FACTORY_WORTH } else { FACTORY_WORTH })
-    } else {
+    } else if e.static_ {
         (e.value >= 1000.0).then_some(e.value + if e.singu { 4000.0 } else { 0.0 })
+    } else if e.frame && e.value >= FRAME_MIN_COST {
+        Some(e.value * e.progress.clamp(0.0, 1.0) * FRAME_WORTH)
+    } else {
+        None
     }
 }
 
@@ -295,6 +309,9 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             }
             add(MissionKind::Static, vec![e.id], e.hp, e.strike_value());
         } else {
+            if let Some(value) = thermite_value(e, factories) {
+                add(MissionKind::Thermite, vec![e.id], e.hp, value);
+            }
             if e.heavy {
                 add(
                     if priority_target(e.value, e.hp) { MissionKind::Heavy } else { MissionKind::Opportunistic },
@@ -454,13 +471,15 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         .into_iter()
         .filter(|p| {
             p.iter().map(|(_, n)| n).sum::<usize>() <= MAX_WING
-                && p.iter().all(|(k, _)| can_hit_submerged(*k, job.submerged))
+                && p.iter().all(|(k, _)| can_hit_submerged(*k, job.kind, job.submerged))
         })
         .collect()
 }
 
-fn can_hit_submerged(plane: Plane, submerged: bool) -> bool {
-    !submerged || plane == Plane::Raven
+/// Raven bombs reach submerged targets, and so does Odin thermite (a water
+/// weapon that burns where it lands); nothing else does.
+fn can_hit_submerged(plane: Plane, kind: MissionKind, submerged: bool) -> bool {
+    !submerged || plane == Plane::Raven || (plane == Plane::Odin && kind == MissionKind::Thermite)
 }
 
 impl Mission {

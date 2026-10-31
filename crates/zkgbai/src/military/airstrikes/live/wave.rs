@@ -90,7 +90,7 @@ pub(super) fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: 
     choices.retain(|p| {
         p.iter().all(|(k, n)| {
             (bomber(*k) || *k == Plane::Sparrow)
-                && can_hit_submerged(*k, plan.job.submerged)
+                && can_hit_submerged(*k, plan.job.kind, plan.job.submerged)
                 && *n <= have.get(k).copied().unwrap_or(0)
         })
     });

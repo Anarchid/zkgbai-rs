@@ -96,4 +96,34 @@ impl Ai {
             self.log("airstrike-turns: done");
         }
     }
+
+    /// `airstrike-strider` (a defender): the held strider hub starts a Dante
+    /// beside itself and builds it slowly, a frame that cannot move for
+    /// minutes. Progress lines show what the Odin found and when it burned.
+    pub(super) fn airstrike_strider_frame(&mut self, frame: i32) {
+        if frame == 120
+            && let Some(hub) = self.cb.team_units().into_iter().find(|u| self.defs.name_of(*u) == "striderhub")
+            && let Some(dante) = self.defs.get("striderdante")
+        {
+            let near = Vec3::xz(hub.pos().x - 220.0, hub.pos().z);
+            let p = self.cb.map().find_closest_build_site(dante, near, 200.0, 1, 0);
+            let at = if p.x >= 0.0 { p } else { near };
+            let ok = springai::reserved::as_owner(|| hub.build(dante, at, 0, 0));
+            self.log(&format!("airstrike-test: hub {} starts striderdante at {:.0},{:.0}: {ok}", hub.id(), at.x, at.z));
+        }
+        if frame % 150 == 0 {
+            for u in self.cb.team_units() {
+                let name = self.defs.name_of(u);
+                if name.starts_with("strider") && name != "striderhub" {
+                    self.log(&format!(
+                        "airstrike-test: frame {name} {} built={} progress={:.2} hp={:.0}",
+                        u.id(),
+                        !u.is_being_built(),
+                        u.build_progress(),
+                        u.health()
+                    ));
+                }
+            }
+        }
+    }
 }
