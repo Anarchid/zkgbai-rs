@@ -100,7 +100,7 @@ impl EconomyManager {
     pub(super) fn morph_sparrow_radar(&mut self, task: TaskId, radar: Unit, scout: UnitDef) {
         if self.sparrows.contains(&radar)
             || self.sparrow_radar_task != Some(task)
-            || !self.tasks.get(task).and_then(|t| t.as_construction()).is_some_and(|c| c.target == Some(radar))
+            || self.tasks.get(task).and_then(|t| t.as_construction()).is_none_or(|c| c.target != Some(radar))
         {
             return;
         }

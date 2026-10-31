@@ -152,10 +152,9 @@ impl Ai {
                     if let Some(u) = self.cb.cheat_new_unit(
                         def,
                         Vec3::xz(center.x + (i % 4) as f32 * 75.0 - 100.0, center.z - 500.0 + (i / 4) as f32 * 75.0),
-                    ) {
-                        if halberds {
-                            springai::reserved::reserve(self.cb, u.id());
-                        }
+                    ) && halberds
+                    {
+                        springai::reserved::reserve(self.cb, u.id());
                     }
                 }
             }
@@ -163,24 +162,23 @@ impl Ai {
         }
         if matches!(test, "assassin-raider-lance" | "assassin-raider-guarded") {
             for (name, at) in [("hoverarty", pos), ("staticmex", Vec3::xz(center.x + 600.0, center.z - 500.0))] {
-                if let Some(def) = self.defs.get(name) {
-                    if let Some(u) = self.cb.cheat_new_unit(def, at) {
-                        u.set_move_state(0, 0);
-                        u.set_fire_state(2, 0);
-                        springai::reserved::reserve(self.cb, u.id());
-                        self.log(&format!("assassin-test: {name} {} bait at {},{}", u.id(), at.x, at.z));
-                    }
+                if let Some(def) = self.defs.get(name)
+                    && let Some(u) = self.cb.cheat_new_unit(def, at)
+                {
+                    u.set_move_state(0, 0);
+                    u.set_fire_state(2, 0);
+                    springai::reserved::reserve(self.cb, u.id());
+                    self.log(&format!("assassin-test: {name} {} bait at {},{}", u.id(), at.x, at.z));
                 }
             }
-            if test == "assassin-raider-guarded" {
-                if let Some(def) = self.defs.get("hoverriot") {
-                    if let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z)) {
-                        u.set_move_state(0, 0);
-                        u.set_fire_state(0, 0);
-                        springai::reserved::reserve(self.cb, u.id());
-                        self.log(&format!("assassin-test: Mace {} guards Lance", u.id()));
-                    }
-                }
+            if test == "assassin-raider-guarded"
+                && let Some(def) = self.defs.get("hoverriot")
+                && let Some(u) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z))
+            {
+                u.set_move_state(0, 0);
+                u.set_fire_state(0, 0);
+                springai::reserved::reserve(self.cb, u.id());
+                self.log(&format!("assassin-test: Mace {} guards Lance", u.id()));
             }
             return;
         }
@@ -259,10 +257,10 @@ impl Ai {
                 && let Some(u) = self.cb.cheat_new_unit(def, pos)
             {
                 u.set_move_state(0, 0);
-                if test == "assassin-target2" {
-                    if let Some(other) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z)) {
-                        other.set_move_state(0, 0);
-                    }
+                if test == "assassin-target2"
+                    && let Some(other) = self.cb.cheat_new_unit(def, Vec3::xz(pos.x + 100.0, pos.z))
+                {
+                    other.set_move_state(0, 0);
                 }
                 if name == "cloaksnipe" {
                     // Keep the firing source at the seeded fix; normal initial
@@ -363,10 +361,11 @@ impl Ai {
                 }
             }
         }
-        if frame == 90 && test == "assassin-lobster" {
-            if let Some(def) = self.defs.get("planescout") {
-                self.cb.cheat_new_unit(def, Vec3::xz(center.x + 100.0, center.z + 300.0));
-            }
+        if frame == 90
+            && test == "assassin-lobster"
+            && let Some(def) = self.defs.get("planescout")
+        {
+            self.cb.cheat_new_unit(def, Vec3::xz(center.x + 100.0, center.z + 300.0));
         }
         // Let normal intelligence ingest LOS before releasing the squad;
         // otherwise its first ordinary move can spend the launcher reload.
@@ -405,11 +404,11 @@ impl Ai {
         if frame == 60 {
             self.cb.cheats_set_enabled(true);
             if test == "assassin-battery-observer" {
-                if let Some(def) = self.defs.get("striderbantha") {
-                    if let Some(u) = self.cb.cheat_new_unit(def, home) {
-                        u.set_fire_state(0, 0);
-                        springai::reserved::reserve(self.cb, u.id());
-                    }
+                if let Some(def) = self.defs.get("striderbantha")
+                    && let Some(u) = self.cb.cheat_new_unit(def, home)
+                {
+                    u.set_fire_state(0, 0);
+                    springai::reserved::reserve(self.cb, u.id());
                 }
                 if let Some(def) = self.defs.get("spiderscout") {
                     for i in 0..8 {
@@ -473,15 +472,16 @@ impl Ai {
                 self.strikes_adopt(u);
             }
         }
-        if frame >= 90 && frame % 30 == 0 {
-            if let Some(mut w) = self.strikes.wave.take() {
-                w.members.retain(|id| self.fighters.get(id).is_some_and(|f| f.unit.health() > 0.0));
-                if let Some(stage) = self.strike_stage(&w) {
-                    w.home = stage;
-                }
-                self.strike_command(&w);
-                self.strikes.wave = Some(w);
+        if frame >= 90
+            && frame % 30 == 0
+            && let Some(mut w) = self.strikes.wave.take()
+        {
+            w.members.retain(|id| self.fighters.get(id).is_some_and(|f| f.unit.health() > 0.0));
+            if let Some(stage) = self.strike_stage(&w) {
+                w.home = stage;
             }
+            self.strike_command(&w);
+            self.strikes.wave = Some(w);
         }
         // Deterministically exercise a nonlethal damage callback on an
         // incomplete wave too; real shells often kill a Flea outright.

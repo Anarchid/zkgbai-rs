@@ -195,8 +195,8 @@ impl Ai {
     ) -> Option<Request> {
         let mut snapshot = FightSnapshot::default();
         for id in members {
-            let Some(f) = self.fighters.get(id) else { return None };
-            let Some(def) = f.unit.def() else { return None };
+            let f = self.fighters.get(id)?;
+            let def = f.unit.def()?;
             let pos = f.get_pos();
             snapshot.units.push(SnapUnit {
                 side: 0,
@@ -206,11 +206,8 @@ impl Ai {
                 z: pos.z,
             });
         }
-        let Some(def) =
-            job.id.and_then(|id| self.war.targets.get(&id)).and_then(|e| e.ud).or_else(|| self.defs.get(&job.name))
-        else {
-            return None;
-        };
+        let def =
+            job.id.and_then(|id| self.war.targets.get(&id)).and_then(|e| e.ud).or_else(|| self.defs.get(&job.name))?;
         let hp =
             job.id.and_then(|id| self.war.targets.get(&id)).map_or(def.health(), |e| e.get_health() * e.def_health());
         let target = snapshot.units.len();
