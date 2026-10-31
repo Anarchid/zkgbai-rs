@@ -22,8 +22,8 @@ use crate::military::jumps::Jumps;
 use crate::military::missiles::Missiles;
 use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
-use crate::military::stakeouts::Stakeouts;
 use crate::military::scouts::Scouts;
+use crate::military::stakeouts::Stakeouts;
 use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
@@ -50,11 +50,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
 /// `airtempo` (an air factory weighed up by the clock and the map's size)
 /// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
-/// `siege` switches on the Tremor and Emissary siege doctrines (see
-/// military/taskforce/siege.rs), under test; `crab` the Crab spire (the
-/// `crab` doctrine with its perch), under test.
-const OFF_BY_DEFAULT: [&str; 9] =
-    ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes", "siege", "crab"];
+/// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
+/// Both can still be disabled with `disable=siege,crab`.
+const OFF_BY_DEFAULT: [&str; 7] = ["pairs", "currency", "permanence", "mexporc", "airtempo", "airfire", "strikes"];
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.

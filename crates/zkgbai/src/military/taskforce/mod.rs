@@ -2,9 +2,10 @@
 //! doctrine (see `doctrine`), with wants written as expressions over what
 //! the force has (see `expr`). On by default: `felon` (the shield ball) and
 //! `impaler` (the escorts of Impaler batteries, see `military::impalers`);
-//! `ravager`, `lance` and `phantom` (marksmen, see `marksman`) and
-//! `tremor` and `emissary` (siege forces, see `siege`) are seeded off; the
-//! rest wait for conducts of their own.
+//! `ravager`, `lance` and `phantom` remain disabled. The siege doctrines
+//! `tremor` and `emissary` unlock after a stable dense front (see `sitzkrieg`).
+//! The Crab's protective perch and Weaver escort start with a Crab; the
+//! remaining disabled seeds wait for conducts of their own.
 //!
 //! The `doctrines` option (or ZKGBAI_DOCTRINES) names a JSON file, or is
 //! the JSON itself: an object of patches by doctrine name, over the seeds
@@ -21,6 +22,7 @@ pub mod doctrine;
 pub mod expr;
 pub mod marksman;
 pub mod siege;
+pub mod sitzkrieg;
 pub mod spotter;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -127,6 +129,8 @@ pub struct Taskforces {
     pub spotters: spotter::Spotters,
     /// Siege forces' stations and how their guns stand (see `siege`).
     pub siege: siege::Siege,
+    pub sitzkrieg: sitzkrieg::Sitzkrieg,
+    automatic_siege: BTreeSet<String>,
 }
 
 /// A doctrine's cores are produced on purpose (its `produce`) only from
@@ -212,23 +216,17 @@ impl Ai {
         self.taskforces.loaded = true;
         let classes = Classes::build(&self.unit_classes, &self.defs);
         let mut doctrines = seeds();
-        // `enable=siege` (or ZKGBAI_ENABLE=siege) switches the siege gun
-        // seeds on, `enable=crab` the Crab spire, as a `doctrines` patch
-        // would (see `siege`).
-        if !self.dev_off("siege") {
-            for d in doctrines.iter_mut().filter(|d| d.aim == Aim::Siege && d.perch.is_none()) {
-                d.enabled = true;
-            }
+        // Crab conduct starts with ownership of a Crab; artillery waits for sitzkrieg.
+        if self.dev_off("crab") {
+            doctrines.iter_mut().filter(|d| d.name == "crab").for_each(|d| d.enabled = false);
         }
-        if !self.dev_off("crab") {
-            for d in doctrines.iter_mut().filter(|d| d.name == "crab") {
-                d.enabled = true;
-            }
-        }
+        self.taskforces.automatic_siege =
+            doctrines.iter().filter(|d| d.aim == Aim::Siege && d.perch.is_none()).map(|d| d.name.clone()).collect();
         for d in &mut doctrines {
             if let Err(e) = d.check(&self.defs, &classes) {
                 self.cb.log(&format!("doctrines: seed {e}; switched off"));
                 d.enabled = false;
+                self.taskforces.automatic_siege.remove(&d.name);
             }
         }
         let option = (self.cb.option("doctrines").filter(|v| !v.trim().is_empty()))
@@ -241,7 +239,21 @@ impl Ai {
             };
             let said = match text.and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| format!("doctrines: {e}")))
             {
-                Ok(patches) => patch(&mut doctrines, &patches, &self.defs, &classes),
+                Ok(patches) => {
+                    // Explicit enabled patches retain control over automatic unlocks.
+                    if let Some(patches) = patches.as_object() {
+                        for (name, patch) in patches {
+                            if patch.get("enabled").is_some()
+                                && let Some(fields) = patch.as_object()
+                                && let Some(mut candidate) = doctrines.iter().find(|d| &d.name == name).cloned()
+                                && candidate.apply(fields).and_then(|()| candidate.check(&self.defs, &classes)).is_ok()
+                            {
+                                self.taskforces.automatic_siege.remove(name);
+                            }
+                        }
+                    }
+                    patch(&mut doctrines, &patches, &self.defs, &classes)
+                }
                 Err(e) => vec![e],
             };
             for line in said {

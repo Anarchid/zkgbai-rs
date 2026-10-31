@@ -443,6 +443,9 @@ impl Ai {
     /// for a role with `produce`: rolled at its `produce` chance, the first
     /// that comes up; with the doctrine and role, for the log.
     pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
+        if let Some(def) = self.crab_support_produce(options) {
+            return Some((def, "crab".into(), "Weaver escort".into()));
+        }
         let tf = &self.taskforces;
         for d in tf.doctrines.iter().filter(|d| d.enabled && taskforce::squad_aim(d.aim)) {
             // A core, while a force of the doctrine has room for one (or it
@@ -458,13 +461,14 @@ impl Ai {
                     .collect();
                 let room = if d.produce_cores > 0 {
                     // Only to fill a forming force up to `produce_cores`.
-                    forces.iter().any(|q| {
-                        !q.engaging && q.engaged == 0 && q.cores(&self.fighters) < d.produce_cores as usize
-                    })
+                    forces
+                        .iter()
+                        .any(|q| !q.engaging && q.engaged == 0 && q.cores(&self.fighters) < d.produce_cores as usize)
                 } else {
                     forces.is_empty()
                         || forces.iter().any(|q| {
-                            !q.engaging && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
+                            !q.engaging
+                                && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
                         })
                 };
                 if room && kgb_rand() < f64::from(d.produce) {
@@ -1109,7 +1113,7 @@ impl Ai {
                     let wait = if army_wait {
                         self.siege_note_wait(sid, &waits);
                         Some((fallback, waits.clone()))
-                    } else if shape.aim == Aim::Siege && shape.perch.is_some() && go {
+                    } else if shape.aim == Aim::Siege && shape.perch.is_some() && (go || shape.doctrine == "crab") {
                         self.siege_wait_raisers(sid, leader, fallback)
                     } else {
                         None
@@ -1179,11 +1183,12 @@ impl Ai {
         }
         // How long a siege force was held for the army before this sortie
         // (taken as the sortie begins; 0 on a break-off or no change).
-        let waited = if engage_at.is_some() && self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege && !s.engaging) {
-            self.siege_take_wait(sid)
-        } else {
-            0
-        };
+        let waited =
+            if engage_at.is_some() && self.squads.get(sid).is_some_and(|s| s.shape.aim == Aim::Siege && !s.engaging) {
+                self.siege_take_wait(sid)
+            } else {
+                0
+            };
         let Some(s) = self.squads.get_mut(sid) else { return };
         s.last_assignment_frame = frame;
         s.keep_pace(&self.fighters, engage_at.is_some());

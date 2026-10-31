@@ -124,7 +124,8 @@ impl Ai {
             && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() || w.get_shields() < 0.5)
                     && view.get_threat(pos) / greed > 0.0
-                    && !w.is_working_on_porc(&self.eco.tasks)))
+                    && !w.is_working_on_porc(&self.eco.tasks)
+                    && !self.crab_escort(wid)))
         {
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.is_chicken = true;
@@ -139,7 +140,7 @@ impl Ai {
         };
         // Busy terraforming (or just ordered to), or flown to a colony:
         // leave it to it.
-        let held = self.eco.terraform_hold.get(&wid).is_some_and(|&until| frame < until);
+        let held = self.eco.terraform_hold.get(&wid).is_some_and(|&until| frame < until) || self.crab_escort(wid);
         if !w.is_chicken && (held || super::terraform::is_terraforming(unit) || self.eco_in_transit(wid)) {
             self.eco.assigned.push_back(wid);
             return;

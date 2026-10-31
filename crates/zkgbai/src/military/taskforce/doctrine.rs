@@ -991,30 +991,25 @@ pub fn seeds() -> Vec<Doctrine> {
     ravager.muster = 0.0;
 
     let mut crab = Doctrine::new("crab");
-    crab.note = "The Crab spire (see `siege`): a Crab parks beyond the enemy statics' reach, Weavers borrowed \
-                 from the economy raise a 200-elmo spike under it and it shells the line from up there; Redbacks \
-                 screen, Recluses hold the line, a Widow spots, a Tarantula past 3000 metal."
-        .into();
-    crab.enabled = false;
+    crab.note = "A survival-first Crab with 2-4 dedicated Weavers: repair each other, the Crab, nearby allies, then reclaim wreckage. Raise a protective pedestal when facing 1500 nearby enemy metal; add small turrets when idle.".into();
+    crab.enabled = true;
     crab.core = vec!["spidercrabe".into()];
     crab.fire_state = Some(2);
     crab.fire_at_radar = Some(false);
-    crab.cores_per_force = 2;
-    crab.roles = vec![
-        Role::escort("screen", &["spiderriot"], "ceil(0.5 * cores)", 140.0, 0.5),
-        Role::escort("line", &["spiderskirm"], "cores", 200.0, 0.0),
-        Role { fire_state: Some(0), spot: Some(Spot::Cloak), ..Role::escort("spotter", &["spiderantiheavy"], "1", 300.0, 0.0) },
-        Role::escort("aa", &["spideraa"], "value > 3000 ? 1 : 0", 90.0, 0.0),
-    ];
+    crab.cores_per_force = 1;
+    // Weavers remain economy workers, reserved and commanded by siege support.
+    crab.roles = Vec::new();
     crab.aim = Aim::Siege;
-    crab.engage_value = 1800.0;
-    crab.engage = Some(Expr::parse("cores >= 1 ? 1800 : 1000000").expect("seed engage"));
+    crab.engage_value = 1.0;
+    crab.engage = Some(Expr::parse("cores >= 1 ? 1 : 1000000").expect("seed engage"));
     crab.muster = 0.0;
     crab.retreat_health = 0.5;
     crab.flee_threat = false;
     crab.perch = Some(Perch {
         raisers: vec!["spidercon".into()],
-        count: Expr::parse("min(3, 2 * cores)").expect("perch count"),
+        count: Expr::parse("min(4, max(2, 2 * cores))").expect("perch count"),
+        min_reach: 0,
+        leave_health: 0.5,
         ..Perch::new()
     });
 
@@ -1245,13 +1240,18 @@ mod tests {
     #[test]
     fn the_crab_perches() {
         let d = seeds().into_iter().find(|d| d.name == "crab").unwrap();
-        assert!(!d.enabled && d.aim == Aim::Siege && !d.flee_threat);
+        assert!(d.enabled && d.aim == Aim::Siege && !d.flee_threat);
+        assert_eq!(d.cores_per_force, 1);
+        assert!(d.roles.is_empty());
         let p = d.perch.as_ref().unwrap();
-        assert_eq!((p.height, p.top, p.min_reach, p.refuse_if_reached), (200.0, 48.0, 3, true));
+        assert_eq!((p.height, p.top, p.min_reach, p.refuse_if_reached), (200.0, 48.0, 0, true));
         assert_eq!(p.raisers, vec!["spidercon"]);
         let classes = Classes::default();
         let two = d.force([("spidercrabe", 1600.0), ("spidercrabe", 1600.0)], &classes);
-        assert_eq!(p.count.want(&two), 3);
+        assert_eq!(p.count.want(&two), 4);
+        let one = d.force([("spidercrabe", 1600.0)], &classes);
+        assert_eq!(p.count.want(&one), 2);
+        assert!(d.engage.as_ref().unwrap().eval(&one) < one.core_value);
         // A patch changes one field of the perch and keeps the rest; null drops it.
         let mut e = d.clone();
         let Value::Object(patch) = json!({"perch": {"height": 150}}) else { panic!() };
@@ -1265,7 +1265,7 @@ mod tests {
         // The natural and claim dials, one change each: off in the seed, on by a patch.
         assert!(d.perch.as_ref().unwrap().natural.is_none() && !d.claim_with_site);
         let p0 = d.perch.as_ref().unwrap();
-        assert!(!p0.refuse_climbers && p0.leave_health == 0.0);
+        assert!(!p0.refuse_climbers && p0.leave_health == 0.5);
         let mut h = d.clone();
         let Value::Object(patch) = json!({"perch": {"refuse_climbers": true, "leave_health": 0.4}}) else { panic!() };
         h.apply(&patch).unwrap();

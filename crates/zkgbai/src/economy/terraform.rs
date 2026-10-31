@@ -197,6 +197,18 @@ impl Ai {
         }
     }
 
+    pub(crate) fn eco_worker_held(&self, id: i32) -> bool {
+        self.eco.terraform_hold.get(&id).is_some_and(|&until| until > self.frame)
+            || self.eco_in_transit(id)
+            || self.logistics_holds(id)
+    }
+
+    pub(crate) fn eco_release_terraform(&mut self, builders: &[Unit]) {
+        for b in builders {
+            self.eco.terraform_hold.remove(&b.id());
+        }
+    }
+
     fn terraform(&mut self, builders: &[Unit], line: &[Vec3], area: bool, kind: f32, height: f32, queue: bool) {
         let Some(&first) = builders.first() else { return };
         if line.len() < 2 {
