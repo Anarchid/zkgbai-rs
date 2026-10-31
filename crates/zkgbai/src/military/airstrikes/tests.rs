@@ -20,6 +20,8 @@ pub(super) fn enemy(id: i32) -> Contact {
         wind: false,
         singu: false,
         factory: false,
+        frame: false,
+        progress: 1.0,
         home: false,
         fighting: false,
     }
@@ -426,8 +428,10 @@ fn submerged_contacts_do_not_buy_interdictors_or_enter_surface_groups() {
     assert!(!choices.is_empty()); // Raven has an underwater-capable payload.
     assert!(choices.iter().flatten().all(|(p, _)| *p == Plane::Raven));
     for plane in Plane::ALL {
-        assert_eq!(can_hit_submerged(plane, true), plane == Plane::Raven);
-        assert!(can_hit_submerged(plane, false));
+        assert_eq!(can_hit_submerged(plane, MissionKind::Static, true), plane == Plane::Raven);
+        let thermite = can_hit_submerged(plane, MissionKind::Thermite, true);
+        assert_eq!(thermite, matches!(plane, Plane::Raven | Plane::Odin));
+        assert!(can_hit_submerged(plane, MissionKind::Shield, false));
     }
 }
 
@@ -487,4 +491,31 @@ fn factories_get_thermite_priced_above_cost_and_the_last_one_most() {
     // An unidentified radar dot is not a factory job; cheap statics stay Raven work.
     assert!(thermite(&[Contact { known: false, ..fac.clone() }]).is_none());
     assert!(thermite(&[Contact { factory: false, ..fac }]).is_none());
+}
+#[test]
+fn unfinished_striders_are_thermite_jobs_worth_twice_their_sunk_metal() {
+    // A Bantha frame (10000 metal, 32000 HP) half built.
+    let bantha = Contact { frame: true, progress: 0.5, value: 10000.0, hp: 16000.0, max_hp: 32000.0, ..enemy(1) };
+    let job =
+        missions(std::slice::from_ref(&bantha), Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Thermite);
+    let job = job.expect("frame thermite job");
+    assert_eq!(job.value, 10000.0);
+    assert!(job.kind.primary());
+    assert_eq!(packages(&job, clear(), 800.0), vec![vec![(Plane::Odin, 2)]]);
+    // Finished, it is an ordinary mobile heavy again; cheap frames are no job.
+    let thermite = |c: Contact| missions(&[c], Vec3::ZERO, 300).iter().any(|j| j.kind == MissionKind::Thermite);
+    assert!(!thermite(Contact { frame: false, ..bantha.clone() }));
+    assert!(!thermite(Contact { value: 1500.0, ..bantha.clone() }));
+    // A frame needs a fresh sighting, like any mobile.
+    assert!(!thermite(Contact { seen: 0, ..bantha }));
+}
+#[test]
+fn odin_thermite_reaches_underwater_statics_other_jobs_stay_raven_only() {
+    let wet = Contact { static_: true, submerged: true, value: 1200.0, hp: 3000.0, max_hp: 3000.0, ..enemy(1) };
+    let jobs = missions(&[wet], Vec3::ZERO, 300);
+    let thermite = jobs.iter().find(|j| j.kind == MissionKind::Thermite).expect("thermite job");
+    assert!(thermite.submerged);
+    assert_eq!(packages(thermite, clear(), 800.0), vec![vec![(Plane::Odin, 1)]]);
+    let stat = jobs.iter().find(|j| j.kind == MissionKind::Static).expect("static job");
+    assert!(packages(stat, clear(), 800.0).iter().flatten().all(|(p, _)| *p == Plane::Raven));
 }

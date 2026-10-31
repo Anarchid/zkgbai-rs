@@ -97,6 +97,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "carpets hold off when friendly ground units are under a line (off by default: Phantoms are worth the friendly fire)",
     ),
     (
+        "heavyflock",
+        "Military",
+        "a Likho strike on a Nimbus/Krow/Odin counts the heavy aircraft flying with it as part of the target, not as AA (default on)",
+    ),
+    (
         "odinfactories",
         "Military",
         "Odins burn enemy factories and strider hubs, valued at 3x cost, 4x for the last one (default on)",

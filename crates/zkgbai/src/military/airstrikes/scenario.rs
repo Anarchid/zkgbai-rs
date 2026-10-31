@@ -39,6 +39,9 @@ impl Ai {
         if test == "airstrike-odin" && frame % 10 == 0 {
             self.airstrike_track(frame);
         }
+        if test == "airstrike-strider" {
+            self.airstrike_strider_frame(frame);
+        }
         if test == "airstrike-factory" && frame % 150 == 0 {
             for u in self.cb.team_units() {
                 let name = self.defs.name_of(u);
@@ -154,6 +157,14 @@ impl Ai {
                 }
                 "airstrike-singu" => spawn.push(("energysingu", site)),
                 "airstrike-factory" => spawn.push(("factoryshield", site)),
+                // The hub works only on a grid of 50 energy: two fusions in
+                // link range (hub 50 + fusion 150), away from the Dante, which
+                // goes up beside the attacker's observer radar at site - 300.
+                "airstrike-strider" => spawn.extend([
+                    ("striderhub", site),
+                    ("energyfusion", Vec3::xz(site.x + 90.0, site.z - 90.0)),
+                    ("energyfusion", Vec3::xz(site.x + 90.0, site.z + 90.0)),
+                ]),
                 "airstrike-aa" => {
                     spawn.push(("energysingu", site));
                     for (dx, dz) in [(-240.0, 0.0), (240.0, 0.0), (0.0, -240.0), (0.0, 240.0)] {
@@ -194,6 +205,10 @@ impl Ai {
                             });
                             // Hold-fire alone still permits explicit attack
                             // orders from initial unit-idle registration.
+                            springai::reserved::reserve(self.cb, u.id());
+                        }
+                        // The fixture alone drives the hub (see `airstrike_strider_frame`).
+                        if test == "airstrike-strider" && name == "striderhub" {
                             springai::reserved::reserve(self.cb, u.id());
                         }
                         if test == "airstrike-wave" && Plane::of(name).is_some() {
