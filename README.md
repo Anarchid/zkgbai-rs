@@ -147,7 +147,7 @@ Installing
 
 Unzip a release's `ZKGBAI-<version>.zip` into the spring data directory (the one holding `games/`
 and `maps/`), or copy a local build's `dist-rs/AI/Skirmish/ZKGBAI/<version>` to
-`<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.4.0`.
+`<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.5.0`.
 Lobbies listing local AIs will then offer it.
 
 Testing against other AIs
@@ -156,7 +156,7 @@ Testing against other AIs
 Requires a Zero-K data dir (`~/.spring` with an engine under `engine/linux64`, the game and maps).
 
     tools/arena/match.sh -m "Comet Catcher Redux v3.1" \
-        "ZKGBAI:dev@$PWD/dist-rs/AI/Skirmish/ZKGBAI/0.4.0/libSkirmishAI.so" "CircuitAI:stable"
+        "ZKGBAI:dev@$PWD/dist-rs/AI/Skirmish/ZKGBAI/0.5.0/libSkirmishAI.so" "CircuitAI:stable"
     tools/arena/series.sh -n 2 -j 4 "ZKGBAI:dev@<lib>" "1052188CircuitAIBrutal64:stable"
 
 The harness runs `spring-headless` at 20× speed in throw-away write dirs, injects a small LuaUI widget

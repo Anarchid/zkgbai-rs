@@ -1,6 +1,6 @@
 [package]
 name = "zkgbai"
-version = "0.4.0"
+version = "0.5.0"
 description = "Zero-K Graph-Based AI"
 edition.workspace = true
 license.workspace = true
