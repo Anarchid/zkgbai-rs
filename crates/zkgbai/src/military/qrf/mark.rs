@@ -132,7 +132,7 @@ pub struct Mark {
     /// Team -> track ids of what it marked last.
     pub(super) marks: BTreeMap<usize, BTreeSet<i32>>,
     /// Where raids were first seen.
-    entries: Vec<Vec3>,
+    pub(super) entries: Vec<Vec3>,
     seen: BTreeSet<i32>,
     posts: Vec<Vec3>,
     sited: i32,
@@ -882,17 +882,22 @@ impl Ai {
         if self.qrf.mark.entries.len() >= 4 {
             return self.qrf.mark.entries.clone();
         }
+        let mut v = self.qrf.mark.entries.clone();
+        v.push(self.qrf_enemy_side());
+        v
+    }
+
+    /// The enemy's side: its centre if known and away from our value, else
+    /// the mirror of our value's centre.
+    pub(super) fn qrf_enemy_side(&self) -> Vec3 {
         let map = self.cb.map();
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
         let n = self.qrf.assets.len().max(1) as f32;
         let c = self.qrf.assets.iter().fold(Vec3::ZERO, |s, a| s + a.pos * (1.0 / n));
-        let enemy = match self.graph.get_enemy_center() {
+        match self.graph.get_enemy_center() {
             e if e != crate::util::NULLPOS && distance(e, c) > 1500.0 => e,
             _ => Vec3::xz(w - c.x, h - c.z),
-        };
-        let mut v = self.qrf.mark.entries.clone();
-        v.push(enemy);
-        v
+        }
     }
 
     /// Screen posts for `k` teams over our value: our assets clustered by
