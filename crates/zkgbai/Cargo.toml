@@ -16,6 +16,8 @@ crate-type = ["cdylib", "rlib"]
 springai.workspace = true
 zk-terrain.workspace = true
 serde_json = "1"
+# The banter lexicon (data/banter.toml and players' banter.toml).
+toml = "1"
 delaunator = "1"
 # The board: the map as a PNG for pilots that read images.
 png = "0.18"

@@ -17,6 +17,8 @@ if pgrep -x cargo > /dev/null; then echo "cargo is running; wait for it" >&2; ex
 mkdir -p "$dst"
 put() { cp "$1" "$dst/.$2.tmp" && mv -f "$dst/.$2.tmp" "$dst/$2"; }
 put "$lib" libSkirmishAI.so
+# The built-in banter lexicon, for tuning in ../banter.toml (see its header).
+put "$src/banter.toml" banter.example.toml
 sed "s/@VERSION@/$version/" "$src/AIInfo.lua" > "$dst/.AIInfo.lua.tmp" && mv -f "$dst/.AIInfo.lua.tmp" "$dst/AIInfo.lua"
 # The lobby build serves the operator and keeps a journal unless told not to.
 python3 - "$src/AIOptions.lua" "$dst/.AIOptions.lua.tmp" <<'PY'

@@ -41,4 +41,6 @@ fi
 
 sed "s/@VERSION@/$version/" crates/zkgbai/data/AIInfo.lua > "$ai/AIInfo.lua"
 cp crates/zkgbai/data/AIOptions.lua "$ai/AIOptions.lua"
+# The built-in banter lexicon, for players to copy to ../banter.toml and tune.
+cp crates/zkgbai/data/banter.toml "$ai/banter.example.toml"
 echo "$ai"

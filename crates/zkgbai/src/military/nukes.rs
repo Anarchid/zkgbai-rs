@@ -504,6 +504,7 @@ impl Ai {
 
     /// Fire a missile from `silo` at `target`, with `value` in the blast.
     fn nukes_launch(&mut self, silo: Unit, target: Vec3, value: f32) {
+        self.banter_superweapon("staticnuke");
         let (stock, from) = (silo.stockpile(), silo.pos());
         silo.execute_custom_command(CMD_ATTACK, &[target.x, target.y, target.z], 0, NO_TIMEOUT);
         let due = self.frame + (30.0 * (distance(silo.pos(), target) / MISSILE_SPEED + FLIGHT_EXTRA)) as i32;

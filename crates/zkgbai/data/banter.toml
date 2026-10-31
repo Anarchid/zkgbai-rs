@@ -1,0 +1,613 @@
+# ZKGBAI banter: what it says in chat, and when.
+#
+# To tune it, put a banter.toml in the game's AI/Skirmish/ZKGBAI/ folder (all
+# versions) or in one version's folder below it (that version only); a copy
+# of this file ships there as banter.example.toml. It needs
+# only what it changes: [settings] keys, lines to add or replace (by id), and
+# ids to switch off ("*" ends a pattern):
+#
+#   [settings]
+#   budget = 10
+#   off = ["taunt.lobster", "cook.*"]
+#
+#   [[line]]
+#   id = "taunt.mine"
+#   on = "taunt"
+#   say = "your move"
+#
+# Style: typed chat, lowercase, light punctuation. The classics from older
+# versions ("Resign lobster!", "SHINY!", "It's cooking time!") keep theirs.
+#
+# The lobby option "Banter" overrides the budget (0 or "off": silent but
+# for glhf and gg).
+#
+# How a line is picked. When something happens (an event), every line `on`
+# it whose conditions (`if`) hold is a candidate; the ones with the most
+# conditions win (the most specific line for the moment), and among those
+# one is drawn by `weight`. A condition on a pattern ending in "*" counts
+# half: a line following up one line ("said:taunt.over") beats a line
+# following up its whole family ("said:taunt.*"). A line is said at most once a game unless
+# `repeat = true`. Nothing fits: nothing is said. Silence is fine.
+#
+# Every ZKGBAI in the game hears every other's lines and counts them against
+# one shared budget, keeps quiet for `quiet` seconds after any of them, and
+# lets the first to speak on a moment have it. Another ZKGBAI's line can be
+# answered (`on = "reply"`): once, and a reply is never answered.
+#
+# Line keys:
+#   id       unique name; a family shares a prefix (taunt.*), which
+#            conditions (said:taunt.*) and `off` patterns use
+#   on       the event (below), or "reply"
+#   say      a string, or a list said one after another
+#   if       conditions, all must hold (below)
+#   to       "all" (default), "allies" or "specs" (a reply to a line to
+#            allies goes to allies whatever it says)
+#   weight   relative odds among equally specific lines (default 1)
+#   free     true: not counted against the budget, not held by `quiet`
+#   repeat   true: may be said more than once a game
+#   answers  (replies) the line ids it answers: a pattern ("taunt.*") or
+#            ids separated by "|"
+#   from     (replies) "enemy", "ally" or "any" (default) ZKGBAI
+#
+# Conditions: "name" (non-zero), "!name" (zero or absent), or
+# "name OP value" with OP one of == != < <= > >= and value a number, a word,
+# or another name ("ospots > espots").
+#   said:PATTERN    times this instance said lines matching it this game
+#                   (PATTERN: an id, ids separated by "|", or "family.*")
+#   heard:PATTERN   times it heard another ZKGBAI say them
+#   nth             how many times this event has happened this game
+#   min             game minute
+#   ospots, espots  metal spots we hold, the enemy holds
+#   army, enemy_army  mobile army metal, ours and the enemy's (as known)
+#   enemies, allies   enemy teams, allied teams
+#   behind          1 when we hold fewer spots than the enemy
+#   lobster         "lobster", or "lobsters" against more than one team
+# plus the event's own fields.
+#
+# Text: {name} puts a field in; {name:k} as thousands ("1.2k"), {name:cap}
+# capitalised. A line with a field the event lacks is not a candidate.
+#
+# Events and their fields:
+#   start          the game starts
+#   resign         we resign
+#   taunt          well ahead: more than half the territory, 1.5x the enemy's
+#                  spots, twice its army
+#   turned         behind (fewer spots than the enemy, or under two-thirds its
+#                  army) after having taunted
+#   recovered      well ahead again after having turned
+#   hopeless       we would resign, but an ally plays on (the alliance's call:
+#                  "resignable" is said to one's own team)
+#   inferno        an Inferno launched: n (things in the fire), value (their metal)
+#   burnt          an Inferno's fire is out: n, metal (what it burnt that we saw go)
+#   eos            an Eos launched at a building: target (its name), value
+#   silo_lost      our missile silo destroyed: fired (missiles it launched)
+#   superweapon    one of ours fires: weapon (nuke, zenith, starlight)
+#   shiny          an enemy Singularity or advanced geo goes up: what (singu, geo)
+#   shiny_ours     one of ours goes up: what
+#   raid_repelled  a raid on our economy wiped out: where (north, south-west...),
+#                  metal (its worth), lost (ours), nth (raids from there seen off),
+#                  breached (raids from there that cost us)
+#   raid_cost      a raid cost us: where, lost, claimed (1: we called it closed)
+#   comm_escape    an enemy commander we had under a quarter health got away
+#   comm_kill      an enemy commander dies: escapes (times it got away before)
+
+[settings]
+budget = 6         # quips a game, across every ZKGBAI in it; free lines don't count
+quiet = 90         # seconds of silence after any ZKGBAI's quip
+hold = [2, 5]      # seconds a quip waits to hear whether another ZKGBAI spoke first
+expire = 30        # seconds a quip stays worth saying
+reply_within = 20  # seconds after a quip that it may be answered
+off = []
+
+# The most lines a game on an event (any event not listed: no limit).
+[settings.limit]
+taunt = 3
+hopeless = 2
+inferno = 3
+burnt = 2
+superweapon = 2
+raid_repelled = 2
+comm_escape = 3
+
+# Seconds before the same event is considered again (spoken or not).
+[settings.cooldown]
+hopeless = 300
+taunt = 240
+turned = 240
+recovered = 240
+inferno = 60
+burnt = 60
+superweapon = 120
+raid_repelled = 180
+raid_cost = 180
+comm_escape = 60
+
+# ---------------------------------------------------------------- opening
+
+[[line]]
+id = "glhf"
+on = "start"
+free = true
+say = "glhf!"
+
+[[line]]
+id = "glhf.u2"
+on = "reply"
+answers = "glhf"
+from = "enemy"
+free = true
+say = "u2"
+
+# ------------------------------------------------------------- the claim
+# "It's over" is a claim. The turned/recovered/resign lines below hold it
+# to account.
+
+[[line]]
+id = "taunt.time"
+on = "taunt"
+say = ["Do you know what time it is?", "It's time to resign!"]
+
+[[line]]
+id = "taunt.lobster"
+on = "taunt"
+say = "Resign {lobster}!"
+
+[[line]]
+id = "taunt.over"
+on = "taunt"
+say = "It's over, resign already."
+
+[[line]]
+id = "taunt.help"
+on = "taunt"
+say = ["Having trouble?", "Type \"!resign\" for help."]
+
+# A second taunt, later. (Resigning is their team's call.)
+[[line]]
+id = "taunt.count"
+on = "taunt"
+if = ["said:taunt.*"]
+say = "{ospots} spots to {espots}, your call"
+
+[[line]]
+id = "taunt.norush"
+on = "taunt"
+if = ["said:taunt.*"]
+say = "no rush"
+
+[[line]]
+id = "taunt.still"
+on = "taunt"
+if = ["said:taunt.over"]
+say = "still over"
+
+[[line]]
+id = "taunt.stilltime"
+on = "taunt"
+if = ["said:taunt.time"]
+say = "still time"
+
+# The claim fails.
+[[line]]
+id = "turned.review"
+on = "turned"
+if = ["said:taunt.*"]
+say = "hm"
+
+[[line]]
+id = "turned.help"
+on = "turned"
+if = ["said:taunt.help"]
+say = "having trouble"
+
+[[line]]
+id = "turned.time"
+on = "turned"
+if = ["said:taunt.time"]
+say = "ok it was not time"
+
+[[line]]
+id = "turned.over"
+on = "turned"
+if = ["said:taunt.over"]
+say = "ok not over"
+
+[[line]]
+id = "turned.lobster"
+on = "turned"
+if = ["said:taunt.lobster"]
+say = "{lobster} underestimated"
+
+# The claim comes good after all.
+[[line]]
+id = "recovered.saying"
+on = "recovered"
+if = ["said:turned.*"]
+say = "as i was saying"
+
+[[line]]
+id = "recovered.review"
+on = "recovered"
+if = ["said:turned.review"]
+say = "nvm"
+
+[[line]]
+id = "recovered.time"
+on = "recovered"
+if = ["said:turned.time"]
+say = "it is time again"
+
+# Lost, with an ally still playing: we don't resign, but say so to the team.
+[[line]]
+id = "hopeless"
+on = "hopeless"
+to = "allies"
+say = "looks resignable tbh"
+
+[[line]]
+id = "hopeless.imo"
+on = "hopeless"
+to = "allies"
+say = "resignable imo"
+
+[[line]]
+id = "hopeless.still"
+on = "hopeless"
+to = "allies"
+if = ["said:hopeless*"]
+say = "still resignable"
+
+[[line]]
+id = "hopeless.withdrawn"
+on = "hopeless"
+to = "allies"
+if = ["said:taunt.*"]
+say = "uh, resignable tbh"
+
+# The claim is settled the other way.
+[[line]]
+id = "gg"
+on = "resign"
+free = true
+say = "gg!"
+
+[[line]]
+id = "gg.withdrawn"
+on = "resign"
+if = ["said:taunt.*"]
+free = true
+say = "gg, i take it back"
+
+[[line]]
+id = "gg.help"
+on = "resign"
+if = ["said:taunt.help"]
+free = true
+say = "gg, took my own advice"
+
+[[line]]
+id = "gg.time"
+on = "resign"
+if = ["said:taunt.time"]
+free = true
+say = "gg, clock was wrong"
+
+[[line]]
+id = "gg.over"
+on = "resign"
+if = ["said:taunt.over"]
+free = true
+say = "gg, now it's over"
+
+[[line]]
+id = "gg.lobster"
+on = "resign"
+if = ["said:taunt.lobster"]
+free = true
+say = "gg, {lobster} wins"
+
+# ---------------------------------------------------------------- cooking
+
+[[line]]
+id = "cook.first"
+on = "inferno"
+if = ["nth == 1"]
+say = "It's cooking time!"
+
+[[line]]
+id = "cook.table"
+on = "inferno"
+if = ["said:cook.*", "n >= 5"]
+say = "table for {n}"
+
+[[line]]
+id = "cook.still"
+on = "inferno"
+if = ["said:cook.*"]
+say = "still cooking"
+
+[[line]]
+id = "cook.seconds"
+on = "inferno"
+if = ["said:cook.*"]
+say = "seconds?"
+
+[[line]]
+id = "cook.done"
+on = "burnt"
+if = ["said:cook.*", "metal >= 1000"]
+say = "{metal:k} metal, well done"
+
+[[line]]
+id = "cook.under"
+on = "burnt"
+if = ["said:cook.*", "metal < 150"]
+say = "undercooked"
+
+[[line]]
+id = "cook.closed"
+on = "silo_lost"
+if = ["fired >= 3"]
+say = "kitchen closed"
+
+[[line]]
+id = "cook.served"
+on = "silo_lost"
+if = ["said:cook.*", "fired >= 8"]
+say = "kitchen closed, {fired} served"
+
+[[line]]
+id = "cook.unopened"
+on = "silo_lost"
+if = ["fired == 0"]
+say = "kitchen closed before opening"
+
+[[line]]
+id = "eos.first"
+on = "eos"
+if = ["nth == 1"]
+say = "Nice knowing you."
+
+[[line]]
+id = "eos.named"
+on = "eos"
+if = ["nth == 1", "value >= 1500"]
+say = "nice knowing you, {target}"
+
+# ----------------------------------------------------------- superweapons
+
+[[line]]
+id = "sw.nuke"
+on = "superweapon"
+if = ["weapon == nuke", "nth == 1"]
+say = "Nice knowing you."
+
+[[line]]
+id = "sw.zenith"
+on = "superweapon"
+if = ["weapon == zenith", "nth == 1"]
+say = "forecast: meteors"
+
+[[line]]
+id = "sw.starlight"
+on = "superweapon"
+if = ["weapon == starlight", "nth == 1"]
+say = "hold still"
+
+[[line]]
+id = "sw.again"
+on = "superweapon"
+if = ["said:sw.*", "nth >= 2"]
+say = "again"
+
+[[line]]
+id = "sw.rip"
+on = "superweapon"
+if = ["nth >= 2"]
+say = "R.I.P."
+
+[[line]]
+id = "sw.rekt"
+on = "superweapon"
+if = ["nth >= 2"]
+say = "Get rekt."
+
+# ------------------------------------------------------------------ shiny
+
+[[line]]
+id = "shiny"
+on = "shiny"
+if = ["nth == 1"]
+say = "SHINY!"
+
+[[line]]
+id = "shiny.count"
+on = "shiny"
+if = ["said:shiny*", "nth >= 2"]
+say = "SHINY! that's {nth}"
+
+[[line]]
+id = "shiny.ours"
+on = "shiny_ours"
+say = "that one was ours"
+
+[[line]]
+id = "shiny.ours.less"
+on = "shiny_ours"
+if = ["said:shiny*"]
+say = "ours, less shiny"
+
+# ------------------------------------------------------------------ raids
+# "Closed" is a claim too; raid_cost holds it to account.
+
+[[line]]
+id = "raid.closed"
+on = "raid_repelled"
+if = ["metal >= 300", "breached == 0", "nth == 1"]
+say = "{where} is closed"
+
+[[line]]
+id = "raid.properly"
+on = "raid_repelled"
+if = ["metal >= 300", "breached >= 1"]
+say = "{where} is closed, properly this time"
+
+[[line]]
+id = "raid.again"
+on = "raid_repelled"
+if = ["metal >= 300", "nth >= 3"]
+say = "{where} again, same result"
+
+[[line]]
+id = "raid.review"
+on = "raid_cost"
+if = ["claimed"]
+say = "{where} under review"
+
+# -------------------------------------------------------------- commanders
+
+[[line]]
+id = "comm.lucky"
+on = "comm_escape"
+if = ["nth == 1"]
+say = "lucky"
+
+[[line]]
+id = "comm.suspicious"
+on = "comm_escape"
+if = ["nth == 2"]
+say = "escaped again, suspicious"
+
+[[line]]
+id = "comm.favouritism"
+on = "comm_escape"
+if = ["nth >= 3"]
+say = "favouritism"
+
+[[line]]
+id = "comm.eventually"
+on = "comm_kill"
+if = ["escapes >= 2"]
+say = "caught it, eventually"
+
+# ----------------------------------------------------------------- replies
+# Answers to another ZKGBAI's line. An enemy taunting us gets an honest
+# answer: the "behind" ones only when we are.
+
+[[line]]
+id = "re.lobster"
+on = "reply"
+answers = "taunt.lobster"
+from = "enemy"
+say = "not a lobster"
+
+[[line]]
+id = "re.time"
+on = "reply"
+answers = "taunt.time"
+from = "enemy"
+say = "not yet"
+
+[[line]]
+id = "re.over"
+on = "reply"
+answers = "taunt.over"
+from = "enemy"
+say = "not over"
+
+[[line]]
+id = "re.over.mostly"
+on = "reply"
+answers = "taunt.over"
+from = "enemy"
+if = ["behind"]
+say = "mostly over"
+
+[[line]]
+id = "re.help"
+on = "reply"
+answers = "taunt.help"
+from = "enemy"
+say = "no trouble"
+
+[[line]]
+id = "re.help.some"
+on = "reply"
+answers = "taunt.help"
+from = "enemy"
+if = ["behind"]
+say = "some"
+
+[[line]]
+id = "re.help.back"
+on = "reply"
+answers = "turned.help"
+from = "enemy"
+say = "Type \"!resign\" for help."
+
+[[line]]
+id = "re.notover.now"
+on = "reply"
+answers = "turned.over"
+from = "enemy"
+if = ["ospots > espots"]
+say = "it is now"
+
+[[line]]
+id = "re.cook"
+on = "reply"
+answers = "cook.first"
+from = "enemy"
+say = "medium rare pls"
+
+[[line]]
+id = "re.shiny"
+on = "reply"
+answers = "shiny|shiny.count"
+from = "enemy"
+say = "it was insured"
+
+[[line]]
+id = "re.suspicious"
+on = "reply"
+answers = "comm.suspicious"
+from = "enemy"
+say = "skill"
+
+[[line]]
+id = "re.closed"
+on = "reply"
+answers = "raid.closed"
+from = "enemy"
+say = "we'll see"
+
+[[line]]
+id = "re.seconded"
+on = "reply"
+answers = "taunt.*"
+from = "ally"
+say = "seconded"
+
+[[line]]
+id = "re.regrettably"
+on = "reply"
+answers = "turned.*"
+from = "ally"
+if = ["said:re.seconded"]
+say = "seconded, regrettably"
+
+[[line]]
+id = "re.resignable"
+on = "reply"
+answers = "hopeless*"
+from = "ally"
+say = "ye, resignable"
+
+[[line]]
+id = "re.gg"
+on = "reply"
+answers = "gg*"
+from = "enemy"
+free = true
+# Not "gg!": text two lines share reads as the reply, which nothing answers.
+say = "gg"
