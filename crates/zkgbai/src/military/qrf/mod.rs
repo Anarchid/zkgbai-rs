@@ -147,6 +147,9 @@ pub struct RaidGroup {
     /// the assets (unit ids) its members have been pressing.
     pub pressed: i32,
     pub pressed_on: Vec<i32>,
+    /// Outside legacy strength/territory limits: only a predicted plan may
+    /// engage this group. Never send it through the heuristic fallback.
+    pub prediction_only: bool,
 }
 
 /// Something of ours worth defending.
@@ -486,6 +489,7 @@ impl Ai {
                     mobility: mobility.unwrap_or(Mobility::BOT),
                     pressed,
                     pressed_on,
+                    prediction_only: false,
                 }
             })
             .collect();

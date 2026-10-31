@@ -320,6 +320,7 @@ mod tests {
             mobility: crate::military::qrf::field::Mobility::BOT,
             pressed: 0,
             pressed_on: vec![],
+            prediction_only: false,
         });
         ai
     }

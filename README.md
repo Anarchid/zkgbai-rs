@@ -403,6 +403,15 @@ and larger forces retain the legacy policy; pending or materially stale
 predictions preserve current orders. `qrf-predict` journal events record the
 assignments, loss estimates, snapshot age, simulations and worker time.
 
+Small known ground groups already in weapon range of protected assets (or
+recently observed firing at them) can also be evaluated beyond the legacy
+strength/territory gates. This includes bombardment by skirmishers such as
+Rogues. Threat deadlines account for weapon range, and the rollout judges
+whether reaching the shooter helps, rather than requiring a defender to
+reach the mex first. These additional groups are never attacked through the
+legacy fallback when prediction is unavailable; leaving them unanswered is
+still a valid predicted outcome.
+
 The rollout uses two-dimensional straight movement plus path-derived detour
 delays, not engine path simulation. Raiders keep their last observed asset
 target and then select nearby surviving assets. Up to four threatened assets

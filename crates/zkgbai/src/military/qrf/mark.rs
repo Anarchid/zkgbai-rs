@@ -157,6 +157,7 @@ pub(super) struct Target {
     /// Threatened assets: index into `qrf.assets`, the raid's seconds.
     pub(super) threatened: Vec<(usize, f32)>,
     pub(super) urgency: f32,
+    prediction_only: bool,
 }
 
 /// The assignment of rows (teams) to distinct columns (targets), one per
@@ -270,6 +271,7 @@ impl Ai {
 
         // The raids that threaten anything, with their travel times.
         let mut targets: Vec<Target> = Vec::new();
+        let predict_enabled = !self.dev_off("qrfpredict");
         // In normal play the travel times go only as far as they are used
         // (the staged game keeps the whole map, as it was tuned on).
         let (raid_max, team_max) = if self.qrf.live { (HORIZON + 15.0, HORIZON * 2.0) } else { (NEVER, NEVER) };
@@ -300,20 +302,45 @@ impl Ai {
         for (gi, f) in group_fields.iter().enumerate() {
             let Some(f) = f.as_ref() else { continue };
             let g = &self.qrf.groups[gi];
+            let range = g
+                .members
+                .iter()
+                .filter_map(|id| self.qrf.tracks.get(id)?.kind())
+                .map(|d| d.max_weapon_range())
+                .fold(0.0, f32::max);
             let threatened: Vec<(usize, f32)> = (self.qrf.assets.iter().enumerate())
-                .map(|(i, a)| (i, f.at(a.pos)))
+                .map(|(i, a)| {
+                    let path = f.at(a.pos);
+                    let pressed =
+                        g.pressed > 0 && frame - g.pressed <= PRESSED_RECALL && g.pressed_on.contains(&a.unit.id());
+                    let time = if predict_enabled {
+                        super::predict::threat_time(path, distance(g.center, a.pos), range, g.speed, pressed)
+                    } else {
+                        path
+                    };
+                    (i, time)
+                })
                 .filter(|&(_, t)| t < HORIZON)
                 .collect();
             if threatened.is_empty() {
                 continue;
             }
             let urgency = threatened.iter().map(|&(i, t)| self.qrf.assets[i].cost / (t + 5.0)).sum();
-            targets.push(Target { groups: vec![gi], center: g.center, power: g.power, threatened, urgency });
+            targets.push(Target {
+                groups: vec![gi],
+                center: g.center,
+                power: g.power,
+                threatened,
+                urgency,
+                prediction_only: g.prediction_only,
+            });
         }
         // More raids than teams: pair the closest raids up.
-        let predict_small = !self.dev_off("qrfpredict")
-            && teams.len() <= super::predict::MAX_TEAMS
-            && targets.len() <= super::predict::MAX_RAIDS;
+        let predict_small =
+            predict_enabled && teams.len() <= super::predict::MAX_TEAMS && targets.len() <= super::predict::MAX_RAIDS;
+        if !predict_small {
+            targets.retain(|t| !t.prediction_only);
+        }
         while !predict_small && targets.len() > teams.len() && targets.len() >= 2 {
             let mut best = (f32::INFINITY, 0, 1);
             for i in 0..targets.len() {
@@ -382,6 +409,7 @@ impl Ai {
             if under_fire { a.unit.health() / (t.power / 10.0).max(1.0) } else { tr }
         };
         let mut allowed = vec![vec![true; targets.len()]; team_ids.len()];
+        let mut predict_allowed = allowed.clone();
         for (a, &team) in team_ids.iter().enumerate() {
             let (pos, _) = self.qrf_team_pos(&teams[&team]);
             for (b, t) in targets.iter().enumerate() {
@@ -411,14 +439,18 @@ impl Ai {
                 // refused were answering raids before they pressed, and
                 // mexes lost by 10:00 went 5.5 to 8.7; the slack test and
                 // the hold in seconds are what the rule keeps.)
-                allowed[a][b] = self.qrf_mark_allows(team, t) && (team < MOON || slack && !cooling);
+                // The rollout asks whether reaching the shooter in time
+                // helps. A deadline for reaching the mex must not veto it.
+                predict_allowed[a][b] = self.qrf_mark_allows(team, t) && (team < MOON || !cooling);
+                allowed[a][b] =
+                    !t.prediction_only && self.qrf_mark_allows(team, t) && (team < MOON || slack && !cooling);
                 if !allowed[a][b] {
                     cost[a][b] += 1e9;
                 }
             }
         }
         let prediction = if predict_small {
-            self.qrf_predict_plan(&teams, &team_ids, &targets, &fields, &allowed)
+            self.qrf_predict_plan(&teams, &team_ids, &targets, &fields, &predict_allowed)
         } else {
             super::predict::Plan::Legacy
         };
@@ -436,6 +468,9 @@ impl Ai {
                     free.remove(team);
                 }
                 for (ti, t) in targets.iter().enumerate() {
+                    if t.prediction_only {
+                        continue;
+                    }
                     let mine: f32 =
                         legacy.iter().filter(|p| p.1 == ti).map(|p| self.qrf_team_power(&teams[&p.0])).sum();
                     if free.is_empty() || t.power < DOUBLE_RATIO * mine {
