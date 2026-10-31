@@ -8,6 +8,7 @@ mod live;
 mod scenario;
 #[cfg(test)]
 mod tests;
+mod turns;
 
 use crate::util::distance;
 use group::{Blast, GroupStrike};
@@ -137,6 +138,8 @@ struct Contact {
     raider: bool,
     wind: bool,
     singu: bool,
+    /// A factory or strider hub: what the enemy's army comes out of.
+    factory: bool,
     home: bool,
     fighting: bool,
 }
@@ -146,6 +149,21 @@ impl Contact {
         // Destroying extraction denies recurring income and a contested spot.
         // Keep this separate from raw metal for eligibility/cost thresholds.
         self.value * if self.mex { 4.0 } else { 1.0 }
+    }
+}
+
+/// A factory is worth more than its metal: it is where the army comes from,
+/// and losing it costs the enemy the rebuild time too. Their last one, more.
+const FACTORY_WORTH: f32 = 3.0;
+const LAST_FACTORY_WORTH: f32 = 4.0;
+
+/// Thermite value of a static: superweapon-class statics of at least 1000
+/// metal (Singularities with a bonus) and every factory, priced above cost.
+fn thermite_value(e: &Contact, factories: usize) -> Option<f32> {
+    if e.factory {
+        Some(e.value * if factories <= 1 { LAST_FACTORY_WORTH } else { FACTORY_WORTH })
+    } else {
+        (e.value >= 1000.0).then_some(e.value + if e.singu { 4000.0 } else { 0.0 })
     }
 }
 
@@ -238,6 +256,7 @@ fn intercept_time(from: Vec3, target: Vec3, velocity: Vec3, speed: f32) -> Optio
 fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
     let mut jobs = Vec::new();
     let mut clustered = std::collections::BTreeSet::new();
+    let factories = contacts.iter().filter(|c| c.factory && c.static_ && c.known).count();
     for e in contacts {
         let fresh = e.live && frame - e.seen <= FRESH;
         if !e.static_ && !fresh {
@@ -271,8 +290,8 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             continue;
         }
         if e.static_ {
-            if e.value >= 1000.0 {
-                add(MissionKind::Thermite, vec![e.id], e.hp, e.value + if e.singu { 4000.0 } else { 0.0 });
+            if let Some(value) = thermite_value(e, factories) {
+                add(MissionKind::Thermite, vec![e.id], e.hp, value);
             }
             add(MissionKind::Static, vec![e.id], e.hp, e.strike_value());
         } else {

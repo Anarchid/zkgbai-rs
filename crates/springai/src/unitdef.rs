@@ -91,6 +91,13 @@ getters!(UnitDef.def_id {
     fn fire_state() -> i32 = UnitDef_getFireState;
     fn move_state() -> i32 = UnitDef_getMoveState;
     fn turn_radius() -> f32 = UnitDef_getTurnRadius;
+    /// Strafe-aircraft flight model (Recoil's StrafeAirMoveType): control
+    /// surface authority and how the nose and the velocity pull each other.
+    fn max_rudder() -> f32 = UnitDef_getMaxRudder;
+    fn max_elevator() -> f32 = UnitDef_getMaxElevator;
+    fn max_bank() -> f32 = UnitDef_getMaxBank;
+    fn front_to_speed() -> f32 = UnitDef_getFrontToSpeed;
+    fn speed_to_front() -> f32 = UnitDef_getSpeedToFront;
     fn wanted_height() -> f32 = UnitDef_getWantedHeight;
     fn is_hover_attack() -> bool = UnitDef_isHoverAttack;
     fn is_air_strafe() -> bool = UnitDef_isAirStrafe;

@@ -276,6 +276,10 @@ impl Ai {
                         || self.unit_classes.medium_raiders.contains(e.def_name.as_str()),
                     wind: e.def_name == "energywind",
                     singu: e.def_name == "energysingu",
+                    // `disable=odinfactories` keeps factories out of thermite jobs.
+                    factory: e.is_static
+                        && (e.def_name.starts_with("factory") || e.def_name == "striderhub")
+                        && !self.dev_off("odinfactories"),
                     home: self.graph.is_ally_territory(e.position),
                     fighting: !e.is_static
                         && e.can_attack()
@@ -284,6 +288,18 @@ impl Ai {
                 }
             })
             .collect()
+    }
+
+    /// Where an Odin's shield cluster covers our troops fighting at `fight`:
+    /// on the mobile ground fighter nearest to it, within 600 elmos. None
+    /// once they have left or died, so a drop never lands on empty ground.
+    fn airstrike_shield_point(&self, fight: Vec3) -> Option<Vec3> {
+        self.cb
+            .friendly_units_in(fight, 600.0)
+            .into_iter()
+            .filter(|u| u.def().is_some_and(|d| !d.is_able_to_fly() && d.speed() > 0.0 && d.is_able_to_attack()))
+            .map(|u| u.pos())
+            .min_by(|a, b| distance(*a, fight).total_cmp(&distance(*b, fight)))
     }
 
     // A HeavyAir mission deliberately engages its quarry. Only that aircraft
@@ -400,12 +416,8 @@ impl Ai {
                 job.deep = true;
             }
             if job.kind == MissionKind::Shield {
-                let ally =
-                    self.cb.friendly_units_in(job.pos, 600.0).into_iter().find(|u| {
-                        u.def().is_some_and(|d| !d.is_able_to_fly() && d.speed() > 0.0 && d.is_able_to_attack())
-                    });
-                let Some(ally) = ally else { continue };
-                job.pos = ally.pos();
+                let Some(drop) = self.airstrike_shield_point(job.pos) else { continue };
+                job.pos = drop;
             }
             let quarry_enemies =
                 (job.kind == MissionKind::HeavyAir).then(|| self.airstrike_interceptors_except(Some(job.target)));
@@ -527,6 +539,7 @@ impl Ai {
         let mut occupied: BTreeSet<_> =
             self.bomber_handler.sorties.iter().flat_map(|s| s.job.targets.iter().copied()).collect();
         let sorties = std::mem::take(&mut self.bomber_handler.sorties);
+        let turns = !self.dev_off("airturns");
         let mut active = BTreeSet::new();
         let aircraft: BTreeMap<_, _> = self.bomber_handler.units.iter().map(|(&id, a)| (id, a.unit)).collect();
         for mut sortie in sorties {
@@ -554,10 +567,16 @@ impl Ai {
             } else {
                 remembered
             };
-            let pos = if sortie.job.kind == MissionKind::Shield {
-                sortie.job.pos
-            } else {
-                target.filter(|_| observed).map_or(sortie.job.pos, |e| e.position)
+            // A shield drop follows the troops it is for: our fighter nearest
+            // the enemy (or the last drop point while it is out of sight). It
+            // is called off once none are left there.
+            let shield_drop = (sortie.job.kind == MissionKind::Shield).then(|| {
+                self.airstrike_shield_point(target.filter(|_| observed).map_or(sortie.job.pos, |e| e.position))
+            });
+            let troops_gone = matches!(shield_drop, Some(None));
+            let pos = match shield_drop {
+                Some(drop) => drop.unwrap_or(sortie.job.pos),
+                None => target.filter(|_| observed).map_or(sortie.job.pos, |e| e.position),
             };
             let quarry_enemies = (sortie.job.kind == MissionKind::HeavyAir)
                 .then(|| self.airstrike_interceptors_except(Some(sortie.job.target)));
@@ -602,7 +621,7 @@ impl Ai {
                 distance(w.target, pos) <= wave::MAX_PURSUIT
                     && wave::route_allowed(from, &approach.route(pos), |p| self.graph.is_ally_territory(p))
             });
-            let done = disabled || !valid || !wave_safe || frame - sortie.launched > SORTIE_TIMEOUT;
+            let done = disabled || !valid || !wave_safe || troops_gone || frame - sortie.launched > SORTIE_TIMEOUT;
             let mut keep = Vec::new();
             for (index, id) in sortie.members.into_iter().enumerate() {
                 let line = lines.get(index).copied();
@@ -650,6 +669,8 @@ impl Ai {
                             if u.health() < u.max_health() * 0.5 { "damage" } else { "unsafe_route" }
                         } else if frame - sortie.launched > SORTIE_TIMEOUT {
                             "timeout"
+                        } else if troops_gone {
+                            "no_troops"
                         } else if disabled {
                             "disabled"
                         } else {
@@ -688,7 +709,7 @@ impl Ai {
                 if let Some(l) = line.filter(|_| reroute) {
                     Self::carpet_order(u, &approach.route(l.far), l);
                 } else if reroute && !route.is_empty() {
-                    Self::airstrike_route(u, &route, true);
+                    Self::airstrike_route(u, &route, true, turns);
                     Self::airstrike_attack(u, &sortie.job, target.map(|e| e.unit), pos, OPTION_SHIFT_KEY);
                 }
                 // Keep the queued safe approach intact. Retarget a moving
@@ -752,7 +773,23 @@ impl Ai {
             a.returning = true;
             a.last_order = frame;
             if !route.is_empty() {
-                Self::airstrike_route(u, &route, false);
+                if self.test.as_deref().is_some_and(|t| t.starts_with("airstrike-")) {
+                    let pts =
+                        |r: &[Vec3]| r.iter().take(4).map(|p| format!("{:.0},{:.0}", p.x, p.z)).collect::<Vec<_>>();
+                    let flown = Self::airstrike_flyable(u, &route);
+                    self.log(&format!(
+                        "airstrike-test: return {id} at {:.0},{:.0} vel {:.1},{:.1} route {:?} flown {:?} ({} of {})",
+                        u.pos().x,
+                        u.pos().z,
+                        u.vel().x,
+                        u.vel().z,
+                        pts(&route),
+                        pts(&flown),
+                        flown.len(),
+                        route.len()
+                    ));
+                }
+                Self::airstrike_route(u, &route, false, turns);
             }
             if hurt || empty {
                 u.execute_custom_command(
@@ -852,6 +889,7 @@ impl Ai {
         wave: Option<WaveFlight>,
     ) -> bool {
         let job = &plan.job;
+        let turns = !self.dev_off("airturns");
         let interceptors = if job.kind == MissionKind::Intercept {
             Vec::new()
         } else {
@@ -941,7 +979,7 @@ impl Ai {
             } else if let Some(&l) = lines.get(index) {
                 Self::carpet_order(a.unit, &carpet_routes[index], l);
             } else {
-                Self::airstrike_route(a.unit, &route, true);
+                Self::airstrike_route(a.unit, &route, true, turns);
                 Self::airstrike_attack(
                     a.unit,
                     job,
@@ -994,9 +1032,26 @@ impl Ai {
         true
     }
 
-    fn airstrike_route(u: Unit, route: &[Vec3], attacking: bool) {
+    /// `route` less the waypoints `u` cannot turn onto from its flight now.
+    fn airstrike_flyable(u: Unit, route: &[Vec3]) -> Vec<Vec3> {
+        let Some(d) = u.def() else { return route.to_vec() };
+        let radius = super::turns::turn_radius(
+            d.max_rudder(),
+            d.max_elevator(),
+            d.max_bank(),
+            d.front_to_speed(),
+            d.speed_to_front(),
+        );
+        super::turns::flyable(u.pos(), u.vel(), radius, super::turns::arrival_radius(d.turn_radius()), route)
+    }
+
+    fn airstrike_route(u: Unit, route: &[Vec3], attacking: bool, turns: bool) {
+        // Cut only the bends this airframe cannot turn onto (see `turns`): a
+        // heavy bomber would orbit such a waypoint until the next order. Keep
+        // every other bend of the planned route.
+        let route = if turns { Self::airstrike_flyable(u, route) } else { route.to_vec() };
         // Stop the move queue one cell before impact and let the attack command
-        // do the terminal approach. Never cut across bends in the planned route.
+        // do the terminal approach.
         let n = if attacking { route.len().saturating_sub(1) } else { route.len() };
         for (i, p) in route.iter().take(n).enumerate() {
             u.move_to(*p, if i == 0 { 0 } else { OPTION_SHIFT_KEY });
