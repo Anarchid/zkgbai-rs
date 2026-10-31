@@ -1,8 +1,44 @@
-//! One local fallback pass before an armed strike gives up its target area.
+//! One local target change: salvage a failed attack, or take a better, earlier drop.
 use super::*;
 
 const VICINITY: f32 = 800.0;
 const MAX_LEG: f32 = 1200.0;
+
+// Leave room for the engine's terminal turn/release inside the eight-second
+// commitment. Require a real gain rather than reacting to small route jitter.
+const MAX_OPPORTUNITY_ETA: f32 = 6.0;
+const TIME_GAIN: f32 = 1.0;
+const VALUE_GAIN: f32 = 1.1;
+
+fn better_drop(old_value: f32, new_value: f32, old_eta: f32, new_eta: f32) -> bool {
+    old_value.is_finite()
+        && new_value.is_finite()
+        && new_value > old_value * VALUE_GAIN
+        && old_eta.is_finite()
+        && new_eta.is_finite()
+        && new_eta <= MAX_OPPORTUNITY_ETA
+        && new_eta + TIME_GAIN <= old_eta
+}
+
+fn arrival_time(from: Vec3, route: &[Vec3], velocity: Vec3, speed: f32) -> f32 {
+    let Some(&target) = route.last() else { return f32::INFINITY };
+    if speed <= 0.0 {
+        return f32::INFINITY;
+    }
+    let mut previous = from;
+    let length: f32 = route
+        .iter()
+        .map(|&p| {
+            let leg = distance(previous, p);
+            previous = p;
+            leg
+        })
+        .sum();
+    // A close contact moving away may take longer to catch than a farther
+    // stationary quarry. Routing detours are charged on top of interception.
+    intercept_time(from, target, velocity, speed).unwrap_or(f32::INFINITY)
+        + (length - distance(from, target)).max(0.0) / speed
+}
 
 fn local(anchor: Vec3, from: Vec3, target: Vec3, length: f32) -> bool {
     distance(anchor, target) <= VICINITY
@@ -112,7 +148,10 @@ impl Ai {
         let observed = old.is_some_and(|e| !e.is_dead && (e.visible || e.is_radar_visible || e.is_static));
         let anchor = old.filter(|_| observed).map_or(sortie.job.pos, |e| e.position);
         let range = distance(from, anchor);
-        if range > VICINITY {
+        let contacts = self.airstrike_contacts();
+        // Most travelling sorties have no local alternative. Avoid another
+        // full path field until something known is actually near the aircraft.
+        if !contacts.iter().any(|e| e.known && e.live && !e.air && distance(from, e.pos) <= VICINITY) {
             return false;
         }
         let field = self.airstrike_field(from, interceptors);
@@ -137,23 +176,33 @@ impl Ai {
                             )
                     })
                 }));
-        if !fallback_due(
+        let fallback = fallback_due(
             sortie.job.kind == MissionKind::Speculative,
             observed,
             sortie.memory.destroyed,
             self.frame - sortie.memory.last_contact,
             range,
             unsafe_route,
-        ) {
-            return false;
-        }
+        );
         let mut have = BTreeMap::new();
         for a in &loaded {
             *have.entry(a.kind).or_default() += 1;
         }
         let mut actual: Vec<_> = have.iter().map(|(&k, &n)| (k, n)).collect();
-        let contacts = self.airstrike_contacts();
         let blast = self.airstrike_blast();
+        let mut old_job = sortie.job.clone();
+        old_job.pos = anchor;
+        if let Some(e) = contacts.iter().find(|e| e.id == old_job.target && e.live) {
+            old_job.hp = e.hp;
+            old_job.value = e.value;
+        }
+        if old_job.group.is_some() {
+            let victims: Vec<_> = contacts.iter().filter(|e| e.live && old_job.targets.contains(&e.id)).collect();
+            old_job.group = Some(GroupStrike::new(&victims));
+            old_job.aim_group(blast);
+        }
+        let old_value = old_job.damage_value(&actual);
+        let old_velocity = contacts.iter().find(|e| e.id == sortie.job.target && e.live).map_or(Vec3::ZERO, |e| e.vel);
         let mut best: Option<(f32, Plan)> = None;
         for mut job in opportunities(&contacts, home, self.frame) {
             if matches!(job.kind, MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield)
@@ -169,12 +218,33 @@ impl Ai {
             }
             job.aim_group(blast);
             let length = field.length(job.pos).unwrap_or(f32::INFINITY);
-            if !local(anchor, from, job.pos, length)
-                || loaded.iter().any(|a| distance(a.unit.pos(), job.pos) > VICINITY)
+            if !(if fallback {
+                local(anchor, from, job.pos, length)
+            } else {
+                distance(from, job.pos) <= VICINITY && length.is_finite() && length <= MAX_LEG
+            }) || loaded.iter().any(|a| distance(a.unit.pos(), job.pos) > VICINITY)
             {
                 continue;
             }
             let route = field.route(job.pos);
+            if !fallback {
+                let value = job.damage_value(&actual);
+                let velocity = contacts.iter().find(|e| e.id == job.target).map_or(Vec3::ZERO, |e| e.vel);
+                // Every loaded member must get an earlier drop. The leader's
+                // shorter route alone must not drag a trailing bomber backwards.
+                if loaded.iter().any(|a| {
+                    a.unit.def().is_none_or(|d| {
+                        !better_drop(
+                            old_value,
+                            value,
+                            arrival_time(a.unit.pos(), &old_route, old_velocity, d.speed()),
+                            arrival_time(a.unit.pos(), &route, velocity, d.speed()),
+                        )
+                    })
+                }) {
+                    continue;
+                }
+            }
             if route.is_empty()
                 || sortie.wave.is_some_and(|w| {
                     distance(w.target, job.pos) > wave::MAX_PURSUIT
@@ -222,8 +292,14 @@ impl Ai {
         }
         let Some((_, plan)) = best else { return false };
         self.log(&format!(
-            "airstrikes: local retarget {:?}:{} -> {:?}:{} value={:.0} distance={:.0}",
-            sortie.job.kind, sortie.job.target, plan.job.kind, plan.job.target, plan.job.value, plan.length
+            "airstrikes: local retarget {:?}:{} -> {:?}:{} value={:.0} distance={:.0} reason={}",
+            sortie.job.kind,
+            sortie.job.target,
+            plan.job.kind,
+            plan.job.target,
+            plan.job.value,
+            plan.length,
+            if fallback { "fallback" } else { "better_earlier_drop" }
         ));
         if let Some(n) = static_raven_limit(&plan.job, &have, self.bomber_handler.raven_damage.unwrap_or(800.0)) {
             // A fallback to a mex must not send the entire old priority wing.
@@ -263,6 +339,47 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_loaded_likho_can_take_a_nearer_wounded_merlin_without_waiting_for_failure() {
+        let from = Vec3::ZERO;
+        let old = super::super::super::tests::job(MissionKind::Group, 2500.0);
+        let merlin = Mission { value: 3500.0, ..super::super::super::tests::job(MissionKind::Heavy, 1500.0) };
+        let wing = [(Plane::Likho, 1)];
+        let clear = Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 };
+        assert!(!fallback_due(false, true, false, 0, 1400.0, false));
+        assert!(precision_fits(&merlin, clear, &BTreeMap::from(wing), 800.0));
+        assert!(better_drop(
+            old.damage_value(&wing),
+            merlin.damage_value(&wing),
+            arrival_time(from, &[Vec3::xz(1400.0, 0.0)], Vec3::ZERO, 270.0),
+            arrival_time(from, &[Vec3::xz(430.0, 0.0)], Vec3::ZERO, 270.0)
+        ));
+        // The opportunity does not waive the payload requirement for a healthy Merlin.
+        assert!(!precision_fits(&Mission { hp: 3000.0, ..merlin }, clear, &BTreeMap::from(wing), 800.0));
+    }
+
+    #[test]
+    fn an_upgrade_must_pay_more_and_finish_sooner_within_the_terminal_window() {
+        assert!(better_drop(600.0, 3500.0, 5.0, 2.0));
+        assert!(!better_drop(600.0, 3500.0, 2.0, 5.0));
+        assert!(!better_drop(600.0, 650.0, 5.0, 2.0));
+        assert!(!better_drop(600.0, 3500.0, 5.0, 4.5));
+        assert!(!better_drop(600.0, 3500.0, 15.0, 7.0));
+        assert!(!better_drop(600.0, 3500.0, f32::INFINITY, 2.0));
+        assert!(!better_drop(600.0, 3500.0, 5.0, f32::NAN));
+    }
+
+    #[test]
+    fn a_short_straight_line_does_not_hide_a_detour_or_an_escaping_target() {
+        let from = Vec3::ZERO;
+        let old = arrival_time(from, &[Vec3::xz(1000.0, 0.0)], Vec3::ZERO, 270.0);
+        let detour = arrival_time(from, &[Vec3::xz(0.0, 600.0), Vec3::xz(400.0, 0.0)], Vec3::ZERO, 270.0);
+        assert!(!better_drop(600.0, 3500.0, old, detour));
+        let escaping = arrival_time(from, &[Vec3::xz(400.0, 0.0)], Vec3::xz(200.0, 0.0), 270.0);
+        assert!(!better_drop(600.0, 3500.0, old, escaping));
+        assert!(!arrival_time(from, &[], Vec3::ZERO, 270.0).is_finite());
+    }
+
     #[test]
     fn a_static_fallback_does_not_spend_the_old_priority_wing() {
         let job = super::super::super::tests::job(MissionKind::Static, 560.0);

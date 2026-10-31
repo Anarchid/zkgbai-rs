@@ -90,6 +90,17 @@ sighting-age threat decay. Both the ordinary air pathfinder and strike planner
 see this shared buffer. An explicit return corridor retraces ingress to home;
 both legs are sampled every 32 elmos, including between waypoints, before launch.
 Active sorties recheck ingress and return corridors against current threats.
+An armed sortie may switch once to a known local opportunity even while its
+original mission remains healthy. The available payload must fit the new job,
+its estimated damage value must improve by more than 10%, and every loaded
+member must arrive at least one second sooner, within six seconds. Arrival
+estimates include route detours and target motion; candidates must lie within
+800 elmos of every loaded member and retain the survival, friendly-fire and
+target-reservation checks. The original target need not be nearby. The new
+attack is ordered immediately and gets the existing eight-second terminal
+commitment, preventing repeated shopping instead of releasing. Existing local
+fallbacks for lost, destroyed or unsafe targets remain available. Retarget logs
+distinguish `better_earlier_drop` from `fallback`.
 Corridor selection retains the shared strategic threat map. Survival uses a
 separate estimate: known ground AA weapon damage against plane armor, projectile
 and salvo counts, and reload time. Enemy HP and splash weighting do not count
