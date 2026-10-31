@@ -1243,6 +1243,23 @@ impl Ai {
                     }
                     return;
                 }
+                // Arrival has a 24-elmo tolerance, wider than the Crab's
+                // small spire. Stop its pending move and raise directly
+                // under its actual position, not beside it at the waypoint.
+                let site = if crab {
+                    leader.stop(0);
+                    if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                        if let Some(ps) = f.perch.as_mut() {
+                            ps.site = p;
+                        }
+                        if let Some(station) = f.station.as_mut() {
+                            station.pos = p;
+                        }
+                    }
+                    p
+                } else {
+                    site
+                };
                 leader.set_move_state(0, 0);
                 self.siege_raise_start(sid, perch, leader, site, frame, near);
             }

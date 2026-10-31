@@ -342,11 +342,13 @@ impl Role {
 
 /// A siege force's perch (the Crab spire, see `siege`): once its leading
 /// core has parked, constructors borrowed from the economy raise a spike
-/// under it, `height` elmos up with a flat top `top` wide, so a cannon's
-/// ballistic reach grows; the station is picked for the reach from up there.
+/// under it, `height` elmos up. The Crab primarily gains protection from
+/// short-range weapons; the extra ballistic reach is a bonus.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Perch {
     pub height: f32,
+    /// Width of the requested square; the terrain gadget expands it to
+    /// whole 16-elmo cells. Mobile cores need no building-sized platform.
     pub top: f32,
     /// Constructor types borrowed to raise it, how many (an expression
     /// over the force), for at most `borrow_s` seconds, from within `range`.
@@ -419,7 +421,7 @@ impl Perch {
         for (k, v) in patch {
             match k.as_str() {
                 "height" => self.height = num(k, v, 16.0, 600.0)?,
-                "top" => self.top = num(k, v, 16.0, 200.0)?,
+                "top" => self.top = num(k, v, 8.0, 200.0)?,
                 "raisers" => self.raisers = names(k, v)?,
                 "count" => {
                     self.count = match v {
@@ -1473,6 +1475,9 @@ pub fn seeds() -> Vec<Doctrine> {
     crab.retreat_health = 0.5;
     crab.flee_threat = false;
     crab.perch = Some(Perch {
+        // The same small square used under a basic radar (16-elmo
+        // footprint, corners inset by 4); do not level the Crab footprint.
+        top: 8.0,
         raisers: vec!["spidercon".into()],
         count: Expr::parse("min(4, max(2, 2 * cores))").expect("perch count"),
         min_reach: 0,
@@ -1794,7 +1799,7 @@ mod tests {
         assert_eq!(d.cores_per_force, 1);
         assert!(d.roles.is_empty());
         let p = d.perch.as_ref().unwrap();
-        assert_eq!((p.height, p.top, p.min_reach, p.refuse_if_reached), (200.0, 48.0, 0, true));
+        assert_eq!((p.height, p.top, p.min_reach, p.refuse_if_reached), (200.0, 8.0, 0, true));
         assert_eq!(p.raisers, vec!["spidercon"]);
         let classes = Classes::default();
         let two = d.force([("spidercrabe", 1600.0), ("spidercrabe", 1600.0)], &classes);
@@ -1806,7 +1811,7 @@ mod tests {
         let mut e = d.clone();
         let Value::Object(patch) = json!({"perch": {"height": 150}}) else { panic!() };
         e.apply(&patch).unwrap();
-        assert_eq!((e.perch.as_ref().unwrap().height, e.perch.as_ref().unwrap().top), (150.0, 48.0));
+        assert_eq!((e.perch.as_ref().unwrap().height, e.perch.as_ref().unwrap().top), (150.0, 8.0));
         let Value::Object(patch) = json!({"perch": null}) else { panic!() };
         e.apply(&patch).unwrap();
         assert!(e.perch.is_none());
