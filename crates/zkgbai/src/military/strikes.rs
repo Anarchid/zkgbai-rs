@@ -258,28 +258,28 @@ impl Ai {
             } else {
                 continue;
             };
-            if e.def_name == "cloaksnipe" {
-                if let Some(j) = jobs.iter_mut().find(|j| j.phantom() && distance(j.pos, e.position) < 400.0) {
-                    if e.visible {
-                        j.id = Some(e.unit_id);
-                        j.pos = e.position;
-                    }
-                    j.last = j.last.max(e.last_seen);
-                    let seen = self
-                        .war
-                        .targets
-                        .values()
-                        .filter(|other| {
-                            !other.is_dead
-                                && other.def_name == "cloaksnipe"
-                                && self.frame - other.last_seen < age
-                                && distance(other.position, j.pos) < 400.0
-                        })
-                        .count();
-                    j.count = j.count.max(seen);
-                    j.value = j.count as f32 * phantom_cost;
-                    continue;
+            if e.def_name == "cloaksnipe"
+                && let Some(j) = jobs.iter_mut().find(|j| j.phantom() && distance(j.pos, e.position) < 400.0)
+            {
+                if e.visible {
+                    j.id = Some(e.unit_id);
+                    j.pos = e.position;
                 }
+                j.last = j.last.max(e.last_seen);
+                let seen = self
+                    .war
+                    .targets
+                    .values()
+                    .filter(|other| {
+                        !other.is_dead
+                            && other.def_name == "cloaksnipe"
+                            && self.frame - other.last_seen < age
+                            && distance(other.position, j.pos) < 400.0
+                    })
+                    .count();
+                j.count = j.count.max(seen);
+                j.value = j.count as f32 * phantom_cost;
+                continue;
             }
             jobs.push(Job {
                 id: Some(e.unit_id),
@@ -852,13 +852,12 @@ impl Ai {
                 return;
             }
             // Follow the front while waiting, and gather before a likely call.
-            if !(w.job.prey.needs_stun(w.tactic) && self.strike_stun(&w.job).is_some()) {
-                if let Some(stage) = self.strike_stage(&w) {
-                    if distance(stage, w.home) > 100.0 {
-                        w.home = stage;
-                        w.query = None;
-                    }
-                }
+            if !(w.job.prey.needs_stun(w.tactic) && self.strike_stun(&w.job).is_some())
+                && let Some(stage) = self.strike_stage(&w)
+                && distance(stage, w.home) > 100.0
+            {
+                w.home = stage;
+                w.query = None;
             }
             if w.job.prey == Prey::Defenseless && !self.strike_opportunity_clear(w.home, w.job.pos) {
                 self.log("strikes: release opportunistic wave; approach is defended");
@@ -952,17 +951,17 @@ impl Ai {
             } else if let Some(e) = target.filter(|e| e.visible || e.is_radar_visible) {
                 w.job.pos = e.position;
                 w.job.last = frame;
-            } else if w.job.phantom() {
-                if let Some(e) = self.war.targets.values().find(|e| {
+            } else if w.job.phantom()
+                && let Some(e) = self.war.targets.values().find(|e| {
                     !e.is_dead
                         && e.visible
                         && e.def_name == "cloaksnipe"
                         && distance(e.position, w.job.pos) < PHANTOM_FIX_RADIUS
-                }) {
-                    w.job.id = Some(e.unit_id);
-                    w.job.pos = e.position;
-                    w.job.last = frame;
-                }
+                })
+            {
+                w.job.id = Some(e.unit_id);
+                w.job.pos = e.position;
+                w.job.last = frame;
             }
         }
         if w.phase == Phase::Returning
