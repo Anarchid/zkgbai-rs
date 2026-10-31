@@ -53,7 +53,7 @@ use crate::defs::cmd;
 use crate::kgbutil::{ArrayGraphics, ByteArrayGraphics};
 use crate::military::roles::Role;
 use crate::nav;
-use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point, kgb_rand};
+use crate::util::{NULLPOS, distance, get_angular_point, get_directional_point};
 use radar::RadarIdentifier;
 
 /// Starting cost for target searches ("nothing found yet").
@@ -1241,6 +1241,9 @@ impl Ai {
         let id = enemy.id();
         // Commanders come free, so they do not count as metal destroyed.
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
+        if let Some(pos) = self.war.targets.get(&id).map(|e| e.position) {
+            self.missiles_note_death(pos, cost.unwrap_or(0.0));
+        }
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
@@ -1267,7 +1270,9 @@ impl Ai {
         }
 
         if shiny {
-            self.say("SHINY!");
+            let what =
+                if self.war.targets.get(&id).is_some_and(|e| e.def_name == "energysingu") { "singu" } else { "geo" };
+            self.banter_offer("shiny", crate::banter::fields([("what", what.into())]));
         }
 
         self.bomber_remove_target(id);
@@ -2340,26 +2345,12 @@ impl Ai {
         if target != NULLPOS {
             self.war_mark_target(target);
             if cook {
-                self.war_cook();
+                let name = self.defs.name_of(u).to_owned();
+                self.banter_superweapon(&name);
             }
             return target;
         }
         NULLPOS
-    }
-
-    fn war_cook(&self) {
-        let rnd = kgb_rand();
-        if rnd > 0.8 {
-            self.say("Nice knowing you.");
-        } else if rnd > 0.6 {
-            self.say("It's cooking time!");
-        } else if rnd > 0.4 {
-            self.say("SHINY!");
-        } else if rnd > 0.2 {
-            self.say("R.I.P.");
-        } else {
-            self.say("Get rekt.");
-        }
     }
 
     /// Origin for rally searches: `start`, else the ally center, else any

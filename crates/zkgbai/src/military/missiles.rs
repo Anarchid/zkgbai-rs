@@ -29,9 +29,9 @@ use std::collections::BTreeMap;
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
-use crate::Ai;
 use crate::terrain::HELD_POWER;
 use crate::util::{NULLPOS, distance, get_directional_point};
+use crate::{Ai, banter};
 
 pub const SILO: &str = "staticmissilesilo";
 const EOS: &str = "tacnuke";
@@ -152,6 +152,15 @@ const CMD_ATTACK: i32 = 20;
 /// (three are not), seven wind generators, three mexes with a picket and a
 /// wind generator, or ten contacts we cannot make out standing together.
 const INFERNO_RADIUS: f32 = 256.0;
+
+/// An Inferno's fire: where, when it is out, and what died in it (seen
+/// dying, or counted burnt when its fire went out).
+struct Cook {
+    at: Vec3,
+    out: i32,
+    n: usize,
+    metal: f32,
+}
 const BURN_STAYING: f32 = 520.0;
 const BURN_PASSING: f32 = 150.0;
 const LIGHT: f32 = 2000.0;
@@ -187,6 +196,10 @@ const REPORT_FRAMES: i32 = 30 * 300;
 #[derive(Default)]
 pub struct Missiles {
     silo: Option<Unit>,
+    /// Missiles launched (by any silo of ours), and the Infernos' fires
+    /// with what died in them, for banter.
+    fired: u32,
+    cooks: Vec<Cook>,
     /// Missiles on the pads.
     ready: Vec<Unit>,
     /// Enemy buildings struck, since when.
@@ -627,6 +640,7 @@ impl Ai {
         self.missiles.burnt.retain(|b| frame - b.1 < BURN_FRAMES);
         self.missiles_settle_strikes();
         self.missiles_settle_burns();
+        self.missiles_settle_cooks();
         let Some(silo) = self.missiles_silo() else { return };
         self.missiles_fire_eos();
         self.missiles_fire_infernos();
@@ -679,6 +693,10 @@ impl Ai {
                 self.missiles_strike_due(t.id, t.pos);
             }
             self.missiles.struck.insert(t.id, frame);
+            let human = (self.war.targets.get(&t.id).and_then(|e| e.ud)).map(|ud| ud.human_name());
+            if let Some(human) = human {
+                self.banter_offer("eos", banter::fields([("target", human.into()), ("value", t.value.into())]));
+            }
             let name = self.war.targets.get(&t.id).map_or("?", |e| e.def_name.as_str());
             let shield = if t.shielded { ", the first to drain its shield" } else { "" };
             self.log(&format!(
@@ -702,6 +720,8 @@ impl Ai {
             let due = frame + (30.0 * (EOS_RISE + distance(m.pos(), p) / EOS_SPEED)) as i32 + BURN_FRAMES;
             self.missiles_launch(m, p);
             self.missiles.burnt.push((p, frame));
+            self.missiles.cooks.push(Cook { at: p, out: due, n: 0, metal: 0.0 });
+            self.banter_offer("inferno", banter::fields([("n", n.into()), ("value", value.into())]));
             for l in self.missiles_light().into_iter().filter(|l| distance(l.pos, p) <= INFERNO_RADIUS) {
                 let b = self.missiles.burns.entry(l.id).or_insert((0.0, due));
                 *b = (b.0 + l.burn, due);
@@ -762,7 +782,34 @@ impl Ai {
         }
     }
 
+    /// An enemy died at `pos`: in one of our fires, it counts for the fire.
+    pub(crate) fn missiles_note_death(&mut self, pos: Vec3, cost: f32) {
+        let frame = self.frame;
+        if let Some(c) =
+            (self.missiles.cooks.iter_mut()).find(|c| frame <= c.out && distance(c.at, pos) <= INFERNO_RADIUS)
+        {
+            c.n += 1;
+            c.metal += cost;
+        }
+    }
+
+    /// Fires that are out: what they burnt.
+    fn missiles_settle_cooks(&mut self) {
+        let frame = self.frame;
+        let (out, burning): (Vec<Cook>, Vec<Cook>) =
+            std::mem::take(&mut self.missiles.cooks).into_iter().partition(|c| frame > c.out);
+        self.missiles.cooks = burning;
+        for c in out {
+            self.banter_offer("burnt", banter::fields([("n", c.n.into()), ("metal", c.metal.into())]));
+        }
+    }
+
+    pub(crate) fn missiles_fired(&self) -> u32 {
+        self.missiles.fired
+    }
+
     fn missiles_launch(&mut self, missile: Unit, at: Vec3) {
+        self.missiles.fired += 1;
         missile.execute_custom_command(CMD_ATTACK, &[at.x, at.y, at.z], 0, NO_TIMEOUT);
         self.missiles.ready.retain(|r| r.id() != missile.id());
     }

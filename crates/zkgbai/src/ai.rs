@@ -203,7 +203,7 @@ pub struct Ai {
     /// The operator API and the run's journal.
     pub op: Operator,
 
-    enemy_teams: BTreeSet<i32>,
+    pub(crate) enemy_teams: BTreeSet<i32>,
     enemy_ally_teams: BTreeSet<i32>,
     pub debug_activated: bool,
     /// Development aid: features switched off, for A/B tests (the AI
@@ -211,7 +211,8 @@ pub struct Ai {
     disabled: BTreeSet<String>,
     /// A staged test to play (AI option `test`, see `strike_test`).
     pub test: Option<String>,
-    rsgn: bool,
+    /// What it says in chat (see `banter`).
+    pub banter: Option<crate::banter::Banter>,
     resigned: bool,
     initialized: bool,
     /// Another instance of this AI on our team leads; we only hand over units.
@@ -316,7 +317,7 @@ impl SkirmishAi for Ai {
             debug_activated: false,
             test: cb.option("test"),
             disabled: dev_features(cb),
-            rsgn: false,
+            banter: None,
             resigned: false,
             initialized: false,
             slave: false,
@@ -519,6 +520,7 @@ impl Ai {
         if !muted.is_empty() {
             self.log(&format!("dev: modules muted: {}", muted.join(", ")));
         }
+        self.banter_init();
         self.initialized = true;
         self.op_start();
         0
@@ -532,7 +534,7 @@ impl Ai {
         self.iq.started = true;
         self.guard("operator.update", |ai| ai.op_update(frame));
         if frame == 0 {
-            self.say("glhf!");
+            self.banter_start();
         }
         if self.resigned {
             return;
@@ -554,9 +556,10 @@ impl Ai {
         if frame % 300 == 0 && frame > 18000 {
             self.check_resign();
         }
-        if frame % 1350 == 0 && frame > 18000 {
+        if frame % 300 == 0 && frame > 18000 {
             self.maybe_taunt();
         }
+        self.guard("banter.update", |ai| ai.banter_update(frame));
 
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
@@ -627,19 +630,22 @@ impl Ai {
         // on The Cold Place, Oct 23: the enemy alliance's spots against this
         // team's own, 28 to 18, and the base gone at 15:00 with the human
         // ally still fighting). So with any ally but our own merged
-        // instances, play on. Those hand us all their units, so this
+        // instances, play on, and say to the team that it looks resignable
+        // (their call). Merged instances hand us all their units, so this
         // judgement is already the whole alliance's.
-        if self.allies.iter().any(|a| !self.comrades.contains(a)) {
-            return;
-        }
         let espots = self.graph.get_enemy_spots().len() as f32;
         let ospots = self.graph.get_owned_spots().len() as f32;
-        if !self.is_ffa
+        let lost = !self.is_ffa
             && espots > 1.5 * ospots
-            && (self.war.enemy_fighter_value > self.fac.army_value * 1.5 || self.fac.factories.is_empty())
-        {
-            self.resign();
+            && (self.war.enemy_fighter_value > self.fac.army_value * 1.5 || self.fac.factories.is_empty());
+        if !lost {
+            return;
         }
+        if self.allies.iter().any(|a| !self.comrades.contains(a)) {
+            self.banter_offer("hopeless", crate::banter::Fields::new());
+            return;
+        }
+        self.resign();
     }
 
     /// Give up the game by leaving it. Merged instances follow as our units
@@ -647,7 +653,7 @@ impl Ai {
     /// blocker (unit_self_destruct.lua) cancels one in any game but a 1v1 or
     /// FFA.
     fn resign(&mut self) {
-        self.say("gg!");
+        self.banter_resign();
         self.emote("resigned");
         self.leave_game();
         self.log("resign: left the game");
@@ -662,40 +668,26 @@ impl Ai {
         self.resigned = true;
     }
 
+    /// "It's over": well ahead, a taunt; behind after one (fewer spots than
+    /// the enemy, or under two-thirds its army), the climb-down (see
+    /// `banter::glue`).
     fn maybe_taunt(&mut self) {
+        if self.is_ffa {
+            return;
+        }
         let espots = self.graph.get_enemy_spots().len() as f32;
         let ospots = self.graph.get_owned_spots().len() as f32;
-        if !self.is_ffa
-            && self.graph.territory_fraction > 0.5
-            && ospots > 1.5 * espots
-            && self.fac.army_value > self.war.enemy_fighter_value * 2.0
-            && (!self.rsgn || kgb_rand() > 0.5)
-            && espots > 0.0
-        {
-            self.rsgn = true;
-            let rnd = kgb_rand();
-            if rnd > 0.75 {
-                self.say("Do you know what time it is?");
-                self.say("It's time to resign!");
-            } else if rnd > 0.5 {
-                if self.enemy_teams.len() > 1 {
-                    self.say("Resign lobsters!");
-                } else {
-                    self.say("Resign lobster!");
-                }
-            } else if rnd > 0.25 {
-                self.say("It's over, resign already.");
-            } else {
-                self.say("Having trouble?");
-                self.say("Type \"!resign\" for help.");
-            }
-        }
+        let (army, enemy) = (self.fac.army_value, self.war.enemy_fighter_value);
+        let ahead = self.graph.territory_fraction > 0.5 && ospots > 1.5 * espots && army > enemy * 2.0 && espots > 0.0;
+        let behind = ospots < espots || army * 1.5 < enemy;
+        self.banter_claim(ahead, behind);
     }
 
     fn message(&mut self, player: i32, text: &str) {
         if !self.active() {
             return;
         }
+        self.banter_hear(text);
         match text {
             "kgbdebug" => {
                 self.debug_activated = !self.debug_activated;
@@ -802,6 +794,7 @@ impl Ai {
                 self.guard("eco.unitDestroyed", |ai| ai.eco_unit_destroyed(unit, attacker));
                 self.guard("war.unitDestroyed", |ai| ai.war_unit_destroyed(unit, attacker));
                 self.guard("fac.unitDestroyed", |ai| ai.fac_unit_destroyed(unit, attacker));
+                self.guard("banter.unitDestroyed", |ai| ai.banter_unit_destroyed(unit));
             }
             Event::UnitCaptured { unit, old_team, new_team } => {
                 self.guard("eco.unitCaptured", |ai| ai.eco_unit_captured(unit, old_team, new_team));

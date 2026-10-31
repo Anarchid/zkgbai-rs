@@ -16,6 +16,7 @@
 //!   lists instead of pointers.
 
 pub mod ai;
+pub mod banter;
 pub mod defs;
 pub mod economy;
 pub mod graph;

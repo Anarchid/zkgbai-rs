@@ -177,6 +177,14 @@ local options = {
 		maxlen = 200,
 	},
 	{
+		key    = 'banter',
+		name   = 'Banter',
+		desc   = 'Quips a game in chat, shared by every ZKGBAI in the game (glhf and gg aside): a number, or off. Empty: 6, or what a banter.toml beside this AI says (see banter.example.toml).',
+		type   = 'string',
+		def    = '',
+		maxlen = 8,
+	},
+	{
 		key    = 'hivemind',
 		name   = 'Hivemind',
 		desc   = 'Allied instances of this AI merge into one: the lowest team leads, the others hand it their units and stop playing. Only when every allied instance has it on: on or off. Empty: off, each instance plays its own team (or the ZKGBAI_HIVEMIND environment variable).',
