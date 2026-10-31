@@ -1,6 +1,7 @@
 //! `airstrike-wind` versus `airstrike-farm`: real factory procurement and
 //! Phoenix bombing of a ZKGBAI wind farm. `airstrike-odin` / `airstrike-singu`
 //! exercise deep thermite procurement and optional Sparrow support.
+mod carpet;
 mod hunt;
 mod opportunity;
 mod targeting;
@@ -18,6 +19,10 @@ impl Ai {
         }
         if test.starts_with("airstrike-targeting") {
             self.airstrike_targeting_scenario(&test, frame);
+            return;
+        }
+        if test.starts_with("airstrike-carpet") {
+            self.airstrike_carpet_scenario(&test, frame);
             return;
         }
         if test.starts_with("airstrike-hunt") {

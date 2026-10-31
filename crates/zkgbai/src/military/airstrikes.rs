@@ -71,6 +71,7 @@ pub enum MissionKind {
     Group,
     Heavy,
     Speculative,
+    Carpet,
     Wind,
     Thermite,
     Assassinate,
@@ -83,6 +84,7 @@ impl MissionKind {
         match self {
             Self::Heavy => "Priority strike",
             Self::Speculative => "Artillery hunt",
+            Self::Carpet => "Carpet bombing",
             Self::Opportunistic => "Opportunistic strike",
             Self::Group => "Group strike",
             Self::Intercept => "Interception",
@@ -103,7 +105,7 @@ impl MissionKind {
         match self {
             Self::Intercept => 10.0,
             Self::Interdict => 9.0,
-            Self::Heavy | Self::HeavyAir => 8.0,
+            Self::Heavy | Self::HeavyAir | Self::Carpet => 8.0,
             Self::Wind => 7.0,
             Self::Thermite => 7.0,
             Self::Group => 6.0,
@@ -154,6 +156,10 @@ struct Inference {
     pos: Vec3,
     uncertainty: f32,
     last: i32,
+    /// The last impact's origin and unit bearing toward the shooter, and the
+    /// weapon's range: a carpet lays its lines along that bearing.
+    bearing: Option<(Vec3, Vec3)>,
+    range: f32,
 }
 
 #[derive(Clone)]
@@ -417,6 +423,7 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         Group if unopposed => job.group_packages(&[Likho]),
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
         Speculative if very_light => vec![vec![(Likho, salvo(2000.0))]],
+        Carpet if very_light => job.carpet_packages(),
         Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
         Heavy | Opportunistic if unopposed => vec![vec![(Likho, salvo(2000.0))]],
         Thermite if !risk.intercepted => vec![vec![(Odin, count(job.hp, 14000.0))]],

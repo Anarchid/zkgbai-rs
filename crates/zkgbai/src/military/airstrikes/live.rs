@@ -7,6 +7,7 @@ use crate::{Ai, defs::cmd};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod carpet;
 mod defense;
 mod release;
 mod retarget;
@@ -342,6 +343,16 @@ impl Ai {
             .unwrap_or_default()
     }
 
+    /// The first loaded bomber of a sortie: where its flight is planned from.
+    fn airstrike_lead(&self, sortie: &Sortie) -> Option<Vec3> {
+        sortie
+            .members
+            .iter()
+            .filter_map(|id| self.bomber_handler.units.get(id))
+            .find(|a| a.kind != Plane::Sparrow && a.unit.rules_param_float("noammo", 0.0) == 0.0)
+            .map(|a| a.unit.pos())
+    }
+
     pub fn bomber_update(&mut self, frame: i32) {
         if frame % PERIOD != self.offset % PERIOD {
             return;
@@ -380,6 +391,7 @@ impl Ai {
         let blast = self.airstrike_blast();
         let mut jobs = missions(&contacts, home, frame);
         jobs.extend(self.airstrike_speculative_jobs());
+        jobs.extend(self.airstrike_carpet_jobs());
         let had_jobs = !jobs.is_empty();
         let mut plans = Vec::new();
         for mut job in jobs {
@@ -527,11 +539,18 @@ impl Ai {
             let acquired = acquired || retargeted;
             occupied.extend(sortie.job.targets.iter().copied());
             let hunting = sortie.job.kind == MissionKind::Speculative;
+            let carpet = sortie.job.kind == MissionKind::Carpet;
+            let refreshed = carpet && {
+                let lead = self.airstrike_lead(&sortie).unwrap_or(home);
+                self.carpet_refresh(&mut sortie, lead)
+            };
             let target = self.war.targets.get(&sortie.job.target);
             let observed = target.is_some_and(|e| !e.is_dead && (e.visible || e.is_radar_visible));
             let remembered = sortie.memory.valid(frame, observed, target.is_some_and(|e| e.is_static && !e.is_dead));
             let valid = if hunting {
                 speculation::searching(frame, sortie.launched, sortie.searched_since)
+            } else if carpet {
+                frame - sortie.launched <= carpet::WINDOW
             } else {
                 remembered
             };
@@ -553,13 +572,7 @@ impl Ai {
             } else {
                 quarry_field.as_ref().unwrap_or(air)
             };
-            let from = sortie
-                .members
-                .iter()
-                .filter_map(|id| self.bomber_handler.units.get(id))
-                .find(|a| a.kind != Plane::Sparrow && a.unit.rules_param_float("noammo", 0.0) == 0.0)
-                .map(|a| a.unit.pos())
-                .unwrap_or(home);
+            let from = self.airstrike_lead(&sortie).unwrap_or(home);
             let approach = self.airstrike_field(from, enemies);
             let exit = return_route(home, &field.route(pos));
             let risk = round_trip(
@@ -573,16 +586,31 @@ impl Ai {
             // Blind pursuit keeps the engine's last unit attack intact. Never
             // replace it with a ground attack or refresh hidden unit handles.
             let can_order = observed || hunting || target.is_some_and(|e| e.is_static);
-            let reroute = acquired || (can_order && frame - sortie.last_route >= 150 && distance(from, pos) > 800.0);
+            let reroute = acquired
+                || if carpet {
+                    refreshed
+                } else {
+                    can_order && frame - sortie.last_route >= 150 && distance(from, pos) > 800.0
+                };
             let route = if reroute { approach.route(pos) } else { Vec::new() };
-            let disabled = self.dev_off("airstrikes") || (hunting && self.dev_off("airspeculate"));
+            // One line per Phoenix still on the sortie, in member order.
+            let lines = if carpet { self.carpet_lines(&sortie.job, sortie.members.len()) } else { Vec::new() };
+            let disabled = self.dev_off("airstrikes")
+                || (hunting && self.dev_off("airspeculate"))
+                || (carpet && self.dev_off("carpet"));
             let wave_safe = sortie.wave.is_none_or(|w| {
                 distance(w.target, pos) <= wave::MAX_PURSUIT
                     && wave::route_allowed(from, &approach.route(pos), |p| self.graph.is_ally_territory(p))
             });
             let done = disabled || !valid || !wave_safe || frame - sortie.launched > SORTIE_TIMEOUT;
             let mut keep = Vec::new();
-            for id in sortie.members {
+            for (index, id) in sortie.members.into_iter().enumerate() {
+                let line = lines.get(index).copied();
+                // Napalm must not land on our troops walking toward the sniper.
+                let clear = line.is_none_or(|l| {
+                    self.bomber_handler.units.get(&id).is_none_or(|a| distance(a.unit.pos(), l.aim) > 1500.0)
+                        || self.carpet_clear(l)
+                });
                 let Some(a) = self.bomber_handler.units.get_mut(&id) else { continue };
                 let u = a.unit;
                 let spent = u.rules_param_float("noammo", 0.0) > 0.0;
@@ -591,7 +619,8 @@ impl Ai {
                         .is_some_and(|d| sortie.job.flight_safe(a.kind, risk, u.health(), u.max_health(), d.speed()));
                 let reachable = sortie.job.kind == MissionKind::Shield
                     || can_hit_submerged(a.kind, target.is_some_and(|e| e.is_submerged()));
-                let safe = reachable && sortie.release.allows(id, frame, forecast_safe, u.health(), u.max_health());
+                let safe =
+                    reachable && clear && sortie.release.allows(id, frame, forecast_safe, u.health(), u.max_health());
                 if springai::reserved::is_reserved(self.cb, id) {
                     *self
                         .bomber_handler
@@ -611,6 +640,8 @@ impl Ai {
                     } else {
                         let reason = if !valid {
                             "target_lost"
+                        } else if !clear {
+                            "friendly_fire"
                         } else if !wave_safe {
                             "wave_depth"
                         } else if !reachable {
@@ -654,13 +685,17 @@ impl Ai {
                     a.last_order = -1000;
                     continue;
                 }
-                if reroute && !route.is_empty() {
+                if let Some(l) = line.filter(|_| reroute) {
+                    Self::carpet_order(u, &approach.route(l.far), l);
+                } else if reroute && !route.is_empty() {
                     Self::airstrike_route(u, &route, true);
                     Self::airstrike_attack(u, &sortie.job, target.map(|e| e.unit), pos, OPTION_SHIFT_KEY);
                 }
                 // Keep the queued safe approach intact. Retarget a moving
                 // contact only in the terminal area, at most every three seconds.
-                if can_order && !hunting && frame - sortie.last_order >= 90 && distance(u.pos(), pos) < 650.0 {
+                // A carpet's pass is flown as ordered: re-aiming would break it.
+                if can_order && !hunting && !carpet && frame - sortie.last_order >= 90 && distance(u.pos(), pos) < 650.0
+                {
                     Self::airstrike_attack(u, &sortie.job, target.map(|e| e.unit), pos, 0);
                 }
                 active.insert(id);
@@ -842,6 +877,21 @@ impl Ai {
         if route.is_empty() {
             return false;
         }
+        let lines = if job.kind == MissionKind::Carpet {
+            let lines = self.carpet_lines(job, members.len());
+            if lines.len() != members.len() || !lines.iter().all(|l| self.carpet_clear(*l)) {
+                return false;
+            }
+            lines
+        } else {
+            Vec::new()
+        };
+        let carpet_routes: Vec<_> = if lines.is_empty() {
+            Vec::new()
+        } else {
+            let field = self.airstrike_field(self.graph.get_ally_center(), &interceptors);
+            lines.iter().map(|l| field.route(l.far)).collect()
+        };
         let mut members = members.to_vec();
         let mut package = package.to_vec();
         if job.optional_escort() {
@@ -878,7 +928,7 @@ impl Ai {
                 package.push((Plane::Sparrow, count));
             }
         }
-        for &id in &members {
+        for (index, &id) in members.iter().enumerate() {
             let leader =
                 self.bomber_handler.units[&id].escort.and_then(|id| self.bomber_handler.units.get(&id)).map(|a| a.unit);
             let a = self.bomber_handler.units.get_mut(&id).unwrap();
@@ -888,6 +938,8 @@ impl Ai {
                 if let Some(leader) = leader {
                     a.unit.guard(leader, 0);
                 }
+            } else if let Some(&l) = lines.get(index) {
+                Self::carpet_order(a.unit, &carpet_routes[index], l);
             } else {
                 Self::airstrike_route(a.unit, &route, true);
                 Self::airstrike_attack(
@@ -910,6 +962,16 @@ impl Ai {
             plan.risk.aa,
             plan.risk.exposure
         ));
+        for l in &lines {
+            self.log(&format!(
+                "airstrikes: carpet line ({:.0}, {:.0}) -> ({:.0}, {:.0}) for {}",
+                l.near.x,
+                l.near.z,
+                l.aim.x,
+                l.aim.z,
+                job.inference.as_ref().map_or("?", |f| f.def.as_str())
+            ));
+        }
         self.bomber_handler.launched += 1;
         if let Some(fix) = &job.inference {
             self.bomber_handler.speculation.attempted.insert(fix.id, frame);
@@ -1008,6 +1070,10 @@ fn mission_view(
         "last_contact": sortie.map(|s| s.memory.last_contact),
         "retargeted": sortie.is_some_and(|s| s.retargeted),
         "seeking_contact": job.kind == MissionKind::Speculative,
+        "carpet_lines": job.inference.as_ref().filter(|_| job.kind == MissionKind::Carpet).map(|f| {
+            let n = sortie.map_or_else(|| packages.first().map_or(0, |p| p.iter().map(|(_, n)| n).sum()), |s| s.members.len());
+            carpet::lines(f, n).iter().map(|l| [[l.near.x, l.near.z], [l.aim.x, l.aim.z]]).collect::<Vec<_>>()
+        }),
         "optional_escort": job.optional_escort().then_some(Plane::Sparrow.name()),
         "pos": [job.pos.x, job.pos.z], "seen": job.seen,
         "route": route.iter().map(|p| [p.x, p.z]).collect::<Vec<_>>(),

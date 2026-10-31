@@ -60,7 +60,15 @@ impl Ai {
                     return None;
                 }
                 Some((
-                    Inference { id: f.id, def: name.to_owned(), pos: f.pos, uncertainty: f.uncertainty, last: f.last },
+                    Inference {
+                        id: f.id,
+                        def: name.to_owned(),
+                        pos: f.pos,
+                        uncertainty: f.uncertainty,
+                        last: f.last,
+                        bearing: None,
+                        range: f.range,
+                    },
                     value,
                     d.health(),
                 ))
@@ -103,7 +111,8 @@ impl Ai {
     }
 
     pub(super) fn airstrike_acquire(&self, sortie: &mut Sortie, occupied: &BTreeSet<i32>) -> bool {
-        if sortie.job.kind != MissionKind::Speculative {
+        // A carpet that shows its sniper bombs the unit itself.
+        if !matches!(sortie.job.kind, MissionKind::Speculative | MissionKind::Carpet) {
             return false;
         }
         let Some(fix) = &sortie.job.inference else { return false };
@@ -121,6 +130,15 @@ impl Ai {
             })
             .min_by(|a, b| distance(a.position, fix.pos).total_cmp(&distance(b.position, fix.pos)));
         if let Some(e) = target {
+            if sortie.job.kind == MissionKind::Carpet {
+                self.log(&format!(
+                    "airstrikes: carpet shows {} {} at ({:.0}, {:.0})",
+                    fix.def,
+                    e.unit.id(),
+                    e.position.x,
+                    e.position.z
+                ));
+            }
             sortie.job.kind = MissionKind::Heavy;
             sortie.job.target = e.unit.id();
             sortie.job.targets.push(e.unit.id());
