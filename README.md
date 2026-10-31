@@ -17,15 +17,23 @@ Stakeout damage response
 ------------------------
 
 `stakeoutqrf` is on by default. When an enemy ground or sea raider/scout damages one of our
-economy units, available stakeouts within twice the Lotus weapon range of the damaged unit
-(normally 920 elmos) immediately become QRF members and receive a fight order toward the attacker.
+economy units, available stakeouts join QRF if their estimated travel time to firing range,
+plus time to kill the attacker and a one-second response margin, is less than the victim's
+remaining HP divided by the attacker's sustained HP DPS. Each qualifying stakeout joins;
+there is no fixed radius or single-responder cap. Fast units can rescue from farther away.
+The estimate uses terrain route cost, current health, armor-specific weapon damage, salvo/reload,
+weapon range and the responder's slow state. Unreachable, unarmed, disarmed and paralyzed responders do
+not qualify. EMP, slow-only and disarm damage do not count as lethal DPS. This is a single-attacker
+sustained-fire estimate, not a prediction of dodging, healing, shields or the full nearby fight.
 Constructors, commanders, factories, caretakers, income, grid and storage buildings qualify,
 including unfinished buildings; combat units, turrets and terraform markers do not.
 Units retreating for repairs or reserved by the operator keep their existing orders.
 This works while looking, moving or shadowing as well as while parked. It requires QRF to be
 enabled. Use `disable=stakeoutqrf`, `ZKGBAI_DISABLE=stakeoutqrf`, or
-`feature stakeoutqrf off=true` for the control. The operator journal records `stakeout`
-events with `event=damage_qrf`, the recruited units, victim and attacker.
+`feature stakeoutqrf off=true` for the control. The first hit is evaluated immediately; repeated
+hits on the same victim by the same attacker are rechecked at most twice per second.
+The operator journal records `stakeout` events with `event=damage_qrf`, recruited units, victim,
+attacker, estimated survival time and each responder's travel and kill times.
 
 Layout
 ------
