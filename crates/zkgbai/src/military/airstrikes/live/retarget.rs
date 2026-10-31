@@ -19,6 +19,11 @@ fn fallback_due(hunting: bool, observed: bool, destroyed: bool, gap: i32, range:
                 && (if hunting { range <= 250.0 } else { gap > 30 * 20 || (gap >= 30 * 5 && range <= 400.0) })))
 }
 
+fn static_raven_limit(job: &Mission, have: &BTreeMap<Plane, usize>, damage: f32) -> Option<usize> {
+    (job.kind == MissionKind::Static && have.len() == 1 && have.contains_key(&Plane::Raven))
+        .then(|| job.ravens(damage).min(have[&Plane::Raven]))
+}
+
 fn fits(package: &[(Plane, usize)], have: &BTreeMap<Plane, usize>) -> bool {
     // Do not give an incompatible payload the new job, or count spent aircraft
     // toward a reliable strike. Mixed Raven/Likho waves retain mixed packages.
@@ -39,7 +44,7 @@ fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, rave
                 | MissionKind::Thermite
         )
         && !have.is_empty()
-        && have.keys().all(|k| matches!(k, Plane::Raven | Plane::Likho))
+        && have.keys().all(|k| matches!(k, Plane::Raven | Plane::Likho) && can_hit_submerged(*k, job.submerged))
         && (!have.contains_key(&Plane::Raven) || risk.aa <= 0.15)
         && have
             .iter()
@@ -57,6 +62,7 @@ fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             continue;
         }
         jobs.push(Mission {
+            submerged: e.submerged,
             kind: MissionKind::Opportunistic,
             target: e.id,
             pos: e.pos,
@@ -74,7 +80,7 @@ fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
 
 impl Ai {
     pub(super) fn airstrike_retarget(
-        &self,
+        &mut self,
         sortie: &mut Sortie,
         home: Vec3,
         air: &AirField,
@@ -84,7 +90,7 @@ impl Ai {
         if sortie.retargeted
             || self.dev_off("airstrikes")
             || self.frame - sortie.launched > SORTIE_TIMEOUT
-            || matches!(sortie.job.kind, MissionKind::Intercept | MissionKind::Shield)
+            || matches!(sortie.job.kind, MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield)
             || (sortie.job.kind == MissionKind::Speculative && self.dev_off("airspeculate"))
         {
             return false;
@@ -121,7 +127,14 @@ impl Ai {
             && (old_risk.intercepted
                 || loaded.iter().any(|a| {
                     a.unit.def().is_none_or(|d| {
-                        !sortie.job.flight_safe(a.kind, old_risk, a.unit.health(), a.unit.max_health(), d.speed())
+                        !can_hit_submerged(a.kind, old.is_some_and(|e| e.is_submerged()))
+                            || !sortie.job.flight_safe(
+                                a.kind,
+                                old_risk,
+                                a.unit.health(),
+                                a.unit.max_health(),
+                                d.speed(),
+                            )
                     })
                 }));
         if !fallback_due(
@@ -138,12 +151,12 @@ impl Ai {
         for a in &loaded {
             *have.entry(a.kind).or_default() += 1;
         }
-        let actual: Vec<_> = have.iter().map(|(&k, &n)| (k, n)).collect();
+        let mut actual: Vec<_> = have.iter().map(|(&k, &n)| (k, n)).collect();
         let contacts = self.airstrike_contacts();
         let blast = self.airstrike_blast();
         let mut best: Option<(f32, Plan)> = None;
         for mut job in opportunities(&contacts, home, self.frame) {
-            if matches!(job.kind, MissionKind::Intercept | MissionKind::Shield)
+            if matches!(job.kind, MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield)
                 || job.target == sortie.job.target
                 || job.targets.iter().any(|id| occupied.contains(id) && !sortie.job.targets.contains(id))
                 || !self
@@ -212,6 +225,25 @@ impl Ai {
             "airstrikes: local retarget {:?}:{} -> {:?}:{} value={:.0} distance={:.0}",
             sortie.job.kind, sortie.job.target, plan.job.kind, plan.job.target, plan.job.value, plan.length
         ));
+        if let Some(n) = static_raven_limit(&plan.job, &have, self.bomber_handler.raven_damage.unwrap_or(800.0)) {
+            // A fallback to a mex must not send the entire old priority wing.
+            // Cancel surplus queued attacks before handing them to recovery.
+            let surplus: BTreeSet<_> = loaded
+                .iter()
+                .skip(n)
+                .map(|a| {
+                    a.unit.stop(0);
+                    a.unit.id()
+                })
+                .collect();
+            for id in &surplus {
+                let a = self.bomber_handler.units.get_mut(id).unwrap();
+                a.returning = true;
+                a.last_order = -1000;
+            }
+            sortie.members.retain(|id| !surplus.contains(id));
+            actual = vec![(Plane::Raven, n)];
+        }
         let previous = sortie.job.targets.clone();
         sortie.job = plan.job;
         sortie.job.targets.extend(previous);
@@ -231,6 +263,13 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_static_fallback_does_not_spend_the_old_priority_wing() {
+        let job = super::super::super::tests::job(MissionKind::Static, 560.0);
+        assert_eq!(static_raven_limit(&job, &BTreeMap::from([(Plane::Raven, 4)]), 800.0), Some(1));
+        assert_eq!(static_raven_limit(&job, &BTreeMap::from([(Plane::Likho, 2)]), 800.0), None);
+    }
+
     #[test]
     fn local_opportunities_include_light_units_but_not_unknown_or_stale_contacts() {
         let mut c = super::super::super::tests::enemy(7);

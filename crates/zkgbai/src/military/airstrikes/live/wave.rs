@@ -44,6 +44,7 @@ fn preference(job: &Mission, package: &[(Plane, usize)]) -> f32 {
     let favorite = match job.kind {
         MissionKind::Group | MissionKind::Wind | MissionKind::Interdict => Plane::Phoenix,
         MissionKind::Thermite => Plane::Odin,
+        MissionKind::HeavyAir => Plane::Likho,
         _ => Plane::Raven,
     };
     if package.iter().all(|(kind, _)| *kind == favorite || *kind == Plane::Sparrow)
@@ -64,10 +65,15 @@ pub(super) fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: 
         MissionKind::Heavy | MissionKind::Opportunistic | MissionKind::Static | MissionKind::Thermite
     ) {
         let mut precision = plan.job.clone();
-        precision.kind = MissionKind::Heavy;
+        if precision.kind == MissionKind::Thermite {
+            precision.kind = MissionKind::Static;
+        }
         choices.extend(packages(&precision, plan.risk, raven_damage));
+        if precision.kind == MissionKind::Static && !precision.submerged && !plan.risk.intercepted {
+            choices.push(vec![(Plane::Likho, (f64::from(precision.hp) * 1.2 / 2000.0).ceil().max(1.0) as usize)]);
+        }
         // Combine partial Raven/Likho wings when neither alone can kill it.
-        if plan.risk.aa <= 0.15 && !plan.risk.intercepted {
+        if plan.risk.aa <= 0.15 && !plan.risk.intercepted && !plan.job.submerged {
             let required = f64::from(plan.job.hp) * 1.2;
             for likhos in 1..=have.get(&Plane::Likho).copied().unwrap_or(0).min(MAX_WING) {
                 let remaining = required - likhos as f64 * 2000.0;
@@ -82,7 +88,11 @@ pub(super) fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: 
         }
     }
     choices.retain(|p| {
-        p.iter().all(|(k, n)| (bomber(*k) || *k == Plane::Sparrow) && *n <= have.get(k).copied().unwrap_or(0))
+        p.iter().all(|(k, n)| {
+            (bomber(*k) || *k == Plane::Sparrow)
+                && can_hit_submerged(*k, plan.job.submerged)
+                && *n <= have.get(k).copied().unwrap_or(0)
+        })
     });
     choices.sort();
     choices.dedup();
@@ -233,6 +243,7 @@ mod tests {
 
     fn plan(kind: MissionKind, id: i32, hp: f32, value: f32) -> Plan {
         let job = Mission {
+            submerged: false,
             kind,
             inference: None,
             group: (kind == MissionKind::Group).then(|| {
@@ -262,6 +273,21 @@ mod tests {
     }
 
     #[test]
+    fn wave_and_normal_dispatch_prefer_a_nearby_mex_and_use_one_raven() {
+        let solar = plan(MissionKind::Static, 1, 600.0, 70.0);
+        let mut mex = plan(MissionKind::Static, 2, 560.0, 340.0);
+        mex.length += 150.0;
+        assert!(mex.score() > solar.score());
+        let have = BTreeMap::from([(Plane::Raven, 4)]);
+        let plans = vec![solar, mex];
+        let available: Vec<_> = plans.iter().map(|p| choices(p, &have, 800.0)).collect();
+        assert_eq!(available, vec![vec![vec![(Plane::Raven, 1)]], vec![vec![(Plane::Raven, 1)]]]);
+        let allocated = allocate(&plans, &have, &available);
+        assert_eq!(allocated[0], (1, vec![(Plane::Raven, 1)]));
+        assert_eq!(allocated[1], (0, vec![(Plane::Raven, 1)]));
+    }
+
+    #[test]
     fn legacy_gate_waits_for_eight_and_recovery() {
         assert!(!flock_ready(7, 0));
         assert!(flock_ready(8, 0));
@@ -284,7 +310,7 @@ mod tests {
         let have = BTreeMap::from([(Plane::Raven, 5), (Plane::Phoenix, 1), (Plane::Likho, 2), (Plane::Odin, 1)]);
         let available: Vec<_> = plans.iter().map(|p| choices(p, &have, 800.0)).collect();
         let assigned = allocate(&plans, &have, &available);
-        assert_eq!(assigned.iter().flat_map(|(_, p)| p).map(|(_, n)| n).sum::<usize>(), 9);
+        assert_eq!(assigned.iter().flat_map(|(_, p)| p).map(|(_, n)| n).sum::<usize>(), 8);
         assert_eq!(assigned.len(), 5);
         for (i, kind) in
             [(0, Plane::Raven), (1, Plane::Phoenix), (2, Plane::Likho), (3, Plane::Odin), (4, Plane::Raven)]

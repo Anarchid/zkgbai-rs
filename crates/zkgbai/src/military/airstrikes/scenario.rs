@@ -2,6 +2,7 @@
 //! Phoenix bombing of a ZKGBAI wind farm. `airstrike-odin` / `airstrike-singu`
 //! exercise deep thermite procurement and optional Sparrow support.
 mod hunt;
+mod targeting;
 use super::Plane;
 use crate::Ai;
 use crate::util::get_directional_point;
@@ -10,6 +11,10 @@ use springai::Vec3;
 impl Ai {
     pub(crate) fn airstrike_scenario(&mut self, frame: i32) {
         let Some(test) = self.test.clone().filter(|s| s.starts_with("airstrike-")) else { return };
+        if test.starts_with("airstrike-targeting") {
+            self.airstrike_targeting_scenario(&test, frame);
+            return;
+        }
         if test.starts_with("airstrike-hunt") {
             self.airstrike_hunt_scenario(&test, frame);
             return;
