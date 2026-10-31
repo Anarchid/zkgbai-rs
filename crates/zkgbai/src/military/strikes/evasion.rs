@@ -89,7 +89,7 @@ impl Ai {
                 goal.x = goal.x.clamp(1.0, (map.width() * 8 - 1).max(1) as f32);
                 goal.z = goal.z.clamp(1.0, (map.height() * 8 - 1).max(1) as f32);
                 goal.y = map.elevation_at(goal.x, goal.z);
-                if reaches(self.reach_terrain(), def, p, goal, 40.0) {
+                if self.strike_point_reachable(def, p, goal) {
                     candidates.push(goal);
                 }
             }
