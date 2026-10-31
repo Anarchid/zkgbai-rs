@@ -242,7 +242,19 @@ fn apart(a: &MechUnit, b: &MechUnit) -> f64 {
 }
 
 /// What a run of the mechanics fight answers.
+/// A local raid-defense rollout. Arrival delays represent path detours beyond
+/// straight-line travel; absent units cannot fire, block, or draw enemy fire.
+/// Raiders keep shooting their observed asset, then the nearest surviving
+/// protected asset. Unlike ordinary fights, positions remain two-dimensional.
+#[derive(Clone, Debug, Default)]
+pub struct Defense {
+    pub arrivals: Vec<i32>,
+    pub assets: Vec<usize>,
+    pub focus: Vec<Option<usize>>,
+}
+
 struct Run<'a> {
+    defense: Option<&'a Defense>,
     hazard: Option<&'a Hazard>,
     withdraw: bool,
     /// A's mobile units drive through B (fates' pass mode).
@@ -324,7 +336,34 @@ impl Model {
         mode: FateMode,
         paralysis: &[(usize, f32)],
     ) -> Vec<UnitFate> {
+        self.fates_config(snap, horizon, mode, paralysis, None)
+    }
+
+    pub fn defense_fates(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        defense: &Defense,
+        paralysis: &[(usize, f32)],
+    ) -> Vec<UnitFate> {
+        self.fates_config(snap, horizon, FateMode::AMove, paralysis, Some(defense))
+    }
+
+    fn fates_config(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        mode: FateMode,
+        paralysis: &[(usize, f32)],
+        defense: Option<&Defense>,
+    ) -> Vec<UnitFate> {
         let mut units = self.mech_units(snap);
+        if defense.is_some() {
+            for (m, u) in units.iter_mut().zip(&snap.units) {
+                m.u.x = u.x as f64;
+                m.lat = u.z as f64;
+            }
+        }
         for &(index, ratio) in paralysis {
             if ratio.is_finite()
                 && ratio >= 0.0
@@ -348,7 +387,7 @@ impl Model {
             FateMode::Assassinate { target } => Some(target),
             _ => None,
         };
-        let mut run = Run { hazard: None, withdraw: false, pass, focus, horizon, track: Some(track) };
+        let mut run = Run { defense, hazard: None, withdraw: false, pass, focus, horizon, track: Some(track) };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let Some(tr) = run.track else { return Vec::new() };
         let c = &self.mech.fate;
@@ -528,7 +567,7 @@ pub(super) fn simulate_mech(
     hazard: Option<&Hazard>,
     withdraw: bool,
 ) -> (f64, f64) {
-    let mut run = Run { hazard, withdraw, pass: false, focus: None, horizon: HORIZON, track: None };
+    let mut run = Run { defense: None, hazard, withdraw, pass: false, focus: None, horizon: HORIZON, track: None };
     run_mech(template, hits, stun_cap_s, &mut run).0
 }
 
@@ -550,6 +589,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut alive: Vec<usize> = Vec::with_capacity(n);
     let mut sides: [Vec<usize>; 2] = [Vec::with_capacity(n), Vec::with_capacity(n)];
     let mut foes: Vec<usize> = Vec::with_capacity(n);
+    let mut raid_focus = vec![None; n];
     while f < run.horizon {
         if let Some(hz) = hazard
             && f > 0
@@ -562,7 +602,10 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             surv *= 1.0 - h;
         }
         alive.clear();
-        alive.extend((0..n).filter(|&i| us[i].u.alive));
+        alive
+            .extend((0..n).filter(|&i| {
+                us[i].u.alive && run.defense.is_none_or(|d| d.arrivals.get(i).copied().unwrap_or(0) <= f)
+            }));
         for (s, side) in sides.iter_mut().enumerate() {
             side.clear();
             side.extend(alive.iter().copied().filter(|&i| us[i].u.side as usize == s));
@@ -574,7 +617,33 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             armed(0) && armed(1)
         };
         if !goes_on {
+            if run.defense.is_some_and(|d| {
+                d.arrivals
+                    .iter()
+                    .enumerate()
+                    .any(|(i, &at)| at > f && at < run.horizon && us.get(i).is_some_and(|u| u.u.alive))
+            }) {
+                f += DT;
+                continue;
+            }
             break;
+        }
+        // Raiders target the economy they came for, rather than abandoning
+        // a mex to chase a defender that is still on the other side of the map.
+        if let Some(d) = run.defense {
+            raid_focus.fill(None);
+            for &i in &sides[1] {
+                raid_focus[i] =
+                    d.focus.get(i).copied().flatten().filter(|j| d.assets.contains(j) && sides[0].contains(j)).or_else(
+                        || {
+                            d.assets
+                                .iter()
+                                .copied()
+                                .filter(|j| sides[0].contains(j))
+                                .min_by(|&a, &b| apart(&us[a], &us[i]).total_cmp(&apart(&us[b], &us[i])))
+                        },
+                    );
+            }
         }
         // Status: burns tick, paralysis and slow wear off (units killed by a
         // burn earlier in order still wear off, as in the Python model).
@@ -604,17 +673,19 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 continue;
             }
             let side = us[i].u.side as usize;
-            let mut nearest: Option<(f64, f64)> = None;
+            let mut nearest: Option<(f64, f64, f64)> = None;
             for &j in &sides[1 - side] {
-                if side == 0 && run.focus.is_some_and(|target| target != j) {
+                if side == 0 && run.focus.is_some_and(|target| target != j)
+                    || side == 1 && raid_focus[i].is_some_and(|target| target != j)
+                {
                     continue;
                 }
                 let d = apart(&us[j], &us[i]);
                 if nearest.is_none_or(|n| d < n.0) {
-                    nearest = Some((d, us[j].u.x));
+                    nearest = Some((d, us[j].u.x, us[j].lat));
                 }
             }
-            let Some((dist, nx)) = nearest else { continue };
+            let Some((dist, nx, nz)) = nearest else { continue };
             let speed = us[i].u.speed * (1.0 - us[i].slowed());
             if run.pass && side == 0 {
                 if us[i].kamikaze && dist <= KAMIKAZE_REACH {
@@ -631,6 +702,21 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 u.x -= if nx > u.x { speed * dt } else { -speed * dt };
                 u.moving = true;
                 moved = true;
+                continue;
+            }
+            if run.defense.is_some() {
+                if us[i].kamikaze && dist <= KAMIKAZE_REACH {
+                    kill(&mut us, &mut killed, i);
+                    continue;
+                }
+                if us[i].u.armed && dist > us[i].u.max_range * 0.95 {
+                    let step = (speed * dt).min((dist - us[i].u.max_range * 0.9).max(0.0));
+                    let fraction = step / dist.max(1.0);
+                    us[i].u.x += (nx - us[i].u.x) * fraction;
+                    us[i].lat += (nz - us[i].lat) * fraction;
+                    us[i].u.moving = step > 0.0;
+                    moved |= step > 0.0;
+                }
                 continue;
             }
             if us[i].kamikaze {
@@ -667,12 +753,11 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             let side = us[i].u.side as usize;
             foes.clear();
-            foes.extend(
-                sides[1 - side]
-                    .iter()
-                    .copied()
-                    .filter(|&j| us[j].u.alive && (side != 0 || run.focus.is_none_or(|target| target == j))),
-            );
+            foes.extend(sides[1 - side].iter().copied().filter(|&j| {
+                us[j].u.alive
+                    && (side != 0 || run.focus.is_none_or(|target| target == j))
+                    && (side != 1 || raid_focus[i].is_none_or(|target| target == j))
+            }));
             if foes.is_empty() {
                 continue;
             }

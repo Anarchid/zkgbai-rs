@@ -385,3 +385,26 @@ jobs; reload, landing terrain and flight clearance are checked before each jump.
 on; the operator's `feature` tool with `{"name":"commander","off":true}` disables both behaviors
 and immediately releases active defenders to economy work. `off:false` re-enables them.
 `disable=commander` or `ZKGBAI_DISABLE=commander` disables them at startup.
+
+QRF predictor assignment
+------------------------
+
+`qrfpredict` is on by default for Mark's small encounters (at most four teams,
+four raids and 32 units per local rollout). `disable=qrfpredict` restores the
+legacy arrival/value matching and power-ratio conduct. The operator feature
+switch can toggle it during play. A background worker evaluates every eligible
+team subset against each raid, including leaving it unanswered, and chooses
+disjoint subsets by expected friendly losses. Protected assets, current health,
+EMP, observed asset targets and terrain travel delays participate in 30-second
+mechanics rollouts. Nearby response is therefore not interchangeable with a
+distant assignment. Predictor-selected teams bypass the legacy attack power
+ratio and are not split afterward by the metal-ratio rule. Unknown encounters
+and larger forces retain the legacy policy; pending or materially stale
+predictions preserve current orders. `qrf-predict` journal events record the
+assignments, loss estimates, snapshot age, simulations and worker time.
+
+The rollout uses two-dimensional straight movement plus path-derived detour
+delays, not engine path simulation. Raiders keep their last observed asset
+target and then select nearby surviving assets. Up to four threatened assets
+are considered per raid; overlapping asset values are divided among threats.
+These bounded approximations should be checked against game outcomes.

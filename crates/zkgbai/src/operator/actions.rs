@@ -97,6 +97,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("reach", "Army", "reachability checks by the terrain model"),
     ("precision", "Army", "raiders shoot from where defenses cannot shoot back"),
     ("squadhyst", "Army", "raider squads keep their rally point a while"),
+    ("qrfpredict", "Army", "predict small QRF assignments including asset losses and arrival times"),
     ("justenough", "Army", "one raider claim per target; QRF teams sized to the raid"),
     ("venomraid", "Army", "Venoms raid after the opening, Fleas left to the stakeouts"),
     (

@@ -28,6 +28,7 @@ pub mod intent;
 pub mod live;
 pub mod mark;
 pub mod ops;
+mod predict;
 pub mod station;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -188,6 +189,7 @@ pub struct Qrf {
     /// The operator's roles for teams (and the floor's zones, see `floor`).
     pub roles: BTreeMap<usize, live::Role>,
     pub floor: floor::Floor,
+    predict: predict::Predictor,
     /// Moonlighting squads sent at a raid, with the frame last sent;
     /// periods each has gone unmatched since; and every squad ever drafted
     /// (a second draft is a redraft, counted apart).
