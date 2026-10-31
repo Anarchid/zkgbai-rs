@@ -14,6 +14,7 @@ use crate::kgbutil::Pathfinder;
 use crate::logistics::Logistics;
 use crate::los::LosManager;
 use crate::military::blasts::Blasts;
+use crate::military::coalesce::Coalesce;
 use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::incursions::Incursions;
@@ -25,6 +26,7 @@ use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
 use crate::military::scouts::Scouts;
 use crate::military::stakeouts::Stakeouts;
+use crate::military::stayveto::StayVeto;
 use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
@@ -60,8 +62,12 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// better than both, each taking up the metal the other left.
 /// The crushing-defeat veto (`fightsim`) is on. Raider packs and organic
 /// fire squads remain opt-in. Ravager and Minotaur packs are on for WIP
-/// observation (disable=ravager,minotaur to opt out).
-pub(crate) const OFF_BY_DEFAULT: [&str; 12] = [
+/// observation (disable=ravager,minotaur to opt out). `coalesce` (raider
+/// gangs judged by the fight predictor) and `stayveto` (retreats the
+/// predictor says throw a won fight away) are on for WIP observation
+/// (2026-10-31, disable=coalesce,stayveto to opt out); their shadow
+/// switches (journal only) stay off.
+pub(crate) const OFF_BY_DEFAULT: [&str; 14] = [
     "pairs",
     "currency",
     "permanence",
@@ -74,6 +80,8 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 12] = [
     "dagger",
     "blitz",
     "firesquads",
+    "coalesceshadow",
+    "stayshadow",
 ];
 /// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 /// Both can still be disabled with `disable=siege,crab`.
@@ -178,6 +186,10 @@ pub struct Ai {
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
     pub stakeouts: Stakeouts,
+    /// Raider gangs judged by the fight predictor (`coalesce`).
+    pub coalesce: Coalesce,
+    /// Retreats judged by the fight predictor (`stayveto`).
+    pub stayveto: StayVeto,
     /// Which handler each unit belongs to (see `military::roles`).
     pub roles: crate::military::roles::Roles,
     pub air_intel: crate::military::air_intel::AirIntel,
@@ -294,6 +306,8 @@ impl SkirmishAi for Ai {
             iq: Default::default(),
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
+            coalesce: Coalesce::default(),
+            stayveto: StayVeto::default(),
             roles: Default::default(),
             air_intel: Default::default(),
             precision: Default::default(),

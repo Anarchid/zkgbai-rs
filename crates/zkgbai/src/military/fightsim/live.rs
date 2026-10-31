@@ -132,6 +132,9 @@ pub struct FightSim {
     pub agreements: u64,
     last_report: i32,
     reported: (u64, u64, u64),
+    /// The model for synchronous local judgements (see `local`), loaded
+    /// once on first use.
+    pub(crate) local_model: Option<Option<Arc<Model>>>,
 }
 
 /// Side A of a snapshot as the window needs it, and the sides' metal.

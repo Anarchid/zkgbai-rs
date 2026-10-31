@@ -443,7 +443,8 @@ mod tests {
         // The design note's table (CRAB-SPIRE.md section 1, from Cannon.cpp):
         // 600 flat, 708 from 150 up, 738 from 200, 792 from 300.
         let g = crab(0.0);
-        for (up, want) in [(0.0, 600.0), (50.0, 635.0), (150.0, 708.0), (200.0, 738.0), (300.0, 792.0), (400.0, 841.0)] {
+        for (up, want) in [(0.0, 600.0), (50.0, 635.0), (150.0, 708.0), (200.0, 738.0), (300.0, 792.0), (400.0, 841.0)]
+        {
             let got = g.reach_2d(-up);
             assert!((got - want).abs() <= 3.0, "{up} up: {got} for {want}");
         }

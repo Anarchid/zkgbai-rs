@@ -23,6 +23,7 @@
 //! death, EMP, slow, engagement, heatray) beside it when asked.
 
 pub mod live;
+pub mod local;
 pub mod mech;
 pub mod worker;
 

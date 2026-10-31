@@ -5,6 +5,7 @@ pub mod air_intel;
 pub mod airstrikes;
 pub mod arsenal;
 pub mod blasts;
+pub mod coalesce;
 pub mod drops;
 pub mod enemy;
 pub mod fightsim;
@@ -27,6 +28,7 @@ pub mod roles;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod stakeouts;
+pub mod stayveto;
 pub mod strike_test;
 pub mod strikes;
 pub mod sweeps;
@@ -522,6 +524,7 @@ impl Ai {
         // Before the squads decide: their fight predictions arrive here.
         self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
+        self.guard("coalesce.update", |ai| ai.coalesce_update(frame));
         self.guard("raider.update", |ai| ai.raider_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
@@ -1244,6 +1247,8 @@ impl Ai {
         self.intel_enemy_destroyed(id, cost);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
+        self.coalesce_enemy_destroyed(id);
+        self.stayveto_enemy_destroyed(id);
         self.bomber_target_destroyed(enemy.id());
         self.counterbattery_destroyed(enemy.id());
         self.strikes_enemy_destroyed(enemy.id());
@@ -1970,7 +1975,10 @@ impl Ai {
         // at the ground estimate through the strike support-fire path.
         for fix in self.counterbattery_fixes(sweeps::counterbattery::FRESH).filter(|f| f.ground) {
             let score = distance(origin, fix.pos) - fix.range;
-            if score < cost { target = fix.pos; cost = score; }
+            if score < cost {
+                target = fix.pos;
+                cost = score;
+            }
         }
         let war = &self.war;
 

@@ -1391,8 +1391,9 @@ mod tests {
         take_orders();
         squad.add_unit(81, &mut fighters, 0);
         let orders = take_orders();
-        assert!(!orders.iter().any(|&(id, topic, custom)| id == 81 &&
-            (topic == CommandTopic::COMMAND_UNIT_GUARD || custom == cmd::ORBIT)));
+        assert!(!orders.iter().any(
+            |&(id, topic, custom)| id == 81 && (topic == CommandTopic::COMMAND_UNIT_GUARD || custom == cmd::ORBIT)
+        ));
         assert_eq!(fighters[&81].squad, Some(1));
         // A doctrine deliberately led by an Iris retains its core controller.
         doctrine.core = vec!["cloakjammer".into()];

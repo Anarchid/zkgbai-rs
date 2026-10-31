@@ -613,6 +613,28 @@ impl Ai {
         }
     }
 
+    /// Armed pickets a raider gang may borrow (see `coalesce`): not running
+    /// from an enemy and not pulled home for repairs.
+    pub(crate) fn stakeouts_borrowable(&self, frame: i32) -> Vec<(i32, Unit)> {
+        (self.stakeouts.members.iter())
+            .filter(|(_, m)| m.armed && frame >= m.fleeing_until && !m.f.is_dead())
+            .filter(|(_, m)| !self.retreat_handler.is_retreating(m.f.id))
+            .map(|(&id, m)| (id, m.f.unit))
+            .collect()
+    }
+
+    /// A picket a gang borrowed comes back: it forgets what it was
+    /// standing for and is ticked at once, so it walks back to its duty.
+    pub(crate) fn stakeouts_release(&mut self, id: i32) {
+        if let Some(m) = self.stakeouts.members.get_mut(&id) {
+            m.standing = false;
+            m.bogey = None;
+            m.sortie = None;
+            m.step_to = None;
+            m.last_tick = 0;
+        }
+    }
+
     /// Whether the stakeouts decide how many scouts a factory of this kind
     /// builds (its scout is one of theirs).
     pub(crate) fn stakeouts_own(&self, kind: FacKind) -> bool {
@@ -795,6 +817,10 @@ impl Ai {
         let Some(m) = self.stakeouts.members.get(&id) else { return };
         if m.f.is_dead() {
             self.stakeouts_remove_unit(m.f.unit, None);
+            return;
+        }
+        // Borrowed by a raider gang (see `coalesce`).
+        if self.coalesce_owns(id) {
             return;
         }
         let (unit, p, sight, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.duty);

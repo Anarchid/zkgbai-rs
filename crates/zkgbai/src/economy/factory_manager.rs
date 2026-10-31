@@ -691,12 +691,13 @@ impl Ai {
         // in place of a plain fighter. (Not of the scouts of the factories
         // that open with a wave of them: the QRF floor took a jump opening's
         // second Puppy for a Pyro guard.)
-        let special = matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy" | "shieldshield" | "cloakjammer")
-            || choice == scouts::WIDOW
-            || choice == scouts::SCYTHE
-            || choice == scouts::OWL
-            || self.firefighters_order(kind) == Some(choice)
-            || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
+        let special =
+            matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy" | "shieldshield" | "cloakjammer")
+                || choice == scouts::WIDOW
+                || choice == scouts::SCYTHE
+                || choice == scouts::OWL
+                || self.firefighters_order(kind) == Some(choice)
+                || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
         let picked = choice;
         let choice = match (ai_wants_builder || special, fac.unit) {
             (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
