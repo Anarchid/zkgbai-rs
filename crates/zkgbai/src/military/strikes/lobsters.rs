@@ -110,28 +110,35 @@ impl Ai {
                 && matches!(j.prey, Prey::GlassCannon | Prey::Fragile)
         })
     }
-    fn lobster_strike_release(&mut self, sid: SquadId, m: Mission) {
-        self.lobster_strike_abort(sid);
+    fn lobster_strike_release_unit(&mut self, sid: SquadId, id: i32, launcher: i32, retreat: bool) {
+        let Some(f) = self.fighters.get(&id).filter(|f| !f.is_dead()) else { return };
+        let u = f.unit;
+        let still_member = f.squad == Some(sid);
         let takeover = self.qrf_drafted(sid)
             || self.op_squad_target(sid).is_some()
             || self.op.over.squad_intents.contains_key(&sid);
-        for id in m.members.iter().chain(std::iter::once(&m.launcher)) {
-            let Some(f) = self.fighters.get(id).filter(|f| !f.is_dead() && f.squad == Some(sid)) else { continue };
-            let u = f.unit;
-            if !springai::reserved::is_reserved(self.cb, *id) {
-                if !takeover {
-                    u.stop(0);
-                }
-                if *id == m.launcher {
-                    u.set_fire_state(0, 0);
-                } else {
-                    u.set_fire_state(2, 0);
-                    crate::military::fire_squad::release_unit(u);
-                }
+        // A wounded unit may already have left the squad in the damage
+        // callback. Restore its controls too, without erasing its repair order
+        // or overriding a new tactical owner.
+        if !springai::reserved::is_reserved(self.cb, id) && !self.squad_strike_owns(id) && !self.fire_controls(id) {
+            if still_member && !takeover {
+                u.stop(0);
             }
-            if m.retreat.contains(id) {
-                self.retreat_add_coward(u);
+            if id == launcher {
+                u.set_fire_state(0, 0);
+            } else {
+                u.set_fire_state(2, 0);
+                crate::military::fire_squad::release_unit(u);
             }
+        }
+        if retreat && !self.retreat_handler.is_coward(id) {
+            self.retreat_add_coward(u);
+        }
+    }
+    fn lobster_strike_release(&mut self, sid: SquadId, m: Mission) {
+        self.lobster_strike_abort(sid);
+        for &id in m.members.iter().chain(std::iter::once(&m.launcher)) {
+            self.lobster_strike_release_unit(sid, id, m.launcher, m.retreat.contains(&id));
         }
         self.strikes.lobsters.retry.insert(sid, self.frame + 300);
         self.log(&format!("strikes: Lobster/Buoy squad {sid} released from {}", m.job.name));
@@ -192,6 +199,9 @@ impl Ai {
         if let Some(mut m) = self.strikes.lobsters.missions.remove(&sid) {
             let old_members = m.members.clone();
             m.members.retain(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead() && f.squad == Some(sid)));
+            for id in old_members.iter().filter(|id| !m.members.contains(id)) {
+                self.lobster_strike_release_unit(sid, *id, m.launcher, m.retreat.contains(id));
+            }
             let before_flight = matches!(m.state, State::Gathering | State::Assessing | State::Launching);
             let launcher_ok = self.fighters.get(&m.launcher).is_some_and(|f| {
                 !f.is_dead()
