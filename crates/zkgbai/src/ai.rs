@@ -633,6 +633,7 @@ impl Ai {
                     | "shadowprobe"
                     | "heavies"
                     | "veto-scalpels"
+                    | "veto-scalpels10"
                     | "heavypush"
                     | "paladin"
                     | "farm"

@@ -1,18 +1,20 @@
 //! Development aid: the veto's own case staged by the AI option `test`.
 //!
-//! `test=veto-scalpels`: a passive defender gets five Scalpels in a row
-//! across the way halfway to the enemy (the map's middle on a mirrored
-//! map), and a factory behind its base (an AI team with no factory or
+//! `test=veto-scalpels` (or `veto-scalpels10`): a passive defender gets
+//! five (ten) Scalpels in rows across the way halfway to the enemy (the
+//! map's middle on a mirrored map), and a factory behind its base (an AI team with no factory or
 //! constructor is out); its commander holds its fire behind the base. The
 //! Scalpels get no orders: ZK's tactical AI has idle units engage and skirm
 //! as they would in a real game.
 //!
-//! `test=veto-knight` (one Knight) or `test=veto-knights` (three): the
-//! attacker plays as ever, and gets them by its base, made an attacking
-//! squad at [`ADOPT_FRAME`], with an Owl parked short of the middle so it
-//! sees the Scalpels before it walks into their range. The veto should turn
-//! a lone Knight back before the first volley and keep it back; three
-//! Knights lose less than the veto's 75% in its 15 s and go in. Read the
+//! `test=veto-knights`: the attacker plays as ever, and gets three Knights
+//! by its base, made an attacking squad at [`ADOPT_FRAME`] (a squad under
+//! three units and 1000 metal is cut off back to forming, so one Knight
+//! never attacks alone), with an Owl parked short of the middle so it sees
+//! the Scalpels before it walks into their range. Against ten Scalpels the
+//! veto should turn the Knights back before the first volley and keep them
+//! back; against five they lose less than the veto's 75% in its 15 s and
+//! go in (staged1: one Knight lost, none of the Scalpels' health). Read the
 //! `k=fightsim` verdict and release records, and the `fightsim-test:` log
 //! lines every 5 s: the Knights' health and distance to the nearest
 //! Scalpel, and the Scalpels' health as seen.
@@ -43,11 +45,10 @@ impl Ai {
     }
 
     pub(crate) fn veto_scenario(&mut self, frame: i32) {
-        let knights = match self.test.as_deref() {
-            Some("veto-knight") => 1,
-            Some("veto-knights") => 3,
-            _ => return,
-        };
+        if self.test.as_deref() != Some("veto-knights") {
+            return;
+        }
+        let knights = 3;
         if frame == GIVE_FRAME {
             let (base, enemy) = self.veto_scenario_line();
             let half = distance(base, enemy) / 2.0;

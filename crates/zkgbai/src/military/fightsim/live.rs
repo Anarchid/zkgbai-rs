@@ -14,8 +14,10 @@
 //!
 //! A veto latches: the squad keeps retreating for at least [`LATCH_MIN`],
 //! then while the fight against the enemies that set it (remembered for
-//! [`LATCH_MEMORY`] after last seen, wherever they are) is still crushing,
-//! for at most [`LATCH_MAX`]. `fightshadow` keeps judging and logging when
+//! [`LATCH_MEMORY`] after last seen, wherever they are), judged as if the
+//! squad alone stood again where the veto stopped it, is still crushing,
+//! for at most [`LATCH_MAX`]: the squad growing or the enemy leaving ends
+//! it; the retreat's own distance and what stands by it at the haven do not. `fightshadow` keeps judging and logging when
 //! the veto is disabled. Ordinary assault/raider attacks use this veto,
 //! including on home ground. Strike missions and other special controllers
 //! keep their own conduct. Side A includes nearby friendly support; side B
@@ -136,6 +138,8 @@ struct Latch {
     since: i32,
     /// The enemies of the vetoed fight.
     enemies: Vec<i32>,
+    /// Where the squad was when vetoed.
+    at: Vec3,
 }
 
 /// Only the next stretch of an attack matters, including enemy firing reach.
@@ -265,7 +269,8 @@ impl Ai {
             }
         }
         fs.commits.retain(|_, a| frame - a.frame <= STALE);
-        fs.latches.retain(|_, l| frame - l.since <= LATCH_MAX);
+        // Squads gone: a living squad's latch ends at its next check, logged.
+        fs.latches.retain(|_, l| frame - l.since <= 2 * LATCH_MAX);
         self.fightsim_close_windows(frame);
         if frame - self.war.fightsim.last_report >= REPORT_PERIOD {
             self.fightsim_report(frame);
@@ -377,7 +382,10 @@ impl Ai {
                 name,
                 range,
                 reload: wd.reload(),
-                salvo: wd.salvo_size(),
+                // Shots per reload as the hit tables count them: projectiles per
+                // shot times the burst (a Scalpel fires two missiles a volley; the
+                // engine's salvo size alone, its burst, is one).
+                salvo: wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1),
                 damage,
                 weapon_type: wd.weapon_type(),
             });
@@ -400,9 +408,9 @@ impl Ai {
 
     /// The fight a squad at `pos` would be in now: the squad and our other
     /// fighters beside it against every identified enemy within reach as
-    /// last seen, or (`only`) against those enemies wherever they were last
-    /// seen within [`LATCH_MEMORY`]. `None` without an armed enemy (nothing
-    /// to predict).
+    /// last seen, or (`only`) the squad alone against those enemies wherever
+    /// they were last seen within [`LATCH_MEMORY`]. `None` without an armed
+    /// enemy (nothing to predict).
     fn fight_snapshot(
         &mut self,
         sid: SquadId,
@@ -418,8 +426,12 @@ impl Ai {
         }
         let members: Vec<i32> = squad.fighters.iter().copied().chain(squad.leader).collect();
         for (id, f) in &self.fighters {
+            // A latched fight (`only`) is the squad's own: what stands by
+            // it at the haven does not walk back in with it.
             if !members.contains(id)
-                && (distance(f.get_pos(), pos) > FRIEND_REACH || self.retreat_handler.is_retreating(*id))
+                && (only.is_some()
+                    || distance(f.get_pos(), pos) > FRIEND_REACH
+                    || self.retreat_handler.is_retreating(*id))
             {
                 continue;
             }
@@ -542,13 +554,22 @@ impl Ai {
             self.war.fightsim.fallbacks += 1;
             return flat;
         };
-        if let Some((since, enemies)) = self.war.fightsim.latches.get(&sid).map(|l| (l.since, l.enemies.clone())) {
+        if let Some((since, enemies, at)) =
+            self.war.fightsim.latches.get(&sid).map(|l| (l.since, l.enemies.clone(), l.at))
+        {
             let age = frame - since;
             let mut judged = None;
             let hold = latch_holds(age, || {
-                let r = self
-                    .fight_snapshot(sid, pos, target, Some(&enemies))
-                    .map(|(snap, _)| self.fightsim_judge(model, &snap));
+                let r = self.fight_snapshot(sid, pos, target, Some(&enemies)).map(|(mut snap, _)| {
+                    // As if back where the veto stopped us: the retreat's
+                    // distance alone must not make the fight look winnable.
+                    let (dx, dz) = (at.x - pos.x, at.z - pos.z);
+                    for u in snap.units.iter_mut().filter(|u| u.side == 0) {
+                        u.x += dx;
+                        u.z += dz;
+                    }
+                    self.fightsim_judge(model, &snap)
+                });
                 judged = Some(r);
                 r.is_some_and(|(_, crushing)| crushing)
             });
@@ -609,7 +630,7 @@ impl Ai {
         }
         if drives && retreat {
             let enemies = notes.enemies.iter().map(|e| e.0).collect();
-            self.war.fightsim.latches.insert(sid, Latch { since: frame, enemies });
+            self.war.fightsim.latches.insert(sid, Latch { since: frame, enemies, at: pos });
         }
         apply_veto(flat, drives, retreat)
     }

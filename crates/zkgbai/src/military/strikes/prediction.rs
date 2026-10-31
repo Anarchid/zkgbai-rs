@@ -99,7 +99,10 @@ impl Ai {
                 name,
                 range: wd.range(),
                 reload: wd.reload(),
-                salvo: wd.salvo_size(),
+                // Shots per reload as the hit tables count them: projectiles per
+                // shot times the burst (a Scalpel fires two missiles a volley; the
+                // engine's salvo size alone, its burst, is one).
+                salvo: wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1),
                 damage,
                 weapon_type: wd.weapon_type(),
             });
