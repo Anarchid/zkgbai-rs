@@ -56,6 +56,32 @@ def load_water(path):
 
 
 
+def load_slow(path):
+    """Mechanics round 6 (slow2, unit_timeslow.lua): per weapon (slow per full hit, slow-only?, overslow cap
+    bonus, damage per hit) from the fixed def dump (slow_hits.py output); weapons outside the unit dump
+    (commander modules) take the engine factor from the weapon table. Returns the hit cells of the slow-only
+    weapons inferred from their targets' slow state (train games minus the dev fold), for with_slow_cells."""
+    import slow_hits
+    import split
+    d = pickle.load(open(path, "rb"))
+    table = dict(d["slow_per_hit"])
+    for name, row in predict.G["wtab"].iterrows():
+        if name not in table and float(row.get("slow", 0) or 0) > 0 and float(row["damage"]) > 0:
+            table[name] = (float(row["slow"]) * float(row["damage"]), False, 0.0, float(row["damage"]))
+    M["slow2"] = table
+    return slow_hits.cells(d["rows"], split.DEV_FOLD)
+
+
+def with_slow_cells(cells, extra):
+    """Hit cells with the slow-only weapons' (no hits logged: they deal no damage) replaced by inferred ones."""
+    import pandas as pd
+    c = cells.reset_index() if not isinstance(cells.index, pd.RangeIndex) else cells.copy()
+    only = {k for k, v in M["slow2"].items() if v[1]}
+    c = c[~c["wd"].isin(only)]
+    e = extra.reset_index().reindex(columns=c.columns, fill_value=0.0)
+    return pd.concat([c, e], ignore_index=True)
+
+
 def _water_setup(fight, us, recs):
     """Per-unit 2-D anchor on the fight axis and water traits; None when the map has no heightmap."""
     W = M.get("water")
@@ -180,7 +206,7 @@ ENGAGE_NAMES = ["const", "ratio>0.5", "ratio>1", "ratio>1.5", "ratio>2.5", "rati
 # ----------------------------------------------------------------------------- sim
 class X:
     """Per-unit mechanics state riding on a SimUnit."""
-    __slots__ = ("maxhp", "air", "kamikaze", "death", "engage", "blockers", "para", "slowdmg", "slow_last",
+    __slots__ = ("maxhp", "air", "kamikaze", "death", "engage", "blockers", "para", "slowdmg", "slow_last", "ovs",
                  "burns", "range_", "speed_", "sh", "shmax", "shregen", "shr", "drain", "lat")
 
 
@@ -202,6 +228,7 @@ def _setup(fight, opts):
         x.para = 0.0
         x.slowdmg = 0.0
         x.slow_last = -10 ** 9
+        x.ovs = 0.0  # slow2: overslow cap bonus (share of health), decaying like slow
         x.burns = []
         sd = M.get("shield", {}).get(r["def"]) if opts.get("shield") else None
         x.sh = sd["power"] if sd else None  # full at the start, or (shield_start) the charge logged at the unit's first row
@@ -224,6 +251,22 @@ def _setup(fight, opts):
                         u.weapons.append(sw)
                         u.max_range = max(u.max_range, sw.range)
                         u.armed = True
+    if opts.get("slow2") and not opts.get("slow2d"):
+        # slow-only weapons (no damage in the engine's weapon table) fire: they only slow
+        tab = M.get("slow2", {})
+        wtab = predict.G["wtab"]
+        for u, r in zip(units, recs):
+            d = ud.get(r["def"])
+            names = predict.G["commw"].get(r["def"]) or ([w.name for w in d.weapons] if d is not None else [])
+            have = {w.name for w in u.weapons}
+            for nm in names:
+                t = tab.get(nm)
+                if t is not None and t[1] and nm not in have and nm in wtab.index and float(wtab.loc[nm]["range"]) > 0:
+                    sw = predict.SimWeapon(nm, wtab.loc[nm])
+                    sw.nominal = 0.0
+                    u.weapons.append(sw)
+                    u.max_range = max(u.max_range, sw.range)
+                    u.armed = True
     if opts.get("engage") or opts.get("rate"):
         w = M.get("engage_w")
         for i, (u, r, x) in enumerate(zip(units, recs, xs)):
@@ -292,6 +335,11 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     hits = predict.G["hits"]
     if opts.get("shield2"):  # mechanics round 4: shield pools starting from the logged charge
         opts = dict(opts, shield=1, shield_start=1)
+    if opts.get("slow2d"):  # slow2 without the slow-only weapons (the Rust port)
+        opts = dict(opts, slow2=1)
+    if opts.get("slow2"):  # mechanics round 6: slow2 refines slow
+        opts = dict(opts, slow=1)
+    slow2 = M.get("slow2", {}) if opts.get("slow2") else None
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
     if passing is not None:
@@ -408,6 +456,12 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     x.para = max(0.0, x.para - x.maxhp / STUN_DECAY_S * DT / 30.0)
                 if x.slowdmg > 0 and f - x.slow_last > SLOW_GRACE:
                     x.slowdmg = max(0.0, x.slowdmg - SLOW_DECAY * max(u.hp, 1.0) * DT / 30.0)
+                if slow2 is not None:
+                    # ZK: overslow allowance decays at the slow rate; slow damage capped at (0.5 + it) x health
+                    if x.ovs > 0:
+                        x.ovs = max(0.0, x.ovs - SLOW_DECAY * DT / 30.0)
+                    if x.slowdmg > 0:
+                        x.slowdmg = min(x.slowdmg, (SLOW_MAX + x.ovs) * max(u.hp, 1.0))
             alive = [u for u in us if u.alive]
         if opts.get("shield"):
             for u in alive:
@@ -586,6 +640,8 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                         if opts.get("slow") and slow > 0:
                             xe = xof[id(e)]
                             xe.slowdmg += slow * per_victim * eff; xe.slow_last = f
+                            if slow2 is not None:
+                                xe.slowdmg = min(xe.slowdmg, (SLOW_MAX + xe.ovs) * max(e.hp, 1.0))
                         hurt(e, per_victim * eff)
                     continue
                 inr = [(apart(e, u), e) for e in foes if apart(e, u) <= w.range and e.alive
@@ -624,7 +680,19 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     xt.para += emp * p_tgt * shots * eff * (xt.maxhp / max(tgt.hp, 1.0))
                     cap = xt.maxhp * (1.0 + M.get("stun_cap_s", 4.0) / STUN_DECAY_S)
                     xt.para = min(xt.para, cap)
-                if opts.get("slow") and slow > 0:
+                if slow2 is not None:
+                    t2 = slow2.get(w.name)
+                    if t2 is not None:
+                        per_hit, only, ovs, base_dmg = t2
+                        if only:  # the full slow per landed shot
+                            amt = per_hit * p_tgt * (w.salvo if w.hitscan else shots) * eff
+                        else:  # scales with the damage landed (unit_timeslow.lua scaleSlow)
+                            amt = (per_hit / base_dmg if base_dmg > 0 else 0.0) * w.nominal * frac * p_tgt * shots * eff
+                        xt.slowdmg += amt
+                        xt.ovs = max(xt.ovs, ovs)
+                        xt.slowdmg = min(xt.slowdmg, (SLOW_MAX + xt.ovs) * max(tgt.hp, 1.0))
+                        xt.slow_last = f
+                elif opts.get("slow") and slow > 0:
                     xt.slowdmg += slow * w.nominal * frac * p_tgt * shots * eff
                     xt.slow_last = f
                 if dmg > 0:
