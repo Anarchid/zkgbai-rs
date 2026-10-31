@@ -3,6 +3,7 @@
 //! exercise deep thermite procurement and optional Sparrow support.
 mod carpet;
 mod hunt;
+mod opportunity;
 mod targeting;
 use super::Plane;
 use crate::Ai;
@@ -12,6 +13,10 @@ use springai::Vec3;
 impl Ai {
     pub(crate) fn airstrike_scenario(&mut self, frame: i32) {
         let Some(test) = self.test.clone().filter(|s| s.starts_with("airstrike-")) else { return };
+        if test.starts_with("airstrike-opportunity") {
+            self.airstrike_opportunity_scenario(&test, frame);
+            return;
+        }
         if test.starts_with("airstrike-targeting") {
             self.airstrike_targeting_scenario(&test, frame);
             return;

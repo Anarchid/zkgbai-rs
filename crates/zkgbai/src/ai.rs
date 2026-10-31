@@ -579,6 +579,7 @@ impl Ai {
                     | "assassin-target"
                     | "assassin-target2"
                     | "airstrike-targeting-targets"
+                    | "airstrike-opportunity-targets"
                     | "airstrike-hunt-target"
                     | "airstrike-hunt-decoy"
                     | "airstrike-carpet-target"
