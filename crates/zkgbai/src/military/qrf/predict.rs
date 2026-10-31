@@ -17,9 +17,19 @@ use crate::util::distance;
 pub(super) const MAX_TEAMS: usize = 4;
 pub(super) const MAX_RAIDS: usize = 4;
 const HORIZON: i32 = 30 * 30;
-const MAX_UNITS: usize = 32;
+pub(super) const MAX_UNITS: usize = 32;
 const STALE: i32 = 45;
 const KEEP: f32 = 5.0; // metal: a small tie preference, not a commitment lock
+
+/// Time until the shooter can damage an asset, not until it walks onto it.
+/// Observed shelling also counts across terrain the shooter cannot traverse.
+pub(super) fn threat_time(path: f32, gap: f32, range: f32, speed: f32, pressed: bool) -> f32 {
+    if pressed || gap <= range { 0.0 } else { (path - range / speed.max(1.0)).max(0.0) }
+}
+
+pub(super) fn small_encounter(teams: usize, raids: usize, units: usize) -> bool {
+    teams > 0 && teams <= MAX_TEAMS && raids <= MAX_RAIDS && units <= MAX_UNITS
+}
 
 #[derive(Clone, Debug)]
 struct Observed {
@@ -361,6 +371,21 @@ impl Ai {
 mod tests {
     use super::*;
     #[test]
+    fn bombardment_deadline_uses_range_and_observed_fire() {
+        assert_eq!(threat_time(40.0, 500.0, 530.0, 54.0, false), 0.0);
+        assert_eq!(threat_time(f32::INFINITY, 900.0, 530.0, 54.0, true), 0.0);
+        assert!(threat_time(f32::INFINITY, 900.0, 530.0, 54.0, false).is_infinite());
+        assert!((threat_time(30.0, 1080.0, 540.0, 54.0, false) - 20.0).abs() < 0.01);
+    }
+    #[test]
+    fn additional_targets_stay_within_the_prediction_budget() {
+        assert!(small_encounter(1, 2, 8));
+        assert!(!small_encounter(0, 2, 8));
+        assert!(!small_encounter(5, 2, 8));
+        assert!(!small_encounter(1, 5, 8));
+        assert!(!small_encounter(1, 2, 33));
+    }
+    #[test]
     fn can_keep_both_defenders_on_the_raid_that_would_cost_more() {
         let costs = vec![vec![255.0, 200.0, 150.0, 10.0], vec![60.0, 5.0, 5.0, 0.0]];
         let (loss, masks) = choose(&costs, 2);
@@ -437,6 +462,46 @@ mod regression {
         raid.assets[0].unit.hp *= 0.21;
         raid.assets[2].unit.hp *= 0.61;
         raid
+    }
+    fn bombardment(rogues: usize) -> Raid {
+        let venom = spec("spideremp", 190.0, 740.0, 2.8, Some(("spideremp_spider", 240.0, 1.2, 65.0)));
+        let mut rogue = spec("shieldskirm", 125.0, 520.0, 1.8, Some(("shieldskirm_storm_rocket", 530.0, 7.0, 330.0)));
+        Arc::make_mut(&mut rogue).weapons[0].weapon_type = "MissileLauncher".into();
+        let mex = spec("staticmex", 85.0, 560.0, 0.0, None);
+        Raid {
+            enemies: (0..rogues).map(|i| observed(100 + i as i32, rogue.clone(), 1, 480.0, 20.0 * i as f32)).collect(),
+            assets: (0..3).map(|i| observed(200 + i, mex.clone(), 0, 0.0, 120.0 * i as f32)).collect(),
+            weights: vec![1.0; 3],
+            defenders: vec![vec![(observed(1, venom, 0, 600.0, 0.0), 0)]],
+            allowed: 1,
+            kept: 0,
+            focus: vec![200; rogues],
+        }
+    }
+    #[test]
+    fn nearby_venom_can_intercept_two_rogues_bombarding_mexes() {
+        let mut raid = bombardment(2);
+        // A responder on the mex side can interrupt the bombardment. Merely
+        // being nearby, behind the shooters, is not an equivalent approach.
+        let behind = compute(Request { frame: 0, teams: vec![0], raids: vec![raid.clone()] }).1.unwrap();
+        assert_eq!(behind.masks, vec![0]);
+        raid.defenders[0][0].0.unit.x = 240.0;
+        let request = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()] };
+        let decision = compute(request).1.unwrap();
+        eprintln!("Rogue bombardment: {decision:?}");
+        assert_eq!(decision.masks, vec![1], "a non-raider attack can be worth intercepting");
+        assert!(decision.loss < decision.undefended);
+        let mut late = raid;
+        late.defenders[0][0].1 = HORIZON;
+        let decision = compute(Request { frame: 0, teams: vec![0], raids: vec![late] }).1.unwrap();
+        assert_eq!(decision.masks, vec![0], "do not send a responder after the assets are lost");
+    }
+    #[test]
+    fn overwhelming_bombardment_is_evaluated_without_forcing_an_attack() {
+        let raid = bombardment(12);
+        let decision = compute(Request { frame: 0, teams: vec![0], raids: vec![raid] }).1.unwrap();
+        eprintln!("Overwhelming bombardment: {decision:?}");
+        assert_eq!(decision.masks, vec![0]);
     }
     #[test]
     fn adansonia_nearby_venom_is_not_equivalent_to_a_distant_assignment() {

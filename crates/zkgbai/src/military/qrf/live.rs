@@ -24,7 +24,9 @@
 //!
 //! Raids are the enemy groups near our value and not in their territory,
 //! and only those our force could take on (no stronger than twice it): a
-//! main army is the army's and the incursion planner's. Teams stand off
+//! main army is the army's and the incursion planner's. Small known groups
+//! bombarding assets may pass those gates for predictor-only evaluation.
+//! Teams stand off
 //! enemy defenses. The algorithm on autopilot is `mark` (see [`super::mark`]);
 //! the operator can give a team a role (a zone, a post, a place to hold)
 //! and a tactic (mark, shadow, hunt), and the roles are kept until cleared.
@@ -621,10 +623,34 @@ impl Ai {
     pub(super) fn qrf_live_filter(&mut self, frame: i32) {
         let assets: Vec<Vec3> = self.qrf.assets.iter().map(|a| a.pos).collect();
         let near = |c: Vec3| assets.iter().map(|&a| distance(a, c)).fold(f32::INFINITY, f32::min);
+        let teams = self.qrf_teams();
+        let force: f32 = teams.values().map(|ids| self.qrf_team_power(ids)).sum();
+        let army = ARMY_RATIO * force.max(150.0);
+        let predict = !self.dev_off("qrfpredict") && self.qrf.algo == "mark";
+        let small =
+            predict && super::predict::small_encounter(teams.len(), self.qrf.groups.len(), self.qrf.members.len() + 4);
+        let tracks = &self.qrf.tracks;
+        let protected = &self.qrf.assets;
         let graph = &self.graph;
-        self.qrf.groups.retain(|g| {
+        self.qrf.groups.retain_mut(|g| {
             let d = near(g.center);
-            d < NEAR && (d < NEAR_IN_THEIRS || !graph.is_enemy_territory(g.center))
+            let legacy_near = d < NEAR && (d < NEAR_IN_THEIRS || !graph.is_enemy_territory(g.center));
+            let known = g.members.iter().all(|id| tracks.get(id).and_then(|t| t.kind()).is_some());
+            let bombards = g.members.iter().filter_map(|id| tracks.get(id)).any(|t| {
+                let range = t.kind().map_or(0.0, |d| d.max_weapon_range());
+                range > 0.0
+                    && protected.iter().any(|a| {
+                        distance(a.pos, t.pos) <= range
+                            || t.pressed > 0 && frame - t.pressed <= PRESSED_RECALL && t.pressed_on == a.unit.id()
+                    })
+            });
+            let modeled = small
+                && known
+                && bombards
+                && d < NEAR
+                && self.qrf.members.len() + g.members.len() + 4 <= super::predict::MAX_UNITS;
+            g.prediction_only = modeled && (!legacy_near || g.power > army);
+            legacy_near || modeled
         });
         let biggest = RAID_FLOOR.max(RAID_SHARE * self.qrf.budget.army);
         let raids: Vec<f32> = (self.qrf.groups.iter())
@@ -637,9 +663,6 @@ impl Ai {
         while self.qrf.budget.sightings.front().is_some_and(|s| frame - s.0 > RECALL) {
             self.qrf.budget.sightings.pop_front();
         }
-        let teams = self.qrf_teams();
-        let force: f32 = teams.values().map(|ids| self.qrf_team_power(ids)).sum();
-        let army = ARMY_RATIO * force.max(150.0);
         // Raids too strong for the force are no targets, but they still
         // raid: kept aside so a loss to them counts. (With no force the cap
         // is 300; a human raiding in fours, or a Dagger beside a Dante,
@@ -647,7 +670,7 @@ impl Ai {
         // stayed "quiet" through 12 losses, and the force never formed:
         // Theta Crystals, Oct 23.)
         let (groups, heavies): (Vec<RaidGroup>, Vec<RaidGroup>) =
-            std::mem::take(&mut self.qrf.groups).into_iter().partition(|g| g.power <= army);
+            std::mem::take(&mut self.qrf.groups).into_iter().partition(|g| g.power <= army || g.prediction_only);
         self.qrf.groups = groups;
         self.qrf.heavies = heavies;
     }
