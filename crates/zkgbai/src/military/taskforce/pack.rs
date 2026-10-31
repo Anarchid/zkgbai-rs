@@ -1,5 +1,6 @@
-//! Packs: forces that fight on the move (the `pack` aim; the `ravager`
-//! doctrine, off by default: `enable=ravager`).
+//! Packs: forces that fight on the move (the `pack` aim). Ravager packs are
+//! on by default, asleep until the middle game (`disable=ravager`); Minotaur
+//! and raider packs are opt-in (`enable=minotaur`, ...).
 //!
 //! A pack fights as a player drives Ravagers. Its cores move in formation
 //! with the leader (`Keep::Formation`: its moves shifted by each one's

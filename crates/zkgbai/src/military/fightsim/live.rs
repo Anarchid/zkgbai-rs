@@ -35,7 +35,7 @@ use crate::Ai;
 use crate::military::{SquadId, SquadKind};
 use crate::util::{NULLPOS, distance};
 
-/// Default-on veto (`disable=fightsim` restores ordinary threat policy).
+/// Opt-in veto (`enable=fightsim`; off, the ordinary threat policy decides).
 pub const FEATURE: &str = "fightsim";
 /// The ordinary shadow switch; fire squads also need the worker.
 pub const SHADOW: &str = "fightshadow";
@@ -637,8 +637,8 @@ mod veto_tests {
     }
 
     #[test]
-    fn veto_is_default_on_and_never_replaces_the_normal_retreat_rule() {
-        assert!(!crate::ai::OFF_BY_DEFAULT.contains(&FEATURE));
+    fn veto_is_opt_in_and_never_replaces_the_normal_retreat_rule() {
+        assert!(crate::ai::OFF_BY_DEFAULT.contains(&FEATURE));
         for flat in [false, true] {
             assert_eq!(apply_veto(flat, false, true), flat);
             assert_eq!(apply_veto(flat, true, false), flat);

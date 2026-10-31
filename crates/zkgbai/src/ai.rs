@@ -58,7 +58,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// both off went 9-0-1 against 3-3-4 with both on, with the old economy at
 /// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
 /// better than both, each taking up the metal the other left.
-/// The experimental Ravager, Minotaur, raider packs and organic fire squads remain opt-in.
+/// `fightsim` (the crushing-defeat veto) waits until its effect has been
+/// seen in play. Ravager packs are on, asleep until the middle game;
+/// Minotaur and raider packs and organic fire squads remain opt-in.
 pub(crate) const OFF_BY_DEFAULT: [&str; 14] = [
     "pairs",
     "currency",
@@ -66,9 +68,9 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 14] = [
     "mexporc",
     "airtempo",
     "airfire",
+    "fightsim",
     "posture",
     "ecoladder",
-    "ravager",
     "minotaur",
     "scorcher",
     "dagger",

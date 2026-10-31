@@ -194,12 +194,13 @@ retreat handler returns healed units to the assault pool. Individual departures 
 `firesquad_repair` journal records; there is no whole-squad recovery state.
 Fire squads are disabled by default; without the switch, Firewalker keeps its artillery role.
 `disable=firesquads` restores ordinary assault conduct. Fire-squad predictions run independently
-of the default-on `fightsim` veto for ordinary attacks. The `squads` operator response
+of the `fightsim` veto for ordinary attacks. The `squads` operator response
 labels active formations `fireteam` and exposes their tactic, cores, range and focus; mode changes appear as `firesquad` journal
 records. The dashboard, map labels, HUD and in-game operator widget show the fireteam label
 and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
 
-Ordinary ground assault and raider squads use `fightsim` as a default-on veto.
+With `enable=fightsim`, ordinary ground assault and raider squads use the predictor as a veto
+(off by default until its effect has been seen in play).
 Only predicted crushing defeats add a refusal: at least 75% of our armed metal
 lost, at most 5% of theirs, and enemy metal losses no greater than one tenth of
 ours. Otherwise the ordinary threat policy decides; a predicted win is never
@@ -214,8 +215,8 @@ along the next 1200 elmos of the approach plus their weapon reach. Fights above
 96 units are skipped, never truncated. Shield support, submerged combat and
 cloaked/bomb squads are excluded where the model cannot represent the tactic.
 Strike missions, explicit operator orders and specialized controllers retain
-their conduct. `disable=fightsim`, `ZKGBAI_DISABLE=fightsim`, or the operator's
-`feature` tool with `{"name":"fightsim","off":true}` disables the veto. With
+their conduct. `enable=fightsim`, `ZKGBAI_ENABLE=fightsim`, or the operator's
+`feature` tool with `{"name":"fightsim","off":false}` enables the veto. With
 `fightshadow` enabled, predictions still appear in the journal. Verdict records
 use mode `veto` and report `veto`, `armed_metal`, predicted casualties and the
 baseline threat decision, so actual refusals can be compared against losses.
