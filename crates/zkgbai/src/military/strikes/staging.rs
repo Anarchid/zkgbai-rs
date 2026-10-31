@@ -43,7 +43,7 @@ impl Ai {
             && !self.graph.is_enemy_territory(p)
             && self.war.get_porc_threat(p) <= 0.0
             && self.war.get_effective_threat(p) <= 0.0
-            && u.def().is_some_and(|d| reaches(self.reach_terrain(), d, from, p, 80.0))
+            && u.def().is_some_and(|d| self.strike_point_reachable(d, from, p))
     }
 
     /// Prefer 600–950 from the job when that is also behind our front;
@@ -106,7 +106,7 @@ impl Ai {
                     && !self.graph.is_enemy_territory(p)
                     && self.war.get_porc_threat(p) <= 0.0
                     && (unsafe_home || self.war.get_effective_threat(p) <= 0.0)
-                    && reaches(self.reach_terrain(), def, w.home, p, 80.0)
+                    && self.strike_point_reachable(def, w.home, p)
             })
             .filter_map(|p| {
                 let danger = risk(p);

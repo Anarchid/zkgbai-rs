@@ -157,7 +157,7 @@ impl Ai {
             && members.iter().filter(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead())).all(|id| {
                 let Some(f) = self.fighters.get(id) else { return false };
                 let Some(def) = f.unit.def() else { return false };
-                reaches(self.reach_terrain(), def, f.get_pos(), job.pos, 80.0)
+                self.strike_target_point(def, f.get_pos(), job.pos).is_some()
                     && !self.war.targets.values().any(|e| {
                         !e.is_dead
                             && Some(e.unit_id) != job.id
@@ -443,14 +443,17 @@ impl Ai {
         }
         let visible = m.job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible).map(|e| e.unit);
         for id in &m.members {
-            let Some(f) = self.fighters.get_mut(id) else { continue };
+            let Some(f) = self.fighters.get(id) else { continue };
             let u = f.unit;
-            f.target = m.job.pos;
+            let point = u.def().and_then(|d| self.strike_target_point(d, u.pos(), m.job.pos));
+            self.fighters.get_mut(id).unwrap().target = m.job.pos;
             u.set_fire_state(if matches!(self.defs.name_of(u), "hoverassault" | "cloakheavyraid") { 0 } else { 2 }, 0);
             if let Some(t) = visible.filter(|t| distance(u.pos(), t.pos()) < u.max_range().max(80.0) * 0.9) {
                 u.attack(t, 0);
+            } else if let Some(p) = point {
+                kgb_move_to(u, p, 0, self.frame);
             } else {
-                kgb_move_to(u, m.job.pos, 0, self.frame);
+                u.stop(0);
             }
         }
         if let Some(s) = self.squads.get_mut(sid) {

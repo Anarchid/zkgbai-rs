@@ -241,7 +241,7 @@ impl Ai {
                             self.fighters.get(id).is_some_and(|f| {
                                 let p = f.get_pos();
                                 let end = Vec3::xz(p.x + plan.to.x - plan.from.x, p.z + plan.to.z - plan.from.z);
-                                f.unit.def().is_some_and(|d| reaches(self.reach_terrain(), d, end, m.job.pos, 80.0))
+                                f.unit.def().is_some_and(|d| self.strike_target_point(d, end, m.job.pos).is_some())
                             })
                         });
                         if !clear || self.missiles_ground_burning(plan.to) {
@@ -344,6 +344,10 @@ impl Ai {
                     }
                 }
                 State::Attacking => {
+                    if !self.strike_members_reach(&m.members, m.job.pos) {
+                        self.lobster_strike_release(sid, m);
+                        return None;
+                    }
                     if self.frame - m.commanded >= 15 {
                         let visible = m
                             .job
@@ -352,30 +356,32 @@ impl Ai {
                             .filter(|e| e.visible && !e.is_dead)
                             .map(|e| e.unit);
                         for (i, id) in m.members.iter().enumerate() {
-                            let Some(f) = self.fighters.get_mut(id) else { continue };
+                            let Some(f) = self.fighters.get(id) else { continue };
                             let u = f.unit;
                             u.set_fire_state(2, 0);
-                            f.target = m.job.pos;
+                            self.fighters.get_mut(id).unwrap().target = m.job.pos;
                             if let Some(t) = visible {
                                 if distance(u.pos(), t.pos()) <= u.max_range().max(80.0) * 0.95 {
                                     u.attack(t, 0);
                                 } else {
-                                    kgb_move_to(
-                                        u,
-                                        crate::util::get_directional_point(t.pos(), u.pos(), u.max_range() * 0.8),
-                                        0,
-                                        self.frame,
-                                    );
+                                    let desired =
+                                        crate::util::get_directional_point(t.pos(), u.pos(), u.max_range() * 0.8);
+                                    if let Some(p) = self.strike_move_point(u, desired, t.pos(), u.max_range()) {
+                                        kgb_move_to(u, p, 0, self.frame);
+                                    } else {
+                                        u.stop(0);
+                                    }
                                 }
                             } else {
                                 let angle = (self.frame - m.since) as f32 / 90.0
                                     + i as f32 * std::f32::consts::TAU / m.members.len() as f32;
-                                kgb_move_to(
-                                    u,
-                                    Vec3::xz(m.job.pos.x + angle.cos() * 160.0, m.job.pos.z + angle.sin() * 160.0),
-                                    0,
-                                    self.frame,
-                                );
+                                let desired =
+                                    Vec3::xz(m.job.pos.x + angle.cos() * 160.0, m.job.pos.z + angle.sin() * 160.0);
+                                if let Some(p) = self.strike_move_point(u, desired, m.job.pos, u.max_range()) {
+                                    kgb_move_to(u, p, 0, self.frame);
+                                } else {
+                                    u.stop(0);
+                                }
                             }
                         }
                         m.commanded = self.frame;
