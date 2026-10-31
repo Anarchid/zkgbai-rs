@@ -591,6 +591,14 @@ impl Ai {
             Some((s, deployed)) => return (s, distance(pos, s) > if deployed { PARK_LEAVE } else { PARK }),
             None => {
                 let (s, k, v, how, nat) = self.siege_pick(sid, leader, reach, up, &statics);
+                let perch_site = how.contains("perch site") && !how.starts_with("no perch site");
+                if crab && !perch_site {
+                    // A mobile Crab has an attack mission, not an artillery
+                    // station. Its loner conduct issues the fight orders; the
+                    // wrapper must not replace them with station moves.
+                    self.crab_advance(sid, leader, s);
+                    return (s, false);
+                }
                 let old = self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()).map(|s| s.pos);
                 if old.is_none_or(|o| distance(o, s) > AT_STATION) {
                     let near = nearest(s, &statics);
@@ -620,7 +628,6 @@ impl Ai {
                 let f = self.taskforces.siege.forces.entry(sid).or_default();
                 // The same place again keeps the station as it is (parked
                 // stays parked); a new one starts unparked.
-                let perch_site = how.contains("perch site") && !how.starts_with("no perch site");
                 if old.is_none_or(|o| distance(o, s) > AT_STATION) {
                     f.station = Some(Station { pos: s, reach: (k, v), deployed: false, natural: nat, perch_site });
                 } else if let Some(st) = f.station.as_mut() {
@@ -632,6 +639,53 @@ impl Ai {
             }
         };
         (station, distance(pos, station) > PARK)
+    }
+
+    /// Off a pedestal, preserve the Crab's original loner conduct while
+    /// retaining its taskforce identity and dedicated Weaver escorts.
+    fn crab_advance(&mut self, sid: SquadId, leader: Unit, target: Vec3) {
+        if self.taskforces.siege.forces.get(&sid).is_some_and(|f| f.station.is_some() || f.perch.is_some()) {
+            self.siege_release(sid, "resuming mobile mission");
+            if let Some(f) = self.taskforces.siege.forces.get_mut(&sid) {
+                f.station = None;
+            }
+        }
+        let old = self.squads.get(sid).map_or(NULLPOS, |s| s.target);
+        if let Some(s) = self.squads.get_mut(sid) {
+            s.target = target;
+        }
+        if old != target && (old == NULLPOS || target == NULLPOS || distance(old, target) > 100.0) {
+            self.op_emit(
+                "crab-mission",
+                json!({"squad": sid, "crab": leader.id(),
+                "target": if target == NULLPOS { None } else { Some([target.x, target.z]) },
+                "selector": "loner"}),
+            );
+            self.log(&format!(
+                "taskforce: the crab force (squad {sid}) mobile mission: {}",
+                if target == NULLPOS {
+                    "no eligible loner target".to_owned()
+                } else {
+                    format!(
+                        "fight toward ({:.0}, {:.0}), {:.0} away, using loner target selection",
+                        target.x,
+                        target.z,
+                        distance(leader.pos(), target)
+                    )
+                }
+            ));
+        }
+        if target == NULLPOS {
+            if old != NULLPOS {
+                leader.stop(0);
+            }
+            return;
+        }
+        // Same Fighter::fight_to path and command kind as misc_assign_loners.
+        let mut nav = crate::nav!(self);
+        if let Some(f) = self.fighters.get_mut(&leader.id()) {
+            f.fight_to(target, &mut nav);
+        }
     }
 
     /// A station for force `sid`: the best candidate the guns can reach
@@ -697,22 +751,12 @@ impl Ai {
                 let (k, v) = in_reach(p, reach, statics);
                 return (p, k, v, "protective perch site");
             }
-            // No valuable local concentration: travel with the army. Never
-            // seek a distant pedestal merely to extend ballistic range.
-            let target = self.war_get_arty_target(from, false);
-            let target = if target == NULLPOS { self.graph.get_enemy_center() } else { target };
-            let range = Self::siege_reach(leader, 0.0);
-            let target = if target == NULLPOS || distance(target, from) <= range {
-                from
-            } else {
-                get_directional_point(target, from, range)
-            };
-            let p = if self.siege_fits(target, leader, &self.siege_statics(0.0)) {
-                target
-            } else {
-                self.graph_get_closest_haven(from)
-            };
-            return (p, 0, 0.0, "crab mobile escort");
+            // Use exactly the loner's mission selector. Artillery prefers
+            // heavily defended targets; rejecting its first choice against
+            // a straight-line siege safety test sent the Crab back home.
+            // The loner's assault path can route around intervening defenses,
+            // and engine fight orders decide where to stop and fire.
+            return (self.war_get_target(leader, false), 0, 0.0, "crab mobile mission");
         }
         // What climbs a pillar or outranges it refuses the perch (the
         // `refuse_climbers` dial): the enemy's spider or jump factories seen,
