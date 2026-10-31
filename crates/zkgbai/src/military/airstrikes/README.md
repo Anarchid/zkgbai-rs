@@ -64,10 +64,13 @@ Primary missions:
   Very light AA only. Like the artillery hunt this is evidence, not a unit
   handle: it uses Phoenixes already built and never buys any. New impacts
   re-aim a carpet still more than 900 elmos out; a sniper seen near the fix
-  turns the sortie into an attack on the unit. Each line's strip must be clear
-  of our and allied ground units at launch and again within 1500 elmos of the
-  aim (abort reason `friendly_fire`). Carpets never join combined waves or
-  local retargeting. `disable=carpet` switches it off.
+  turns the sortie into an attack on the unit. Phantoms sit in contested
+  ground, so by default a carpet burns whoever is under it: each line logs the
+  friendly ground units (ours and allied) and their metal under its strip at
+  launch and again at release. `enable=carpetspare` instead requires every
+  strip clear at launch and again within 1500 elmos of the aim (abort reason
+  `friendly_fire`). Carpets never join combined waves or local retargeting.
+  `disable=carpet` switches it off.
 
 Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
