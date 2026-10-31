@@ -171,7 +171,7 @@ impl Ai {
     /// Re-evaluate a damaged unit; `on_fire` if it is burning.
     pub fn retreat_check_unit(&mut self, unit: Unit, on_fire: bool) {
         let id = unit.id();
-        if self.fire_controls(id) {
+        if self.fire_controls(id) || self.lobster_strike_assessing(id) {
             return;
         }
         let Some(c) = self.retreat_handler.cowards.get_mut(&id) else {

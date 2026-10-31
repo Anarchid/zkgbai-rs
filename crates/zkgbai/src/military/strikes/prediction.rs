@@ -18,6 +18,14 @@ pub(super) struct Request {
     pub(super) members: Vec<i32>,
     paralysis: Option<f32>,
     stun_required: bool,
+    insertion: Option<crate::military::fightsim::mech::Insertion>,
+}
+impl Request {
+    pub(super) fn with_throw(mut self, dx: f32, dz: f32, wait: i32, flight: i32) -> Self {
+        self.insertion =
+            Some(crate::military::fightsim::mech::Insertion { count: self.members.len(), dx, dz, wait, flight });
+        self
+    }
 }
 pub(super) struct Answer {
     pub(super) key: u64,
@@ -44,11 +52,12 @@ impl Predictor {
                     let horizon =
                         if r.stun_required { (stun_frames - 90).clamp(1, DIVE_TIMEOUT) } else { DIVE_TIMEOUT };
                     let paralysis: Vec<_> = r.paralysis.map(|ratio| (r.target, ratio)).into_iter().collect();
-                    let fates = model.fates_with_paralysis(
+                    let fates = model.fates_with_insertion(
                         &r.snapshot,
                         horizon,
                         FateMode::Assassinate { target: r.target },
                         &paralysis,
+                        r.insertion,
                     );
                     let fate = fates.get(r.target);
                     let kill_frames = fate.and_then(|f| f.death_frame);
@@ -262,7 +271,16 @@ impl Ai {
         if stun_required && paralysis.is_none() {
             return None;
         }
-        Some(Request { key, snapshot, target, pos: job.pos, members: members.to_vec(), paralysis, stun_required })
+        Some(Request {
+            key,
+            snapshot,
+            target,
+            pos: job.pos,
+            members: members.to_vec(),
+            paralysis,
+            stun_required,
+            insertion: None,
+        })
     }
 }
 

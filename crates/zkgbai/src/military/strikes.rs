@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod evasion;
 mod fragile;
+mod lobsters;
 mod opportunities;
 mod prediction;
 mod scenario;
@@ -149,6 +150,7 @@ struct Wave {
 #[derive(Default)]
 pub struct Strikes {
     wave: Option<Wave>,
+    lobsters: lobsters::LobsterStrikes,
     members: BTreeSet<i32>,
     /// Factory id -> (type, issue frame, nanoframe id).
     orders: BTreeMap<i32, (&'static str, i32, Option<i32>)>,
@@ -218,7 +220,7 @@ impl Ai {
                 "evading": w.members.iter().filter(|id| self.strike_evasion_goal(**id).is_some()).count(),
             })
         });
-        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "squad_missions": self.squad_strikes_status(), "raider_missions": self.squad_strikes_status(), "counterbattery": self.counterbattery_status() })
+        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "squad_missions": self.squad_strikes_status(), "raider_missions": self.squad_strikes_status(), "lobster_missions": self.lobster_strikes_status(), "counterbattery": self.counterbattery_status() })
     }
 
     /// Merge seen Phantoms with impact estimates by max, not addition: a
@@ -630,6 +632,7 @@ impl Ai {
             return;
         }
         self.strikes.evasion.retain(|id, (_, until)| frame < *until && self.fighters.contains_key(id));
+        self.lobster_strikes_update();
         self.squad_strikes_maintain();
         // Offer ready Halberd squads first, before the dedicated wave borrows
         // individual members or an unrelated wave monopolizes recruitment.

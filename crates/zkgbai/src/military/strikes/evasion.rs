@@ -43,6 +43,7 @@ impl Ai {
     }
 
     pub(crate) fn strikes_unit_damaged(&mut self, u: Unit, attacker: Option<Unit>, dir: Vec3) {
+        self.lobster_strike_damaged(u.id());
         let Some(fire) = self
             .strikes
             .wave
