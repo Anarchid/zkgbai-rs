@@ -79,7 +79,10 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
+/// `conquest` (the commander walks to forward ground a few turrets hold,
+/// takes its metal, and fortifies it when the denial pays) is a 2026-10-31
+/// experiment, installed as ZKGBAI conquest for its first battery.
+pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
     "pairs",
     "currency",
     "permanence",
@@ -98,6 +101,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
     "chatcommands",
     "densgate",
     "fight2d",
+    "conquest",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.

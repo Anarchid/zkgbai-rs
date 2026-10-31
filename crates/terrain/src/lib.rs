@@ -35,6 +35,7 @@
 
 mod borders;
 mod build;
+pub mod conquest;
 pub mod fortify;
 mod graph;
 pub mod lanes;

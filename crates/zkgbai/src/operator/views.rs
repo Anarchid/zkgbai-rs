@@ -473,6 +473,11 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
 /// The map's regime as the posture reads it: structural openness per
 /// movement tier (lanes), the deciding tier, density, and the fixed-defense
 /// budget they set (see `crate::posture`).
+/// Conquest objectives and the one under way (see `economy::conquest`).
+pub fn conquest(ai: &mut Ai, _: &Args) -> Out {
+    Ok(ai.conquest_json())
+}
+
 pub fn regime(ai: &mut Ai, _: &Args) -> Out {
     use crate::posture;
     let p = &ai.posture;

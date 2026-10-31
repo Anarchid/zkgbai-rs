@@ -662,6 +662,12 @@ impl Ai {
                     return (dist / 4.0) - 3000.0 + (400.0 * (cost_mod - 1.0)).max(0.0);
                 }
 
+                // A conquest objective's job: its commander's first, and
+                // its turrets' for builders near them (see `conquest`).
+                if let Some(bonus) = self.conquest_bonus(worker.id, task.id) {
+                    return (dist / 4.0) - bonus + (400.0 * (cost_mod - 1.0)).max(0.0);
+                }
+
                 // On the crew of a tracked issue: its share of the value
                 // (see `logistics`).
                 if let Some(share) = self.logistics_bonus(worker.id, task.id) {

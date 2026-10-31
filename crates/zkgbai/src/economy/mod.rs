@@ -8,6 +8,7 @@ mod assign;
 pub mod build_ids;
 mod colonize;
 mod commander;
+mod conquest;
 pub mod factory;
 pub mod factory_manager;
 mod fortify;
@@ -93,6 +94,8 @@ pub struct EconomyManager {
     pub tasks: TaskStore,
     /// Worker ids of commanders.
     pub commanders: Vec<i32>,
+    /// Forward objectives the commander takes and fortifies (see `conquest`).
+    pub conquest: conquest::Conquest,
     /// Workers waiting for a new assignment (worker ids).
     pub idlers: VecDeque<i32>,
     /// Workers with an assignment, re-evaluated round-robin (worker ids).
@@ -335,6 +338,7 @@ impl EconomyManager {
             mexes: Vec::new(),
             tasks: TaskStore::default(),
             commanders: Vec::new(),
+            conquest: conquest::Conquest::default(),
             idlers: VecDeque::new(),
             assigned: VecDeque::new(),
             seeders: VecDeque::new(),
@@ -773,6 +777,7 @@ impl Ai {
         self.eco_plan_grid(frame);
         self.eco_update_requisition(frame);
         self.eco_update_new_factory(frame);
+        self.eco_conquest_update(frame);
 
         if frame % 30 == self.offset % 30 {
             self.eco_update_silo_preparation();

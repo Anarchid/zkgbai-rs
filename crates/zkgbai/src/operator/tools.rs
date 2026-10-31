@@ -219,6 +219,16 @@ pub static TOOLS: &[Tool] = &[
         run: views::military,
     },
     Tool {
+        name: "conquest",
+        description: "Conquest (feature `conquest`): how many forward objectives the map has, the belief about each \
+                       enemy team's movement tier, and the objective under way (commander, stage: walk, watch or \
+                       fortify, its mex jobs and turret sites).",
+        params: &[],
+        writes: false,
+        needs_modules: true,
+        run: views::conquest,
+    },
+    Tool {
         name: "regime",
         description: "The map's regime as the defense posture reads it: structural openness per movement tier \
                        (lanes: perimeter and closure, the fronts that would close our metal off and their defense \
