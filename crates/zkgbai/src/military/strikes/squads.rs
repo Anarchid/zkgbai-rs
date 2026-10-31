@@ -280,11 +280,9 @@ impl Ai {
                             && self.strike_evasion_goal(*id).is_none()
                     })
                 });
-                if ready {
-                    if let Some(key) = self.squad_strike_predict(&m.job, &m.members, m.home, m.halberds) {
-                        m.key = key;
-                        m.since = self.frame;
-                    }
+                if ready && let Some(key) = self.squad_strike_predict(&m.job, &m.members, m.home, m.halberds) {
+                    m.key = key;
+                    m.since = self.frame;
                 }
                 let goal = m.home;
                 self.strikes.missions.insert(sid, m);

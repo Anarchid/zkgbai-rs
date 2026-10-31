@@ -539,10 +539,10 @@ impl Squad {
             }
             return;
         }
-        if self.fire.active() {
-            if let Some(f) = fighters.get(&id) {
-                crate::military::fire_squad::release_unit(f.unit);
-            }
+        if self.fire.active()
+            && let Some(f) = fighters.get(&id)
+        {
+            crate::military::fire_squad::release_unit(f.unit);
         }
         match self.kind {
             SquadKind::Taskforce => self.taskforce_remove_unit(id, fighters, frame, nav),

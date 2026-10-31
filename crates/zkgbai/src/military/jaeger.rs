@@ -1326,8 +1326,7 @@ mod tests {
 
     #[test]
     fn recruited_hunter_cannot_leave_an_order_for_the_next_scout() {
-        let mut j = Jaegers::default();
-        j.ordered = vec![("spiderantiheavy", 0), ("jumpbomb", 0)];
+        let mut j = Jaegers { ordered: vec![("spiderantiheavy", 0), ("jumpbomb", 0)], ..Default::default() };
         assert!(j.order_filled("spiderantiheavy", 30));
         assert!(!j.order_filled("spiderantiheavy", 60));
         assert_eq!(j.ordered, [("jumpbomb", 0)]);

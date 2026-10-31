@@ -152,10 +152,10 @@ impl Ai {
         let inferences = self.airstrike_inferences();
         // Release a scout once its evidence expires or a real contact is acquired.
         self.bomber_handler.speculation.scouts.retain(|_, s| inferences.iter().any(|(f, _, _)| f.id == s.fix.id));
-        if let Some(s) = self.bomber_handler.speculation.scouts.get_mut(&id) {
-            if distance(from, s.pos) < 150.0 {
-                s.arrived.get_or_insert(frame);
-            }
+        if let Some(s) = self.bomber_handler.speculation.scouts.get_mut(&id)
+            && distance(from, s.pos) < 150.0
+        {
+            s.arrived.get_or_insert(frame);
         }
         let selected = self.bomber_handler.speculation.scouts.get(&id).map(|s| (s.fix.clone(), s.pos));
         let d = unit.def()?;

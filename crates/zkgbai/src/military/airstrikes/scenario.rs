@@ -214,11 +214,12 @@ impl Ai {
                 }
             }
         }
-        if test == "airstrike-wave" && frame == 150 {
-            if let Some(d) = self.defs.get("staticradar") {
-                for (x, z) in [(300.0, -300.0), (900.0, 1000.0), (1500.0, 0.0)] {
-                    self.cb.cheat_new_unit(d, Vec3::xz(site.x + x, site.z + z));
-                }
+        if test == "airstrike-wave"
+            && frame == 150
+            && let Some(d) = self.defs.get("staticradar")
+        {
+            for (x, z) in [(300.0, -300.0), (900.0, 1000.0), (1500.0, 0.0)] {
+                self.cb.cheat_new_unit(d, Vec3::xz(site.x + x, site.z + z));
             }
         }
         if frame == 150

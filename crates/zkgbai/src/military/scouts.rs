@@ -359,10 +359,10 @@ impl Ai {
     }
 
     pub(crate) fn scouts_air_created(&mut self, unit: Unit, builder: Option<Unit>) {
-        if let Some(builder) = builder {
-            if self.scouts.air_orders.get(&builder.id()).is_some_and(|&(name, _)| name == self.defs.name_of(unit)) {
-                self.scouts.air_orders.remove(&builder.id());
-            }
+        if let Some(builder) = builder
+            && self.scouts.air_orders.get(&builder.id()).is_some_and(|&(name, _)| name == self.defs.name_of(unit))
+        {
+            self.scouts.air_orders.remove(&builder.id());
         }
     }
 

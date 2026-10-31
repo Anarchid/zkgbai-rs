@@ -75,8 +75,8 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 14] = [
     "blitz",
     "firesquads",
 ];
-/// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
-/// Both can still be disabled with `disable=siege,crab`.
+// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
+// Both can still be disabled with `disable=siege,crab`.
 
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.

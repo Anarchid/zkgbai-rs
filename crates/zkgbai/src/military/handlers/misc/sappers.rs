@@ -253,9 +253,7 @@ impl Ai {
             });
             let selected = kept.or_else(|| {
                 let reachable = self.pathfinder.raider_reachability(&self.war, unit, 0.0);
-                let Some(map) = unit.def().and_then(tier_of).and_then(|tier| self.terrain()?.tier(tier)) else {
-                    return None;
-                };
+                let map = unit.def().and_then(tier_of).and_then(|tier| self.terrain()?.tier(tier))?;
                 let sites: Vec<_> = self
                     .sapper_sites(sapper.radius)
                     .into_iter()

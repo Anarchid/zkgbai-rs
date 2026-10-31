@@ -439,7 +439,7 @@ fn heavy_air_is_confirmed_likho_only_and_allows_partial_krow_strikes() {
         assert!(!anti_air::heavy_air_target(name));
     }
     let krow = Contact { air: true, heavy_air: true, value: 4200.0, hp: 16000.0, ..enemy(1) };
-    let jobs = missions(&[krow.clone()], Vec3::ZERO, 300);
+    let jobs = missions(std::slice::from_ref(&krow), Vec3::ZERO, 300);
     let mission = jobs.iter().find(|j| j.kind == MissionKind::HeavyAir).unwrap();
     assert!(mission.kind.primary());
     let choices = packages(mission, clear(), 800.0);

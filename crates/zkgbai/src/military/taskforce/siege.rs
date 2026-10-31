@@ -1310,7 +1310,8 @@ impl Ai {
                 } else if self.squads.get(sid).is_some_and(|q| q.shape.doctrine == "crab")
                     && !f.support.paused.is_empty()
                 {
-                    return;
+                    // The Crab's escorts set the raise aside to repair or guard
+                    // and take it up again; none are sent in their stead.
                 } else if working == 0 && since >= 20 && ps.tries < RAISE_TRIES && (since as f32) < perch.borrow_s {
                     // The raisers were called away (threatened, or taken):
                     // others are sent, up to RAISE_TRIES within the borrow.
@@ -1806,8 +1807,8 @@ impl Ai {
         if !is_site || perching {
             return None;
         }
-        let Some(perch) = self.squads.get(sid).and_then(|q| q.shape.perch.clone()) else { return None };
-        let Some(site) = self.siege_station(sid) else { return None };
+        let perch = self.squads.get(sid).and_then(|q| q.shape.perch.clone())?;
+        let site = self.siege_station(sid)?;
         let f = self.taskforces.siege.forces.entry(sid).or_default();
         f.raisers.retain(|u| u.health() > 0.0);
         let tries = f.raisers_tries;
