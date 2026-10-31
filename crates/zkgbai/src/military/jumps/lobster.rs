@@ -5,12 +5,12 @@ use std::collections::BTreeMap;
 
 use springai::{Unit, Vec3};
 
-use super::{JumpDef, MIN_ENGAGE, REACH, STALL, ground, param};
+use super::{JumpDef, REACH, STALL, ground, param};
 use crate::Ai;
-use crate::kgbutil::{PathCost, kgb_move_to};
+use crate::kgbutil::{PathCost, kgb_move_to, kgb_move_to_exact};
 use crate::military::{SquadId, SquadKind};
 use crate::nav;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 
 const LOBSTER: &str = "amphlaunch";
 // unit_thrower accelerates vertically for 22 frames, then sideways, with
@@ -18,6 +18,11 @@ const LOBSTER: &str = "amphlaunch";
 const FLIGHT: i32 = 155;
 const GATHER_TIME: i32 = 90;
 const GATHER_MARGIN: f32 = 24.0;
+// A short throw can be the only way across a cliff. Tactical target
+// selection has its own minimum distance; route execution must not use it.
+const MIN_THROW: f32 = 32.0;
+const TAKEOFF: f32 = 40.0;
+const APPROACH_TIME: i32 = 30 * 20;
 
 #[derive(Default)]
 pub(super) struct Lobsters {
@@ -31,6 +36,8 @@ struct Throw {
     squad: SquadId,
     members: Vec<i32>,
     to: Vec3,
+    /// Routed throws stage the launcher and passengers at the same take-off.
+    takeoff: Option<Vec3>,
     resume: Vec3,
     escape: bool,
     phase: Phase,
@@ -38,14 +45,24 @@ struct Throw {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
+    Approach(i32),
     Gather(i32),
     Aim(i32),
     Flight(i32),
 }
 
 impl Phase {
+    fn start(frame: i32, launcher: Vec3, takeoff: Option<Vec3>) -> Self {
+        if takeoff.is_some_and(|at| distance(launcher, at) > TAKEOFF) {
+            Self::Approach(frame)
+        } else {
+            Self::Gather(frame)
+        }
+    }
+
     fn expired(self, frame: i32) -> bool {
         match self {
+            Self::Approach(at) => frame - at >= APPROACH_TIME,
             Self::Gather(at) => frame - at >= GATHER_TIME,
             Self::Aim(at) => frame - at >= STALL,
             Self::Flight(at) => frame - at >= FLIGHT,
@@ -65,6 +82,31 @@ fn gathered(launcher: Vec3, passengers: &[Vec3], radius: f32) -> bool {
 
 fn grounded(middle: f32, ground: f32, height: f32) -> bool {
     middle - ground.max(-5.0) <= height + 12.0
+}
+
+fn throw_in_range(from: Vec3, to: Vec3, reach: f32) -> bool {
+    (MIN_THROW..=reach).contains(&distance(from, to))
+}
+
+/// A path link describes one unit's landing at a cliff rim. Try nearby
+/// aims so the whole formation can land on the far side. The caller also
+/// verifies that every passenger can walk back to the planned landing.
+fn landing_aim(planned: Vec3, from: Vec3, mut clear: impl FnMut(Vec3) -> bool) -> Option<Vec3> {
+    if clear(planned) {
+        return Some(planned);
+    }
+    let forward = (planned.z - from.z).atan2(planned.x - from.x);
+    for radius in [32.0, 64.0, 96.0, 128.0, 160.0] {
+        for k in 0..8 {
+            let turn = (k + 1) / 2 * if k % 2 == 1 { 1 } else { -1 };
+            let angle = forward + turn as f32 * std::f32::consts::FRAC_PI_4;
+            let p = Vec3::new(planned.x + radius * angle.cos(), planned.y, planned.z + radius * angle.sin());
+            if clear(p) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 impl Ai {
@@ -134,7 +176,7 @@ impl Ai {
 
     fn lobster_clear(&self, jd: JumpDef, lobster: Unit, passengers: &[Unit], to: Vec3) -> bool {
         let from = lobster.pos();
-        if !(MIN_ENGAGE..=jd.range * REACH).contains(&distance(from, to)) {
+        if !throw_in_range(from, to, jd.reach()) {
             return false;
         }
         passengers.iter().all(|u| {
@@ -145,6 +187,32 @@ impl Ai {
             // its own landing (including water restrictions).
             self.jump_clear(JumpDef { max_depth: def.max_water_depth(), ..jd }, pos, end)
                 && self.cb.map().is_possible_to_build_at(def, ground(self, end), 0)
+        })
+    }
+
+    fn lobster_safe(&self, to: Vec3, escape: bool, mine: f32) -> bool {
+        escape || (self.war.get_porc_threat(to) <= 0.0 && self.war.get_enemy_power(to) <= super::PYRO_EDGE * mine)
+    }
+
+    fn lobster_route_landing(
+        &mut self,
+        jd: JumpDef,
+        lobster: Unit,
+        passengers: &[Unit],
+        planned: Vec3,
+        escape: bool,
+        mine: f32,
+    ) -> Option<Vec3> {
+        let from = lobster.pos();
+        landing_aim(planned, from, |to| {
+            self.lobster_safe(to, escape, mine)
+                && self.lobster_clear(jd, lobster, passengers, to)
+                && passengers.iter().all(|u| {
+                    let Some(def) = u.def() else { return false };
+                    // Do not "fix" a cliff landing by putting a passenger
+                    // back on the near side, or on an isolated ledge.
+                    self.pathfinder.get_path_cost(&self.war, landing(u.pos(), from, to), planned, def) >= 0.0
+                })
         })
     }
 
@@ -293,37 +361,22 @@ impl Ai {
         } else {
             None
         };
-        if let Some(plan) = route
-            && distance(from, plan.to) > jd.range * REACH
-            && distance(leader.pos(), plan.from) > 40.0
-        {
-            // Walk to this take-off only while the optional launcher is
-            // with us. Losing/reloading it restores normal ground routing
-            // on the next assignment, rather than waiting at the cliff.
-            let mut nav = nav!(self);
-            if let Some(s) = self.squads.get_mut(sid) {
-                if escape {
-                    s.retreat_to(plan.from, &mut self.fighters, &mut nav);
-                } else {
-                    s.set_target(plan.from, &mut self.fighters, &mut nav);
-                }
-                s.target = target;
-            }
-            return true;
-        }
-        let routed = route.map(|p| p.to).filter(|&to| self.lobster_clear(jd, lobster, &passengers, to));
-        let to = strike.or(routed).or_else(|| {
+        // Keep a routed throw even when the current spread cannot land:
+        // first move to its take-off and gather, then validate the actual
+        // formation. Falling back to a walking order loses the jump edge.
+        let routed = route.filter(|p| self.lobster_safe(p.to, escape, mine));
+        let takeoff = routed.map(|p| p.from);
+        let to = strike.or(routed.map(|p| p.to)).or_else(|| {
             self.jump_path(leader, target, jd.range * REACH, |ai, p| {
-                ai.lobster_clear(jd, lobster, &passengers, p)
-                    && (escape
-                        || (ai.war.get_porc_threat(p) <= 0.0 && ai.war.get_enemy_power(p) <= super::PYRO_EDGE * mine))
+                ai.lobster_clear(jd, lobster, &passengers, p) && ai.lobster_safe(p, escape, mine)
             })
             .map(|(to, _)| to)
         });
         let Some(to) = to else { return false };
+        let phase = Phase::start(self.frame, from, takeoff);
         if std::env::var_os("ZKGBAI_JUMP_TRACE").is_some() {
             self.log(&format!(
-                "lobster: gather {} squad {sid} escape {escape} to ({:.0}, {:.0})",
+                "lobster: plan {} squad {sid} phase {phase:?} escape {escape} to ({:.0}, {:.0})",
                 lobster.id(),
                 to.x,
                 to.z
@@ -333,17 +386,37 @@ impl Ai {
             squad: sid,
             members: passengers.iter().map(|u| u.id()).collect(),
             to,
+            takeoff,
             resume: target,
             escape,
-            phase: Phase::Gather(self.frame),
+            phase,
         };
         if let Some(s) = self.squads.get_mut(sid) {
             s.target = target;
         }
         self.jumps.lobsters.throws.insert(lobster.id(), t);
-        lobster.stop(0);
+        if let Some(at) = takeoff.filter(|_| matches!(phase, Phase::Approach(_))) {
+            // Fighter::move_to randomises the endpoint by 100 elmos
+            // and queues only two waypoints. This leg must actually reach
+            // the take-off while ordinary squad assignments are suspended.
+            for u in passengers {
+                self.lobster_approach(u, at, radius * 0.6);
+            }
+            self.lobster_approach(lobster, at, TAKEOFF * 0.5);
+        } else {
+            lobster.stop(0);
+        }
         self.lobster_tick(lobster.id());
         true
+    }
+
+    fn lobster_approach(&mut self, u: Unit, at: Vec3, stop: f32) {
+        let path = self.pathfinder.find_path(&self.war, u, at, PathCost::AvoidEnemies);
+        let last = path.len().saturating_sub(1);
+        for (i, wp) in path.into_iter().enumerate() {
+            let opts = if i == 0 { 0 } else { OPTION_SHIFT_KEY };
+            kgb_move_to_exact(u, wp, if i == last { stop } else { 16.0 }, opts, self.frame);
+        }
     }
 
     fn lobster_resume(&mut self, t: Throw) {
@@ -420,34 +493,72 @@ impl Ai {
         let (jd, radius) = self.lobster_ready(lobster).unwrap();
         let mine = self.war.get_total_friendly_power(lobster.pos())
             + self.squads.get(t.squad).map_or(0.0, |s| s.get_threat(&self.fighters) as f32);
-        if !self.lobster_clear(jd, lobster, &passengers, t.to)
-            || (!t.escape
-                && (self.war.get_porc_threat(t.to) > 0.0 || self.war.get_enemy_power(t.to) > super::PYRO_EDGE * mine))
-        {
+        let (to, escape, phase, takeoff) = (t.to, t.escape, t.phase, t.takeoff);
+        if !self.lobster_safe(to, escape, mine) {
             self.lobster_cancel(id);
             return;
         }
-        if matches!(t.phase, Phase::Aim(_)) {
+        let pos = lobster.pos();
+        if matches!(phase, Phase::Approach(_)) {
+            let at = takeoff.expect("routed approach has a take-off");
+            // The launcher can outrun its passengers. Keep their queued
+            // approach alive until they arrive, rather than spending the
+            // three-second gather budget while they are still walking.
+            if distance(pos, at) > TAKEOFF || passengers.iter().any(|u| distance(pos, u.pos()) > radius) {
+                return;
+            }
+            lobster.stop(0);
+            self.jumps.lobsters.throws.get_mut(&id).unwrap().phase = Phase::Gather(self.frame);
+        }
+        if matches!(phase, Phase::Aim(_)) {
+            if !self.lobster_clear(jd, lobster, &passengers, to) {
+                self.lobster_cancel(id);
+            }
             return;
         }
-        let pos = lobster.pos();
+        // Whole-formation landing searches include walking checks; do
+        // them at the gather-order cadence, not on every engine frame.
+        if self.frame % 10 != (self.offset + 5) % 10 {
+            return;
+        }
         let positions: Vec<Vec3> = passengers.iter().map(Unit::pos).collect();
-        if gathered(pos, &positions, radius) {
+        // The current spread may straddle the cliff even though the
+        // gathered formation fits. Keep gathering until a whole-squad
+        // landing is clear, with the normal bounded gather timeout.
+        let aim = if gathered(pos, &positions, radius) {
+            if takeoff.is_some() {
+                self.lobster_route_landing(jd, lobster, &passengers, to, escape, mine)
+            } else {
+                self.lobster_clear(jd, lobster, &passengers, to).then_some(to)
+            }
+        } else {
+            None
+        };
+        if let Some(aim) = aim {
             // Stop passengers during the brief aim so they cannot walk out
             // of the cylinder between the readiness check and the shot.
             for u in passengers {
                 u.stop(0);
             }
-            if lobster.dgun_pos(ground(self, t.to), 0) {
-                self.jumps.lobsters.throws.get_mut(&id).unwrap().phase = Phase::Aim(self.frame);
+            if lobster.dgun_pos(ground(self, aim), 0) {
+                let t = self.jumps.lobsters.throws.get_mut(&id).unwrap();
+                t.to = aim;
+                t.phase = Phase::Aim(self.frame);
             } else {
                 self.lobster_cancel(id);
             }
-        } else if self.frame % 10 == (self.offset + 5) % 10 {
+        } else {
             let n = passengers.len() as f32;
             for (i, u) in passengers.iter().enumerate() {
                 let angle = std::f32::consts::TAU * i as f32 / n;
                 let p = Vec3::xz(pos.x + angle.cos() * radius * 0.4, pos.z + angle.sin() * radius * 0.4);
+                // At a cliff rim, part of the gathering circle can lie
+                // on the slope. Do not send a passenger there indefinitely.
+                let p = if u.def().is_some_and(|d| self.cb.map().is_possible_to_build_at(d, ground(self, p), 0)) {
+                    p
+                } else {
+                    pos
+                };
                 kgb_move_to(*u, ground(self, p), 0, self.frame);
             }
         }
@@ -471,6 +582,53 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routed_throw_approaches_even_when_landing_is_already_in_range() {
+        let launcher = Vec3::xz(64.0, 256.0);
+        let takeoff = Vec3::xz(256.0, 256.0);
+        let to = Vec3::xz(384.0, 256.0);
+        assert!(throw_in_range(launcher, to, 570.0));
+        assert_eq!(Phase::start(100, launcher, Some(takeoff)), Phase::Approach(100));
+        assert_eq!(Phase::start(200, takeoff, Some(takeoff)), Phase::Gather(200));
+        assert_eq!(Phase::start(100, launcher, None), Phase::Gather(100));
+    }
+
+    #[test]
+    fn routed_short_cliff_crossing_is_not_a_tactical_distance_decision() {
+        let from = Vec3::xz(64.0, 256.0);
+        let to = Vec3::xz(192.0, 256.0);
+        // The planner admits links spanning two 64-elmo grid cells.
+        assert!(distance(from, to) < super::super::MIN_ENGAGE);
+        assert!(throw_in_range(from, to, 570.0));
+        assert!(!throw_in_range(from, from, 570.0));
+        assert!(!throw_in_range(from, Vec3::xz(640.0, 256.0), 570.0));
+    }
+
+    #[test]
+    fn cliff_rim_landing_moves_inland_until_the_whole_squad_fits() {
+        let launcher = Vec3::xz(64.0, 256.0);
+        let planned = Vec3::xz(192.0, 256.0);
+        let passengers = [Vec3::xz(4.0, 256.0), Vec3::xz(124.0, 256.0)];
+        // The leader-sized link lands on the plateau at x >= 176, but
+        // preserving the squad's offsets would leave one on the cliff.
+        let clear = |aim| passengers.iter().all(|&p| landing(p, launcher, aim).x >= 176.0);
+        assert!(!clear(planned));
+        let aim = landing_aim(planned, launcher, clear).unwrap();
+        assert_eq!(aim, Vec3::xz(256.0, 256.0));
+        assert!(passengers.iter().all(|&p| landing(p, launcher, aim).x >= 176.0));
+    }
+
+    #[test]
+    fn landing_adjustment_can_go_sideways_and_never_accepts_an_unsafe_candidate() {
+        let launcher = Vec3::xz(100.0, 300.0);
+        let planned = Vec3::xz(400.0, 300.0);
+        // A building blocks the landing and the plateau ends ahead.
+        let aim = landing_aim(planned, launcher, |p| p.z >= 364.0 && (p.x - 400.0).abs() < 1.0).unwrap();
+        assert!((aim.x - 400.0).abs() < 1.0 && aim.z >= 364.0);
+        assert_eq!(landing_aim(planned, launcher, |_| false), None);
+        assert_eq!(landing_aim(planned, launcher, |_| true), Some(planned));
+    }
 
     #[test]
     fn launch_requires_the_whole_squad_inside_the_gather_radius() {
@@ -502,10 +660,13 @@ mod tests {
     }
 
     #[test]
-    fn gather_aim_and_flight_have_separate_bounded_lifetimes() {
-        for (phase, duration) in
-            [(Phase::Gather(100), GATHER_TIME), (Phase::Aim(100), STALL), (Phase::Flight(100), FLIGHT)]
-        {
+    fn approach_gather_aim_and_flight_have_separate_bounded_lifetimes() {
+        for (phase, duration) in [
+            (Phase::Approach(100), APPROACH_TIME),
+            (Phase::Gather(100), GATHER_TIME),
+            (Phase::Aim(100), STALL),
+            (Phase::Flight(100), FLIGHT),
+        ] {
             assert!(!phase.expired(100 + duration - 1));
             assert!(phase.expired(100 + duration));
         }
