@@ -76,7 +76,7 @@ impl Ai {
                             u.id(),
                             self.defs.name_of(u).to_owned(),
                             u.health(),
-                            u.pos().y - map.height_at(u.pos().x, u.pos().z),
+                            u.pos().y - map.elevation_at(u.pos().x, u.pos().z),
                         )
                     })
                     .collect();
