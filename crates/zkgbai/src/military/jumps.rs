@@ -11,7 +11,9 @@
 //! home, over the chasers, often over a cliff, as far beyond their guns as
 //! its reach allows: see [`Ai::escape_landing`]), Jacks jumping onto a
 //! target worth it, Pyros into a clump of light units, Jugglenauts into a
-//! crowd (the landing hits 1000 in 340), and Skuttles onto their heavy (see
+//! crowd (the landing stomps everything within 170 for up to 1001, friends
+//! too: none of their jumps land on ours or our allies', see [`STOMP`]),
+//! and Skuttles onto their heavy (see
 //! `jaeger`). Jumps at enemies land where they will be by then (`lead`;
 //! off, onto where they are). A Skuttle shown against its
 //! will (an enemy near, or hit) jumps at once: onto the best blast in
@@ -61,12 +63,37 @@ const MAX_LANDING_SLOPE: f32 = 0.7;
 /// A target last seen longer ago than this is not jumped at.
 const FRESH: i32 = 45;
 
-/// Jugglenaut landings (1000 damage within 170, falling off fast from
-/// the middle, ours hit too): worth one from this much enemy metal within
-/// this, and none with more than this much of ours there.
+/// Jugglenaut landings (see [`STOMP`]): worth one from this much enemy
+/// metal within this, and none that harms more than this much metal of
+/// ours and our allies'.
 const SUMO_CROWD: f32 = 700.0;
 const SUMO_SPLASH: f32 = 150.0;
 const SUMO_FRIENDS: f32 = 300.0;
+
+/// What stomps where it lands.
+const STOMPER: &str = "jumpsumo";
+/// A Jugglenaut's landing (its `LANDING` weapon) does 1001 to everything
+/// within 170 of it but itself (`noSelfDamage`), falling to nothing at the
+/// rim (edgeEffectiveness 0), and throws it about: ours, our buildings and
+/// our allies' as much as the enemy's.
+const STOMP: f32 = 1001.1;
+const STOMP_RADIUS: f32 = 170.0;
+/// Friends are reckoned this much nearer the landing than they are (they
+/// wander in the seconds before it lands), and going on as they go for
+/// this far at most.
+const STOMP_MARGIN: f32 = 40.0;
+const STOMP_LEAD: f32 = 150.0;
+/// A Jugglenaut jumps out of the way (escaping, or over a cliff on its way)
+/// only where its landing harms no more than this much metal of ours and
+/// our allies' (in shares of their health): a scratch at the rim.
+const STOMP_HARMLESS: f32 = 15.0;
+/// A Jugglenaut at its take-off whose landing is not clear of friends lands
+/// this far beside it at most (as high: the same side of the cliff)...
+const STOMP_ASIDE: [f32; 3] = [60.0, 120.0, 180.0];
+const STOMP_ASIDE_RISE: f32 = 24.0;
+/// ...or waits this many checks for them to clear before it gives the jump
+/// up (no other unit's ways use its links: all jump farther).
+const STOMP_PATIENCE: u32 = 15;
 
 /// Pyros: at least this many light enemies within this of the landing.
 /// The jump's 10 s reload strands a Pyro that jumps in where it loses, so
@@ -277,6 +304,50 @@ pub struct Jumps {
     skuttles: BTreeMap<i32, (bool, f32, bool)>,
     /// Skuttles seen losing their cloak since the summary.
     pub shown: u32,
+    /// Where each of our jumpers ordered off lands, and the frame it is
+    /// down by (a Jugglenaut's stomp spares it there).
+    landings: BTreeMap<i32, (Vec3, i32)>,
+    /// Since the summary: Jugglenaut jumps held for friends under every
+    /// landing, and those that landed beside the planned one or farther
+    /// off for friends under it.
+    pub stomp_held: u32,
+    pub stomp_aside: u32,
+}
+
+/// A friend about a Jugglenaut's landing.
+struct Bystander {
+    at: Vec3,
+    /// Where it goes, elmos a frame.
+    vel: Vec3,
+    radius: f32,
+    health: f32,
+    metal: f32,
+}
+
+/// Metal of `near` that a stomp at `c` (on the ground) `t` frames from now
+/// kills, in shares of their health: each reckoned at the nearest point of
+/// its going by then (up to [`STOMP_LEAD`]), [`STOMP_MARGIN`] nearer still.
+fn stomp_harm(near: &[Bystander], c: Vec3, t: f32) -> f32 {
+    (near.iter())
+        .map(|b| {
+            let mut go = b.vel * t;
+            if go.length() > STOMP_LEAD {
+                go = go * (STOMP_LEAD / go.length());
+            }
+            let gg = go.x * go.x + go.y * go.y + go.z * go.z;
+            let k = if gg > 0.0 {
+                let w = c - b.at;
+                ((w.x * go.x + w.y * go.y + w.z * go.z) / gg).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let surface = ((b.at + go * k).distance(c) - b.radius - STOMP_MARGIN).max(0.0);
+            if surface >= STOMP_RADIUS {
+                return 0.0;
+            }
+            b.metal * (STOMP * (1.0 - surface / STOMP_RADIUS) / b.health.max(1.0)).min(1.0)
+        })
+        .sum()
 }
 
 fn param(ud: UnitDef, key: &str) -> Option<f32> {
@@ -355,9 +426,11 @@ impl Ai {
         let Some(jd) = self.jump_ready(unit) else { return false };
         let pos = unit.pos();
         let def = unit.def();
+        let near = self.stomp_guard(unit, pos, jd.range * REACH);
         let Some((to, way)) = self.jump_path(unit, goal, jd.range * REACH, |ai, p| {
             let view = ai.war.view(def);
             ai.jump_clear(jd, pos, p)
+                && ai.stomp_spares(near.as_deref(), jd, pos, p)
                 && view.get_porc_threat(p) <= 0.0
                 && view.get_effective_threat(p) <= 0.0
                 && distance(pos, p) >= MIN_ESCAPE
@@ -373,6 +446,90 @@ impl Ai {
             }
         }
         true
+    }
+
+    /// Where our `id` is landing from a jump ordered off, if it is.
+    pub(crate) fn jump_landing(&self, id: i32) -> Option<Vec3> {
+        self.jumps.landings.get(&id).filter(|l| l.1 >= self.frame).map(|l| l.0)
+    }
+
+    /// [`Ai::stomp_bystanders`] for jumps out of the way (escapes, travel,
+    /// cliffs on a way); none with `stomp` off.
+    fn stomp_guard(&self, unit: Unit, from: Vec3, reach: f32) -> Option<Vec<Bystander>> {
+        if self.dev_off("stomp") { None } else { self.stomp_bystanders(unit, from, reach) }
+    }
+
+    /// The friends a stomp by `unit` (if it stomps, see [`STOMP`]) landing
+    /// within `reach` of `from` may hit: ours, our buildings and our allies';
+    /// our jumpers in flight where they land.
+    fn stomp_bystanders(&self, unit: Unit, from: Vec3, reach: f32) -> Option<Vec<Bystander>> {
+        if self.defs.name_of(unit) != STOMPER {
+            return None;
+        }
+        let (me, frame) = (unit.id(), self.frame);
+        let r = reach + STOMP_RADIUS + STOMP_MARGIN + STOMP_LEAD + 64.0;
+        let bystander = |u: Unit, landing: Option<Vec3>| {
+            let ud = u.def()?;
+            let (at, vel) = landing.map_or_else(|| (u.pos(), u.vel()), |to| (to, Vec3::default()));
+            let health = if u.health() > 0.0 { u.health() } else { ud.health() };
+            let built = if u.is_being_built() { u.build_progress().max(0.05) } else { 1.0 };
+            Some(Bystander { at, vel, radius: ud.radius(), health, metal: ud.cost(self.metal) * built })
+        };
+        let landing = |id: i32| self.jumps.landings.get(&id).filter(|l| l.1 >= frame).map(|l| l.0);
+        let mut near: Vec<Bystander> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for u in self.cb.friendly_units_in_cylinder(from, r) {
+            if u.id() != me && seen.insert(u.id()) {
+                near.extend(bystander(u, landing(u.id())));
+            }
+        }
+        // Ours on their way down from farther off.
+        for (&id, &(to, _)) in self.jumps.landings.iter().filter(|(_, l)| l.1 >= frame) {
+            if id != me && !seen.contains(&id) && distance(from, to) <= r {
+                near.extend(Unit::from_id(self.cb, id).and_then(|u| bystander(u, Some(to))));
+            }
+        }
+        Some(near)
+    }
+
+    /// Whether a landing of `jd` from `from` at `to` harms no friends of
+    /// `near` (see [`Ai::stomp_bystanders`]; none for what does not stomp).
+    fn stomp_spares(&self, near: Option<&[Bystander]>, jd: JumpDef, from: Vec3, to: Vec3) -> bool {
+        near.is_none_or(|near| {
+            stomp_harm(near, ground(self, to), Self::jump_time(jd, distance(from, to))) <= STOMP_HARMLESS
+        })
+    }
+
+    /// Where a Jugglenaut jumping from `from` lands for `want`, clear of the
+    /// friends `near`: there, or the nearest clear spot beside it as high
+    /// (the same side of a cliff); none when there is none.
+    fn stomp_landing(&self, jd: JumpDef, from: Vec3, want: Vec3, near: &[Bystander]) -> Option<Vec3> {
+        if self.stomp_spares(Some(near), jd, from, want) {
+            return Some(want);
+        }
+        let map = self.cb.map();
+        let level = map.elevation_at(want.x, want.z);
+        for r in STOMP_ASIDE {
+            let mut best: Option<(f32, Vec3)> = None;
+            for k in 0..12 {
+                let a = k as f32 * std::f32::consts::TAU / 12.0;
+                let q = Vec3::xz(want.x + a.cos() * r, want.z + a.sin() * r);
+                let d = distance(from, q);
+                if !(MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d)
+                    || (map.elevation_at(q.x, q.z) - level).abs() > STOMP_ASIDE_RISE
+                {
+                    continue;
+                }
+                let harm = stomp_harm(near, ground(self, q), Self::jump_time(jd, d));
+                if harm <= STOMP_HARMLESS && best.is_none_or(|b| harm < b.0) && self.jump_clear(jd, from, q) {
+                    best = Some((harm, q));
+                }
+            }
+            if let Some((_, q)) = best {
+                return Some(q);
+            }
+        }
+        None
     }
 
     /// The jumps of def `ud`, if it jumps (and the gadget drives them).
@@ -451,6 +608,9 @@ impl Ai {
     fn jump_order(&mut self, unit: Unit, to: Vec3, why: &str) {
         let to = ground(self, to);
         unit.execute_custom_command(cmd::JUMP, &[to.x, to.y, to.z], 0, NO_TIMEOUT);
+        let lands = (unit.def().and_then(|d| self.jump_def(d)))
+            .map_or(120.0, |jd| Self::jump_time(jd, distance(unit.pos(), to)));
+        self.jumps.landings.insert(unit.id(), (to, self.frame + lands as i32 + 15));
         self.jumps.last.insert(unit.id(), self.frame);
         self.jumps.pending.push(Pending { unit, at: self.frame, to, queued: false });
         *self.jumps.counts.entry(why.to_owned()).or_default() += 1;
@@ -610,16 +770,48 @@ impl Ai {
         if home == NULLPOS || self.jump_def(def).is_none() {
             return;
         }
-        let pos = unit.pos();
-        if self.war.view(Some(def)).get_threat(pos) <= 0.0 {
+        if self.war.view(Some(def)).get_threat(unit.pos()) <= 0.0 {
             return;
         }
+        self.jump_escape_now(unit, home);
+    }
+
+    /// [`Ai::jump_escape`] whether enemies reach it or not (staged tests).
+    pub(crate) fn jump_escape_now(&mut self, unit: Unit, home: Vec3) {
+        let Some(def) = unit.def() else { return };
+        let pos = unit.pos();
         let Some(jd) = self.jump_ready(unit) else { return };
         let kept = self.pathfinder.jump_plans.get(&unit.id()).copied();
         let land = |d: f32| Self::jump_time(jd, d);
-        let Some((to, way)) =
-            self.escape_landing(unit, pos, home, jd.range * REACH, land, |ai, p| ai.jump_clear(jd, pos, p))
-        else {
+        // A Jugglenaut's landing stomps: not on our side's or our allies'.
+        let near = self.stomp_guard(unit, pos, jd.range * REACH);
+        let spared = std::cell::Cell::new(false);
+        let found = self.escape_landing(unit, pos, home, jd.range * REACH, land, |ai, p| {
+            if !ai.jump_clear(jd, pos, p) {
+                return false;
+            }
+            let spares = ai.stomp_spares(near.as_deref(), jd, pos, p);
+            spared.set(spared.get() || !spares);
+            spares
+        });
+        if spared.get() {
+            let held = found.is_none();
+            if held {
+                self.jumps.stomp_held += 1;
+            } else {
+                self.jumps.stomp_aside += 1;
+            }
+            self.log(&format!(
+                "jumps: {} {} at ({:.0}, {:.0}) {}: friends under {} landings",
+                self.defs.name(def),
+                unit.id(),
+                pos.x,
+                pos.z,
+                if held { "holds its escape" } else { "escapes elsewhere" },
+                if held { "all its" } else { "better" }
+            ));
+        }
+        let Some((to, way)) = found else {
             // (The way's own jump, if any, still stands.)
             if let Some(p) = kept {
                 self.pathfinder.jump_plans.insert(unit.id(), p);
@@ -789,6 +981,7 @@ impl Ai {
     /// engine a frame or more after they are given, so the queue is judged
     /// only once STALL frames have passed.
     fn jumps_watch(&mut self, frame: i32) {
+        self.jumps.landings.retain(|_, l| l.1 >= frame);
         let pending = std::mem::take(&mut self.jumps.pending);
         let trace = std::env::var_os("ZKGBAI_JUMP_TRACE").is_some();
         for mut j in pending {
@@ -832,8 +1025,10 @@ impl Ai {
                 kgb_move_to(unit, j.to, 0, frame);
             } else if j.queued {
                 self.jumps.replaced += 1;
+                self.jumps.landings.remove(&unit.id());
             } else {
                 self.jumps.refused += 1;
+                self.jumps.landings.remove(&unit.id());
             }
         }
     }
@@ -844,6 +1039,7 @@ impl Ai {
         self.jumps.sumos.remove(&unit.id());
         self.jumps.takeoff.remove(&unit.id());
         self.jumps.skuttles.remove(&unit.id());
+        self.jumps.landings.remove(&unit.id());
         self.pathfinder.jump_plans.remove(&unit.id());
     }
 
@@ -869,16 +1065,49 @@ impl Ai {
             let off = Vec3::new(pos.x - p.from.x, 0.0, pos.z - p.from.z);
             let alongside = Vec3::new(p.to.x + off.x, p.to.y, p.to.z + off.z);
             let beside = p.shared && distance(pos, p.from) > TAKEOFF && distance(pos, p.from) <= ALONGSIDE;
-            let landing = if beside && self.jump_to(unit, alongside, "way") {
-                Some(alongside)
-            } else if self.jump_to(unit, p.to, "way") {
-                Some(p.to)
+            // A Jugglenaut lands clear of friends (see STOMP): beside its
+            // landing if need be, or not yet.
+            let stomp = match self.jump_ready(unit) {
+                Some(jd) if distance(pos, p.to) <= jd.range * REACH + ALONGSIDE => {
+                    self.stomp_guard(unit, pos, jd.range * REACH).map(|near| (jd, near))
+                }
+                _ => None,
+            };
+            let mut held = false;
+            let mut place = |ai: &Self, want: Vec3| match &stomp {
+                None => Some(want),
+                Some((jd, near)) => {
+                    let q = ai.stomp_landing(*jd, pos, want, near);
+                    held |= q.is_none();
+                    q
+                }
+            };
+            let landing = if let Some(q) = beside.then(|| place(self, alongside)).flatten()
+                && self.jump_to(unit, q, "way")
+            {
+                Some(q)
+            } else if let Some(q) = place(self, p.to)
+                && self.jump_to(unit, q, "way")
+            {
+                Some(q)
             } else {
                 None
             };
             if let Some(to) = landing {
-                if distance(p.then, p.to) > 16.0 {
+                let aside = distance(to, p.to) > 1.0 && distance(to, alongside) > 1.0;
+                if distance(p.then, p.to) > 16.0 || aside {
                     kgb_move_to(unit, p.then, OPTION_SHIFT_KEY, frame);
+                }
+                if aside {
+                    self.jumps.stomp_aside += 1;
+                    self.log(&format!(
+                        "jumps: {} {} lands its way's jump {:.0} beside ({:.0}, {:.0}): friends under it",
+                        self.defs.name_of(unit),
+                        id,
+                        distance(to, p.to),
+                        p.to.x,
+                        p.to.z
+                    ));
                 }
                 let map = self.cb.map();
                 self.jumps.way_rises.push(map.elevation_at(to.x, to.z) - map.elevation_at(pos.x, pos.z));
@@ -894,10 +1123,13 @@ impl Ai {
                 _ => 1,
             };
             self.jumps.takeoff.insert(id, (p.from, tries));
-            if tries < TAKEOFF_TRIES {
+            if tries < if held { STOMP_PATIENCE } else { TAKEOFF_TRIES } {
                 continue;
             }
             self.jumps.takeoff.remove(&id);
+            if held {
+                self.jumps.stomp_held += 1;
+            }
             if p.shared {
                 // The leader's jump, not this unit's: its own way next.
                 self.pathfinder.jump_plans.remove(&id);
@@ -906,14 +1138,15 @@ impl Ai {
             let (from, to) = self.pathfinder.drop_jump(&p);
             self.jumps.dropped += 1;
             self.log(&format!(
-                "jumps: {} {} stands at its take-off ({:.0}, {:.0}) and cannot jump to ({:.0}, {:.0}): no way \
+                "jumps: {} {} stands at its take-off ({:.0}, {:.0}) and cannot jump to ({:.0}, {:.0}){}: no way \
                  jumps there now",
                 self.defs.name_of(unit),
                 id,
                 from.x,
                 from.z,
                 to.x,
-                to.z
+                to.z,
+                if held { " for friends under it" } else { "" }
             ));
         }
     }
@@ -928,7 +1161,7 @@ impl Ai {
             let rises: Vec<String> = self.jumps.way_rises.iter().map(|r| format!("{r:+.0}")).collect();
             self.log(&format!(
                 "jumps: {} in the last minute ({} flew, {} replaced, {} never queued, {} stalled, {} dropped from \
-                 ways): {}{}{}",
+                 ways): {}{}{}{}",
                 self.jumps.total,
                 self.jumps.flew,
                 self.jumps.replaced,
@@ -937,8 +1170,18 @@ impl Ai {
                 self.jumps.dropped,
                 counts.join(", "),
                 if rises.is_empty() { String::new() } else { format!("; ways rose {}", rises.join(" ")) },
-                if self.jumps.shown == 0 { String::new() } else { format!("; Skuttles shown {}", self.jumps.shown) }
+                if self.jumps.shown == 0 { String::new() } else { format!("; Skuttles shown {}", self.jumps.shown) },
+                if self.jumps.stomp_held + self.jumps.stomp_aside == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        "; Jugglenauts kept off friends: {} held, {} landed aside",
+                        self.jumps.stomp_held, self.jumps.stomp_aside
+                    )
+                }
             ));
+            self.jumps.stomp_held = 0;
+            self.jumps.stomp_aside = 0;
             self.jumps.way_rises.clear();
             self.jumps.counts.clear();
             self.jumps.total = 0;
@@ -1000,15 +1243,6 @@ impl Ai {
                 Seen { id: e.unit_id, pos, vel, metal, health: e.current_health() }
             })
             .collect()
-    }
-
-    /// Metal of our own units within `r` of `p` (jumpers excepted).
-    fn jumps_friends_near(&self, p: Vec3, r: f32) -> f32 {
-        (self.cb.friendly_units_in(p, r).iter())
-            .filter(|u| u.team() == self.team_id && u.def().is_some_and(|d| d.speed() > 0.0))
-            .filter(|u| self.defs.name_of(**u) != "jumpsumo")
-            .filter_map(|u| u.def().map(|d| d.cost(self.metal)))
-            .sum()
     }
 
     /// A Jack jumps onto the best target in reach that its side can take:
@@ -1143,11 +1377,15 @@ impl Ai {
     }
 
     /// A Jugglenaut jumps into the thick of a crowd (its landing hits all
-    /// within 340).
+    /// within 170, see [`STOMP`]), sparing friends.
     fn jumps_sumo(&mut self, unit: Unit) {
         let Some(jd) = self.jump_ready(unit) else { return };
         let pos = unit.pos();
         let near = self.jumps_enemies_near(pos, jd.range * REACH + SUMO_SPLASH + LEAD_LOOK);
+        if near.is_empty() {
+            return;
+        }
+        let friends = self.stomp_bystanders(unit, pos, jd.range * REACH).unwrap_or_default();
         let mut best: Option<(f32, Vec3)> = None;
         for seed in &near {
             // Onto where it will be, and the crowd about it by then.
@@ -1160,7 +1398,7 @@ impl Ai {
             let metal: f32 = near.iter().filter(|e| distance(e.at(t), p) <= SUMO_SPLASH).map(|e| e.metal).sum();
             if metal >= SUMO_CROWD
                 && best.is_none_or(|b| metal > b.0)
-                && self.jumps_friends_near(p, 170.0) <= SUMO_FRIENDS
+                && stomp_harm(&friends, ground(self, p), t) <= SUMO_FRIENDS
             {
                 best = Some((metal, p));
             }
@@ -1448,5 +1686,38 @@ mod tests {
         assert_eq!(blast_damage(30.0 + BLAST_RADIUS, 30.0), 0.0);
         let half = blast_damage(30.0 + BLAST_RADIUS / 2.0, 30.0);
         assert!((0.6 * BLAST..0.65 * BLAST).contains(&half), "{half}");
+    }
+
+    fn friend(x: f32, vx: f32, health: f32, metal: f32) -> Bystander {
+        Bystander { at: Vec3::xz(x, 0.0), vel: Vec3::xz(vx, 0.0), radius: 10.0, health, metal }
+    }
+
+    #[test]
+    fn stomps_kill_light_friends_under_them_and_scratch_heavies() {
+        let c = Vec3::xz(0.0, 0.0);
+        // A Glaive (65 metal, 230 health) under the landing: all of it.
+        assert_eq!(stomp_harm(&[friend(30.0, 0.0, 230.0, 65.0)], c, 90.0), 65.0);
+        // Another Jugglenaut (1700, 13500 health) under it: a share.
+        let sumo = stomp_harm(&[friend(30.0, 0.0, 13500.0, 1700.0)], c, 90.0);
+        assert!((100.0..130.0).contains(&sumo), "{sumo}");
+        // Beyond the stomp, its margin and the unit's radius: nothing.
+        let far = STOMP_RADIUS + STOMP_MARGIN + 10.0 + 1.0;
+        assert_eq!(stomp_harm(&[friend(far, 0.0, 230.0, 65.0)], c, 90.0), 0.0);
+        // Toward the rim: less than the middle, but more than harmless.
+        let rim = stomp_harm(&[friend(150.0, 0.0, 2000.0, 300.0)], c, 90.0);
+        assert!(rim > STOMP_HARMLESS && rim < 150.0, "{rim}");
+    }
+
+    #[test]
+    fn stomps_count_friends_walking_in_but_not_out() {
+        let c = Vec3::xz(0.0, 0.0);
+        // 300 off, walking across the landing at 2 a frame: in it by then.
+        assert!(stomp_harm(&[friend(300.0, -2.0, 230.0, 65.0)], c, 90.0) > 60.0);
+        // 300 off, walking away: clear.
+        assert_eq!(stomp_harm(&[friend(300.0, 2.0, 230.0, 65.0)], c, 90.0), 0.0);
+        // Under it now and leaving: still counted (it may stop).
+        assert_eq!(stomp_harm(&[friend(0.0, 2.0, 230.0, 65.0)], c, 90.0), 65.0);
+        // The lead stops at STOMP_LEAD: a fast one 600 off is not counted.
+        assert_eq!(stomp_harm(&[friend(600.0, -10.0, 230.0, 65.0)], c, 90.0), 0.0);
     }
 }

@@ -27,6 +27,7 @@ pub mod roles;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod stakeouts;
+pub mod stomp_test;
 pub mod strike_test;
 pub mod strikes;
 pub mod sweeps;
@@ -546,6 +547,7 @@ impl Ai {
         self.guard("strikes.update", |ai| ai.strikes_update(frame));
         self.guard("strike_test.update", |ai| ai.strike_test_update(frame));
         self.guard("raid_test.update", |ai| ai.raid_test_update(frame));
+        self.guard("stomp_test.update", |ai| ai.stomp_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
@@ -1043,6 +1045,7 @@ impl Ai {
 
         self.war.new_units.remove(&id);
         self.raid_test_unit_destroyed(unit);
+        self.stomp_test_unit_destroyed(unit);
         self.firefighters_unit_destroyed(unit, attacker);
         self.qrf_asset_lost(unit, attacker);
         self.qrf_remove_unit(id);
