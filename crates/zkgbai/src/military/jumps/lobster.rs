@@ -16,6 +16,11 @@ const LOBSTER: &str = "amphlaunch";
 // unit_thrower accelerates vertically for 22 frames, then sideways, with
 // a nominal 125-frame flight and 15 extra frames of collision protection.
 pub(crate) const FLIGHT: i32 = 155;
+/// Frames from the throw order to the landing: the launcher's aim (a few
+/// frames), the vertical start (the sideways push ends ~20 frames in) and
+/// the 125-frame flight. The flight takes as long however far the throw,
+/// so a throw at anything moving lands well behind it unless led.
+const LANDS: f32 = 150.0;
 pub(crate) const STRIKE_AIM_FRAMES: i32 = STALL;
 const GATHER_TIME: i32 = 90;
 const GATHER_MARGIN: f32 = 24.0;
@@ -42,6 +47,9 @@ struct Throw {
     resume: Vec3,
     escape: bool,
     strike: bool,
+    /// A throw onto a clump of enemies: the clump, aimed at anew (led) as
+    /// it goes (it moves while the squad gathers).
+    chase: Vec<i32>,
     phase: Phase,
 }
 
@@ -184,6 +192,7 @@ impl Ai {
                 resume: target,
                 escape: false,
                 strike: true,
+                chase: Vec::new(),
                 phase: Phase::Gather(self.frame),
             },
         );
@@ -341,6 +350,29 @@ impl Ai {
         })
     }
 
+    /// Where a throw onto clump `chase` lands: where the clump's middle will
+    /// be by then (see [`LANDS`]), or near it where the squad lands clear and
+    /// safe; none if the clump is gone from sight or out of reach.
+    fn lobster_chase(&self, jd: JumpDef, lobster: Unit, passengers: &[Unit], chase: &[i32], mine: f32) -> Option<Vec3> {
+        let frame = self.frame;
+        let seen: Vec<(Vec3, Vec3)> = (chase.iter())
+            .filter_map(|id| self.war.targets.get(id))
+            .filter(|e| !e.is_dead && frame - e.last_seen <= super::FRESH)
+            .map(|e| self.enemy_motion(e))
+            .collect();
+        if seen.is_empty() {
+            return None;
+        }
+        let n = seen.len() as f32;
+        let mean = |f: fn(&(Vec3, Vec3)) -> f32| seen.iter().map(f).sum::<f32>() / n;
+        let c = Vec3::xz(mean(|s| s.0.x), mean(|s| s.0.z));
+        let v = Vec3::xz(mean(|s| s.1.x), mean(|s| s.1.z));
+        let led = super::ahead(c, v, LANDS);
+        landing_aim(led, lobster.pos(), |p| {
+            self.lobster_clear(jd, lobster, passengers, p) && self.lobster_safe(p, false, mine)
+        })
+    }
+
     /// Iris-style attachment, with one Lobster per amphib squad. It stays
     /// outside the member list, squad value, leader choice and rally checks.
     pub(crate) fn lobster_support(&mut self, id: i32) -> bool {
@@ -481,11 +513,13 @@ impl Ai {
             own_dps += dps;
             own_range = own_range.max(range);
         }
-        let strike = (!escape)
-            .then(|| self.jumps_pyro_target(from, jd.range, mine, own_dps, own_range))
+        let (strike, chase) = (!escape)
+            .then(|| self.jumps_pyro_target(from, jd.range, mine, own_dps, own_range, |_| LANDS))
             .flatten()
-            .filter(|&to| self.lobster_clear(jd, lobster, &passengers, to));
-        let route = if strike.is_none() && !self.dev_off("jumppath") {
+            .filter(|(to, _)| self.lobster_clear(jd, lobster, &passengers, *to))
+            .map_or((None, Vec::new()), |(to, clump)| (Some(to), clump));
+        // An escape throws now or not at all: no walk to a take-off first.
+        let route = if strike.is_none() && !escape && !self.dev_off("jumppath") {
             self.pathfinder.equipped_jump(&self.war, leader, target, PathCost::AvoidEnemies, jd)
         } else {
             None
@@ -496,12 +530,31 @@ impl Ai {
         let routed = route.filter(|p| self.lobster_safe(p.to, escape, mine));
         let takeoff = routed.map(|p| p.from);
         let to = strike.or(routed.map(|p| p.to)).or_else(|| {
-            self.jump_path(leader, target, jd.range * REACH, |ai, p| {
-                ai.lobster_clear(jd, lobster, &passengers, p) && ai.lobster_safe(p, escape, mine)
-            })
-            .map(|(to, _)| to)
+            if escape {
+                // As far beyond the chasers' guns as the throw reaches, not
+                // just out of them (see `escape_landing`).
+                let clear = |ai: &Self, p| ai.lobster_clear(jd, lobster, &passengers, p);
+                self.escape_landing(leader, from, target, jd.range * REACH, |_| LANDS, clear).map(|(to, _)| to)
+            } else {
+                self.jump_path(leader, target, jd.range * REACH, |ai, p| {
+                    ai.lobster_clear(jd, lobster, &passengers, p) && ai.lobster_safe(p, escape, mine)
+                })
+                .map(|(to, _)| to)
+            }
         });
         let Some(to) = to else { return false };
+        if escape || strike.is_some() {
+            self.log(&format!(
+                "lobster: squad {sid} plans {} {:.0} of its {:.0} reach from ({:.0}, {:.0}) to ({:.0}, {:.0})",
+                if escape { "an escape" } else { "a throw onto a clump," },
+                distance(from, to),
+                jd.range * REACH,
+                from.x,
+                from.z,
+                to.x,
+                to.z
+            ));
+        }
         let phase = Phase::start(self.frame, from, takeoff);
         if std::env::var_os("ZKGBAI_JUMP_TRACE").is_some() {
             self.log(&format!(
@@ -519,6 +572,7 @@ impl Ai {
             resume: target,
             escape,
             strike: false,
+            chase,
             phase,
         };
         if let Some(s) = self.squads.get_mut(sid) {
@@ -633,6 +687,7 @@ impl Ai {
         let mine = self.war.get_total_friendly_power(lobster.pos())
             + self.squads.get(t.squad).map_or(0.0, |s| s.get_threat(&self.fighters) as f32);
         let (to, escape, phase, takeoff) = (t.to, t.escape, t.phase, t.takeoff);
+        let chase = t.chase.clone();
         if !t.strike && !self.lobster_safe(to, escape, mine) {
             self.lobster_cancel(id);
             return;
@@ -667,6 +722,20 @@ impl Ai {
         let aim = if gathered(pos, &positions, radius) {
             if takeoff.is_some() {
                 self.lobster_route_landing(jd, lobster, &passengers, to, escape, mine)
+            } else if !chase.is_empty() {
+                // Onto where the clump will be when they land, from now.
+                let Some(aim) = self.lobster_chase(jd, lobster, &passengers, &chase, mine) else {
+                    self.log(&format!("lobster: {id} lets its clump go (out of sight, reach or safety)"));
+                    self.lobster_cancel(id);
+                    return;
+                };
+                self.log(&format!(
+                    "lobster: {id} throws onto its clump led to ({:.0}, {:.0}), {:.0} from the first aim",
+                    aim.x,
+                    aim.z,
+                    distance(aim, to)
+                ));
+                Some(aim)
             } else {
                 self.lobster_clear(jd, lobster, &passengers, to).then_some(to)
             }

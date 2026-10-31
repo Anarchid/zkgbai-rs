@@ -139,7 +139,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("jaeger", "Army", "anti-heavy hunters once enemy heavies show"),
     ("widowcap", "Army", "jaeger Widows kept to a quarter of the rest of the army's metal"),
     ("pounce", "Army", "jaeger Skuttles jump on any heavy in reach, their mark or not"),
-    ("lead", "Army", "jaeger Skuttles jump where their heavy will be when they land"),
+    ("lead", "Army", "jumps and Lobster throws at enemies land where they will be by then (off: where they are)"),
     ("ambush", "Army", "jaegers lie in wait on a heavy's way; Widows stun only where the army can finish"),
     ("dodge", "Army", "cloaked jaegers step (Skuttles jump) out of sight of enemies coming their way"),
     ("jaegerreserve", "Army", "the energy reserve asked of the game covers the jaegers' cloaks"),
