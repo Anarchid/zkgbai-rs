@@ -10,9 +10,10 @@ use crate::defs::cmd;
 use crate::kgbutil::kgb_move_to;
 use crate::military::Fighter;
 use crate::nav;
-use crate::util::{NULLPOS, distance, get_directional_point, get_radial_point};
+use crate::util::{NULLPOS, distance, get_radial_point};
 
 mod sappers;
+mod supports;
 
 #[derive(Default)]
 pub struct MiscHandler {
@@ -321,64 +322,6 @@ impl Ai {
         for slot in [&mut h.nuke, &mut h.zenith, &mut h.derp] {
             if slot.is_some_and(gone) {
                 *slot = None;
-            }
-        }
-    }
-
-    fn misc_update_supports(&mut self) {
-        let ids: Vec<i32> = self.misc_handler.supports.iter().copied().collect();
-        for id in ids {
-            if self.lobster_support(id) {
-                continue;
-            }
-            if self.retreat_handler.is_retreating(id) {
-                continue;
-            }
-            let Some(s) = self.fighters.get(&id) else { continue };
-            let mut squad = s.squad;
-            let my_pos = s.get_pos();
-
-            if squad.is_some_and(|sid| self.squads.get(sid).is_none_or(|sq| sq.is_dead(&self.fighters))) {
-                squad = None;
-            }
-            if squad.is_none() && !self.squad_handler.squads.is_empty() {
-                let mut max_value = 0.0;
-                for sq in self.squad_handler.squads.iter().filter_map(|&sid| self.squads.get(sid)) {
-                    if sq.is_dead(&self.fighters) {
-                        continue;
-                    }
-                    if sq.metal_value > max_value {
-                        max_value = sq.metal_value;
-                        squad = Some(sq.id);
-                    }
-                }
-            }
-            if let Some(s) = self.fighters.get_mut(&id) {
-                s.squad = squad;
-            }
-
-            let target = match squad.and_then(|sid| self.squads.get(sid)) {
-                Some(sq) => {
-                    let spos = sq.get_pos(&self.fighters);
-                    let starget = sq.target;
-                    if spos == starget {
-                        self.say("Iris's squad's pos equals its target!");
-                    }
-                    if starget != NULLPOS {
-                        if self.war.get_threat(starget) > 0.0 || self.war.get_bp(starget) == 0.0 {
-                            get_directional_point(starget, spos, distance(spos, starget) + 125.0)
-                        } else {
-                            get_directional_point(spos, starget, 125.0)
-                        }
-                    } else {
-                        spos
-                    }
-                }
-                None => self.graph_get_closest_haven(my_pos),
-            };
-            let mut nav = nav!(self);
-            if let Some(s) = self.fighters.get_mut(&id) {
-                s.move_to(target, &mut nav);
             }
         }
     }

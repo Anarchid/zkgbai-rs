@@ -433,6 +433,16 @@ impl Ai {
 
     fn squad_assign_assault(&mut self, id: i32) {
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
+        // Orphaned taskforce supports must never become assault squads.
+        if self.unit_classes.mob_supports.contains(self.defs.name_of(unit)) {
+            self.squad_leave_squad(id);
+            self.squad_handler.fighters.remove(&id);
+            if let Some(mut f) = self.fighters.remove(&id) {
+                f.squad = None;
+                self.misc_add_support(f);
+            }
+            return;
+        }
         let slot = Slot::for_assault(self.defs.name_of(unit), !self.dev_off("firesquads"));
         let key = (slot, unit.def().and_then(tier_of));
         let tf = self.graph.territory_fraction;
@@ -474,6 +484,10 @@ impl Ai {
     }
 
     pub fn squad_add_assault(&mut self, f: Fighter) {
+        if self.unit_classes.mob_supports.contains(self.defs.name_of(f.unit)) {
+            self.misc_add_support(f);
+            return;
+        }
         // port: one fighter store serves all handlers, so also refuse units
         // another handler already controls instead of replacing its wrapper.
         if self.squad_handler.fighters.contains(&f.id) || self.fighters.contains_key(&f.id) {
@@ -497,6 +511,10 @@ impl Ai {
             .collect();
         let mut squads: Vec<SquadId> = Vec::new();
         for f in fresh {
+            if self.unit_classes.mob_supports.contains(self.defs.name_of(f.unit)) {
+                self.misc_add_support(f);
+                continue;
+            }
             let id = f.id;
             self.fighters.insert(id, f);
             self.squad_handler.fighters.insert(id);
@@ -792,9 +810,9 @@ impl Ai {
                     self.taskforce_spotter_release(id);
                     return;
                 }
-                // Spare cloakers retain the ordinary support controller;
-                // they can be called when a battery fills or loses its Iris.
-                if name == "cloakjammer" {
+                // Spare shields and cloakers escort other fighters or
+                // frontline assets until their doctrine has a place for them.
+                if self.unit_classes.mob_supports.contains(name.as_str()) {
                     self.squad_handler.fighters.remove(&id);
                     if let Some(mut f) = self.fighters.remove(&id) {
                         f.squad = None;
@@ -931,11 +949,12 @@ impl Ai {
         let ids: Vec<i32> = self.squad_handler.fighters.iter().chain(&self.misc_handler.supports).copied().collect();
         for id in ids {
             let Some(f) = self.fighters.get(&id) else { continue };
-            let spare_cloaker = self.misc_handler.supports.contains(&id) && self.defs.name_of(f.unit) == "cloakjammer";
-            if !f.shield_mob && !spare_cloaker {
+            let spare_support = self.misc_handler.supports.contains(&id)
+                && self.unit_classes.mob_supports.contains(self.defs.name_of(f.unit));
+            if !f.shield_mob && !spare_support {
                 continue;
             }
-            if (!spare_cloaker && f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_taskforce()))
+            if (!spare_support && f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_taskforce()))
                 || !self.squad_fits(sid, id)
             {
                 continue;
@@ -956,7 +975,7 @@ impl Ai {
             if !wanted {
                 continue;
             }
-            if spare_cloaker {
+            if spare_support {
                 self.misc_handler.supports.remove(&id);
                 self.squad_handler.fighters.insert(id);
                 if let Some(f) = self.fighters.get_mut(&id) {

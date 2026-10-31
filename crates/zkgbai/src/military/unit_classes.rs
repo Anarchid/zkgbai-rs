@@ -104,9 +104,8 @@ impl UnitClasses {
                 "shieldarty",
                 "shieldfelon",
                 "vehcapture",
-                "shieldshield",
             ]),
-            mob_supports: set(&["cloakjammer", "amphlaunch"]),
+            mob_supports: set(&["shieldshield", "cloakjammer", "amphlaunch"]),
             striders: set(&["striderdante", "striderscorpion", "striderbantha", "striderdetriment"]),
             loners: set(&["vehsupport", "tankheavyassault", "spidercrabe", "amphassault"]),
             arties: set(&[
