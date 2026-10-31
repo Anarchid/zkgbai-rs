@@ -190,3 +190,29 @@ reports gathering, assessing and diving (also exposed through the legacy
 Halberd squad formation and mission selection, with no preseeded strike wave.
 `test=assassin-halberd-squad-phantom` versus `test=assassin-target` adds a seeded
 approximate firing fix and a genuinely cloaked victim.
+
+## Lobster / Buoy strikes
+
+An existing amphibious assault squad containing Buoys can use its attached,
+reloaded Lobster against fresh named artillery or fragile targets. This does not
+order extra Buoys or launchers. The squad must already be near its launcher;
+combined throw range and Buoy weapon range determine whether a job is in reach.
+All passengers gather before the normal throw controller checks their arcs and
+individual landing positions. Strikes then predicts the kill before authorizing
+manual fire. Ordinary landing threat vetoes do not override that kill assessment.
+
+The mechanics rollout carries passengers along the throw displacement, including
+up to 45 frames of aiming and 155 frames of flight. Enemy fire, health loss,
+reloads, EMP and slow persist; passengers cannot fire before landing. This is a
+conservative ground-fire approximation of the horizontal flight, not a simulation
+of the actual ballistic arc or cloak discovery. Existing 55% target-death gating
+still applies, and both the launcher and exact membership are rechecked before
+launch. Buoys fire at will and focus the target after landing; unknown Phantom
+fixes are searched. Death, stale evidence, takeover or a failed throw ends the
+mission. The launcher retains manual-fire-only behavior and stays at take-off.
+
+`military.strikes.lobster_missions` exposes the launcher, passengers, target and
+phase. `test=assassin-lobster` versus `test=assassin-raider-lance`, and
+`test=assassin-lobster-phantom` versus `test=assassin-target`, exercise ordinary
+squads without a preseeded mission. The existing `strikes`, `lobsters` and `jumps`
+switches all gate this tactic.

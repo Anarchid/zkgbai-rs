@@ -15,7 +15,8 @@ use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 const LOBSTER: &str = "amphlaunch";
 // unit_thrower accelerates vertically for 22 frames, then sideways, with
 // a nominal 125-frame flight and 15 extra frames of collision protection.
-const FLIGHT: i32 = 155;
+pub(crate) const FLIGHT: i32 = 155;
+pub(crate) const STRIKE_AIM_FRAMES: i32 = STALL;
 const GATHER_TIME: i32 = 90;
 const GATHER_MARGIN: f32 = 24.0;
 // A short throw can be the only way across a cliff. Tactical target
@@ -40,6 +41,7 @@ struct Throw {
     takeoff: Option<Vec3>,
     resume: Vec3,
     escape: bool,
+    strike: bool,
     phase: Phase,
 }
 
@@ -47,6 +49,7 @@ struct Throw {
 enum Phase {
     Approach(i32),
     Gather(i32),
+    Assess(i32),
     Aim(i32),
     Flight(i32),
 }
@@ -64,6 +67,7 @@ impl Phase {
         match self {
             Self::Approach(at) => frame - at >= APPROACH_TIME,
             Self::Gather(at) => frame - at >= GATHER_TIME,
+            Self::Assess(at) => frame - at >= 90,
             Self::Aim(at) => frame - at >= STALL,
             Self::Flight(at) => frame - at >= FLIGHT,
         }
@@ -109,7 +113,128 @@ fn landing_aim(planned: Vec3, from: Vec3, mut clear: impl FnMut(Vec3) -> bool) -
     None
 }
 
+/// Frozen take-off and landing used by the strike predictor and revalidated
+/// immediately before issuing the launch command.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StrikeThrow {
+    pub launcher: i32,
+    pub from: Vec3,
+    pub to: Vec3,
+    pub ready: bool,
+    pub fired: bool,
+}
+
+fn strike_landing(from: Vec3, target: Vec3, throw_range: f32, gun_range: f32) -> Option<Vec3> {
+    // Adding a fractional reach to map coordinates can round a maximum
+    // throw just outside the controller's range check. Leave one elmo spare.
+    let reach = throw_range - 1.0;
+    let d = distance(from, target);
+    if reach < MIN_THROW || d < MIN_THROW || d > reach + gun_range * 0.95 {
+        return None;
+    }
+    let travel = (d - gun_range * 0.75).max(MIN_THROW).min(reach);
+    Some(Vec3::xz(from.x + (target.x - from.x) * travel / d, from.z + (target.z - from.z) * travel / d))
+}
+
 impl Ai {
+    pub(crate) fn lobster_strike_begin(&mut self, sid: SquadId, target: Vec3) -> bool {
+        if self.jumps.lobsters.throws.values().any(|t| t.squad == sid) {
+            return false;
+        }
+        let Some(passengers) = self.lobster_members(sid) else { return false };
+        let Some(lobster) = self
+            .misc_handler
+            .supports
+            .iter()
+            .filter_map(|id| self.fighters.get(id))
+            .filter(|f| f.squad == Some(sid) && self.defs.name_of(f.unit) == LOBSTER)
+            .map(|f| f.unit)
+            .find(|u| {
+                !springai::reserved::is_reserved(self.cb, u.id())
+                    && !self.qrf_claims(u.id())
+                    && self.lobster_ready(*u).is_some()
+            })
+        else {
+            return false;
+        };
+        let (jd, radius) = self.lobster_ready(lobster).unwrap();
+        let from = lobster.pos();
+        if passengers.iter().any(|u| {
+            distance(from, u.pos()) > radius + 80.0
+                || !u
+                    .def()
+                    .is_some_and(|d| grounded(u.pos().y, self.cb.map().elevation_at(u.pos().x, u.pos().z), d.height()))
+        }) {
+            return false;
+        }
+        let gun_range = passengers
+            .iter()
+            .filter(|u| self.defs.name_of(**u) == "amphfloater")
+            .map(|u| u.max_range())
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        let Some(to) = strike_landing(from, target, jd.reach(), gun_range) else { return false };
+        self.jumps.lobsters.throws.insert(
+            lobster.id(),
+            Throw {
+                squad: sid,
+                members: passengers.iter().map(Unit::id).collect(),
+                to,
+                takeoff: None,
+                resume: target,
+                escape: false,
+                strike: true,
+                phase: Phase::Gather(self.frame),
+            },
+        );
+        lobster.stop(0);
+        self.lobster_tick(lobster.id());
+        true
+    }
+
+    pub(crate) fn lobster_strike_throw(&self, sid: SquadId) -> Option<StrikeThrow> {
+        let (&id, t) = self.jumps.lobsters.throws.iter().find(|(_, t)| t.squad == sid && t.strike)?;
+        let from = self.fighters.get(&id).map_or(t.to, |f| f.unit.pos());
+        Some(StrikeThrow {
+            launcher: id,
+            from,
+            to: t.to,
+            ready: matches!(t.phase, Phase::Assess(_)),
+            fired: matches!(t.phase, Phase::Flight(_)),
+        })
+    }
+
+    pub(crate) fn lobster_strike_launch(&mut self, sid: SquadId, plan: StrikeThrow) -> bool {
+        let Some(current) = self.lobster_strike_throw(sid) else { return false };
+        if self.missiles_ground_burning(plan.to)
+            || !current.ready
+            || current.launcher != plan.launcher
+            || distance(current.from, plan.from) > 32.0
+            || distance(current.to, plan.to) > 1.0
+        {
+            return false;
+        }
+        let Some(lobster) = self.fighters.get(&plan.launcher).map(|f| f.unit) else { return false };
+        let Some((jd, radius)) = self.lobster_ready(lobster) else { return false };
+        let Some(passengers) = self.lobster_members(sid) else { return false };
+        if !gathered(lobster.pos(), &passengers.iter().map(Unit::pos).collect::<Vec<_>>(), radius)
+            || !self.lobster_clear(jd, lobster, &passengers, plan.to)
+        {
+            return false;
+        }
+        if !lobster.dgun_pos(ground(self, plan.to), 0) {
+            return false;
+        }
+        self.jumps.lobsters.throws.get_mut(&plan.launcher).unwrap().phase = Phase::Aim(self.frame);
+        true
+    }
+
+    pub(crate) fn lobster_strike_abort(&mut self, sid: SquadId) {
+        if let Some((&id, _)) = self.jumps.lobsters.throws.iter().find(|(_, t)| t.squad == sid && t.strike) {
+            self.lobster_cancel(id);
+        }
+    }
+
     fn lobster_members(&self, sid: SquadId) -> Option<Vec<Unit>> {
         let s = self.squads.get(sid)?;
         if s.kind != SquadKind::Assault || s.is_air_squad || s.fighters.is_empty() {
@@ -223,7 +348,8 @@ impl Ai {
         if self.defs.name_of(f.unit) != LOBSTER {
             return false;
         }
-        if self.retreat_handler.is_retreating(id)
+        if self.lobster_strike_owns(id)
+            || self.retreat_handler.is_retreating(id)
             || self.jumps.lobsters.throws.get(&id).is_some_and(|t| !matches!(t.phase, Phase::Flight(_)))
         {
             return true;
@@ -243,6 +369,9 @@ impl Ai {
                             && self.fighters.get(&other).is_some_and(|f| {
                                 if f.squad != Some(sid) || self.defs.name_of(f.unit) != LOBSTER {
                                     return false;
+                                }
+                                if self.lobster_strike_owns(other) {
+                                    return true;
                                 }
                                 if self
                                     .jumps
@@ -389,6 +518,7 @@ impl Ai {
             takeoff,
             resume: target,
             escape,
+            strike: false,
             phase,
         };
         if let Some(s) = self.squads.get_mut(sid) {
@@ -420,6 +550,9 @@ impl Ai {
     }
 
     fn lobster_resume(&mut self, t: Throw) {
+        if t.strike {
+            return;
+        }
         let mut nav = nav!(self);
         if let Some(s) = self.squads.get_mut(t.squad) {
             if t.escape {
@@ -465,13 +598,14 @@ impl Ai {
         if matches!(t.phase, Phase::Aim(_)) && lobster.weapons().iter().any(|w| w.reload_frame() > self.frame) {
             let to = t.to;
             let sid = t.squad;
+            let strike = t.strike;
             self.jumps.lobsters.throws.get_mut(&id).unwrap().phase = Phase::Flight(self.frame);
             *self.jumps.counts.entry("lobster".to_owned()).or_default() += 1;
             self.jumps.total += 1;
             self.jumps.flew += 1;
             // The launcher stays behind, so start catching up immediately.
             let mut nav = nav!(self);
-            if let Some(f) = self.fighters.get_mut(&id) {
+            if !strike && let Some(f) = self.fighters.get_mut(&id) {
                 f.move_to(to, &mut nav);
             }
             if std::env::var_os("ZKGBAI_JUMP_TRACE").is_some() {
@@ -479,7 +613,12 @@ impl Ai {
             }
             return;
         }
-        if t.phase.expired(self.frame) || self.lobster_ready(lobster).is_none() || self.qrf_drafted(t.squad) {
+        if t.phase.expired(self.frame)
+            || self.lobster_ready(lobster).is_none()
+            || self.qrf_drafted(t.squad)
+            || (t.strike
+                && (self.op_squad_target(t.squad).is_some() || self.op.over.squad_intents.contains_key(&t.squad)))
+        {
             self.lobster_cancel(id);
             return;
         }
@@ -494,7 +633,7 @@ impl Ai {
         let mine = self.war.get_total_friendly_power(lobster.pos())
             + self.squads.get(t.squad).map_or(0.0, |s| s.get_threat(&self.fighters) as f32);
         let (to, escape, phase, takeoff) = (t.to, t.escape, t.phase, t.takeoff);
-        if !self.lobster_safe(to, escape, mine) {
+        if !t.strike && !self.lobster_safe(to, escape, mine) {
             self.lobster_cancel(id);
             return;
         }
@@ -510,7 +649,7 @@ impl Ai {
             lobster.stop(0);
             self.jumps.lobsters.throws.get_mut(&id).unwrap().phase = Phase::Gather(self.frame);
         }
-        if matches!(phase, Phase::Aim(_)) {
+        if matches!(phase, Phase::Aim(_) | Phase::Assess(_)) {
             if !self.lobster_clear(jd, lobster, &passengers, to) {
                 self.lobster_cancel(id);
             }
@@ -540,7 +679,11 @@ impl Ai {
             for u in passengers {
                 u.stop(0);
             }
-            if lobster.dgun_pos(ground(self, aim), 0) {
+            if self.jumps.lobsters.throws.get(&id).is_some_and(|t| t.strike) {
+                let t = self.jumps.lobsters.throws.get_mut(&id).unwrap();
+                t.to = aim;
+                t.phase = Phase::Assess(self.frame);
+            } else if lobster.dgun_pos(ground(self, aim), 0) {
                 let t = self.jumps.lobsters.throws.get_mut(&id).unwrap();
                 t.to = aim;
                 t.phase = Phase::Aim(self.frame);
@@ -582,6 +725,20 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strike_uses_throw_plus_buoy_range_without_a_fictitious_longer_throw() {
+        let from = Vec3::xz(100.0, 100.0);
+        let target = Vec3::xz(1050.0, 100.0);
+        let aim = strike_landing(from, target, 570.0, 450.0).unwrap();
+        assert!(distance(from, aim) <= 570.0);
+        assert!(distance(aim, target) <= 450.0 * 0.95);
+        assert!(strike_landing(from, Vec3::xz(1200.0, 100.0), 570.0, 450.0).is_none());
+        assert!(strike_landing(from, from, 570.0, 450.0).is_none());
+        let from = Vec3::xz(3072.0, 3406.0);
+        let aim = strike_landing(from, Vec3::xz(3072.0, 4396.0), 620.0 * 0.92, 450.0).unwrap();
+        assert!(throw_in_range(from, aim, 620.0 * 0.92));
+    }
 
     #[test]
     fn routed_throw_approaches_even_when_landing_is_already_in_range() {
@@ -664,6 +821,7 @@ mod tests {
         for (phase, duration) in [
             (Phase::Approach(100), APPROACH_TIME),
             (Phase::Gather(100), GATHER_TIME),
+            (Phase::Assess(100), 90),
             (Phase::Aim(100), STALL),
             (Phase::Flight(100), FLIGHT),
         ] {

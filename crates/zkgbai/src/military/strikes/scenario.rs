@@ -6,6 +6,10 @@ impl Ai {
     pub(crate) fn strikes_scenario(&mut self, frame: i32) {
         let Some(test) = self.test.clone() else { return };
         let test = test.as_str();
+        if test.starts_with("assassin-lobster") {
+            self.strikes_lobster_scenario(test, frame);
+            return;
+        }
         if test.starts_with("assassin-battery-") {
             self.strikes_battery_scenario(test, frame);
             return;
@@ -338,6 +342,61 @@ impl Ai {
         }
         self.log(&format!("assassin-test: {count} {} assembled", tactic.name()));
     }
+    fn strikes_lobster_scenario(&mut self, test: &str, frame: i32) {
+        let map = self.cb.map();
+        let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
+        let home = Vec3::xz(center.x, center.z - 690.0);
+        if frame == 60 {
+            self.cb.cheats_set_enabled(true);
+            for (name, count) in [("amphfloater", 4), ("amphlaunch", 1)] {
+                if let Some(def) = self.defs.get(name) {
+                    for i in 0..count {
+                        let at = if name == "amphlaunch" {
+                            home
+                        } else {
+                            Vec3::xz(home.x + i as f32 * 30.0 - 45.0, home.z - 10.0)
+                        };
+                        if let Some(u) = self.cb.cheat_new_unit(def, at) {
+                            springai::reserved::reserve(self.cb, u.id());
+                        }
+                    }
+                }
+            }
+        }
+        if frame == 90 && test == "assassin-lobster" {
+            if let Some(def) = self.defs.get("planescout") {
+                self.cb.cheat_new_unit(def, Vec3::xz(center.x + 100.0, center.z + 300.0));
+            }
+        }
+        // Let normal intelligence ingest LOS before releasing the squad;
+        // otherwise its first ordinary move can spend the launcher reload.
+        if frame == 150 {
+            let units: Vec<_> =
+                self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "amphfloater").collect();
+            for u in &units {
+                springai::reserved::release(self.cb, u.id());
+                self.squad_remove_unit(*u);
+                self.war.new_units.remove(&u.id());
+            }
+            let sid = self.squad_adopt(&units)[0];
+            if let Some(u) = self.cb.friendly_units().into_iter().find(|u| self.defs.name_of(*u) == "amphlaunch") {
+                springai::reserved::release(self.cb, u.id());
+                self.misc_remove_unit(u);
+                self.war.new_units.remove(&u.id());
+                let mut f = Fighter::new(u, u.def().unwrap().cost(self.metal), self.team_id);
+                f.squad = Some(sid);
+                self.misc_add_support(f);
+            }
+            if test == "assassin-lobster-phantom" {
+                self.sweeps_seed_phantom_fix(Vec3::xz(center.x, center.z + 300.0), 1);
+            }
+            self.log(&format!("assassin-test: Buoy squad {sid} with attached Lobster, no preseeded mission"));
+        }
+        if frame >= 150 && frame % 150 == 0 {
+            self.log(&format!("assassin-test: Lobster {}", self.strikes_status()));
+        }
+    }
+
     /// Real artillery fires at a durable witness; an intentionally incomplete
     /// Flea wave nearby exercises the same staging and command routines.
     fn strikes_battery_scenario(&mut self, test: &str, frame: i32) {
