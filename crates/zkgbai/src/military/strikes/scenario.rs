@@ -10,6 +10,39 @@ impl Ai {
             self.strikes_battery_scenario(test, frame);
             return;
         }
+        if matches!(test, "assassin-halberd-squad" | "assassin-halberd-squad-phantom") && frame == 90 {
+            let units: Vec<_> =
+                self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "hoverassault").collect();
+            let income = self.eco.adjusted_income;
+            self.eco.adjusted_income = 45.0;
+            for u in units {
+                springai::reserved::release(self.cb, u.id());
+                self.squad_remove_unit(u);
+                self.squad_add_assault(Fighter::new(u, u.def().unwrap().cost(self.metal), self.team_id));
+            }
+            self.eco.adjusted_income = income;
+            let sid = *self.squad_handler.squads.back().unwrap();
+            self.squads.get_mut(sid).unwrap().status = 'a';
+            self.log(&format!(
+                "assassin-test: ordinary Halberd squad {sid} ready; kind={:?}, members={}",
+                self.squads.get(sid).unwrap().kind,
+                self.squads.get(sid).unwrap().fighters.len()
+            ));
+            let map = self.cb.map();
+            if test == "assassin-halberd-squad-phantom" {
+                self.sweeps_seed_phantom_fix(Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0 + 300.0), 1);
+            } else if let Some(def) = self.defs.get("planescout") {
+                self.cb
+                    .cheat_new_unit(def, Vec3::xz(map.width() as f32 * 4.0 + 150.0, map.height() as f32 * 4.0 + 300.0));
+            }
+            return;
+        }
+        if matches!(test, "assassin-halberd-squad" | "assassin-halberd-squad-phantom")
+            && frame >= 150
+            && frame % 150 == 0
+        {
+            self.log(&format!("assassin-test: Halberd squads {}", self.strikes_status()));
+        }
         if test == "assassin-raiders" && frame == 90 {
             let units: Vec<_> =
                 self.cb.friendly_units().into_iter().filter(|u| self.defs.name_of(*u) == "cloakraid").collect();
@@ -108,13 +141,18 @@ impl Ai {
         let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
         let pos = Vec3::xz(center.x, center.z + 300.0);
         self.cb.cheats_set_enabled(true);
-        if test == "assassin-raiders" {
-            if let Some(def) = self.defs.get("cloakraid") {
-                for i in 0..8 {
-                    self.cb.cheat_new_unit(
+        if matches!(test, "assassin-raiders" | "assassin-halberd-squad" | "assassin-halberd-squad-phantom") {
+            let halberds = matches!(test, "assassin-halberd-squad" | "assassin-halberd-squad-phantom");
+            if let Some(def) = self.defs.get(if halberds { "hoverassault" } else { "cloakraid" }) {
+                for i in 0..if halberds { 5 } else { 8 } {
+                    if let Some(u) = self.cb.cheat_new_unit(
                         def,
                         Vec3::xz(center.x + (i % 4) as f32 * 75.0 - 100.0, center.z - 500.0 + (i / 4) as f32 * 75.0),
-                    );
+                    ) {
+                        if halberds {
+                            springai::reserved::reserve(self.cb, u.id());
+                        }
+                    }
                 }
             }
             return;

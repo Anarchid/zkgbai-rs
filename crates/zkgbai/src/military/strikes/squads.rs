@@ -1,4 +1,4 @@
-//! Existing raider squads may spend themselves on exposed artillery. This is
+//! Existing raider and pure Halberd squads may spend themselves on artillery. This is
 //! target selection, not procurement: their normal membership stays intact.
 use super::{
     prediction::{Answer, Predictor},
@@ -18,6 +18,8 @@ pub(super) struct Mission {
     answer: Option<Answer>,
     retreat: Vec<i32>,
     commanded: i32,
+    halberds: bool,
+    home: Vec3,
 }
 
 /// A riot beside the target or anywhere on the approach vetoes the mission;
@@ -33,16 +35,92 @@ fn answer_current(a: &Answer, m: &Mission, frame: i32) -> bool {
     a.key == m.key && frame - m.since < 90 && a.members == m.members && distance(a.pos, m.job.pos) < 150.0
 }
 
+fn eligible_kind(kind: SquadKind, all_halberds: bool) -> bool {
+    kind == SquadKind::Raider || (matches!(kind, SquadKind::Assault | SquadKind::Hover) && all_halberds)
+}
+
+fn same_job(a: &Job, b: &Job) -> bool {
+    match (a.id, b.id) {
+        (Some(a), Some(b)) => a == b,
+        _ => a.name == b.name && distance(a.pos, b.pos) < 500.0,
+    }
+}
+
 impl Ai {
-    pub(crate) fn raider_strike_owns(&self, id: i32) -> bool {
+    pub(super) fn squad_strike_job_taken(&self, job: &Job) -> bool {
+        self.strikes.missions.values().any(|m| same_job(&m.job, job))
+    }
+
+    pub(super) fn squad_strike_waiting_fire(&self, id: i32) -> Option<i32> {
+        self.strikes
+            .missions
+            .values()
+            .find(|m| m.halberds && !m.diving && m.members.contains(&id))
+            .map(|_| Tactic::Halberd.fire_state())
+    }
+
+    pub(super) fn squad_strike_evade(&mut self, id: i32, goal: Vec3) {
+        if let Some(m) = self.strikes.missions.values_mut().find(|m| m.halberds && !m.diving && m.members.contains(&id))
+        {
+            m.home = goal;
+            m.key = 0;
+            m.answer = None;
+        }
+    }
+
+    pub(crate) fn squad_strike_active(&self, sid: SquadId) -> bool {
+        self.strikes.missions.contains_key(&sid)
+    }
+
+    pub(crate) fn squad_strike_halberds(&self, sid: SquadId) -> bool {
+        self.squads.get(sid).is_some_and(|s| {
+            matches!(s.kind, SquadKind::Hover | SquadKind::Assault)
+                && !s.fighters.is_empty()
+                && s.fighters.iter().all(|id| {
+                    self.fighters
+                        .get(id)
+                        .is_none_or(|f| f.is_dead() || self.defs.name_of(f.unit) == Tactic::Halberd.name())
+                })
+        })
+    }
+
+    fn squad_strike_refresh(&self, m: &Mission) -> Option<Job> {
+        if !m.halberds {
+            return m.job.id.and_then(|id| self.squad_strike_job(id));
+        }
+        // A confirmed kill ends this mission. Do not turn its old position
+        // back into an anonymous search; new firing evidence can offer a job.
+        if m.job
+            .id
+            .is_some_and(|id| self.strikes.killed.contains(&id) || self.war.targets.get(&id).is_some_and(|e| e.is_dead))
+        {
+            return None;
+        }
+        self.strike_jobs(SNIPER_MEMORY)
+            .into_iter()
+            .find(|j| same_job(j, &m.job) && self.strike_target_allowed(Tactic::Halberd, j))
+    }
+
+    fn squad_strike_clear_for(&self, job: &Job, members: &[i32], halberds: bool) -> bool {
+        if !halberds {
+            return self.squad_strike_clear(job, members);
+        }
+        // Assaults may accept escorts: the assassination model prices them
+        // into target death, instead of applying the raiders' hard riot veto.
+        members
+            .iter()
+            .filter(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead()))
+            .all(|id| self.fighters.get(id).is_some_and(|f| self.strike_suitable(Tactic::Halberd, job, f.get_pos())))
+    }
+    pub(crate) fn squad_strike_owns(&self, id: i32) -> bool {
         self.fighters
             .get(&id)
             .and_then(|f| f.squad)
-            .and_then(|sid| self.strikes.raiders.get(&sid))
+            .and_then(|sid| self.strikes.missions.get(&sid))
             .is_some_and(|m| m.members.contains(&id))
     }
 
-    fn raider_strike_job(&self, id: i32) -> Option<Job> {
+    fn squad_strike_job(&self, id: i32) -> Option<Job> {
         let e = self.war.targets.get(&id)?;
         if e.is_dead
             || !e.identified
@@ -72,7 +150,7 @@ impl Ai {
         })
     }
 
-    fn raider_strike_clear(&self, job: &Job, members: &[i32]) -> bool {
+    fn squad_strike_clear(&self, job: &Job, members: &[i32]) -> bool {
         !self.missiles_ground_burning(job.pos)
             && members.iter().filter(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead())).all(|id| {
                 let Some(f) = self.fighters.get(id) else { return false };
@@ -88,13 +166,13 @@ impl Ai {
             })
     }
 
-    fn raider_strike_available(&self, sid: SquadId) -> bool {
+    fn squad_strike_available(&self, sid: SquadId) -> bool {
         !self.dev_off("strikes")
             && !self.qrf_drafted(sid)
             && !self.op.over.squad_intents.contains_key(&sid)
             && self.op_squad_target(sid).is_none()
             && self.squads.get(sid).is_some_and(|s| {
-                s.kind == SquadKind::Raider
+                eligible_kind(s.kind, self.squad_strike_halberds(sid))
                     && s.status == 'a'
                     && s.fighters.iter().any(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead()))
                     && s.fighters.len() <= MAX_WAVE
@@ -112,12 +190,12 @@ impl Ai {
             })
     }
 
-    pub(crate) fn raider_strike_cancel(&mut self, sid: SquadId) {
-        let Some(m) = self.strikes.raiders.remove(&sid) else { return };
-        self.raider_strike_release(sid, m);
+    pub(crate) fn squad_strike_cancel(&mut self, sid: SquadId) {
+        let Some(m) = self.strikes.missions.remove(&sid) else { return };
+        self.squad_strike_release(sid, m);
     }
 
-    fn raider_strike_release(&mut self, sid: SquadId, m: Mission) {
+    fn squad_strike_release(&mut self, sid: SquadId, m: Mission) {
         let takeover = self.qrf_drafted(sid)
             || self.op.over.squad_intents.contains_key(&sid)
             || self.op_squad_target(sid).is_some();
@@ -135,66 +213,91 @@ impl Ai {
                 self.retreat_add_coward(u);
             }
         }
-        self.strikes.raider_retry.insert(sid, self.frame + 30 * 10);
-        self.log(&format!("strikes: raider squad {sid} released from {} {}", m.job.name, m.job.id.unwrap_or(-1)));
+        self.strikes.squad_retry.insert(sid, self.frame + 30 * 10);
+        self.log(&format!("strikes: squad {sid} released from {} {}", m.job.name, m.job.id.unwrap_or(-1)));
     }
 
     /// Also cancel orphaned or pre-empted missions when their squad's handler
     /// no longer runs (deleted squads, operator orders, QRF, strikes disabled).
-    pub(super) fn raider_strikes_maintain(&mut self) {
+    pub(super) fn squad_strikes_maintain(&mut self) {
         let cancel: Vec<_> = self
             .strikes
-            .raiders
+            .missions
             .iter()
             .filter_map(|(&sid, m)| {
-                let invalid = !self.raider_strike_available(sid)
+                let invalid = !self.squad_strike_available(sid)
                     || self.frame - m.since >= DIVE_TIMEOUT
-                    || m.job
-                        .id
-                        .and_then(|id| self.raider_strike_job(id))
-                        .is_none_or(|job| !self.raider_strike_clear(&job, &m.members));
+                    || self
+                        .squad_strike_refresh(m)
+                        .is_none_or(|job| !self.squad_strike_clear_for(&job, &m.members, m.halberds));
                 invalid.then_some(sid)
             })
             .collect();
         for sid in cancel {
-            self.raider_strike_cancel(sid);
+            self.squad_strike_cancel(sid);
         }
-        self.strikes.raider_retry.retain(|sid, at| *at > self.frame && self.squads.get(*sid).is_some());
+        self.strikes.squad_retry.retain(|sid, at| *at > self.frame && self.squads.get(*sid).is_some());
     }
 
     /// Runs before normal danger/mex scoring. A pending answer briefly holds
     /// the squad; a committed answer owns its orders until the job ends.
-    pub(crate) fn raider_strike(&mut self, sid: SquadId) -> Option<Vec3> {
-        if !self.raider_strike_available(sid) {
-            self.raider_strike_cancel(sid);
+    pub(crate) fn squad_strike(&mut self, sid: SquadId) -> Option<Vec3> {
+        if !self.squad_strike_available(sid) {
+            self.squad_strike_cancel(sid);
             return None;
         }
-        if let Some(p) = self.strikes.raider_predictor.as_ref() {
+        if let Some(p) = self.strikes.squad_predictor.as_ref() {
             while let Ok(a) = p.rx.try_recv() {
-                if let Some(m) = self.strikes.raiders.values_mut().find(|m| m.key == a.key) {
+                if let Some(m) = self.strikes.missions.values_mut().find(|m| m.key == a.key) {
                     m.answer = Some(a);
                 }
             }
         }
-        if let Some(mut m) = self.strikes.raiders.remove(&sid) {
+        if let Some(mut m) = self.strikes.missions.remove(&sid) {
             m.members.retain(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead() && f.squad == Some(sid)));
-            let job = m.job.id.and_then(|id| self.raider_strike_job(id));
+            let job = self.squad_strike_refresh(&m);
             if m.members.is_empty()
                 || self.frame - m.since >= DIVE_TIMEOUT
-                || job.as_ref().is_none_or(|j| !self.raider_strike_clear(j, &m.members))
+                || job.as_ref().is_none_or(|j| !self.squad_strike_clear_for(j, &m.members, m.halberds))
             {
-                self.raider_strike_release(sid, m);
+                self.squad_strike_release(sid, m);
                 return None;
             }
             m.job = job.unwrap();
+            if m.key == 0 {
+                // An existing assault squad can be stretched along its old
+                // route. Gather the whole force before evaluating the dive.
+                self.squad_strike_command(sid, &m);
+                let ready = m.members.iter().all(|id| {
+                    self.fighters.get(id).is_some_and(|f| {
+                        distance(f.get_pos(), m.home) <= formation_radius(m.members.len())
+                            && self.strike_evasion_goal(*id).is_none()
+                    })
+                });
+                if ready {
+                    if let Some(key) = self.squad_strike_predict(&m.job, &m.members, m.home, m.halberds) {
+                        m.key = key;
+                        m.since = self.frame;
+                    }
+                }
+                let goal = m.home;
+                self.strikes.missions.insert(sid, m);
+                return Some(goal);
+            }
             if !m.diving {
                 if let Some(a) = m.answer.take() {
                     if !answer_current(&a, &m, self.frame) || !launchable(a.probability) {
-                        self.raider_strike_release(sid, m);
+                        self.squad_strike_release(sid, m);
                         return None;
                     }
                     m.diving = true;
                     m.since = self.frame;
+                    if self.strikes.wave.as_ref().is_some_and(|w| {
+                        matches!(w.phase, Phase::Forming | Phase::Screening) && same_job(&w.job, &m.job)
+                    }) {
+                        let w = self.strikes.wave.take().unwrap();
+                        self.strikes_release(w);
+                    }
                     for id in &m.members {
                         if self.retreat_handler.is_coward(*id) {
                             m.retreat.push(*id);
@@ -204,76 +307,75 @@ impl Ai {
                         }
                     }
                     self.log(&format!(
-                        "strikes: raider squad {sid} ({} units) dive {} {} (target death {:.0}%)",
+                        "strikes: squad {sid} ({} units) dive {} {} (target death {:.0}%)",
                         m.members.len(),
                         m.job.name,
                         m.job.id.unwrap_or(-1),
                         a.probability * 100.0
                     ));
                 } else if self.frame - m.since >= 90 {
-                    self.raider_strike_release(sid, m);
+                    self.squad_strike_release(sid, m);
                     return None;
                 }
             }
             if m.diving && self.frame - m.commanded >= 15 {
-                self.raider_strike_command(sid, &m);
+                self.squad_strike_command(sid, &m);
                 m.commanded = self.frame;
             }
             let goal = m.job.pos;
-            self.strikes.raiders.insert(sid, m);
+            self.strikes.missions.insert(sid, m);
             return Some(goal);
         }
         if self.strikes.model_failed
-            || self.strikes.raider_retry.get(&sid).is_some_and(|at| *at > self.frame)
-            || self.strikes.raiders.values().any(|m| !m.diving)
+            || self.strikes.squad_retry.get(&sid).is_some_and(|at| *at > self.frame)
+            || self.strikes.missions.values().any(|m| !m.diving)
         {
             return None;
         }
-        self.strikes.raider_retry.insert(sid, self.frame + 30);
+        self.strikes.squad_retry.insert(sid, self.frame + 30);
         let s = self.squads.get(sid)?;
         let from = s.get_pos(&self.fighters);
         let members: Vec<_> =
             s.fighters.iter().copied().filter(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead())).collect();
-        let mut jobs: Vec<_> = self
-            .war
-            .targets
-            .values()
-            .filter(|e| e.visible)
-            .filter_map(|e| self.raider_strike_job(e.unit_id))
+        let halberds = self.squad_strike_halberds(sid);
+        let candidates = if halberds {
+            self.strike_jobs(SNIPER_MEMORY)
+                .into_iter()
+                .filter(|j| self.strike_target_allowed(Tactic::Halberd, j))
+                .collect()
+        } else {
+            self.war
+                .targets
+                .values()
+                .filter(|e| e.visible)
+                .filter_map(|e| self.squad_strike_job(e.unit_id))
+                .collect::<Vec<_>>()
+        };
+        let mut jobs: Vec<_> = candidates
+            .into_iter()
             .filter(|j| {
                 distance(from, j.pos) < SEARCH_RADIUS
-                    && !self.strikes.raiders.values().any(|m| m.job.id == j.id)
-                    && !self.strikes.wave.as_ref().is_some_and(|w| w.phase == Phase::Diving && w.job.id == j.id)
+                    && !self.strike_cooling(j.pos)
+                    && !self.strikes.missions.values().any(|m| same_job(&m.job, j))
+                    && !self.strikes.wave.as_ref().is_some_and(|w| w.phase == Phase::Diving && same_job(&w.job, j))
             })
             .collect();
         jobs.sort_by(|a, b| {
             (distance(from, a.pos) / a.value.max(1.0)).total_cmp(&(distance(from, b.pos) / b.value.max(1.0)))
         });
-        let job = jobs.into_iter().find(|j| self.raider_strike_clear(j, &members))?;
-        if self.strikes.raider_predictor.is_none() {
-            match Predictor::start() {
-                Ok(p) => self.strikes.raider_predictor = Some(p),
-                Err(e) => {
-                    self.log(&format!("strikes: raider model unavailable: {e}"));
-                    self.strikes.model_failed = true;
-                    return None;
-                }
-            }
-        }
-        self.strikes.serial += 1;
-        let key = self.strikes.serial;
-        // Raiders may be mixed: retaining all enemy weapons is conservative
-        // and avoids selecting a representative unit with a different mask.
-        let request = self.strike_prediction_request(key, &job, &members, from, None, false)?;
-        self.strikes.raider_predictor.as_ref()?.tx.try_send(request).ok()?;
+        let job = jobs.into_iter().find(|j| self.squad_strike_clear_for(j, &members, halberds))?;
+        let key = if halberds { 0 } else { self.squad_strike_predict(&job, &members, from, false)? };
         for id in &members {
             if let Some(f) = self.fighters.get_mut(id) {
                 f.clear_task(&mut self.raider_handler.scout_tasks);
                 f.unit.stop(0);
+                if halberds {
+                    f.unit.set_fire_state(0, 0);
+                }
             }
         }
         let goal = job.pos;
-        self.strikes.raiders.insert(
+        self.strikes.missions.insert(
             sid,
             Mission {
                 job,
@@ -284,12 +386,55 @@ impl Ai {
                 answer: None,
                 retreat: Vec::new(),
                 commanded: -30,
+                halberds,
+                home: from,
             },
         );
         Some(goal)
     }
 
-    fn raider_strike_command(&mut self, sid: SquadId, m: &Mission) {
+    fn squad_strike_predict(&mut self, job: &Job, members: &[i32], from: Vec3, halberds: bool) -> Option<u64> {
+        if self.strikes.squad_predictor.is_none() {
+            match Predictor::start() {
+                Ok(p) => self.strikes.squad_predictor = Some(p),
+                Err(e) => {
+                    self.log(&format!("strikes: squad model unavailable: {e}"));
+                    self.strikes.model_failed = true;
+                    return None;
+                }
+            }
+        }
+        self.strikes.serial += 1;
+        let key = self.strikes.serial;
+        let ground = if halberds { self.defs.get(Tactic::Halberd.name()) } else { None };
+        let request = self.strike_prediction_request(key, job, members, from, ground, false)?;
+        self.strikes.squad_predictor.as_ref()?.tx.try_send(request).ok()?;
+        Some(key)
+    }
+
+    fn squad_strike_command(&mut self, sid: SquadId, m: &Mission) {
+        if m.halberds {
+            self.strike_command(&Wave {
+                tactic: Tactic::Halberd,
+                job: m.job.clone(),
+                needed: m.members.len(),
+                members: m.members.clone(),
+                phase: if m.diving { Phase::Diving } else { Phase::Forming },
+                since: m.since,
+                home: m.home,
+                query: None,
+            });
+            let target = if m.diving { m.job.pos } else { m.home };
+            if let Some(s) = self.squads.get_mut(sid) {
+                s.target = target;
+            }
+            for id in &m.members {
+                if let Some(f) = self.fighters.get_mut(id) {
+                    f.target = target;
+                }
+            }
+            return;
+        }
         let visible = m.job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible).map(|e| e.unit);
         for id in &m.members {
             let Some(f) = self.fighters.get_mut(id) else { continue };
@@ -308,14 +453,15 @@ impl Ai {
         }
     }
 
-    pub(super) fn raider_strikes_status(&self) -> serde_json::Value {
+    pub(super) fn squad_strikes_status(&self) -> serde_json::Value {
         serde_json::json!(
             self.strikes
-                .raiders
+                .missions
                 .iter()
                 .map(|(sid, m)| serde_json::json!({
                     "squad": sid, "target": m.job.id, "def": m.job.name, "members": m.members,
-                    "phase": if m.diving { "diving" } else { "assessing" },
+                    "phase": if m.diving { "diving" } else if m.key == 0 { "gathering" } else { "assessing" },
+                    "tactic": if m.halberds { "hoverassault" } else { "raiders" },
                 }))
                 .collect::<Vec<_>>()
         )
@@ -325,6 +471,16 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_raiders_or_pure_halberd_assaults_can_take_squad_jobs() {
+        assert!(eligible_kind(SquadKind::Raider, false));
+        assert!(eligible_kind(SquadKind::Hover, true));
+        assert!(eligible_kind(SquadKind::Assault, true));
+        assert!(!eligible_kind(SquadKind::Hover, false));
+        assert!(!eligible_kind(SquadKind::Assault, false));
+        assert!(!eligible_kind(SquadKind::Taskforce, true));
+    }
+
     #[test]
     fn riot_cover_includes_target_and_route_but_not_distant_escorts() {
         let from = Vec3::xz(0.0, 0.0);
@@ -354,6 +510,8 @@ mod tests {
             answer: None,
             retreat: Vec::new(),
             commanded: 0,
+            halberds: false,
+            home: Vec3::xz(0.0, 0.0),
         };
         let a = Answer { key: 7, kill_frames: Some(100), probability: 1.0, pos: m.job.pos, members: vec![2, 3] };
         assert!(answer_current(&a, &m, 101));

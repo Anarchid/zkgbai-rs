@@ -17,8 +17,8 @@ mod evasion;
 mod fragile;
 mod opportunities;
 mod prediction;
-mod raiders;
 mod scenario;
+mod squads;
 mod staging;
 
 const PERIOD: i32 = 30;
@@ -155,9 +155,9 @@ pub struct Strikes {
     cooldowns: Vec<(Vec3, i32)>,
     predictor: Option<prediction::Predictor>,
     model_failed: bool,
-    raiders: BTreeMap<crate::military::wrappers::SquadId, raiders::Mission>,
-    raider_retry: BTreeMap<crate::military::wrappers::SquadId, i32>,
-    raider_predictor: Option<prediction::Predictor>,
+    missions: BTreeMap<crate::military::wrappers::SquadId, squads::Mission>,
+    squad_retry: BTreeMap<crate::military::wrappers::SquadId, i32>,
+    squad_predictor: Option<prediction::Predictor>,
     killed: BTreeSet<i32>,
     serial: u64,
     last_halberd_order: Option<i32>,
@@ -218,7 +218,7 @@ impl Ai {
                 "evading": w.members.iter().filter(|id| self.strike_evasion_goal(**id).is_some()).count(),
             })
         });
-        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "raider_missions": self.raider_strikes_status(), "counterbattery": self.counterbattery_status() })
+        serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "squad_missions": self.squad_strikes_status(), "raider_missions": self.squad_strikes_status(), "counterbattery": self.counterbattery_status() })
     }
 
     /// Merge seen Phantoms with impact estimates by max, not addition: a
@@ -608,7 +608,7 @@ impl Ai {
 
     fn strike_can_recruit(&self, f: &Fighter, name: &str) -> bool {
         self.defs.name_of(f.unit) == name
-            && !self.raider_strike_owns(f.id)
+            && !self.squad_strike_owns(f.id)
             && !springai::reserved::is_reserved(self.cb, f.id)
             && !self.retreat_handler.is_retreating(f.id)
             && !self.qrf_claims(f.id)
@@ -630,7 +630,15 @@ impl Ai {
             return;
         }
         self.strikes.evasion.retain(|id, (_, until)| frame < *until && self.fighters.contains_key(id));
-        self.raider_strikes_maintain();
+        self.squad_strikes_maintain();
+        // Offer ready Halberd squads first, before the dedicated wave borrows
+        // individual members or an unrelated wave monopolizes recruitment.
+        let squads: Vec<_> = self.squad_handler.squads.iter().copied().collect();
+        for sid in squads {
+            if self.squad_strike_halberds(sid) {
+                self.squad_strike(sid);
+            }
+        }
         self.strikes_support_fire();
         self.strikes.orders.retain(|_, (_, f, _)| frame - *f < JOB_MEMORY);
         self.strikes.cooldowns.retain(|(_, f)| frame - *f < COOLDOWN);
@@ -642,7 +650,7 @@ impl Ai {
         }
         if self.strikes.wave.is_none() {
             'jobs: for j in self.strike_jobs(JOB_MEMORY) {
-                if self.strike_cooling(j.pos) {
+                if self.strike_cooling(j.pos) || self.squad_strike_job_taken(&j) {
                     continue;
                 }
                 for tactic in [Tactic::Scythe, Tactic::Halberd, Tactic::Dirtbag, Tactic::Flea, Tactic::Dart] {
@@ -848,7 +856,7 @@ impl Ai {
             }
             let expected = w.job.id.is_some_and(|id| self.jaeger_stun_expected(id));
             w.phase = staging::waiting_phase(w.tactic, frame - w.job.last, expected);
-            if w.phase == Phase::Screening {
+            if w.phase == Phase::Screening || self.squad_strike_job_taken(&w.job) {
                 w.query = None;
             }
             let radius = staging::muster_radius(w.tactic, w.members.len());
@@ -859,6 +867,7 @@ impl Ai {
                     .iter()
                     .all(|id| self.fighters.get(id).is_some_and(|f| distance(f.get_pos(), w.home) < radius));
             if w.phase == Phase::Forming
+                && !self.squad_strike_job_taken(&w.job)
                 && gathered
                 && frame - w.job.last < SNIPER_MEMORY
                 && self.strike_target_allowed(w.tactic, &w.job)
