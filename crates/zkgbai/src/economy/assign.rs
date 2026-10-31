@@ -1002,6 +1002,16 @@ impl Ai {
                 }
             }
 
+            // A queued reactor must still have its setback when the front
+            // moves. Keep started nanoframes under the existing threat policy.
+            if target.is_none()
+                && self.eco.fusion_tasks.contains(&id)
+                && !self.eco_reactor_site_safe(bt, pos)
+                && !invalid.contains(&id)
+            {
+                invalid.push(id);
+            }
+
             if self.war.get_porc_threat(pos) > 0.0
                 && (target.is_none() || !bt.is_able_to_attack())
                 && !invalid.contains(&id)

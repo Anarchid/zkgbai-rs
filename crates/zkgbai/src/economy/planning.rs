@@ -2550,14 +2550,7 @@ impl Ai {
             return;
         };
 
-        let ally_center = self.graph.get_ally_center();
-        let ally_base = self.graph.get_ally_base();
-        let mut position = get_angular_point(ally_center, ally_base, distance(ally_center, ally_base));
-        position = self.graph.get_overdrive_sweet_spot(position, name);
-        if position == NULLPOS {
-            return;
-        }
-        position = self.eco_build_site(def, position, 0);
+        let Some(position) = self.eco_reactor_site(def) else { return };
         self.eco_add_construction(WorkerTask::construction(def, position, 0), None, Some(List::Fusion));
     }
 
