@@ -18,7 +18,8 @@
 //! - The engine tells us nothing of allied units' lives, so jobs on an
 //!   ally's frame are looked at every second: done once it stands, dropped
 //!   if it dies or leaves the alliance.
-//! - Superweapons and anti-nukes go by turns between allied ZKGBAIs. AIs
+//! - Superweapons, anti-nukes and factories that take plates (see
+//!   `plate`) go by turns between allied ZKGBAIs. AIs
 //!   cannot read each other's command queues, so a plan shows only once its
 //!   frame stands, and instances that decide at once would start at once.
 //!   The k-th of a kind the alliance has (anyone's, frames too) is the turn
@@ -70,13 +71,16 @@ const SAY_EVERY: i32 = 30 * 60;
 /// counted.
 #[derive(Default)]
 pub struct AlliedProjects {
-    turns: BTreeMap<&'static str, Turn>,
+    turns: BTreeMap<String, Turn>,
     said: BTreeMap<String, i32>,
     /// Every living unit of [`ASSISTED`] types in the alliance, ours too,
     /// with its type: counted every second (see
     /// `eco_watch_allied_projects`), so the planners that ask each pass
     /// need not go over every allied unit.
     census: Vec<(Unit, &'static str)>,
+    /// The alliance's factories, ours too, standing or rising: counted
+    /// with the census, for plates (see `plate`).
+    pub(super) factories: Vec<Unit>,
 }
 
 /// A wish for the next of a kind: the alliance's count of it when asked,
@@ -115,13 +119,13 @@ impl AlliedProjects {
     /// Whether `team` may start the next of `kind`, the alliance having
     /// `count` of it: on its own turn at once, else after [`LAPSE`] per
     /// step from the owner, counted from the first ask at this count.
-    fn ask(&mut self, kind: &'static str, order: &[i32], team: i32, count: usize, frame: i32) -> Wait {
+    fn ask(&mut self, kind: &str, order: &[i32], team: i32, count: usize, frame: i32) -> Wait {
         let n = order.len().max(1);
         let owner = order.get(count % n).copied().unwrap_or(team);
         let steps = steps(order, count, team);
         let reset = self.turns.get(kind).is_none_or(|t| t.count != count || frame - t.last > FORGET);
         if reset {
-            self.turns.insert(kind, Turn { count, since: frame, last: frame });
+            self.turns.insert(kind.to_owned(), Turn { count, since: frame, last: frame });
         }
         let turn = self.turns.get_mut(kind).expect("inserted above");
         let was = turn.last;
@@ -159,12 +163,17 @@ impl Ai {
 
     /// Whether we may start the next of `kind` (the types `names`) now:
     /// see the module notes. Alone, always.
-    pub(super) fn eco_ally_turn(&mut self, kind: &'static str, names: &[&str]) -> bool {
+    pub(super) fn eco_ally_turn(&mut self, kind: &str, names: &[&str]) -> bool {
+        let count = self.eco.allied.count(names);
+        self.eco_ally_turn_at(kind, count)
+    }
+
+    /// [`Self::eco_ally_turn`] with the alliance's count of the kind given.
+    pub(super) fn eco_ally_turn_at(&mut self, kind: &str, count: usize) -> bool {
         let order = self.eco_turn_order();
         if order.len() < 2 {
             return true;
         }
-        let count = self.eco.allied.count(names);
         let w = self.eco.allied.ask(kind, &order, self.team_id, count, self.frame);
         if w.fresh {
             self.log(&format!(
@@ -322,13 +331,16 @@ impl Ai {
             return;
         }
         self.eco_watch_plates();
-        self.eco.allied.census = (self.cb.friendly_units().into_iter())
-            .filter(|&u| u.health() > 0.0)
-            .filter_map(|u| {
-                let name = self.defs.name_of(u);
-                ASSISTED.iter().find(|&&n| n == name).map(|&n| (u, n))
-            })
-            .collect();
+        let (mut census, mut factories) = (Vec::new(), Vec::new());
+        for u in self.cb.friendly_units().into_iter().filter(|u| u.health() > 0.0) {
+            let name = self.defs.name_of(u);
+            if let Some(&n) = ASSISTED.iter().find(|&&n| n == name) {
+                census.push((u, n));
+            } else if name.starts_with("factory") {
+                factories.push(u);
+            }
+        }
+        (self.eco.allied.census, self.eco.allied.factories) = (census, factories);
         let mut ended = Vec::new();
         let mut pending = Vec::new();
         for &id in &self.eco.construction_tasks {

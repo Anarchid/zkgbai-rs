@@ -847,6 +847,13 @@ impl Ai {
             // don't build the same fac twice.
             self.eco.potential_fac_list.remove(def_name);
         }
+        // nor one we have a plate of, waiting for its factory or not
+        for p in self.eco.plates.clone() {
+            if let Some(d) = p.def() {
+                let tech = self.fac_tech(d);
+                self.eco.potential_fac_list.remove(&tech);
+            }
+        }
 
         // Which factories' units can get to the metal; a factory asked for.
         let from = self.eco.workers.get(&wid).map(|w| w.get_pos());
@@ -857,6 +864,7 @@ impl Ai {
         let asked_value = self.eco.requisition_value;
         let reach_fac = asked.as_ref().filter(|(f, _)| !self.eco_has_factory(f)).map(|(f, _)| f.clone());
         let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
+        let fac_due = self.eco.new_fac_due;
 
         if self.eco.potential_fac_list.is_empty() && reach_fac.is_none() && new_type.is_none() {
             self.eco.added_facs = false;
@@ -955,22 +963,30 @@ impl Ai {
             }
         };
 
-        // A type an ally has standing: a plate on theirs instead (see
-        // `plate`). Not the opening, nor while energy is what we lack.
-        if !is_plop
-            && nfac > 0
-            && !self.eco_energy_starved()
-            && let Some(id) = self.eco_plate_instead(wid, factory)
-        {
-            if let Some((f, why)) = &asked
-                && *f == fac_name
-            {
-                self.logistics_factory(id, asked_value, why);
-                if is_air_requisition(why) {
-                    self.eco.air_asked = true;
+        // A type an ally has (standing or rising): a plate on theirs instead
+        // (see `plate`). Else ours in our turn, so allies that want the
+        // type at once do not each build one. Not the opening, nor while
+        // energy is what we lack.
+        if !is_plop && nfac > 0 && !self.eco_energy_starved() {
+            if let Some(id) = self.eco_plate_instead(wid, factory) {
+                if let Some((f, why)) = &asked
+                    && *f == fac_name
+                {
+                    self.logistics_factory(id, asked_value, why);
+                    if is_air_requisition(why) {
+                        self.eco.air_asked = true;
+                    }
                 }
+                return;
             }
-            return;
+            if !self.eco_factory_turn(&fac_name) {
+                restore(self, &fac_name);
+                self.eco.new_fac_due = fac_due;
+                if self.eco.requisition.is_none() {
+                    self.eco.requisition = asked;
+                }
+                return;
+            }
         }
 
         let Some(wpos) = self.eco.workers.get(&wid).map(|w| w.get_pos()) else {
@@ -1332,10 +1348,11 @@ impl Ai {
     /// factory (its constructors fly anywhere) only when no ground or sea
     /// factory gets to most of it.
     /// Whether we have a factory named `name`, standing or going up.
-    /// Whether a factory of type `name` (or a plate on one: see `plate`)
-    /// stands or is planned.
+    /// Whether a factory of type `name` (or a plate on one, working or
+    /// waiting for its factory: see `plate`) stands or is planned.
     pub(super) fn eco_has_factory(&self, name: &str) -> bool {
         self.fac.factories.values().any(|f| f.tech == name)
+            || self.eco.plates.iter().any(|&p| p.def().is_some_and(|d| self.fac_tech(d) == name))
             || (self.eco.factory_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)))
                 .filter_map(|t| t.as_construction())
                 .any(|c| self.fac_tech(c.build_type) == name)

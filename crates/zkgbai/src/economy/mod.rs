@@ -218,8 +218,10 @@ pub struct EconomyManager {
     pub(super) pending_power: Option<grid::PendingPower>,
     /// What allies build, and turns with allied ZKGBAIs (see `allied`).
     pub(super) allied: allied::AlliedProjects,
-    /// Our factory plates, producing or not (see `plate`).
+    /// Our factory plates, producing or not (see `plate`), and since when
+    /// those with no factory of their type in range have had none.
     pub(super) plates: Vec<Unit>,
+    pub(super) plate_orphaned: BTreeMap<i32, i32>,
     /// When it was last said that no Bertha site was found.
     bertha_report: i32,
     last_repaired_unit: i32,
@@ -414,6 +416,7 @@ impl EconomyManager {
             pending_power: None,
             allied: Default::default(),
             plates: Vec::new(),
+            plate_orphaned: BTreeMap::new(),
             bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
