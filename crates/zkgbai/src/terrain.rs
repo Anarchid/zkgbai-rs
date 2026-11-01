@@ -21,24 +21,38 @@ use zk_terrain::{ChokeKind, MoveClass, Pos, SpringMapData, Terrain, Tier, TierMa
 use crate::Ai;
 use crate::defs::Defs;
 
-/// A model and its compute time, from the analysis thread.
-type Analysed = Receiver<(Terrain, Duration)>;
+/// An analysis under way on its thread.
+pub struct Job {
+    /// The model and its compute time, when done.
+    rx: Receiver<(Terrain, Duration)>,
+    started: Instant,
+    /// Game frame it started at.
+    frame: i32,
+    /// A copy of its input, written out if it runs past [`STUCK_AFTER`].
+    input: Option<SpringMapData>,
+}
 
 pub enum TerrainModel {
     /// First analysis running.
     Pending {
-        rx: Analysed,
+        job: Job,
     },
     Ready {
         terrain: Terrain,
         /// A re-analysis under way.
-        rebuild: Option<Analysed>,
+        rebuild: Option<Job>,
     },
     Unavailable,
 }
 
 /// Frames between re-analyses of the terrain.
 const REANALYSIS_PERIOD: i32 = 30 * 60;
+
+/// An analysis takes ~0.1 s on a 1v1 map. One still running after this has
+/// run away: some re-analyses grow by ~0.5 GB/s until arena engines hit
+/// their 8 GB cap (2026-10/11, cause unknown), so its input is written out
+/// for an offline repro (see [`Ai::terrain_watchdog`]).
+const STUCK_AFTER: Duration = Duration::from_secs(3);
 
 /// Constructor whose movement class stands for each tier.
 const TIER_UNITS: [(Tier, &str); 6] = [
@@ -66,8 +80,8 @@ impl TerrainModel {
             })
             .collect();
         cb.log(&format!("terrain: slope limits {}", classes.join(", ")));
-        match analyse(cb, defs) {
-            Ok(rx) => TerrainModel::Pending { rx },
+        match analyse(cb, defs, 0) {
+            Ok(job) => TerrainModel::Pending { job },
             Err(e) => {
                 cb.log(&format!("terrain: {e}; terrain analysis disabled"));
                 TerrainModel::Unavailable
@@ -114,8 +128,9 @@ fn tier_classes(defs: &Defs) -> Vec<(Tier, MoveClass)> {
 }
 
 /// Analyse the map as it is now on a background thread.
-fn analyse(cb: Callback, defs: &Defs) -> Result<Analysed, String> {
+fn analyse(cb: Callback, defs: &Defs, frame: i32) -> Result<Job, String> {
     let data = map_data(cb)?;
+    let input = SpringMapData { slope_map: data.slope_map.clone(), height_map: data.height_map.clone(), ..data };
     let classes = tier_classes(defs);
     let (tx, rx) = mpsc::channel();
     // Pure computation: the thread must never call into the engine.
@@ -127,7 +142,7 @@ fn analyse(cb: Callback, defs: &Defs) -> Result<Analysed, String> {
             let _ = tx.send((terrain, start.elapsed()));
         })
         .map_err(|e| format!("cannot start analysis thread ({e})"))?;
-    Ok(rx)
+    Ok(Job { rx, started: Instant::now(), frame, input: Some(input) })
 }
 
 /// The terrain limits of a ground unit type; `None` for aircraft and
@@ -204,21 +219,22 @@ impl Ai {
         }
         let reanalyse = !self.dev_off("reanalysis");
         if let TerrainModel::Ready { rebuild, .. } = &mut self.terrain {
-            match rebuild.as_ref().map(|rx| rx.try_recv()) {
+            match rebuild.as_ref().map(|job| job.rx.try_recv()) {
                 None if reanalyse && (frame + self.offset) % REANALYSIS_PERIOD == 0 => {
-                    match analyse(self.cb, &self.defs) {
-                        Ok(rx) => *rebuild = Some(rx),
+                    match analyse(self.cb, &self.defs, frame) {
+                        Ok(job) => *rebuild = Some(job),
                         Err(e) => self.cb.log(&format!("terrain: re-analysis failed: {e}")),
                     }
                 }
                 Some(Ok((terrain, _))) => self.terrain_replace(terrain),
                 Some(Err(TryRecvError::Disconnected)) => *rebuild = None,
+                Some(Err(TryRecvError::Empty)) => self.terrain_watchdog(frame),
                 _ => {}
             }
             return;
         }
-        let TerrainModel::Pending { rx } = &self.terrain else { return };
-        match rx.try_recv() {
+        let TerrainModel::Pending { job } = &self.terrain else { return };
+        match job.rx.try_recv() {
             Ok((terrain, compute)) => {
                 self.terrain = TerrainModel::Ready { terrain, rebuild: None };
                 self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
@@ -233,7 +249,7 @@ impl Ai {
                     ));
                 }
             }
-            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Empty) => self.terrain_watchdog(frame),
             Err(TryRecvError::Disconnected) => {
                 self.log("terrain: analysis failed; continuing without terrain model");
                 self.terrain = TerrainModel::Unavailable;
@@ -302,6 +318,80 @@ impl Ai {
 const DUMP_FRAMES: [i32; 3] = [1800, 9000, 18000];
 
 impl Ai {
+    /// An analysis still running (no result waiting) after [`STUCK_AFTER`]
+    /// has run away: write
+    /// its input once, as `terrain-stuck-<map>-f<frame>-team<n>-<pid>.zktamap`
+    /// plus a `.json` naming the game and the movement classes, into
+    /// `ZKGBAI_STUCK_DIR` (arena.conf points every arena engine at one) or
+    /// else the AI's writeable directory, for `examples/oomhunt` in the
+    /// terrain crate.
+    fn terrain_watchdog(&mut self, frame: i32) {
+        let job = match &mut self.terrain {
+            TerrainModel::Pending { job } | TerrainModel::Ready { rebuild: Some(job), .. } => job,
+            _ => return,
+        };
+        // ZKGBAI_STUCK_AFTER_MS overrides the threshold (0 saves every
+        // analysis' input: for testing this).
+        static AFTER: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+        let after = *AFTER.get_or_init(|| {
+            std::env::var("ZKGBAI_STUCK_AFTER_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(STUCK_AFTER, Duration::from_millis)
+        });
+        if job.input.is_none() || job.started.elapsed() < after {
+            return;
+        }
+        let (input, started, secs) = (job.input.take(), job.frame, job.started.elapsed().as_secs_f64());
+        let Some(input) = input else { return };
+        let writeable = self.cb.writeable_dir();
+        let dir = std::env::var_os("ZKGBAI_STUCK_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| writeable.as_deref().map(std::path::PathBuf::from));
+        let Some(dir) = dir else {
+            self.log(&format!(
+                "terrain: analysis from f={started} still running after {secs:.1} s; nowhere to save its input"
+            ));
+            return;
+        };
+        let name: String =
+            self.cb.map().name().chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' { c } else { '_' }).collect();
+        let stem = format!("terrain-stuck-{name}-f{started}-team{}-{}", self.team_id, std::process::id());
+        let map_file = dir.join(format!("{stem}.zktamap"));
+        let classes: Vec<serde_json::Value> = tier_classes(&self.defs)
+            .iter()
+            .map(|(t, c)| {
+                serde_json::json!({
+                    "tier": t.name(), "max_slope": c.max_slope, "slope_mod": c.slope_mod,
+                    "max_water_depth": if c.max_water_depth.is_finite() { serde_json::json!(c.max_water_depth) } else { serde_json::json!("inf") },
+                    "min_water_depth": c.min_water_depth, "hover": c.hover,
+                })
+            })
+            .collect();
+        let info = serde_json::json!({
+            "map": self.cb.map().name(),
+            "started_frame": started,
+            "noticed_frame": frame,
+            "seconds": secs,
+            "team": self.team_id,
+            "pid": std::process::id(),
+            "writeable_dir": writeable,
+            "classes": classes,
+        });
+        let saved = std::fs::create_dir_all(&dir).and_then(|()| input.save(&map_file)).and_then(|()| {
+            std::fs::write(dir.join(format!("{stem}.json")), serde_json::to_string_pretty(&info).unwrap_or_default())
+        });
+        match saved {
+            Ok(()) => self.log(&format!(
+                "terrain: analysis from f={started} still running after {secs:.1} s (runaway?); input saved to {}",
+                map_file.display()
+            )),
+            Err(e) => self.log(&format!(
+                "terrain: analysis from f={started} still running after {secs:.1} s; cannot save input: {e}"
+            )),
+        }
+    }
+
     /// Development aid: with `ZKGBAI_DUMP_TERRAIN=<dir>` in the environment,
     /// write the map data (`<map>.zktamap`) and the AI's view of the game
     /// (`<map>-f<frame>-team<n>.json`: bases and metal spots with sides) for
