@@ -1,6 +1,7 @@
 //! Economy: workers and construction/reclaim/repair tasks, energy and
 //! overdrive grid, static defenses, superweapons.
 
+mod allied;
 mod army_support;
 mod assign;
 pub mod build_ids;
@@ -211,6 +212,8 @@ pub struct EconomyManager {
     pub grid_defs: grid::GridDefs,
     /// A building that needs power, held back until its site has it.
     pub(super) pending_power: Option<grid::PendingPower>,
+    /// What allies build, and turns with allied ZKGBAIs (see `allied`).
+    pub(super) allied: allied::AlliedProjects,
     /// When it was last said that no Bertha site was found.
     bertha_report: i32,
     last_repaired_unit: i32,
@@ -402,6 +405,7 @@ impl EconomyManager {
             colony_wants_air: None,
             grid_defs: grid::GridDefs::default(),
             pending_power: None,
+            allied: Default::default(),
             bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
@@ -746,6 +750,8 @@ impl Ai {
             self.eco_defend_links();
             self.eco_defend_mexes();
 
+            // jobs on allies' frames, and projects an ally's frame takes
+            self.eco_watch_allied_projects();
             // remove finished or invalidated tasks
             self.eco_clean_orders();
             self.eco_plan_army_support();

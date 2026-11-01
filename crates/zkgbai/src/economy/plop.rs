@@ -44,7 +44,7 @@ impl Ai {
     }
 
     pub(super) fn eco_wait_for_allied_plop(&self) -> bool {
-        waits(self.frame, self.team_id, &self.iq.plop_peers, |team| {
+        waits(self.frame, self.team_id, &self.iq.peers, |team| {
             self.iq.placed_factories.contains_key(&team)
                 || self.iq.teams.get(&team).is_some_and(|ps| ps.iter().any(|p| p.def_name.starts_with("factory")))
         })
@@ -216,7 +216,7 @@ mod tests {
         ai.defs = crate::defs::Defs::new(ai.cb);
         ai.allies = vec![0, 4];
         ai.iq.ai_allies = BTreeSet::from([0, 4]);
-        ai.iq.plop_peers = BTreeSet::from([0, 4]);
+        ai.iq.peers = BTreeSet::from([0, 4]);
         ai.eco.potential_fac_list = names(&["factoryveh"]);
         ai.eco.opening = Some("factorygunship".into());
         let def = ai.defs.get("factorygunship").unwrap();

@@ -568,7 +568,12 @@ impl Ai {
         // do we need a protector? (also when the enemy could be hiding one)
         let suspicious = self.intel_wants_anti();
         let nuked = self.eco.got_nuked || self.nukes.enemy_detonation;
-        if !self.eco.anti_nuke && (self.war.enemy_has_nuke || nuked || suspicious) {
+        // Not while an ally's covers our base, nor before our turn (see
+        // `allied`).
+        if !self.eco.anti_nuke
+            && (self.war.enemy_has_nuke || nuked || suspicious)
+            && self.eco_anti_due(self.graph.get_ally_center())
+        {
             if suspicious && !self.war.enemy_has_nuke && !nuked {
                 self.log(&format!(
                     "intel: {:.0} metal of the enemy's suspiciously unaccounted for; building an anti-nuke",
@@ -1155,6 +1160,9 @@ impl Ai {
         let Some(bertha) = self.defs.get("staticheavyarty") else {
             return;
         };
+        if self.eco_assist_ally(bertha) {
+            return;
+        }
         let Some(position) = self.eco_bertha_site(bertha) else { return };
         self.eco_add_powered(bertha, position, List::SuperWep);
     }
@@ -1192,6 +1200,7 @@ impl Ai {
                 if site.x < 0.0
                     || self.eco_bad_super_wep_site(site)
                     || self.eco.super_weps.iter().any(|b| distance(b.pos(), site) < 350.0)
+                    || self.eco_big_gun_near(site, 350.0)
                 {
                     continue;
                 }
@@ -1237,6 +1246,10 @@ impl Ai {
         let Some(death) = self.defs.get(name) else {
             return;
         };
+        // An ally's frame of it first; else in our turn (see `allied`).
+        if self.eco_assist_ally(death) || !self.eco_ally_turn("superweapon", &super::allied::SUPERWEAPONS) {
+            return;
+        }
 
         let ally_base = self.graph.get_ally_base();
         let ally_center = self.graph.get_ally_center();
@@ -2560,6 +2573,9 @@ impl Ai {
         let Some(def) = self.defs.get(name) else {
             return;
         };
+        if self.eco_assist_ally(def) {
+            return;
+        }
 
         let Some(position) = self.eco_reactor_site(def) else { return };
         self.eco_add_construction(WorkerTask::construction(def, position, 0), None, Some(List::Fusion));

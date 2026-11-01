@@ -981,11 +981,14 @@ impl Ai {
             let (bt, pos, facing) = (c.build_type, t.position, c.facing);
             let mut target = c.target;
             if target.is_none() && !map.is_possible_to_build_at(bt, pos, facing) {
-                //check to make sure it isn't our own nanoframe, since update is called before unitCreated
+                // Our own nanoframe (update is called before unitCreated) or
+                // an ally's of the same type: build it (see `allied`).
                 let radius = bt.x_size().min(bt.z_size()) as f32 * 4.0;
-                let nano = self.cb.friendly_units_in_cylinder(pos, radius).into_iter().find(|u| {
-                    u.is_being_built() && u.def().is_some_and(|d| d.id() == bt.id()) && u.team() == self.team_id
-                });
+                let nano = self
+                    .cb
+                    .friendly_units_in_cylinder(pos, radius)
+                    .into_iter()
+                    .find(|u| u.is_being_built() && u.def().is_some_and(|d| d.id() == bt.id()) && u.health() > 0.0);
                 match nano {
                     Some(u) => {
                         target = Some(u);
@@ -993,7 +996,7 @@ impl Ai {
                             c.target = Some(u);
                         }
                     }
-                    // if a construction job is blocked and it isn't our own nanoframe, remove it
+                    // if a construction job is blocked and not by a frame of its type, remove it
                     None => {
                         if !invalid.contains(&id) {
                             invalid.push(id);
