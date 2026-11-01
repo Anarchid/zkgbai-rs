@@ -68,8 +68,9 @@ pub struct AllyPlans {
     skipped_logged: BTreeSet<(i32, i32)>,
     /// The allies played by AIs; the others are humans.
     pub ai_allies: BTreeSet<i32>,
-    /// Other independently controlled ZKGBAI teams whose plops we sequence.
-    pub plop_peers: BTreeSet<i32>,
+    /// The allied ZKGBAIs that play their own teams (hivemind off): plops
+    /// (see `plop`) and unique projects (see `allied`) go by turns with them.
+    pub peers: BTreeSet<i32>,
     /// Living allied factories, refreshed while we still have a plop.
     pub placed_factories: BTreeMap<i32, BTreeSet<String>>,
     /// Whether the game is on (the pregame is over).

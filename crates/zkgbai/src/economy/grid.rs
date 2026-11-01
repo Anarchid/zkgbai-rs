@@ -175,6 +175,10 @@ impl Ai {
     }
 
     fn eco_start_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
+        // An ally may have started one meanwhile (see `allied`).
+        if self.eco_assist_ally(def) {
+            return;
+        }
         let mut ct = WorkerTask::construction(def, pos, 0);
         if let Some(c) = ct.as_construction_mut() {
             c.frame_issued = self.frame;
