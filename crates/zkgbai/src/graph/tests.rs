@@ -172,6 +172,32 @@ fn spots_sharing_an_integer_position_keep_only_the_last_one_linked() {
 }
 
 #[test]
+fn ally_center_falls_back_to_our_start_while_we_hold_no_spot() {
+    let mut g = graph(&[(640.0, 640.0), (1280.0, 640.0), (2560.0, 2560.0)]);
+    // Nothing known: no home at all.
+    g.calc_centers();
+    assert_eq!(g.get_ally_center(), Vec3::ZERO);
+
+    // Only the start box's spots: their center.
+    g.metal_spots[0].ally_shadowed = true;
+    g.metal_spots[1].ally_shadowed = true;
+    g.calc_ally_base();
+    assert_eq!(g.get_ally_center(), Vec3::xz(960.0, 640.0));
+
+    // Our chosen start beats the box.
+    g.set_start_pos(Vec3::new(700.0, 55.0, 900.0));
+    assert_eq!(g.get_ally_center(), Vec3::new(700.0, 55.0, 900.0));
+
+    // Owned spots beat both, and losing them all falls back again.
+    g.set_owned(2);
+    g.calc_centers();
+    assert_eq!(g.get_ally_center(), Vec3::xz(2560.0, 2560.0));
+    g.set_neutral(2);
+    g.calc_centers();
+    assert_eq!(g.get_ally_center(), Vec3::new(700.0, 55.0, 900.0));
+}
+
+#[test]
 fn territory_inference_along_a_chain() {
     // A - B - C - D, 640 elmos apart
     let mut g = graph(&[(640.0, 640.0), (1280.0, 640.0), (1920.0, 640.0), (2560.0, 640.0)]);

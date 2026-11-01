@@ -816,8 +816,19 @@ impl GraphManager {
         canvas.render()
     }
 
+    /// Center of our owned spots: home for retreats, drops and the like.
+    /// Holding no spot (before the first mex, after losing them all), our
+    /// start, else the center of our start box's spots; `NULLPOS` only if
+    /// neither is known.
+    // port: the original kept (0, 0) then, and sent units home to the corner.
     pub fn get_ally_center(&self) -> Vec3 {
-        self.ally_center
+        if self.ally_center != NULLPOS {
+            self.ally_center
+        } else if self.start_pos != NULLPOS {
+            self.start_pos
+        } else {
+            self.ally_base
+        }
     }
 
     pub fn get_ally_base(&self) -> Vec3 {
@@ -1058,7 +1069,7 @@ impl Ai {
     /// 100 elmos from the closest (by distance per build power) safe worker
     /// in our territory, towards the ally center; `None` if no worker is safe.
     fn graph_closest_worker_haven(&self, position: Vec3, need_no_aa: bool) -> Option<Vec3> {
-        let ally_center = self.graph.ally_center;
+        let ally_center = self.graph.get_ally_center();
         let mut closest = None;
         let mut dist = 0.0;
         for w in self.eco.workers.values() {
@@ -1088,7 +1099,7 @@ impl Ai {
     }
 
     pub fn graph_get_closest_haven(&self, position: Vec3) -> Vec3 {
-        self.graph_closest_worker_haven(position, false).unwrap_or(self.graph.ally_center)
+        self.graph_closest_worker_haven(position, false).unwrap_or(self.graph.get_ally_center())
     }
 
     /// The closest metal spot without enemy threat; the map center if none.
@@ -1110,7 +1121,7 @@ impl Ai {
     pub fn graph_get_closest_air_haven(&self, position: Vec3) -> Vec3 {
         match self.graph_closest_worker_haven(position, true) {
             Some(closest) => self.graph_build_site(closest),
-            None => self.graph.ally_center,
+            None => self.graph.get_ally_center(),
         }
     }
 
