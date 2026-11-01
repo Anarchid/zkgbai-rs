@@ -537,12 +537,19 @@ impl Ai {
             self.eco.chose_sup_wep = false;
         }
 
-        // do we need superweapons? (not while energy is what we lack)
+        // do we need superweapons? (not while energy is what we lack) A
+        // merged hivemind has striders first, as allies always merged once;
+        // allies playing apart count the alliance's reactors and start
+        // superweapons in turns (see `allied`).
+        let reactors = if self.merged_allies > 0 || self.allies.is_empty() || self.dev_off("allyterritory") {
+            self.eco.fusions.len()
+        } else {
+            self.eco_alliance_reactors()
+        };
         if !self.eco.chose_sup_wep
             && !self.eco_energy_starved()
-            && ((!self.allies.is_empty() && self.eco.has_striders && self.fac.num_striders > 1)
-                || self.allies.is_empty())
-            && self.eco.fusions.len() > 4
+            && (self.merged_allies == 0 || (self.eco.has_striders && self.fac.num_striders > 1))
+            && reactors > 4
         {
             self.eco_choose_super_weapon();
         }

@@ -53,13 +53,17 @@ fn generated_terrain_height_does_not_hide_mexes_from_the_graph() {
     unsafe extern "C" fn unit_def(_: i32, id: i32) -> i32 {
         if id == 3 { 43 } else { 42 }
     }
+    // Unit 4, an ally's mex; the rest are ours.
+    unsafe extern "C" fn unit_team(_: i32, id: i32) -> i32 {
+        if id == 4 { 1 } else { 0 }
+    }
     unsafe fn units_in(pos: *mut f32, radius: f32, spherical: bool, out: *mut i32, max: i32, enemy: bool) -> i32 {
         // SAFETY: the callback receives a three-component query position.
         let p = unsafe { std::slice::from_raw_parts(pos, 3) };
         let units: &[(i32, [f32; 3])] = if enemy {
             &[(2, [2000.0, -300.0, 1000.0])]
         } else {
-            &[(1, [1000.0, 300.0, 1000.0]), (3, [3000.0, 0.0, 1000.0])]
+            &[(1, [1000.0, 300.0, 1000.0]), (3, [3000.0, 0.0, 1000.0]), (4, [4000.0, 0.0, 1000.0])]
         };
         let mut count = 0;
         for &(id, u) in units {
@@ -89,6 +93,7 @@ fn generated_terrain_height_does_not_hide_mexes_from_the_graph() {
         Mod_getLosMipLevel: Some(los_mip),
         Map_getLosMap: Some(los_map),
         Unit_getDef: Some(unit_def),
+        Unit_getTeam: Some(unit_team),
         getFriendlyUnitsIn: Some(friendly),
         getEnemyUnitsIn: Some(enemy),
         ..Default::default()
@@ -96,9 +101,10 @@ fn generated_terrain_height_does_not_hide_mexes_from_the_graph() {
     // SAFETY: the table lives forever and implements the callbacks used below.
     let cb = unsafe { Callback::from_raw(0, table) };
     let los = crate::los::LosManager::new(cb);
-    let mut g = graph(&[(1000.0, 1000.0), (2000.0, 1000.0), (3000.0, 1000.0), (1100.0, 1000.0)]);
+    let mut g = graph(&[(1000.0, 1000.0), (2000.0, 1000.0), (3000.0, 1000.0), (1100.0, 1000.0), (4000.0, 1000.0)]);
     g.cb = cb;
     g.mex_def_id = 42;
+    g.my_team_id = 0;
     g.set_owned(0);
     g.metal_spots[0].extractor = Unit::from_id(cb, 1);
 
@@ -109,7 +115,11 @@ fn generated_terrain_height_does_not_hide_mexes_from_the_graph() {
         assert!(g.metal_spots[1].hostile, "enemy mexes below the original terrain must be seen too");
         assert!(!g.metal_spots[2].owned && !g.metal_spots[2].hostile, "a non-mex is not an extractor");
         assert!(!g.metal_spots[3].owned && !g.metal_spots[3].hostile, "keep the horizontal radius limit");
-        assert_eq!(g.territory_fraction, 0.25);
+        assert!(!g.metal_spots[0].allied, "our own mex is ours, not an ally's");
+        assert!(g.metal_spots[4].allied && !g.metal_spots[4].owned, "an ally's mex is the alliance's");
+        assert!(g.metal_spots[4].touched, "an ally's mex counts as touched");
+        // Ours and the ally's, of five.
+        assert_eq!(g.territory_fraction, 0.4);
     }
 }
 

@@ -201,6 +201,14 @@ impl Ai {
         w.ok
     }
 
+    /// The alliance's standing fusions and singularities, ours too, as of
+    /// the last census.
+    pub(super) fn eco_alliance_reactors(&self) -> usize {
+        (self.eco.allied.census.iter())
+            .filter(|&&(u, n)| matches!(n, "energyfusion" | "energysingu") && u.health() > 0.0 && !u.is_being_built())
+            .count()
+    }
+
     /// Every allied team's factories, plates and mexes (ours too), as of
     /// the last census; none alone.
     pub(crate) fn ally_anchors(&self) -> &[(i32, Vec3)] {

@@ -107,7 +107,9 @@ impl Ai {
         let theirs: f32 = spots.iter().filter(|s| !s.owned && (s.hostile || s.enemy_shadowed)).map(|s| s.value).sum();
         let seen: f32 = spots.iter().filter(|s| !s.owned && s.hostile).map(|s| s.value).sum();
         let held = seen + INFERRED_WEIGHT * (theirs - seen);
-        let income = CALIBRATION * self.eco.static_income * (held + BASE_VALUE) / (ours + BASE_VALUE);
+        // A base for each enemy team (one in a 1v1, as fitted).
+        let bases = self.get_enemy_team_ids().len().max(1) as f32;
+        let income = CALIBRATION * self.eco.static_income * (held + bases * BASE_VALUE) / (ours + BASE_VALUE);
         let infrastructure = self.eco_infrastructure_value();
         let intel = &mut self.intel;
         if intel.last_frame == 0 {
@@ -151,12 +153,30 @@ impl Ai {
         }
     }
 
+    /// What our income stands for in the alliance's: scaled by the spots
+    /// it holds (ours and our allies') against ours, a base for each of us,
+    /// as the enemy's estimate is. The estimate is of the whole enemy
+    /// alliance, so a test of our income against it reads the alliance's
+    /// (each instance of a Folsom trio set its third against the whole
+    /// enemy team, 2026-11-01). Alone (or `disable=allyterritory`), 1.
+    pub(crate) fn intel_alliance_scale(&self) -> f32 {
+        if self.allies.is_empty() || self.dev_off("allyterritory") {
+            return 1.0;
+        }
+        let spots = &self.graph.metal_spots;
+        let ours: f32 = spots.iter().filter(|s| s.owned).map(|s| s.value).sum();
+        let held: f32 = spots.iter().filter(|s| s.owned || (s.allied && !s.hostile)).map(|s| s.value).sum();
+        let bases = (1 + self.allies.len()) as f32;
+        (held + bases * BASE_VALUE) / (ours + BASE_VALUE)
+    }
+
     /// Whether the enemy could be hiding a nuke and we can afford to guard
-    /// against it.
+    /// against it (the alliance can: see [`Self::intel_alliance_scale`]).
     pub fn intel_wants_anti(&self) -> bool {
+        let scale = self.intel_alliance_scale();
         !self.dev_off("intel")
             && self.intel.suspicious() >= ANTI_SUSPICION.max(ANTI_SHARE * self.intel.produced)
-            && self.eco.adjusted_income >= ANTI_INCOME
-            && self.eco.static_income >= 0.8 * self.intel.income
+            && self.eco.adjusted_income * scale >= ANTI_INCOME
+            && self.eco.static_income * scale >= 0.8 * self.intel.income
     }
 }

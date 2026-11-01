@@ -454,11 +454,15 @@ impl Ai {
             .fold((0, 0.0), |(n, v), d| (n + 1, v + d.cost(metal)))
     }
 
-    /// Whether to build a silo: a strike would pay and we can afford one.
+    /// Whether to build a silo: a strike would pay and we can afford one
+    /// (the alliance can, in a team game: see `intel_alliance_scale`; the
+    /// superweapon turn and help with allied frames keep it to one at a
+    /// time, see `economy::allied`).
     pub fn nukes_wanted(&self) -> bool {
+        let scale = self.intel_alliance_scale();
         !self.dev_off("nukes")
-            && self.eco.adjusted_income >= NUKE_INCOME
-            && self.eco.static_income >= 0.8 * self.intel.income
+            && self.eco.adjusted_income * scale >= NUKE_INCOME
+            && self.eco.static_income * scale >= 0.8 * self.intel.income
             && self.nukes_target(Purpose::Build).is_some_and(|(_, v)| v >= STRIKE_VALUE)
     }
 

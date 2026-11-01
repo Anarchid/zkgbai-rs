@@ -80,8 +80,17 @@ fn per_bp(distance: f32, bp: f32) -> f32 {
 pub struct GraphManager {
     cb: Callback,
     pub my_team_id: i32,
+    /// The share of the map's spots the alliance holds (our mexes and our
+    /// allies'), and whether that (or touched spots) reads eminent. Phase
+    /// signals all over (unit mix, fusions, AA, squad sizes): in team
+    /// games they read the alliance's ground, as a merged hivemind's always
+    /// did; each ally counting only its own held a third of it (Folsom Dam
+    /// trio, 2026-11-01: 15-20% each against the 40% threshold, no fusion
+    /// in 31 minutes). `disable=allyterritory` counts our own only.
     pub territory_fraction: f32,
     pub eminent_territory: bool,
+    /// Whether allies' mexes count in the territory share.
+    pub ally_territory: bool,
     pub is_water_map: bool,
     /// Pylon-ish unit-def name -> grid link radius.
     pub pylon_defs: BTreeMap<String, i32>,
@@ -152,6 +161,7 @@ impl GraphManager {
             my_team_id: -1,
             territory_fraction: 0.0,
             eminent_territory: false,
+            ally_territory: true,
             is_water_map: false,
             pylon_defs: BTreeMap::new(),
             metal_spots: Vec::new(),
@@ -318,8 +328,14 @@ impl GraphManager {
                 // and terraforming can move the extractor far above or
                 // below it: ownership depends on x/z, not that stale y.
                 let mut has_mex = false;
-                if self.cb.friendly_units_in_cylinder(pos, 50.0).into_iter().any(|u| self.is_mex(u)) {
+                let friendly: Vec<Unit> =
+                    self.cb.friendly_units_in_cylinder(pos, 50.0).into_iter().filter(|&u| self.is_mex(u)).collect();
+                self.metal_spots[i].allied = friendly.iter().any(|u| u.team() != self.my_team_id);
+                if !friendly.is_empty() {
                     self.metal_spots[i].hostile = false;
+                    // An ally's counts as touched as ours does (else the
+                    // 85% test is out of reach with allies).
+                    self.metal_spots[i].touched |= self.ally_territory;
                     has_mex = true;
                 }
                 if !has_mex && self.cb.enemy_units_in_cylinder(pos, 50.0).into_iter().any(|u| self.is_mex(u)) {
@@ -334,6 +350,7 @@ impl GraphManager {
                 let ms = &mut self.metal_spots[i];
                 ms.visible = false;
                 ms.owned = false;
+                ms.allied = false;
                 if frame - ms.last_seen > 3600 {
                     ms.last_seen = frame - 1800;
                 }
@@ -354,7 +371,10 @@ impl GraphManager {
         let spots = self.metal_spots.len() as f32;
         // port: the original divides by zero (NaN) on maps without metal spots.
         if spots > 0.0 {
-            self.territory_fraction = self.get_owned_spots().len() as f32 / spots;
+            let held = (self.metal_spots.iter())
+                .filter(|ms| ms.owned || (self.ally_territory && ms.allied && !ms.hostile))
+                .count();
+            self.territory_fraction = held as f32 / spots;
             self.eminent_territory =
                 self.get_touched_spots().len() as f32 / spots > 0.85 || self.territory_fraction > 0.4;
         } else {
@@ -1020,7 +1040,10 @@ impl GraphManager {
 /// Cross-module graph logic and module events.
 impl Ai {
     /// Module init: nothing to do (the original only cached manager pointers).
-    pub fn graph_init(&mut self) {}
+    pub fn graph_init(&mut self) {
+        self.graph.my_team_id = self.team_id;
+        self.graph.ally_territory = !self.dev_off("allyterritory");
+    }
 
     pub fn graph_lua_message(&mut self, data: &str) {
         self.graph.lua_message(data);
