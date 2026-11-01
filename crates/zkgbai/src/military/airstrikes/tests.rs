@@ -519,3 +519,22 @@ fn odin_thermite_reaches_underwater_statics_other_jobs_stay_raven_only() {
     let stat = jobs.iter().find(|j| j.kind == MissionKind::Static).expect("static job");
     assert!(packages(stat, clear(), 800.0).iter().flatten().all(|(p, _)| *p == Plane::Raven));
 }
+
+#[test]
+fn a_flea_interdiction_takes_one_magpie() {
+    // 40 health: one Magpie, or one Phoenix (launch orders them by metal).
+    let p = packages(&job(MissionKind::Interdict, 40.0), clear(), 800.0);
+    assert_eq!(p, vec![vec![(Plane::Magpie, 1)], vec![(Plane::Phoenix, 1)]]);
+    // A Glaive: two Magpies; a Scythe: five, or one Phoenix.
+    let p = packages(&job(MissionKind::Interdict, 230.0), clear(), 800.0);
+    assert_eq!(p, vec![vec![(Plane::Magpie, 2)], vec![(Plane::Phoenix, 1)]]);
+    let p = packages(&job(MissionKind::Interdict, 820.0), clear(), 800.0);
+    assert_eq!(p, vec![vec![(Plane::Magpie, 5)], vec![(Plane::Phoenix, 1)]]);
+    // A Magpie's purchase is the cheaper deficit for a Flea.
+    let have = std::collections::BTreeMap::new();
+    let cost = |k: Plane| if k == Plane::Phoenix { 520.0 } else { 250.0 };
+    assert_eq!(
+        purchase(&packages(&job(MissionKind::Interdict, 40.0), clear(), 800.0), &have, cost),
+        Some(Plane::Magpie)
+    );
+}
