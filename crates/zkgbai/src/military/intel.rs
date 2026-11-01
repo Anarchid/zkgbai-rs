@@ -78,6 +78,14 @@ impl Intel {
     pub fn suspicious(&self) -> f32 {
         self.unaccounted() - self.infrastructure * self.produced
     }
+
+    /// The enemy's worth as far as we can tell: what it made less what we
+    /// saw die, or what we have seen of it and not seen die if that is
+    /// more (the production estimate runs low against a big economy).
+    /// Commanders are in neither.
+    pub fn estimated_value(&self) -> f32 {
+        (self.produced - self.killed).max(self.known.values().sum::<f32>())
+    }
 }
 
 impl Ai {

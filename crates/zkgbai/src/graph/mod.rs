@@ -367,6 +367,16 @@ impl GraphManager {
         u.def().is_some_and(|d| d.id() == self.mex_def_id)
     }
 
+    pub fn is_mex_def(&self, def: UnitDef) -> bool {
+        def.id() == self.mex_def_id
+    }
+
+    /// The metal spot a mex at `pos` stands on (within 50, as the spot
+    /// update finds them).
+    pub fn spot_under(&self, pos: Vec3) -> Option<usize> {
+        self.get_closest_spot_index(pos).filter(|&i| distance(self.metal_spots[i].position, pos) <= 50.0)
+    }
+
     /// Whether ground forces travel a link directly (and territory shadows
     /// spread along it; see `ground_links`).
     pub fn is_ground_link(&self, link: usize) -> bool {
