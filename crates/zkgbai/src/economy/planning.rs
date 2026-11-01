@@ -917,14 +917,21 @@ impl Ai {
             fac_name = "factoryship".to_owned();
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
-        } else if !opening_due && is_plop && choices.contains("factorygunship") {
-            fac_name = "factorygunship".to_owned();
+        } else if let Some(air) = (!opening_due && is_plop && self.allies.len() >= 2)
+            .then(|| super::plop::AIR_FACTORIES.iter().filter(|f| choices.contains(**f)).collect::<Vec<_>>())
+            .filter(|air| !air.is_empty() && kgb_rand() < super::plop::AIR_OPENING)
+        {
+            // An air plant now and then (see `plop`).
+            fac_name = (*air[((kgb_rand() * air.len() as f64) as usize).min(air.len() - 1)]).to_owned();
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
         } else if (nfac as i32) < 1 + merged.max(1) || has_striders || is_plop || self.eco.pylons.is_empty() {
             // (The air factory for tempo weighs more as the game runs on.)
             let (gunship, plane) = self.eco_air_tempo_weights();
+            // An air plop only by its own roll above (see `plop`).
+            let ground = choices.iter().any(|f| !super::plop::AIR_FACTORIES.contains(&f.as_str()));
             let weight = |f: &str| match f {
+                _ if is_plop && ground && super::plop::AIR_FACTORIES.contains(&f) => 0.0,
                 "factorygunship" => gunship,
                 "factoryplane" => plane,
                 _ => 1.0,
@@ -1481,11 +1488,23 @@ impl Ai {
                 return self.eco.opening.clone();
             }
         }
-        // A shipyard half the time, a gunship plop in big teams, else any.
-        let roll = if list.contains("factoryship") && kgb_rand() < 0.5 {
+        // A shipyard half the time; in teams of three or more now and then
+        // an air plant (see `plop`); else any but the air plants, and not
+        // the water side's openings when another has it.
+        let air: Vec<&str> = (super::plop::AIR_FACTORIES.iter()).copied().filter(|f| list.contains(*f)).collect();
+        let others_water = self.eco.water_side.is_some_and(|(team, _)| team != self.team_id);
+        let rest: Vec<&String> = (list.iter())
+            .filter(|f| !super::plop::AIR_FACTORIES.contains(&f.as_str()))
+            .filter(|f| !(others_water && super::plop::WATER_FACTORIES.contains(&f.as_str())))
+            .collect();
+        let pick = |v: &[&str]| v[((kgb_rand() * v.len() as f64) as usize).min(v.len() - 1)].to_owned();
+        let roll = if list.contains("factoryship") && !others_water && kgb_rand() < 0.5 {
             Some("factoryship".to_owned())
-        } else if list.contains("factorygunship") {
-            Some("factorygunship".to_owned())
+        } else if !air.is_empty() && self.allies.len() >= 2 && kgb_rand() < super::plop::AIR_OPENING {
+            Some(pick(&air))
+        } else if !rest.is_empty() {
+            let rest: Vec<&str> = rest.iter().map(|s| s.as_str()).collect();
+            Some(pick(&rest))
         } else {
             let n = ((kgb_rand() * list.len() as f64) as usize).min(list.len() - 1);
             list.iter().nth(n).cloned()

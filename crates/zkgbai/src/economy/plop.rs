@@ -10,7 +10,13 @@
 //! and an amphibious or hover opening (user, 2026-11-02: "in a Folsom 3v3,
 //! at least one gets a water-capable factory ... picking the northern
 //! spot"). Every instance decides it alike in the pregame, from the map
-//! and the start boxes, so no message is needed.
+//! and the start boxes, so no message is needed; the others leave water
+//! openings to it.
+//!
+//! From three allies a side (us included) an opening may be an air plant
+//! (user, 2026-11-02): [`AIR_OPENING`] of the rolls, the plane or gunship
+//! plant at random. Air moves as one type, so a second air roll in the
+//! alliance gives way at the plop.
 
 use std::collections::BTreeSet;
 
@@ -26,11 +32,17 @@ const WADE: f32 = 22.0;
 /// A land constructor builds this far from where it stands, about, elmos.
 const WET_REACH: f32 = 120.0;
 /// The share of our side's metal under water from which one of us takes
-/// the water side.
-const WATER_NEED: f32 = 0.12;
+/// the water side: Folsom Dam Deluxe V4 has 9-11% (the reservoir's, by
+/// the northern starts).
+const WATER_NEED: f32 = 0.08;
 /// Openings whose constructors take metal under water and on land too (a
 /// shipyard's take no land).
 pub(crate) const WATER_FACTORIES: [&str; 2] = ["factoryamph", "factoryhover"];
+/// The air plants an opening may be.
+pub(crate) const AIR_FACTORIES: [&str; 2] = ["factoryplane", "factorygunship"];
+/// The share of opening rolls that take an air plant, with two allies or
+/// more: about 58% of three-ZKGBAI sides get one.
+pub(crate) const AIR_OPENING: f64 = 0.25;
 
 /// How a factory's units move, for spreading the alliance's openings: the
 /// terrain tier, aircraft as one, else the factory itself.
@@ -86,6 +98,10 @@ impl Ai {
             }
             used.extend(plans.iter().filter(|p| p.def_name.starts_with("factory")).map(|p| p.def_name.clone()));
         }
+        // Another's water side opens for water: known to all in the pregame.
+        if self.eco.water_side.is_some_and(|(team, _)| team != self.team_id) {
+            used.extend(WATER_FACTORIES.iter().map(|f| (*f).to_owned()));
+        }
         used
     }
 
@@ -138,11 +154,16 @@ impl Ai {
             }
         }
         let share = if total > 0.0 { wet / total } else { 0.0 };
+        let at = if wet > 0.0 { Vec3::xz(wx / wet, wz / wet) } else { base };
         if share < WATER_NEED {
-            self.log(&format!("economy: {:.0}% of our side's metal is under water: no water side", 100.0 * share));
+            self.log(&format!(
+                "economy: {:.0}% of our side's metal is under water (about ({:.0}, {:.0})): no water side",
+                100.0 * share,
+                at.x,
+                at.z
+            ));
             return None;
         }
-        let at = Vec3::xz(wx / wet, wz / wet);
         let team = self.iq.peers.iter().copied().chain([self.team_id]).max()?;
         let site = starts.into_iter().min_by(|a, b| distance(*a, at).total_cmp(&distance(*b, at)))?;
         self.log(&format!(
