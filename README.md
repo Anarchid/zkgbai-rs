@@ -13,28 +13,6 @@ This is the Rust rewrite. It is a native engine AI (a plain `cdylib` speaking th
 interface), so unlike the original Java AI it needs no JVM and ships the same way CircuitAI does:
 a folder with `libSkirmishAI.so`, `SkirmishAI.dll`, `AIInfo.lua` and `AIOptions.lua`.
 
-Stakeout damage response
-------------------------
-
-`stakeoutqrf` is on by default. When an enemy ground or sea raider/scout damages one of our
-economy units, available stakeouts join QRF if their estimated travel time to firing range,
-plus time to kill the attacker and a one-second response margin, is less than the victim's
-remaining HP divided by the attacker's sustained HP DPS. Each qualifying stakeout joins;
-there is no fixed radius or single-responder cap. Fast units can rescue from farther away.
-The estimate uses terrain route cost, current health, armor-specific weapon damage, salvo/reload,
-weapon range and the responder's slow state. Unreachable, unarmed, disarmed and paralyzed responders do
-not qualify. EMP, slow-only and disarm damage do not count as lethal DPS. This is a single-attacker
-sustained-fire estimate, not a prediction of dodging, healing, shields or the full nearby fight.
-Constructors, commanders, factories, caretakers, income, grid and storage buildings qualify,
-including unfinished buildings; combat units, turrets and terraform markers do not.
-Units retreating for repairs or reserved by the operator keep their existing orders.
-This works while looking, moving or shadowing as well as while parked. It requires QRF to be
-enabled. Use `disable=stakeoutqrf`, `ZKGBAI_DISABLE=stakeoutqrf`, or
-`feature stakeoutqrf off=true` for the control. The first hit is evaluated immediately; repeated
-hits on the same victim by the same attacker are rechecked at most twice per second.
-The operator journal records `stakeout` events with `event=damage_qrf`, recruited units, victim,
-attacker, estimated survival time and each responder's travel and kill times.
-
 Layout
 ------
 
@@ -48,65 +26,6 @@ Layout
 | `tools/terrain-view` | Renders a tier's regions (darker on slopes units crawl up), gates (red, orange where going round them is easy) and borders (magenta where crossing is free, blue with a yellow tick into the side it climbs into) to PNG and, given a scenario dumped by the AI (`ZKGBAI_DUMP_TERRAIN=<dir>`), overlays and prints the strategic analysis. |
 | `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. `luaui/gui_zkgbai_operator.lua`: the same in the game, as a LuaUI widget. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
-
-Above 2000 projected metal per square kiloelmo, each full 2000 metal of completed ground
-combat units allows one Aspis or Iris (a shared allowance). Existing shield/cloak factories
-supply them; otherwise constructors build dedicated Aegis/Cornea statics and morph them.
-Support units do not contribute to the army budget. Nanoframes, pending factory orders,
-construction jobs and active morphs reserve slots; ordinary static defenses are left in place.
-
-Gate fortification scores the direct route and equidistant frontier using ground travel between
-our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
-gate's value; distance from home and constructor travel reduce it sharply. The planner compares
-turret sites by uncovered gate value per metal, including shared sites between gates, and checks
-range and terrain clearance at the centre and both edges of each front. Existing and queued
-defenses reserve each sample separately, so complementary coverage counts and saturated overlap
-earns no additional value. Built or queued Lotus range circles must not overlap.
-Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
-covers them; when both have affordable, safe sites, a fair coin chooses the type, using its best
-site. Both become eligible at 25 metal income, subject to the pooled budget. Repeated checks of
-one request do not add credit. Planned upgrades reserve demand,
-and cancelled upgrades release it. Placement still requires a safe constructor route and, when
-posture is enabled, sufficient posture budget. Lower standing-metal density and a larger share
-of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
-pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
-so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
-reuse a matching existing or queued turret when it covers the asset's nearby approaches. Otherwise
-they prefer a safe shared gate site that retains that coverage, falling back to ordinary local
-placement when no such site is available. Other requested weapon types are retained; AA, shields
-and the opening factory defense keep their existing placement, subject to the Lotus overlap cap.
-Forward construction and ditches require local support, reachable approaches, and checks against
-current threats and recent raids; workers reconsider fortification jobs when support changes.
-The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds
-in `crates/zkgbai/src/economy/fortify.rs`.
-
-The `fortify` feature is on by default. Set `disable=fortify` (or
-`ZKGBAI_DISABLE=fortify`) to restore the previous gate planner; it can also be
-toggled live with the operator feature switch. The new planner respects the
-posture defense budget and the existing `detour` ditch-value and job-cost checks.
-
-Tactical missile silos are scored at their final buildable positions, with a 3450-elmo reach
-including a margin for the pads. Sites near significant enemy region density or recent raids
-reserve their silo footprint while a heavy laser, two light lasers, flak and an area shield are
-built first. Only live, completed defenses release the silo job; missing guards are requeued,
-and blocked preparation sites are abandoned. Existing defenses can satisfy the prerequisites.
-Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
-
-Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
-known and inferred enemy static metal and observed battlefield density exceeds the
-**Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
-step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
-requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
-Density is `posture.density`: our standing metal plus known enemy metal, divided by usable
-ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
-remembered live statics remain counted. Coverage and battlefield density are separate gates;
-the missile firing disk is not the density denominator. Density and lanes are measured even
-with defense posture disabled; before lanes are available the full slider threshold applies.
-Decision logs and the operator `regime` view report the adjusted threshold. Static value
-includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
-confidence), without double-counting known mexes or assigning locations to unobserved spending.
-The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
-and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
 
 Building
 --------
@@ -172,11 +91,180 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
-`mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
+`mexporc` (the turret by every mex and link, the "porc tax").
 `ZKGBAI_MUTE` (or the AI option `mute`) silences modules: `eco`, `fac`, `raider`, `squad`, `scouts`, ... (the
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
 that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are
 worth.
+`ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
+The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?test=bite` against
+`ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
+spider factory, should be intercepted, find the anti-nuke with Widows, stun it and get a missile through;
+with `test=eos` it gets a missile silo by the Fusions instead, and its Eos should count each one they hit gone.
+With `test=drop` (hovers) or `test=dropbot` (bots) it gets five Charons and five riots every
+three minutes and drops them by the defender's buildings, walkable or not: a check of the air route,
+landing spots and unload handling (`drops:` lines, with a status line every 30 s in the air).
+`test=bertha` gives it five Fusions and a radar at once (a superweapon soon, sited by shell paths, its
+site linked to power first); `test=colony` a constructor and a Charon, `test=colonyair` an air
+constructor, to colonize the free metal far off. `ZKGBAI?test=aaprobe` against `ZKGBAI?test=aafort`
+flies unarmed Charons over static and mobile anti-air the attacker never sees (`air-intel:` lines:
+the raw hits, and every minute the contacts it has placed, to compare with the fort's).
+`ZKGBAI?test=hunt` against `ZKGBAI?test=snipers` (or `test=lances`) stages assassination strikes: the defender
+posts a Phantom (a Lance) 1400 elmos out every 2.5 minutes, every second one with a Reaver behind it, and the
+attacker gets raiders every 2 minutes; the strikes (`strikes:` lines, scored by `tools/arena/strikes.py`) should
+kill the snipers. `disable=strikes` switches them off. Dedicated Halberd, Dirtbag, Flea and Scythe waves use
+modeled target-death probability; the older `strike_margin` setting no longer controls this gate.
+See [assassination waves](crates/zkgbai/src/military/strikes/README.md) for tactic rules and isolated engine scenarios.
+`ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
+
+Behaviour
+---------
+
+Most of these have a feature switch: `disable=<name>` (AI option) or `ZKGBAI_DISABLE=<name>` turns
+off one that is on by default, `enable=<name>` or `ZKGBAI_ENABLE=<name>` turns on one that is off
+by default (the list is `OFF_BY_DEFAULT` in `crates/zkgbai/src/ai.rs`), and the operator's
+`feature` tool switches one mid-game.
+
+### QRF predictor assignment
+
+`qrfpredict` is on by default for small encounters (at most four teams, four raids and 32 units
+per local rollout) under the live QRF's default algorithm, `mark`. `disable=qrfpredict` restores the
+legacy arrival/value matching and power-ratio conduct. The operator feature
+switch can toggle it during play. A background worker evaluates every eligible
+team subset against each raid, including leaving it unanswered, and chooses
+disjoint subsets by expected friendly losses. Protected assets, current health,
+EMP, observed asset targets and terrain travel delays participate in 30-second
+mechanics rollouts. Nearby response is therefore not interchangeable with a
+distant assignment. Predictor-selected teams bypass the legacy attack power
+ratio and are not split afterward by the metal-ratio rule. Unknown encounters
+and larger forces retain the legacy policy; pending or materially stale
+predictions preserve current orders. `qrf-predict` journal events record the
+assignments, loss estimates, snapshot age, simulations and worker time.
+
+Small known ground groups already in weapon range of protected assets (or
+recently observed firing at them) can also be evaluated beyond the legacy
+strength/territory gates. This includes bombardment by skirmishers such as
+Rogues. Threat deadlines account for weapon range, and the rollout judges
+whether reaching the shooter helps, rather than requiring a defender to
+reach the mex first. These additional groups are never attacked through the
+legacy fallback when prediction is unavailable; leaving them unanswered is
+still a valid predicted outcome.
+
+The rollout uses two-dimensional straight movement plus path-derived detour
+delays, not engine path simulation. Raiders keep their last observed asset
+target and then select nearby surviving assets. Up to four threatened assets
+are considered per raid; overlapping asset values are divided among threats.
+
+### Stakeout damage response
+
+`stakeoutqrf` is on by default. When an enemy ground or sea raider/scout damages one of our
+economy units, available stakeouts join QRF if their estimated travel time to firing range,
+plus time to kill the attacker and a one-second response margin, is less than the victim's
+remaining HP divided by the attacker's sustained HP DPS. Each qualifying stakeout joins;
+there is no fixed radius or single-responder cap. Fast units can rescue from farther away.
+The estimate uses terrain route cost, current health, armor-specific weapon damage, salvo/reload,
+weapon range and the responder's slow state. Unreachable, unarmed, disarmed and paralyzed responders do
+not qualify. EMP, slow-only and disarm damage do not count as lethal DPS. This is a single-attacker
+sustained-fire estimate, not a prediction of dodging, healing, shields or the full nearby fight.
+Constructors, commanders, factories, caretakers, income, grid and storage buildings qualify,
+including unfinished buildings; combat units, turrets and terraform markers do not.
+Units retreating for repairs or reserved by the operator keep their existing orders.
+This works while looking, moving or shadowing as well as while parked. It requires QRF to be
+enabled. Use `disable=stakeoutqrf`, `ZKGBAI_DISABLE=stakeoutqrf`, or
+`feature stakeoutqrf off=true` for the control. The first hit is evaluated immediately; repeated
+hits on the same victim by the same attacker are rechecked at most twice per second.
+The operator journal records `stakeout` events with `event=damage_qrf`, recruited units, victim,
+attacker, estimated survival time and each responder's travel and kill times.
+
+### Commanders on raid defense
+
+Commanders answer raids within 650 elmos of where they were working, closing to weapon
+range and returning to work when the raid leaves. They keep a fixed response area, avoid enemy
+turrets, and leave defense when below 65% health or short of shields. Recon commanders jump
+along safe routes both when responding and when traveling to construction, repair or reclaim
+jobs; reload, landing terrain and flight clearance are checked before each jump. This defaults
+on; the operator's `feature` tool with `{"name":"commander","off":true}` disables both behaviors
+and immediately releases active defenders to economy work. `off:false` re-enables them.
+`disable=commander` or `ZKGBAI_DISABLE=commander` disables them at startup.
+
+### Gate fortification
+
+Gate fortification scores the direct route and equidistant frontier using ground travel between
+our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
+gate's value; distance from home and constructor travel reduce it sharply. The planner compares
+turret sites by uncovered gate value per metal, including shared sites between gates, and checks
+range and terrain clearance at the centre and both edges of each front. Existing and queued
+defenses reserve each sample separately, so complementary coverage counts and saturated overlap
+earns no additional value. Built or queued Lotus range circles must not overlap.
+Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
+covers them; when both have affordable, safe sites, a fair coin chooses the type, using its best
+site. Both become eligible at 25 metal income, subject to the pooled budget. Repeated checks of
+one request do not add credit. Planned upgrades reserve demand,
+and cancelled upgrades release it. Placement still requires a safe constructor route and, when
+posture is enabled, sufficient posture budget. Lower standing-metal density and a larger share
+of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
+pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
+so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
+reuse a matching existing or queued turret when it covers the asset's nearby approaches. Otherwise
+they prefer a safe shared gate site that retains that coverage, falling back to ordinary local
+placement when no such site is available. Other requested weapon types are retained; AA, shields
+and the opening factory defense keep their existing placement, subject to the Lotus overlap cap.
+Forward construction and ditches require local support, reachable approaches, and checks against
+current threats and recent raids; workers reconsider fortification jobs when support changes.
+The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds
+in `crates/zkgbai/src/economy/fortify.rs`.
+
+The `fortify` feature is on by default. Set `disable=fortify` (or
+`ZKGBAI_DISABLE=fortify`) to restore the previous gate planner; it can also be
+toggled live with the operator feature switch. The new planner respects the
+posture defense budget and the existing `detour` ditch-value and job-cost checks.
+
+### Shield and cloak support
+
+Above 2000 projected metal per square kiloelmo, each full 2000 metal of completed ground
+combat units allows one Aspis or Iris (a shared allowance). Existing shield/cloak factories
+supply them; otherwise constructors build dedicated Aegis/Cornea statics and morph them.
+Support units do not contribute to the army budget. Nanoframes, pending factory orders,
+construction jobs and active morphs reserve slots; ordinary static defenses are left in place.
+
+### Tactical missile silos
+
+Tactical missile silos are scored at their final buildable positions, with a 3450-elmo reach
+including a margin for the pads. Sites near significant enemy region density or recent raids
+reserve their silo footprint while a heavy laser, two light lasers, flak and an area shield are
+built first. Only live, completed defenses release the silo job; missing guards are requeued,
+and blocked preparation sites are abandoned. Existing defenses can satisfy the prerequisites.
+Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
+
+Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
+known and inferred enemy static metal and observed battlefield density exceeds the
+**Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
+step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
+requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
+Density is `posture.density`: our standing metal plus known enemy metal, divided by usable
+ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
+remembered live statics remain counted. Coverage and battlefield density are separate gates;
+the missile firing disk is not the density denominator. Density and lanes are measured even
+with defense posture disabled; before lanes are available the full slider threshold applies.
+Decision logs and the operator `regime` view report the adjusted threshold. Static value
+includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
+confidence), without double-counting known mexes or assigning locations to unobserved spending.
+The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
+and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
+
+### Colonization
+
+Colonization discounts a candidate's metal value by its distance from the enemy
+centroid relative to the distance from our start to that centroid (capped at one).
+Its constructor job bonus also gets that discount, multiplied by
+`clamp(posture.density / 400, 0, 1)`. This is the same global standing-metal per
+usable square kiloelmo estimate used for missile-silo eligibility. Both adjustments
+are on by default: `colonize_policy=combined`. Use `enemy_distance` or `density`
+to keep only one, or `baseline` for the original scoring and bonus.
+`disable=colonize` still disables colonization entirely.
+
+### Fire squads
+
 With `enable=firesquads` (or `ZKGBAI_ENABLE=firesquads`), ordinary ground assault squads
 automatically adopt fire-squad tactics when anti-unit skirmishers
 supply at least 55% of their metal (45% to remain in that mode). The longest range supported by
@@ -198,6 +286,8 @@ of the `fightsim` veto for ordinary attacks. The `squads` operator response
 labels active formations `fireteam` and exposes their tactic, cores, range and focus; mode changes appear as `firesquad` journal
 records. The dashboard, map labels, HUD and in-game operator widget show the fireteam label
 and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
+
+### Fight predictor veto
 
 With `enable=fightsim`, ordinary ground assault and raider squads use the predictor as a veto
 (off by default until its effect has been seen in play).
@@ -221,41 +311,22 @@ their conduct. `enable=fightsim`, `ZKGBAI_ENABLE=fightsim`, or the operator's
 use mode `veto` and report `veto`, `armed_metal`, predicted casualties and the
 baseline threat decision, so actual refusals can be compared against losses.
 
+### Lobster throws
+
+Optional Lobster squad equipment is on by default (`lobsters`): amphib factories aim for one
+launcher per full 2,500 metal of non-raider armed amphib units, including those under construction
+but excluding Lobsters themselves. Squads gather briefly for a throw when a loaded launcher is nearby,
+then continue normally while it reloads and catches up; a fresh launcher may take over.
+Use `feature name=lobsters off=true` to stop new production and cancel pending throws;
+`feature name=lobsters off=false` turns it back on. Flights already underway finish.
+For A/B runs use `disable=lobsters` or `ZKGBAI_DISABLE=lobsters`.
+
+### Allied instances
 
 Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
 on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.
 Setting the option's `def` to `'on'` in the installed AIOptions.lua does the same for every instance of that
 version the lobby leaves the option unset on.
-`ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
-The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?test=bite` against
-`ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
-spider factory, should be intercepted, find the anti-nuke with Widows, stun it and get a missile through;
-with `test=eos` it gets a missile silo by the Fusions instead, and its Eos should count each one they hit gone.
-With `test=drop` (hovers) or `test=dropbot` (bots) it gets five Charons and five riots every
-three minutes and drops them by the defender's buildings, walkable or not: a check of the air route,
-landing spots and unload handling (`drops:` lines, with a status line every 30 s in the air).
-`test=bertha` gives it five Fusions and a radar at once (a superweapon soon, sited by shell paths, its
-site linked to power first); `test=colony` a constructor and a Charon, `test=colonyair` an air
-constructor, to colonize the free metal far off. `ZKGBAI?test=aaprobe` against `ZKGBAI?test=aafort`
-flies unarmed Charons over static and mobile anti-air the attacker never sees (`air-intel:` lines:
-the raw hits, and every minute the contacts it has placed, to compare with the fort's).
-`ZKGBAI?test=hunt` against `ZKGBAI?test=snipers` (or `test=lances`) stages assassination strikes: the defender
-posts a Phantom (a Lance) 1400 elmos out every 2.5 minutes, every second one with a Reaver behind it, and the
-attacker gets raiders every 2 minutes; the strikes (`strikes:` lines, scored by `tools/arena/strikes.py`) should
-kill the snipers. `disable=strikes` switches them off. Dedicated Halberd, Dirtbag, Flea and Scythe waves use
-modeled target-death probability; the older `strike_margin` setting no longer controls this gate.
-See [assassination waves](crates/zkgbai/src/military/strikes/README.md) for tactic rules and isolated engine scenarios.
-`ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
-
-
-Colonization discounts a candidate's metal value by its distance from the enemy
-centroid relative to the distance from our start to that centroid (capped at one).
-Its constructor job bonus also gets that discount, multiplied by
-`clamp(posture.density / 400, 0, 1)`. This is the same global standing-metal per
-usable square kiloelmo estimate used for missile-silo eligibility. Both adjustments
-are on by default: `colonize_policy=combined`. Use `enemy_distance` or `density`
-to keep only one, or `baseline` for the original scoring and bonus.
-`disable=colonize` still disables colonization entirely.
 
 Operator API and run journal
 ----------------------------
@@ -311,14 +382,6 @@ view draw them as sliders, choices and switches from that list. The HUD can carr
 pinned reads (`hud pin=enemies args={...}`) and the `board`, the map as a PNG (`GET /board` shows it;
 MCPL hosts get it as an image block). Calls run on the AI's thread at its next frame, so they are
 answered while the game runs.
-
-Optional Lobster squad equipment is on by default (`lobsters`): amphib factories aim for one
-launcher per full 2,500 metal of non-raider armed amphib units, including those under construction
-but excluding Lobsters themselves. Squads gather briefly for a throw when a loaded launcher is nearby,
-then continue normally while it reloads and catches up; a fresh launcher may take over.
-Use `feature name=lobsters off=true` to stop new production and cancel pending throws;
-`feature name=lobsters off=false` turns it back on. Flights already underway finish.
-For A/B runs use `disable=lobsters` or `ZKGBAI_DISABLE=lobsters`.
 
 **Piloting.** `tools/arena/pilot.sh -m "Agalta v1.0" -f factorytank -D mexporc` starts a real-time
 match of the operator-served build against an unsteered copy of itself and prints the pilot's
@@ -387,44 +450,3 @@ License
 -------
 
 GNU General Public License, version 2 (see `LICENSE`).
-
-Commanders also answer raids within 650 elmos of where they were working, closing to weapon
-range and returning to work when the raid leaves. They keep a fixed response area, avoid enemy
-turrets, and leave defense when below 65% health or short of shields. Recon commanders jump
-along safe routes both when responding and when traveling to construction, repair or reclaim
-jobs; reload, landing terrain and flight clearance are checked before each jump. This defaults
-on; the operator's `feature` tool with `{"name":"commander","off":true}` disables both behaviors
-and immediately releases active defenders to economy work. `off:false` re-enables them.
-`disable=commander` or `ZKGBAI_DISABLE=commander` disables them at startup.
-
-QRF predictor assignment
-------------------------
-
-`qrfpredict` is on by default for Mark's small encounters (at most four teams,
-four raids and 32 units per local rollout). `disable=qrfpredict` restores the
-legacy arrival/value matching and power-ratio conduct. The operator feature
-switch can toggle it during play. A background worker evaluates every eligible
-team subset against each raid, including leaving it unanswered, and chooses
-disjoint subsets by expected friendly losses. Protected assets, current health,
-EMP, observed asset targets and terrain travel delays participate in 30-second
-mechanics rollouts. Nearby response is therefore not interchangeable with a
-distant assignment. Predictor-selected teams bypass the legacy attack power
-ratio and are not split afterward by the metal-ratio rule. Unknown encounters
-and larger forces retain the legacy policy; pending or materially stale
-predictions preserve current orders. `qrf-predict` journal events record the
-assignments, loss estimates, snapshot age, simulations and worker time.
-
-Small known ground groups already in weapon range of protected assets (or
-recently observed firing at them) can also be evaluated beyond the legacy
-strength/territory gates. This includes bombardment by skirmishers such as
-Rogues. Threat deadlines account for weapon range, and the rollout judges
-whether reaching the shooter helps, rather than requiring a defender to
-reach the mex first. These additional groups are never attacked through the
-legacy fallback when prediction is unavailable; leaving them unanswered is
-still a valid predicted outcome.
-
-The rollout uses two-dimensional straight movement plus path-derived detour
-delays, not engine path simulation. Raiders keep their last observed asset
-target and then select nearby surviving assets. Up to four threatened assets
-are considered per raid; overlapping asset values are divided among threats.
-These bounded approximations should be checked against game outcomes.
