@@ -13,6 +13,9 @@ pub struct MetalSpot {
     pub value: f32,
     pub visible: bool,
     pub owned: bool,
+    /// An ally's mex stands here (ours make it `owned`): the alliance's
+    /// territory, for the territory share (see `GraphManager::territory_fraction`).
+    pub allied: bool,
     pub touched: bool,
     pub hostile: bool,
     pub enemy_shadowed: bool,
@@ -34,6 +37,7 @@ impl MetalSpot {
             value: m,
             visible: false,
             owned: false,
+            allied: false,
             touched: false,
             hostile: false,
             enemy_shadowed: false,

@@ -1608,6 +1608,7 @@ mod tests {
             value: 1.0,
             visible: false,
             owned: false,
+            allied: false,
             touched: false,
             hostile,
             enemy_shadowed,
