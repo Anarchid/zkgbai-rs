@@ -136,9 +136,11 @@ impl TerrainAnalyzer {
             }
         }
 
-        if ai.allies.len() > 2 {
-            ai.log(&format!("{TA_MSG}Allies detected, enabling gs start!"));
+        // From 3v3 on an opening may be an air plant (see `economy::plop`).
+        if ai.allies.len() >= 2 {
+            ai.log(&format!("{TA_MSG}Allies detected, enabling air starts!"));
             self.add("factorygunship");
+            self.add("factoryplane");
         }
 
         let team_size = ai.merged_allies + 1;
