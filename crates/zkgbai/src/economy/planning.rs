@@ -2359,9 +2359,20 @@ impl Ai {
         self.eco_add_simple(radar, position, List::Radar, Some(List::Radar));
     }
 
+    /// Whether a radar at `position` would see what ours (standing or
+    /// planned) do not, nor an ally's: the alliance shares its radar, so a
+    /// radar beside an ally's sees nothing new. Allied instances that each
+    /// counted their own put radars side by side on the same hill.
     fn eco_need_radar(&self, position: Vec3) -> bool {
         !self.eco.radars.iter().any(|r| distance(r.pos(), position) <= 1250.0)
             && !self.eco.radar_tasks.iter().any(|&r| distance(self.eco.task_pos(r), position) <= 1250.0)
+            && (self.allies.is_empty()
+                || !(self.cb.friendly_units_in_cylinder(position, 1250.0).into_iter()).any(|u| {
+                    u.team() != self.team_id
+                        && u.health() > 0.0
+                        && !u.is_being_built()
+                        && matches!(self.defs.name_of(u), "staticradar" | "staticheavyradar")
+                }))
     }
 
     pub(super) fn eco_capture_mexes(&mut self) {
