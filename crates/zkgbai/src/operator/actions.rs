@@ -168,6 +168,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),
+    (
+        "chatcommands",
+        "Intel",
+        "kgbdebug, kgbprofile, kgbterrain, kgbgraph, kgbmap and kgbfac from chat (off by default: any player's line reaches us, the enemy's too)",
+    ),
     ("aaintel", "Intel", "unseen anti-air placed from hits on our aircraft"),
     ("scouts", "Intel", "deep scouting with cloaked Widows"),
     ("radar", "Intel", "watchtowers: advanced radar on raised ground"),

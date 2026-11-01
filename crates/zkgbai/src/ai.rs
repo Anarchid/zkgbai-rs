@@ -62,7 +62,11 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// seen in play. Ravager packs are on, asleep until the middle game;
 /// Minotaur and raider packs and organic fire squads remain opt-in.
 /// `densgate` (phase gates on map density) waits for its A/B.
-pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
+/// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
+/// chat line, whispers and the other side's ally chat included, with only
+/// its sender, so anyone in the game could set our first factory or switch
+/// our debug output.
+pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
     "pairs",
     "currency",
     "permanence",
@@ -79,6 +83,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
     "firesquads",
     "carpetspare",
     "densgate",
+    "chatcommands",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -692,6 +697,10 @@ impl Ai {
             return;
         }
         self.banter_hear(text);
+        // Chat commands take anyone's line (see `OFF_BY_DEFAULT`).
+        if self.dev_off("chatcommands") {
+            return;
+        }
         match text {
             "kgbdebug" => {
                 self.debug_activated = !self.debug_activated;
