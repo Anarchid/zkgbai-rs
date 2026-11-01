@@ -56,7 +56,11 @@ Primary missions:
   filled, the factory may maintain one spare escort for recent deep missions;
   this includes queued/building/active Sparrows. The economy's scout is not
   borrowed or sent to detonate.
-- Raiders on our territory: Phoenix or Magpies.
+- Raiders on our territory: Magpies, one per 200 raider health (a Flea takes
+  one, a Glaive two), or Phoenixes, one per 1000, whichever puts less metal
+  in the air; launch takes the cheapest package it can fill, so a Phoenix
+  goes at a light raider only when no Magpie is ready. Raiders the
+  firefighters are already on are left to them.
 - Heavy aircraft in sight (Nimbus, Krow, Odin): Likhos, as many as each adds
   250 metal of damage value, when the target can be reached within 25 seconds.
   The quarry and the heavy aircraft within 600 elmos of it (its flock: Nimbus

@@ -454,7 +454,13 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     let choices = match job.kind {
         HeavyAir if unopposed => job.heavy_air_packages(),
         Intercept if risk.aa <= 0.4 => vec![vec![(Magpie, 1), (Raptor, count(job.hp, 700.0).max(2))]],
-        Interdict if clear => vec![vec![(Phoenix, count(job.hp, 1000.0))], vec![(Magpie, count(job.hp, 350.0).max(2))]],
+        // Magpies by the raider health one answers (a Flea takes one, a
+        // Glaive two). Launch and procurement take the cheaper of the two
+        // (see `Ai::airstrike_cheapest_first`).
+        Interdict if clear => {
+            let magpies = count(job.hp, crate::military::firefighters::MAGPIE_ANSWERS);
+            vec![vec![(Magpie, magpies)], vec![(Phoenix, count(job.hp, 1000.0))]]
+        }
         Group if clear => job.group_packages(&[Phoenix, Likho]),
         Group if unopposed => job.group_packages(&[Likho]),
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],

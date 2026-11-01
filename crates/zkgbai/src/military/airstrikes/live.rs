@@ -164,6 +164,24 @@ impl Ai {
         self.bomber_handler.building.contains_key(&id) || self.bomber_handler.units.contains_key(&id)
     }
 
+    /// Whether a sortie is out against this enemy.
+    pub(crate) fn airstrike_engaged(&self, enemy: i32) -> bool {
+        self.bomber_handler.sorties.iter().any(|s| s.job.targets.contains(&enemy))
+    }
+
+    /// Alternatives ordered by the metal they put in the air, cheapest
+    /// first (stable: equal ones keep their order). Launch takes the first
+    /// it can fill, so a Phoenix no longer goes at a Flea a Magpie is ready
+    /// for.
+    fn airstrike_cheapest_first(&self, choices: &mut [Vec<(Plane, usize)>]) {
+        let metal = |p: &Vec<(Plane, usize)>| {
+            (p.iter())
+                .map(|(k, n)| *n as f32 * self.defs.get(k.name()).map_or(f32::INFINITY, |d| d.cost(self.metal)))
+                .sum::<f32>()
+        };
+        choices.sort_by(|a, b| metal(a).total_cmp(&metal(b)));
+    }
+
     pub fn bomber_add_bomber(&mut self, b: Bomber) {
         let Some(kind) = Plane::of(self.defs.name_of(b.unit)) else { return };
         self.bomber_handler.building.remove(&b.id);
@@ -423,6 +441,16 @@ impl Ai {
         self.bomber_handler.refresh_priority_memory(&contacts, frame);
         let blast = self.airstrike_blast();
         let mut jobs = missions(&contacts, home, frame);
+        // Raiders the firefighters are already on are theirs (they in turn
+        // leave alone what a sortie is on, see `firefighters`).
+        jobs.retain(|j| j.kind != MissionKind::Interdict || !self.firefighters_engaged(j.target));
+        let theirs: Vec<_> = (self.bomber_handler.recent.keys())
+            .filter(|k| k.0 == MissionKind::Interdict && self.firefighters_engaged(k.1))
+            .copied()
+            .collect();
+        for key in theirs {
+            self.bomber_handler.recent.remove(&key);
+        }
         jobs.extend(self.airstrike_speculative_jobs());
         jobs.extend(self.airstrike_carpet_jobs());
         let had_jobs = !jobs.is_empty();
@@ -447,13 +475,16 @@ impl Ai {
             let field =
                 if job.kind == MissionKind::Intercept { &defense_air } else { quarry_field.as_ref().unwrap_or(&air) };
             let risk = self.airstrike_risk(field, home, job.pos, enemies);
-            let choices: Vec<_> = packages(&job, risk, self.bomber_handler.raven_damage.unwrap_or(800.0))
+            let mut choices: Vec<_> = packages(&job, risk, self.bomber_handler.raven_damage.unwrap_or(800.0))
                 .into_iter()
                 .filter(|p| {
                     p.iter()
                         .all(|(k, _)| self.defs.get(k.name()).is_some_and(|d| k.survives(risk, d.health(), d.speed())))
                 })
                 .collect();
+            if job.kind == MissionKind::Interdict {
+                self.airstrike_cheapest_first(&mut choices);
+            }
             // Seeing a still-existing job become unsafe invalidates its memory
             // immediately; a mere loss of radar contact may retain procurement.
             self.bomber_handler.recent.remove(&job.key());
