@@ -7,9 +7,18 @@
 //! price. Not for the opening (the commander's plop is free) and not for
 //! strider hubs (no plates).
 //!
+//! An ally's factory still rising will do too: the plate starts work when
+//! the factory is done. Allied ZKGBAIs often want a type at once (all three
+//! asked for an air plant within 20 frames on Calamity, 2026-11-02, from
+//! the same enemy-AA read, and each built one before any stood), so with
+//! no allied factory of the type to plate, the factory goes by turns (see
+//! `allied`): the one whose turn it is builds it, the others plate it.
+//!
 //! A plate whose factory is gone builds nothing (the gadget's `nofactory`
 //! rules param): it leaves our factories until a factory of its type stands
-//! in range again, which the gadget finds by itself.
+//! in range again, which the gadget finds by itself. With no factory of its
+//! type standing or rising in range for [`ORPHANED`], it is blown up, so
+//! the type can be had again (a plate of ours counts as having it).
 
 use springai::{Unit, UnitDef, Vec3};
 
@@ -26,6 +35,8 @@ const PLATE_RANGE: f32 = 420.0;
 /// kept this far inside the range.
 const PLATE_RINGS: [f32; 2] = [220.0, 320.0];
 const PLATE_SLACK: f32 = 40.0;
+/// A plate with no factory of its type in range this long goes, frames.
+const ORPHANED: i32 = 900;
 
 impl Ai {
     /// The factory type whose units `def` builds: a plate's factory, else
@@ -40,19 +51,29 @@ impl Ai {
         (plate.custom_param("child_of_factory").as_deref() == Some(name)).then_some(plate)
     }
 
-    /// The allied factory of type `name` we would plate: standing, safe,
-    /// near our base; the one nearest our factories.
+    /// The allied factory of type `name` we would plate: standing (else
+    /// rising), safe, near our base; the one nearest our factories.
     fn eco_plate_parent(&self, name: &str) -> Option<Unit> {
         let homes = self.eco_homes();
-        (self.cb.friendly_units().into_iter())
-            .filter(|u| {
-                u.team() != self.team_id && u.health() > 0.0 && !u.is_being_built() && self.defs.name_of(*u) == name
-            })
+        (self.eco.allied.factories.iter().copied())
+            .filter(|u| u.team() != self.team_id && u.health() > 0.0 && self.defs.name_of(*u) == name)
             .filter(|u| self.eco_ally_site_safe(u.pos()))
             .map(|u| (u, homes.iter().map(|&h| distance(h, u.pos())).fold(f32::MAX, f32::min)))
             .filter(|&(_, d)| d <= ASSIST_REACH)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .min_by(|a, b| (a.0.is_being_built(), a.1).partial_cmp(&(b.0.is_being_built(), b.1)).unwrap())
             .map(|(u, _)| u)
+    }
+
+    /// Whether we may build a factory of type `name` now, with no ally's
+    /// to plate: always for types without plates, else in our turn (see
+    /// `allied`), counting the alliance's factories of the type.
+    pub(super) fn eco_factory_turn(&mut self, name: &str) -> bool {
+        if self.allies.is_empty() || self.dev_off("plates") || self.eco_plate_of(name).is_none() {
+            return true;
+        }
+        let count =
+            (self.eco.allied.factories.iter()).filter(|u| u.health() > 0.0 && self.defs.name_of(**u) == name).count();
+        self.eco_ally_turn_at(name, count)
     }
 
     /// Where a `plate` goes by `parent`, and its facing: in range, off the
@@ -139,8 +160,32 @@ impl Ai {
     /// factory, and come back once they have one.
     pub(super) fn eco_watch_plates(&mut self) {
         self.eco.plates.retain(|u| u.health() > 0.0 && u.team() == self.team_id);
+        let plates: Vec<i32> = self.eco.plates.iter().map(|u| u.id()).collect();
+        self.eco.plate_orphaned.retain(|id, _| plates.contains(id));
         for plate in self.eco.plates.clone() {
             let Some(def) = plate.def() else { continue };
+            let tech = self.fac_tech(def);
+            let near = (self.cb.friendly_units_in_cylinder(plate.pos(), PLATE_RANGE).into_iter())
+                .any(|u| u.health() > 0.0 && self.defs.name_of(u) == tech);
+            if near {
+                self.eco.plate_orphaned.remove(&plate.id());
+            } else {
+                let since = *self.eco.plate_orphaned.entry(plate.id()).or_insert(self.frame);
+                if self.frame - since > ORPHANED {
+                    let p = plate.pos();
+                    self.log(&format!(
+                        "economy: no {tech} in range of the {} at ({:.0}, {:.0}) for {} s; blowing it up",
+                        self.defs.name(def),
+                        p.x,
+                        p.z,
+                        ORPHANED / 30
+                    ));
+                    self.fac.factories.remove(&plate.id());
+                    plate.self_destruct(0);
+                    self.eco.plate_orphaned.remove(&plate.id());
+                    continue;
+                }
+            }
             let producing = self.fac.factories.contains_key(&plate.id());
             let working = Self::eco_plate_working(plate);
             let p = plate.pos();
@@ -153,7 +198,6 @@ impl Ai {
                 ));
                 self.fac.factories.remove(&plate.id());
             } else if !producing && working {
-                let tech = self.fac_tech(def);
                 self.log(&format!(
                     "economy: the {} at ({:.0}, {:.0}) has a {tech} again",
                     self.defs.name(def),
