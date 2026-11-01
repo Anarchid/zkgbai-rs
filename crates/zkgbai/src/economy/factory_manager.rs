@@ -464,27 +464,38 @@ impl Ai {
             self.fac.army_value += cost / 2.0;
         }
 
-        if name.contains("factory") || name.contains("hub") {
+        let tech = self.fac_tech(def);
+        if tech != name {
+            // A plate: it produces while a factory of its type stands in
+            // range (see `plate`).
+            self.eco_plate_finished(unit);
+        } else if name.contains("factory") || name.contains("hub") {
             self.log(&format!("economy: {name} finished"));
-            let first_fac = (self.fac.factories.len() as i32) < 1 + self.merged_allies;
-            let mut fac = Factory::new(unit, name, first_fac, self.map_diag);
-            if !name.contains("hub") {
-                // Worker cost-effectiveness, from the first constructor this factory can build.
-                if let Some(con) = def.build_options().into_iter().find(|ud| !ud.build_options().is_empty()) {
-                    fac.cost_per_bp = con.cost(self.metal) / con.build_speed();
-                    fac.worker_bp = con.build_speed();
-                }
-            }
-            let is_hub = fac.kind() == FacKind::StriderHub;
-            let id = fac.id;
-            self.fac.factories.insert(id, fac);
+            self.fac_register(unit, &tech);
+        }
+    }
 
-            self.fac_assign_factory_task(id);
-            unit.set_move_state(2, 0);
-
-            if is_hub {
-                self.fac.strider_hub = Some(id);
+    /// Produce from `unit`, a factory or a plate, as one of type `tech`.
+    pub(crate) fn fac_register(&mut self, unit: Unit, tech: &str) {
+        let Some(def) = unit.def() else { return };
+        let first_fac = (self.fac.factories.len() as i32) < 1 + self.merged_allies;
+        let mut fac = Factory::new(unit, tech, first_fac, self.map_diag);
+        if !tech.contains("hub") {
+            // Worker cost-effectiveness, from the first constructor this factory can build.
+            if let Some(con) = def.build_options().into_iter().find(|ud| !ud.build_options().is_empty()) {
+                fac.cost_per_bp = con.cost(self.metal) / con.build_speed();
+                fac.worker_bp = con.build_speed();
             }
+        }
+        let is_hub = fac.kind() == FacKind::StriderHub;
+        let id = fac.id;
+        self.fac.factories.insert(id, fac);
+
+        self.fac_assign_factory_task(id);
+        unit.set_move_state(2, 0);
+
+        if is_hub {
+            self.fac.strider_hub = Some(id);
         }
     }
 

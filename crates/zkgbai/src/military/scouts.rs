@@ -439,7 +439,7 @@ impl Ai {
 
     /// Whether we have a spider factory to build Widows.
     fn scouts_spider_factory(&self) -> bool {
-        self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == "factoryspider")
+        self.fac.factories.values().any(|f| f.tech == "factoryspider")
     }
 
     /// Where a scout at `from` should scout deep, and how long it has gone

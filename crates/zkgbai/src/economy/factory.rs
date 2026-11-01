@@ -59,6 +59,9 @@ pub struct Factory {
     pub worker_bp: f32,
     /// The opening factory (see `new`).
     pub opener: bool,
+    /// The factory type whose units it builds: its own, or for a plate
+    /// (see `plate`) its factory's.
+    pub tech: String,
     pos: Vec3,
     kind: FacKind,
 }
@@ -81,6 +84,7 @@ impl Factory {
             cost_per_bp: 0.0,
             worker_bp: 0.0,
             opener: first_fac,
+            tech: def_name.to_owned(),
             pos: unit.pos(),
             kind,
         };

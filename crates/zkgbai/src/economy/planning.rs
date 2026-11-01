@@ -37,10 +37,11 @@ const SLOPE_CELL: f32 = 16.0;
 /// Ground direction (x, z) of each building facing: south, east, north, west.
 const FACING_DIRS: [(f32, f32); 4] = [(0.0, 1.0), (1.0, 0.0), (0.0, -1.0), (-1.0, 0.0)];
 
-/// Whether factories of this type keep their exit clear: all but the
-/// aircraft plants (their units lift off).
+/// Whether factories (and plates: see `plate`) of this type keep their
+/// exit clear: all but the aircraft plants (their units lift off).
 pub(super) fn keeps_exit(name: &str) -> bool {
-    name.starts_with("factory") && name != "factoryplane" && name != "factorygunship"
+    (name.starts_with("factory") || name.starts_with("plate"))
+        && !matches!(name, "factoryplane" | "factorygunship" | "plateplane" | "plategunship")
 }
 
 /// The ground in front of a factory of type `def` at `pos` facing `facing`:
@@ -366,7 +367,7 @@ impl Ai {
         self.eco_add_construction(WorkerTask::construction(def, pos, 0), Some(dedup), extra)
     }
 
-    fn eco_can_reach(&mut self, wid: i32, pos: Vec3) -> bool {
+    pub(super) fn eco_can_reach(&mut self, wid: i32, pos: Vec3) -> bool {
         let Some(w) = self.eco.workers.get(&wid) else {
             return false;
         };
@@ -630,7 +631,7 @@ impl Ai {
     /// units with the engine's slope map, `None` for the aircraft plants.
     /// Spiders climb any slope, so only buildings wall the spider factory's
     /// exit.
-    fn eco_exit_check(&self, factory: UnitDef) -> Option<(Vec<MoveClass>, Vec<f32>)> {
+    pub(super) fn eco_exit_check(&self, factory: UnitDef) -> Option<(Vec<MoveClass>, Vec<f32>)> {
         if !keeps_exit(self.defs.name(factory)) {
             return None;
         }
@@ -714,7 +715,7 @@ impl Ai {
     /// exit is clear, else the least blocked: (site, facing, exit cost). A
     /// facing the footprint does not fit at `pos` turned is sited anew.
     /// Without an exit to keep, the first facing that builds.
-    fn eco_factory_exit(
+    pub(super) fn eco_factory_exit(
         &self,
         def: UnitDef,
         pos: Vec3,
@@ -839,7 +840,7 @@ impl Ai {
         // declaration and clobbered the `hasStriders` member instead.
         let mut has_striders = false;
         for f in self.fac.factories.values() {
-            let def_name = self.defs.name_of(f.unit);
+            let def_name = f.tech.as_str();
             if def_name == "striderhub" {
                 has_striders = true;
             }
@@ -953,6 +954,24 @@ impl Ai {
                 ai.eco.potential_fac_list.insert(name.to_owned());
             }
         };
+
+        // A type an ally has standing: a plate on theirs instead (see
+        // `plate`). Not the opening, nor while energy is what we lack.
+        if !is_plop
+            && nfac > 0
+            && !self.eco_energy_starved()
+            && let Some(id) = self.eco_plate_instead(wid, factory)
+        {
+            if let Some((f, why)) = &asked
+                && *f == fac_name
+            {
+                self.logistics_factory(id, asked_value, why);
+                if is_air_requisition(why) {
+                    self.eco.air_asked = true;
+                }
+            }
+            return;
+        }
 
         let Some(wpos) = self.eco.workers.get(&wid).map(|w| w.get_pos()) else {
             return;
@@ -1313,11 +1332,13 @@ impl Ai {
     /// factory (its constructors fly anywhere) only when no ground or sea
     /// factory gets to most of it.
     /// Whether we have a factory named `name`, standing or going up.
+    /// Whether a factory of type `name` (or a plate on one: see `plate`)
+    /// stands or is planned.
     pub(super) fn eco_has_factory(&self, name: &str) -> bool {
-        self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name)
+        self.fac.factories.values().any(|f| f.tech == name)
             || (self.eco.factory_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)))
                 .filter_map(|t| t.as_construction())
-                .any(|c| self.defs.name(c.build_type) == name)
+                .any(|c| self.fac_tech(c.build_type) == name)
     }
 
     /// Now and then past some income, have a factory of a new type built
@@ -1380,7 +1401,7 @@ impl Ai {
         let reaches = |tier: Tier, p: Vec3| {
             terrain.tier(tier).is_none_or(|m| m.connected(terrain_pos(from), terrain_pos(p), FACTORY_REACH))
         };
-        let factories: Vec<&str> = self.fac.factories.values().map(|f| self.defs.name_of(f.unit)).collect();
+        let factories: Vec<&str> = self.fac.factories.values().map(|f| f.tech.as_str()).collect();
         let ours: Vec<Tier> = factories.iter().filter_map(|f| factory_tier(f)).collect();
         // Aircraft get everywhere already.
         if ours.is_empty() || factories.iter().any(|f| factory_tier(f).is_none() && f.contains("factory")) {
@@ -1468,7 +1489,7 @@ impl Ai {
                 gap,
             ));
         }
-        let owned = |name: &str| self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
+        let owned = |name: &str| self.fac.factories.values().any(|f| f.tech == name);
         if !owned("factoryspider")
             && let Some(value) = self.scouts_want_factory().filter(|&v| v >= nukes::STRIKE_VALUE)
         {
@@ -2762,7 +2783,7 @@ impl Ai {
             // Spread caretakers evenly between facs, with some priority.
             let mut num_ct = count_cts(f.id);
             let merged = self.merged_allies > 0;
-            match self.defs.name_of(f.unit) {
+            match f.tech.as_str() {
                 "striderhub" => num_ct += if merged { -0.3 } else { 0.1 },
                 "factoryplane" | "factorygunship" => num_ct += if merged { -0.2 } else { 0.1 },
                 "factoryshield" => num_ct += if merged { -0.1 } else { 0.0 },
