@@ -1,10 +1,53 @@
 //! Opening factory diversity without a pregame queue relay. UnitCreated
 //! reaches the owning AI only, so observe allied placements through the
 //! friendly-unit snapshot before issuing or refreshing our build orders.
+//!
+//! Allies spread their openings over movement types (see [`movetype`]):
+//! a later pick prefers a type whose units move unlike any ally's, then a
+//! type no ally has, then whatever plays the map. And where much of our
+//! side's metal lies under water, one allied ZKGBAI takes the water side
+//! (see [`Ai::eco_water_side`]): the start in our box nearest that metal,
+//! and an amphibious or hover opening (user, 2026-11-02: "in a Folsom 3v3,
+//! at least one gets a water-capable factory ... picking the northern
+//! spot"). Every instance decides it alike in the pregame, from the map
+//! and the start boxes, so no message is needed.
 
 use std::collections::BTreeSet;
 
+use springai::Vec3;
+use zk_terrain::Tier;
+
+use super::planning::factory_tier;
 use crate::Ai;
+use crate::util::{NULLPOS, distance};
+
+/// Land constructors wade this deep, elmos (`maxWaterDepth`).
+const WADE: f32 = 22.0;
+/// A land constructor builds this far from where it stands, about, elmos.
+const WET_REACH: f32 = 120.0;
+/// The share of our side's metal under water from which one of us takes
+/// the water side.
+const WATER_NEED: f32 = 0.12;
+/// Openings whose constructors take metal under water and on land too (a
+/// shipyard's take no land).
+pub(crate) const WATER_FACTORIES: [&str; 2] = ["factoryamph", "factoryhover"];
+
+/// How a factory's units move, for spreading the alliance's openings: the
+/// terrain tier, aircraft as one, else the factory itself.
+fn movetype(name: &str) -> &str {
+    if matches!(name, "factoryplane" | "factorygunship") {
+        return "air";
+    }
+    match factory_tier(name) {
+        Some(Tier::Bot) => "bot",
+        Some(Tier::Vehicle) => "vehicle",
+        Some(Tier::Hover) => "hover",
+        Some(Tier::Amphib) => "amph",
+        Some(Tier::Spider) => "spider",
+        Some(Tier::Ship) => "ship",
+        _ => name,
+    }
+}
 
 /// Ten seconds for an earlier controller to declare or place its factory.
 /// Stagger the fallback by rank, too: a missing AI must neither block the
@@ -17,7 +60,14 @@ fn waits(frame: i32, team: i32, peers: &BTreeSet<i32>, known: impl Fn(i32) -> bo
     frame < WAIT + SLOT * rank && peers.range(..team).any(|&t| !known(t))
 }
 
+/// Of the `viable` openings, those whose units move unlike any of the
+/// `used` ones', else those not used, else all.
 fn diverse(viable: &BTreeSet<String>, used: &BTreeSet<String>) -> BTreeSet<String> {
+    let moved: BTreeSet<&str> = used.iter().map(|u| movetype(u)).collect();
+    let fresh: BTreeSet<_> = viable.iter().filter(|v| !moved.contains(movetype(v))).cloned().collect();
+    if !fresh.is_empty() {
+        return fresh;
+    }
     let unused: BTreeSet<_> = viable.difference(used).cloned().collect();
     // A duplicate that can play the map is better than no factory.
     if unused.is_empty() { viable.clone() } else { unused }
@@ -40,7 +90,71 @@ impl Ai {
     }
 
     pub(super) fn eco_plop_choices(&self, viable: &BTreeSet<String>) -> BTreeSet<String> {
+        // The water side opens for water, if any such opening plays the map.
+        if self.eco.water_side.is_some_and(|(team, _)| team == self.team_id) {
+            let wet: BTreeSet<String> =
+                viable.iter().filter(|f| WATER_FACTORIES.contains(&f.as_str())).cloned().collect();
+            if !wet.is_empty() {
+                return wet;
+            }
+        }
         diverse(viable, &self.eco_allied_plop_types())
+    }
+
+    /// Whether a land constructor cannot build at `p`: deeper than it
+    /// wades, with no ground it wades to within its reach.
+    fn eco_wet(&self, p: Vec3) -> bool {
+        let map = self.cb.map();
+        let deep = |x: f32, z: f32| map.elevation_at(x, z) < -WADE;
+        deep(p.x, p.z)
+            && (0..8).all(|k| {
+                let a = k as f32 * std::f32::consts::TAU / 8.0;
+                deep(p.x + WET_REACH * a.cos(), p.z + WET_REACH * a.sin())
+            })
+    }
+
+    /// The alliance's water side, from what every allied instance knows
+    /// alike in the pregame: with another allied ZKGBAI and at least
+    /// [`WATER_NEED`] of our side's metal (spots nearer our start box than
+    /// the enemy's) where land constructors cannot build, the last of us in
+    /// team order takes the spot in our start box nearest that metal and
+    /// opens for water. (team, start spot)
+    pub(crate) fn eco_water_side(&self) -> Option<(i32, Vec3)> {
+        if self.iq.peers.is_empty() || self.dev_off("waterside") {
+            return None;
+        }
+        let (base, enemy) = (self.graph.get_ally_base(), self.graph.get_enemy_base()?);
+        let starts: Vec<Vec3> = self.graph.get_ally_territory().iter().map(|s| s.position).collect();
+        if base == NULLPOS || starts.len() < 2 {
+            return None;
+        }
+        let ours = (self.graph.metal_spots.iter()).filter(|s| distance(s.position, base) < distance(s.position, enemy));
+        let (mut total, mut wet, mut wx, mut wz) = (0.0, 0.0, 0.0, 0.0);
+        for s in ours {
+            total += s.value;
+            if self.eco_wet(s.position) {
+                wet += s.value;
+                (wx, wz) = (wx + s.value * s.position.x, wz + s.value * s.position.z);
+            }
+        }
+        let share = if total > 0.0 { wet / total } else { 0.0 };
+        if share < WATER_NEED {
+            self.log(&format!("economy: {:.0}% of our side's metal is under water: no water side", 100.0 * share));
+            return None;
+        }
+        let at = Vec3::xz(wx / wet, wz / wet);
+        let team = self.iq.peers.iter().copied().chain([self.team_id]).max()?;
+        let site = starts.into_iter().min_by(|a, b| distance(*a, at).total_cmp(&distance(*b, at)))?;
+        self.log(&format!(
+            "economy: {:.0}% of our side's metal is under water, about ({:.0}, {:.0}): team {team} takes the water side, \
+             starting at ({:.0}, {:.0})",
+            100.0 * share,
+            at.x,
+            at.z,
+            site.x,
+            site.z
+        ));
+        Some((team, site))
     }
 
     pub(super) fn eco_wait_for_allied_plop(&self) -> bool {
@@ -121,6 +235,22 @@ mod tests {
         let used = names(&["factorygunship"]);
         assert!(!diverse(&viable, &used).contains("factorygunship"));
         assert_eq!(diverse(&viable, &names(&["factorygunship", "factorycloak"])), names(&["factoryveh"]));
+    }
+
+    #[test]
+    fn later_picks_prefer_units_that_move_unlike_the_allies() {
+        let viable = names(&["factorycloak", "factoryshield", "factoryveh", "factoryamph"]);
+        // A cloak ally: no more bots.
+        assert_eq!(diverse(&viable, &names(&["factorycloak"])), names(&["factoryveh", "factoryamph"]));
+        // Bots and vehicles taken: the amphibians.
+        assert_eq!(diverse(&viable, &names(&["factoryshield", "factorytank"])), names(&["factoryamph"]));
+        // Every movement type taken: any type not taken.
+        let bots = names(&["factorycloak", "factoryshield"]);
+        assert_eq!(diverse(&bots, &names(&["factoryjump"])), bots);
+        assert_eq!(diverse(&bots, &names(&["factorycloak"])), names(&["factoryshield"]));
+        // Aircraft move as one.
+        assert_eq!(movetype("factoryplane"), movetype("factorygunship"));
+        assert_ne!(movetype("factoryhover"), movetype("factoryamph"));
     }
 
     #[test]

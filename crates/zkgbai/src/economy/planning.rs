@@ -198,7 +198,7 @@ pub(crate) fn picked_factory(list: &BTreeSet<String>, k: usize) -> String {
 }
 
 /// Movement tier of a factory's units; `None` for aircraft and striders.
-fn factory_tier(name: &str) -> Option<Tier> {
+pub(super) fn factory_tier(name: &str) -> Option<Tier> {
     match name {
         "factorycloak" | "factoryshield" | "factoryjump" => Some(Tier::Bot),
         "factoryveh" | "factorytank" => Some(Tier::Vehicle),
@@ -1454,6 +1454,8 @@ impl Ai {
     /// with the first factory's odds (see `eco_create_factory_task`), kept
     /// for it. Only the reach check can still rule it out.
     pub(crate) fn eco_roll_opening(&mut self) -> Option<String> {
+        // Decided first: the starts of the others depend on it too.
+        self.eco.water_side = self.eco_water_side();
         if !self.eco.user_fac.is_empty() {
             return Some(self.eco.user_fac.clone());
         }
@@ -1466,6 +1468,18 @@ impl Ai {
         }
         if self.merged_allies > 0 {
             return None;
+        }
+        // The water side opens for water (see `plop`).
+        if self.eco.water_side.is_some_and(|(team, _)| team == self.team_id) {
+            let wet: Vec<String> = (super::plop::WATER_FACTORIES.iter())
+                .filter(|f| self.eco.potential_fac_list.contains(**f))
+                .map(|f| (*f).to_owned())
+                .collect();
+            if !wet.is_empty() {
+                let n = ((kgb_rand() * wet.len() as f64) as usize).min(wet.len() - 1);
+                self.eco.opening = Some(wet[n].clone());
+                return self.eco.opening.clone();
+            }
         }
         // A shipyard half the time, a gunship plop in big teams, else any.
         let roll = if list.contains("factoryship") && kgb_rand() < 0.5 {

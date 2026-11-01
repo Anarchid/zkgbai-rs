@@ -222,6 +222,9 @@ pub struct EconomyManager {
     /// those with no factory of their type in range have had none.
     pub(super) plates: Vec<Unit>,
     pub(super) plate_orphaned: BTreeMap<i32, i32>,
+    /// The alliance's water side, decided in the pregame (see `plop`):
+    /// (team, start spot).
+    pub(crate) water_side: Option<(i32, Vec3)>,
     /// When it was last said that no Bertha site was found.
     bertha_report: i32,
     last_repaired_unit: i32,
@@ -417,6 +420,7 @@ impl EconomyManager {
             allied: Default::default(),
             plates: Vec::new(),
             plate_orphaned: BTreeMap::new(),
+            water_side: None,
             bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
