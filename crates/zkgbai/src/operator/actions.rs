@@ -173,6 +173,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Intel",
         "resign (with allies: say it looks resignable) when the alliance holds under half the hostile spots and the enemy is estimated worth 4x the alliance; off: own spots and army, or no factory",
     ),
+    (
+        "chatcommands",
+        "Intel",
+        "kgbdebug, kgbprofile, kgbterrain, kgbgraph, kgbmap and kgbfac from chat (off by default: any player's line reaches us, the enemy's too)",
+    ),
     ("aaintel", "Intel", "unseen anti-air placed from hits on our aircraft"),
     ("scouts", "Intel", "deep scouting with cloaked Widows"),
     ("radar", "Intel", "watchtowers: advanced radar on raised ground"),
