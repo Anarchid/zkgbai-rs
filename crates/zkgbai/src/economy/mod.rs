@@ -13,6 +13,7 @@ mod fortify;
 mod geo;
 pub mod grid;
 mod lotus;
+mod phase;
 mod planning;
 mod plop;
 mod safespot;
@@ -80,6 +81,8 @@ pub struct EconomyManager {
     pub fusions: Vec<Unit>,
     /// When the overdrive phase began (see `eco_overdrive_phase`).
     pub od_phase: Option<i32>,
+    /// `densgate`'s phase this frame: (frame, reference minutes, income scale).
+    phase_cache: Cell<(i32, f32, f32)>,
     pub mexes: Vec<Unit>,
 
     /// All worker tasks; the lists below hold ids into it.
@@ -312,6 +315,7 @@ impl EconomyManager {
             nanos: BTreeMap::new(),
             fusions: Vec::new(),
             od_phase: None,
+            phase_cache: Cell::new((-1, 0.0, 1.0)),
             mexes: Vec::new(),
             tasks: TaskStore::default(),
             commanders: Vec::new(),
@@ -812,6 +816,8 @@ impl Ai {
         let merged = self.merged_allies as f32;
         let odreserve = !self.dev_off("odreserve");
         let odphase_off = self.dev_off("odphase");
+        // (Overdrive storage from 5 min of the phase clock: `densgate`.)
+        let od_storage_time = self.phase_frame() > OD_STORAGE_FROM;
         let (m, e) = (self.metal, self.energy);
         let team = self.team_id;
         let eco = &mut self.eco;
@@ -901,7 +907,7 @@ impl Ai {
         eco.estalled = eco.hard_estalled
             || eco.raw_mex_income * eratio > eco.effective_income_energy
             || (odreserve
-                && frame > OD_STORAGE_FROM
+                && od_storage_time
                 && eco.max_storage > 1.0
                 && eco.energy + eco.energy_reserve < OD_STORAGE_FILL * eco.max_storage);
         if eco.max_storage > 1.0 && eco.hard_estalled && eco.metal / eco.max_storage > 0.5 {

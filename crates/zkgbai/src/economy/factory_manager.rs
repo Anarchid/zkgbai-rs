@@ -881,7 +881,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "cloakcon";
@@ -964,7 +964,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "shipcon";
@@ -1040,7 +1040,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "shieldcon";
@@ -1134,7 +1134,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "amphcon";
@@ -1210,7 +1210,7 @@ impl Ai {
         let war = &self.war;
         let tf = self.graph.territory_fraction;
         let eminent = self.graph.eminent_territory;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "vehcon";
@@ -1295,7 +1295,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "hovercon";
@@ -1367,7 +1367,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) {
             return "tankcon";
@@ -1471,7 +1471,7 @@ impl Ai {
             return "spideraa";
         }
 
-        if self.eco.adjusted_income > 30.0
+        if self.phase_income() > 30.0
             && kgb_rand() < f64::from((tf / 5.0) * (1.0 - fm.arty_value / war.enemy_porc_value))
         {
             fac.add_scout_allowance(6);
@@ -1480,7 +1480,7 @@ impl Ai {
 
         // Now and then a wave of raiders, as the cloak factory sends Glaives.
         if venom_raid && !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
-            fac.raider_spam -= (((self.eco.adjusted_income / 5.0).floor() as i32).clamp(6, 12) - 1) as f32;
+            fac.raider_spam -= (((self.phase_income() / 5.0).floor() as i32).clamp(6, 12) - 1) as f32;
             return self.fac_spider_raider(fac);
         }
 
@@ -1513,7 +1513,7 @@ impl Ai {
     /// raider budget counts Glaive-sized raiders; a Venom costs as much as
     /// [`VENOM_RAIDER_SLOTS`] of them.
     fn fac_spider_raider(&self, fac: &mut Factory) -> &'static str {
-        if self.frame < VENOM_RAIDERS_FROM {
+        if self.phase_frame() < VENOM_RAIDERS_FROM {
             fac.raider_spam += 1.0;
             fac.building_for = Some(Role::SoloRaider);
             "spiderscout"
@@ -1535,7 +1535,7 @@ impl Ai {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
-        let income = self.eco.adjusted_income;
+        let income = self.phase_income();
 
         if self.fac_need_workers(fac) || self.fac_wants_early_constable() {
             return "jumpcon";
@@ -1622,7 +1622,7 @@ impl Ai {
     /// built Pyros first). For the first EARLY_CONS_FRAMES; off with
     /// `disable=earlycons`.
     fn fac_wants_early_constable(&self) -> bool {
-        if self.frame >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
+        if self.phase_frame() >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
             return false;
         }
         // Constables begun or rolling out count too (`new_workers`, until
@@ -1678,7 +1678,7 @@ impl Ai {
     pub(crate) fn fac_wants_firewalker(&self) -> bool {
         let skirms = self.war.enemy_light_skirm_value;
         let have = self.fac.num_firewalkers as f32 * FIREWALKER_COST;
-        self.eco.adjusted_income > 20.0 && skirms >= FIREWALKER_SKIRMS && have < 0.5 * skirms
+        self.phase_income() > 20.0 && skirms >= FIREWALKER_SKIRMS && have < 0.5 * skirms
     }
 
     /// Jugglenauts while the enemy's close-range army (raiders, riots,
@@ -1686,7 +1686,7 @@ impl Ai {
     fn fac_wants_jugglenaut(&self) -> bool {
         let brawlers = self.war.enemy_brawler_value;
         let have = self.fac.num_jugglenauts as f32 * JUGGLENAUT_COST;
-        self.eco.adjusted_income > 35.0 && brawlers >= JUGGLENAUT_BRAWLERS && have < 0.4 * brawlers && kgb_rand() > 0.5
+        self.phase_income() > 35.0 && brawlers >= JUGGLENAUT_BRAWLERS && have < 0.4 * brawlers && kgb_rand() > 0.5
     }
 
     /// Puppies for a herd that grows with the wreckage away from our base
@@ -1699,7 +1699,8 @@ impl Ai {
             return false;
         }
         // (No herd of its own in the first minutes: Constables then.)
-        let mut want = if self.frame < 30 * 60 * 4 { 0 } else { 2 } + (self.puppies_wreck_metal() / 150.0) as usize;
+        let mut want =
+            if self.phase_frame() < 30 * 60 * 4 { 0 } else { 2 } + (self.puppies_wreck_metal() / 150.0) as usize;
         if self.war.enemy_cloaky_value > 600.0 {
             want += 6;
         }

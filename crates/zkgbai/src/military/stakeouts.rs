@@ -652,7 +652,7 @@ impl Ai {
         }
         let s = &self.stakeouts;
         let coming = self.roles.declared_count(Role::Stakeout);
-        (s.wanted(self.frame) as i32 - (s.count() + coming) as i32).max(0)
+        (s.wanted(self.phase_frame()) as i32 - (s.count() + coming) as i32).max(0)
     }
 
     /// Whether pickets have been dying fast lately: none is to be built.
@@ -1363,6 +1363,8 @@ impl Ai {
         let shunned = |i: usize| self.stakeouts.shunned.get(&i).is_some_and(|&until| until > frame);
         let speed = speed.max(1.0);
         let mut best: Option<(usize, f32)> = None;
+        // (The opening's look window runs on the phase clock: `densgate`.)
+        let opening = self.phase_frame() < LOOK_UNTIL;
         for &i in &pool {
             let s = &spots[i];
             if age(i) <= FRESH || taken.contains(&i) || shunned(i) || self.stakeouts.near_home(s.position) {
@@ -1373,7 +1375,7 @@ impl Ai {
             }
             let stale = (age(i) as f32 / 30.0).min(120.0);
             let mut cost = distance(p, s.position) / speed - stale * STALE_WORTH;
-            if frame < LOOK_UNTIL && distance(s.position, centre) < START_RADIUS {
+            if opening && distance(s.position, centre) < START_RADIUS {
                 cost -= START_WORTH;
             }
             if best.is_none_or(|(_, b)| cost < b) {
@@ -1402,7 +1404,7 @@ impl Ai {
             frame / 30,
             s.count(),
             s.posts.len(),
-            s.wanted(frame),
+            s.wanted(self.phase_frame()),
             st.claimed,
             st.lost,
             st.sightings,
@@ -1433,7 +1435,7 @@ impl Ai {
         self.op_emit(
             "stakeout",
             json!({"event": "summary", "t": frame / 30, "members": s.count(), "look": look, "post": post, "shadow": shadow,
-                   "posts": posts, "manned": manned, "wanted": s.wanted(frame), "pickets": members,
+                   "posts": posts, "manned": manned, "wanted": s.wanted(self.phase_frame()), "pickets": members,
                    "claimed": st.claimed, "lost": st.lost, "sightings": st.sightings, "flights": st.flights,
                    "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks}),
         );
