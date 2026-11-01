@@ -72,7 +72,11 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// switches (journal only) stay off.
 /// `densgate` (phase gates on the map's density clock) is on for WIP
 /// observation (2026-11-02, disable=densgate to opt out); off on main.
-pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
+/// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
+/// chat line, whispers and the other side's ally chat included, with only
+/// its sender, so anyone in the game could set our first factory or switch
+/// our debug output.
+pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
     "pairs",
     "currency",
     "permanence",
@@ -89,6 +93,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
     "stayshadow",
     "carpetspare",
     "stayveto",
+    "chatcommands",
 ];
 /// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 /// Both can still be disabled with `disable=siege,crab`.
@@ -782,6 +787,10 @@ impl Ai {
             return;
         }
         self.banter_hear(text);
+        // Chat commands take anyone's line (see `OFF_BY_DEFAULT`).
+        if self.dev_off("chatcommands") {
+            return;
+        }
         match text {
             "kgbdebug" => {
                 self.debug_activated = !self.debug_activated;
