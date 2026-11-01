@@ -989,6 +989,22 @@ impl Ai {
         }
         let priority_starts = self.allies.iter().filter(|&&a| a < self.team_id).count();
 
+        // The alliance's water side (see `economy::plop`): its start is
+        // decided, and taken out of the others' choice.
+        let water = self.eco.water_side;
+        if let Some((team, site)) = water {
+            if team == self.team_id {
+                self.send_start_pos(site, map_center);
+                self.log("Teams Mode: Start Position by the water, for a water-capable opening.");
+                return;
+            }
+            spots.retain(|&s| s != site);
+        }
+        if spots.is_empty() {
+            self.log("chooseStartPos: no spot left in the start box but the water side's.");
+            return;
+        }
+
         // Central spot that also has a close neighbour.
         let central_spot = |spots: &[Vec3]| -> Vec3 {
             let mut best = spots[0];
@@ -1016,8 +1032,9 @@ impl Ai {
             return;
         }
 
-        // On teams: spread out from previously chosen spots by team order.
-        let mut cached = Vec::new();
+        // On teams: spread out from previously chosen spots by team order
+        // (and from the water side's).
+        let mut cached: Vec<Vec3> = water.map(|(_, site)| site).into_iter().collect();
         if self.allies.len() > 1 {
             cached.push(central_spot(&spots));
         }
