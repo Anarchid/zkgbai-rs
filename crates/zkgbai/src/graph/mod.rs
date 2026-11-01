@@ -314,12 +314,15 @@ impl GraphManager {
                 self.metal_spots[i].last_seen = frame;
                 self.metal_spots[i].visible = true;
 
+                // mex_y is the original terrain height. Generated maps
+                // and terraforming can move the extractor far above or
+                // below it: ownership depends on x/z, not that stale y.
                 let mut has_mex = false;
-                if self.cb.friendly_units_in(pos, 50.0).into_iter().any(|u| self.is_mex(u)) {
+                if self.cb.friendly_units_in_cylinder(pos, 50.0).into_iter().any(|u| self.is_mex(u)) {
                     self.metal_spots[i].hostile = false;
                     has_mex = true;
                 }
-                if !has_mex && self.cb.enemy_units_in(pos, 50.0).into_iter().any(|u| self.is_mex(u)) {
+                if !has_mex && self.cb.enemy_units_in_cylinder(pos, 50.0).into_iter().any(|u| self.is_mex(u)) {
                     self.set_hostile(i);
                     has_mex = true;
                 }
