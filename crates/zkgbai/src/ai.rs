@@ -63,11 +63,14 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// The crushing-defeat veto (`fightsim`) is on. Raider packs and organic
 /// fire squads remain opt-in. Ravager and Minotaur packs are on for WIP
 /// observation (disable=ravager,minotaur to opt out). `coalesce` (raider
-/// gangs judged by the fight predictor) and `stayveto` (retreats the
-/// predictor says throw a won fight away) are on for WIP observation
-/// (2026-10-31, disable=coalesce,stayveto to opt out); their shadow
+/// gangs judged by the fight predictor) is on for WIP observation
+/// (2026-10-31, disable=coalesce to opt out). `stayveto` (retreats the
+/// predictor says throw a won fight away) is off since the 2026-11-01
+/// batteries (zkgbai-runs/coalesce/RESULTS.md): it lost its mirror 3-15
+/// and changed nothing against Circuit or Wires, and its standing units
+/// died more without killing more (enable=stayveto to opt in). The shadow
 /// switches (journal only) stay off.
-pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
     "pairs",
     "currency",
     "permanence",
@@ -83,6 +86,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
     "coalesceshadow",
     "stayshadow",
     "carpetspare",
+    "stayveto",
 ];
 /// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 /// Both can still be disabled with `disable=siege,crab`.

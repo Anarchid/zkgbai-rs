@@ -507,4 +507,11 @@ mod tests {
         assert!(stands(200.0, 120.0, 150.0, true));
         assert!(!stands(200.0, 150.0, 150.0, true));
     }
+
+    #[test]
+    fn off_by_default_after_the_batteries() {
+        // 2026-11-01: lost its mirror 3-15, nothing against Circuit or Wires.
+        assert!(crate::ai::OFF_BY_DEFAULT.contains(&"stayveto"));
+        assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"coalesce"));
+    }
 }
