@@ -331,7 +331,22 @@ impl Ai {
             .filter(|e| !e.is_dead && e.identified && (e.is_aa || e.is_flex_aa))
             .map(|e| e.value)
             .sum();
-        scout_policy(area, self.eco.effective_income, self.projected_metal_density(), aa_metal)
+        let mut policy = scout_policy(area, self.eco.effective_income, self.projected_metal_density(), aa_metal);
+        // The map's quotas are the alliance's, not each ally's (user,
+        // 2026-11-02: three instances built three times the Owls): the
+        // Owls and deep Widows one of us builds, the first in team order
+        // with the factory for them (see `allied`), less the Owls other
+        // allies fly; the Sparrows go round us.
+        if !self.allies.is_empty() {
+            policy.owls = if self.ally_owner_of("factoryplane") == self.team_id {
+                policy.owls.saturating_sub(self.ally_others_have(OWL))
+            } else {
+                0
+            };
+            policy.widows &= self.ally_owner_of("factoryspider") == self.team_id;
+            policy.sparrows = self.ally_quota_share(policy.sparrows, SPARROW);
+        }
+        policy
     }
 
     /// Estimated global standing metal per million square elmos of usable land.
