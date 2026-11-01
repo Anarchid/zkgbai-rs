@@ -826,7 +826,7 @@ impl Ai {
     /// The factory the operator asked for, until it stands or is under way.
     pub(crate) fn op_requisition(&mut self) -> Option<(String, String)> {
         let name = self.op.over.requisition.clone()?;
-        let standing = self.fac.factories.values().any(|f| self.defs.name_of(f.unit) == name);
+        let standing = self.fac.factories.values().any(|f| f.tech == name);
         let planned = self
             .eco
             .factory_tasks

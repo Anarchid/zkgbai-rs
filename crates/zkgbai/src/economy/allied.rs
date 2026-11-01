@@ -54,7 +54,7 @@ pub(super) const LAPSE: i32 = 1800;
 const FORGET: i32 = 900;
 /// An allied frame farther than this from our base and factories is left
 /// to its owner, elmos.
-const ASSIST_REACH: f32 = 3000.0;
+pub(super) const ASSIST_REACH: f32 = 3000.0;
 /// An allied anti-nuke this close to where ours would stand covers us:
 /// half of `nuke_coverage` (2500).
 const ANTI_SHARED: f32 = 1250.0;
@@ -180,7 +180,7 @@ impl Ai {
     }
 
     /// Where our assets are: the alliance's base and our factories.
-    fn eco_homes(&self) -> Vec<Vec3> {
+    pub(super) fn eco_homes(&self) -> Vec<Vec3> {
         std::iter::once(self.graph.get_ally_center()).chain(self.fac.factories.values().map(|f| f.unit.pos())).collect()
     }
 
@@ -191,7 +191,7 @@ impl Ai {
     }
 
     /// Whether our workers may go and help at `p`.
-    fn eco_ally_site_safe(&self, p: Vec3) -> bool {
+    pub(super) fn eco_ally_site_safe(&self, p: Vec3) -> bool {
         !self.graph.is_enemy_territory(p) && self.war.get_porc_threat(p) <= 0.0 && self.war.get_threat(p) <= 0.0
     }
 
@@ -313,13 +313,15 @@ impl Ai {
             .any(|&(u, n)| BIG_GUNS.contains(&n) && u.health() > 0.0 && distance(u.pos(), site) <= radius)
     }
 
-    /// Every second: end jobs on allied frames that stand, died or left
-    /// the alliance; move projects not yet started (and a superweapon
-    /// waiting for power) to an ally's frame of their type.
+    /// Every second: plates follow their factories (see `plate`); end jobs
+    /// on allied frames that stand, died or left the alliance; move
+    /// projects not yet started (and a superweapon waiting for power) to an
+    /// ally's frame of their type.
     pub(super) fn eco_watch_allied_projects(&mut self) {
         if self.allies.is_empty() {
             return;
         }
+        self.eco_watch_plates();
         self.eco.allied.census = (self.cb.friendly_units().into_iter())
             .filter(|&u| u.health() > 0.0)
             .filter_map(|u| {

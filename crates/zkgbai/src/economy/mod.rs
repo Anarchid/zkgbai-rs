@@ -15,6 +15,7 @@ pub mod grid;
 mod lotus;
 mod phase;
 mod planning;
+mod plate;
 mod plop;
 mod safespot;
 mod silo;
@@ -217,6 +218,8 @@ pub struct EconomyManager {
     pub(super) pending_power: Option<grid::PendingPower>,
     /// What allies build, and turns with allied ZKGBAIs (see `allied`).
     pub(super) allied: allied::AlliedProjects,
+    /// Our factory plates, producing or not (see `plate`).
+    pub(super) plates: Vec<Unit>,
     /// When it was last said that no Bertha site was found.
     bertha_report: i32,
     last_repaired_unit: i32,
@@ -410,6 +413,7 @@ impl EconomyManager {
             grid_defs: grid::GridDefs::default(),
             pending_power: None,
             allied: Default::default(),
+            plates: Vec::new(),
             bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
@@ -883,7 +887,7 @@ impl Ai {
         // note: cloaky uniquely requires running energy rich.
         if self.merged_allies < 2 {
             for f in self.fac.factories.values() {
-                match self.defs.name_of(f.unit) {
+                match f.tech.as_str() {
                     "striderhub" => eco.has_striders = true,
                     "factoryplane" => eco.has_planes = true,
                     "factorygunship" => eco.has_gunship = true,
