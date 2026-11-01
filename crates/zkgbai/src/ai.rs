@@ -83,6 +83,27 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
 
+/// A lost game (`resignvalue`): the alliance holds under half the spots we
+/// hold hostile, and the enemy is estimated worth at least four times what
+/// the alliance has. Hostile spots include mexes killed out of sight: the
+/// enemy rebuilds them soon enough.
+const RESIGN_SPOTS: f32 = 2.0;
+const RESIGN_VALUE: f32 = 4.0;
+
+/// Whether the alliance's numbers read lost (see `Ai::alliance_reads_lost`).
+/// Replayed over the 512 arena games against Wires:v2 of Nov 1, this fires
+/// before the old rule's resign in 6 of its 213 resigns, and in none of
+/// the 298 games won or played to the cap; at the old rule's resigns the
+/// enemy was worth a median 1.5 times us, and at 1.5 or 2 times this
+/// would have given up 6 and 1 of those games. The old rule gave up Urban
+/// Hell (Nov 1, 0.5.3 vs Wires) at 1.5x on 17 hostile spots to 11, 3 of
+/// them mexes our Infernos had burnt out of sight. In team games it
+/// read one player's share against all it saw of the enemy, and said
+/// "looks resignable" at the first check in all six 3v3 smokes of Nov 1.
+fn resign_reading(our_value: f32, enemy_value: f32, our_spots: usize, enemy_spots: usize) -> bool {
+    enemy_spots as f32 > RESIGN_SPOTS * our_spots as f32 && enemy_value >= RESIGN_VALUE * our_value
+}
+
 /// The features switched off: the `disable` option (or ZKGBAI_DISABLE),
 /// and those off by default that `enable` (or ZKGBAI_ENABLE) does not name.
 /// An option carried empty (a loaded save keeps the slot's options, blank)
@@ -217,6 +238,8 @@ pub struct Ai {
     /// What it says in chat (see `banter`).
     pub banter: Option<crate::banter::Banter>,
     resigned: bool,
+    /// The last resign check read the game lost (logged when it turns).
+    reads_lost: bool,
     initialized: bool,
     /// Another instance of this AI on our team leads; we only hand over units.
     slave: bool,
@@ -323,6 +346,7 @@ impl SkirmishAi for Ai {
             disabled: dev_features(cb),
             banter: None,
             resigned: false,
+            reads_lost: false,
             initialized: false,
             slave: false,
             merge_target: i32::MAX,
@@ -635,13 +659,19 @@ impl Ai {
         // team's own, 28 to 18, and the base gone at 15:00 with the human
         // ally still fighting). So with any ally but our own merged
         // instances, play on, and say to the team that it looks resignable
-        // (their call). Merged instances hand us all their units, so this
-        // judgement is already the whole alliance's.
-        let espots = self.graph.get_enemy_spots().len() as f32;
-        let ospots = self.graph.get_owned_spots().len() as f32;
-        let lost = !self.is_ffa
-            && espots > 1.5 * ospots
-            && (self.war.enemy_fighter_value > self.fac.army_value * 1.5 || self.fac.factories.is_empty());
+        // (their call). The reading is the alliance's either way (see
+        // `alliance_reads_lost`). Never in an FFA: the rivals fight each
+        // other too.
+        if self.is_ffa {
+            return;
+        }
+        let lost = if self.dev_off("resignvalue") { self.legacy_reads_lost() } else { self.alliance_reads_lost() };
+        if lost != self.reads_lost {
+            self.reads_lost = lost;
+            if !lost {
+                self.log("resign: no longer reads lost");
+            }
+        }
         if !lost {
             return;
         }
@@ -650,6 +680,50 @@ impl Ai {
             return;
         }
         self.resign();
+    }
+
+    /// Lost by the whole alliance's numbers (`resignvalue`, default on, see
+    /// `resign_reading`): spots with our or an ally's mex against those we
+    /// hold hostile, and the metal in our and our allies' units and
+    /// buildings (commanders left out, as `Intel` leaves out the enemy's;
+    /// nanoframes at full cost) against the enemy's estimated worth.
+    fn alliance_reads_lost(&mut self) -> bool {
+        let metal = self.metal;
+        let mut value = 0.0f32;
+        let mut spots = BTreeSet::new();
+        for u in self.cb.friendly_units() {
+            let Some(def) = u.def() else { continue };
+            if self.defs.is_commander(def) {
+                continue;
+            }
+            value += def.cost(metal);
+            if self.graph.is_mex_def(def)
+                && let Some(i) = self.graph.spot_under(u.pos())
+            {
+                spots.insert(i);
+            }
+        }
+        let enemy_value = self.intel.estimated_value();
+        let enemy_spots = self.graph.get_enemy_spots().len();
+        let lost = resign_reading(value, enemy_value, spots.len(), enemy_spots);
+        if lost && !self.reads_lost {
+            self.log(&format!(
+                "resign: reads lost: the alliance's {value:.0} metal against the enemy's ~{enemy_value:.0} ({:.1}x), \
+                 {} spots against {enemy_spots} hostile",
+                enemy_value / value.max(1.0),
+                spots.len()
+            ));
+        }
+        lost
+    }
+
+    /// The rule before `resignvalue`: this team's own spots and army against
+    /// all it sees of the enemy, or no factory.
+    fn legacy_reads_lost(&self) -> bool {
+        let espots = self.graph.get_enemy_spots().len() as f32;
+        let ospots = self.graph.get_owned_spots().len() as f32;
+        espots > 1.5 * ospots
+            && (self.war.enemy_fighter_value > self.fac.army_value * 1.5 || self.fac.factories.is_empty())
     }
 
     /// Give up the game by leaving it. Merged instances follow as our units
@@ -1302,12 +1376,26 @@ fn lua_def_field(lua: &str, key: &str, field: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Instance, ingroup, lua_def_field};
+    use super::{Instance, ingroup, lua_def_field, resign_reading};
 
     const SCRIPT: &str = "[GAME]\n{\n  [AI0]\n  {\n    Name=a;\n    ShortName=ZKGBAI;\n    Team=1;\n  }\n  [AI1]\n  {\n    ShortName=CircuitAI;\n    Team=2;\n  }\n  [AI2]\n  {\n    ShortName=ZKGBAI;\n    [Options]\n    {\n      Hivemind=On;\n      version=2;\n    }\n    Team=3;\n    Version=WIP-1;\n  }\n  [TEAM1]\n  {\n    TeamLeader=0;\n  }\n}\n";
 
     fn instance(value: &str, version: &str) -> Option<Instance> {
         Some(Instance { value: value.into(), version: version.into() })
+    }
+
+    #[test]
+    fn resigns_only_crushed_on_both_counts() {
+        // Urban Hell at the old rule's gg: 1.5x the worth, 17 hostile to 11.
+        assert!(!resign_reading(28_864.0, 44_310.0, 11, 17));
+        // Four times the worth on more than twice the spots.
+        assert!(resign_reading(5_000.0, 20_000.0, 3, 7));
+        // Either alone is not enough.
+        assert!(!resign_reading(5_000.0, 20_000.0, 4, 8));
+        assert!(!resign_reading(5_000.0, 19_900.0, 1, 9));
+        // Nothing left: any hostile spot will do.
+        assert!(resign_reading(0.0, 500.0, 0, 1));
+        assert!(!resign_reading(0.0, 500.0, 0, 0));
     }
 
     #[test]

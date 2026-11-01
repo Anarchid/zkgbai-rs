@@ -76,7 +76,8 @@
 #                  army) after having taunted
 #   recovered      well ahead again after having turned
 #   hopeless       we would resign, but an ally plays on (the alliance's call:
-#                  "resignable" is said to one's own team)
+#                  "resignable" is said to one's own team); read on the
+#                  whole alliance's numbers (ai.rs resign_reading)
 #   inferno        an Inferno launched: n (things in the fire), value (their metal)
 #   burnt          an Inferno's fire is out: n, metal (what it burnt that we saw go)
 #   eos            an Eos launched at a building: target (its name), value
