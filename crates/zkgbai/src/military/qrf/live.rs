@@ -482,7 +482,7 @@ impl Ai {
 
     /// Whether the dedicated picks are made now (past the early game).
     pub fn qrf_late(&self) -> bool {
-        self.eco.adjusted_income >= LATE_INCOME || self.frame >= LATE_FRAME
+        self.phase_income() >= LATE_INCOME || self.phase_frame() >= LATE_FRAME
     }
 
     /// An asset of ours (a static or a worker) took damage: the attacker's

@@ -39,6 +39,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
     ("odphase", "Energy", "the overdrive phase by energy, free spots and fusions (off: two fusions)"),
     ("ecoladder", "Energy", "fusions and singularities opened by income or the map's density"),
+    ("densgate", "Economy", "phase gates on the map's density clock, not time and income"),
     ("stallgate", "Energy", "no storage or superweapon while energy stalls"),
     ("storagegate", "Energy", "storages wait for energy first"),
     ("wind", "Energy", "turbines where they beat solars locally"),

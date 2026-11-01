@@ -56,7 +56,7 @@
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 
-mod density;
+pub(crate) mod density;
 use density::DensityMap;
 
 use springai::{Unit, Vec3};
@@ -336,13 +336,16 @@ impl Ai {
 
     /// Estimated global standing metal per million square elmos of usable land.
     pub(crate) fn projected_metal_density(&self) -> f32 {
-        self.scouts
-            .density_map
-            .get_or_init(|| {
-                let players = 1 + self.allies.len() + self.get_enemy_team_ids().len();
-                DensityMap::new(self.cb, &self.graph.metal_spots, players)
-            })
-            .at_frame(self.frame)
+        self.density_forecast().at_frame(self.frame)
+    }
+
+    /// This map's density forecast (made on first use: it reads the
+    /// heightmap and counts the players).
+    pub(crate) fn density_forecast(&self) -> &DensityMap {
+        self.scouts.density_map.get_or_init(|| {
+            let players = 1 + self.allies.len() + self.get_enemy_team_ids().len();
+            DensityMap::new(self.cb, &self.graph.metal_spots, players)
+        })
     }
 
     /// Widows for persistent deep scouting, independent of strike look jobs.
