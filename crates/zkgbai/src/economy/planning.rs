@@ -386,6 +386,8 @@ impl Ai {
         let has_plop = worker.has_plop();
         {
             let eco = &self.eco;
+            // Income for factory timing, on the phase clock (`densgate`).
+            let phase_static = self.phase_static_income();
             let nfac = self.fac.factories.len() as i32;
             let merged = self.merged_allies;
             let tf = self.graph.territory_fraction;
@@ -399,19 +401,19 @@ impl Ai {
                 // (an air factory for tempo past the usual cap, with the room
                 // a factory of a new type gets)
                 || (eco.requisition.as_ref().is_some_and(|(f, _)| !self.eco_has_factory(f))
-                    && eco.static_income > REQUISITION_INCOME
+                    && phase_static > REQUISITION_INCOME
                     && nfac >= 1
                     && (nfac < 3 + merged
                         || (eco.requisition.as_ref().is_some_and(|(_, why)| is_air_requisition(why))
-                            && (nfac as f32) < 1.0 + eco.static_income / NEW_FAC_PER))
+                            && (nfac as f32) < 1.0 + phase_static / NEW_FAC_PER))
                     && no_fac_tasks)
-                || (eco.static_income > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
+                || (phase_static > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
                 // a factory of a new type, now and then
                 || (eco.new_fac_due && nfac >= 1 && no_fac_tasks)
-                || (eco.static_income > 90.0 && nfac == 2 && nnanos > 6 && eminent && no_fac_tasks)
-                || (merged > 0 && eco.static_income > 65.0 && !eco.has_striders && eminent && no_fac_tasks)
+                || (phase_static > 90.0 && nfac == 2 && nnanos > 6 && eminent && no_fac_tasks)
+                || (merged > 0 && phase_static > 65.0 && !eco.has_striders && eminent && no_fac_tasks)
                 || (merged > 0
-                    && eco.static_income > 65.0
+                    && phase_static > 65.0
                     && tf > 0.35
                     && (!eco.has_planes && !eco.has_gunship)
                     && no_fac_tasks)
@@ -1324,7 +1326,7 @@ impl Ai {
         if (frame + self.offset) % 30 != 0 || self.fac.factories.is_empty() || self.eco.new_fac_due {
             return;
         }
-        let income = self.eco.static_income;
+        let income = self.phase_static_income();
         let next = || frame + NEW_FAC_EVERY + ((kgb_rand() * 2.0 - 1.0) * f64::from(NEW_FAC_JITTER)) as i32;
         let Some(at) = self.eco.new_fac_at else {
             if income > NEW_FAC_INCOME {
@@ -1534,7 +1536,7 @@ impl Ai {
         if self.dev_off("airtempo") {
             return 0.0;
         }
-        air_tempo_dose(self.frame as f32 / 1800.0, self.map_diag)
+        air_tempo_dose(self.phase_minutes(), self.map_diag)
     }
 
     /// The enemy's standing value (the production estimate less what

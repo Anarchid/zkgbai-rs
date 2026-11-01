@@ -61,7 +61,8 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `fightsim` (the crushing-defeat veto) waits until its effect has been
 /// seen in play. Ravager packs are on, asleep until the middle game;
 /// Minotaur and raider packs and organic fire squads remain opt-in.
-pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
+/// `densgate` (phase gates on map density) waits for its A/B.
+pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
     "pairs",
     "currency",
     "permanence",
@@ -77,6 +78,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
     "blitz",
     "firesquads",
     "carpetspare",
+    "densgate",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
