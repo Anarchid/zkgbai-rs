@@ -36,6 +36,7 @@ use springai::{Unit, UnitDef, Vec3};
 
 use super::{List, TaskId, WorkerTask};
 use crate::Ai;
+use crate::military::scouts::{OWL, SPARROW};
 use crate::util::distance;
 
 /// Projects an ally's frame of the same type is helped with before we
@@ -81,6 +82,13 @@ pub struct AlliedProjects {
     /// The alliance's factories, ours too, standing or rising: counted
     /// with the census, for plates (see `plate`).
     pub(super) factories: Vec<Unit>,
+    /// The alliance's plates, ours too.
+    plates: Vec<Unit>,
+    /// Every allied team's factories, plates and mexes, ours too: whose
+    /// the enemy near them is to answer (see `military::Faced`).
+    anchors: Vec<(i32, Vec3)>,
+    /// The alliance's air scouts (Owls, Sparrows) by team.
+    scouts: Vec<(i32, &'static str)>,
 }
 
 /// A wish for the next of a kind: the alliance's count of it when asked,
@@ -113,6 +121,11 @@ fn steps(order: &[i32], count: usize, team: i32) -> usize {
     let n = order.len();
     let me = order.iter().position(|&t| t == team).unwrap_or(0);
     (me + n - count % n) % n
+}
+
+/// The `me`-th of `n`'s part of `quota`: the i-th to the (i mod n)-th.
+fn quota_share(quota: usize, n: usize, me: usize) -> usize {
+    (0..quota).filter(|i| i % n.max(1) == me).count()
 }
 
 impl AlliedProjects {
@@ -186,6 +199,46 @@ impl Ai {
             self.log(&format!("economy: team {} started no {kind} #{} in its turn; starting ours", w.owner, count + 1));
         }
         w.ok
+    }
+
+    /// Every allied team's factories, plates and mexes (ours too), as of
+    /// the last census; none alone.
+    pub(crate) fn ally_anchors(&self) -> &[(i32, Vec3)] {
+        &self.eco.allied.anchors
+    }
+
+    /// Who of us builds what the alliance needs one of us to (its air
+    /// scouts, its deep-scouting Widows): the first allied ZKGBAI in team
+    /// order with a factory or plate of type `factory`, else the first.
+    pub(crate) fn ally_owner_of(&self, factory: &str) -> i32 {
+        let order = self.eco_turn_order();
+        let plate = factory.strip_prefix("factory").map(|t| format!("plate{t}")).unwrap_or_default();
+        let a = &self.eco.allied;
+        let has = |team: i32| {
+            a.factories.iter().any(|&u| u.team() == team && self.defs.name_of(u) == factory)
+                || a.plates.iter().any(|&u| u.team() == team && self.defs.name_of(u) == plate)
+        };
+        order.iter().copied().find(|&t| has(t)).unwrap_or(order[0])
+    }
+
+    /// How many `name`s (an air scout) allies other than the allied
+    /// ZKGBAIs (humans, other AIs) have.
+    pub(crate) fn ally_others_have(&self, name: &str) -> usize {
+        let order = self.eco_turn_order();
+        self.eco.allied.scouts.iter().filter(|&&(t, n)| n == name && !order.contains(&t)).count()
+    }
+
+    /// Our part of `quota` the alliance wants: less what allies other
+    /// than ZKGBAIs have of `name`, the i-th of the rest to the (i mod
+    /// n)-th of the n allied ZKGBAIs in team order. Alone, all of it.
+    pub(crate) fn ally_quota_share(&self, quota: usize, name: &str) -> usize {
+        let order = self.eco_turn_order();
+        if order.len() < 2 {
+            return quota;
+        }
+        let rest = quota.saturating_sub(self.ally_others_have(name));
+        let me = order.iter().position(|&t| t == self.team_id).unwrap_or(0);
+        quota_share(rest, order.len(), me)
     }
 
     /// Where our assets are: the alliance's base and our factories.
@@ -331,16 +384,26 @@ impl Ai {
             return;
         }
         self.eco_watch_plates();
-        let (mut census, mut factories) = (Vec::new(), Vec::new());
+        let (mut census, mut factories, mut plates) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut anchors, mut scouts) = (Vec::new(), Vec::new());
         for u in self.cb.friendly_units().into_iter().filter(|u| u.health() > 0.0) {
             let name = self.defs.name_of(u);
             if let Some(&n) = ASSISTED.iter().find(|&&n| n == name) {
                 census.push((u, n));
             } else if name.starts_with("factory") {
                 factories.push(u);
+                anchors.push((u.team(), u.pos()));
+            } else if name.starts_with("plate") {
+                plates.push(u);
+                anchors.push((u.team(), u.pos()));
+            } else if name == "staticmex" {
+                anchors.push((u.team(), u.pos()));
+            } else if let Some(&n) = [OWL, SPARROW].iter().find(|&&n| n == name) {
+                scouts.push((u.team(), n));
             }
         }
-        (self.eco.allied.census, self.eco.allied.factories) = (census, factories);
+        let a = &mut self.eco.allied;
+        (a.census, a.factories, a.plates, a.anchors, a.scouts) = (census, factories, plates, anchors, scouts);
         let mut ended = Vec::new();
         let mut pending = Vec::new();
         for &id in &self.eco.construction_tasks {
@@ -512,6 +575,16 @@ mod tests {
         assert!(!p.ask("superweapon", &order, 1, 0, 0).ok);
         assert!(p.ask("anti-nuke", &order, 1, 1, 0).ok);
         assert!(ask_until(&mut p, "superweapon", &order, 1, 0, 30, LAPSE).ok);
+    }
+
+    #[test]
+    fn quotas_go_round_the_team_order_and_add_up() {
+        assert_eq!([0, 1, 2].map(|me| quota_share(2, 3, me)), [1, 1, 0]);
+        assert_eq!([0, 1, 2].map(|me| quota_share(4, 3, me)), [2, 1, 1]);
+        assert_eq!([0, 1].map(|me| quota_share(0, 2, me)), [0, 0]);
+        for (q, n) in [(1, 1), (5, 2), (7, 4)] {
+            assert_eq!((0..n).map(|me| quota_share(q, n, me)).sum::<usize>(), q);
+        }
     }
 
     #[test]

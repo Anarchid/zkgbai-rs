@@ -435,7 +435,7 @@ impl Ai {
 
         // do we need AA?
         if self.eco.enemy_has_air
-            && self.war.max_enemy_air_value > 1000.0
+            && self.war_air_to_answer() > 1000.0
             && self.graph.territory_fraction > 0.4
             && self.eco.aa_tasks.is_empty()
         {
@@ -1569,19 +1569,19 @@ impl Ai {
                 self.intel.unaccounted().max(0.0),
             ));
         }
-        // Firewalkers burn masses of light skirmishers.
-        let skirms = self.war.enemy_light_skirm_value;
+        // Firewalkers burn masses of light skirmishers (those ours to
+        // answer: see `military::Faced`).
+        let (skirms, fighters) = (self.war.faced.light_skirm, self.war.faced.fighter);
         if !owned("factoryjump")
             && self.eco.bots_viable
             && self.defs.get("factoryjump").is_some()
             && skirms >= FIREWALKER_REQUISITION
-            && skirms >= FIREWALKER_SHARE * self.war.enemy_fighter_value
+            && skirms >= FIREWALKER_SHARE * fighters
         {
             return Some((
                 "factoryjump".to_owned(),
                 format!(
-                    "{skirms:.0} of the enemy's {:.0} metal of army seen is light skirmishers: Firewalkers",
-                    self.war.enemy_fighter_value
+                    "{skirms:.0} of the enemy's {fighters:.0} metal of army ours to answer is light skirmishers: Firewalkers"
                 ),
                 skirms,
             ));
@@ -1704,6 +1704,16 @@ impl Ai {
             return None;
         }
         let (enemy, static_aa, planes) = self.eco_air_tempo_enemy();
+        // Our share of the enemy: of its army seen, what is ours to answer
+        // (see `military::Faced`); an even share before any is seen.
+        let share = if self.allies.is_empty() {
+            1.0
+        } else if self.war.enemy_fighter_value > 0.0 {
+            self.war.faced.fighter / self.war.enemy_fighter_value
+        } else {
+            1.0 / (1 + self.allies.len()) as f32
+        };
+        let enemy = enemy * share;
         let value = AIR_TEMPO_SHARE * enemy * dose;
         let name = if planes { "factoryplane" } else { "factorygunship" };
         let cost = self.defs.get(name)?.cost(self.metal);

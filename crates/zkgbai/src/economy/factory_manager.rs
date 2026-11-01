@@ -827,7 +827,8 @@ impl Ai {
     fn fac_aa_roll(&self) -> bool {
         let fm = &self.fac;
         if fm.fighter_value > fm.aa_value {
-            let ratio = fm.aa_value / self.war.max_enemy_air_value;
+            // The enemy aircraft ours to answer (see `military::Faced`).
+            let ratio = fm.aa_value / self.war_air_to_answer();
             kgb_rand() > f64::from(ratio * ratio)
         } else {
             false
@@ -1687,7 +1688,7 @@ impl Ai {
     /// Recluses...) outweigh what we have of them; a jump factory taken
     /// for that (see `eco_find_requisition`) builds little else.
     pub(crate) fn fac_wants_firewalker(&self) -> bool {
-        let skirms = self.war.enemy_light_skirm_value;
+        let skirms = self.war.faced.light_skirm;
         let have = self.fac.num_firewalkers as f32 * FIREWALKER_COST;
         self.phase_income() > 20.0 && skirms >= FIREWALKER_SKIRMS && have < 0.5 * skirms
     }
@@ -1695,7 +1696,7 @@ impl Ai {
     /// Jugglenauts while the enemy's close-range army (raiders, riots,
     /// assaults) is big and we are rich enough.
     fn fac_wants_jugglenaut(&self) -> bool {
-        let brawlers = self.war.enemy_brawler_value;
+        let brawlers = self.war.faced.brawler;
         let have = self.fac.num_jugglenauts as f32 * JUGGLENAUT_COST;
         self.phase_income() > 35.0 && brawlers >= JUGGLENAUT_BRAWLERS && have < 0.4 * brawlers && kgb_rand() > 0.5
     }
@@ -1712,7 +1713,7 @@ impl Ai {
         // (No herd of its own in the first minutes: Constables then.)
         let mut want =
             if self.phase_frame() < 30 * 60 * 4 { 0 } else { 2 } + (self.puppies_wreck_metal() / 150.0) as usize;
-        if self.war.enemy_cloaky_value > 600.0 {
+        if self.war.faced.cloaky > 600.0 {
             want += 6;
         }
         herd < want.min(HERD_CAP) && kgb_rand() > 0.5

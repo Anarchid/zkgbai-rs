@@ -82,6 +82,33 @@ fn aa_porc_circle(e: &mut Enemy) -> (i32, i32, i32, i32) {
 /// 185, Dagger 212, Kodachi 210; Scalpel 330, Rocko 275).
 pub const OUTRANGES_RAIDERS: f32 = 260.0;
 
+/// The enemy forces ours to answer in a team game: those nearer our
+/// factories and mexes than any ally's (see `war_update_targets`). The
+/// counters we build (anti-air, Firewalkers, Jugglenauts, Puppies, air
+/// tempo) answer these, so allies that each counted the whole enemy
+/// alliance no longer each build its full answer (user, 2026-11-02: "do
+/// they sum all enemy units or the ones they are fighting themselves?").
+/// Alone, everything is ours.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Faced {
+    pub fighter: f32,
+    pub light_skirm: f32,
+    pub brawler: f32,
+    pub cloaky: f32,
+    /// The most enemy aircraft ours at once, as `max_enemy_air_value`.
+    pub max_air: f32,
+}
+
+impl Ai {
+    /// The enemy air force our anti-air answers: what came at us, and at
+    /// least an even share of the whole (aircraft cross the map in
+    /// seconds, so an ally not yet raided keeps some).
+    pub(crate) fn war_air_to_answer(&self) -> f32 {
+        let even = self.war.max_enemy_air_value / (1 + self.allies.len()) as f32;
+        self.war.faced.max_air.max(even)
+    }
+}
+
 pub struct MilitaryManager {
     cb: Callback,
 
@@ -103,6 +130,7 @@ pub struct MilitaryManager {
     pub enemy_light_porc_value: f32,
     pub enemy_heavy_porc_value: f32,
     pub max_enemy_air_value: f32,
+    pub faced: Faced,
     pub slasher_spam: i32,
     pub enemy_heavy_value: f32,
     pub enemy_has_troll_com: bool,
@@ -191,6 +219,7 @@ impl MilitaryManager {
             enemy_light_porc_value: 0.0,
             enemy_heavy_porc_value: 0.0,
             max_enemy_air_value: 0.0,
+            faced: Faced::default(),
             slasher_spam: 0,
             enemy_heavy_value: 0.0,
             enemy_has_troll_com: false,
@@ -1668,6 +1697,16 @@ impl Ai {
         let metal = self.metal;
         // Commander drones should not prompt early AA, even across a large enemy team.
         let count_commander_drones = self.projected_metal_density() >= 500.0;
+        // Whose to answer (see `Faced`): the nearest allied factory or mex.
+        let anchors = self.ally_anchors().to_vec();
+        let us = self.team_id;
+        let ours = |p: Vec3| {
+            anchors.is_empty()
+                || anchors
+                    .iter()
+                    .min_by(|a, b| distance(a.1, p).total_cmp(&distance(b.1, p)))
+                    .is_some_and(|a| a.0 == us)
+        };
         let war = &mut self.war;
         war.sniper_sightings.retain(|d| frame - d.frame_issued <= 900);
         war.defense_targets.retain(|d| frame - d.frame_issued <= 300);
@@ -1682,6 +1721,8 @@ impl Ai {
         war.enemy_has_anti_nuke = false;
         war.enemy_has_nuke = false;
         let mut enemy_air_value = 0.0f32;
+        let mut faced_air = 0.0f32;
+        war.faced = Faced { max_air: war.faced.max_air, ..Faced::default() };
         war.enemy_heavy_value = 0.0;
         war.enemy_fighter_value = 0.0;
         war.enemy_light_skirm_value = 0.0;
@@ -1695,6 +1736,7 @@ impl Ai {
             let Some(ud) = t.ud else { continue };
             let name = t.def_name.as_str();
             let cost = ud.cost(metal);
+            let mine = ours(t.position);
             if !t.is_static && !t.is_worker && t.power > 0.0 && ud.speed() > 0.0 && frame - t.last_seen < 1800 {
                 mobile_value += cost;
                 if t.threat_radius >= OUTRANGES_RAIDERS {
@@ -1737,9 +1779,11 @@ impl Ai {
                     if matches!(name, "dronelight" | "droneheavyslow" | "dronecarry") {
                         if count_commander_drones || name == "dronecarry" {
                             enemy_air_value += 25.0;
+                            faced_air += if mine { 25.0 } else { 0.0 };
                         }
                     } else {
                         enemy_air_value += cost;
+                        faced_air += if mine { cost } else { 0.0 };
                     }
                 }
                 _ => {
@@ -1751,6 +1795,8 @@ impl Ai {
 
             if t.def_speed() > 0.0 && t.def_max_weapon_range() > 0.0 && t.def_builds_nothing() {
                 war.enemy_fighter_value += cost;
+                let faced = if mine { cost } else { 0.0 };
+                war.faced.fighter += faced;
                 if !t.can_fly() {
                     if matches!(
                         name,
@@ -1764,6 +1810,7 @@ impl Ai {
                             | "shipskirm"
                     ) {
                         war.enemy_light_skirm_value += cost;
+                        war.faced.light_skirm += faced;
                     } else if t.is_raider
                         || t.is_riot
                         || matches!(
@@ -1780,9 +1827,11 @@ impl Ai {
                         )
                     {
                         war.enemy_brawler_value += cost;
+                        war.faced.brawler += faced;
                     }
                     if name.starts_with("cloak") {
                         war.enemy_cloaky_value += cost;
+                        war.faced.cloaky += faced;
                     }
                 }
             }
@@ -1790,6 +1839,7 @@ impl Ai {
         war.outranging_share = if mobile_value > 0.0 { outranging_value / mobile_value } else { 0.0 };
 
         war.max_enemy_air_value = enemy_air_value.max(war.max_enemy_air_value);
+        war.faced.max_air = faced_air.max(war.faced.max_air);
 
         war.target_markers.retain(|tm| frame - tm.frame <= 150);
     }
