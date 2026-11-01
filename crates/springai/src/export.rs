@@ -10,6 +10,9 @@
 //!   instance is still handling another one, the nested event is queued and
 //!   delivered right after the outer handler returns, instead of aliasing
 //!   `&mut` state.
+//! - **No unloading under a running thread.** The library stays loaded
+//!   until the process exits (see `pin_library`), so threads an AI leaves
+//!   running when it is released never run on in unmapped code.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -94,6 +97,34 @@ fn install_panic_hook() {
     });
 }
 
+/// Keep this library loaded until the process exits (once per process).
+///
+/// The engine frees an AI's library when it releases the last instance
+/// (`/aikill`, an AI resigning or crashing). On Windows that unmaps it, and
+/// a thread the AI left running (a detached computation) then crashes the
+/// game. Linux already keeps the library mapped: glibc does not unload one
+/// with thread-local destructors still registered.
+#[cfg(windows)]
+fn pin_library() {
+    const GET_MODULE_HANDLE_EX_FLAG_PIN: u32 = 0x1;
+    const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: u32 = 0x4;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleExW(flags: u32, module_name: *const u16, module: *mut *mut c_void) -> i32;
+    }
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Any address inside this library names it.
+        let here = pin_library as *const u16;
+        let mut module = std::ptr::null_mut();
+        let flags = GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS;
+        unsafe { GetModuleHandleExW(flags, here, &mut module) };
+    });
+}
+
+#[cfg(not(windows))]
+fn pin_library() {}
+
 /// Take the message of the most recent panic on this thread, if the panic
 /// hook recorded one. For AIs that catch panics themselves (e.g. to isolate
 /// sub-modules) and want to log what happened.
@@ -128,6 +159,7 @@ fn guarded<R>(cb: Option<Callback>, what: &str, f: impl FnOnce() -> R) -> Result
 /// # Safety
 /// Must only be called by the engine with a valid callback table.
 pub unsafe fn init<T: SkirmishAi>(reg: &Registry<T>, ai_id: i32, raw: *const SSkirmishAICallback) -> i32 {
+    pin_library();
     install_panic_hook();
     if raw.is_null() {
         return error::UNKNOWN_INSTANCE;
