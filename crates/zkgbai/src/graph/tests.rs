@@ -31,6 +31,89 @@ fn link_set(g: &GraphManager) -> BTreeSet<(usize, usize)> {
 }
 
 #[test]
+fn generated_terrain_height_does_not_hide_mexes_from_the_graph() {
+    // mex_y comes from GetGroundOrigHeight. A generated map (or later
+    // terraforming) can put the actual extractor far above or below it.
+    unsafe extern "C" fn map_size(_: i32) -> i32 {
+        512
+    }
+    unsafe extern "C" fn los_mip(_: i32) -> i32 {
+        6
+    }
+    unsafe extern "C" fn los_map(_: i32, out: *mut i32, max: i32) -> i32 {
+        if out.is_null() {
+            return 64;
+        }
+        for i in 0..max.min(64) as usize {
+            // SAFETY: the caller provides space for max entries.
+            unsafe { out.add(i).write(1) };
+        }
+        64
+    }
+    unsafe extern "C" fn unit_def(_: i32, id: i32) -> i32 {
+        if id == 3 { 43 } else { 42 }
+    }
+    unsafe fn units_in(pos: *mut f32, radius: f32, spherical: bool, out: *mut i32, max: i32, enemy: bool) -> i32 {
+        // SAFETY: the callback receives a three-component query position.
+        let p = unsafe { std::slice::from_raw_parts(pos, 3) };
+        let units: &[(i32, [f32; 3])] = if enemy {
+            &[(2, [2000.0, -300.0, 1000.0])]
+        } else {
+            &[(1, [1000.0, 300.0, 1000.0]), (3, [3000.0, 0.0, 1000.0])]
+        };
+        let mut count = 0;
+        for &(id, u) in units {
+            let d2 =
+                (p[0] - u[0]).powi(2) + (p[2] - u[2]).powi(2) + if spherical { (p[1] - u[1]).powi(2) } else { 0.0 };
+            if d2 <= radius * radius {
+                if !out.is_null() && count < max {
+                    // SAFETY: count is within the supplied output buffer.
+                    unsafe { out.add(count as usize).write(id) };
+                }
+                count += 1;
+            }
+        }
+        count
+    }
+    unsafe extern "C" fn friendly(_: i32, pos: *mut f32, r: f32, spherical: bool, out: *mut i32, max: i32) -> i32 {
+        // SAFETY: forward the engine callback's buffers unchanged.
+        unsafe { units_in(pos, r, spherical, out, max, false) }
+    }
+    unsafe extern "C" fn enemy(_: i32, pos: *mut f32, r: f32, spherical: bool, out: *mut i32, max: i32) -> i32 {
+        // SAFETY: forward the engine callback's buffers unchanged.
+        unsafe { units_in(pos, r, spherical, out, max, true) }
+    }
+    let table = Box::leak(Box::new(springai::ffi::SSkirmishAICallback {
+        Map_getWidth: Some(map_size),
+        Map_getHeight: Some(map_size),
+        Mod_getLosMipLevel: Some(los_mip),
+        Map_getLosMap: Some(los_map),
+        Unit_getDef: Some(unit_def),
+        getFriendlyUnitsIn: Some(friendly),
+        getEnemyUnitsIn: Some(enemy),
+        ..Default::default()
+    }));
+    // SAFETY: the table lives forever and implements the callbacks used below.
+    let cb = unsafe { Callback::from_raw(0, table) };
+    let los = crate::los::LosManager::new(cb);
+    let mut g = graph(&[(1000.0, 1000.0), (2000.0, 1000.0), (3000.0, 1000.0), (1100.0, 1000.0)]);
+    g.cb = cb;
+    g.mex_def_id = 42;
+    g.set_owned(0);
+    g.metal_spots[0].extractor = Unit::from_id(cb, 1);
+
+    for frame in [60, 120] {
+        g.update(frame, &los);
+        assert!(g.metal_spots[0].owned, "the finished mex must survive the LOS refresh");
+        assert_eq!(g.metal_spots[0].extractor.map(|u| u.id()), Some(1));
+        assert!(g.metal_spots[1].hostile, "enemy mexes below the original terrain must be seen too");
+        assert!(!g.metal_spots[2].owned && !g.metal_spots[2].hostile, "a non-mex is not an extractor");
+        assert!(!g.metal_spots[3].owned && !g.metal_spots[3].hostile, "keep the horizontal radius limit");
+        assert_eq!(g.territory_fraction, 0.25);
+    }
+}
+
+#[test]
 fn square_with_center_triangulates_into_spokes() {
     let pts = [(0.0, 0.0), (100.0, 0.0), (0.0, 100.0), (100.0, 100.0), (50.0, 50.0)];
     let edges = delaunay_edges(&pts);
