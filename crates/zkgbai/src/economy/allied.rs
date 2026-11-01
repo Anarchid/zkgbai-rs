@@ -6,7 +6,9 @@
 //! same spot, one after the other (each picks the alliance's base), and a
 //! job whose site an ally's frame took was dropped, never helped.
 //!
-//! - An ally's frame is helped as ours would be. A job whose site an allied
+//! - An ally's frame is helped as ours would be, if enough of it is left
+//!   to build to be worth the walk ([`ASSIST_LEFT`]; an ally's mex is done
+//!   before our constructor gets there). A job whose site such an allied
 //!   frame of its type took builds that frame (see `eco_clean_orders`); a
 //!   project of [`ASSISTED`] we are about to start, or queued and have not
 //!   started, goes to an ally's frame of its type near us instead (the one
@@ -56,6 +58,11 @@ const ASSIST_REACH: f32 = 3000.0;
 /// An allied anti-nuke this close to where ours would stand covers us:
 /// half of `nuke_coverage` (2500).
 const ANTI_SHARED: f32 = 1250.0;
+/// An allied frame with less than this metal of it left to build is left
+/// to its owner. Cheaper frames went up before help arrived: in a 3v3 smoke
+/// on Comet Catcher (2026-11-01), allies helped 329 of each other's mexes,
+/// 136 of which died unfinished, walking past the next spot to do it.
+pub(super) const ASSIST_LEFT: f32 = 300.0;
 /// The same note goes to the log at most this often, frames.
 const SAY_EVERY: i32 = 30 * 60;
 
@@ -177,6 +184,12 @@ impl Ai {
         std::iter::once(self.graph.get_ally_center()).chain(self.fac.factories.values().map(|f| f.unit.pos())).collect()
     }
 
+    /// Whether enough of the allied frame `u` is left to build to be worth
+    /// sending help (see [`ASSIST_LEFT`]).
+    pub(super) fn eco_worth_helping(&self, u: Unit) -> bool {
+        u.def().is_some_and(|d| d.cost(self.metal) * (1.0 - u.build_progress()) >= ASSIST_LEFT)
+    }
+
     /// Whether our workers may go and help at `p`.
     fn eco_ally_site_safe(&self, p: Vec3) -> bool {
         !self.graph.is_enemy_territory(p) && self.war.get_porc_threat(p) <= 0.0 && self.war.get_threat(p) <= 0.0
@@ -193,7 +206,9 @@ impl Ai {
             .map(|&(u, _)| u)
             .filter(|u| {
                 let p = u.pos();
-                homes.iter().any(|&h| distance(h, p) <= ASSIST_REACH) && self.eco_ally_site_safe(p)
+                homes.iter().any(|&h| distance(h, p) <= ASSIST_REACH)
+                    && self.eco_ally_site_safe(p)
+                    && self.eco_worth_helping(*u)
             })
             .max_by(|a, b| a.build_progress().total_cmp(&b.build_progress()))
     }
@@ -270,7 +285,11 @@ impl Ai {
             return true;
         }
         if let Some(a) = self.eco_ally_anti(site) {
-            if a.is_being_built() && self.eco_task_on(a).is_none() && self.eco_ally_site_safe(a.pos()) {
+            if a.is_being_built()
+                && self.eco_task_on(a).is_none()
+                && self.eco_ally_site_safe(a.pos())
+                && self.eco_worth_helping(a)
+            {
                 self.eco_help_frame(a, List::Construction);
             }
             let p = a.pos();
@@ -352,7 +371,7 @@ impl Ai {
                     self.eco.anti_nuke = false;
                     continue;
                 }
-                a.filter(|a| self.eco_ally_site_safe(a.pos()))
+                a.filter(|&a| self.eco_ally_site_safe(a.pos()) && self.eco_worth_helping(a))
             } else {
                 self.eco_ally_frame(def)
             };
