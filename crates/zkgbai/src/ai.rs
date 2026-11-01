@@ -1326,6 +1326,81 @@ mod tests {
         assert_eq!(ingroup(script, 2, "hivemind"), instance("", "wip"));
     }
 
+    /// The shape the engine's Lua parser needs, as far as our data files go:
+    /// every short string closes on its own line (comments skipped) and the
+    /// braces balance.
+    fn lua_shape(lua: &str) -> Result<(), String> {
+        let (mut depth, mut line, mut quote, mut escaped, mut closed) = (0i32, 1, None, false, false);
+        let mut chars = lua.chars().peekable();
+        while let Some(c) = chars.next() {
+            // Right after a string: a separator, a closing bracket, `..` or a comment.
+            if closed && !c.is_whitespace() {
+                closed = false;
+                if !matches!(c, ',' | '}' | ')' | ']' | '.' | ';' | '-') {
+                    return Err(format!("line {line}: `{c}` right after a string"));
+                }
+            }
+            if c == '\n' {
+                if quote.is_some() {
+                    return Err(format!("line {line}: a string runs past the end of its line"));
+                }
+                line += 1;
+                continue;
+            }
+            match quote {
+                Some(q) => {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if c == q {
+                        quote = None;
+                        closed = true;
+                    }
+                }
+                None => match c {
+                    '\'' | '"' => quote = Some(c),
+                    '[' if chars.peek() == Some(&'[') => return Err(format!("line {line}: long strings not checked")),
+                    // A comment, to the end of the line.
+                    '-' if chars.peek() == Some(&'-') => {
+                        while chars.peek().is_some_and(|&n| n != '\n') {
+                            chars.next();
+                        }
+                    }
+                    '{' => depth += 1,
+                    '}' if depth == 0 => return Err(format!("line {line}: a brace closes nothing")),
+                    '}' => depth -= 1,
+                    _ => {}
+                },
+            }
+        }
+        match (quote, depth) {
+            (Some(_), _) => Err("a string is still open at the end".to_owned()),
+            (None, 0) => Ok(()),
+            (None, d) => Err(format!("{d} braces left open")),
+        }
+    }
+
+    /// A quote inside a single-quoted `desc` ends the string early, and the
+    /// engine, which parses every installed AI's options at startup, then
+    /// dies for every game on the machine (`map's` in densgate's line,
+    /// 2026-11-02). `lua_def_field` reads past such a quote, so the option
+    /// tests did not see it.
+    #[test]
+    fn lua_data_files_have_closed_strings_and_balanced_braces() {
+        for (name, lua) in [
+            ("AIOptions.lua", include_str!("../data/AIOptions.lua")),
+            ("AIInfo.lua", include_str!("../data/AIInfo.lua")),
+        ] {
+            assert_eq!(lua_shape(lua), Ok(()), "{name}");
+        }
+        assert!(lua_shape("local t = {\n\tdesc = 'the map's density clock',\n}\nreturn t\n").is_err());
+        assert!(lua_shape("local t = {\n\tdesc = 'the map\\'s clock', -- the engine's\n}\nreturn t\n").is_ok());
+        assert!(lua_shape("local t = {\n\tkey = 'x',\n").is_err());
+        // Two stray quotes balance, but Lua still rejects the word after the first.
+        assert!(lua_shape("local t = {\n\tdesc = 'the map's and the engine's clock',\n}\n").is_err());
+    }
+
     #[test]
     fn reads_option_defaults() {
         let options = include_str!("../data/AIOptions.lua");
