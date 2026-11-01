@@ -328,6 +328,12 @@ on every one of them) they merge into one instead: the lowest team leads and the
 Setting the option's `def` to `'on'` in the installed AIOptions.lua does the same for every instance of that
 version the lobby leaves the option unset on.
 
+Playing apart, they (and any ally, human or AI) share their projects instead of racing them. An ally's
+half-built building takes the job of ours that would go there, and an ally's superweapon, Bertha, reactor or
+anti-nuke rising near our base gets our help before we start our own. Allied instances start superweapons and
+anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. Opening
+factories go by turns too, each instance preferring a type its allies have not placed.
+
 Operator API and run journal
 ----------------------------
 
