@@ -332,7 +332,10 @@ Playing apart, they (and any ally, human or AI) share their projects instead of 
 half-built building takes the job of ours that would go there, and an ally's superweapon, Bertha, reactor or
 anti-nuke rising near our base gets our help before we start our own. Allied instances start superweapons and
 anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. Opening
-factories go by turns too, each instance preferring a type its allies have not placed.
+factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Where much of
+a side's metal lies under water, one instance takes the start nearest it and an amphibious or hover opening; from
+3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on
+the ally's (`disable=plates` builds our own instead).
 
 Operator API and run journal
 ----------------------------
