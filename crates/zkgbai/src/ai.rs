@@ -70,8 +70,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// and changed nothing against Circuit or Wires, and its standing units
 /// died more without killing more (enable=stayveto to opt in). The shadow
 /// switches (journal only) stay off.
-/// `densgate` (phase gates on map density) waits for its A/B.
-pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
+/// `densgate` (phase gates on the map's density clock) is on for WIP
+/// observation (2026-11-02, disable=densgate to opt out); off on main.
+pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
     "pairs",
     "currency",
     "permanence",
@@ -88,7 +89,6 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
     "stayshadow",
     "carpetspare",
     "stayveto",
-    "densgate",
 ];
 /// Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 /// Both can still be disabled with `disable=siege,crab`.
