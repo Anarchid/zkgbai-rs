@@ -268,13 +268,13 @@ impl Ai {
         let snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         let mut local = Local { snap, ours: Vec::new(), theirs: Vec::new(), unknown };
         for (u, def, hp) in ours {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(u.id(), def);
             let p = u.pos();
             local.ours.push(Ours { id: u.id(), cost: spec.cost });
             local.snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
         }
         for (eid, def, hp, p, armed, name) in theirs {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(eid, def);
             let Some(e) = self.war.targets.get(&eid) else { continue };
             let (value, is_prize) = (spec.cost * weight(e), prize(e, spec.cost));
             let armed = armed && !spec.weapons.is_empty();
