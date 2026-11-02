@@ -636,7 +636,7 @@ mod regression {
     fn daggers_trickling_into_a_mace_are_priced_as_dying() {
         let model = Model::load().unwrap();
         let raid = mace_on_mexes(&[1100.0, 1600.0, 2100.0]);
-        let focus = SimFlags::from_switches(false, true);
+        let focus = SimFlags::from_switches(false, true, false);
         // Expected Dagger metal dead, and the plan, by raid aim.
         let run = |aim| {
             let (snap, fates, _) = rollout(&model, &raid, 1, focus, aim);

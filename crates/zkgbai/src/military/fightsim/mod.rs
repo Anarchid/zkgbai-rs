@@ -33,6 +33,10 @@ use std::sync::Arc;
 const HITS_TSV: &str = include_str!("../../../data/fightsim_hits.tsv");
 const DEFS_TSV: &str = include_str!("../../../data/fightsim_defs.tsv");
 const COEF_TSV: &str = include_str!("../../../data/fightsim_coef.tsv");
+/// Weapons that fire from tubes (ZK scriptReload.lua, the weapon's
+/// customParams `script_burst` and `script_reload`): Picket, Ogre, Trident,
+/// Hacksaw, Angler, Disco Rave Party.
+const SRELOAD_TSV: &str = include_str!("../../../data/fightsim_sreload.tsv");
 
 /// Frames per simulation step.
 const DT: i32 = 3;
@@ -115,12 +119,15 @@ pub struct SnapUnit {
 pub struct SimFlags {
     pub twod: bool,
     pub focus: bool,
+    /// Tube weapons fire from their tubes, each reloading on its own clock
+    /// (mech.py `sreload`); off, they fire at the engine reload forever.
+    pub sreload: bool,
 }
 
 impl SimFlags {
     /// The flags as the AI's switches set them.
-    pub fn from_switches(fight2d: bool, focus: bool) -> SimFlags {
-        SimFlags { twod: fight2d, focus: focus || fight2d }
+    pub fn from_switches(fight2d: bool, focus: bool, sreload: bool) -> SimFlags {
+        SimFlags { twod: fight2d, focus: focus || fight2d, sreload }
     }
 
     /// Whether shots go to the least-health target (always in the plane).
@@ -446,6 +453,8 @@ pub struct Model {
     pub cal_a: ZoiBeta,
     pub cal_b: ZoiBeta,
     pub mech: mech::MechTables,
+    /// Tube weapons: weapon def name -> (tubes, frames each tube reloads).
+    pub sreload: HashMap<String, (usize, i32)>,
     /// The data files' fitting headers.
     pub fitted: String,
 }
@@ -470,6 +479,13 @@ impl Model {
             coef.push((k.to_owned(), parse_f64(v)?));
         }
         let mech = mech::MechTables::load()?;
+        let mut sreload = HashMap::new();
+        for line in data_lines(SRELOAD_TSV) {
+            let f: Vec<&str> = line.split('\t').collect();
+            let [name, tubes, secs] = f[..] else { return Err(format!("sreload: bad line {line:?}")) };
+            let tubes = tubes.parse::<usize>().map_err(|e| format!("sreload: bad tubes {tubes:?}: {e}"))?;
+            sreload.insert(name.to_owned(), (tubes.max(1), ((parse_f64(secs)? * 30.0).round() as i32).max(1)));
+        }
         let fitted = [HITS_TSV, COEF_TSV]
             .iter()
             .filter_map(|t| t.lines().next())
@@ -484,6 +500,7 @@ impl Model {
             cal_a: ZoiBeta { theta: take(&coef, "zoibA.")? },
             cal_b: ZoiBeta { theta: take(&coef, "zoibB.")? },
             mech,
+            sreload,
             fitted,
         })
     }
@@ -518,9 +535,10 @@ impl Model {
         out
     }
 
-    fn sim_weapon(&self, w: &WeaponSpec) -> SimWeapon {
+    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags) -> SimWeapon {
         let salvo = w.salvo.max(1);
         let hitscan = w.hitscan();
+        let tubes = if flags.sreload { self.sreload.get(&w.name).copied() } else { None };
         SimWeapon {
             key: self.hits.weapon(&w.name),
             range: w.range as f64,
@@ -529,6 +547,9 @@ impl Model {
             salvo,
             nominal: if hitscan { w.damage as f64 * salvo as f64 } else { w.damage as f64 },
             next: 0,
+            // Tubes start loaded.
+            tubes: tubes.map_or_else(Vec::new, |(n, _)| vec![0; n]),
+            tube_reload: tubes.map_or(0, |(_, r)| r),
         }
     }
 
@@ -580,7 +601,7 @@ impl Model {
         snap.units
             .iter()
             .zip(xs)
-            .map(|(u, x)| self.sim_unit(u, x, u.spec.weapons.iter().map(|w| self.sim_weapon(w)).collect()))
+            .map(|(u, x)| self.sim_unit(u, x, u.spec.weapons.iter().map(|w| self.sim_weapon(w, snap.flags)).collect()))
             .collect()
     }
 }
@@ -599,6 +620,27 @@ struct SimWeapon {
     /// otherwise.
     nominal: f64,
     next: i32,
+    /// Tube weapons (`SimFlags::sreload`): the frame each tube is loaded
+    /// again; empty for every other weapon.
+    tubes: Vec<i32>,
+    /// Frames a tube takes to reload after it fires.
+    tube_reload: i32,
+}
+
+impl SimWeapon {
+    /// Whether a tube weapon has a loaded tube at frame `f`; if so it fires
+    /// from the one loaded longest, which starts reloading (slowed by `slow`,
+    /// as the engine reload). If not, it waits for the next tube. Other
+    /// weapons always may.
+    fn take_tube(&mut self, f: i32, slow: f64) -> bool {
+        let Some((k, &ready)) = self.tubes.iter().enumerate().min_by_key(|&(_, t)| *t) else { return true };
+        if ready > f {
+            self.next = ready;
+            return false;
+        }
+        self.tubes[k] = f + if slow > 0.0 { (self.tube_reload as f64 / (1.0 - slow)) as i32 } else { self.tube_reload };
+        true
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -761,6 +803,9 @@ fn simulate(template: &[SimUnit], hits: &HitTables, hazard: Option<&Hazard>, wit
                 }
                 let range = us[i].weapons[wi].range;
                 let Some((dist, j)) = target.filter(|(d, _)| *d <= range) else { continue };
+                if !us[i].weapons[wi].take_tube(f, 0.0) {
+                    continue;
+                }
                 us[i].weapons[wi].next = f + us[i].weapons[wi].reload;
                 shot_fired = true;
                 let rb = if range > 0.0 { ((RBANDS as f64 * dist / range) as i32).min(RBANDS) } else { RBANDS } as u8;

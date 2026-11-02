@@ -1199,9 +1199,15 @@ impl Ai {
     /// the plane, no overlaps, splash, least-health targeting) and
     /// `fightfocus` (least-health targeting on the axis; on by default since
     /// its confirmation A/B, zkgbai-runs/fight2d/ab2; `disable=fightfocus`).
-    /// `fight2d` is off by default.
+    /// `fight2d` is off by default. `sreload` (on; `disable=sreload`): tube
+    /// weapons (Picket, Ogre, ...) fire from tubes that each reload on their
+    /// own clock.
     pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
-        crate::military::fightsim::SimFlags::from_switches(!self.dev_off("fight2d"), !self.dev_off("fightfocus"))
+        crate::military::fightsim::SimFlags::from_switches(
+            !self.dev_off("fight2d"),
+            !self.dev_off("fightfocus"),
+            !self.dev_off("sreload"),
+        )
     }
 
     pub fn features_off(&self) -> Vec<String> {
