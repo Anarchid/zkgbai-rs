@@ -7,6 +7,10 @@ usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity]
   <crate-dir>   crates/zkgbai: writes data/fightsim_mech.tsv and the parity cases
                 src/military/fightsim/testdata/mech_parity_{units,cases}.tsv and mech_fates_cases.tsv
   parity        only rewrite the parity cases (no calibration fit, tables untouched)
+  variants      the `fightfocus` / `fight2d` rows only: splash table, each variant's calibration and fates
+                recalibration (score_fates.py with FATE_VARIANT=<v> -> predictor/fates-<v>/cal.tsv, run first),
+                and the variant parity cases (mech_variants_*.tsv); every other line of fightsim_mech.tsv stays
+  variant-parity  only the variant parity cases
 The sim runs on the crate's own base tables (refit-1 hit cells and hazard, the ones in
 data/fightsim_hits.tsv and fightsim_coef.tsv): predict._init on ~/.../refit1/empcap with
 PRED_HAZARD=refit1/hazard.pkl, so the calibration and the parity numbers match what Rust runs.
@@ -35,6 +39,12 @@ SHIELD = os.path.join(ROOT, "mech2", "shield.json")      # _dyn_weapons for heat
 FATES_CAL = os.path.join(ROOT, "fates", "cal.tsv")       # score_fates.py: the p_dead recalibration
 SLOW = os.path.join(ROOT, "mech6", "slowhits.pkl")       # slow_hits.py: the slow2 table (fixed dump)
 OPTS = {"air": 1, "burn": 1, "death": 1, "emp": 1, "slow": 1, "engage": 1, "heatray": 1, "slow2d": 1}
+# The Rust switches (2026-11-02, zkgbai-runs/predictor/twod/rerun-plane): `fightfocus` = least health in range
+# first, `fight2d` = the plane fight (twod + sep + aoe) with focus. Each has its own calibration and fates
+# recalibration; the base rows stay as they are.
+AOE = os.path.join(ROOT, "twod", "fit", "aoe_all.pkl")   # aoe_fit.py: splash kappa by weapon class
+VARIANTS = {"focus": dict(OPTS, focus=1), "2d": dict(OPTS, twod=1, sep=1, aoe=1, focus=1)}
+VARIANT_FATES_CAL = {v: os.path.join(ROOT, f"fates-{v}", "cal.tsv") for v in VARIANTS}
 G = {}
 
 
@@ -44,7 +54,13 @@ def init(rdir):
     mech.load(os.path.join(rdir, "mech.pkl"))
     mech.load_shield(SHIELD, os.path.join(rdir, "empcap", "hitcells.pkl"))
     mech.load_slow(SLOW)  # the slow2 table; its inferred slow-only hit cells are not used (slow2d)
+    mech.load_aoe(AOE)  # used only by opts with `aoe`
     G["hz"] = predict.G["hazard"]
+
+
+def opts_of(variant):
+    """The mech.py opts a variant name stands for ("" or "base" = OPTS)."""
+    return VARIANTS.get(variant, OPTS)
 
 
 def run(f):
@@ -118,6 +134,66 @@ def fit_calibration(rdir, workers, n_cal=12000):
         for i, t in enumerate(c.theta):
             cal[f"zoib{side}.t{i}"] = t
     return cal, len(sel), int(dec.sum())
+
+
+def run_variant(args):
+    f, variant = args
+    return mech.simulate_mech(f, opts_of(variant), G["hz"])
+
+
+def fit_variant_calibration(rdir, workers, n_cal=12000):
+    """fit_calibration's fit for each of VARIANTS, on the same fights (seed 17): {variant: cal}."""
+    fs = pickle.load(open(os.path.join(rdir, "fights.pkl"), "rb"))
+    sel = [f for f in fs if f["closed"] and f["costA"] >= predict.MIN_COST and f["costB"] >= predict.MIN_COST
+           and not math.isnan(f["yA"]) and not math.isnan(f["yB"]) and split.split_of(f["game"], f["series"]) == "train"]
+    del fs
+    random.seed(17)
+    sel = random.sample(sel, min(n_cal, len(sel)))
+    yA = np.array([f["yA"] for f in sel]); yB = np.array([f["yB"] for f in sel])
+    win = np.where(yB - yA > predict.DECIDE, 1, np.where(yA - yB > predict.DECIDE, 0, -1))
+    dec = win >= 0
+    cals = {}
+    with Pool(workers, initializer=init, initargs=(rdir,)) as pool:
+        for v in VARIANTS:
+            out = pool.map(run_variant, [(f, v) for f in sel], chunksize=32)
+            kA = np.array([o[0] for o in out]); kB = np.array([o[1] for o in out])
+            zA = logit(np.clip(kA, 0.005, 0.995)); zB = logit(np.clip(kB, 0.005, 0.995)); zw = kB - kA
+            cA = predict.ZOIBeta().fit(zA, yA); cB = predict.ZOIBeta().fit(zB, yB)
+            lw = predict.Logit1().fit(zw[dec], win[dec])
+            cal = {"win.w0": lw.w[0], "win.w1": lw.w[1]}
+            for side, c in (("A", cA), ("B", cB)):
+                for i, t in enumerate(c.theta):
+                    cal[f"zoib{side}.t{i}"] = t
+            cals[v] = cal
+            print(f"{v}: win {cal['win.w0']:.3f} {cal['win.w1']:.3f}", flush=True)
+    return cals, len(sel), int(dec.sum())
+
+
+class _W:
+    """The two fields mech._aoe_info reads off a weapon."""
+    def __init__(self, name, hitscan):
+        self.name, self.hitscan = name, hitscan
+
+
+def export_variant_rows(out, cals):
+    """Rewrite only the variant rows of fightsim_mech.tsv: splash (`aoe`), each variant's calibration and fates
+    recalibration (`cal <variant>.<key>`); every other line is kept as it is."""
+    keep = [l for l in open(out).read().split("\n") if l
+            and not l.startswith("aoe\t") and not any(l.startswith(f"cal\t{v}.") for v in VARIANTS)]
+    wtab = predict.G["wtab"]
+    rows = []
+    for name in sorted(wtab.index):
+        ai = mech._aoe_info(_W(name, wtab.loc[name, "type"] in predict.HITSCAN))
+        if ai is not None:
+            a, edge, kt, kf, geo = ai
+            rows.append(f"aoe\t{name}\t{a:.10g}\t{edge:.10g}\t{kt:.10g}\t{kf:.10g}\t{geo:.10g}")
+    for v, cal in cals.items():
+        rows += [f"cal\t{v}.{k}\t{x:.10g}" for k, x in cal.items()]
+        fc = [float(l.split("\t")[1]) for l in open(VARIANT_FATES_CAL[v]).read().split("\n")[1:] if l]
+        rows += [f"cal\t{v}.fate.t{i}\t{x:.10g}" for i, x in enumerate(fc)]
+    with open(out, "w") as fh:
+        fh.write("\n".join(keep + rows) + "\n")
+    return sum(r.startswith("aoe\t") for r in rows)
 
 
 # ----------------------------------------------------------------------------- parity cases
@@ -219,8 +295,100 @@ def export_parity(tdir):
             print(f"{name:18} " + " ".join(f"{'X' if d else '.'}{p:.2f}" for d, p in zip(fa["dead"], fa["pdead"])))
 
 
+# Variant cases: CASES (crowds and a line, so the plane differs from the axis) plus fights only the plane has.
+# "ring": A on a circle of radius d0 around B's first unit, which stands `off` elmos from the circle's centre.
+VCASES = dict({k: v + ("line" if k == "engage_line" else "crowd",) for k, v in CASES.items()}, **{
+    "ring_glaives": ([("cloakraid", 1.0)] * 4, [("tankraid", 1.0)], 300.0, "ring:5"),
+    "ring_centred": ([("cloakraid", 1.0)] * 4, [("tankraid", 1.0)], 300.0, "ring:0"),
+    "spread_scorchers": ([("vehraid", 0.9)] * 4, [("cloakraid", 1.0)] * 5, 236.3, "crowd"),
+    "splash_blob": ([("tankraid", 1.0)] * 2, [("cloakraid", 1.0)] * 6, 250.7, "crowd"),
+})
+VFATE_CASES = {
+    "amove_mirror": ("mirror_mixed", 300), "amove_eco": None, "amove_imps": ("imps_and_fire", 2700),
+    "ring_glaives": ("ring_glaives", 450), "spread_scorchers": ("spread_scorchers", 300), "splash_blob": ("splash_blob", 300),
+}
+
+
+def make_vfight(ud, a, b, d0, layout):
+    if not layout.startswith("ring"):
+        return make_fight(ud, a, b, d0, layout)
+    off = float(layout.split(":")[1])
+    def rec(name, hpf, x, z):
+        d = ud.get(name)
+        return {"def": name, "hp": d.health * hpf, "hpmax": d.health, "cost": d.cost, "armed": d.armed,
+                "x": x, "z": z, "static": d.static, "com": False}
+    A = [rec(n, h, d0 * math.cos(2 * math.pi * i / len(a)), d0 * math.sin(2 * math.pi * i / len(a))) for i, (n, h) in enumerate(a)]
+    B = [rec(n, h, off + 20.0 * i, 0.0) for i, (n, h) in enumerate(b)]
+    ca = (sum(r["x"] for r in A) / len(A), sum(r["z"] for r in A) / len(A))
+    cb = (sum(r["x"] for r in B) / len(B), sum(r["z"] for r in B) / len(B))
+    return {"A": A, "B": B, "d0": math.hypot(ca[0] - cb[0], ca[1] - cb[1]), "game": "parity", "fid": 0}
+
+
+def _units(f):
+    return ";".join(f"{s}:{r['def']}:{r['hp']:.10g}:{r['x']:.10g}:{r['z']:.10g}" for s, side in ((0, f["A"]), (1, f["B"])) for r in side)
+
+
+def export_parity_variants(tdir):
+    """mech_variants_{units,cases,fates}.tsv: each variant's answers on VCASES and its fates on VFATE_CASES."""
+    ud, wtab = predict.G["ud"], predict.G["wtab"]
+    defs = sorted({n for a, b, *_ in VCASES.values() for n, _ in a + b} | {n for a, b, *_ in FATE_CASES.values() for n, _ in a + b})
+    with open(os.path.join(tdir, "mech_variants_units.tsv"), "w") as fh:
+        fh.write("# unit specs for the variant parity cases, as mech_parity_units.tsv\n")
+        fh.write("def\tcost\thealth\tspeed\tmobile\tair\tbuilder\tcom\tradius\tweapons\n")
+        for name in defs:
+            d = ud.get(name)
+            ws = []
+            for w in d.weapons:
+                if w.name in wtab.index and float(wtab.loc[w.name, "range"]) > 0 and wtab.loc[w.name, "type"] != "Shield":
+                    r = wtab.loc[w.name]
+                    ws.append(f"{w.name}:{r['type']}:{float(r['range']):.10g}:{float(r['reload']):.10g}:{int(r['salvo'])}:{float(r['damage']):.10g}")
+            fh.write(f"{name}\t{d.cost:.10g}\t{d.health:.10g}\t{d.speed:.10g}\t{int(d.canmove)}\t{int(d.canfly)}\t{int(d.builder)}\t0\t"
+                     f"{d.radius:.10g}\t{'|'.join(ws)}\n")
+    with open(os.path.join(tdir, "mech_variants_cases.tsv"), "w") as fh:
+        fh.write("# Python mech.simulate_mech per variant (focus = least health in range first; 2d = twod + sep + aoe + focus), opts"
+                 " six + heatray + slow2d: units side:def:hp:x:z; dps = no hazard, stop = with the hazard, wd = A withdraws\n")
+        fh.write("case\tvariant\tunits\tdps_A\tdps_B\tstop_A\tstop_B\twd_A\twd_B\n")
+        for name, (a, b, d0, layout) in VCASES.items():
+            f = make_vfight(ud, a, b, d0, layout)
+            for v in VARIANTS:
+                o = opts_of(v)
+                dps = mech.simulate_mech(f, o, None)
+                stop = mech.simulate_mech(f, o, G["hz"])
+                wd = mech.simulate_mech(f, o, G["hz"], withdraw=True)
+                fh.write(f"{name}\t{v}\t{_units(f)}\t{dps[0]:.10g}\t{dps[1]:.10g}\t{stop[0]:.10g}\t{stop[1]:.10g}\t{wd[0]:.10g}\t{wd[1]:.10g}\n")
+                print(f"{name:18} {v:6} dps {dps[0]:.3f} {dps[1]:.3f}  stop {stop[0]:.3f} {stop[1]:.3f}  wd {wd[0]:.3f} {wd[1]:.3f}")
+    with open(os.path.join(tdir, "mech_variants_fates.tsv"), "w") as fh:
+        fh.write("# Python mech.simulate_mech fates per variant (no hazard), a-move: units side:def:hp:x:z; fates per unit dead:death"
+                 " frame (-1 alive):hp left:pdead\n")
+        fh.write("case\tvariant\tunits\thorizon\tfates\n")
+        for name, spec in VFATE_CASES.items():
+            if spec is None:
+                a, b, d0, _, horizon = FATE_CASES[name]
+                f = make_fight(ud, a, b, d0, "crowd")
+            else:
+                a, b, d0, layout = VCASES[spec[0]]
+                f, horizon = make_vfight(ud, a, b, d0, layout), spec[1]
+            for v in VARIANTS:
+                fa = {}
+                mech.simulate_mech(f, opts_of(v), None, fates=fa, horizon=horizon)
+                fs = ";".join(f"{int(d)}:{-1 if t is None else t}:{h:.10g}:{p:.10g}"
+                              for d, t, h, p in zip(fa["dead"], fa["death_f"], fa["hp"], fa["pdead"]))
+                fh.write(f"{name}\t{v}\t{_units(f)}\t{horizon}\t{fs}\n")
+                print(f"{name:18} {v:6} " + " ".join(f"{'X' if d else '.'}{p:.2f}" for d, p in zip(fa["dead"], fa["pdead"])))
+
+
 def main(rdir, crate, workers=2, what="all"):
     workers = int(workers)
+    if what in ("variants", "variant-parity"):
+        # the `fightfocus` / `fight2d` rows and parity cases only; the base tables and cases are untouched
+        if what == "variants":
+            cals, n, nd = fit_variant_calibration(rdir, workers)
+        init(rdir)
+        if what == "variants":
+            k = export_variant_rows(os.path.join(crate, "data", "fightsim_mech.tsv"), cals)
+            print(f"{k} splash rows; variant calibration on {n} fights ({nd} decided)")
+        export_parity_variants(os.path.join(crate, "src", "military", "fightsim", "testdata"))
+        return
     if what != "parity":
         cal, n, nd = fit_calibration(rdir, workers)
     init(rdir)

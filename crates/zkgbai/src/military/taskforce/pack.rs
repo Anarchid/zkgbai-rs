@@ -1099,7 +1099,7 @@ impl Ai {
             let c = Vec3::xz(pack.iter().map(|u| u.2.x).sum::<f32>() / n, pack.iter().map(|u| u.2.z).sum::<f32>() / n);
             let meet = if at > JUDGE_MEET { route_point(route, at - JUDGE_MEET) } else { c };
             let (sx, sz) = (meet.x - c.x, meet.z - c.z);
-            let mut snap = FightSnapshot::default();
+            let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
             for (spec, hp, p, _) in &pack {
                 snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x + sx, z: p.z + sz });
             }
@@ -1214,7 +1214,7 @@ impl Ai {
             } else {
                 statics.iter().sum::<f32>() / statics.len() as f32
             };
-            let mut snap = FightSnapshot::default();
+            let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
             for (spec, hp, p, _) in &pack {
                 snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
             }

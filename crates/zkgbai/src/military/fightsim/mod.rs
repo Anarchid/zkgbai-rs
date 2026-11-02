@@ -103,10 +103,38 @@ pub struct SnapUnit {
     pub z: f32,
 }
 
+/// Which mechanics fight a consumer asks for (the AI's switches; both off
+/// = the frozen fight). `fight2d` (`twod`): units keep their places in the
+/// plane and move there, do not overlap, and splash weapons hit the units
+/// around their target (mech.py `twod`, `sep`, `aoe`); it targets as
+/// `focus` does. `fightfocus` (`focus`): every shot goes to the target in
+/// range with the least health left, nearest first among equals; the plane
+/// fight spreads fire without it, and the axis gets it only by stacking
+/// everyone on one line (zkgbai-runs/predictor/twod/rerun-plane).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimFlags {
+    pub twod: bool,
+    pub focus: bool,
+}
+
+impl SimFlags {
+    /// The flags as the AI's switches set them.
+    pub fn from_switches(fight2d: bool, focus: bool) -> SimFlags {
+        SimFlags { twod: fight2d, focus: focus || fight2d }
+    }
+
+    /// Whether shots go to the least-health target (always in the plane).
+    fn least_health(&self) -> bool {
+        self.focus || self.twod
+    }
+}
+
 /// The two sides of a prospective fight, as seen now.
 #[derive(Clone, Debug, Default)]
 pub struct FightSnapshot {
     pub units: Vec<SnapUnit>,
+    /// Which fight to run on it.
+    pub flags: SimFlags,
 }
 
 impl FightSnapshot {
@@ -610,6 +638,33 @@ fn project(snap: &FightSnapshot) -> Vec<f64> {
     snap.units.iter().map(|u| (u.x as f64 - ca.0) * ax + (u.z as f64 - ca.1) * az).collect()
 }
 
+/// mech.py `plane`: each unit's (along, across) in the plane fight. Along
+/// is [`project`]'s axis from A's centroid towards B's; across is the
+/// offset from it. When the centroids coincide (a surround) the map's x
+/// axis serves; a side with no units gets `project`'s layout.
+fn plane(snap: &FightSnapshot) -> Vec<(f64, f64)> {
+    let cent = |side: u8| {
+        let pts: Vec<(f64, f64)> =
+            snap.units.iter().filter(|u| u.side == side).map(|u| (u.x as f64, u.z as f64)).collect();
+        (!pts.is_empty()).then(|| {
+            let n = pts.len() as f64;
+            (pts.iter().map(|p| p.0).sum::<f64>() / n, pts.iter().map(|p| p.1).sum::<f64>() / n)
+        })
+    };
+    let (Some(ca), Some(cb)) = (cent(0), cent(1)) else {
+        return project(snap).into_iter().map(|x| (x, 0.0)).collect();
+    };
+    let d0 = (cb.0 - ca.0).hypot(cb.1 - ca.1);
+    let (ax, az) = if d0 >= 1.0 { ((cb.0 - ca.0) / d0, (cb.1 - ca.1) / d0) } else { (1.0, 0.0) };
+    snap.units
+        .iter()
+        .map(|u| {
+            let (px, pz) = (u.x as f64 - ca.0, u.z as f64 - ca.1);
+            (px * ax + pz * az, -px * az + pz * ax)
+        })
+        .collect()
+}
+
 /// The deterministic one-dimensional fight (predict.py `simulate` with
 /// `rng=None`): expected killed share of each side's armed cost, weighted
 /// over the stopping time when a hazard is given. `withdraw`: every mobile
@@ -804,7 +859,7 @@ mod tests {
                 for (w, s) in want.iter_mut().zip(&f[2..8]) {
                     *w = s.parse().unwrap();
                 }
-                (f[0].to_owned(), FightSnapshot { units }, want)
+                (f[0].to_owned(), FightSnapshot { flags: Default::default(), units }, want)
             })
             .collect()
     }
@@ -895,6 +950,7 @@ mod tests {
         assert_eq!((out.killed_a, out.killed_b, out.armed_a), (0.0, 0.0, 0));
         let specs = specs();
         let snap = FightSnapshot {
+            flags: Default::default(),
             units: vec![SnapUnit { side: 0, spec: specs["cloakraid"].clone(), hp: 230.0, x: 0.0, z: 0.0 }],
         };
         let out = m.predict(&snap);
@@ -933,15 +989,21 @@ mod commit_tests {
     #[test]
     fn cannot_commit_on_calibration_without_reaching_any_enemy() {
         let model = Model::load().unwrap();
-        let snap = FightSnapshot { units: vec![gun(0, 1000.0, 0.0), gun(1, 10.0, 20000.0)] };
+        let snap = FightSnapshot { flags: Default::default(), units: vec![gun(0, 1000.0, 0.0), gun(1, 10.0, 20000.0)] };
         assert_eq!(model.predict_commit(&snap).killed_b, 0.0);
     }
 
     #[test]
     fn mechanics_commitment_distinguishes_winning_and_losing_firefights() {
         let model = Model::load().unwrap();
-        let win = model.predict_commit(&FightSnapshot { units: vec![gun(0, 1000.0, 0.0), gun(1, 10.0, 400.0)] });
-        let lose = model.predict_commit(&FightSnapshot { units: vec![gun(0, 10.0, 0.0), gun(1, 1000.0, 400.0)] });
+        let win = model.predict_commit(&FightSnapshot {
+            flags: Default::default(),
+            units: vec![gun(0, 1000.0, 0.0), gun(1, 10.0, 400.0)],
+        });
+        let lose = model.predict_commit(&FightSnapshot {
+            flags: Default::default(),
+            units: vec![gun(0, 10.0, 0.0), gun(1, 1000.0, 400.0)],
+        });
         assert!(win.killed_b > win.killed_a, "{win:?}");
         assert!(lose.killed_a > lose.killed_b, "{lose:?}");
     }

@@ -11,7 +11,7 @@ use springai::Unit;
 use super::{field::Field, mark::Target};
 use crate::Ai;
 use crate::kgbutil::worker::Worker;
-use crate::military::fightsim::{FightSnapshot, Model, SnapUnit, mech::Defense};
+use crate::military::fightsim::{FightSnapshot, Model, SimFlags, SnapUnit, mech::Defense};
 use crate::util::distance;
 
 pub(super) const MAX_TEAMS: usize = 4;
@@ -56,6 +56,8 @@ struct Request {
     frame: i32,
     teams: Vec<usize>,
     raids: Vec<Raid>,
+    /// The fight the AI's switches ask for (`fight2d`, `fightfocus`).
+    flags: SimFlags,
 }
 
 impl Request {
@@ -137,8 +139,13 @@ fn choose(costs: &[Vec<f32>], teams: usize) -> (f32, Vec<usize>) {
     best
 }
 
+#[cfg(test)]
 fn losses(model: &Model, raid: &Raid, mask: usize) -> f32 {
-    let mut snap = FightSnapshot::default();
+    losses_with(model, raid, mask, SimFlags::default())
+}
+
+fn losses_with(model: &Model, raid: &Raid, mask: usize, flags: SimFlags) -> f32 {
+    let mut snap = FightSnapshot { flags, ..Default::default() };
     let mut defense = Defense::default();
     let mut paralysis = Vec::new();
     let mut weights = Vec::new();
@@ -200,7 +207,7 @@ fn compute(request: Request) -> Answer {
                             return f32::INFINITY;
                         }
                         simulations += 1;
-                        losses(model, r, mask)
+                        losses_with(model, r, mask, request.flags)
                     })
                     .collect()
             })
@@ -323,7 +330,7 @@ impl Ai {
             }
             raids.push(Raid { enemies, assets, weights, defenders: candidates, allowed: allowed_mask, kept, focus });
         }
-        let request = Request { frame: self.frame, teams: team_ids.to_vec(), raids };
+        let request = Request { frame: self.frame, teams: team_ids.to_vec(), raids, flags: self.sim_flags() };
         let state = &mut self.qrf.predict;
         let worker = state.worker.get_or_insert_with(|| Worker::new("qrf-predict", compute));
         if let Some((result, elapsed)) = worker.poll() {
@@ -483,7 +490,7 @@ mod regression {
         let mut raid = bombardment(2);
         // A responder on the mex side can interrupt the bombardment.
         raid.defenders[0][0].0.unit.x = 240.0;
-        let request = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()] };
+        let request = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()], flags: SimFlags::default() };
         let decision = compute(request).1.unwrap();
         eprintln!("Rogue bombardment: {decision:?}");
         assert_eq!(decision.masks, vec![1], "a non-raider attack can be worth intercepting");
@@ -496,13 +503,15 @@ mod regression {
             losses(&model, &late, 1),
             "an absent responder must not even alter the enemy engagement estimate"
         );
-        let decision = compute(Request { frame: 0, teams: vec![0], raids: vec![late] }).1.unwrap();
+        let decision =
+            compute(Request { frame: 0, teams: vec![0], raids: vec![late], flags: SimFlags::default() }).1.unwrap();
         assert_eq!(decision.masks, vec![0], "do not send a responder after the assets are lost");
     }
     #[test]
     fn overwhelming_bombardment_is_evaluated_without_forcing_an_attack() {
         let raid = bombardment(12);
-        let decision = compute(Request { frame: 0, teams: vec![0], raids: vec![raid] }).1.unwrap();
+        let decision =
+            compute(Request { frame: 0, teams: vec![0], raids: vec![raid], flags: SimFlags::default() }).1.unwrap();
         eprintln!("Overwhelming bombardment: {decision:?}");
         assert_eq!(decision.masks, vec![0]);
     }
@@ -533,7 +542,7 @@ mod regression {
     }
     #[test]
     fn stale_health_membership_and_eligibility_invalidate_answers() {
-        let req = Request { frame: 10, teams: vec![0, 1], raids: vec![incident()] };
+        let req = Request { frame: 10, teams: vec![0, 1], raids: vec![incident()], flags: SimFlags::default() };
         assert!(req.reusable(&req));
         let mut now = req.clone();
         now.frame += STALE + 1;
@@ -550,7 +559,7 @@ mod regression {
     }
     #[test]
     fn local_predictor_cost_is_bounded() {
-        let request = Request { frame: 0, teams: vec![0, 1], raids: vec![incident()] };
+        let request = Request { frame: 0, teams: vec![0, 1], raids: vec![incident()], flags: SimFlags::default() };
         let (_, result) = compute(request.clone());
         assert!(result.is_ok());
         let start = std::time::Instant::now();

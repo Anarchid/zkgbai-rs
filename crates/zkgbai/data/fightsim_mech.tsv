@@ -280,3 +280,377 @@ cal	fate.t0	-1.108232
 cal	fate.t1	0.256247
 cal	fate.t2	0.380171
 cal	fate.t3	0.080529
+aoe	amphaa_alphabet_missile	24	1	0.2472148995	0.209887776	0
+aoe	amphaa_missile	24	1	0.2472148995	0.209887776	0.03017278879
+aoe	amphbomb_amphbomb_death	250	0.4	0.1488933336	0.05045469237	0
+aoe	amphfloater_cannon	16	1	0.1488933336	0.05045469237	0.005191331418
+aoe	amphfloater_fake_cannon	16	1	0.1488933336	0.05045469237	0
+aoe	amphimpulse_sonic	64	0.5	0.1488933336	0.05045469237	0.02620489176
+aoe	amphraid_torpedo	16	0.99	0.2888931306	0.09942503577	0.01001184053
+aoe	amphraid_torpmissile	16	0	0.2472148995	0.209887776	0.003616468707
+aoe	amphriot_flechette	32	0.5	0.1488933336	0.05045469237	0.01329087791
+aoe	amphriot_torpedo	16	0.6	0.2888931306	0.09942503577	0.009987525455
+aoe	amphsupport_cannon	20	0.1	0.1488933336	0.05045469237	0
+aoe	amphsupport_fake_cannon	20	0.1	0.1488933336	0.05045469237	0
+aoe	armcom0_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	armcom1_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	armcom2_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	armcom3_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	armcom4_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	armcom5_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	assaultcruiser_missile	24	0.5	0.2472148995	0.209887776	0
+aoe	atomic_blast	240	0	0.1488933336	0.05045469237	0
+aoe	atomic_blastsml	160	0	0.1488933336	0.05045469237	0
+aoe	benzcom0_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	benzcom1_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	benzcom2_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	benzcom3_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	benzcom4_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	benzcom5_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	big_unit	60	0	0.1488933336	0.05045469237	0
+aoe	big_unitex	32	0	0.1488933336	0.05045469237	0
+aoe	big_unitex_merl	32	0	0.1488933336	0.05045469237	0
+aoe	bomberassault_thermite_bomb	20	0	0.1488933336	0.05045469237	0
+aoe	bomberassault_zeppelin_bomb	50	0.7	0.02414547668	0.07172248286	0
+aoe	bomberheavy_arm_pidr	96	0.5	0.2472148995	0.209887776	0
+aoe	bomberheavyold_arm_pidr	96	0.5	0.2472148995	0.209887776	0
+aoe	bomberprec_a_torpedo	16	0	0.2888931306	0.09942503577	0
+aoe	bomberprec_bombsabot	16	0	0.2472148995	0.209887776	0.003775154627
+aoe	bomberriot_napalm	160	0.7	0.02414547668	0.07172248286	0.02934743563
+aoe	bomberstrike_missile	24	0	0.2472148995	0.209887776	0
+aoe	chicken_dodo_dodo_death	150	0.4	0.1488933336	0.05045469237	0
+aoe	chicken_dragon_goo	80	0	0.1488933336	0.05045469237	0
+aoe	chicken_dragon_melee	16	0	0.1488933336	0.05045469237	0
+aoe	chicken_dragon_queencrush	150	1	0.1488933336	0.05045469237	0
+aoe	chicken_roc_goo	48	0	0.1488933336	0.05045469237	0
+aoe	chicken_tiamat_flamethrower	32	0	0.173082846	0.03168290879	0
+aoe	chickenblobber_weapon	48	0	0.1488933336	0.05045469237	0
+aoe	chickenbroodqueen_melee	16	0	0.1488933336	0.05045469237	0
+aoe	chickenc_weapon	64	0	0.1488933336	0.05045469237	0
+aoe	chickend_spores	48	0	0.2472148995	0.209887776	0
+aoe	chickenflyerqueen_basiliskbomb	24	0	0.02414547668	0.07172248286	0
+aoe	chickenflyerqueen_goo	100	0	0.1488933336	0.05045469237	0
+aoe	chickenflyerqueen_tiamatbomb	36	0	0.02414547668	0.07172248286	0
+aoe	chickenlandqueen_basiliskbomb	24	0	0.02414547668	0.07172248286	0
+aoe	chickenlandqueen_firegoo	128	0	0.1488933336	0.05045469237	0
+aoe	chickenlandqueen_melee	16	0	0.1488933336	0.05045469237	0
+aoe	chickenlandqueen_queencrush	200	1	0.1488933336	0.05045469237	0
+aoe	chickenlandqueen_tiamatbomb	36	0	0.02414547668	0.07172248286	0
+aoe	chickenr_weapon	16	0	0.1488933336	0.05045469237	0
+aoe	chickenspire_slamspore	80	0	0.2472148995	0.209887776	0
+aoe	chickenwurm_death	128	0.5	0.1488933336	0.05045469237	0
+aoe	chickenwurm_napalm	64	0	0.1488933336	0.05045469237	0
+aoe	chickenwurm_uwgoo	64	0	0.1488933336	0.05045469237	0
+aoe	cloakbomb_cloakbomb_death	176	0.5	0.1488933336	0.05045469237	0
+aoe	cloakriot_warrior_weapon	48	0.5	0.1488933336	0.05045469237	0.02424028703
+aoe	cloakskirm_bot_rocket	24	0	0.2472148995	0.209887776	0.0107483117
+aoe	comm_battle_pea_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_battle_pea_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_assault_0_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_assault_1_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_assault_2_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_assault_3_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_assault_4_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_assault_5_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_hispeed_1_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_2_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_3_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_3_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_4_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_4_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_5_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_hispeed_5_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_0_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_1_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_1_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_cai_range_2_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_2_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_cai_range_3_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_3_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_3_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_cai_range_4_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_4_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_4_commweapon_partillery	32	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_4_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_cai_range_5_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_5_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_5_commweapon_hpartillery	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_5_commweapon_partillery	32	0.5	0.1488933336	0.05045469237	0
+aoe	comm_cai_range_5_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_cai_riot_0_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_riot_0_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_1_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_1_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_riot_1_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_2_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_2_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_riot_2_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_3_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_3_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_riot_3_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_4_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_4_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_riot_4_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_5_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_cai_riot_5_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_cai_riot_5_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_campaign_praetorian_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_ex	210	0	0.1488933336	0.05045469237	0
+aoe	comm_ex_big	260	0	0.1488933336	0.05045469237	0
+aoe	comm_flamer_commweapon_flamethrower	32	0	0.173082846	0.03168290879	0
+aoe	comm_flamer_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_flamer_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_guardian_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_hammer_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_hammer_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_hammer_commweapon_partillery	32	0.5	0.1488933336	0.05045469237	0
+aoe	comm_hunter_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_marine_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_marksman_commweapon_massdriver	16	0	0.1488933336	0.05045469237	0
+aoe	comm_riot_cai_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_riot_cai_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_riot_cai_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_riot_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_riot_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_riot_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_rocketeer_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_rocketeer_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_strike_hmg_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_strike_hmg_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_strike_lpb_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_strike_pea_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_stun_cai_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_thunder_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_0_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_0_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_1_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_1_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_1_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_2_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_2_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_2_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_3_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_3_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_3_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_4_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_4_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_4_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_5_commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_battle_5_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_battle_5_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_1_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_2_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_3_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_3_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_4_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_4_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_5_commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_recon_5_commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_0_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_1_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_1_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_trainer_siege_2_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_2_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_trainer_siege_3_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_3_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_3_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_trainer_siege_4_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_4_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_4_commweapon_partillery	32	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_4_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_trainer_siege_5_assault_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_5_commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_5_commweapon_hpartillery	48	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_5_commweapon_partillery	32	0.5	0.1488933336	0.05045469237	0
+aoe	comm_trainer_siege_5_commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	comm_trainer_strike_0_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_strike_1_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_strike_2_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_strike_3_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_strike_4_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	comm_trainer_strike_5_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	commander_egg_commander_egg_emp	140	1	0.1488933336	0.05045469237	0
+aoe	commweapon_aamissile	24	0	0.2472148995	0.209887776	0
+aoe	commweapon_assaultcannon	16	0	0.1488933336	0.05045469237	0
+aoe	commweapon_clusterbomb	80	0	0.1488933336	0.05045469237	0
+aoe	commweapon_concussion	96	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	commweapon_disruptorbomb	256	0	0.1488933336	0.05045469237	0
+aoe	commweapon_flakcannon	32	0.85	0.1488933336	0.05045469237	0
+aoe	commweapon_flamethrower	32	0	0.173082846	0.03168290879	0
+aoe	commweapon_heavymachinegun	48	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_heavymachinegun_disrupt	48	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_hpartillery	48	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_hpartillery_napalm	128	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_massdriver	16	0	0.1488933336	0.05045469237	0
+aoe	commweapon_missilelauncher	24	0	0.2472148995	0.209887776	0
+aoe	commweapon_napalmgrenade	128	0	0.1488933336	0.05045469237	0
+aoe	commweapon_partillery	32	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_partillery_napalm	64	0.5	0.1488933336	0.05045469237	0
+aoe	commweapon_riotcannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	commweapon_riotcannon_napalm	90	0.75	0.1488933336	0.05045469237	0
+aoe	commweapon_rocketlauncher	45	0	0.2472148995	0.209887776	0
+aoe	commweapon_rocketlauncher_napalm	67	0	0.2472148995	0.209887776	0
+aoe	commweapon_shotgun	16	0	0.1488933336	0.05045469237	0
+aoe	commweapon_shotgun_disrupt	16	0	0.1488933336	0.05045469237	0
+aoe	commweapon_shotlaser	16	0	0.173082846	0.03168290879	0
+aoe	commweapon_shotlaser_disrupt	16	0	0.173082846	0.03168290879	0
+aoe	commweapon_slamrocket	80	1	0.2472148995	0.209887776	0
+aoe	commweapon_sonicgun	35	0.75	0.173082846	0.03168290879	0
+aoe	commweapon_sunburst	16	1	0.1488933336	0.05045469237	0
+aoe	corcom0_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	corcom0_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	corcom1_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	corcom1_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	corcom2_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	corcom2_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	corcom3_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	corcom3_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	corcom4_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	corcom4_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	corcom5_disintegrator	24	0	0.1896155375	0.09876036094	0
+aoe	corcom5_shock_cannon	72	0.75	0.1488933336	0.05045469237	0
+aoe	crawl_blastsml	128	0.35	0.1488933336	0.05045469237	0
+aoe	dbg_m0r0_landing	170	0	0.1488933336	0.05045469237	0
+aoe	dbg_m0r1_landing	170	0	0.1488933336	0.05045469237	0
+aoe	dbg_m1r0_landing	170	0	0.1488933336	0.05045469237	0
+aoe	dbg_m1r1_landing	170	0	0.1488933336	0.05045469237	0
+aoe	dbg_moire_disarm_rocket	140	1	0.2472148995	0.209887776	0
+aoe	empmissile_emp_weapon	140	1	0.2472148995	0.209887776	0
+aoe	energysingu_singularity	640	0	0.1488933336	0.05045469237	0
+aoe	estor_building	260	0	0.1488933336	0.05045469237	0
+aoe	estor_buildingex	210	0	0.1488933336	0.05045469237	0
+aoe	fac_plateex	147	0	0.1488933336	0.05045469237	0
+aoe	grebe_grenade	48	0	0.1488933336	0.05045469237	0
+aoe	gunshipaa_aa_missile	24	0	0.2472148995	0.209887776	0.02509981466
+aoe	gunshipassault_vtol_salvo	48	0.5	0.2472148995	0.209887776	0.03660299527
+aoe	gunshipbomb_fake_weapon	128	0.4	0.1488933336	0.05045469237	0
+aoe	gunshipbomb_gunshipbomb_bomb	128	0.5	0.1488933336	0.05045469237	0
+aoe	gunshipheavyskirm_emg	20	0.5	0.1488933336	0.05045469237	0.004589470223
+aoe	gunshipkrow_clusterbomb	64	0	0.1488933336	0.05045469237	0
+aoe	hoveraa_weapon	32	1	0.2472148995	0.209887776	0.02989425884
+aoe	hoverassault_dew	24	1	0.173082846	0.03168290879	0.01347854163
+aoe	hoverdepthcharge_depthcharge	80	0.75	0.2888931306	0.09942503577	0
+aoe	hoverdepthcharge_fake_depthcharge	80	0.75	0.1488933336	0.05045469237	0
+aoe	hovershotgun_shotgun	16	0	0.173082846	0.03168290879	0
+aoe	hoverskirm_missile	40	0	0.2472148995	0.209887776	0.01874433461
+aoe	hoversonic_sonicgun	35	0.75	0.173082846	0.03168290879	0
+aoe	jumparty_napalm_sprayer	64	0	0.1488933336	0.05045469237	0.02767906404
+aoe	jumpbomb_jumpbomb_death	90	0.4	0.1488933336	0.05045469237	0
+aoe	jumpraid_flamethrower	32	0	0.173082846	0.03168290879	0.009017400073
+aoe	jumpraid_pyro_death	128	0.5	0.1488933336	0.05045469237	0
+aoe	jumpscout_missile	20	0	0.2472148995	0.209887776	0.01683707436
+aoe	jumpsumo_landing	170	0	0.1488933336	0.05045469237	0
+aoe	large_buildingex	170	0	0.1488933336	0.05045469237	0
+aoe	medium_buildingex	130	0	0.1488933336	0.05045469237	0
+aoe	napalmmissile_weapon	256	0.4	0.2472148995	0.209887776	0
+aoe	nebula_cannon	16	0	0.1488933336	0.05045469237	0
+aoe	nuclear_missile	640	0.3	0.1488933336	0.05045469237	0
+aoe	planefighter_missile	24	0	0.2472148995	0.209887776	0.03218481099
+aoe	raveparty_blue_shocker	160	0.75	0.1488933336	0.05045469237	0
+aoe	raveparty_green_stamper	192	0	0.1488933336	0.05045469237	0
+aoe	raveparty_orange_roaster	400	0.25	0.1488933336	0.05045469237	0
+aoe	raveparty_red_killer	96	0.5	0.1488933336	0.05045469237	0
+aoe	raveparty_violet_slugger	360	0.8	0.1488933336	0.05045469237	0
+aoe	raveparty_yellow_slammer	192	0.5	0.1488933336	0.05045469237	0
+aoe	seismic_seismic_weapon	320	0.4	0.2472148995	0.209887776	0
+aoe	shieldaa_armkbot_missile	24	0	0.2472148995	0.209887776	0.0255565474
+aoe	shieldassault_thud_weapon	18	0	0.1488933336	0.05045469237	0.006394251574
+aoe	shieldbomb_shieldbomb_death	192	0.4	0.1488933336	0.05045469237	0
+aoe	shieldriot_blast	275	0.6	0.1488933336	0.05045469237	0
+aoe	shieldskirm_storm_rocket	48	0	0.2472148995	0.209887776	0.03402498358
+aoe	shipaa_aa_missile	24	0	0.2472148995	0.209887776	0.02390387407
+aoe	shiparty_plasma	48	0	0.1488933336	0.05045469237	0.02141447618
+aoe	shipassault_missile	24	0.5	0.2472148995	0.209887776	0.01820752149
+aoe	shipassault_sonic	100	0.5	0.1488933336	0.05045469237	0.07847472818
+aoe	shipcarrier_disarm_rocket	140	1	0.2472148995	0.209887776	0
+aoe	shipheavyarty_plasma	48	0	0.1488933336	0.05045469237	0
+aoe	shipriot_shotgun	24	0	0.1488933336	0.05045469237	0.01174640099
+aoe	shipskirm_rocket	37	0	0.2472148995	0.209887776	0.02204040125
+aoe	shiptorpraider_torpedo	32	0.6	0.2888931306	0.09942503577	0.03698080903
+aoe	small_buildingex	90	0	0.1488933336	0.05045469237	0
+aoe	small_unitex	16	0	0.1488933336	0.05045469237	0
+aoe	spideraa_aa	24	0	0.2472148995	0.209887776	0.01327780036
+aoe	spiderassault_thud_weapon	18	0	0.1488933336	0.05045469237	0.003674748367
+aoe	spidercrabe_arm_crabe_gauss	100	0.3	0.1488933336	0.05045469237	0.04405463232
+aoe	spiderskirm_adv_rocket	24	0.5	0.2472148995	0.209887776	0.01071171772
+aoe	staticantinuke_amd_rocket	210	0	0.2472148995	0.209887776	0
+aoe	staticarty_plasma	96	0.5	0.1488933336	0.05045469237	0
+aoe	staticcon_nanoboom2	64	0.75	0.1488933336	0.05045469237	0
+aoe	staticheavyarty_plasma	88	0	0.1488933336	0.05045469237	0
+aoe	staticnuke_crblmssl	960	0.3	0.2472148995	0.209887776	0
+aoe	striderantiheavy_disintegrator	24	0	0.1896155375	0.09876036094	0.005752854257
+aoe	striderarty_rocket	64	0.5	0.2472148995	0.209887776	0.04198105612
+aoe	striderbantha_emp_missile	64	0.5	0.2472148995	0.209887776	0
+aoe	striderdante_dante_flamer	48	0	0.173082846	0.03168290879	0.0193928065
+aoe	striderdante_napalm_rockets	84	0.4	0.2472148995	0.209887776	0.1004361136
+aoe	striderdante_napalm_rockets_salvo	84	0.4	0.2472148995	0.209887776	0.1043552981
+aoe	striderdetriment_landing	250	0	0.1488933336	0.05045469237	0
+aoe	striderdetriment_obliteration_blaster	106	0.5	0.173082846	0.03168290879	0
+aoe	striderdetriment_takeoff	150	0	0.1488933336	0.05045469237	0
+aoe	striderdozer_terra_spray	128	0	0.1488933336	0.05045469237	0
+aoe	subscout_subscout_death	128	0.5	0.1488933336	0.05045469237	0
+aoe	subtacmissile_tacnuke	128	0.4	0.2472148995	0.209887776	0
+aoe	tacnuke_weapon	96	0.4	0.2472148995	0.209887776	0
+aoe	tankaa_flak	32	0.85	0.1488933336	0.05045469237	0.0275590051
+aoe	tankarty_core_artillery	42	0.5	0.1488933336	0.05045469237	0.01467090431
+aoe	tankassault_cor_reap	16	0	0.1488933336	0.05045469237	0.002793531319
+aoe	tankheavyarty_plasma	70	0.5	0.1488933336	0.05045469237	0.03005319729
+aoe	tankheavyassault_cor_gol	16	0	0.1488933336	0.05045469237	0.003372287148
+aoe	tankraid_napalm_bomblet	48	0	0.1488933336	0.05045469237	0.008989836777
+aoe	tankriot_tawf_banisher	80	0.4	0.2472148995	0.209887776	0.06898083484
+aoe	tiptest_plasma	16	0	0.1488933336	0.05045469237	0
+aoe	turretaaflak_armflak_gun	64	0.5	0.1488933336	0.05045469237	0.05664752173
+aoe	turretaaheavy_advsam	120	0.25	0.2472148995	0.209887776	0
+aoe	turretheavy_plasma	96	0.7	0.1488933336	0.05045469237	0
+aoe	turretriot_turretriot_weapon	48	0.5	0.1488933336	0.05045469237	0.04273197931
+aoe	turrettorp_torpedo	32	0.6	0.2888931306	0.09942503577	0.095918011
+aoe	vehaa_missile	16	1	0.2472148995	0.209887776	0.02631486723
+aoe	veharty_mine	48	0	0.1488933336	0.05045469237	0.03066337754
+aoe	vehassault_plasma	16	0	0.1488933336	0.05045469237	0.004198197295
+aoe	vehriot_vehriot_weapon	72	0.75	0.1488933336	0.05045469237	0.06123181231
+aoe	vehsupport_cortruck_missile	24	0	0.2472148995	0.209887776	0.01123449812
+aoe	zenith_meteor	128	0.8	0.2472148995	0.209887776	0
+aoe	zenith_meteor_aim	128	0.8	0.2472148995	0.209887776	0
+aoe	zenith_meteor_float	128	0.8	0.2472148995	0.209887776	0
+aoe	zenith_meteor_uncontrolled	128	0.8	0.1488933336	0.05045469237	0
+cal	focus.win.w0	0.2942487109
+cal	focus.win.w1	3.678272806
+cal	focus.zoibA.t0	-0.2008742201
+cal	focus.zoibA.t1	-0.4161840138
+cal	focus.zoibA.t2	-0.1879421324
+cal	focus.zoibA.t3	0.3161940594
+cal	focus.zoibA.t4	-0.4301962192
+cal	focus.zoibA.t5	0.1936818288
+cal	focus.zoibA.t6	1.679203007
+cal	focus.zoibB.t0	-0.487009903
+cal	focus.zoibB.t1	-0.4568258934
+cal	focus.zoibB.t2	0.1776756899
+cal	focus.zoibB.t3	0.2709524219
+cal	focus.zoibB.t4	-0.3979838703
+cal	focus.zoibB.t5	0.1829256047
+cal	focus.zoibB.t6	1.623297769
+cal	focus.fate.t0	-1.110863
+cal	focus.fate.t1	0.260693
+cal	focus.fate.t2	0.361196
+cal	focus.fate.t3	0.075054
+cal	2d.win.w0	0.2939600738
+cal	2d.win.w1	3.742761564
+cal	2d.zoibA.t0	-0.2255775185
+cal	2d.zoibA.t1	-0.4178752386
+cal	2d.zoibA.t2	-0.1634951174
+cal	2d.zoibA.t3	0.3113977996
+cal	2d.zoibA.t4	-0.4212926247
+cal	2d.zoibA.t5	0.1901614851
+cal	2d.zoibA.t6	1.669843078
+cal	2d.zoibB.t0	-0.5184395037
+cal	2d.zoibB.t1	-0.4562920758
+cal	2d.zoibB.t2	0.2023236368
+cal	2d.zoibB.t3	0.2762981343
+cal	2d.zoibB.t4	-0.3786051261
+cal	2d.zoibB.t5	0.1835235004
+cal	2d.zoibB.t6	1.625239432
+cal	2d.fate.t0	-1.125682
+cal	2d.fate.t1	0.265016
+cal	2d.fate.t2	0.366127
+cal	2d.fate.t3	0.074736

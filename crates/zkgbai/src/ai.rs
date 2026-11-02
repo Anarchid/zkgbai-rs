@@ -76,7 +76,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "pairs",
     "currency",
     "permanence",
@@ -95,6 +95,8 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
     "stayveto",
     "chatcommands",
     "densgate",
+    "fight2d",
+    "fightfocus",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -1187,6 +1189,14 @@ impl Ai {
     /// Whether a feature is switched off for testing (see `disabled`).
     pub fn dev_off(&self, feature: &str) -> bool {
         self.disabled.contains(feature)
+    }
+
+    /// The fight predictor's mechanics fight as the switches ask for it, on
+    /// every snapshot this AI builds: `fight2d` (units keep their places in
+    /// the plane, no overlaps, splash, least-health targeting) and
+    /// `fightfocus` (least-health targeting on the axis), both off by default.
+    pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
+        crate::military::fightsim::SimFlags::from_switches(!self.dev_off("fight2d"), !self.dev_off("fightfocus"))
     }
 
     pub fn features_off(&self) -> Vec<String> {

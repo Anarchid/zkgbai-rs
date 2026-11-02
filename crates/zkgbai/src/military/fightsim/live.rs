@@ -393,7 +393,7 @@ impl Ai {
         }
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         ((target.x / 256.0) as i32, (target.z / 256.0) as i32).hash(&mut hash);
-        let mut snap = FightSnapshot::default();
+        let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         let mut notes = SnapshotNotes {
             members: Vec::new(),
             enemies: Vec::new(),
@@ -560,7 +560,7 @@ impl Ai {
             }
         }
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        let mut snapshot = FightSnapshot::default();
+        let mut snapshot = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         let mut metal = [0.0; 2];
         for (side, id, d, hp, p) in raw {
             // A casualty, reinforcement, substantial damage, or movement
@@ -738,7 +738,7 @@ mod veto_tests {
                 units.push(SnapUnit { side, hp: spec.health, spec: spec.clone(), x, z: i as f32 * 40.0 });
             }
         }
-        FightSnapshot { units }
+        FightSnapshot { flags: Default::default(), units }
     }
 
     #[test]
