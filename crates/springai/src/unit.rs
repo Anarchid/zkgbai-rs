@@ -92,6 +92,13 @@ impl Unit {
         (0..self.num_weapons().max(0)).map(|index| Weapon { unit: *self, index }).collect()
     }
 
+    /// Charge of the unit's shield, negative when it has none. The engine
+    /// reads `unit->shieldWeapon` for an out-of-range weapon index, and does
+    /// not check line of sight: callers ask only about units in sight.
+    pub fn shield_charge(&self) -> f32 {
+        ffi!(self.cb, Unit_Weapon_getShieldPower, self.unit_id, -1)
+    }
+
     /// The live weapon instance for the given weapon mount index, if any.
     pub fn weapon(&self, mount: i32) -> Option<Weapon> {
         let index = ffi!(self.cb, Unit_getWeapon, self.unit_id, mount);

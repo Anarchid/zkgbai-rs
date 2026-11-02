@@ -656,6 +656,8 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "airstrike-outpost"
+                    | "airstrike-turrets"
                     | "airstrike-ravagers"
                     | "airstrike-ravagers-aa"
                     | "assassin-raider-lance"

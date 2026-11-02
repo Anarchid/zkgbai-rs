@@ -42,8 +42,8 @@ pub(super) fn route_allowed(from: Vec3, route: &[Vec3], friendly: impl Fn(Vec3) 
 
 fn preference(job: &Mission, package: &[(Plane, usize)]) -> f32 {
     let favorite = match job.kind {
-        MissionKind::Group | MissionKind::Wind | MissionKind::Interdict => Plane::Phoenix,
-        MissionKind::Thermite => Plane::Odin,
+        MissionKind::Group | MissionKind::Wind | MissionKind::Interdict | MissionKind::Outpost => Plane::Phoenix,
+        MissionKind::Thermite | MissionKind::Turret => Plane::Odin,
         MissionKind::HeavyAir => Plane::Likho,
         _ => Plane::Raven,
     };
@@ -69,11 +69,17 @@ pub(super) fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: 
             precision.kind = MissionKind::Static;
         }
         choices.extend(packages(&precision, plan.risk, raven_damage));
-        if precision.kind == MissionKind::Static && !precision.submerged && !plan.risk.intercepted {
-            choices.push(vec![(Plane::Likho, (f64::from(precision.hp) * 1.2 / 2000.0).ceil().max(1.0) as usize)]);
+        let likhos = (f64::from(precision.hp) * 1.2 / 2000.0).ceil().max(1.0) as usize;
+        if precision.kind == MissionKind::Static
+            && !precision.submerged
+            && !plan.risk.intercepted
+            && precision.value >= LIKHO_MIN_VALUE * likhos as f32
+        {
+            choices.push(vec![(Plane::Likho, likhos)]);
         }
-        // Combine partial Raven/Likho wings when neither alone can kill it.
-        if plan.risk.aa <= 0.15 && !plan.risk.intercepted && !plan.job.submerged {
+        // Combine partial Raven/Likho wings when neither alone can kill it
+        // (and a Raven's bomb can catch it).
+        if plan.risk.aa <= 0.15 && !plan.risk.intercepted && !plan.job.submerged && !plan.job.fast {
             let required = f64::from(plan.job.hp) * 1.2;
             for likhos in 1..=have.get(&Plane::Likho).copied().unwrap_or(0).min(MAX_WING) {
                 let remaining = required - likhos as f64 * 2000.0;
@@ -81,7 +87,10 @@ pub(super) fn choices(plan: &Plan, have: &BTreeMap<Plane, usize>, raven_damage: 
                     break;
                 }
                 let ravens = (remaining / f64::from(raven_damage.max(1.0))).ceil() as usize + 1;
-                if ravens <= have.get(&Plane::Raven).copied().unwrap_or(0) && likhos + ravens <= MAX_WING {
+                if ravens <= have.get(&Plane::Raven).copied().unwrap_or(0)
+                    && likhos + ravens <= MAX_WING
+                    && plan.job.value >= LIKHO_MIN_VALUE * likhos as f32
+                {
                     choices.push(vec![(Plane::Likho, likhos), (Plane::Raven, ravens)]);
                 }
             }
@@ -194,19 +203,13 @@ impl Ai {
             .iter()
             .map(|p| {
                 let mut options = choices(p, &have, self.bomber_handler.raven_damage.unwrap_or(800.0));
-                let friendlies = self
-                    .cb
-                    .friendly_units_in(p.job.pos, 220.0)
-                    .iter()
-                    .any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()));
                 options.retain(|package| {
                     package.iter().all(|(kind, _)| {
-                        !(friendlies && matches!(kind, Plane::Phoenix | Plane::Likho))
-                            && ready[kind].iter().all(|id| {
-                                let u = self.bomber_handler.units[id].unit;
-                                u.def().is_some_and(|d| kind.survives(p.risk, u.health(), d.speed()))
-                            })
-                    })
+                        ready[kind].iter().all(|id| {
+                            let u = self.bomber_handler.units[id].unit;
+                            u.def().is_some_and(|d| kind.survives(p.risk, u.health(), d.speed()))
+                        })
+                    }) && self.airstrike_spares_friends(&p.job, package, &p.route)
                 });
                 options
             })
@@ -255,7 +258,7 @@ mod tests {
                 c.pos = Vec3::xz(1000.0, id as f32 * 100.0);
                 c.hp = hp;
                 c.value = value;
-                GroupStrike::new(&[&c])
+                GroupStrike::new(&[&c], Vec::new())
             }),
             target: id,
             targets: vec![id],
@@ -264,6 +267,8 @@ mod tests {
             value,
             seen: 0,
             deep: false,
+            shields: Vec::new(),
+            fast: false,
         };
         let risk = Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 };
         Plan {

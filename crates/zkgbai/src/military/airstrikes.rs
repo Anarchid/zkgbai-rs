@@ -6,12 +6,14 @@ mod escort;
 mod group;
 mod live;
 mod scenario;
+mod shields;
 #[cfg(test)]
 mod tests;
 mod turns;
 
 use crate::util::distance;
-use group::{Blast, GroupStrike};
+use group::{Arms, Blast, GroupStrike};
+use shields::Shield;
 use springai::Vec3;
 
 pub use live::BomberHandler;
@@ -26,6 +28,27 @@ const MAX_PRIORITY_HP_PER_METAL: f32 = 3.0;
 fn priority_target(value: f32, hp: f32) -> bool {
     value >= MIN_PRIORITY_METAL && hp / value <= MAX_PRIORITY_HP_PER_METAL
 }
+/// A Raven's guided bomb flies 135 elmos/s and homes only weakly: in 37k
+/// bombs of our arena combat logs it hit 86-88% of targets moving under 80
+/// elmos/s at release, 73% at 80-100 and about 25% above. By top speed:
+/// Scorcher 32%, Kodachi 30%, Dagger 10%, Glaive 50%, Pyro 56%, against
+/// Rocko 94%, Ravager 91%, Fencer 88%, Reaper 85%. Units this fast or faster
+/// are Magpie and Likho work, never Ravens'.
+const RAVEN_MAX_TARGET_SPEED: f32 = 90.0;
+/// Clumps for group strikes: ground units of this much metal each (heavies
+/// such as Grizzly 1900, Goliath 2200 and Crab 1600 included, striders left
+/// to single-target strikes), at least two worth this much together. A pair
+/// of Grizzlies is one target: five Likhos at one of them burn both (about
+/// 2800 metal of damage value), where each alone would need six to kill.
+const GROUP_MIN_UNIT_METAL: f32 = 150.0;
+const GROUP_MAX_UNIT_METAL: f32 = 2500.0;
+const GROUP_MIN_SIZE: usize = 2;
+const GROUP_MIN_METAL: f32 = 600.0;
+
+/// A Likho (2000 metal) flies at a single target only for at least this much
+/// metal per Likho: the worth a group strike asks of each. A 125-metal Quill
+/// or a 35-metal tidal is Raven work or none.
+pub(super) const LIKHO_MIN_VALUE: f32 = 250.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Plane {
@@ -79,6 +102,10 @@ pub enum MissionKind {
     Opportunistic,
     Static,
     Shield,
+    /// Spare Phoenixes on a clump of buildings: a mex among its Solars.
+    Outpost,
+    /// A spare Odin's thermite on a heavy defense (Gauss, Stinger).
+    Turret,
 }
 impl MissionKind {
     fn label(self) -> &'static str {
@@ -96,11 +123,16 @@ impl MissionKind {
             Self::Assassinate => "Assassination",
             Self::Static => "Static strike",
             Self::Shield => "Shield drop",
+            Self::Outpost => "Outpost burn",
+            Self::Turret => "Turret burn",
         }
     }
 
     fn primary(self) -> bool {
-        !matches!(self, Self::Assassinate | Self::Opportunistic | Self::Static | Self::Shield)
+        !matches!(
+            self,
+            Self::Assassinate | Self::Opportunistic | Self::Static | Self::Shield | Self::Outpost | Self::Turret
+        )
     }
     fn priority(self) -> f32 {
         match self {
@@ -112,7 +144,8 @@ impl MissionKind {
             Self::Group => 6.0,
             Self::Speculative => 5.0,
             Self::Assassinate | Self::Opportunistic => 3.0,
-            Self::Shield => 2.0,
+            Self::Shield | Self::Turret => 2.0,
+            Self::Outpost => 1.5,
             Self::Static => 1.0,
         }
     }
@@ -145,6 +178,14 @@ struct Contact {
     progress: f32,
     home: bool,
     fighting: bool,
+    /// Its shield's radius and charge (full unless in sight).
+    shield: Option<(f32, f32)>,
+    /// Damage taken per point dealt while armored (closed Solars, Gausses: 1/3).
+    armor: f32,
+    /// It has a weapon: a building with one is a defense.
+    armed: bool,
+    /// Top speed (elmos/s), 0 while unidentified.
+    speed: f32,
 }
 
 impl Contact {
@@ -181,6 +222,33 @@ fn thermite_value(e: &Contact, factories: usize) -> Option<f32> {
     }
 }
 
+/// A heavy defense worth a spare Odin's thermite (Gauss 400, Stinger 450,
+/// Sunlance 700, Thresher 450): an armed building of this much metal that is
+/// not already a thermite target. Stardusts, Faradays and Lotuses are left to
+/// Ravens.
+const TURRET_MIN_COST: f32 = 400.0;
+fn heavy_defense(e: &Contact) -> bool {
+    e.static_ && e.armed && e.shield.is_none() && !e.factory && e.value >= TURRET_MIN_COST
+}
+
+/// Buildings an outpost burn counts: the eco and light porc of an expansion
+/// (mex 85, Solar 70, wind 35, Lotus 90, pylon 200), not factories, dear
+/// statics (thermite) or shields.
+const OUTPOST_MAX_COST: f32 = 300.0;
+/// An outpost: at least this many such buildings within this reach of a seed.
+const OUTPOST_MIN: usize = 3;
+const OUTPOST_REACH: f32 = 260.0;
+fn outpost_member(c: &Contact) -> bool {
+    c.static_
+        && c.known
+        && !c.air
+        && !c.submerged
+        && !c.factory
+        && !c.singu
+        && c.shield.is_none()
+        && c.value <= OUTPOST_MAX_COST
+}
+
 #[derive(Clone)]
 struct Inference {
     id: i32,
@@ -208,10 +276,23 @@ struct Mission {
     targets: Vec<i32>,
     seen: i32,
     deep: bool,
+    /// Enemy shields over the targets: bombs they take count for nothing.
+    shields: Vec<Shield>,
+    /// Too fast for a Raven's guided bomb (`RAVEN_MAX_TARGET_SPEED`).
+    fast: bool,
 }
 impl Mission {
     fn key(&self) -> (MissionKind, i32) {
         (self.kind, self.target)
+    }
+    /// Bombs of this shield damage and blast radius the shields over the aim
+    /// take before one gets through.
+    fn soak(&self, damage: f32, radius: f32) -> usize {
+        shields::soak(&self.shields, self.pos, damage, radius)
+    }
+    /// A charged bubble over the target eats an Odin's thermite whole.
+    fn thermite_blocked(&self) -> bool {
+        self.soak(shields::THERMITE_DAMAGE, shields::THERMITE_RADIUS) > 0
     }
     fn score(&self) -> f32 {
         let reward = if matches!(self.kind, MissionKind::Heavy | MissionKind::Opportunistic | MissionKind::Assassinate)
@@ -219,8 +300,10 @@ impl Mission {
             self.value / self.hp.max(1.0) * 3000.0
         } else if self.kind == MissionKind::HeavyAir {
             self.damage_value(&[(Plane::Likho, 1)])
-        } else if self.kind == MissionKind::Group {
-            self.damage_value(&[(Plane::Likho, 1)]).max(self.damage_value(&[(Plane::Phoenix, 1)]))
+        } else if let Some(per_plane) = self.group_per_plane() {
+            // Groups and outposts: the best value per aircraft, after the
+            // bombs any shields over them take (one aircraft's pass without).
+            per_plane
         } else {
             self.value
         };
@@ -271,11 +354,13 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
     let mut jobs = Vec::new();
     let mut clustered = std::collections::BTreeSet::new();
     let factories = contacts.iter().filter(|c| c.factory && c.static_ && c.known).count();
+    let carriers = shields::carriers(contacts);
     for e in contacts {
         let fresh = e.live && frame - e.seen <= FRESH;
         if !e.static_ && !fresh {
             continue;
         }
+        let here = shields::over(&carriers, &[e.pos]);
         let mut add = |kind, targets: Vec<i32>, hp, value| {
             jobs.push(Mission {
                 kind,
@@ -289,6 +374,8 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                 targets,
                 seen: frame,
                 deep: e.singu || distance(e.pos, home) >= 3000.0,
+                shields: here.clone(),
+                fast: !e.static_ && e.speed >= RAVEN_MAX_TARGET_SPEED,
             })
         };
         if e.air {
@@ -306,6 +393,10 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
         if e.static_ {
             if let Some(value) = thermite_value(e, factories) {
                 add(MissionKind::Thermite, vec![e.id], e.hp, value);
+            } else if heavy_defense(e) {
+                // Thermite against the hit points behind its armor (a closed
+                // Gauss takes a third): one Odin still burns any of them.
+                add(MissionKind::Turret, vec![e.id], e.hp / e.armor.clamp(0.05, 1.0), e.value);
             }
             add(MissionKind::Static, vec![e.id], e.hp, e.strike_value());
         } else {
@@ -337,7 +428,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                 && c.known
                 && c.live
                 && frame - c.seen <= FRESH
-                && (150.0..=1200.0).contains(&c.value)
+                && (GROUP_MIN_UNIT_METAL..=GROUP_MAX_UNIT_METAL).contains(&c.value)
         };
         if (e.wind || medium(e)) && !clustered.contains(&e.id) {
             let group: Vec<_> = contacts
@@ -345,7 +436,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                 .filter(|c| distance(c.pos, e.pos) < 260.0 && if e.wind { c.wind } else { medium(c) })
                 .collect();
             let value = group.iter().map(|c| c.value).sum::<f32>();
-            if (e.wind && group.len() >= 5) || (!e.wind && group.len() >= 3 && value >= 600.0) {
+            if (e.wind && group.len() >= 5) || (!e.wind && group.len() >= GROUP_MIN_SIZE && value >= GROUP_MIN_METAL) {
                 let targets = group.iter().map(|c| c.id).collect::<Vec<_>>();
                 clustered.extend(targets.iter().copied());
                 add(
@@ -355,13 +446,16 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                     value,
                 );
                 if !e.wind {
+                    let points: Vec<_> = group.iter().map(|c| c.pos).collect();
                     let job = jobs.last_mut().unwrap();
-                    job.group = Some(GroupStrike::new(&group));
-                    job.aim_group(Blast::default());
+                    job.shields = shields::over(&carriers, &points);
+                    job.group = Some(GroupStrike::new(&group, job.shields.clone()));
+                    job.aim_group(Arms::default());
                 }
             }
         }
     }
+    jobs.extend(outposts(contacts, &carriers, home, frame));
     jobs.sort_by(|a, b| {
         b.kind
             .primary()
@@ -370,6 +464,49 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             .then_with(|| a.key().cmp(&b.key()))
     });
     jobs.truncate(128);
+    jobs
+}
+
+/// Clumps of cheap buildings for spare Phoenixes: a mex among its Solars,
+/// turbines and light porc. Mexes seed first, so an expansion is taken about
+/// its mex; each building joins one outpost.
+fn outposts(contacts: &[Contact], carriers: &[Shield], home: Vec3, frame: i32) -> Vec<Mission> {
+    let members: Vec<&Contact> = contacts.iter().filter(|c| outpost_member(c)).collect();
+    let mut taken = std::collections::BTreeSet::new();
+    let mut jobs = Vec::new();
+    for seed in members.iter().filter(|c| c.mex).chain(members.iter().filter(|c| !c.mex)) {
+        if taken.contains(&seed.id) {
+            continue;
+        }
+        let group: Vec<&Contact> = members
+            .iter()
+            .filter(|c| !taken.contains(&c.id) && distance(c.pos, seed.pos) < OUTPOST_REACH)
+            .copied()
+            .collect();
+        if group.len() < OUTPOST_MIN {
+            continue;
+        }
+        taken.extend(group.iter().map(|c| c.id));
+        let points: Vec<_> = group.iter().map(|c| c.pos).collect();
+        let shields = shields::over(carriers, &points);
+        let mut job = Mission {
+            kind: MissionKind::Outpost,
+            submerged: false,
+            group: Some(GroupStrike::outpost(&group, shields.clone(), home)),
+            inference: None,
+            target: seed.id,
+            pos: seed.pos,
+            hp: group.iter().map(|c| c.hp).sum(),
+            value: group.iter().map(|c| c.strike_value()).sum(),
+            targets: group.iter().map(|c| c.id).collect(),
+            seen: frame,
+            deep: distance(seed.pos, home) >= 3000.0,
+            shields,
+            fast: false,
+        };
+        job.aim_group(Arms::default());
+        jobs.push(job);
+    }
     jobs
 }
 
@@ -445,6 +582,9 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     // Apply the margin in f64 so exact multiples do not round just above
     // a bomb boundary and demand another aircraft (e.g. 12000 HP / 800).
     let salvo = |damage: f32| (f64::from(job.hp) * 1.2 / f64::from(damage.max(1.0))).ceil().max(1.0) as usize;
+    // Implosion bombs the shields over the target take come on top (Likho,
+    // 2000 damage over 96 elmos).
+    let likhos = salvo(2000.0) + job.soak(2000.0, 96.0);
     let raven = job.ravens(raven_damage);
     let clear = risk.aa <= 0.02 && !risk.intercepted;
     let very_light = risk.aa <= 0.15 && !risk.intercepted;
@@ -463,13 +603,24 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         }
         Group if clear => job.group_packages(&[Phoenix, Likho]),
         Group if unopposed => job.group_packages(&[Likho]),
+        Outpost if clear => job.group_packages(&[Phoenix]),
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
         Speculative if very_light => vec![vec![(Likho, salvo(2000.0))]],
         Carpet if very_light => job.carpet_packages(),
-        Heavy | Opportunistic if very_light => vec![vec![(Raven, raven)], vec![(Likho, salvo(2000.0))]],
-        Heavy | Opportunistic if unopposed => vec![vec![(Likho, salvo(2000.0))]],
-        Thermite if !risk.intercepted => vec![vec![(Odin, count(job.hp, 14000.0))]],
-        Assassinate | Static if very_light => vec![vec![(Raven, raven)]],
+        Heavy | Opportunistic if unopposed => {
+            let mut options = Vec::new();
+            if very_light && !job.fast {
+                options.push(vec![(Raven, raven)]);
+            }
+            if job.value >= LIKHO_MIN_VALUE * likhos as f32 {
+                options.push(vec![(Likho, likhos)]);
+            }
+            options
+        }
+        Thermite | Turret if !risk.intercepted && !job.thermite_blocked() => {
+            vec![vec![(Odin, count(job.hp, 14000.0))]]
+        }
+        Assassinate | Static if very_light && !job.fast => vec![vec![(Raven, raven)]],
         Shield if !risk.intercepted => vec![vec![(Odin, 1)]],
         _ => vec![],
     };
@@ -483,20 +634,27 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
 }
 
 /// Raven bombs reach submerged targets, and so does Odin thermite (a water
-/// weapon that burns where it lands); nothing else does.
+/// weapon that burns where it lands, on factories as on turrets); nothing
+/// else does.
 fn can_hit_submerged(plane: Plane, kind: MissionKind, submerged: bool) -> bool {
-    !submerged || plane == Plane::Raven || (plane == Plane::Odin && kind == MissionKind::Thermite)
+    !submerged
+        || plane == Plane::Raven
+        || (plane == Plane::Odin && matches!(kind, MissionKind::Thermite | MissionKind::Turret))
 }
 
 impl Mission {
     fn ravens(&self, damage: f32) -> usize {
-        if self.kind == MissionKind::Static {
-            // Stationary secondary targets need the lethal payload, no spare.
-            (self.hp / damage.max(1.0)).ceil().max(1.0) as usize
-        } else {
-            let salvo = (f64::from(self.hp) * 1.2 / f64::from(damage.max(1.0))).ceil().max(1.0) as usize;
-            salvo + usize::from(matches!(self.kind, MissionKind::Heavy | MissionKind::Assassinate))
-        }
+        // Bombs the shields over the target take come first: a Felon's own
+        // bubble takes two, an Aspis over it four more.
+        let soaked = self.soak(damage, shields::RAVEN_RADIUS);
+        soaked
+            + if self.kind == MissionKind::Static {
+                // Stationary secondary targets need the lethal payload, no spare.
+                (self.hp / damage.max(1.0)).ceil().max(1.0) as usize
+            } else {
+                let salvo = (f64::from(self.hp) * 1.2 / f64::from(damage.max(1.0))).ceil().max(1.0) as usize;
+                salvo + usize::from(matches!(self.kind, MissionKind::Heavy | MissionKind::Assassinate))
+            }
     }
 }
 

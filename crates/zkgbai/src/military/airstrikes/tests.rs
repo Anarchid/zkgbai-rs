@@ -24,6 +24,10 @@ pub(super) fn enemy(id: i32) -> Contact {
         progress: 1.0,
         home: false,
         fighting: false,
+        shield: None,
+        armor: 1.0,
+        armed: false,
+        speed: 50.0,
     }
 }
 fn clear() -> Risk {
@@ -38,7 +42,7 @@ pub(super) fn job(kind: MissionKind, hp: f32) -> Mission {
             let mut c = enemy(1);
             c.hp = hp;
             c.value = 1000.0;
-            GroupStrike::new(&[&c])
+            GroupStrike::new(&[&c], Vec::new())
         }),
         target: 1,
         pos: Vec3::xz(2000.0, 2000.0),
@@ -47,6 +51,8 @@ pub(super) fn job(kind: MissionKind, hp: f32) -> Mission {
         targets: vec![1],
         seen: 300,
         deep: false,
+        shields: Vec::new(),
+        fast: false,
     }
 }
 #[test]
@@ -323,7 +329,7 @@ fn splash_geometry_and_live_weapon_profile_limit_group_value() {
     let mut job = ravager_group(160.0, 2200.0);
     assert!(job.damage_value(&[(Plane::Likho, 1)]) < 200.0);
     assert!(job.group_packages(&[Plane::Likho]).is_empty());
-    job.aim_group(Blast { damage: 4000.0, radius: 400.0, edge: 0.5 });
+    job.aim_group(Arms { likho: Blast { damage: 4000.0, radius: 400.0, edge: 0.5 }, ..Arms::default() });
     assert_eq!(job.target, 1);
     assert!(job.damage_value(&[(Plane::Likho, 1)]) > 700.0);
     assert_eq!(job.group_packages(&[Plane::Likho]), vec![vec![(Plane::Likho, 1)]]);
@@ -537,4 +543,224 @@ fn a_flea_interdiction_takes_one_magpie() {
         purchase(&packages(&job(MissionKind::Interdict, 40.0), clear(), 800.0), &have, cost),
         Some(Plane::Magpie)
     );
+}
+
+/// An Aspis with four Thugs about it, as in the `airstrike-shieldball` fixture.
+fn shieldball(shields: bool) -> Vec<Contact> {
+    let mut aspis = enemy(1);
+    (aspis.value, aspis.hp, aspis.max_hp) = (700.0, 700.0, 700.0);
+    aspis.shield = shields.then_some((350.0, 3600.0));
+    let mut es = vec![aspis];
+    for i in 0..4 {
+        let mut thug = enemy(2 + i);
+        (thug.value, thug.hp, thug.max_hp) = (175.0, 960.0, 960.0);
+        thug.pos = Vec3::xz(1965.0 + 70.0 * (i % 2) as f32, 1965.0 + 70.0 * (i / 2) as f32);
+        thug.shield = shields.then_some((90.0, 1200.0));
+        es.push(thug);
+    }
+    es
+}
+
+#[test]
+fn shieldball_packages_spend_the_aspis_first() {
+    let group =
+        |es: &[Contact]| missions(es, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Group).unwrap();
+    let bare = group(&shieldball(false));
+    assert!(bare.group_packages(&[Plane::Likho]).contains(&vec![(Plane::Likho, 1)]));
+    let ball = group(&shieldball(true));
+    // The Aspis takes the first implosion bomb (Thug bubbles are too weak
+    // for one); the second lands: two Likhos, never one alone.
+    assert_eq!(ball.damage_value(&[(Plane::Likho, 1)]), 0.0);
+    assert_eq!(ball.group_packages(&[Plane::Likho]), vec![vec![(Plane::Likho, 2)]]);
+    // Its dome takes 720 a Phoenix pass: five passes before any fire lands.
+    let phoenix = ball.group_packages(&[Plane::Phoenix]);
+    assert!(!phoenix.is_empty() && phoenix.iter().all(|p| p[0].1 > 5), "{phoenix:?}");
+    // Its ranking counts the bombs spent too, but bubbles make its metal
+    // dearer for ground fire: with the shields' worth it still outranks the
+    // same clump bare, without it, it falls behind.
+    assert!(ball.score() > bare.score());
+    let plain = |mut j: Mission| {
+        j.aim_group(Arms { plain_worth: true, ..Arms::default() });
+        j.score()
+    };
+    assert!(plain(ball) < plain(bare));
+}
+
+#[test]
+fn thug_bubbles_make_their_metal_dearer() {
+    // Four Thugs 70 apart, no Aspis: each sits under its own bubble and two
+    // neighbours' (diagonals are 99 out), 1200 of bubble in all.
+    let thugs: Vec<_> = shieldball(true).into_iter().skip(1).collect();
+    let bare: Vec<_> = shieldball(false).into_iter().skip(1).collect();
+    let group =
+        |es: &[Contact]| missions(es, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Group).unwrap();
+    let (thugs, bare) = (group(&thugs), group(&bare));
+    // Their bubbles stop no implosion bomb: the same damage, at
+    // (960 + 1200) / 960 = 2.25 times the worth.
+    let ratio = thugs.damage_value(&[(Plane::Likho, 1)]) / bare.damage_value(&[(Plane::Likho, 1)]);
+    assert!((ratio - 2.25).abs() < 0.01, "{ratio}");
+}
+
+#[test]
+fn a_felon_ball_is_likho_work_before_raven_work() {
+    // A Felon among four Thugs is also a Raven priority target (620 metal at
+    // 2.6 HP/metal). Ranked by plain metal the Ravens went first and their
+    // sortie covered the Felon, so the clump strike could not launch.
+    let mut es: Vec<_> = shieldball(true).into_iter().skip(1).collect();
+    let mut felon = enemy(1);
+    (felon.value, felon.hp, felon.max_hp, felon.heavy) = (620.0, 1600.0, 1600.0, true);
+    felon.shield = Some((120.0, 1800.0));
+    es.push(felon);
+    let jobs = missions(&es, Vec3::ZERO, 300);
+    let heavy = jobs.iter().find(|j| j.kind == MissionKind::Heavy).unwrap();
+    let group = jobs.iter().find(|j| j.kind == MissionKind::Group).unwrap();
+    assert!(group.targets.contains(&1));
+    assert!(group.score() > heavy.score());
+    let mut plain = group.clone();
+    plain.aim_group(Arms { plain_worth: true, ..Arms::default() });
+    assert!(plain.score() < heavy.score());
+}
+
+#[test]
+fn single_strikes_add_the_bombs_shields_take() {
+    let mut es = shieldball(true);
+    let mut felon = enemy(9);
+    (felon.value, felon.hp, felon.max_hp, felon.heavy) = (620.0, 1600.0, 1600.0, true);
+    felon.shield = Some((120.0, 1800.0));
+    // Under the Aspis, clear of the Thugs' bubbles (each would take a bomb).
+    felon.pos = Vec3::xz(2000.0, 2200.0);
+    es.push(felon);
+    let heavy = missions(&es, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Heavy).unwrap();
+    // Four Ravens kill a bare Felon; its own bubble takes two bombs, the
+    // Aspis four more. One Likho bomb goes to the Aspis.
+    assert_eq!(packages(&heavy, clear(), 800.0), vec![vec![(Plane::Raven, 10)], vec![(Plane::Likho, 2)]]);
+}
+
+#[test]
+fn heavy_defenses_are_secondary_odin_work_unless_shielded() {
+    let mut gauss = enemy(1);
+    (gauss.static_, gauss.armed, gauss.value, gauss.hp, gauss.max_hp, gauss.armor) =
+        (true, true, 400.0, 3000.0, 3000.0, 0.333);
+    let turret = |es: &[Contact]| missions(es, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Turret);
+    let job = turret(std::slice::from_ref(&gauss)).expect("turret job");
+    assert!(!job.kind.primary());
+    assert_eq!(packages(&job, clear(), 800.0), vec![vec![(Plane::Odin, 1)]]);
+    // Cheap porc is left to Ravens; dear statics stay thermite jobs.
+    let stardust = Contact { value: 220.0, ..gauss.clone() };
+    assert!(turret(&[stardust]).is_none());
+    // An Aegis bubble over it eats the thermite: no Odin for it, nor for a
+    // factory under one.
+    let mut aegis = enemy(2);
+    (aegis.static_, aegis.value, aegis.shield) = (true, 525.0, Some((350.0, 3600.0)));
+    aegis.pos = Vec3::xz(2100.0, 2000.0);
+    let job = turret(&[gauss.clone(), aegis.clone()]).expect("turret job");
+    assert!(packages(&job, clear(), 800.0).is_empty());
+    let factory = Contact { factory: true, armed: false, value: 900.0, ..gauss };
+    let thermite =
+        missions(&[factory, aegis], Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Thermite).unwrap();
+    assert!(packages(&thermite, clear(), 800.0).is_empty());
+}
+
+/// A mex among four Solars, 80 elmos out, approached from the west.
+fn expansion() -> Vec<Contact> {
+    let building = |id, x: f32, z: f32, value, hp, armor| {
+        let mut c = enemy(id);
+        (c.static_, c.pos, c.value, c.hp, c.max_hp, c.armor) =
+            (true, Vec3::xz(2000.0 + x, 2000.0 + z), value, hp, hp, armor);
+        c
+    };
+    let mut es = vec![Contact { mex: true, ..building(1, 0.0, 0.0, 85.0, 560.0, 1.0) }];
+    for (i, (x, z)) in [(80.0, 0.0), (-80.0, 0.0), (0.0, 80.0), (0.0, -80.0)].into_iter().enumerate() {
+        es.push(building(2 + i as i32, x, z, 70.0, 600.0, 0.333));
+    }
+    es
+}
+
+#[test]
+fn spare_phoenixes_burn_an_expansion() {
+    let home = Vec3::xz(0.0, 2000.0);
+    let job = missions(&expansion(), home, 300).into_iter().find(|j| j.kind == MissionKind::Outpost).expect("outpost");
+    assert!(!job.kind.primary());
+    assert_eq!(job.targets.len(), 5);
+    // One salvo leaves the mex at about 430 of 560; two burn it down. The
+    // Solars, closed to a third of the damage, need six along the line.
+    assert!(job.damage_value(&[(Plane::Phoenix, 1)]) < 150.0);
+    assert!(job.damage_value(&[(Plane::Phoenix, 2)]) >= 340.0);
+    let phoenix = packages(&job, clear(), 800.0);
+    assert_eq!(phoenix.last(), Some(&vec![(Plane::Phoenix, 2)]));
+    assert!(phoenix.iter().all(|p| p.len() == 1 && p[0].0 == Plane::Phoenix && p[0].1 <= group::OUTPOST_WING));
+    // Napalm needs clear air, and two buildings are no outpost.
+    assert!(packages(&job, Risk { aa: 0.3, ..clear() }, 800.0).is_empty());
+    assert!(missions(&expansion()[..2], home, 300).iter().all(|j| j.kind != MissionKind::Outpost));
+}
+
+#[test]
+fn a_pair_of_grizzlies_is_one_likho_target() {
+    // Two unescorted Grizzlies (1900 metal, 8700 HP) walking 55 apart: each
+    // alone needs six Likhos for a sure kill, so five ready ones never flew.
+    let grizzly = |id, x: f32| {
+        let mut g = enemy(id);
+        (g.value, g.hp, g.max_hp, g.heavy, g.speed) = (1900.0, 8700.0, 8700.0, true, 45.0);
+        g.pos = Vec3::xz(2000.0 + x, 2000.0);
+        g
+    };
+    let es = [grizzly(1, 0.0), grizzly(2, 55.0)];
+    let jobs = missions(&es, Vec3::ZERO, 300);
+    let single = jobs.iter().find(|j| j.kind == MissionKind::Opportunistic).unwrap();
+    assert!(packages(single, clear(), 800.0).contains(&vec![(Plane::Likho, 6)]));
+    let pair = jobs.iter().find(|j| j.kind == MissionKind::Group).expect("pair is a group");
+    assert_eq!(pair.targets.len(), 2);
+    let five = pair.damage_value(&[(Plane::Likho, 5)]);
+    assert!(five > 2500.0, "{five}");
+    assert!(pair.group_packages(&[Plane::Likho]).contains(&vec![(Plane::Likho, 5)]));
+    // The pair outranks either Grizzly's own job.
+    assert!(pair.kind.primary() && !single.kind.primary());
+}
+
+#[test]
+fn likhos_skip_cheap_single_targets_and_ravens_skip_fast_ones() {
+    let opportunistic = |value, hp, speed| {
+        let mut e = enemy(1);
+        (e.value, e.hp, e.max_hp, e.heavy, e.speed) = (value, hp, hp, true, speed);
+        missions(&[e], Vec3::ZERO, 300)
+            .into_iter()
+            .find(|j| matches!(j.kind, MissionKind::Opportunistic | MissionKind::Heavy))
+            .unwrap()
+    };
+    // A Quill (125 metal, 87 elmos/s): Ravens only.
+    let quill = opportunistic(125.0, 960.0, 87.0);
+    assert!(packages(&quill, clear(), 800.0).iter().all(|p| p.iter().all(|(k, _)| *k == Plane::Raven)));
+    assert!(!packages(&quill, clear(), 800.0).is_empty());
+    // A Scorcher (130 metal, 111 elmos/s): too fast for Ravens, too cheap for
+    // a Likho: no strike.
+    assert!(packages(&opportunistic(130.0, 1050.0, 111.0), clear(), 800.0).is_empty());
+    // A fast but dear target keeps the Likho.
+    let fast = opportunistic(900.0, 2000.0, 100.0);
+    assert_eq!(packages(&fast, clear(), 800.0), vec![vec![(Plane::Likho, 2)]]);
+}
+
+#[test]
+fn collateral_is_priced_by_blast_reach() {
+    let arms = Arms::default();
+    let aim = Vec3::xz(2000.0, 2000.0);
+    let from = Vec3::xz(0.0, 2000.0);
+    let unit = |x: f32, z: f32, hp, worth| group::Bystander {
+        pos: Vec3::xz(2000.0 + x, 2000.0 + z),
+        hp,
+        worth,
+        armor: 1.0,
+        building: false,
+    };
+    // A Glaive (65 metal, 360 HP) 50 out dies to an implosion bomb: 65.
+    let glaive = [unit(50.0, 0.0, 360.0, 65.0)];
+    let cost = group::collateral(arms, aim, from, &[(Plane::Likho, 1)], &glaive);
+    assert!((cost - 65.0).abs() < 0.5, "{cost}");
+    // 150 out it is beyond the implosion (96) but under the napalm line.
+    let far = [unit(150.0, 0.0, 360.0, 65.0)];
+    assert_eq!(group::collateral(arms, aim, from, &[(Plane::Likho, 1)], &far), 0.0);
+    assert!(group::collateral(arms, aim, from, &[(Plane::Phoenix, 1)], &far) > 30.0);
+    // Napalm reaches along the line far beyond across it.
+    let across = [unit(0.0, 200.0, 360.0, 65.0)];
+    assert_eq!(group::collateral(arms, aim, from, &[(Plane::Phoenix, 1)], &across), 0.0);
+    assert!(group::collateral_reach(arms) >= 350.0);
 }

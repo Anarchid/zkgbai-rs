@@ -80,10 +80,13 @@ fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, rave
                 | MissionKind::Thermite
         )
         && !have.is_empty()
-        && have
-            .keys()
-            .all(|k| matches!(k, Plane::Raven | Plane::Likho) && can_hit_submerged(*k, job.kind, job.submerged))
+        && have.keys().all(|k| {
+            matches!(k, Plane::Raven | Plane::Likho)
+                && can_hit_submerged(*k, job.kind, job.submerged)
+                && !(job.fast && *k == Plane::Raven)
+        })
         && (!have.contains_key(&Plane::Raven) || risk.aa <= 0.15)
+        && job.value >= LIKHO_MIN_VALUE * have.get(&Plane::Likho).copied().unwrap_or(0) as f32
         && have
             .iter()
             .map(|(k, n)| *n as f64 * if *k == Plane::Raven { f64::from(raven_damage) } else { 2000.0 })
@@ -93,6 +96,7 @@ fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, rave
 
 fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
     let mut jobs = missions(contacts, home, frame);
+    let carriers = shields::carriers(contacts);
     for e in contacts.iter().filter(|e| e.known && e.live && !e.air && !e.static_ && frame - e.seen <= FRESH) {
         // A terminal opportunity need not meet the primary 600-metal filter,
         // or belong to an artillery/raider class. Keep it secondary.
@@ -111,6 +115,9 @@ fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             targets: vec![e.id],
             seen: frame,
             deep: false,
+            shields: shields::over(&carriers, &[e.pos]),
+            // Any raider is one of these; a Raven's bomb cannot catch it.
+            fast: e.speed >= RAVEN_MAX_TARGET_SPEED,
         });
     }
     jobs
@@ -194,7 +201,7 @@ impl Ai {
             *have.entry(a.kind).or_default() += 1;
         }
         let mut actual: Vec<_> = have.iter().map(|(&k, &n)| (k, n)).collect();
-        let blast = self.airstrike_blast();
+        let arms = self.airstrike_arms();
         let mut old_job = sortie.job.clone();
         old_job.pos = anchor;
         if let Some(e) = contacts.iter().find(|e| e.id == old_job.target && e.live) {
@@ -203,14 +210,21 @@ impl Ai {
         }
         if old_job.group.is_some() {
             let victims: Vec<_> = contacts.iter().filter(|e| e.live && old_job.targets.contains(&e.id)).collect();
-            old_job.group = Some(GroupStrike::new(&victims));
-            old_job.aim_group(blast);
+            let points: Vec<_> = victims.iter().map(|e| e.pos).collect();
+            old_job.shields = shields::over(&shields::carriers(&contacts), &points);
+            old_job.group = Some(if old_job.kind == MissionKind::Outpost {
+                GroupStrike::outpost(&victims, old_job.shields.clone(), home)
+            } else {
+                GroupStrike::new(&victims, old_job.shields.clone())
+            });
+            old_job.aim_group(arms);
         }
         let old_value = old_job.damage_value(&actual);
         let old_velocity = contacts.iter().find(|e| e.id == sortie.job.target && e.live).map_or(Vec3::ZERO, |e| e.vel);
         let mut best: Option<(f32, Plan)> = None;
         for mut job in opportunities(&contacts, home, self.frame) {
             if matches!(job.kind, MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield)
+                || self.airstrike_kind_off(job.kind)
                 || job.target == sortie.job.target
                 || job.targets.iter().any(|id| occupied.contains(id) && !sortie.job.targets.contains(id))
                 || !self
@@ -221,7 +235,7 @@ impl Ai {
             {
                 continue;
             }
-            job.aim_group(blast);
+            job.aim_group(arms);
             let length = field.length(job.pos).unwrap_or(f32::INFINITY);
             if !(if fallback {
                 local(anchor, from, job.pos, length)
@@ -272,13 +286,7 @@ impl Ai {
             {
                 continue;
             }
-            if have.keys().any(|k| matches!(k, Plane::Phoenix | Plane::Likho))
-                && self
-                    .cb
-                    .friendly_units_in(job.pos, 220.0)
-                    .iter()
-                    .any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
-            {
+            if !self.airstrike_spares_friends(&job, &actual, &route) {
                 continue;
             }
             let choices = packages(&job, risk, self.bomber_handler.raven_damage.unwrap_or(800.0));

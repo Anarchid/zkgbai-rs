@@ -16,6 +16,8 @@ mod wave;
 use defense::FireSource;
 
 const PERIOD: i32 = 30;
+/// Our own losses a drop may cost, as a share of what it removes.
+const COLLATERAL_SHARE: f32 = 0.5;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
 const COOLDOWN: i32 = 30 * 15;
 
@@ -108,6 +110,9 @@ struct Sortie {
     package: Vec<(Plane, usize)>,
 }
 
+/// A unit def's shield (radius, full charge) and armor.
+type DefShield = (Option<(f32, f32)>, f32);
+
 #[derive(Default)]
 pub struct BomberHandler {
     units: BTreeMap<i32, Aircraft>,
@@ -126,6 +131,10 @@ pub struct BomberHandler {
     last_wave_launch: i32,
     launched: usize,
     raven_damage: Option<f32>,
+    /// Per unit def: its shield's radius and full charge, and its armor.
+    def_shields: std::cell::RefCell<BTreeMap<i32, DefShield>>,
+    /// Launches and retargets held back for what they would do to our own.
+    collateral_holds: std::cell::Cell<usize>,
     defenses: Vec<FireSource>,
     utilization: BTreeMap<Plane, Utilization>,
     speculation: speculation::State,
@@ -283,6 +292,13 @@ impl Ai {
                     || (!e.identified
                         && live
                         && e.position.y > ground.height_at(e.position.x, e.position.z).max(0.0) + 100.0);
+                // `disable=airshields` plans as if no enemy had a shield.
+                let (shield, armor) = e.ud.map_or((None, 1.0), |d| self.airstrike_def_shield(d));
+                let shield = shield.filter(|_| !self.dev_off("airshields")).map(|(radius, full)| {
+                    // The charge of a bubble in sight; a full one otherwise.
+                    let now = if e.visible { e.unit.shield_charge() } else { -1.0 };
+                    (radius, if now >= 0.0 { now.min(full) } else { full })
+                });
                 Contact {
                     id: e.unit_id,
                     pos: e.position,
@@ -315,9 +331,82 @@ impl Ai {
                         && e.can_attack()
                         && self.war.get_friendly_threat(e.position) > 0.5
                         && self.war.get_threat(e.position) > 0.3,
+                    shield,
+                    armor,
+                    armed: e.can_attack(),
+                    speed: e.def_speed(),
                 }
             })
             .collect()
+    }
+
+    /// Whether a package's implosion bombs and napalm spare our own and
+    /// allied ground units and buildings enough: the damage they would take
+    /// (priced like enemy victims, see `group::collateral`) must stay under
+    /// half of what the strike removes. `disable=collateral` restores the old
+    /// rule: no Likho or Phoenix drop with any of ours within 220 elmos. Carpets
+    /// weigh their own strips (see `carpet`).
+    fn airstrike_spares_friends(&self, job: &Mission, package: &[(Plane, usize)], route: &[Vec3]) -> bool {
+        if job.kind == MissionKind::Carpet || !package.iter().any(|(k, _)| matches!(k, Plane::Phoenix | Plane::Likho)) {
+            return true;
+        }
+        let ground = |u: &Unit| u.def().is_some_and(|d| !d.is_able_to_fly());
+        if self.dev_off("collateral") {
+            return !self.cb.friendly_units_in(job.pos, 220.0).iter().any(ground);
+        }
+        let arms = self.airstrike_arms();
+        let bystanders: Vec<_> = self
+            .cb
+            .friendly_units_in(job.pos, group::collateral_reach(arms))
+            .into_iter()
+            .filter(ground)
+            .filter_map(|u| {
+                let d = u.def()?;
+                let building = d.speed() <= 0.0;
+                let mex = self.defs.name_of(u) == "staticmex";
+                Some(group::Bystander {
+                    pos: u.pos(),
+                    hp: u.health(),
+                    worth: d.cost(self.metal) * if mex { 4.0 } else { 1.0 },
+                    // Our Solars close when hit too; units are taken unarmored.
+                    armor: if building { self.airstrike_def_shield(d).1 } else { 1.0 },
+                    building,
+                })
+            })
+            .collect();
+        if bystanders.is_empty() {
+            return true;
+        }
+        // The line runs along the final leg: from the last waypoint short of
+        // the aim (or home).
+        let from = route
+            .iter()
+            .rev()
+            .find(|p| distance(**p, job.pos) > 100.0)
+            .copied()
+            .unwrap_or_else(|| self.graph.get_ally_center());
+        let cost = group::collateral(arms, job.pos, from, package, &bystanders);
+        let gain = if job.group.is_some() || job.kind == MissionKind::HeavyAir {
+            job.damage_value(package)
+        } else {
+            job.value
+        };
+        let spares = cost <= COLLATERAL_SHARE * gain;
+        if !spares {
+            self.bomber_handler.collateral_holds.set(self.bomber_handler.collateral_holds.get() + 1);
+        }
+        spares
+    }
+
+    /// Mission kinds switched off: `disable=outposts` (spare Phoenixes on
+    /// clumps of buildings), `disable=odinturrets` (spare Odins on heavy
+    /// defenses).
+    fn airstrike_kind_off(&self, kind: MissionKind) -> bool {
+        match kind {
+            MissionKind::Outpost => self.dev_off("outposts"),
+            MissionKind::Turret => self.dev_off("odinturrets"),
+            _ => false,
+        }
     }
 
     /// Where an Odin's shield cluster covers our troops fighting at `fight`:
@@ -373,6 +462,44 @@ impl Ai {
             self.airstrike_path_risk(from, &route, interceptors),
             self.airstrike_path_risk(pos, &return_route(from, &route), interceptors),
         )
+    }
+
+    /// A def's shield (radius, full charge) and armor, read once.
+    fn airstrike_def_shield(&self, d: springai::UnitDef) -> DefShield {
+        *self.bomber_handler.def_shields.borrow_mut().entry(d.id()).or_insert_with(|| {
+            let shield =
+                d.shield_def().map(|w| (w.shield_radius(), w.shield_power())).filter(|s| s.0 > 0.0 && s.1 > 0.0);
+            let armor = d.armored_multiple();
+            (shield, if armor > 0.0 && armor <= 1.0 { armor } else { 1.0 })
+        })
+    }
+
+    fn airstrike_arms(&self) -> Arms {
+        Arms {
+            likho: self.airstrike_blast(),
+            napalm: self.airstrike_napalm(),
+            plain_worth: self.dev_off("shieldworth"),
+        }
+    }
+
+    /// The installed Phoenix salvo, for buildings under its line.
+    fn airstrike_napalm(&self) -> group::Napalm {
+        self.defs
+            .get(Plane::Phoenix.name())
+            .into_iter()
+            .flat_map(|d| d.weapon_mounts())
+            .filter_map(|m| m.weapon_def())
+            .filter(|w| !w.name().to_lowercase().contains("fake"))
+            .filter_map(|w| {
+                w.damage_types().first().copied().map(|damage| group::Napalm {
+                    bombs: (w.salvo_size().max(1) * w.projectiles_per_shot().max(1)) as usize,
+                    damage,
+                    radius: w.area_of_effect(),
+                    edge: w.edge_effectiveness(),
+                })
+            })
+            .find(|n| n.damage > 0.0 && n.radius > 0.0)
+            .unwrap_or_default()
     }
 
     fn airstrike_blast(&self) -> Blast {
@@ -439,8 +566,9 @@ impl Ai {
         let defense_air = self.airstrike_field(home, &[]);
         let contacts = self.airstrike_contacts();
         self.bomber_handler.refresh_priority_memory(&contacts, frame);
-        let blast = self.airstrike_blast();
+        let arms = self.airstrike_arms();
         let mut jobs = missions(&contacts, home, frame);
+        jobs.retain(|j| !self.airstrike_kind_off(j.kind));
         // Raiders the firefighters are already on are theirs (they in turn
         // leave alone what a sortie is on, see `firefighters`).
         jobs.retain(|j| j.kind != MissionKind::Interdict || !self.firefighters_engaged(j.target));
@@ -456,8 +584,10 @@ impl Ai {
         let had_jobs = !jobs.is_empty();
         let mut plans = Vec::new();
         for mut job in jobs {
-            job.aim_group(blast);
-            if job.kind == MissionKind::Thermite && air.length(job.pos).unwrap_or(f32::INFINITY) >= 3000.0 {
+            job.aim_group(arms);
+            if matches!(job.kind, MissionKind::Thermite | MissionKind::Turret)
+                && air.length(job.pos).unwrap_or(f32::INFINITY) >= 3000.0
+            {
                 job.deep = true;
             }
             if job.kind == MissionKind::Shield {
@@ -970,12 +1100,8 @@ impl Ai {
         }) {
             return false;
         }
-        // Napalm and implosion blasts should not carpet our own troops.
-        // A carpet weighs its own strips (see `carpet`).
-        if job.kind != MissionKind::Carpet
-            && members.iter().any(|id| matches!(self.bomber_handler.units[id].kind, Plane::Phoenix | Plane::Likho))
-            && self.cb.friendly_units_in(job.pos, 220.0).iter().any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
-        {
+        // Napalm and implosion blasts land on whoever is under them.
+        if !self.airstrike_spares_friends(job, package, &plan.route) {
             return false;
         }
         let route = plan.route.clone();
@@ -1138,7 +1264,11 @@ impl Ai {
             MissionKind::Shield => {
                 u.execute_custom_command(cmd::AIR_MANUALFIRE, &[pos.x, pos.y, pos.z], options, NO_TIMEOUT);
             }
-            MissionKind::Wind | MissionKind::Thermite | MissionKind::Static => {
+            MissionKind::Wind
+            | MissionKind::Thermite
+            | MissionKind::Turret
+            | MissionKind::Static
+            | MissionKind::Outpost => {
                 u.attack_area(pos, 0.0, options);
             }
             _ => {
@@ -1202,7 +1332,7 @@ fn mission_view(
         "route": route.iter().map(|p| [p.x, p.z]).collect::<Vec<_>>(),
         "members": sortie.map(|s| s.members.as_slice()).unwrap_or(&[]),
         "launched": sortie.map(|s| s.launched),
-        "package_damage_values": (job.kind == MissionKind::Group).then(||
+        "package_damage_values": matches!(job.kind, MissionKind::Group | MissionKind::Outpost).then(||
             packages.iter().map(|p| job.damage_value(p)).collect::<Vec<_>>()),
         "packages": packages.iter().map(|pkg| pkg.iter().map(|(k,n)| json!({
             "unit": k.name(), "name": format!("{k:?}"), "count": n
@@ -1234,6 +1364,7 @@ impl BomberHandler {
             "ordered": self.orders.len(), "building": self.building.len(),
             "available": missions.len() - self.sorties.len(), "in_progress": self.sorties.len(),
             "missions": missions,
+            "collateral_holds": self.collateral_holds.get(),
             "combined_strikes": {"checks": self.wave_checks, "last_check": self.last_wave_check,
                 "launched": self.waves_launched, "last_launch": self.last_wave_launch},
             "utilization": self.utilization.iter().map(|(k, u)| json!({"unit": k.name(), "name": format!("{k:?}"),
@@ -1285,6 +1416,8 @@ mod operator_tests {
             value: 4000.0,
             seen: 30,
             deep: true,
+            shields: Vec::new(),
+            fast: false,
         };
         let route = vec![Vec3::xz(500.0, 200.0), job.pos];
         let package = vec![(Plane::Odin, 1), (Plane::Sparrow, 1)];

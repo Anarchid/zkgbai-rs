@@ -94,6 +94,27 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("carpet", "Military", "napalm unseen Phantoms along their shots' bearings with available Phoenixes (default on)"),
     (
+        "airshields",
+        "Military",
+        "bomb counts include the bombs enemy shields would take, and Odins skip shielded targets (default on)",
+    ),
+    (
+        "collateral",
+        "Military",
+        "Likho and Phoenix drops weigh what they would do to our own and allied units and buildings (off: none within 220 elmos; default on)",
+    ),
+    (
+        "shieldworth",
+        "Military",
+        "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",
+    ),
+    (
+        "outposts",
+        "Military",
+        "spare Phoenixes burn clumps of cheap buildings, such as a mex among its Solars (default on)",
+    ),
+    ("odinturrets", "Military", "spare Odins burn heavy defenses such as Gauss and Stinger (default on)"),
+    (
         "carpetspare",
         "Military",
         "carpets hold off when friendly ground units are under a line (off by default: Phantoms are worth the friendly fire)",
