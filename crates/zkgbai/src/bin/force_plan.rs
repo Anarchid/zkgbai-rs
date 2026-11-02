@@ -92,8 +92,8 @@ fn main() {
     let horizon: f32 = flag("--horizon").and_then(|v| v.parse().ok()).unwrap_or(90.0);
     let flags = match flag("--sim").as_deref() {
         Some("plain") => SimFlags::default(),
-        Some("2d") => SimFlags::from_switches(true, false),
-        _ => SimFlags::from_switches(false, true),
+        Some("2d") => SimFlags::from_switches(true, false, true),
+        _ => SimFlags::from_switches(false, true, true),
     };
     let (Some(path), Some(against_s)) = (args.get(1).cloned(), against_s) else {
         eprintln!("usage: force_plan <specs.tsv> --against \"3 turretlaser\" (--factory factoryveh | --with a,b)");
