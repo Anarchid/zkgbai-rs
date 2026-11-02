@@ -150,6 +150,12 @@ and `maps/`), or copy a local build's `dist-rs/AI/Skirmish/ZKGBAI/<version>` to
 `<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.4.0`.
 Lobbies listing local AIs will then offer it.
 
+The lobby's `ZKGBAI wip` is the branch `wip`. Work meant for it is merged or cherry-picked into
+`wip`; it does not get a branch of its own. `tools/install-wip.sh` installs the release build with the
+operator and journal on. For the `wip` version it refuses anything but a clean checkout of `wip`
+whose library carries that commit's build stamp. It writes `INSTALLED` (stamp, commit, sha256)
+next to the library.
+
 Testing against other AIs
 -------------------------
 
