@@ -1,7 +1,14 @@
-//! Patient minefields: spread across front gates, then across each gate.
-//! Both destinations and live positions reserve blast clearance.
+//! Patient minefields: spread across front gates, then across each gate,
+//! each a line across the enemy's approach (their route from their centre,
+//! bent by the terrain). Both destinations and live positions reserve blast
+//! clearance. An Imp's EMP stuns friend and foe alike, so its blast stops
+//! short of our armed buildings: by a turret it waits on the enemy's way
+//! in, just out of the turret's footprint, where the turret still reaches
+//! what the blast stuns. A placed mine the enemy can see and shoot stays
+//! where it is.
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
+use zk_terrain::paths::Paths;
 
 use crate::Ai;
 use crate::defs::cmd;
@@ -13,6 +20,24 @@ const PERIOD: i32 = 150;
 const ARRIVED: f32 = 16.0;
 // Covers arrival tolerance at both ends and the receiving unit's footprint.
 const CLEARANCE: f32 = 64.0;
+/// How much of an Imp's blast radius beyond the mine (its enemy side,
+/// where whoever sets it off and those behind stand) a supporting turret
+/// must still reach.
+const COVER: f32 = 0.75;
+/// A supporting turret's mine lies within this angle (cosine: 60 degrees)
+/// of the enemy's approach to it. New ones go straight up the approach, so
+/// a drifting enemy centre does not walk settled mines away at once.
+const UPSTREAM_COS: f32 = 0.5;
+/// How far ahead of a front metal spot its minefield lies.
+const SPOT_LEAD: f32 = 200.0;
+/// The enemy's way in through a gate is read this far outside its
+/// crossing, over the last `GATE_LOOKBACK` elmos of their route there.
+const GATE_LOOKOUT: f32 = 64.0;
+const GATE_LOOKBACK: f32 = 200.0;
+/// How long a mobile enemy's last sighting still counts as its eyes there.
+const SIGHT_MEMORY: i32 = 300;
+/// Sight assumed for a contact not yet identified.
+const UNKNOWN_SIGHT: f32 = 450.0;
 
 #[derive(Clone, Copy)]
 struct Site {
@@ -29,6 +54,10 @@ pub(super) struct Sapper {
     imp: bool,
     snitch: bool,
     site: Option<Site>,
+    /// Has stood on a site: moving now would be relocating.
+    placed: bool,
+    /// Kept still last pass, watched by the enemy.
+    held: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +66,99 @@ struct Reservation {
     position: Vec3,
     radius: f32,
     site: Option<Site>,
+}
+
+/// A line across the enemy's approach to lay a minefield on.
+#[derive(Clone, Copy)]
+struct Field {
+    /// Middle of the front row.
+    center: Vec3,
+    /// Unit vector towards where the enemy comes from.
+    toward: Vec3,
+    width: f32,
+    /// Groups sites, so mines spread across fields first.
+    gate: Vec3,
+    value: f32,
+}
+
+/// A completed turret that can finish what an Imp stuns.
+#[derive(Clone, Copy)]
+struct Finisher {
+    position: Vec3,
+    range: f32,
+    /// Half its footprint's diagonal.
+    footprint: f32,
+    /// Unit vector towards where the enemy comes from.
+    toward: Vec3,
+}
+
+impl Finisher {
+    /// The nearest a mine with this blast radius may wait: the blast stops
+    /// short of the turret's footprint, with arrival tolerance to spare.
+    fn standoff(&self, radius: f32) -> f32 {
+        radius + self.footprint + CLEARANCE
+    }
+
+    /// Whether a mine at `p` waits on the enemy's way to this turret, its
+    /// blast short of it, near enough that the turret fires on what the
+    /// blast stuns.
+    fn covers(&self, p: Vec3, radius: f32) -> bool {
+        let (dx, dz) = (p.x - self.position.x, p.z - self.position.z);
+        let d = dx.hypot(dz);
+        d >= self.standoff(radius)
+            && d + COVER * radius <= self.range
+            && dx * self.toward.x + dz * self.toward.z >= UPSTREAM_COS * d
+    }
+
+    /// Where a mine with this blast radius waits: straight up the enemy's
+    /// approach, as near as the blast allows; `None` if the turret is too
+    /// short-ranged to cover any place its blast spares.
+    fn site(&self, radius: f32) -> Option<Vec3> {
+        // A hair past the standoff, so rounding fails no clearance check.
+        let d = self.standoff(radius) + 1.0;
+        let p = Vec3::xz(self.position.x + self.toward.x * d, self.position.z + self.toward.z * d);
+        self.covers(p, radius).then_some(p)
+    }
+}
+
+/// Where enemy ground forces come from, seen from any position: the last
+/// stretch of their route from their centre on the movement tier of their
+/// ground army; straight from it before the terrain analysis.
+struct Approach<'a> {
+    /// `None` while no enemy territory is known.
+    enemy: Option<Vec3>,
+    routes: Option<Paths<'a>>,
+}
+
+impl Approach<'_> {
+    /// Unit vector from `p` towards where the enemy comes from, judged
+    /// over the last `lookback` elmos of their way there.
+    fn toward(&self, p: Vec3, lookback: f32) -> Option<Vec3> {
+        let enemy = self.enemy?;
+        let waypoint = self.routes.as_ref().and_then(|r| r.approach(pos(p), lookback));
+        unit_toward(p, waypoint.map_or(enemy, |w| Vec3::xz(w.x, w.z)))
+    }
+}
+
+/// Unit vector from `from` to `to`; `None` if they (nearly) coincide.
+fn unit_toward(from: Vec3, to: Vec3) -> Option<Vec3> {
+    let (dx, dz) = (to.x - from.x, to.z - from.z);
+    let d = dx.hypot(dz);
+    (d >= 1.0).then(|| Vec3::xz(dx / d, dz / d))
+}
+
+/// A friendly building a blast must spare.
+#[derive(Clone, Copy)]
+struct Building {
+    center: Vec3,
+    /// Half its footprint's diagonal.
+    footprint: f32,
+    armed: bool,
+}
+
+/// Half a footprint's diagonal (footprint sizes are in 8-elmo squares).
+fn footprint(def: UnitDef) -> f32 {
+    4.0 * (def.x_size() as f32).hypot(def.z_size() as f32)
 }
 
 fn blast_radius(def: UnitDef) -> f32 {
@@ -55,13 +177,16 @@ fn configure(unit: Unit) {
     unit.execute_custom_command(cmd::UNIT_AI, &[0.0], 0, NO_TIMEOUT);
 }
 
-fn supported(imp: bool, turret: f32, mobile: f32) -> bool {
-    !imp || turret > 0.0 || mobile > 0.0
+/// Imps only stun: our army (the friendly threat map) or a turret covering
+/// the mine must finish their prey.
+fn supported(imp: bool, turret: bool, mobile: f32) -> bool {
+    !imp || turret || mobile > 0.0
 }
 
-fn turret_covers_approach(mine: Vec3, turret: Vec3, enemy: Vec3, range: f32) -> bool {
-    distance(mine, turret) <= range
-        && (mine.x - turret.x) * (enemy.x - turret.x) + (mine.z - turret.z) * (enemy.z - turret.z) > 0.0
+/// Whether a known enemy unit at `at` sees `p`: a building always, a
+/// mobile one while in our sight or lately seen there.
+fn sighted(p: Vec3, at: Vec3, sight: f32, fixed: bool, age: i32) -> bool {
+    (fixed || age <= SIGHT_MEMORY) && distance(p, at) <= sight
 }
 
 fn spaced(id: i32, p: Vec3, radius: f32, reservations: &[Reservation]) -> bool {
@@ -71,10 +196,33 @@ fn spaced(id: i32, p: Vec3, radius: f32, reservations: &[Reservation]) -> bool {
     })
 }
 
-/// Keep the whole building footprint outside a Snitch's blast, including
-/// arrival tolerance. Imps may still shelter under nearby turret coverage.
-fn clear_of_statics(snitch: bool, p: Vec3, radius: f32, statics: &[(Vec3, f32)]) -> bool {
-    !snitch || statics.iter().all(|&(center, footprint)| distance(p, center) >= radius + footprint + CLEARANCE)
+/// Keep a blast off friendly buildings' footprints, with arrival tolerance:
+/// a Snitch's off every building, an Imp's off armed ones (its stun would
+/// silence the turrets meant to finish its prey).
+fn clear_of_statics(snitch: bool, imp: bool, p: Vec3, radius: f32, statics: &[Building]) -> bool {
+    statics
+        .iter()
+        .filter(|b| snitch || (imp && b.armed))
+        .all(|b| distance(p, b.center) >= radius + b.footprint + CLEARANCE)
+}
+
+/// Rows across every field and, for an Imp, the place before each turret
+/// that can finish its prey.
+fn candidate_sites(imp: bool, radius: f32, fields: &[Field], finishers: &[Finisher]) -> Vec<Site> {
+    let mut sites = Vec::new();
+    for f in fields {
+        for (p, depth) in rows(f.center, f.toward, f.width, radius + CLEARANCE) {
+            sites.push(Site { position: p, gate: f.gate, value: f.value, depth });
+        }
+    }
+    if imp {
+        for t in finishers {
+            if let Some(p) = t.site(radius) {
+                sites.push(Site { position: p, gate: t.position, value: 1.0, depth: 0 });
+            }
+        }
+    }
+    sites
 }
 
 /// First occupy other gates, then add depth at already occupied gates.
@@ -131,6 +279,8 @@ impl Ai {
                 imp: self.defs.name(def) == "cloakbomb",
                 snitch: self.defs.name(def) == "shieldbomb",
                 site: None,
+                placed: false,
+                held: false,
             },
         );
     }
@@ -141,69 +291,101 @@ impl Ai {
             && (self.graph.is_ally_territory(p) || self.war.get_total_friendly_power(p) > 0.0)
     }
 
-    fn sapper_supported(&self, imp: bool, p: Vec3) -> bool {
-        // Sappers never paint these maps, so mines cannot count one another
-        // (or themselves) as the firepower that finishes stunned enemies.
-        let mobile = self.war.get_friendly_threat(p);
-        if supported(imp, 0.0, mobile) {
+    fn sapper_supported(&self, imp: bool, p: Vec3, radius: f32, finishers: &[Finisher]) -> bool {
+        if !imp {
             return true;
         }
-        // The general porc map also paints nanoframes. Only a completed,
-        // functioning turret behind the mine can finish its stunned prey.
-        let enemy = self.graph.get_enemy_center();
-        let turret = !enemy.is_zero()
-            && self.eco.dporcs.values().any(|t| {
-                !t.is_dead()
-                    && !t.unit.is_being_built()
-                    && !t.unit.is_paralyzed()
-                    && turret_covers_approach(p, t.get_pos(), enemy, t.unit.max_range())
-            });
-        supported(imp, if turret { 1.0 } else { 0.0 }, mobile)
+        // Sappers never paint these maps, so mines cannot count one another
+        // (or themselves) as the firepower that finishes stunned enemies.
+        supported(imp, finishers.iter().any(|t| t.covers(p, radius)), self.war.get_friendly_threat(p))
     }
 
-    fn sapper_sites(&self, radius: f32) -> Vec<Site> {
-        let mut sites = Vec::new();
+    /// Whether the enemy's ground army walks at `p` (anywhere, before the
+    /// terrain analysis): a mine elsewhere is off their way.
+    fn sapper_enemy_ground(&self, p: Vec3) -> bool {
+        let Some(strategy) = &self.strategy else { return true };
+        self.terrain().and_then(|t| t.tier(strategy.tier)).is_none_or(|map| map.region_near(pos(p), 32.0).is_some())
+    }
+
+    /// Whether the enemy can both shoot at `p` and see it, by the sight of
+    /// their known units. A mine walking off from there shows itself under
+    /// their guns.
+    fn sapper_watched(&self, p: Vec3, frame: i32) -> bool {
+        self.war.get_threat(p) > 0.0
+            && self.war.targets.values().filter(|e| !e.is_dead).any(|e| {
+                let sight = e.ud.map_or(UNKNOWN_SIGHT, |d| d.los_radius());
+                let age = if e.visible { 0 } else { frame - e.last_seen };
+                sighted(p, e.position, sight, e.is_static, age)
+            })
+    }
+
+    fn sapper_approach(&self) -> Approach<'_> {
+        let enemy = Some(self.graph.get_enemy_center()).filter(|e| !e.is_zero());
+        let routes = enemy.and_then(|e| {
+            let map = self.terrain()?.tier(self.strategy.as_ref()?.tier)?;
+            Some(Paths::new(map, pos(e), |_| false))
+        });
+        Approach { enemy, routes }
+    }
+
+    /// Lines across the enemy's approach: our front gates, or else (open
+    /// maps, and before the terrain analysis) our front metal spots.
+    fn sapper_fields(&self, approach: &Approach) -> Vec<Field> {
+        let mut fields = Vec::new();
         if let Some(strategy) = &self.strategy
             && let Some(map) = self.terrain().and_then(|t| t.tier(strategy.tier))
         {
             for (rank, gate) in strategy.fortify.iter().enumerate() {
                 let c = &map.chokes[gate.choke];
                 let crossing = Vec3::xz(c.pos.x, c.pos.z);
-                let setback = distance(crossing, gate.pos);
-                if setback < 1.0 {
-                    continue;
-                }
-                let center = get_directional_point(crossing, gate.pos, setback.min(32.0));
+                let Some(outward) = unit_toward(gate.pos, crossing) else { continue };
+                let center = get_directional_point(crossing, gate.pos, distance(crossing, gate.pos).min(32.0));
                 if !self.sapper_front(center) {
                     continue;
                 }
-                let forward = Vec3::xz(c.pos.x - gate.pos.x, c.pos.z - gate.pos.z);
-                for (p, depth) in rows(center, forward, gate.width, radius + CLEARANCE) {
-                    // The strategy already orders gates by priority.
-                    sites.push(Site { position: p, gate: crossing, value: 1.0 / (1.0 + rank as f32), depth });
-                }
+                // The enemy's way in, read just outside the gate; straight
+                // through it if their route there comes from our side.
+                let outside = Vec3::xz(crossing.x + outward.x * GATE_LOOKOUT, crossing.z + outward.z * GATE_LOOKOUT);
+                let toward = (approach.toward(outside, GATE_LOOKBACK))
+                    .filter(|t| t.x * outward.x + t.z * outward.z > 0.0)
+                    .unwrap_or(outward);
+                // The strategy already orders gates by priority.
+                let value = 1.0 / (1.0 + rank as f32);
+                fields.push(Field { center, toward, width: gate.width, gate: crossing, value });
             }
         }
         // Open maps and the period before terrain analysis still get a
         // distributed minefield, using owned front spots as sectors.
-        if sites.is_empty() {
-            let enemy = self.graph.get_enemy_center();
-            if enemy.is_zero() {
-                return sites;
-            }
+        if fields.is_empty() {
             for spot in self.graph.get_front_line_spots().into_iter().filter(|s| s.owned) {
                 let gate = spot.get_pos();
-                if distance(gate, enemy) < 1.0 {
-                    continue;
-                }
-                let center = get_directional_point(gate, enemy, 200.0);
-                let forward = Vec3::xz(enemy.x - gate.x, enemy.z - gate.z);
-                for (p, depth) in rows(center, forward, 800.0, radius + CLEARANCE) {
-                    sites.push(Site { position: p, gate, value: spot.value.max(1.0), depth });
-                }
+                // On the last stretch of the enemy's way to the spot.
+                let Some(toward) = approach.toward(gate, SPOT_LEAD + CLEARANCE) else { continue };
+                let center = Vec3::xz(gate.x + toward.x * SPOT_LEAD, gate.z + toward.z * SPOT_LEAD);
+                fields.push(Field { center, toward, width: 800.0, gate, value: spot.value.max(1.0) });
             }
         }
-        sites
+        fields
+    }
+
+    /// Completed turrets that deal damage (a Faraday's stun finishes
+    /// nothing), each with the enemy's approach over a mine's standoff. A
+    /// stunned one still counts: it recovers, and a mine walking off
+    /// uncovers itself.
+    fn sapper_finishers(&self, approach: &Approach, radius: f32) -> Vec<Finisher> {
+        (self.eco.dporcs.values())
+            .filter(|t| !t.is_dead() && !t.unit.is_being_built())
+            .filter_map(|t| {
+                let def = t.unit.def()?;
+                if !def.weapon_mounts().iter().filter_map(|m| m.weapon_def()).any(|w| !w.is_paralyzer()) {
+                    return None;
+                }
+                let (position, range, footprint) = (t.get_pos(), t.unit.max_range(), footprint(def));
+                let mut f = Finisher { position, range, footprint, toward: Vec3::ZERO };
+                f.toward = approach.toward(position, f.standoff(radius) + CLEARANCE)?;
+                Some(f)
+            })
+            .collect()
     }
 
     pub(super) fn misc_update_sappers(&mut self, frame: i32) {
@@ -213,22 +395,25 @@ impl Ai {
         let sappers: Vec<_> = self.misc_handler.sappers.values().copied().collect();
         // Snapshot all friendly buildings, including allies and nanoframes,
         // once per planning pass. New construction also invalidates old sites.
-        let statics: Vec<_> = if sappers.iter().any(|s| s.snitch) {
-            self.cb
-                .friendly_units()
-                .into_iter()
+        let statics: Vec<_> = if sappers.iter().any(|s| s.snitch || s.imp) {
+            (self.cb.friendly_units().into_iter())
                 .filter_map(|u| {
                     let def = u.def()?;
                     if u.health() <= 0.0 || def.speed() > 0.0 {
                         return None;
                     }
-                    // Footprint sizes are in 8-elmo squares; use half the diagonal.
-                    let footprint = 4.0 * (def.x_size() as f32).hypot(def.z_size() as f32);
-                    Some((u.pos(), footprint))
+                    let armed = !def.weapon_mounts().is_empty();
+                    Some(Building { center: u.pos(), footprint: footprint(def), armed })
                 })
                 .collect()
         } else {
             Vec::new()
+        };
+        let imp_radius = sappers.iter().filter(|s| s.imp).map(|s| s.radius).fold(0.0, f32::max);
+        let (fields, finishers) = {
+            let approach = self.sapper_approach();
+            let finishers = if imp_radius > 0.0 { self.sapper_finishers(&approach, imp_radius) } else { Vec::new() };
+            (self.sapper_fields(&approach), finishers)
         };
         let mut reservations: Vec<_> = sappers
             .iter()
@@ -237,9 +422,24 @@ impl Ai {
         for (i, sapper) in sappers.iter().enumerate() {
             let unit = sapper.unit;
             let from = reservations[i].position;
-            // Do not uncover an ambush just as the enemy walks into it.
+            // Do not uncover an ambush just as the enemy walks into it, nor
+            // walk a placed mine off under the eyes and guns of the enemy.
             // Fire-at-will handles contact; never give ATTACK or FIGHT here.
-            if !self.cb.enemy_units_in(from, sapper.radius + 128.0).is_empty() {
+            let near = !self.cb.enemy_units_in(from, sapper.radius + 128.0).is_empty();
+            let watched = !near && sapper.placed && self.sapper_watched(from, frame);
+            if watched != sapper.held {
+                self.misc_handler.sappers.get_mut(&unit.id()).unwrap().held = watched;
+                if watched {
+                    let moving = unit.num_current_commands() > 0;
+                    self.log(&format!(
+                        "sappers: {} holds at ({:.0}, {:.0}) in enemy sight and reach (moving {moving})",
+                        unit.id(),
+                        from.x,
+                        from.z
+                    ));
+                }
+            }
+            if near || watched {
                 if unit.num_current_commands() > 0 {
                     unit.stop(0);
                 }
@@ -247,21 +447,21 @@ impl Ai {
             }
             let kept = sapper.site.filter(|s| {
                 self.sapper_front(s.position)
-                    && self.sapper_supported(sapper.imp, s.position)
-                    && clear_of_statics(sapper.snitch, s.position, sapper.radius, &statics)
+                    && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
+                    && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
                     && spaced(unit.id(), s.position, sapper.radius, &reservations)
             });
             let selected = kept.or_else(|| {
                 let reachable = self.pathfinder.raider_reachability(&self.war, unit, 0.0);
                 let map = unit.def().and_then(tier_of).and_then(|tier| self.terrain()?.tier(tier))?;
-                let sites: Vec<_> = self
-                    .sapper_sites(sapper.radius)
+                let sites: Vec<_> = candidate_sites(sapper.imp, sapper.radius, &fields, &finishers)
                     .into_iter()
                     .filter(|s| {
                         self.sapper_front(s.position)
-                            && self.sapper_supported(sapper.imp, s.position)
-                            && clear_of_statics(sapper.snitch, s.position, sapper.radius, &statics)
+                            && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
+                            && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
                             && self.war.get_porc_threat(s.position) <= 0.0
+                            && self.sapper_enemy_ground(s.position)
                             && map.region_at(pos(s.position)).is_some()
                             && reachable.reaches(s.position)
                     })
@@ -269,7 +469,27 @@ impl Ai {
                 choose_site(unit.id(), from, sapper.radius, &sites, &reservations)
             });
             reservations[i].site = selected;
-            self.misc_handler.sappers.get_mut(&unit.id()).unwrap().site = selected;
+            if kept.is_none()
+                && let Some(s) = selected
+            {
+                let p = s.position;
+                let armed = statics.iter().filter(|b| b.armed).map(|b| distance(p, b.center) - b.footprint);
+                let gate = (s.gate.x - p.x).hypot(s.gate.z - p.z);
+                self.log(&format!(
+                    "sappers: {} {} -> ({:.0}, {:.0}), {:.0} from its field's gate, nearest armed building edge {:.0}, \
+                     turret cover {}",
+                    unit.def().map_or("?", |d| self.defs.name(d)),
+                    unit.id(),
+                    p.x,
+                    p.z,
+                    gate,
+                    armed.fold(f32::INFINITY, f32::min),
+                    finishers.iter().any(|t| t.covers(p, sapper.radius)),
+                ));
+            }
+            let placed = sapper.placed || selected.is_some_and(|s| distance(from, s.position) <= ARRIVED);
+            let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
+            (entry.site, entry.placed) = (selected, placed);
             match selected {
                 Some(mut s) if distance(from, s.position) > ARRIVED => {
                     if kept.is_none() || unit.num_current_commands() == 0 {
@@ -294,26 +514,96 @@ mod tests {
         Site { position: Vec3::xz(x, 100.0), gate: Vec3::xz(gate, 100.0), value, depth: 0 }
     }
 
-    #[test]
-    fn imps_need_independent_support_but_snitches_do_not() {
-        assert!(!supported(true, 0.0, 0.0));
-        assert!(supported(true, 100.0, 0.0));
-        assert!(supported(true, 0.0, 0.1));
-        assert!(supported(false, 0.0, 0.0));
+    /// A Lotus-like turret at (1000, 1000), facing the enemy along `toward`.
+    fn lotus(toward: Vec3) -> Finisher {
+        Finisher { position: Vec3::xz(1000.0, 1000.0), range: 460.0, footprint: 23.0, toward }
+    }
+
+    /// `d` elmos from (1000, 1000) at `deg` degrees from +x.
+    fn polar(d: f32, deg: f32) -> Vec3 {
+        let a = deg.to_radians();
+        Vec3::xz(1000.0 + d * a.cos(), 1000.0 + d * a.sin())
     }
 
     #[test]
-    fn snitches_keep_blast_clearance_from_building_edges_but_imps_can_use_cover() {
-        let building = [(Vec3::xz(1000.0, 1000.0), 100.0)];
+    fn imps_need_independent_support_but_snitches_do_not() {
+        assert!(!supported(true, false, 0.0));
+        assert!(supported(true, true, 0.0));
+        assert!(supported(true, false, 0.1));
+        assert!(supported(false, false, 0.0));
+    }
+
+    #[test]
+    fn snitches_spare_every_building_and_imps_every_armed_one() {
+        let building = |armed| [Building { center: Vec3::xz(1000.0, 1000.0), footprint: 100.0, armed }];
         // Outside the centre's blast radius is insufficient for a large building.
         let near = Vec3::xz(1400.0, 1000.0);
-        assert!(!clear_of_statics(true, near, 384.0, &building));
-        assert!(!clear_of_statics(true, Vec3::xz(1547.0, 1000.0), 384.0, &building));
-        assert!(clear_of_statics(true, Vec3::xz(1548.0, 1000.0), 384.0, &building));
-        assert!(clear_of_statics(false, near, 384.0, &building));
-        assert!(clear_of_statics(true, near, 384.0, &[]));
+        assert!(!clear_of_statics(true, false, near, 384.0, &building(false)));
+        assert!(!clear_of_statics(true, false, Vec3::xz(1547.0, 1000.0), 384.0, &building(false)));
+        assert!(clear_of_statics(true, false, Vec3::xz(1548.0, 1000.0), 384.0, &building(false)));
+        assert!(clear_of_statics(true, false, near, 384.0, &[]));
+        // An Imp's stun may wash over a mex, never over a turret.
+        assert!(clear_of_statics(false, true, near, 384.0, &building(false)));
+        assert!(!clear_of_statics(false, true, near, 384.0, &building(true)));
+        assert!(clear_of_statics(false, true, Vec3::xz(1548.0, 1000.0), 384.0, &building(true)));
+        // Other bombs (Skuttles) keep none.
+        assert!(clear_of_statics(false, false, near, 384.0, &building(true)));
         // A previously valid placement becomes invalid when a building appears.
-        assert!(!clear_of_statics(true, near, 384.0, &[(near, 16.0)]));
+        let new = [Building { center: near, footprint: 16.0, armed: true }];
+        assert!(!clear_of_statics(true, false, near, 384.0, &new));
+        assert!(!clear_of_statics(false, true, near, 384.0, &new));
+    }
+
+    #[test]
+    fn a_turret_covers_mines_past_its_blast_on_the_enemy_side_within_its_reach() {
+        // An Imp (blast radius 176) by a Lotus: at least 263 out, and the
+        // turret reaching 132 past the mine, so at most 328.
+        let t = lotus(Vec3::xz(1.0, 0.0));
+        assert!(t.covers(polar(270.0, 0.0), 176.0));
+        assert!(t.covers(polar(320.0, 50.0), 176.0));
+        // Under the turret: the stun would take it too.
+        assert!(!t.covers(polar(150.0, 0.0), 176.0));
+        assert!(!t.covers(polar(260.0, 0.0), 176.0));
+        // Too far: the stunned stand out of its reach.
+        assert!(!t.covers(polar(340.0, 0.0), 176.0));
+        // Off the enemy's way in, or behind the turret.
+        assert!(!t.covers(polar(270.0, 70.0), 176.0));
+        assert!(!t.covers(polar(270.0, 180.0), 176.0));
+    }
+
+    #[test]
+    fn a_turret_site_lies_straight_up_the_approach_just_past_its_blast() {
+        let t = lotus(Vec3::xz(0.0, -1.0));
+        let p = t.site(176.0).unwrap();
+        assert!((p.x - 1000.0).abs() < 0.01 && (1000.0 - p.z - 264.0).abs() < 0.01, "{p:?}");
+        let turret = [Building { center: t.position, footprint: t.footprint, armed: true }];
+        assert!(clear_of_statics(false, true, p, 176.0, &turret));
+        // Too short-ranged to reach what any blast it survives stuns.
+        assert!(Finisher { range: 300.0, ..t }.site(176.0).is_none());
+    }
+
+    #[test]
+    fn only_imps_take_turret_sites_and_rows_run_across_the_approach() {
+        let center = Vec3::xz(2000.0, 2000.0);
+        let field = Field { center, toward: Vec3::xz(0.0, 1.0), width: 1000.0, gate: center, value: 1.0 };
+        let t = lotus(Vec3::xz(1.0, 0.0));
+        let imp = candidate_sites(true, 176.0, &[field], &[t]);
+        let snitch = candidate_sites(false, 176.0, &[field], &[t]);
+        assert_eq!((imp.len(), snitch.len()), (10, 9));
+        assert!(imp.iter().any(|s| s.gate.x == 1000.0 && t.covers(s.position, 176.0)));
+        // The enemy comes from +z: the front row runs along x, depth
+        // behind it.
+        assert!(snitch.iter().filter(|s| s.depth == 0).all(|s| s.position.z == 2000.0));
+        assert!(snitch.iter().filter(|s| s.depth > 0).all(|s| s.position.z < 2000.0));
+    }
+
+    #[test]
+    fn enemy_eyes_are_buildings_and_lately_seen_mobiles_in_sight_range() {
+        let (p, at) = (Vec3::xz(0.0, 0.0), Vec3::xz(400.0, 0.0));
+        assert!(sighted(p, at, 450.0, false, 0));
+        assert!(!sighted(p, at, 350.0, false, 0));
+        assert!(!sighted(p, at, 450.0, false, SIGHT_MEMORY + 1));
+        assert!(sighted(p, at, 450.0, true, 100_000));
     }
 
     #[test]
@@ -356,15 +646,6 @@ mod tests {
         let front = site(1000.0, 1000.0, 1.0);
         let rear = Site { depth: 1, ..site(500.0, 1000.0, 1.0) };
         assert_eq!(choose_site(1, Vec3::ZERO, 200.0, &[rear, front], &[]).unwrap().position.x, 1000.0);
-    }
-
-    #[test]
-    fn turret_support_places_the_mine_in_front_and_in_weapon_range() {
-        let turret = Vec3::xz(1000.0, 1000.0);
-        let enemy = Vec3::xz(2000.0, 1000.0);
-        assert!(turret_covers_approach(Vec3::xz(1200.0, 1000.0), turret, enemy, 300.0));
-        assert!(!turret_covers_approach(Vec3::xz(800.0, 1000.0), turret, enemy, 300.0));
-        assert!(!turret_covers_approach(Vec3::xz(1400.0, 1000.0), turret, enemy, 300.0));
     }
 
     #[test]

@@ -188,6 +188,22 @@ impl<'a> Paths<'a> {
         route
     }
 
+    /// Where the route to `p` arrives from: its last waypoint (a chokepoint,
+    /// or else the origin) at least `lookback` elmos from `p`; `None` if `p`
+    /// is unreachable. The direction from `p` to it is the approach to `p`,
+    /// bent by the terrain, over its last `lookback` elmos.
+    pub fn approach(&self, p: Pos, lookback: f32) -> Option<Pos> {
+        let (mut at, _) = self.last_side(p)?;
+        while let Some(s) = at {
+            let waypoint = self.map.chokes[self.choke_of[s]].pos;
+            if waypoint.distance(p) >= lookback {
+                return Some(waypoint);
+            }
+            at = self.from[s];
+        }
+        Some(self.origin)
+    }
+
     /// The last side on the way to `p` (`None` within the origin's region)
     /// and the route length.
     fn last_side(&self, p: Pos) -> Option<(Option<usize>, f32)> {
@@ -231,6 +247,25 @@ mod tests {
         assert!(closed.distance_to(at(22.0, 1.0)).is_none());
         assert!(closed.to_region(4).is_infinite());
         assert!(closed.distance_to(at(12.0, 1.0)).is_some());
+    }
+
+    #[test]
+    fn approach_is_the_last_waypoint_beyond_the_lookback() {
+        let map = rooms();
+        let (ab, bc) = (0, 1);
+        let origin = at(5.0, 6.0);
+        let from_d = Paths::new(&map, origin, |_| false);
+        let p = at(22.0, 1.0);
+        assert_eq!(from_d.approach(p, 10.0), Some(map.chokes[bc].pos));
+        // Both sides of a crossing share its position: past it, the
+        // waypoint before.
+        let beyond = p.distance(map.chokes[bc].pos) + 1.0;
+        assert_eq!(from_d.approach(p, beyond), Some(map.chokes[ab].pos));
+        // Every waypoint too close: the origin itself.
+        assert_eq!(from_d.approach(p, 1e6), Some(origin));
+        assert_eq!(from_d.approach(at(6.0, 5.0), 10.0), Some(origin));
+        let closed = Paths::new(&map, origin, |c| c == bc);
+        assert_eq!(closed.approach(p, 10.0), None);
     }
 
     #[test]
