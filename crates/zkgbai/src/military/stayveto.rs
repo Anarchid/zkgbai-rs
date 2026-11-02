@@ -509,9 +509,11 @@ mod tests {
     }
 
     #[test]
-    fn off_by_default_after_the_batteries() {
-        // 2026-11-01: lost its mirror 3-15, nothing against Circuit or Wires.
-        assert!(crate::ai::OFF_BY_DEFAULT.contains(&"stayveto"));
+    fn on_by_default_in_the_wip_line() {
+        // 2026-11-01: off after losing its mirror 3-15 (nothing against
+        // Circuit or Wires); 2026-11-02 back on in the wip for a second look
+        // with the newer predictor, beside the latched fightsim veto.
+        assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"stayveto"));
         assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"coalesce"));
     }
 }
