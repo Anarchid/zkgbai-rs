@@ -264,6 +264,21 @@ New AA invalidates procurement
 memory and causes active sorties to abort or update their approaches. Spent or
 damaged aircraft return via threat-aware routes and rearm.
 
+Wide-turning airframes (`disable=odinroutes`; a real turn of 300 elmos or more,
+in practice the Odin at about 400) get their own routes (`AirField::route_for`).
+The cheapest way runs over 64-elmo cells in eight directions, so a slanting
+flight staircases in 45-degree steps a cell or two apart, turns an Odin needs
+`400 * tan(22.5)`, about 166 elmos of straight flight on each side, to make.
+Its route is pulled straight instead: from each waypoint the next is the
+farthest point of the cheapest way whose straight leg costs at most 5% (plus
+two open cells) more than the way it replaces, so it cuts across open air but
+not into anti-air the cheapest way went round, among legs whose turn fits in
+half of each leg it joins; when none does, the safe leg overrunning least. A
+sortie flying an Odin uses it for the plan, its in-flight re-routes (from the
+lead's heading) and the egress; an Odin flying home alone, from its own
+heading. On a test wall of anti-air with a gap, 11 cell waypoints became 3 with
+39-degree turns.
+
 Every route an aircraft is given skips the waypoints it cannot turn onto from
 its current flight (`turns.rs`, `disable=airturns` restores the old routes).
 The engine completes a move only within `max(turnRadius + 16, 128)` elmos, far

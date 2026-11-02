@@ -109,6 +109,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Likho and Phoenix drops weigh what they would do to our own and allied units and buildings (off: none within 220 elmos; default on)",
     ),
     (
+        "odinroutes",
+        "Military",
+        "wide-turning airframes (Odin) fly fewer, straighter legs on turns they can make, still clear of anti-air (default on)",
+    ),
+    (
         "airpool",
         "Military",
         "loaded bombers of separate sorties pool onto a target none can take alone, such as two lone Ravens on a Lance (default on)",

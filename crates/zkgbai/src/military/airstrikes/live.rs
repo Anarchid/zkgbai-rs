@@ -530,12 +530,39 @@ impl Ai {
 
     /// The first loaded bomber of a sortie: where its flight is planned from.
     fn airstrike_lead(&self, sortie: &Sortie) -> Option<Vec3> {
+        self.airstrike_lead_unit(sortie).map(|u| u.pos())
+    }
+
+    fn airstrike_lead_unit(&self, sortie: &Sortie) -> Option<Unit> {
         sortie
             .members
             .iter()
             .filter_map(|id| self.bomber_handler.units.get(id))
             .find(|a| a.kind != Plane::Sparrow && a.unit.rules_param_float("noammo", 0.0) == 0.0)
-            .map(|a| a.unit.pos())
+            .map(|a| a.unit)
+    }
+
+    /// The circle an airframe really turns on (see `turns`), which decides
+    /// whether its routes are pulled straight (`AirField::route_for`); zero
+    /// with `disable=odinroutes`.
+    fn airstrike_turn_radius(&self, plane: Plane) -> f32 {
+        if self.dev_off("odinroutes") {
+            return 0.0;
+        }
+        self.defs.get(plane.name()).map_or(0.0, |d| {
+            super::turns::turn_radius(
+                d.max_rudder(),
+                d.max_elevator(),
+                d.max_bank(),
+                d.front_to_speed(),
+                d.speed_to_front(),
+            )
+        })
+    }
+
+    /// The widest turn among aircraft that fly a route (escorts guard theirs).
+    fn airstrike_route_radius(&self, planes: impl IntoIterator<Item = Plane>) -> f32 {
+        planes.into_iter().filter(|p| *p != Plane::Sparrow).map(|p| self.airstrike_turn_radius(p)).fold(0.0, f32::max)
     }
 
     pub fn bomber_update(&mut self, frame: i32) {
@@ -629,7 +656,9 @@ impl Ai {
                 continue;
             }
             let length = field.length(job.pos).unwrap_or(f32::INFINITY);
-            let route = field.route(job.pos);
+            // An Odin's package flies fewer, gentler legs (see `route_for`).
+            let radius = self.airstrike_route_radius(choices.iter().flatten().map(|(k, _)| *k));
+            let route = field.route_for(job.pos, radius, None);
             let return_route = return_route(home, &route);
             let plan = Plan { job, packages: choices, risk, length, route, return_route };
             // Inferences use existing aircraft; only confirmed targets buy a fleet.
@@ -780,11 +809,21 @@ impl Ai {
             } else {
                 quarry_field.as_ref().unwrap_or(air)
             };
-            let from = self.airstrike_lead(&sortie).unwrap_or(home);
+            let lead = self.airstrike_lead_unit(&sortie);
+            let from = lead.map_or(home, |u| u.pos());
+            let heading = lead.and_then(|u| {
+                let v = u.vel();
+                let len = (v.x * v.x + v.z * v.z).sqrt();
+                (len > 1e-3).then(|| (v.x / len, v.z / len))
+            });
+            let radius = self.airstrike_route_radius(
+                sortie.members.iter().filter_map(|id| self.bomber_handler.units.get(id)).map(|a| a.kind),
+            );
             let approach = self.airstrike_field(from, enemies);
-            let exit = return_route(home, &field.route(pos));
+            let approach_route = approach.route_for(pos, radius, heading);
+            let exit = return_route(home, &field.route_for(pos, radius, None));
             let risk = round_trip(
-                self.airstrike_path_risk(from, &approach.route(pos), enemies),
+                self.airstrike_path_risk(from, &approach_route, enemies),
                 self.airstrike_path_risk(pos, &exit, enemies),
             );
             sortie.return_route = exit;
@@ -800,7 +839,7 @@ impl Ai {
                 } else {
                     can_order && frame - sortie.last_route >= 150 && distance(from, pos) > 800.0
                 };
-            let route = if reroute { approach.route(pos) } else { Vec::new() };
+            let route = if reroute { approach_route.clone() } else { Vec::new() };
             // One line per Phoenix still on the sortie, in member order.
             let lines = if carpet { self.carpet_lines(&sortie.job, sortie.members.len()) } else { Vec::new() };
             let disabled = self.dev_off("airstrikes")
@@ -808,7 +847,7 @@ impl Ai {
                 || (carpet && self.dev_off("carpet"));
             let wave_safe = sortie.wave.is_none_or(|w| {
                 distance(w.target, pos) <= wave::MAX_PURSUIT
-                    && wave::route_allowed(from, &approach.route(pos), |p| self.graph.is_ally_territory(p))
+                    && wave::route_allowed(from, &approach_route, |p| self.graph.is_ally_territory(p))
             });
             let done =
                 disabled || !valid || !wave_safe || troops_gone || hatched || frame - sortie.launched > SORTIE_TIMEOUT;
@@ -968,7 +1007,10 @@ impl Ai {
             }
             let needs_pad = hurt || empty;
             let route = if !(at_home || needs_pad && self.graph.is_ally_territory(u.pos())) {
-                self.airstrike_field(u.pos(), interceptors).route(home)
+                let v = u.vel();
+                let len = (v.x * v.x + v.z * v.z).sqrt();
+                let heading = (len > 1e-3).then(|| (v.x / len, v.z / len));
+                self.airstrike_field(u.pos(), interceptors).route_for(home, self.airstrike_turn_radius(a.kind), heading)
             } else {
                 vec![]
             };
