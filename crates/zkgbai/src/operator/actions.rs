@@ -84,7 +84,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "picketloan",
         "Defense",
-        "pickets lent to the QRF stay on the stakeout budget until back or dead, and displaced pickets relocate instead of raiding (default on)",
+        "dear pickets (120+ metal: Kodachi) lent to the QRF stay on the stakeout budget until back or dead, and displaced ones relocate instead of raiding (default on)",
     ),
     (
         "openscouts",
