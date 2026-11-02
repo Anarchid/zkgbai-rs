@@ -104,6 +104,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Likho and Phoenix drops weigh what they would do to our own and allied units and buildings (off: none within 220 elmos; default on)",
     ),
     (
+        "airpool",
+        "Military",
+        "loaded bombers of separate sorties pool onto a target none can take alone, such as two lone Ravens on a Lance (default on)",
+    ),
+    (
+        "magpiestrafe",
+        "Military",
+        "spare Magpies strafe anything that cannot shoot back, away from AA, while three stay home for raids (default on)",
+    ),
+    (
         "shieldworth",
         "Military",
         "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",

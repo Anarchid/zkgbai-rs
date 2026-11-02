@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod carpet;
 mod defense;
+mod pool;
 mod release;
 mod retarget;
 mod speculation;
@@ -16,6 +17,9 @@ mod wave;
 use defense::FireSource;
 
 const PERIOD: i32 = 30;
+/// Ordinary sorties out at once, and how many of them may be secondary.
+const MAX_SORTIES: usize = 10;
+const MAX_SECONDARY_SORTIES: usize = 4;
 /// Our own losses a drop may cost, as a share of what it removes.
 const COLLATERAL_SHARE: f32 = 0.5;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
@@ -335,6 +339,7 @@ impl Ai {
                     armor,
                     armed: e.can_attack(),
                     speed: e.def_speed(),
+                    aa: e.is_aa || e.is_flex_aa,
                 }
             })
             .collect()
@@ -400,11 +405,13 @@ impl Ai {
 
     /// Mission kinds switched off: `disable=outposts` (spare Phoenixes on
     /// clumps of buildings), `disable=odinturrets` (spare Odins on heavy
-    /// defenses).
+    /// defenses), `disable=magpiestrafe` (spare Magpies on whatever cannot
+    /// shoot back).
     fn airstrike_kind_off(&self, kind: MissionKind) -> bool {
         match kind {
             MissionKind::Outpost => self.dev_off("outposts"),
             MissionKind::Turret => self.dev_off("odinturrets"),
+            MissionKind::Strafe => self.dev_off("magpiestrafe"),
             _ => false,
         }
     }
@@ -676,6 +683,7 @@ impl Ai {
                 .then_with(|| a.job.key().cmp(&b.job.key()))
         });
         self.bomber_handler.plans = plans;
+        self.airstrike_pool(home, &air, &interceptors);
         self.airstrike_fly(frame, home, &air, &defense_air, &interceptors);
         self.airstrike_wave(frame, home);
         self.airstrike_launch(frame, home);
@@ -1010,10 +1018,17 @@ impl Ai {
         // to a sortie are reserved: an unfillable package must not immobilize
         // every aircraft of that type while secondary opportunities expire.
         for plan in plans {
-            if self.bomber_handler.sorties.len() >= 4 {
+            // Secondary sorties (single-plane statics and opportunities among
+            // them) may not crowd out a primary strike: they have their own cap.
+            if self.bomber_handler.sorties.len() >= MAX_SORTIES {
                 break;
             }
             let job = &plan.job;
+            if !job.kind.primary()
+                && self.bomber_handler.sorties.iter().filter(|s| !s.job.kind.primary()).count() >= MAX_SECONDARY_SORTIES
+            {
+                continue;
+            }
             if job.targets.iter().any(|id| covered.contains(id))
                 || !self.airstrike_hunt_available(job)
                 || self.bomber_handler.cooldown.contains_key(&job.target)
@@ -1052,6 +1067,26 @@ impl Ai {
                 }
             }
             let Some((members, package)) = selected else { continue };
+            // Strafes take only spare Magpies: enough stay idle at home, ours
+            // and the firefighters', to answer the next raid.
+            if job.kind == MissionKind::Strafe {
+                let home_magpies = self
+                    .bomber_handler
+                    .units
+                    .iter()
+                    .filter(|(id, a)| {
+                        a.kind == Plane::Magpie
+                            && !busy.contains(id)
+                            && !members.contains(id)
+                            && a.unit.rules_param_float("noammo", 0.0) == 0.0
+                            && distance(a.unit.pos(), home) < 450.0
+                    })
+                    .count()
+                    + self.firefighters_idle(Plane::Magpie.name());
+                if home_magpies < QRF_MAGPIES {
+                    continue;
+                }
+            }
             // An opportunistic assassination must arrive while the observed
             // window still exists; no procurement or long cross-map pursuit.
             if matches!(job.kind, MissionKind::Assassinate | MissionKind::HeavyAir) {

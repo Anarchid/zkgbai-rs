@@ -35,6 +35,19 @@ fn priority_target(value: f32, hp: f32) -> bool {
 /// Rocko 94%, Ravager 91%, Fencer 88%, Reaper 85%. Units this fast or faster
 /// are Magpie and Likho work, never Ravens'.
 const RAVEN_MAX_TARGET_SPEED: f32 = 90.0;
+/// Magpie strafes: one Magpie's load is twelve EMG salvos of 48, so it
+/// answers 460 HP of a slow target (with a 20% margin) and 200 of a raider
+/// (its spray misses those often, see `firefighters::MAGPIE_ANSWERS`). A
+/// target needing more than `STRAFE_WING` Magpies is left alone; at least
+/// `QRF_MAGPIES` stay idle at home (firefighters' included) for raids.
+const MAGPIE_LOAD: f32 = 460.0;
+pub(super) const STRAFE_WING: usize = 4;
+pub(super) const QRF_MAGPIES: usize = 3;
+fn strafe_magpies(hp: f32, fast: bool) -> usize {
+    let answers = if fast { crate::military::firefighters::MAGPIE_ANSWERS } else { MAGPIE_LOAD };
+    (hp.max(1.0) / answers).ceil().max(1.0) as usize
+}
+
 /// Clumps for group strikes: ground units of this much metal each (heavies
 /// such as Grizzly 1900, Goliath 2200 and Crab 1600 included, striders left
 /// to single-target strikes), at least two worth this much together. A pair
@@ -104,6 +117,8 @@ pub enum MissionKind {
     Shield,
     /// Spare Phoenixes on a clump of buildings: a mex among its Solars.
     Outpost,
+    /// Spare Magpies on anything that cannot shoot back, away from AA.
+    Strafe,
     /// A spare Odin's thermite on a heavy defense (Gauss, Stinger).
     Turret,
 }
@@ -124,6 +139,7 @@ impl MissionKind {
             Self::Static => "Static strike",
             Self::Shield => "Shield drop",
             Self::Outpost => "Outpost burn",
+            Self::Strafe => "Magpie strafe",
             Self::Turret => "Turret burn",
         }
     }
@@ -131,7 +147,13 @@ impl MissionKind {
     fn primary(self) -> bool {
         !matches!(
             self,
-            Self::Assassinate | Self::Opportunistic | Self::Static | Self::Shield | Self::Outpost | Self::Turret
+            Self::Assassinate
+                | Self::Opportunistic
+                | Self::Static
+                | Self::Shield
+                | Self::Outpost
+                | Self::Turret
+                | Self::Strafe
         )
     }
     fn priority(self) -> f32 {
@@ -144,7 +166,7 @@ impl MissionKind {
             Self::Group => 6.0,
             Self::Speculative => 5.0,
             Self::Assassinate | Self::Opportunistic => 3.0,
-            Self::Shield | Self::Turret => 2.0,
+            Self::Shield | Self::Turret | Self::Strafe => 2.0,
             Self::Outpost => 1.5,
             Self::Static => 1.0,
         }
@@ -186,6 +208,8 @@ struct Contact {
     armed: bool,
     /// Top speed (elmos/s), 0 while unidentified.
     speed: f32,
+    /// It can shoot at aircraft.
+    aa: bool,
 }
 
 impl Contact {
@@ -300,6 +324,9 @@ impl Mission {
             self.value / self.hp.max(1.0) * 3000.0
         } else if self.kind == MissionKind::HeavyAir {
             self.damage_value(&[(Plane::Likho, 1)])
+        } else if self.kind == MissionKind::Strafe {
+            // Metal per Magpie flown.
+            self.value / strafe_magpies(self.hp, self.fast) as f32
         } else if let Some(per_plane) = self.group_per_plane() {
             // Groups and outposts: the best value per aircraft, after the
             // bombs any shields over them take (one aircraft's pass without).
@@ -420,6 +447,13 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             if e.fighting && !e.submerged {
                 add(MissionKind::Shield, vec![e.id], e.hp, e.value);
             }
+        }
+        if fresh
+            && !e.aa
+            && !e.submerged
+            && strafe_magpies(e.hp, !e.static_ && e.speed >= RAVEN_MAX_TARGET_SPEED) <= STRAFE_WING
+        {
+            add(MissionKind::Strafe, vec![e.id], e.hp, e.strike_value());
         }
         let medium = |c: &Contact| {
             !c.air
@@ -593,7 +627,12 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
     let unopposed = !risk.intercepted;
     let choices = match job.kind {
         HeavyAir if unopposed => job.heavy_air_packages(),
-        Intercept if risk.aa <= 0.4 => vec![vec![(Magpie, 1), (Raptor, count(job.hp, 700.0).max(2))]],
+        // Raptors do the killing; a Magpie's slowing EMG assists when one is
+        // ready, and is never bought or waited for.
+        Intercept if risk.aa <= 0.4 => {
+            let raptors = count(job.hp, 700.0).max(2);
+            vec![vec![(Magpie, 1), (Raptor, raptors)], vec![(Raptor, raptors)]]
+        }
         // Magpies by the raider health one answers (a Flea takes one, a
         // Glaive two). Launch and procurement take the cheaper of the two
         // (see `Ai::airstrike_cheapest_first`).
@@ -604,6 +643,10 @@ fn packages(job: &Mission, risk: Risk, raven_damage: f32) -> Vec<Vec<(Plane, usi
         Group if clear => job.group_packages(&[Phoenix, Likho]),
         Group if unopposed => job.group_packages(&[Likho]),
         Outpost if clear => job.group_packages(&[Phoenix]),
+        Strafe if clear => {
+            let n = strafe_magpies(job.hp, job.fast);
+            if n <= STRAFE_WING { vec![vec![(Magpie, n)]] } else { vec![] }
+        }
         Wind if clear => vec![vec![(Phoenix, job.targets.len().div_ceil(12))]],
         Speculative if very_light => vec![vec![(Likho, salvo(2000.0))]],
         Carpet if very_light => job.carpet_packages(),
