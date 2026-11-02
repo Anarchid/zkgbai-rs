@@ -86,8 +86,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// +0.03, sym - on +0.07; disable=conquest to opt out). `conquestleash`
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
-/// sym) stay off.
-pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
+/// sym) stay off, as does `conquestescort` (a QRF team sized by the fight
+/// predictor stands on the objective, 2026-11-03) until its battery.
+pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
     "pairs",
     "currency",
     "permanence",
@@ -108,6 +109,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "fight2d",
     "conquestleash",
     "conquestseq",
+    "conquestescort",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.

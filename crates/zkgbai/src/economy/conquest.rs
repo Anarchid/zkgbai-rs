@@ -212,6 +212,7 @@ impl Ai {
         self.conquest_observe();
         if self.eco.conquest.op.is_some() {
             self.conquest_step(frame);
+            self.escort_update();
         } else if !self.eco.conquest.done {
             self.conquest_start(frame);
         }
@@ -476,7 +477,7 @@ impl Ai {
     }
 
     /// Each enemy team's tier as a distribution: what we saw, or the prior.
-    fn conquest_belief(&self) -> Vec<(i32, Vec<(Tier, f32)>)> {
+    pub(crate) fn conquest_belief(&self) -> Vec<(i32, Vec<(Tier, f32)>)> {
         let c = &self.eco.conquest;
         if c.seen.is_empty() {
             return vec![(-1, prior())];
@@ -604,6 +605,9 @@ impl Ai {
                    "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len(),
                    "taken": self.eco.conquest.taken.len()}),
         );
+        // A team of the QRF's to stand on it (`conquestescort`).
+        let at = self.conquest_v3(center);
+        self.escort_open(at);
     }
 
     fn conquest_belief_json(&self) -> serde_json::Value {
@@ -821,6 +825,7 @@ impl Ai {
     /// Release the commander; drop turret jobs not yet started.
     fn conquest_end(&mut self, why: &str, success: bool) {
         let Some(op) = self.eco.conquest.op.take() else { return };
+        self.escort_close(why);
         if success {
             self.eco.conquest.taken.push(op.idx);
         }
@@ -860,6 +865,7 @@ impl Ai {
             "done": c.done,
             "taken": c.taken,
             "belief": self.conquest_belief_json(),
+            "escort": self.escort_json(),
             "energy_worker": c.energy.as_ref().map(|e| json!({"worker": e.id, "was_greedy": e.was_greedy, "since": e.since / 30})),
             "station": c.station.as_ref().map(|s| json!({"crew": s.crew, "x": s.center.x.round(), "z": s.center.z.round(), "since": s.since / 30, "leash": !self.dev_off("conquestleash")})),
             "op": c.op.as_ref().map(|op| json!({

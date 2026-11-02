@@ -829,6 +829,9 @@ impl Ai {
         if !self.qrf.on || !self.qrf.live {
             return None;
         }
+        if let Some(name) = self.escort_production(factory, choice) {
+            return Some(name);
+        }
         if let Some(name) = self.qrf_floor_production(factory, choice) {
             return Some(name);
         }
