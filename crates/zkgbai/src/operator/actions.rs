@@ -239,6 +239,17 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "veto hopeless attacks by ordinary ground squads, kiting judged, and hold the retreat (default on)",
     ),
+    (
+        "fightfocus",
+        "Army",
+        "the fight predictor sends every shot to the target in range with the least health left (default on in the wip line)",
+    ),
+    ("fight2d", "Army", "the fight predictor fights in the plane: positions kept, no overlaps, splash"),
+    (
+        "sreload",
+        "Army",
+        "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
+    ),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),
