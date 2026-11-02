@@ -942,7 +942,7 @@ impl Ai {
         let handled = self.raider_handled(id);
         if self.raider_handler.raider_squads.is_empty()
             && self.squad_handler.fighters.is_empty()
-            && self.fac.early_worker
+            && self.fac_early_worker()
             && !is_spider
         {
             best_target = self.war_get_raider_rally_skipping(pos, &handled);

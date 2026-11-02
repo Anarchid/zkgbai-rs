@@ -84,6 +84,8 @@ pub struct EconomyManager {
     pub od_phase: Option<i32>,
     /// `densgate`'s phase this frame: (frame, reference minutes, income scale).
     phase_cache: Cell<(i32, f32, f32)>,
+    /// `densgate`'s map diagonal, once known (see `phase_map_diag`).
+    phase_diag: Cell<Option<f32>>,
     pub mexes: Vec<Unit>,
 
     /// All worker tasks; the lists below hold ids into it.
@@ -324,6 +326,7 @@ impl EconomyManager {
             fusions: Vec::new(),
             od_phase: None,
             phase_cache: Cell::new((-1, 0.0, 1.0)),
+            phase_diag: Cell::new(None),
             mexes: Vec::new(),
             tasks: TaskStore::default(),
             commanders: Vec::new(),
@@ -625,6 +628,11 @@ impl Ai {
             Some(format!("energy income {:.0}", self.eco.effective_income_energy))
         } else if free_share <= OD_FREE_SHARE && self.eco.static_income >= OD_FREE_INCOME {
             Some(format!("{free} of {} metal spots free and uncontested", spots.len()))
+        } else if self.phase_on()
+            && self.phase_minutes() >= phase::OD_PHASE_MINUTE
+            && self.phase_static_income() >= OD_FREE_INCOME
+        {
+            Some(format!("density: phase minute {:.1}", self.phase_minutes()))
         } else {
             None
         };

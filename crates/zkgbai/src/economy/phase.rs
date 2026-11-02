@@ -13,9 +13,30 @@
 //! reference both are what they were; on small maps gates open earlier, on
 //! big rich ones later. Gates for what we can afford (constructors,
 //! striders, superweapons, turrets by income) keep the plain income.
+//!
+//! The opening's map-size cutoffs (raider debt, scouts, early workers,
+//! burst sizes) stand in for how long the map stays sparse: under
+//! `densgate` they read the diagonal a map with this map's raider window
+//! would have ([`Ai::phase_map_diag`]). The overdrive phase also starts by
+//! a phase minute ([`OD_PHASE_MINUTE`]).
 
 use crate::Ai;
 use crate::military::scouts::density::DensityMap;
+
+/// The density at which a map's raider window closes: raiders' share of
+/// Wires' production falls from ~60% to ~30% past D 250-500 (ESCALATION §1).
+const WINDOW_DENSITY: f64 = 500.0;
+
+/// Heightmap squares of map diagonal per minute of raider window: the
+/// least-squares fit over 16 maps with measured usable area
+/// (`zkgbai-runs/procure/translate/window_diag.py`). The opening's cutoffs
+/// 910, 1080 and 1270 are then windows of 5.3, 6.3 and 7.4 minutes.
+const DIAG_PER_WINDOW_MINUTE: f32 = 171.0;
+
+/// Under `densgate` the overdrive phase starts by this phase minute at the
+/// latest: the free-spots rule fired at a median 9.9 min on ~10x10 maps and
+/// 10.6 on ~12x12 (wipbench, 2026-11-02), about the reference map's size.
+pub(crate) const OD_PHASE_MINUTE: f32 = 10.5;
 
 impl Ai {
     /// Whether gates run on density (`enable=densgate`).
@@ -52,6 +73,32 @@ impl Ai {
         (self.phase().0 * 1800.0) as i32
     }
 
+    /// What the reference map pays a player at the phase minute over what
+    /// this map pays now (1 without `densgate`).
+    pub(crate) fn phase_scale(&self) -> f32 {
+        if !self.phase_on() {
+            return 1.0;
+        }
+        self.phase().1
+    }
+
+    /// The map diagonal (heightmap squares) for the opening's map-size
+    /// cutoffs: the real one, or (`densgate`) that of a map whose raider
+    /// window (minutes until the forecast reaches [`WINDOW_DENSITY`]) is
+    /// this map's. Small dense maps read smaller, and team games, dense from
+    /// the start, read small.
+    pub(crate) fn phase_map_diag(&self) -> f32 {
+        if !self.phase_on() {
+            return self.map_diag;
+        }
+        if let Some(diag) = self.eco.phase_diag.get() {
+            return diag;
+        }
+        let diag = window_diag(self.density_forecast());
+        self.eco.phase_diag.set(Some(diag));
+        diag
+    }
+
     /// Our static income as the reference map would have paid it at the
     /// phase minute: for the factory timing gates.
     pub(crate) fn phase_static_income(&self) -> f32 {
@@ -71,6 +118,12 @@ impl Ai {
         let merged = self.merged_allies as f32;
         self.phase_static_income() / (1.0 + merged) + (1.0 + merged) * minutes
     }
+}
+
+/// The diagonal of a map whose raider window is `map`'s (see
+/// [`DIAG_PER_WINDOW_MINUTE`]).
+fn window_diag(map: &DensityMap) -> f32 {
+    DIAG_PER_WINDOW_MINUTE * map.minutes_at(WINDOW_DENSITY) as f32
 }
 
 /// The phase on `map` `now` minutes in: the reference map's minute at the
@@ -102,5 +155,19 @@ mod tests {
             assert!(phase_of(&titan, now).0 > now + 0.5, "titan {now}");
             assert!(phase_of(&comet, now).0 < now - 0.5, "comet {now}");
         }
+    }
+
+    #[test]
+    fn raider_windows_give_diagonals_like_the_fit() {
+        // window_diag.py: TitanDuel 803 (real 905), Comet Catcher 1329
+        // (1280), Canis River 1437 (1448); a 4v4 reads as a small map.
+        let titan = window_diag(&DensityMap::from_parts(2, 64.2, 25.1));
+        let comet = window_diag(&DensityMap::from_parts(2, 182.6, 50.3));
+        let canis = window_diag(&DensityMap::from_parts(2, 115.2, 50.7));
+        assert!((titan - 803.0).abs() < 15.0, "{titan}");
+        assert!((comet - 1329.0).abs() < 15.0, "{comet}");
+        assert!((canis - 1437.0).abs() < 15.0, "{canis}");
+        assert!(titan < 910.0 && comet > 1270.0);
+        assert!(window_diag(&DensityMap::from_parts(8, 182.6, 50.3)) < 910.0);
     }
 }

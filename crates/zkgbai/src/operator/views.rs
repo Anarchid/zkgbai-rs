@@ -1269,6 +1269,13 @@ pub fn tick_value(ai: &Ai) -> Value {
         "density": ai.posture.density.round() as i64,
         "laneness": r2(ai.posture.laneness()),
         "share": r2(ai.posture.share),
+        "forecast": ai.projected_metal_density().round() as i64,
+        // `densgate`: phase minute, income scale, phase income, map diagonal.
+        "phase": if ai.phase_on() {
+            json!([r1(ai.phase_minutes()), r2(ai.phase_scale()), r1(ai.phase_income()), ai.phase_map_diag().round() as i64])
+        } else {
+            Value::Null
+        },
     })
 }
 

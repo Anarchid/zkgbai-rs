@@ -479,7 +479,7 @@ impl Ai {
     pub(crate) fn fac_register(&mut self, unit: Unit, tech: &str) {
         let Some(def) = unit.def() else { return };
         let first_fac = (self.fac.factories.len() as i32) < 1 + self.merged_allies;
-        let mut fac = Factory::new(unit, tech, first_fac, self.map_diag);
+        let mut fac = Factory::new(unit, tech, first_fac, self.phase_map_diag());
         if !tech.contains("hub") {
             // Worker cost-effectiveness, from the first constructor this factory can build.
             if let Some(con) = def.build_options().into_iter().find(|ud| !ud.build_options().is_empty()) {
@@ -615,6 +615,19 @@ impl Ai {
 /// The `fac_get_*` choosers only read the AI state and mutate the factory
 /// passed in, which is a copy written back by `fac_assign_factory_task`.
 impl Ai {
+    /// The factory manager's map-size flag (diagonal over 1080: bigger tank
+    /// and boat bursts), under `densgate` by the raider window (see
+    /// `phase_map_diag`).
+    fn fac_big_map(&self) -> bool {
+        if self.phase_on() { self.phase_map_diag() > 1080.0 } else { self.fac.big_map }
+    }
+
+    /// A second early constructor and early raider sneaks (diagonal over
+    /// 1080), under `densgate` by the raider window.
+    pub(crate) fn fac_early_worker(&self) -> bool {
+        if self.phase_on() { self.phase_map_diag() > 1080.0 } else { self.fac.early_worker }
+    }
+
     /// Queue the next unit for factory (or strider hub) `fac_id`.
     fn fac_assign_factory_task(&mut self, fac_id: i32) {
         // A new production decision means any uncreated prior scout order
@@ -875,7 +888,7 @@ impl Ai {
                 && eco.metal / eco.max_storage > 0.8
                 && eco.max_storage > 0.5
                 && worker_deficit > -1)
-            || (fm.early_worker && fm.num_workers < 2 * (1 + merged))
+            || (self.fac_early_worker() && fm.num_workers < 2 * (1 + merged))
         {
             return true;
         }
@@ -1018,7 +1031,7 @@ impl Ai {
         }
 
         if kgb_rand() > 0.9 {
-            let divisor = if fm.big_map { 2.5 } else { 5.0 };
+            let divisor = if self.fac_big_map() { 2.5 } else { 5.0 };
             fac.expensive_raider_spam -= (((income / divisor).floor() as i32).clamp(2, 8) + 1) as f32;
         }
 
@@ -1421,7 +1434,7 @@ impl Ai {
 
         let raid_threshold = if war.sniper_sightings.is_empty() { 0.9 } else { 0.75 };
         if kgb_rand() > raid_threshold {
-            let divisor = if fm.big_map { 2.5 } else { 5.0 };
+            let divisor = if self.fac_big_map() { 2.5 } else { 5.0 };
             fac.expensive_raider_spam -= (((income / divisor).floor() as i32).clamp(2, 8) + 1) as f32;
         }
 
