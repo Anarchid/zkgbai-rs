@@ -28,20 +28,8 @@ CASES = {
 FATES = {"picket_kodachis": 300, "picket_ring": 450, "ogre_daggers": 300, "ogres_thugs": 900, "own_pickets": 600}
 
 
-def load_crate_sreload(crate):
-    """The crate's tube table, as fightsim::Model::parse reads it."""
-    tab = {}
-    for line in open(os.path.join(crate, "data", "fightsim_sreload.tsv")):
-        if not line.strip() or line.startswith("#") or line.startswith("weapon\t"):
-            continue
-        name, tubes, secs = line.rstrip("\n").split("\t")
-        tab[name] = (max(1, int(tubes)), max(1, int(round(float(secs) * 30))))
-    mech.M["sreload"] = tab
-
-
 def main(rdir, crate):
-    E.init(rdir)
-    load_crate_sreload(crate)
+    E.init(rdir)  # loads the crate's tube table
     ud, wtab = predict.G["ud"], predict.G["wtab"]
     tdir = os.path.join(crate, "src", "military", "fightsim", "testdata")
     defs = sorted({n for a, b, *_ in CASES.values() for n, _ in a + b})
@@ -66,10 +54,11 @@ def main(rdir, crate):
             f = E.make_vfight(ud, a, b, d0, layout)
             for v in E.VARIANTS:
                 o = dict(E.opts_of(v), sreload=1)
+                o_off = dict(E.opts_of(v), sreload=0)
                 dps = mech.simulate_mech(f, o, None)
                 stop = mech.simulate_mech(f, o, E.G["hz"])
                 wd = mech.simulate_mech(f, o, E.G["hz"], withdraw=True)
-                off = mech.simulate_mech(f, E.opts_of(v), None)
+                off = mech.simulate_mech(f, o_off, None)
                 fh.write(f"{name}\t{v}\t{E._units(f)}\t{dps[0]:.10g}\t{dps[1]:.10g}\t{stop[0]:.10g}\t{stop[1]:.10g}\t{wd[0]:.10g}"
                          f"\t{wd[1]:.10g}\t{off[0]:.10g}\t{off[1]:.10g}\n")
                 print(f"{name:20} {v:6} dps {dps[0]:.3f} {dps[1]:.3f} (off {off[0]:.3f} {off[1]:.3f})  stop {stop[0]:.3f} {stop[1]:.3f}"
