@@ -156,6 +156,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("ambush", "Army", "jaegers lie in wait on a heavy's way; Widows stun only where the army can finish"),
     ("dodge", "Army", "cloaked jaegers step (Skuttles jump) out of sight of enemies coming their way"),
     ("jaegerreserve", "Army", "the energy reserve asked of the game covers the jaegers' cloaks"),
+    (
+        "ultimata",
+        "Army",
+        "Ultimatums in place of more Widows once enemy heavies clump past 5000 metal or a Paladin or Detriment shows; a strider hub requisitioned for them; default on",
+    ),
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
     (
         "strikefragile",

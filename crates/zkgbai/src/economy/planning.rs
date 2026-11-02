@@ -867,7 +867,9 @@ impl Ai {
         if let Some(from) = from.filter(|_| nfac == 0) {
             self.eco_weigh_factories_by_reach(from);
         }
-        let asked = if nfac > 0 { self.eco.requisition.take() } else { None };
+        // Asked for until its factory is planned: one that cannot go up
+        // now (no site, energy starved) is not lost to a random pick.
+        let asked = if nfac > 0 { self.eco.requisition.clone() } else { None };
         let asked_value = self.eco.requisition_value;
         let reach_fac = asked.as_ref().filter(|(f, _)| !self.eco_has_factory(f)).map(|(f, _)| f.clone());
         let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
@@ -990,15 +992,14 @@ impl Ai {
                     if is_air_requisition(why) {
                         self.eco.air_asked = true;
                     }
+                    self.eco.requisition = None;
                 }
                 return;
             }
             if !self.eco_factory_turn(&fac_name) {
+                // (A requisition stays asked for.)
                 restore(self, &fac_name);
                 self.eco.new_fac_due = fac_due;
-                if self.eco.requisition.is_none() {
-                    self.eco.requisition = asked;
-                }
                 return;
             }
         }
@@ -1132,6 +1133,7 @@ impl Ai {
                 if is_air_requisition(why) {
                     self.eco.air_asked = true;
                 }
+                self.eco.requisition = None;
             }
         } else {
             restore(self, &fac_name);
@@ -1547,6 +1549,16 @@ impl Ai {
             ));
         }
         let owned = |name: &str| self.fac.factories.values().any(|f| f.tech == name);
+        if !owned("striderhub")
+            && let Some(call) = self.jaeger_ulti_call()
+            && self.jaeger_wants(crate::military::jaeger::ULTIMATUM)
+        {
+            return Some((
+                "striderhub".to_owned(),
+                format!("Ultimatums against enemy heavies: {}", call.why),
+                call.value,
+            ));
+        }
         if !owned("factoryspider")
             && let Some(value) = self.scouts_want_factory().filter(|&v| v >= nukes::STRIKE_VALUE)
         {

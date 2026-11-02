@@ -633,6 +633,7 @@ impl Ai {
                     | "shadowprobe"
                     | "heavies"
                     | "heavypush"
+                    | "paladin"
                     | "farm"
                     | "snipers"
                     | "lances"

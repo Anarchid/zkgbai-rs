@@ -10,8 +10,8 @@ use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
 use crate::military::UnitClasses;
 use crate::military::roles::Role;
-use crate::military::scouts;
 use crate::military::stakeouts::{opens_with_scouts, stakeout_unit};
+use crate::military::{jaeger, scouts};
 use crate::util::kgb_rand;
 
 /// Firewalker and Jugglenaut metal, and from how much enemy light
@@ -1808,8 +1808,11 @@ impl Ai {
         let eco = &self.eco;
         let war = &self.war;
 
-        if fm.has_fusion && self.jaeger_wants("striderantiheavy") {
-            return "striderantiheavy";
+        // From a Fusion; called for (see `jaeger`), as soon as our energy
+        // income keeps it cloaked.
+        let ulti_energy = fm.has_fusion || (self.jaeger_ulti_call().is_some() && self.jaeger_ulti_energy());
+        if ulti_energy && self.jaeger_wants(jaeger::ULTIMATUM) {
+            return jaeger::ULTIMATUM;
         }
 
         if eco.bots_viable
