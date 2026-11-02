@@ -43,6 +43,19 @@ const SLIVER_CELLS: usize = 625;
 /// nearest.
 const SPOT_SNAP: f32 = 64.0;
 
+/// On re-analysis a region holding the same spots as before keeps its
+/// piece cap while its size stays within this fraction of the cap's range
+/// of sizes ([`PIECE_CELLS`] wide): a structure levelling its footprint
+/// must not change how many pieces a region is cut into.
+const CAP_SLACK: f32 = 0.05;
+
+/// The piece cap a region holding `spots` (sorted, as bits) was cut with.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Cap {
+    spots: Vec<(u32, u32)>,
+    pieces: usize,
+}
+
 /// Walking costs on the grid: straight and diagonal steps.
 const STEP: u32 = 10;
 const DIAGONAL: u32 = 14;
@@ -50,14 +63,21 @@ const DIAGONAL: u32 = 14;
 /// Cut every region of `map` holding at least [`MIN_SPOTS`] of `spots` whose
 /// spots make more than one cluster. Runs on fresh region labels, before
 /// the borders are linked: gates keep their regions (the piece on their
-/// side), and the pieces' contacts become seams.
-pub(crate) fn split(map: &mut TierMap, spots: &[Pos]) {
+/// side), and the pieces' contacts become seams. The order of `spots` does
+/// not matter. `prior`: the piece caps of the model this one replaces (see
+/// [`CAP_SLACK`]); the caps used go into `map`.
+pub(crate) fn split(map: &mut TierMap, spots: &[Pos], prior: &[Cap]) {
     if spots.is_empty() {
         return;
     }
+    // Ties (equal distances, common on mirrored maps) go by position, not
+    // by the order the spots came in.
+    let mut spots = spots.to_vec();
+    spots.sort_unstable_by(|a, b| a.x.total_cmp(&b.x).then(a.z.total_cmp(&b.z)));
+    spots.dedup();
     let n = map.regions.len();
     let mut by_region: Vec<Vec<Pos>> = vec![Vec::new(); n];
-    for &s in spots {
+    for &s in &spots {
         if let Some(r) = map.region_near(s, SPOT_SNAP) {
             by_region[r].push(s);
         }
@@ -66,12 +86,29 @@ pub(crate) fn split(map: &mut TierMap, spots: &[Pos]) {
         if spots.len() < MIN_SPOTS {
             continue;
         }
-        let max_pieces = (map.regions[r].cells / PIECE_CELLS).max(1);
+        let cells = map.regions[r].cells;
+        let key: Vec<(u32, u32)> = spots.iter().map(|p| (p.x.to_bits(), p.z.to_bits())).collect();
+        let max_pieces = prior
+            .iter()
+            .find(|c| c.spots == key)
+            .map(|c| c.pieces)
+            .filter(|&k| cap_holds(k, cells))
+            .unwrap_or((cells / PIECE_CELLS).max(1));
+        map.built.caps.push(Cap { spots: key, pieces: max_pieces });
         let clusters = clusters(spots, CLUSTER_SPAN, max_pieces);
         if clusters.len() > 1 {
             cut(map, r, spots, &clusters);
         }
     }
+}
+
+/// Whether a region of `cells` cells may keep a cap of `pieces`: whether
+/// its size is within [`CAP_SLACK`] of the sizes that cap goes with.
+fn cap_holds(pieces: usize, cells: usize) -> bool {
+    let range = PIECE_CELLS as f32;
+    let low = if pieces <= 1 { 0.0 } else { (pieces as f32 - CAP_SLACK) * range };
+    let high = (pieces as f32 + 1.0 + CAP_SLACK) * range;
+    (low..high).contains(&(cells as f32))
 }
 
 /// Complete-linkage clusters of `spots` (indices): the two clusters whose
@@ -520,6 +557,30 @@ mod tests {
         assert_eq!(a.region, b.region);
         assert_eq!(a.chokes.len(), b.chokes.len());
         assert!(a.chokes.iter().zip(&b.chokes).all(|(x, y)| x.regions == y.regions && x.pos == y.pos));
+    }
+
+    #[test]
+    fn the_order_of_the_spots_does_not_matter() {
+        // A square of spots, sides inside a cluster's span, diagonals not:
+        // two clusters, either both rows or both columns, a tie only the
+        // order of the spots used to break.
+        let (x, z, d) = (2000.0, 250.0, 900.0);
+        let spots = [Pos::new(x, z), Pos::new(x + d, z), Pos::new(x, z + d), Pos::new(x + d, z + d)];
+        let a = tier_map(&rooms(), Tier::Bot, Tier::Bot.zero_k_class(), &spots);
+        assert_eq!(a.regions.len(), 3, "{:?}", a.regions);
+        for order in [vec![spots[0], spots[2], spots[1], spots[3]], spots.iter().rev().copied().collect()] {
+            let b = tier_map(&rooms(), Tier::Bot, Tier::Bot.zero_k_class(), &order);
+            assert_eq!(a.region, b.region);
+            assert!(a.chokes.iter().zip(&b.chokes).all(|(x, y)| x.regions == y.regions && x.pos == y.pos));
+        }
+    }
+
+    #[test]
+    fn a_cap_holds_while_the_size_stays_near_its_range() {
+        let p = PIECE_CELLS;
+        assert!(cap_holds(1, 0) && cap_holds(1, 2 * p + p / 40) && !cap_holds(1, 2 * p + p / 10));
+        assert!(cap_holds(2, 2 * p - p / 40) && !cap_holds(2, 2 * p - p / 10));
+        assert!(cap_holds(2, 3 * p + p / 40) && !cap_holds(2, 3 * p + p / 10));
     }
 
     impl TierMap {

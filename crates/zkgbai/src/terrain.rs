@@ -8,6 +8,11 @@
 //! graph learns which of its links ground forces travel directly. The
 //! terrain itself is re-analysed every [`REANALYSIS_PERIOD`] frames, so
 //! terraforming (ours or the enemy's: walls, ditches, ramps) shows up.
+//! Only tiers whose ground changed (what stops or slows their units) are
+//! analysed again, and their regions and chokepoints keep the ids they had
+//! where they are still there (`zk_terrain::Terrain::rebuild`, `absorb`):
+//! structures level their footprints all game long, and a fresh analysis
+//! used to renumber most regions for a ditch.
 //!
 //! With `regionsplit` (see [`split_spots`]) the analysis also
 //! cuts regions holding many metal spots into pieces around clusters of
@@ -20,7 +25,7 @@ use springai::{Callback, Unit, UnitDef, Vec3};
 use zk_terrain::occupancy::{Occupancy, Presence};
 use zk_terrain::paths::{Paths, SNAP};
 use zk_terrain::strategy::{Analysis, Asset, Scenario, Side, ground_distance};
-use zk_terrain::{ChokeKind, MoveClass, Pos, SpringMapData, Terrain, Tier, TierMap};
+use zk_terrain::{ChokeKind, MoveClass, Pos, Prior, SpringMapData, Terrain, Tier, TierMap};
 
 use crate::Ai;
 use crate::defs::Defs;
@@ -91,7 +96,7 @@ impl TerrainModel {
             })
             .collect();
         cb.log(&format!("terrain: slope limits {}", classes.join(", ")));
-        match analyse(cb, defs, 0, spots) {
+        match analyse(cb, defs, 0, spots, Prior::default()) {
             Ok(job) => TerrainModel::Pending { job },
             Err(e) => {
                 cb.log(&format!("terrain: {e}; terrain analysis disabled"));
@@ -145,8 +150,9 @@ fn tier_classes(defs: &Defs) -> Vec<(Tier, MoveClass)> {
 }
 
 /// Analyse the map as it is now on a background thread, cutting regions
-/// around the metal `spots` (none: no cuts).
-fn analyse(cb: Callback, defs: &Defs, frame: i32, spots: Vec<Pos>) -> Result<Job, String> {
+/// around the metal `spots` (none: no cuts), for the tiers whose input
+/// changed since the model `prior` comes from (all for a default one).
+fn analyse(cb: Callback, defs: &Defs, frame: i32, spots: Vec<Pos>, prior: Prior) -> Result<Job, String> {
     let data = map_data(cb)?;
     let input = SpringMapData { slope_map: data.slope_map.clone(), height_map: data.height_map.clone(), ..data };
     let classes = tier_classes(defs);
@@ -157,7 +163,7 @@ fn analyse(cb: Callback, defs: &Defs, frame: i32, spots: Vec<Pos>) -> Result<Job
         .name("zkgbai-terrain".into())
         .spawn(move || {
             let start = Instant::now();
-            let terrain = Terrain::build_with_spots(&data, &classes, &cut);
+            let terrain = Terrain::rebuild(&data, &classes, &cut, &prior);
             let _ = tx.send((terrain, start.elapsed(), cut.len()));
         })
         .map_err(|e| format!("cannot start analysis thread ({e})"))?;
@@ -257,15 +263,16 @@ impl Ai {
             let n = spots.as_ref().map_or(0, Vec::len);
             self.log(&format!("terrain: re-analysing with regions cut around {n} metal spots (regionsplit)"));
         }
+        let prior = spots.as_ref().and(self.terrain()).map(Terrain::prior).unwrap_or_default();
         if let TerrainModel::Ready { rebuild, .. } = &mut self.terrain {
             match rebuild.as_ref().map(|job| job.rx.try_recv()) {
                 None if spots.is_some() => {
-                    match analyse(self.cb, &self.defs, frame, spots.take().unwrap_or_default()) {
+                    match analyse(self.cb, &self.defs, frame, spots.take().unwrap_or_default(), prior) {
                         Ok(job) => *rebuild = Some(job),
                         Err(e) => self.cb.log(&format!("terrain: re-analysis failed: {e}")),
                     }
                 }
-                Some(Ok((terrain, _, split))) => self.terrain_replace(terrain, split),
+                Some(Ok((fresh, _, split))) => self.terrain_absorb(fresh, split),
                 Some(Err(TryRecvError::Disconnected)) => *rebuild = None,
                 Some(Err(TryRecvError::Empty)) => self.terrain_watchdog(frame),
                 _ => {}
@@ -496,11 +503,32 @@ impl Ai {
 }
 
 impl Ai {
-    /// Swap in a re-analysed model: report what terraforming changed, and
-    /// redo what refers to the old model's regions and chokepoints.
-    fn terrain_replace(&mut self, terrain: Terrain, split: usize) {
-        let changes = self.terrain_changes(&terrain);
-        self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
+    /// Take in a re-analysis: the tiers whose ground changed replace ours,
+    /// keeping the ids of regions and chokepoints still there. If any did,
+    /// report what terraforming changed and redo what refers to the old
+    /// model's regions and chokepoints.
+    fn terrain_absorb(&mut self, fresh: Terrain, split: usize) {
+        let changes = self.terrain_changes(&fresh);
+        let TerrainModel::Ready { terrain, rebuild, split: built } = &mut self.terrain else { return };
+        *rebuild = None;
+        *built = split;
+        if fresh.tiers().is_empty() {
+            return;
+        }
+        let renumbered = terrain.absorb(fresh);
+        let tiers: Vec<String> = (renumbered.iter())
+            .map(|r| {
+                format!(
+                    "{} ({}/{} regions, {}/{} chokepoints kept their ids)",
+                    r.tier.name(),
+                    r.regions_kept,
+                    r.regions,
+                    r.chokes_kept,
+                    r.chokes
+                )
+            })
+            .collect();
+        self.log(&format!("terrain: re-analysed {}", tiers.join(", ")));
         if let Some(changes) = changes {
             self.log(&format!("terrain: re-analysis: {changes}"));
         }

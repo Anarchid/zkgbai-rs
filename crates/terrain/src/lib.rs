@@ -18,7 +18,10 @@
 //!   the time they take;
 //! - optionally ([`Terrain::build_with_spots`]), regions that hold many
 //!   metal spots cut into pieces around clusters of them ([`split`]), so
-//!   that region-level reads do not lump together spots kilometres apart.
+//!   that region-level reads do not lump together spots kilometres apart;
+//! - re-analysis ([`Terrain::rebuild`], [`Terrain::absorb`]) that leaves
+//!   tiers whose ground did not change alone and keeps the ids of regions
+//!   and chokepoints that are still there.
 //!
 //! On top of the model, [`strategy`] analyses the game's territory (what
 //! guards what, which chokepoints to hold or wall, where bridges, drops and
@@ -38,6 +41,7 @@ pub mod lanes;
 pub mod occupancy;
 pub mod paths;
 pub mod split;
+mod stable;
 pub mod strategy;
 #[cfg(test)]
 mod testmaps;
@@ -45,6 +49,7 @@ pub mod threat;
 mod tier;
 
 pub use borders::{FLANK_REACH, GATE_MARGIN};
+pub use stable::{Prior, Renumbered};
 pub use tier::{MoveClass, SOFT_SPEED, Tier, default_slope_mod, engine_max_slope};
 pub use zkta::spring_map::SpringMapData;
 
@@ -184,6 +189,8 @@ pub struct TierMap {
     region: Vec<u32>,
     /// Fraction of the map passable for this tier.
     pub passable_fraction: f32,
+    /// What the model was built from (see [`Terrain::rebuild`]).
+    pub(crate) built: stable::Built,
 }
 
 impl TierMap {
@@ -341,7 +348,47 @@ impl Terrain {
     /// of the metal `spots` into pieces around clusters of them (see
     /// [`split`]); no spots, no cuts.
     pub fn build_with_spots(data: &SpringMapData, classes: &[(Tier, MoveClass)], spots: &[Pos]) -> Terrain {
-        Terrain { tiers: classes.iter().map(|&(t, c)| build::tier_map(data, t, c, spots)).collect() }
+        Terrain::rebuild(data, classes, spots, &Prior::default())
+    }
+
+    /// What [`rebuild`](Self::rebuild) needs to know of this model.
+    pub fn prior(&self) -> Prior {
+        Prior { tiers: self.tiers.iter().map(|m| (m.tier, m.built.clone())).collect() }
+    }
+
+    /// Like [`build_with_spots`](Self::build_with_spots), for the tiers
+    /// whose input changed since the model `prior` comes from: what stops
+    /// or slows their units, their movement class or the `spots` (in any
+    /// order). The others are left out; their models still hold, though
+    /// slopes may have changed under them without changing what stops or
+    /// slows units (structures level their footprints all game long), which
+    /// leaves climbs, bypasses, walls and border crossings as measured
+    /// before. Regions holding many spots are cut into as many pieces as
+    /// before while their size stays near the old one (see [`split`]).
+    pub fn rebuild(data: &SpringMapData, classes: &[(Tier, MoveClass)], spots: &[Pos], prior: &Prior) -> Terrain {
+        let tiers = classes.iter().filter_map(|&(t, c)| build::tier_map_since(data, t, c, spots, prior.tier(t)));
+        Terrain { tiers: tiers.collect() }
+    }
+
+    /// Take the tiers of `fresh` (a [`rebuild`](Self::rebuild) of this
+    /// model) in place of ours, their regions and chokepoints numbered after
+    /// ours where they are still there (see [`TierMap::renumber_after`]).
+    pub fn absorb(&mut self, fresh: Terrain) -> Vec<Renumbered> {
+        let mut done = Vec::new();
+        for mut map in fresh.tiers {
+            match self.tiers.iter_mut().find(|m| m.tier == map.tier) {
+                Some(old) => {
+                    done.push(map.renumber_after(old));
+                    *old = map;
+                }
+                None => {
+                    let (regions, chokes) = (map.regions.len(), map.chokes.len());
+                    done.push(Renumbered { tier: map.tier, regions, regions_kept: 0, chokes, chokes_kept: 0 });
+                    self.tiers.push(map);
+                }
+            }
+        }
+        done
     }
 
     pub fn tier(&self, tier: Tier) -> Option<&TierMap> {
