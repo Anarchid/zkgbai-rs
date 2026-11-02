@@ -80,12 +80,14 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
 /// `conquest` (the commander walks to forward ground a few turrets hold,
-/// takes its metal, and fortifies it when the denial pays) is a 2026-10-31
-/// experiment, installed as ZKGBAI conquest for its first battery;
-/// `conquestleash` keeps its commander near the ground it took, `conquestsym`
-/// measures both sides' walks alike, `conquestseq` goes on to the next
-/// objective (2026-11-02).
-pub(crate) const OFF_BY_DEFAULT: [&str; 22] = [
+/// takes its metal, and fortifies it when the denial pays) and `conquestsym`
+/// (both sides' walks to an objective measured alike) are on in the wip line
+/// for observation (2026-11-02; batteries in zkgbai-runs/conquest: on - off
+/// +0.03, sym - on +0.07; disable=conquest to opt out). `conquestleash`
+/// (the commander keeps near the ground it took, b3 -0.11) and
+/// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
+/// sym) stay off.
+pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "pairs",
     "currency",
     "permanence",
@@ -104,9 +106,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 22] = [
     "chatcommands",
     "densgate",
     "fight2d",
-    "conquest",
     "conquestleash",
-    "conquestsym",
     "conquestseq",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
