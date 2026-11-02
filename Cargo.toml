@@ -13,7 +13,7 @@ springai-sys = { path = "crates/springai-sys" }
 springai = { path = "crates/springai" }
 zk-terrain = { path = "crates/terrain" }
 # Terrain decomposition into regions and chokepoints.
-zkta = { package = "zkta-rs", git = "https://github.com/Anarchid/zkta-rust", rev = "828d873", default-features = false }
+zkta = { package = "zkta-rs", git = "https://github.com/Anarchid/zkta-rust", rev = "ed881bd", default-features = false }
 
 [profile.release]
 # The engine must never be taken down by an AI panic: we catch unwinds at the
@@ -36,4 +36,4 @@ opt-level = 1
 # zkta's Voronoi backend (boostvoronoi) keeps its beach line in a cpp_map skip
 # list with OS-seeded levels, which made terrain analysis vary between runs;
 # zkta-rust vendors cpp_map with a fixed-seed RNG. Dependents must repeat this.
-cpp_map = { git = "https://github.com/Anarchid/zkta-rust", rev = "828d873" }
+cpp_map = { git = "https://github.com/Anarchid/zkta-rust", rev = "ed881bd" }
