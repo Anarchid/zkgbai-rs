@@ -1241,11 +1241,11 @@ mod tests {
     const SRELOAD_CASES: &str = include_str!("testdata/mech_sreload_cases.tsv");
     const SRELOAD_FATES: &str = include_str!("testdata/mech_sreload_fates.tsv");
 
-    /// export_mech.VARIANTS by name.
+    /// export_mech.VARIANTS by name (both with `sreload` since 2026-11-03).
     fn variant(name: &str) -> SimFlags {
         match name {
-            "focus" => SimFlags::from_switches(false, true, false),
-            "2d" => SimFlags::from_switches(true, false, false),
+            "focus" => SimFlags::from_switches(false, true, true),
+            "2d" => SimFlags::from_switches(true, false, true),
             v => panic!("variant {v:?}"),
         }
     }
