@@ -19,10 +19,21 @@
 //! (`fightsim::local`: every identified enemy about, the commander and our
 //! armed units and turrets within [`FRIENDS`]), ZK's tactical AI moving
 //! the units it governs (`kiting_fates`: Buoys keep their range), over
-//! [`HORIZON`] (10 s). The commander is in danger when the sim's own
-//! P(dead) reaches [`DEATH`], or when it comes out under [`CRIPPLED`] of
-//! its health having lost [`LOSS`] of it (3 Buoys at 420: 57% gone, none
-//! of them hurt). Enemy turrets it is out of range of stay out of the
+//! [`HORIZON`] (10 s).
+//!
+//! The commander does not take a costly fight even when it wins it: its
+//! death is permanent. Besides its metal and build power, every new
+//! commander carries the Vanguard Economy Pack (4 metal and 6 energy
+//! income) for the rest of the game (user, 2026-11-03: "A commander's loss
+//! is not just lasting damage, it's permanent: -4 income forever"). It is
+//! in danger when the sim's own P(dead) reaches [`DEATH`], when it loses
+//! [`LOSS`] of its health within the horizon whatever it kills, or when it
+//! comes out under [`LOW`] of its health having lost [`LOW_LOSS`]. Most
+//! fights are still closing at the horizon (the sim's P(dead) was 0 in
+//! every judgement of the first smoke), so the loss carries the rule: one
+//! Redback at 600 costs a base recon trainer 41% while it kills it, 3
+//! Buoys at 420 cost it 57% and none of them is hurt; a few Fleas or a
+//! lone Glaive cost it 0-5%. Enemy turrets it is out of range of stay out of the
 //! fight (the a-move would walk it in); unidentified contacts are left out
 //! (the threat rules still see them).
 //!
@@ -55,10 +66,12 @@ const PERIOD: i32 = 10;
 /// Our armed units and turrets this close to the commander fight beside it.
 const FRIENDS: f32 = 600.0;
 /// The sim's own P(dead) at which the commander leaves...
-const DEATH: f32 = 0.5;
-/// ...or the health share it must not end below, having lost this share.
-const CRIPPLED: f32 = 0.5;
-const LOSS: f32 = 0.15;
+const DEATH: f32 = 0.25;
+/// ...or the share of its health it must not lose within the horizon...
+const LOSS: f32 = 0.2;
+/// ...or the share it must not end below, having lost this share.
+const LOW: f32 = 0.5;
+const LOW_LOSS: f32 = 0.1;
 /// The danger holds this long past its last verdict (frames).
 const HOLD: i32 = 150;
 /// Jobs the danger's enemies reach are off this long after (frames)...
@@ -115,8 +128,8 @@ struct Verdict {
 /// Whether a commander with `hp` of `max` health and this fate is in
 /// danger.
 fn in_danger(p_raw: f32, hp: f32, hp_left: f32, max: f32) -> bool {
-    let max = max.max(1.0);
-    p_raw >= DEATH || (hp_left < CRIPPLED * max && hp - hp_left >= LOSS * max)
+    let (max, lost) = (max.max(1.0), hp - hp_left);
+    p_raw >= DEATH || lost >= LOSS * max || (hp_left < LOW * max && lost >= LOW_LOSS * max)
 }
 
 impl Ai {
@@ -398,16 +411,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn danger_is_death_or_a_crippling_loss() {
-        // Dies.
+    fn danger_is_death_or_a_costly_fight_even_a_won_one() {
+        // Dies, or might.
         assert!(in_danger(0.6, 3800.0, 0.0, 3800.0));
+        assert!(in_danger(0.3, 3800.0, 2000.0, 3800.0));
         // 3 Buoys at 420: 57% of its health gone, none of them hurt.
         assert!(in_danger(0.0, 3800.0, 1623.0, 3800.0));
-        // 3 Glaives: it kills them and keeps 58%.
-        assert!(!in_danger(0.0, 3800.0, 2213.0, 3800.0));
+        // One Redback at 600 (smoke1 g1): it kills it, but loses 41%.
+        assert!(in_danger(0.0, 3229.0, 1882.0, 3250.0));
+        // A few Fleas or a lone Glaive: a scratch.
+        assert!(!in_danger(0.0, 3250.0, 3178.0, 3250.0));
+        assert!(!in_danger(0.0, 3800.0, 3650.0, 3800.0));
         // Already hurt, a lone raider scratches it: no reason to leave.
         assert!(!in_danger(0.0, 1500.0, 1400.0, 3800.0));
-        // Already hurt and losing a sixth more: leave.
-        assert!(in_danger(0.0, 1500.0, 900.0, 3800.0));
+        // Already hurt and losing a tenth more: leave.
+        assert!(in_danger(0.0, 1500.0, 1100.0, 3800.0));
     }
 }
