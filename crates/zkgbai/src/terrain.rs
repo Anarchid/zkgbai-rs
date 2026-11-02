@@ -8,6 +8,10 @@
 //! graph learns which of its links ground forces travel directly. The
 //! terrain itself is re-analysed every [`REANALYSIS_PERIOD`] frames, so
 //! terraforming (ours or the enemy's: walls, ditches, ramps) shows up.
+//!
+//! With `regionsplit` (see [`split_spots`]) the analysis also
+//! cuts regions holding many metal spots into pieces around clusters of
+//! them (`zk_terrain::split`); switching it while playing re-analyses.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
@@ -20,16 +24,20 @@ use zk_terrain::{ChokeKind, MoveClass, Pos, SpringMapData, Terrain, Tier, TierMa
 
 use crate::Ai;
 use crate::defs::Defs;
+use crate::graph::GraphManager;
 
 /// An analysis under way on its thread.
 pub struct Job {
-    /// The model and its compute time, when done.
-    rx: Receiver<(Terrain, Duration)>,
+    /// The model, its compute time and the number of metal spots its
+    /// regions were cut around, when done.
+    rx: Receiver<(Terrain, Duration, usize)>,
     started: Instant,
     /// Game frame it started at.
     frame: i32,
     /// A copy of its input, written out if it runs past [`STUCK_AFTER`].
     input: Option<SpringMapData>,
+    /// The metal spots regions are cut around (none: no cuts).
+    spots: Vec<Pos>,
 }
 
 pub enum TerrainModel {
@@ -41,6 +49,8 @@ pub enum TerrainModel {
         terrain: Terrain,
         /// A re-analysis under way.
         rebuild: Option<Job>,
+        /// Metal spots the model's regions were cut around (0: none).
+        split: usize,
     },
     Unavailable,
 }
@@ -65,8 +75,9 @@ const TIER_UNITS: [(Tier, &str); 6] = [
 ];
 
 impl TerrainModel {
-    /// Fetch the map data and start the analysis thread.
-    pub fn start(cb: Callback, defs: &Defs) -> Self {
+    /// Fetch the map data and start the analysis thread; regions holding
+    /// many of the metal `spots` get cut around them (none: no cuts).
+    pub fn start(cb: Callback, defs: &Defs, spots: Vec<Pos>) -> Self {
         let classes: Vec<String> = tier_classes(defs)
             .iter()
             .map(|(t, c)| {
@@ -80,7 +91,7 @@ impl TerrainModel {
             })
             .collect();
         cb.log(&format!("terrain: slope limits {}", classes.join(", ")));
-        match analyse(cb, defs, 0) {
+        match analyse(cb, defs, 0, spots) {
             Ok(job) => TerrainModel::Pending { job },
             Err(e) => {
                 cb.log(&format!("terrain: {e}; terrain analysis disabled"));
@@ -119,6 +130,12 @@ fn map_data(cb: Callback) -> Result<SpringMapData, String> {
     Ok(data)
 }
 
+/// The metal spots to cut regions around (`zk_terrain::split`): all of
+/// them with `regionsplit` on, none with it off.
+pub fn split_spots(graph: &GraphManager, on: bool) -> Vec<Pos> {
+    if on { graph.metal_spots.iter().map(|m| pos(m.position)).collect() } else { Vec::new() }
+}
+
 /// Each tier's movement class, from the game's constructor of that tier.
 fn tier_classes(defs: &Defs) -> Vec<(Tier, MoveClass)> {
     TIER_UNITS
@@ -127,22 +144,24 @@ fn tier_classes(defs: &Defs) -> Vec<(Tier, MoveClass)> {
         .collect()
 }
 
-/// Analyse the map as it is now on a background thread.
-fn analyse(cb: Callback, defs: &Defs, frame: i32) -> Result<Job, String> {
+/// Analyse the map as it is now on a background thread, cutting regions
+/// around the metal `spots` (none: no cuts).
+fn analyse(cb: Callback, defs: &Defs, frame: i32, spots: Vec<Pos>) -> Result<Job, String> {
     let data = map_data(cb)?;
     let input = SpringMapData { slope_map: data.slope_map.clone(), height_map: data.height_map.clone(), ..data };
     let classes = tier_classes(defs);
     let (tx, rx) = mpsc::channel();
+    let cut = spots.clone();
     // Pure computation: the thread must never call into the engine.
     std::thread::Builder::new()
         .name("zkgbai-terrain".into())
         .spawn(move || {
             let start = Instant::now();
-            let terrain = Terrain::build_with(&data, &classes);
-            let _ = tx.send((terrain, start.elapsed()));
+            let terrain = Terrain::build_with_spots(&data, &classes, &cut);
+            let _ = tx.send((terrain, start.elapsed(), cut.len()));
         })
         .map_err(|e| format!("cannot start analysis thread ({e})"))?;
-    Ok(Job { rx, started: Instant::now(), frame, input: Some(input) })
+    Ok(Job { rx, started: Instant::now(), frame, input: Some(input), spots })
 }
 
 /// The terrain limits of a ground unit type; `None` for aircraft and
@@ -206,6 +225,12 @@ impl Ai {
         reaches(self.reach_terrain(), def, from, to, range)
     }
 
+    /// How many metal spots `regionsplit` wants the model's regions cut
+    /// around (see [`split_spots`]).
+    fn terrain_split_count(&self) -> usize {
+        if self.dev_off("regionsplit") { 0 } else { self.graph.metal_spots.len() }
+    }
+
     /// The terrain model for reachability checks (none when they are off).
     pub fn reach_terrain(&self) -> Option<&Terrain> {
         if self.dev_off("reach") { None } else { self.terrain.get() }
@@ -218,15 +243,29 @@ impl Ai {
             self.terrain_classify_links();
         }
         let reanalyse = !self.dev_off("reanalysis");
+        // A model cut around other spots than `regionsplit` asks for now
+        // (switched while playing, or the spots arrived late) is redone at
+        // once, re-analysis on or off.
+        let built = match &self.terrain {
+            TerrainModel::Ready { split, rebuild: None, .. } => Some(*split),
+            _ => None,
+        };
+        let resplit = built.is_some_and(|n| n != self.terrain_split_count());
+        let mut spots = (resplit || (reanalyse && (frame + self.offset) % REANALYSIS_PERIOD == 0))
+            .then(|| split_spots(&self.graph, !self.dev_off("regionsplit")));
+        if resplit {
+            let n = spots.as_ref().map_or(0, Vec::len);
+            self.log(&format!("terrain: re-analysing with regions cut around {n} metal spots (regionsplit)"));
+        }
         if let TerrainModel::Ready { rebuild, .. } = &mut self.terrain {
             match rebuild.as_ref().map(|job| job.rx.try_recv()) {
-                None if reanalyse && (frame + self.offset) % REANALYSIS_PERIOD == 0 => {
-                    match analyse(self.cb, &self.defs, frame) {
+                None if spots.is_some() => {
+                    match analyse(self.cb, &self.defs, frame, spots.take().unwrap_or_default()) {
                         Ok(job) => *rebuild = Some(job),
                         Err(e) => self.cb.log(&format!("terrain: re-analysis failed: {e}")),
                     }
                 }
-                Some(Ok((terrain, _))) => self.terrain_replace(terrain),
+                Some(Ok((terrain, _, split))) => self.terrain_replace(terrain, split),
                 Some(Err(TryRecvError::Disconnected)) => *rebuild = None,
                 Some(Err(TryRecvError::Empty)) => self.terrain_watchdog(frame),
                 _ => {}
@@ -235,17 +274,22 @@ impl Ai {
         }
         let TerrainModel::Pending { job } = &self.terrain else { return };
         match job.rx.try_recv() {
-            Ok((terrain, compute)) => {
-                self.terrain = TerrainModel::Ready { terrain, rebuild: None };
+            Ok((terrain, compute, split)) => {
+                self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
                 self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
+                if split > 0 {
+                    self.log(&format!("terrain: regions cut around clusters of the {split} metal spots (regionsplit)"));
+                }
                 for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
-                    let gates = t.chokes.iter().filter(|c| c.kind == ChokeKind::Gate).count();
+                    let count = |k: ChokeKind| t.chokes.iter().filter(|c| c.kind == k).count();
+                    let (gates, seams) = (count(ChokeKind::Gate), count(ChokeKind::Seam));
+                    let pieces = t.regions.iter().filter(|r| r.whole != r.id).count();
                     self.log(&format!(
-                        "terrain: {:<8} {:>5.1}% passable, {} regions, {gates} gates, {} borders",
+                        "terrain: {:<8} {:>5.1}% passable, {} regions ({pieces} new from cuts), {gates} gates, {} borders, {seams} seams",
                         t.tier.name(),
                         t.passable_fraction * 100.0,
                         t.regions.len(),
-                        t.chokes.len() - gates
+                        count(ChokeKind::Border),
                     ));
                 }
             }
@@ -304,6 +348,7 @@ impl Ai {
                     format!("C{} gate {:.0} (wall {:.0}{sides})", c.id, c.width, c.wall)
                 }
                 ChokeKind::Border => format!("C{} border {:.0}", c.id, c.width),
+                ChokeKind::Seam => format!("C{} seam {:.0}", c.id, c.width),
             };
             map_draw.add_point(at(c.pos), &format!("{label}{}", climbs.concat()));
         }
@@ -343,6 +388,7 @@ impl Ai {
             return;
         }
         let (input, started, secs) = (job.input.take(), job.frame, job.started.elapsed().as_secs_f64());
+        let split_spots: Vec<[f32; 2]> = job.spots.iter().map(|p| [p.x, p.z]).collect();
         let Some(input) = input else { return };
         let writeable = self.cb.writeable_dir();
         let dir = std::env::var_os("ZKGBAI_STUCK_DIR")
@@ -377,6 +423,7 @@ impl Ai {
             "pid": std::process::id(),
             "writeable_dir": writeable,
             "classes": classes,
+            "split_spots": split_spots,
         });
         let saved = std::fs::create_dir_all(&dir).and_then(|()| input.save(&map_file)).and_then(|()| {
             std::fs::write(dir.join(format!("{stem}.json")), serde_json::to_string_pretty(&info).unwrap_or_default())
@@ -451,9 +498,9 @@ impl Ai {
 impl Ai {
     /// Swap in a re-analysed model: report what terraforming changed, and
     /// redo what refers to the old model's regions and chokepoints.
-    fn terrain_replace(&mut self, terrain: Terrain) {
+    fn terrain_replace(&mut self, terrain: Terrain, split: usize) {
         let changes = self.terrain_changes(&terrain);
-        self.terrain = TerrainModel::Ready { terrain, rebuild: None };
+        self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
         if let Some(changes) = changes {
             self.log(&format!("terrain: re-analysis: {changes}"));
         }

@@ -27,13 +27,14 @@ const SCALE: u32 = 2;
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    let split = args.iter().position(|a| a == "--split").map(|i| args.remove(i)).is_some();
     let scenario = args.iter().position(|a| a == "--scenario").map(|i| {
         let file = args.get(i + 1).cloned().expect("--scenario needs a file");
         args.drain(i..i + 2);
         load_scenario(Path::new(&file))
     });
     if args.len() < 3 {
-        eprintln!("usage: terrain-view <map.zktamap> <out-dir> [tier,tier,...] [--scenario <file.json>]");
+        eprintln!("usage: terrain-view <map.zktamap> <out-dir> [tier,tier,...] [--scenario <file.json> [--split]]");
         std::process::exit(2);
     }
     let data = SpringMapData::load(Path::new(&args[1])).expect("cannot read map data");
@@ -48,7 +49,13 @@ fn main() {
     };
 
     let start = Instant::now();
-    let terrain = Terrain::build(&data, &tiers);
+    // --split: regions cut around the scenario's metal spots.
+    let spots: Vec<Pos> = match (&scenario, split) {
+        (Some(sc), true) => sc.assets.iter().map(|a| a.pos).collect(),
+        _ => Vec::new(),
+    };
+    let classes: Vec<_> = tiers.iter().map(|&t| (t, t.zero_k_class())).collect();
+    let terrain = Terrain::build_with_spots(&data, &classes, &spots);
     eprintln!("analysed {} tiers in {:.2}s", tiers.len(), start.elapsed().as_secs_f32());
     for map in terrain.tiers() {
         let path = out.join(format!("{}.png", map.tier.name()));
@@ -66,9 +73,10 @@ fn main() {
         let gates = map.chokes.iter().filter(|c| c.kind == ChokeKind::Gate);
         let soft = gates.clone().filter(|c| c.bypass.iter().any(|&b| b < HARD_BYPASS)).count();
         let borders = map.chokes.iter().filter(|c| c.kind == ChokeKind::Border);
+        let seams = map.chokes.iter().filter(|c| c.kind == ChokeKind::Seam).count();
         let climbing = borders.clone().filter(|c| c.climb.iter().any(|&x| x >= 32.0)).count();
         println!(
-            "{:<8} passable {:>5.1}%  regions {:>3}  gates {:>3} ({soft} soft)  borders {:>3} ({climbing} climbing)  -> {}",
+            "{:<8} passable {:>5.1}%  regions {:>3}  gates {:>3} ({soft} soft)  borders {:>3} ({climbing} climbing)  seams {seams:>3}  -> {}",
             map.tier.name(),
             map.passable_fraction * 100.0,
             map.regions.len(),
@@ -283,6 +291,11 @@ fn render(map: &TierMap, slopes: &[bool], muted: bool) -> RgbImage {
             let len = (climb / 4.0).clamp(24.0, 160.0);
             let tip = Pos::new(c.pos.x + (towards.x - c.pos.x) / d * len, c.pos.z + (towards.z - c.pos.z) / d * len);
             thick_line(&mut img, px(c.pos), px(tip), 2, Rgb([255, 230, 0]));
+        }
+    }
+    for c in map.chokes.iter().filter(|c| c.kind == ChokeKind::Seam) {
+        if let Some([a, b]) = c.gate {
+            line(&mut img, px(a), px(b), Rgb([0, 230, 230]));
         }
     }
     for c in map.chokes.iter().filter(|c| c.kind == ChokeKind::Gate) {

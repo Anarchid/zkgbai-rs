@@ -195,6 +195,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("scouts", "Intel", "deep scouting with cloaked Widows"),
     ("radar", "Intel", "watchtowers: advanced radar on raised ground"),
     ("reanalysis", "Intel", "the terrain re-analysed now and then (walls, ditches)"),
+    (
+        "regionsplit",
+        "Intel",
+        "terrain regions holding many metal spots cut into pieces around clusters of them (switching re-analyses)",
+    ),
     ("nukes", "Superweapons", "nuke silos and strikes"),
     ("nukeclear", "Superweapons", "our units keep clear of the blast of our missile in flight"),
     ("missiles", "Superweapons", "tactical missile silos"),
