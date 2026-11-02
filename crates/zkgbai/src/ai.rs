@@ -79,7 +79,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "pairs",
     "currency",
     "permanence",
@@ -99,6 +99,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
     "chatcommands",
     "densgate",
     "fight2d",
+    "frontgate",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.

@@ -11,6 +11,7 @@ pub mod enemy;
 pub mod fightsim;
 pub mod fire_squad;
 pub mod firefighters;
+pub mod front;
 pub mod handlers;
 pub mod impalers;
 pub mod incursions;
@@ -202,6 +203,8 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    /// The density of our fights (see [`front`]).
+    pub front: front::Front,
 }
 
 impl MilitaryManager {
@@ -268,6 +271,7 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            front: front::Front::default(),
         }
     }
 
@@ -585,6 +589,7 @@ impl Ai {
         self.guard("raid_test.update", |ai| ai.raid_test_update(frame));
         self.guard("stomp_test.update", |ai| ai.stomp_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
+        self.guard("front.update", |ai| ai.front_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
