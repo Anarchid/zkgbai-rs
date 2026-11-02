@@ -70,13 +70,13 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// and changed nothing against Circuit or Wires, and its standing units
 /// died more without killing more (enable=stayveto to opt in). The shadow
 /// switches (journal only) stay off.
-/// `densgate` (phase gates on the map's density clock) is on for WIP
-/// observation (2026-11-02, disable=densgate to opt out); off on main.
+/// `densgate` (phase gates on the map's density clock) waits for its A/B
+/// (enable=densgate to opt in).
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
     "pairs",
     "currency",
     "permanence",
@@ -94,6 +94,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
     "carpetspare",
     "stayveto",
     "chatcommands",
+    "densgate",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
