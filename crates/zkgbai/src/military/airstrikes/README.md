@@ -39,8 +39,10 @@ Primary missions:
   cheaper to buy.
 - At least five nearby wind generators: Phoenix, with an approach clear of
   known interceptors.
-- Aircraft on LOS/radar inbound to our territory: one Magpie and at least two
-  Raptors. Unidentified radar contacts can count when clearly above terrain.
+- Aircraft on LOS/radar inbound to our territory: at least two Raptors, with a
+  Magpie to assist (its EMG slows the quarry) when one is ready; it is never
+  bought or waited for. Unidentified radar contacts can count when clearly
+  above terrain.
 - Statics worth at least 1000 metal, and every identified factory or strider
   hub: Odin thermite. Singularities get a bonus; a factory counts three times
   its cost (it is where the army comes from, and the rebuild costs time), four
@@ -177,8 +179,10 @@ Within each tier, mission score is discounted by actual route length
 Procurement uses the same distance discount. Unfillable primary
 packages do not reserve every aircraft of a type; spare aircraft may take
 secondary opportunities while the remaining package is built. Overlapping jobs
-cannot launch duplicate sorties against the same group. There are at most four
-ordinary simultaneous sorties and 24 aircraft in a package; oversized jobs are rejected,
+cannot launch duplicate sorties against the same group. There are at most ten
+ordinary simultaneous sorties, at most four of them secondary (so single-plane
+static and opportunity sorties cannot crowd out a primary strike), and 24
+aircraft in a package; oversized jobs are rejected,
 not silently reduced. Mobile fixes must be live and at most five seconds old.
 
 Every 30 seconds, before ordinary dispatch, a combined-strike fallback checks
@@ -212,14 +216,36 @@ Active sorties recheck ingress and return corridors against current threats.
 An armed sortie may switch once to a known local opportunity even while its
 original mission remains healthy. The available payload must fit the new job,
 its estimated damage value must improve by more than 10%, and every loaded
-member must arrive at least one second sooner, within six seconds. Arrival
+member must arrive within six seconds, either at least one second sooner or
+later but worth the wait: its value per second over the rest of the sortie
+(the drop plus 30 s of flight home and rearm) at least 1.5 times the current
+one's (a Lance a second past a mex qualifies). Arrival
 estimates include route detours and target motion; candidates must lie within
 800 elmos of every loaded member and retain the survival, friendly-fire and
 target-reservation checks. The original target need not be nearby. The new
 attack is ordered immediately and gets the existing eight-second terminal
 commitment, preventing repeated shopping instead of releasing. Existing local
 fallbacks for lost, destroyed or unsafe targets remain available. Retarget logs
-distinguish `better_earlier_drop` from `fallback`.
+distinguish `better_drop` from `fallback`.
+
+Pooling (`live/pool.rs`, `disable=airpool`): a sortie retargets only its own
+bombers, so lone Ravens sent at mexes past a Lance could never take it (one 800
+bomb for 1000 HP). Once an update, the nearest free sorties (not yet switched,
+not in a wave, of strike kinds, every member a loaded, healthy Raven or Likho
+within 800 elmos of the target) whose bombers together fit a strike job give
+them up to one pooled sortie, when the pooled drop's value is at least 1.25
+times the drops they give up, the route survives and friendly fire is within
+bounds. The first donor becomes the pooled sortie (switched, so it does not
+switch again); the others dissolve and their targets are free. Logs read
+`airstrikes: pool N sorties (M bombers) -> Kind:target`.
+
+Magpie strafes (`disable=magpiestrafe`, secondary, priority 2): any identified
+ground unit or building in sight that cannot shoot at aircraft, along a route
+clear of AA. A Magpie's load (twelve EMG salvos of 48) answers 460 HP of a slow
+target and 200 of a raider (90 elmos/s or faster); targets needing more than
+four are left alone. A strafe takes Magpies only while at least three stay idle
+at home, the firefighters' included, for the next raid; Interdict on raiders in
+our territory remains a primary mission.
 Corridor selection retains the shared strategic threat map. Survival uses a
 separate estimate: known ground AA weapon damage against plane armor, projectile
 and salvo counts, and reload time. Enemy HP and splash weighting do not count

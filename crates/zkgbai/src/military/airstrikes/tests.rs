@@ -28,6 +28,7 @@ pub(super) fn enemy(id: i32) -> Contact {
         armor: 1.0,
         armed: false,
         speed: 50.0,
+        aa: false,
     }
 }
 fn clear() -> Risk {
@@ -71,10 +72,10 @@ fn group_and_heavy_switch_to_likho_with_aa() {
     assert!(packages(&job(MissionKind::Wind, 500.0), r, 800.0).is_empty());
 }
 #[test]
-fn interception_needs_magpie_and_raptors() {
+fn interception_takes_raptors_with_a_magpie_to_assist() {
     assert_eq!(
         packages(&job(MissionKind::Intercept, 1200.0), clear(), 800.0),
-        vec![vec![(Plane::Magpie, 1), (Plane::Raptor, 2)]]
+        vec![vec![(Plane::Magpie, 1), (Plane::Raptor, 2)], vec![(Plane::Raptor, 2)]]
     );
     assert!(inbound(Vec3::xz(3000.0, 0.0), Vec3::xz(-200.0, 0.0), Vec3::ZERO, false));
     assert!(!inbound(Vec3::xz(3000.0, 0.0), Vec3::xz(200.0, 0.0), Vec3::ZERO, false));
@@ -410,7 +411,9 @@ fn extraction_denial_has_value_without_changing_cost_eligibility() {
     solar.mex = false;
     solar.value = 70.0;
     solar.hp = 600.0;
-    let jobs = missions(&[solar, mex], Vec3::ZERO, 300);
+    // (Spare Magpies may strafe them too; this is about the Raven jobs.)
+    let jobs: Vec<_> =
+        missions(&[solar, mex], Vec3::ZERO, 300).into_iter().filter(|j| j.kind != MissionKind::Strafe).collect();
     assert_eq!(jobs[0].target, 1);
     assert_eq!(jobs[0].value, 340.0);
     assert!(jobs[0].score() > jobs[1].score() * 4.0);
@@ -763,4 +766,24 @@ fn collateral_is_priced_by_blast_reach() {
     let across = [unit(0.0, 200.0, 360.0, 65.0)];
     assert_eq!(group::collateral(arms, aim, from, &[(Plane::Phoenix, 1)], &across), 0.0);
     assert!(group::collateral_reach(arms) >= 350.0);
+}
+
+#[test]
+fn spare_magpies_strafe_what_cannot_shoot_back() {
+    let strafe = |mut e: Contact| {
+        e.value = 125.0;
+        missions(&[e], Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Strafe)
+    };
+    // A constructor (960 HP): three Magpies, in clear air only.
+    let con = Contact { hp: 960.0, max_hp: 960.0, ..enemy(1) };
+    let job = strafe(con.clone()).expect("strafe");
+    assert!(!job.kind.primary());
+    assert_eq!(packages(&job, clear(), 800.0), vec![vec![(Plane::Magpie, 3)]]);
+    assert!(packages(&job, Risk { aa: 0.3, ..clear() }, 800.0).is_empty());
+    // A raider is harder to hit: a 360-HP Glaive takes two.
+    let glaive = Contact { hp: 360.0, max_hp: 360.0, speed: 115.0, ..enemy(2) };
+    assert_eq!(packages(&strafe(glaive).unwrap(), clear(), 800.0), vec![vec![(Plane::Magpie, 2)]]);
+    // Anything that shoots at aircraft, or needs more than four, is not.
+    assert!(strafe(Contact { aa: true, ..con.clone() }).is_none());
+    assert!(strafe(Contact { hp: 3000.0, max_hp: 3000.0, ..con }).is_none());
 }

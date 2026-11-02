@@ -519,6 +519,16 @@ impl Ai {
     }
 
     /// Whether firefighters are out against this enemy.
+    /// Firefighters of this unit type not out on a fire.
+    pub(crate) fn firefighters_idle(&self, name: &str) -> usize {
+        let Some(kind) = Kind::of(name) else { return 0 };
+        let f = &self.firefighters;
+        f.units
+            .iter()
+            .filter(|(id, u)| Kind::of(self.defs.name_of(**u)) == Some(kind) && !f.on.contains_key(*id))
+            .count()
+    }
+
     pub(crate) fn firefighters_engaged(&self, enemy: i32) -> bool {
         self.firefighters.engaged.contains(&enemy) && !self.dev_off("firefighters")
     }
