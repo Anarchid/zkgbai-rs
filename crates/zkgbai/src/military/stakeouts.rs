@@ -81,7 +81,7 @@
 
 mod rescue;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde_json::json;
 use springai::{Unit, UnitDef, Vec3};
@@ -372,6 +372,10 @@ pub struct Stakeouts {
     /// Strategy frame the posts were planned from.
     posts_frame: i32,
     losses: VecDeque<i32>,
+    /// Pickets lent to another handler (QRF draft, rescue) and still alive:
+    /// they count against the budget until they come back or die, so a
+    /// hand-off is not a free refill from the factory (`picketloan`).
+    loaned: BTreeSet<i32>,
     /// Metal spots lookers fled from, until a frame.
     shunned: BTreeMap<usize, i32>,
     stats: Stats,
@@ -518,9 +522,10 @@ fn post_position(map: &TierMap, choke: usize, home: usize) -> Pos {
 }
 
 impl Ai {
-    /// Whether a new unit is a stakeout's.
-    pub fn stakeouts_claims(&self, name: &str) -> bool {
-        !self.dev_off("stakeouts") && SCOUTS.contains(&name)
+    /// Whether a new unit is a stakeout's: a scout, or one of theirs on loan
+    /// coming back (`picketloan`).
+    pub fn stakeouts_claims(&self, id: i32, name: &str) -> bool {
+        !self.dev_off("stakeouts") && (SCOUTS.contains(&name) || self.stakeouts.loaned.contains(&id))
     }
 
     pub fn stakeouts_add(&mut self, unit: Unit) {
@@ -532,6 +537,7 @@ impl Ai {
         unit.set_move_state(0, 0);
         unit.set_fire_state(2, 0);
         let frame = self.frame;
+        self.stakeouts.loaned.remove(&unit.id());
         self.stakeouts.members.insert(
             unit.id(),
             Stakeout {
@@ -578,6 +584,7 @@ impl Ai {
     pub fn stakeouts_remove_unit(&mut self, unit: Unit, attacker: Option<Unit>) {
         let id = unit.id();
         self.role_left_stakeouts(id);
+        self.stakeouts.loaned.remove(&id);
         let Some(m) = self.stakeouts.members.remove(&id) else { return };
         if let Some(p) = m.post.and_then(|i| self.stakeouts.posts.get_mut(i)) {
             p.manned = None;
@@ -602,9 +609,13 @@ impl Ai {
         );
     }
 
-    /// Let a stakeout go to another role (see `roles`): no loss.
+    /// Let a stakeout go to another role (see `roles`): no loss, but with
+    /// `picketloan` it stays on the books until it comes back or dies.
     pub(crate) fn stakeouts_forget(&mut self, unit: Unit) {
         let Some(m) = self.stakeouts.members.remove(&unit.id()) else { return };
+        if !self.dev_off("picketloan") {
+            self.stakeouts.loaned.insert(unit.id());
+        }
         if let Some(p) = m.post.and_then(|i| self.stakeouts.posts.get_mut(i)) {
             p.manned = None;
         }
@@ -652,7 +663,7 @@ impl Ai {
         }
         let s = &self.stakeouts;
         let coming = self.roles.declared_count(Role::Stakeout);
-        (s.wanted(self.phase_frame()) as i32 - (s.count() + coming) as i32).max(0)
+        (s.wanted(self.phase_frame()) as i32 - (s.count() + coming + s.loaned.len()) as i32).max(0)
     }
 
     /// Whether pickets have been dying fast lately: none is to be built.
@@ -899,7 +910,11 @@ impl Ai {
             .get_mut(&id)
             .is_some_and(|m| m.displacement.finish(p, contact, danger.is_some(), frame))
         {
-            let role = displaced_role(kgb_rand());
+            // With `picketloan` a displaced picket relocates: turned into a
+            // solo raider it would never come back and the factory would
+            // build another (the "conveyor" that fills a tank army with
+            // Kodachis).
+            let role = if self.dev_off("picketloan") { displaced_role(kgb_rand()) } else { Role::Stakeout };
             self.op_emit("stakeout", json!({"event": "displaced", "t": frame / 30, "unit": id, "to": role.name()}));
             if role == Role::SoloRaider {
                 unit.stop(0);

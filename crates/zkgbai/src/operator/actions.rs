@@ -82,6 +82,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("anyscout", "Defense", "stakeouts take any factory's scout"),
     (
+        "picketloan",
+        "Defense",
+        "pickets lent to the QRF stay on the stakeout budget until back or dead, and displaced pickets relocate instead of raiding (default on)",
+    ),
+    (
         "openscouts",
         "Defense",
         "a 1v1 jump, tank or ship opening builds a 200-metal wave of scouts first, then one per 8 raiders",
