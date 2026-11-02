@@ -32,70 +32,44 @@ use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::operator::Operator;
-use crate::posture::Posture;
+use crate::regime::Regime;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
 /// Experimental features that are off unless named in the `enable` option
-/// (or ZKGBAI_ENABLE): `pairs` (Constables pair up on builds) lost its
-/// mirror 3-5, expanding slower (12.5 mexes to 16.5 at minute 10) though
-/// losing fewer; `currency` (the danger of a job on an issue's crew priced
-/// as the worker's expected loss, and the crew holding where it pays) lost
-/// its mirrors 17-23 twice where the issue clients alone won 25-15.
-/// `permanence` (the interception planner keeps unseen enemy groups 45 s,
-/// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
-/// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
-/// frozen hover baseline, 20 games each, Oct 22: the memory frightens
-/// workers more than it positions squads.
+/// (or ZKGBAI_ENABLE).
 /// `mexporc` (a turret by every mex and link) is off by default since
 /// Oct 24: with the home-defense force standing in for the turret it won
 /// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
 /// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
-/// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
-/// `airtempo` (an air factory weighed up by the clock and the map's size)
-/// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
-/// `posture` (a fixed-defense budget from lanes and density) and
-/// `ecoladder` (fusions from 30 metal income) are off since Oct 27: in the
-/// Eye of Horus cloak mirror (zkgbai-runs/horus/mirror2, 10 games an arm)
-/// both off went 9-0-1 against 3-3-4 with both on, with the old economy at
-/// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
-/// better than both, each taking up the metal the other left.
-/// The crushing-defeat veto (`fightsim`) is on. Raider packs and organic
-/// fire squads remain opt-in. Ravager and Minotaur packs are on for WIP
-/// observation (disable=ravager,minotaur to opt out). `coalesce` (raider
-/// gangs judged by the fight predictor) is on for WIP observation
-/// (2026-10-31, disable=coalesce to opt out). `stayveto` (retreats the
-/// predictor says throw a won fight away) is off since the 2026-11-01
-/// batteries (zkgbai-runs/coalesce/RESULTS.md): it lost its mirror 3-15
-/// and changed nothing against Circuit or Wires, and its standing units
-/// died more without killing more (enable=stayveto to opt in). The shadow
-/// switches (journal only) stay off.
+/// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek); on
+/// Nov 2 it gained nothing on the 18 clustered-mex maps either (-0.037).
+/// Turning it on is the operator's "porc every mex" beside its porc zones.
+/// Organic fire squads (`firesquads`) are unfinished and opt-in.
+/// The crushing-defeat veto (`fightsim`) is on. Ravager and Minotaur packs
+/// are on (disable=ravager,minotaur to opt out). `coalesce` (raider gangs
+/// judged by the fight predictor) is on (2026-10-31, disable=coalesce to
+/// opt out). `stayveto` (retreats the predictor says throw a won fight
+/// away) is off since the 2026-11-01 batteries
+/// (zkgbai-runs/coalesce/RESULTS.md): it lost its mirror 3-15 and changed
+/// nothing against Circuit or Wires, and its standing units died more
+/// without killing more (enable=stayveto to opt in). The shadow switches
+/// (journal only) stay off.
+/// `carpetspare`: Phoenix carpets burn friendlies under the line unless
+/// named (Phantoms are worth the friendly fire).
 /// `densgate` (phase gates on the map's density clock) waits for its A/B
 /// (enable=densgate to opt in).
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
-    "pairs",
-    "currency",
-    "permanence",
-    "mexporc",
-    "airtempo",
-    "airfire",
-    "posture",
-    "ecoladder",
-    "scorcher",
-    "dagger",
-    "blitz",
-    "firesquads",
-    "coalesceshadow",
-    "stayshadow",
-    "carpetspare",
-    "stayveto",
-    "chatcommands",
-    "densgate",
-];
+/// Removed on 2026-11-02, with the off paths of 31 settled defaults: the
+/// switches that lost or never had their A/B (`pairs`, `currency`,
+/// `permanence`, `airtempo`, `airfire`, `posture`, `ecoladder`, the
+/// `scorcher`, `dagger` and `blitz` packs); their results are in the
+/// history of this comment.
+pub(crate) const OFF_BY_DEFAULT: [&str; 8] =
+    ["mexporc", "firesquads", "coalesceshadow", "stayshadow", "carpetspare", "stayveto", "chatcommands", "densgate"];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
 
@@ -191,8 +165,8 @@ pub struct Ai {
     pub incursions: Incursions,
     /// The project tracker (see `logistics`).
     pub logistics: Logistics,
-    /// Fixed defenses' share and sites (see `posture`).
-    pub posture: Posture,
+    /// How much the map is lanes, and how full it is (see `regime`).
+    pub regime: Regime,
     /// Our teleport bridge and the squads going through it.
     pub teleports: Teleports,
     /// Our air transports and the drop under way.
@@ -324,7 +298,7 @@ impl SkirmishAi for Ai {
             strategy: None,
             incursions: Incursions::default(),
             logistics: Logistics::default(),
-            posture: Posture::default(),
+            regime: Regime::default(),
             teleports: Teleports::default(),
             drops: Drops::default(),
             intel: Intel::default(),
@@ -599,7 +573,7 @@ impl Ai {
         self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
         self.guard("war.incursions", |ai| ai.incursions_update(frame));
         self.guard("logistics.update", |ai| ai.logistics_update(frame));
-        self.guard("posture.update", |ai| ai.posture_update(frame));
+        self.guard("regime.update", |ai| ai.regime_update(frame));
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }

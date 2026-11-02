@@ -674,8 +674,8 @@ impl Ai {
         // Where the scout is a lane picket (Fleas, Darts; see `stakeouts`),
         // the stakeouts say how many: a post unmanned is a raid unseen, and
         // a picket more than they want is metal idle. Other factories build
-        // their cheapest fast unit for the stakeouts while they are short
-        // (feature `anyscout`), then scouts for raiding alone as before.
+        // their cheapest fast unit for the stakeouts while they are short,
+        // then scouts for raiding alone as before.
         let short = self.stakeouts_short(fac.kind());
         self.fac.scout_budget = if self.stakeouts_own(fac.kind()) || short > 0 {
             short
@@ -1485,10 +1485,9 @@ impl Ai {
             return "spiderscout";
         }
 
-        // Raiders (feature `venomraid`): Fleas in the opening, Venoms after
-        // it; the Fleas then are the stakeouts' alone (the scout detachment).
-        let venom_raid = !self.dev_off("venomraid");
-        if venom_raid && fac.raider_spam < 0.0 {
+        // Raiders: Fleas in the opening, Venoms after it; the Fleas then are
+        // the stakeouts' alone (the scout detachment).
+        if fac.raider_spam < 0.0 {
             return self.fac_spider_raider(fac);
         }
 
@@ -1504,7 +1503,7 @@ impl Ai {
         }
 
         // Now and then a wave of raiders, as the cloak factory sends Glaives.
-        if venom_raid && !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
+        if !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
             fac.raider_spam -= (((self.phase_income() / 5.0).floor() as i32).clamp(6, 12) - 1) as f32;
             return self.fac_spider_raider(fac);
         }
@@ -1644,10 +1643,9 @@ impl Ai {
     /// Constables early, in step with income, as CircuitAI does with jumpjets
     /// (its second by 1.5 minutes, then about one per 5.5 metal of income:
     /// 9 at minute 8 against our 3.5, when it had 18 mexes to our 10; we
-    /// built Pyros first). For the first EARLY_CONS_FRAMES; off with
-    /// `disable=earlycons`.
+    /// built Pyros first). For the first EARLY_CONS_FRAMES.
     fn fac_wants_early_constable(&self) -> bool {
-        if self.phase_frame() >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
+        if self.phase_frame() >= EARLY_CONS_FRAMES {
             return false;
         }
         // Constables begun or rolling out count too (`new_workers`, until
@@ -1661,8 +1659,8 @@ impl Ai {
     }
 
     /// A scout for the stakeouts from the opening factory of a 1v1 while
-    /// the map is sparse (density under the `density_ref` dial), feature
-    /// `openscouts`, where it is one of those that open with scouts (see
+    /// the map is sparse (density under the `density_ref` dial), where it
+    /// is one of those that open with scouts (see
     /// `stakeouts::opens_with_scouts`): right after the constructors, a
     /// wave of [`SCOUT_WAVE`] metal from its scout roster (4 Puppies, 1
     /// Kodachi, 2 Hunters or 4 Cutters), then a wave more per
@@ -1675,10 +1673,9 @@ impl Ai {
         if !fac.opener
             || !opens_with_scouts(fac.kind())
             || !self.is_1v1()
-            || self.dev_off("openscouts")
             || self.dev_off("stakeouts")
             || self.stakeouts_capped()
-            || self.posture.density >= self.posture_levers().density_ref
+            || self.regime.density >= self.regime_density_ref()
         {
             return None;
         }

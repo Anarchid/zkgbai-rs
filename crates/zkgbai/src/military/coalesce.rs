@@ -321,7 +321,6 @@ impl Ai {
 
     /// The raiders free to join a gang, and where each comes from.
     fn coalesce_candidates(&self) -> Vec<(i32, Origin, Unit)> {
-        let frame = self.frame;
         let h = &self.raider_handler;
         let mut out: Vec<(i32, Origin, Unit)> = Vec::new();
         let fighter = |id: &i32| self.fighters.get(id).map(|f| f.unit);
@@ -352,7 +351,7 @@ impl Ai {
             };
             out.push((*id, origin, f.unit));
         }
-        for (id, u) in self.stakeouts_borrowable(frame) {
+        for (id, u) in self.stakeouts_borrowable() {
             out.push((id, Origin::Stakeout, u));
         }
         out.retain(|&(id, _, u)| {

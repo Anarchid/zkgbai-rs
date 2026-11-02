@@ -8,17 +8,16 @@
 //! ground army is vehicles or hovers and ours is not: twelve elmos down is
 //! too steep for those (their slope limit is 27 degrees) while bots and
 //! amphibious units walk straight through. Once dug, the next terrain
-//! re-analysis sees the chokepoint closed to the enemy. With `detour`
-//! (2026-10-28) a ditch is dug only for what it is worth, how much longer
-//! it makes the enemy's way to our metal, and only by a worker whose job it
-//! beats; the old rule took the next fortified gate and the nearest worker
-//! (on Ravaged, a fifth of all constructor time to 6:00 with spots free).
-//! On by default since 2026-10-28 (user: "better to under-porc than to
-//! overporc", until a more principled answer); `disable=detour` restores
-//! the old rule. Its smoke (zkgbai-runs/detour, 4 games an arm) dug 1
-//! ditch to the old rule's 9 and showed the open point: scored one at a
-//! time, the early gates of a seal never pay, the last one (9 spots on
-//! Otago) only once the others are dug.
+//! re-analysis sees the chokepoint closed to the enemy. A ditch is dug only
+//! for what it is worth, how much longer it makes the enemy's way to our
+//! metal, and only by a worker whose job it beats (since 2026-10-28; the
+//! old rule took the next fortified gate and the nearest worker: on
+//! Ravaged, a fifth of all constructor time to 6:00 with spots free; user:
+//! "better to under-porc than to overporc", until a more principled
+//! answer). Its smoke (zkgbai-runs/detour, 4 games an arm) dug 1 ditch to
+//! the old rule's 9 and showed the open point: scored one at a time, the
+//! early gates of a seal never pay, the last one (9 spots on Otago) only
+//! once the others are dug.
 
 use serde_json::json;
 use springai::{NO_TIMEOUT, Unit, Vec3};
@@ -72,7 +71,7 @@ const DITCH_MIN_INCOME: f32 = 8.0;
 /// Workers this far from a ditch are not sent to dig it, elmos.
 const DITCH_WORKER_RANGE: f32 = 2500.0;
 
-/// With `detour`, no ditch is dug for less than this worth (in our average
+/// No ditch is dug for less than this worth (in our average
 /// spots, see `Analysis::slowdown_worth`)...
 const DITCH_MIN_WORTH: f32 = 0.5;
 /// ...and one is priced on the job ladder as a mex is: a quarter of the
@@ -133,7 +132,6 @@ impl Ai {
             return;
         }
         let Some(tier_map) = self.terrain().and_then(|t| t.tier(s.tier)) else { return };
-        let detour = !self.dev_off("detour");
         let fortify = !self.dev_off("fortify");
         let near = |list: &[Vec3], p: Vec3| list.iter().any(|&q| distance(p, q) < 150.0);
         let tried: Vec<Vec3> =
@@ -172,8 +170,7 @@ impl Ai {
         }
         // What each is worth, in our average spots: how much longer the
         // enemy's way to our metal gets with it closed besides the gates
-        // dug already (until a re-analysis makes those terrain). Journaled
-        // either way, acted on with `detour`.
+        // dug already (until a re-analysis makes those terrain).
         let dug = |c: usize| {
             (tier_map.chokes[c].gate)
                 .is_some_and(|[a, b]| near(&self.eco.ditched, Vec3::xz((a.x + b.x) / 2.0, (a.z + b.z) / 2.0)))
@@ -192,7 +189,7 @@ impl Ai {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (choke, mid, line))| {
-                    if detour && worth[i] < DITCH_MIN_WORTH {
+                    if worth[i] < DITCH_MIN_WORTH {
                         return None;
                     }
                     let gate = s.fortify.iter().find(|f| f.choke == *choke)?;
@@ -203,13 +200,11 @@ impl Ai {
                         .filter_map(|w| {
                             let travel = self.eco_fortify_travel(w, *mid)?;
                             let price = travel / 4.0 - DITCH_SPOT_PRICE * worth[i];
-                            let job = if detour { self.eco_current_job_cost(w).min(IDLE_JOB) } else { IDLE_JOB };
-                            if detour && price >= job {
+                            let job = self.eco_current_job_cost(w).min(IDLE_JOB);
+                            if price >= job {
                                 return None;
                             }
-                            let value = gate.score
-                                * super::fortify::travel_discount(travel)
-                                * if detour { worth[i] } else { 1.0 }
+                            let value = gate.score * super::fortify::travel_discount(travel) * worth[i]
                                 / (line.len() as f32 * 16.0).max(1.0);
                             Some((value, i, (w.id, price, job)))
                         })
@@ -219,41 +214,29 @@ impl Ai {
                 .map(|(_, i, w)| (i, w))
         } else {
             (|| {
-                // The old rule takes the first (nearest the enemy).
-                let pick = if detour {
-                    (0..sites.len())
-                        .filter(|&i| worth[i] >= DITCH_MIN_WORTH)
-                        .max_by(|&i, &j| worth[i].total_cmp(&worth[j]))
-                } else {
-                    Some(0)
-                };
-                let i = pick?;
+                // The site worth most, if it is worth digging.
+                let i = (0..sites.len())
+                    .filter(|&i| worth[i] >= DITCH_MIN_WORTH)
+                    .max_by(|&i, &j| worth[i].total_cmp(&worth[j]))?;
                 let (_, mid, _) = &sites[i];
                 let mid = *mid;
                 let worth = worth[i];
 
-                // The old rule: the nearest worker that is not running from
-                // anything. With `detour`, the ditch is a job like a mex (a quarter
-                // of the way, less DITCH_SPOT_PRICE per spot of worth) for whoever
-                // it beats the present job of by most.
+                // The ditch is a job like a mex (a quarter of the way, less
+                // DITCH_SPOT_PRICE per spot of worth) for whoever it beats the
+                // present job of by most, of the workers not running from
+                // anything.
                 let eligible = (self.eco.workers.values())
                     .filter(|w| !w.is_chicken && !w.assigned_plop && !w.unit.is_being_built())
                     .filter(|w| !self.eco_worker_held(w.id))
                     .map(|w| (distance(w.get_pos(), mid), w))
                     .filter(|&(d, _)| d <= DITCH_WORKER_RANGE);
-                let worker = if detour {
-                    eligible
-                        .map(|(d, w)| {
-                            (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, self.eco_current_job_cost(w).min(IDLE_JOB))
-                        })
-                        .filter(|&(_, price, job)| price < job)
-                        .max_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))
-                } else {
-                    eligible
-                        .min_by(|a, b| a.0.total_cmp(&b.0))
-                        .map(|(d, w)| (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, IDLE_JOB))
-                };
-                let (wid, price, job) = worker?;
+                let (wid, price, job) = eligible
+                    .map(|(d, w)| {
+                        (w.id, d / 4.0 - DITCH_SPOT_PRICE * worth, self.eco_current_job_cost(w).min(IDLE_JOB))
+                    })
+                    .filter(|&(_, price, job)| price < job)
+                    .max_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))?;
                 Some((i, (wid, price, job)))
             })()
         };
@@ -278,7 +261,7 @@ impl Ai {
         ));
         self.op_emit(
             "ditch",
-            json!({"event": "dig", "t": frame / 30, "detour": detour, "choke": choke, "x": mid.x.round(),
+            json!({"event": "dig", "t": frame / 30, "choke": choke, "x": mid.x.round(),
                    "z": mid.z.round(), "worth": round2(worth), "worker": wid, "was": was, "price": round2(price),
                    "job": (job < IDLE_JOB).then(|| round2(job)), "candidates": candidates}),
         );
@@ -331,7 +314,6 @@ impl Ai {
         self.crab_escort(id)
             || self.eco.terraform_hold.get(&id).is_some_and(|&until| until > self.frame)
             || self.eco_in_transit(id)
-            || self.logistics_holds(id)
     }
 
     pub(crate) fn eco_release_terraform(&mut self, builders: &[Unit]) {

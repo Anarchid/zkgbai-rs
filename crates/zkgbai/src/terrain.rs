@@ -753,12 +753,10 @@ impl Ai {
         let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
         let all_assets = self.strategy_assets();
         let mut assets = all_assets.clone();
-        // With `detour`, chokepoints are held (and walled) for our own metal
-        // only, not half of every free spot behind them: on Otago three
-        // mexes of ours had gates fortified at 1:29.
-        if !self.dev_off("detour") {
-            assets.retain(|a| a.side != Side::Neutral);
-        }
+        // Chokepoints are held (and walled) for our own metal only, not half
+        // of every free spot behind them: on Otago three mexes of ours had
+        // gates fortified at 1:29.
+        assets.retain(|a| a.side != Side::Neutral);
         let analysis = Analysis::run(&Scenario { map, ally_base: pos(ally), enemy_base: pos(enemy), assets: &assets });
         let elevation = self.cb.map();
         let leyline_enemy = self.strategy.as_ref().map_or(pos(enemy), |s| s.leyline_enemy);

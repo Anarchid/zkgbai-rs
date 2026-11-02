@@ -26,7 +26,7 @@ pub mod logistics;
 pub mod los;
 pub mod military;
 pub mod operator;
-pub mod posture;
+pub mod regime;
 pub mod terrain;
 pub mod util;
 

@@ -17,17 +17,11 @@ use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 // comparisons is restored.
 const NEVER: f32 = f32::MAX;
 
-/// Constables pair up on builds: a Constable within PAIR_RANGE already on a
-/// job makes it PAIR_BONUS cheaper to join (and is no crowd).
-const PAIRED_CON: &str = "jumpcon";
-const PAIR_RANGE: f32 = 500.0;
-const PAIR_BONUS: f32 = 150.0;
-
 /// Raid memory: enemy armed ground units seen within RAID_MEMORY frames and
 /// RAID_RADIUS of a job make it cost RAID_COST more (plus their danger),
 /// unless our power there is more than theirs / RAID_HOLD. Against
 /// jumpjets most of our constructors lost before minute 15 died building
-/// turrets where raiders had just been. Off with `disable=raidmem`.
+/// turrets where raiders had just been.
 const RAID_MEMORY: i32 = 30 * 20;
 const RAID_RADIUS: f32 = 800.0;
 const RAID_HOLD: f32 = 0.8;
@@ -53,13 +47,13 @@ const SQUAD_PULL: f32 = 3000.0;
 /// a stuck unit aside after 6-10 s), nor does the unstick test below fire on
 /// a unit re-ordered that often: on Horus a recon commander (build distance
 /// 144) stood 2-7 minutes behind our own solar, ordered 658 times, while
-/// metal floated. With `approach` a worker that has not got APPROACH_GAIN
+/// metal floated. Now a worker that has not got APPROACH_GAIN
 /// nearer, nor travelled APPROACH_TRAVEL (a detour), in APPROACH_SLOW is
 /// left to its order up to APPROACH_RESEND (one making headway is re-sent
 /// it every time, as before: holding every order 10 s cost income on every
 /// factory in horus/fix ab1), and one that has not in APPROACH_STALL drops
 /// the task and shuns the site for APPROACH_SHUN (within
-/// APPROACH_SHUN_RADIUS). On by default since Oct 27 (`disable=approach`).
+/// APPROACH_SHUN_RADIUS). Since Oct 27.
 const APPROACH_SLOW: i32 = 4 * 30;
 const APPROACH_RESEND: i32 = 10 * 30;
 const APPROACH_GAIN: f32 = 32.0;
@@ -141,12 +135,9 @@ impl Ai {
         let pos = unit.pos();
         // The threat maps as the worker sees them, under water too (see `water`).
         let view = self.war.view(unit.def());
-        // (A worker on the crew of an issue worth more to it than its
-        // risk stays: see `logistics`.)
         // The operator's greed dial scales the threat a worker perceives.
         let greed = self.op_greed();
         if !w.is_chicken
-            && !self.logistics_holds(wid)
             && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() && w.raid_defense.is_none() || w.get_shields() < 0.5)
                     && view.get_threat(pos) / greed > 0.0
@@ -262,8 +253,7 @@ impl Ai {
             }
             return;
         }
-        let approach = !self.dev_off("approach");
-        if approach && wtask == Some(task_id) && self.eco_approach_holds(wid, task_id, task_pos) {
+        if wtask == Some(task_id) && self.eco_approach_holds(wid, task_id, task_pos) {
             return;
         }
 
@@ -331,7 +321,7 @@ impl Ai {
                 let mut nav = crate::nav!(self);
                 w.move_to(task_pos, &mut nav);
             }
-            if approach && let Some(w) = self.eco.workers.get_mut(&wid) {
+            if let Some(w) = self.eco.workers.get_mut(&wid) {
                 let cmd = match order {
                     Order::Build(def, ..) => -def.id(),
                     Order::Repair(_) => CMD_REPAIR,
@@ -357,7 +347,7 @@ impl Ai {
         };
     }
 
-    /// `approach` (see [`APPROACH_RESEND`]): whether worker `wid`, out of
+    /// The approach rule (see [`APPROACH_RESEND`]): whether worker `wid`, out of
     /// build range of its own task `task_id` at `task_pos`, is left to the
     /// order it has, or has stalled and just dropped the task.
     fn eco_approach_holds(&mut self, wid: i32, task_id: TaskId, task_pos: Vec3) -> bool {
@@ -424,16 +414,10 @@ impl Ai {
         // Raiders seen lately near a job count as well as those seen there
         // now: jumpjets come out of the fog in seconds (see RAID_MEMORY).
         let raiders = self.eco_recent_raiders();
-        let currency = !self.dev_off("currency");
         let greed = self.op_greed();
         let threat_cost = |t: &WorkerTask| {
             let p = t.get_pos();
             let near: f32 = raiders.iter().filter(|r| distance(r.0, p) <= RAID_RADIUS).map(|r| r.1).sum();
-            // On the crew of an issue, the danger is in the bonus's
-            // currency: the expected loss of the worker (see `logistics`).
-            if currency && self.logistics_bonus(wid, t.id).is_some() {
-                return self.logistics_risk(worker, p, near);
-            }
             let mut cost = 500.0 * view.get_effective_threat(p).max(0.0);
             if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) {
                 cost += RAID_COST + near;
@@ -568,8 +552,6 @@ impl Ai {
         cluster_bonus(p, free)
     }
 
-    /// What worker `worker` at `wpos` doing `task` costs (lower is better),
-    /// less PAIR_BONUS for a Constable joining its partner (see below).
     /// The danger of the enemy armed ground units seen lately within
     /// RAID_RADIUS of `p` (see below).
     pub(crate) fn eco_raiders_near(&self, p: Vec3) -> f32 {
@@ -577,29 +559,14 @@ impl Ai {
     }
 
     /// Enemy armed ground units seen within RAID_MEMORY frames: where last
-    /// seen and their danger (empty with `disable=raidmem`).
+    /// seen and their danger.
     pub(super) fn eco_recent_raiders(&self) -> Vec<(Vec3, f32)> {
-        if self.dev_off("raidmem") {
-            return Vec::new();
-        }
         let frame = self.frame;
         (self.war.targets.values())
             .filter(|e| !e.is_dead && !e.is_static && !e.can_fly() && e.can_attack() && !e.is_worker)
             .filter(|e| frame - e.last_seen <= RAID_MEMORY && e.position != NULLPOS)
             .map(|e| (e.position, e.get_danger()))
             .collect()
-    }
-
-    fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
-        let cost = self.eco_cost_of_job_alone(worker, wpos, task);
-        if cost >= NEVER || self.dev_off("pairs") || self.defs.name_of(worker.unit) != PAIRED_CON {
-            return cost;
-        }
-        let partner = (task.assigned_workers.iter())
-            .filter(|&&id| id != worker.id)
-            .filter_map(|id| self.eco.workers.get(id))
-            .any(|w| !w.is_com && distance(w.get_pos(), wpos) <= PAIR_RANGE && self.defs.name_of(w.unit) == PAIRED_CON);
-        if partner { cost - PAIR_BONUS } else { cost }
     }
 
     /// What worker `w`'s present job costs it on the ladder (lower is
@@ -616,17 +583,13 @@ impl Ai {
         cost
     }
 
-    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+    /// What worker `worker` at `wpos` doing `task` costs (lower is better).
+    fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
         let task_pos = task.get_pos();
         let dist = distance(wpos, task_pos);
 
-        // Constables (5 build power for 135 metal, 550 health) go in pairs
-        // on one build, as good players pair them: the first other Constable
-        // on the job, if near, is a partner, not a crowd.
-        let pairs = !self.dev_off("pairs") && self.defs.name_of(worker.unit) == PAIRED_CON;
-        let mut partner = false;
         for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)) {
             // increment cost mod for every other worker unassigned to the given task that isn't the worker we're assigning
             // as long as they're closer or equaldist to the target.
@@ -634,14 +597,7 @@ impl Ai {
             let rdist = idist.max(200.0);
             let deltadist = (idist - dist).abs();
             if w.id != worker.id {
-                if pairs
-                    && !partner
-                    && !w.is_com
-                    && distance(w.get_pos(), wpos) <= PAIR_RANGE
-                    && self.defs.name_of(w.unit) == PAIRED_CON
-                {
-                    partner = true;
-                } else if w.is_com {
+                if w.is_com {
                     cost_mod += 2.0;
                 } else if rdist < dist || deltadist < 100.0 {
                     cost_mod += 1.0;
@@ -672,7 +628,7 @@ impl Ai {
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
                     // (Greedy workers build it while metal floats for want
-                    // of it: `energycrew`.)
+                    // of it, see `eco_floating_on_energy`.)
                     let greedy = worker.is_greedy && !self.eco_floating_on_energy();
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
@@ -733,10 +689,10 @@ impl Ai {
                     return -1000.0;
                 }
 
-                // A chokepoint's turret, with `detour`, is priced as light
-                // porc: its metal cost is no pull of its own (a Stinger
-                // outbid a mex at the same distance out to 1400 elmos).
-                let gate_turret = eco.fortify_tasks.contains(&task.id) && !self.dev_off("detour");
+                // A chokepoint's turret is priced as light porc: its metal
+                // cost is no pull of its own (a Stinger outbid a mex at the
+                // same distance out to 1400 elmos).
+                let gate_turret = eco.fortify_tasks.contains(&task.id);
                 if ids.expensive_ids.contains(&def_id) && !gate_turret {
                     // for expensive porc.
                     if eco.hard_estalled {
@@ -778,34 +734,25 @@ impl Ai {
                 if def_id == ids.pylon_id {
                     // for pylons: first of all while a superweapon waits
                     // for its site to have power (see `grid`)
-                    let gridmex = !self.dev_off("gridmex");
                     let nfus = eco.fusions.len();
-                    // With `gridmex`, pylons count once they stand: frames
-                    // counted as pylons dropped their own job down the
-                    // ladder, and one sat at 1% for 16 minutes (Folsom,
-                    // 2026-10-27).
-                    let npyl = if gridmex {
-                        eco.pylons.iter().filter(|u| !u.is_being_built()).count()
-                    } else {
-                        eco.pylons.len()
-                    };
+                    // Pylons count once they stand: frames counted as pylons
+                    // dropped their own job down the ladder, and one sat at
+                    // 1% for 16 minutes (Folsom, 2026-10-27).
+                    let npyl = eco.pylons.iter().filter(|u| !u.is_being_built()).count();
                     if eco.pending_power.is_some() {
                         return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));
                     }
                     // A frame already up is finished first.
-                    if gridmex && ctask.target.is_some() {
+                    if ctask.target.is_some() {
                         return (dist / 4.0) - 1000.0 + (500.0 * (cost_mod - 1.0));
                     }
                     if worker.is_greedy {
                         if nfus > npyl {
                             return (dist / 4.0) - 3000.0 + (500.0 * (cost_mod - 1.0));
                         }
-                        // The grid planner queues only pylons that pay
-                        // (`gridmex`): linking a mex is a mex's worth.
-                        if gridmex {
-                            return (dist / 4.0) - 100.0 + (600.0 * (cost_mod - 1.0)).max(0.0);
-                        }
-                        return dist + (10000.0 * cost_mod);
+                        // The grid planner queues only pylons that pay:
+                        // linking a mex is a mex's worth.
+                        return (dist / 4.0) - 100.0 + (600.0 * (cost_mod - 1.0)).max(0.0);
                     }
                     if nfus > npyl {
                         return (dist / 4.0) - 1000.0 + (500.0 * (cost_mod - 1.0));

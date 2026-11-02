@@ -9,7 +9,7 @@
 //! range 250) from a strider hub. Skuttles (`jumpbomb`: an 8000 blast) are
 //! taken in while heavies are about. Every Ultimatum is a jaeger. Widows
 //! only stun, the army does the killing: they are kept to a share of the
-//! rest of our army's metal (feature `widowcap`).
+//! rest of our army's metal.
 //!
 //! Jaegers walk cloaked and hold their fire, in squads of a kind, which
 //! form until they can take the heavies seen. A squad strikes a heavy
@@ -22,12 +22,11 @@
 //! have fired go back to a haven until they are reloaded. Skuttles are too frail and slow to wait for
 //! their squad's strike where the enemy is about: each pounces on any heavy
 //! worth one within its jump, its squad's mark or not, even one its blast
-//! alone does not kill (feature `pounce`), and jumps where the heavy will
-//! be when it lands, by its velocity (feature `lead`).
+//! alone does not kill, and jumps where the heavy will be when it lands,
+//! by its velocity.
 //!
 //! Hunters lie in wait rather than go after a heavy into the enemy's land
-//! (feature `ambush`; supported Widows can join our army on either side
-//! of the lines): its way over the ground is foreseen (a travel-time
+//! (supported Widows can join our army on either side of the lines): its way over the ground is foreseen (a travel-time
 //! field from it, as the QRF's, down to the asset of ours it heads for by
 //! the QRF mark's rule), and the squad waits beside the first point of it
 //! that it gets to, settled, before the heavy: out of enemy land and
@@ -35,7 +34,7 @@
 //! can take the opportunity, and for Widows only where our
 //! army can kill the heavy while it is stunned (a stun with nothing to
 //! finish it is wasted; they strike only there). Cloaked hunters keep out
-//! of sight of what moves (feature `dodge`): one that an enemy would
+//! of sight of what moves: one that an enemy would
 //! decloak within two seconds (a Skuttle shows itself to anything within
 //! 180, a Widow within 60) steps aside, where it stays clearest of them all;
 //! a Skuttle that cannot get clear on foot jumps clear, since its jumps
@@ -385,7 +384,7 @@ impl Ai {
         let orders = self.jaegers.ordered.iter().filter(|o| frame - o.1 <= ORDER_TIMEOUT);
         let ordered: f32 = orders.clone().filter_map(|o| self.defs.get(o.0)).map(|d| d.cost(self.metal)).sum();
         let have: f32 = self.jaegers.members.iter().filter_map(|id| self.fighters.get(id)).map(|f| f.metal_value).sum();
-        if kind.stuns && !self.dev_off("widowcap") && !self.jaeger_widow_fits() {
+        if kind.stuns && !self.jaeger_widow_fits() {
             return false;
         }
         self.jaegers.members.len() + orders.count() < MAX_JAEGERS && have + ordered < JAEGER_SHARE * heavy
@@ -418,12 +417,9 @@ impl Ai {
     /// Cloak upkeep of our jaegers on the move, energy a second, those on
     /// order counted (so that the store is full when they are out): the
     /// energy reserve asked of the game holds a few seconds of it (see
-    /// `scouts_reserve`; feature `jaegerreserve`). Without it the store
-    /// runs dry while we build, and a cloak paid from it flickers out.
+    /// `scouts_reserve`). Without it the store runs dry while we build,
+    /// and a cloak paid from it flickers out.
     pub fn jaeger_upkeep(&self) -> f32 {
-        if self.dev_off("jaegerreserve") {
-            return 0.0;
-        }
         let frame = self.frame;
         let have: f32 = (self.jaegers.members.iter().filter_map(|id| self.fighters.get(id)))
             .filter(|f| f.unit.health() > 0.0)
@@ -699,7 +695,7 @@ impl Ai {
             // Hunters that lie in wait take a heavy that may come our way
             // (where to wait for it decides), Widows one that our army can
             // finish where it is.
-            let supported = if kind.ambush > 0.0 && !self.dev_off("ambush") {
+            let supported = if kind.ambush > 0.0 {
                 (kind.stuns && self.jaeger_finishes(p, e.def_health())) || !self.graph.is_enemy_territory(p)
             } else {
                 war.get_total_friendly_power(p) > 0.0
@@ -765,7 +761,7 @@ impl Ai {
             Phase::Hunting(target) => {
                 let keep = target.filter(|&t| self.jaeger_cost(kind, ready, pos, t, &army).is_some());
                 let target = keep.or_else(|| self.jaeger_target(kind, ready, pos, &taken, &army));
-                let ambushing = kind.ambush > 0.0 && !self.dev_off("ambush");
+                let ambushing = kind.ambush > 0.0;
                 match target.and_then(|t| Some((t, self.jaeger_heavy(t)?))) {
                     Some((t, (at, unit, value))) => {
                         let health = self.war.targets.get(&t).map_or(0.0, |e| e.def_health());
@@ -900,7 +896,7 @@ impl Ai {
                 // Skuttles jump onto it, all of them each time; one that
                 // cannot waits in reach rather than walk up (see `jumps`).
                 if unit.rules_param_float("is_jumping", 0.0) != 1.0
-                    && (self.jaeger_jump(unit, target, NULLPOS, "skuttle") || self.skuttle_wait(unit, target))
+                    && (self.jump_lead(unit, target, NULLPOS, "skuttle") || self.skuttle_wait(unit, target))
                 {
                     self.jaegers.pounces.insert(unit.id(), (target.id(), frame));
                 }
@@ -928,9 +924,6 @@ impl Ai {
         for (unit, target) in landed {
             unit.attack(target, 0);
         }
-        if self.dev_off("pounce") {
-            return;
-        }
         let Some(kind) = kind_of("jumpbomb") else { return };
         let Some(def) = self.defs.get(kind.name) else { return };
         let alpha = kind.alpha.unwrap_or(0.0);
@@ -952,7 +945,7 @@ impl Ai {
             let jump = self.jump_ready(unit);
             let reach = jump.map_or(SKUTTLE_PRESS, |jd| jd.range);
             // (A heavy coming on may be in reach where it will be.)
-            let lead = if jump.is_some() && !self.dev_off("lead") { POUNCE_LEAD } else { 0.0 };
+            let lead = if jump.is_some() { POUNCE_LEAD } else { 0.0 };
             let pos = unit.pos();
             let war = &self.war;
             let pounces = &self.jaegers.pounces;
@@ -980,7 +973,7 @@ impl Ai {
             // would drop the attack queued after the jump (it flies anyway,
             // and lands idle by the heavy).
             self.jaeger_leave_squad(id);
-            if !(jump.is_some() && self.jaeger_jump(unit, target, at, "skuttle pounce")) {
+            if !(jump.is_some() && self.jump_lead(unit, target, at, "skuttle pounce")) {
                 if !Self::skuttle_presses_on(unit, d) {
                     // (Back into a squad at the next muster.)
                     continue;
@@ -995,15 +988,6 @@ impl Ai {
                 if unit.is_cloaked() { "" } else { ", uncloaked" }
             ));
             self.jaegers.pounces.insert(id, (eid, frame));
-        }
-    }
-
-    /// A Skuttle's jump onto `target`: leading it (feature `lead`) or not.
-    fn jaeger_jump(&mut self, unit: Unit, target: Unit, known: Vec3, why: &str) -> bool {
-        if self.dev_off("lead") {
-            self.jump_strike(unit, target, known, why)
-        } else {
-            self.jump_lead(unit, target, known, why)
         }
     }
 
@@ -1130,9 +1114,6 @@ impl Ai {
     /// all (nearer its goal on a tie), on foot or, a Skuttle that cannot
     /// get clear so, by a jump. Hunters striking or pouncing do not.
     fn jaeger_dodge(&mut self, frame: i32) {
-        if self.dev_off("dodge") {
-            return;
-        }
         let ids: Vec<i32> =
             self.jaegers.members.iter().copied().filter(|id| !self.jaegers.pounces.contains_key(id)).collect();
         let map = self.cb.map();

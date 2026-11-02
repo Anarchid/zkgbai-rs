@@ -231,7 +231,7 @@ table.lanes tr.decides td:first-child::after { content: " ◂"; color: var(--acc
       <label><input type="checkbox" id="showSpots" checked> metal</label>
       <label><input type="checkbox" id="showIntents" checked> intents</label>
       <label title="The metal-spot graph's Delaunay links: who holds a spot unseen is inferred along the walkable ones"><input type="checkbox" id="showLinks" checked> links</label>
-      <label title="The defense posture's lane fronts for the deciding movement tier, with their defense sites"><input type="checkbox" id="showFronts" checked> fronts</label>
+      <label title="The regime's lane fronts for the deciding movement tier, with their defense sites"><input type="checkbox" id="showFronts" checked> fronts</label>
       <label>overlay
         <select id="overlay" autocomplete="off">
           <option value="">none</option>
@@ -374,7 +374,7 @@ function ingest(r) {
       }
       S.events.push(r); touch('log');
       break;
-    case 'posture': S.postures.push(r); S.events.push(r); touch('log', 'regime', 'map'); break;
+    case 'posture': case 'regime': S.postures.push(r); S.events.push(r); touch('log', 'regime', 'map'); break;
     case 'snap': S.snaps.push(r); touch('map'); break;
     default: S.events.push(r); touch('log');
   }
@@ -432,7 +432,7 @@ function renderTiles() {
   tile('Army value', fmtNum(t.army), `enemy seen ${fmtNum(t.enemy_army)} · defenses ${fmtNum(t.enemy_porc)}`);
   tile('Metal spots', `${t.spots[0]} : ${t.spots[1]}`, `ours : enemy · territory ${Math.round((t.territory || 0) * 100)}%`);
   tile('Forces', fmtNum(t.fighters), `fighters · ${t.squads} squads · ${t.workers} workers`);
-  if (t.density !== undefined) tile('Density', fmtNum(t.density), `metal / km² · lanes ${fmtNum(t.laneness, 2)} · defense ${Math.round((t.share || 0) * 100)}%`);
+  if (t.density !== undefined) tile('Density', fmtNum(t.density), `metal / km² · lanes ${fmtNum(t.laneness, 2)}`);
   if (t.produced !== undefined) tile('Enemy produced', fmtNum(t.produced), `estimated · ${fmtNum(t.unaccounted)} unaccounted for`);
   tile('Game time', fmtTime(t.f), S.live ? (S.follow ? 'live' : 'scrolled back') : 'replay');
 }
@@ -698,7 +698,7 @@ function drawMap() {
       hits.push([sx, sy, 'spot', { i, x: s[0], z: s[1], value: s[2], owner: ['free', 'ours', 'enemy', 'enemy territory', 'our territory'][o] || 'free' }]);
     });
   }
-  // The posture's lane fronts for the deciding tier: a ring as wide as the
+  // The regime's lane fronts for the deciding tier: a ring as wide as the
   // front, its defense sites as squares.
   const reg = $('#showFronts').checked ? regimeNow() : null;
   const decides = reg && (reg.lanes || []).find((l) => l.decides);
@@ -1329,9 +1329,9 @@ async function pollLevers() {
 }
 
 // ---------------------------------------------------------------- regime
-// The map's regime as the defense posture reads it: openness per movement
+// The map's regime: openness per movement
 // tier (lanes), density, the fixed-defense budget. Live: the `regime` tool;
-// a journal (or a live game scrolled back): its `posture` records.
+// a journal (or a live game scrolled back): its `regime` records (`posture` in older builds).
 function regimeNow() {
   if (S.live && S.follow && S.regime) return S.regime;
   const f = frameNow();
@@ -1344,9 +1344,9 @@ function regimeNow() {
     fronts: (l.fronts || []).map((x) => ({ pos: x.pos || [x.x, x.z], span: x.span, sites: x.sites || [] })),
   })) : [];
   return {
-    posture: true, measured: lanes.length > 0, tier: rec.tier, laneness: rec.laneness, density: rec.density,
-    density_ref: S.regime ? S.regime.density_ref : null, richness: rec.richness, share: rec.share,
-    cap: S.regime ? S.regime.cap : null, standing: rec.standing, budget: (rec.share || 0) * (rec.standing || 0),
+    measured: lanes.length > 0, tier: rec.tier, laneness: rec.laneness, density: rec.density,
+    density_ref: S.regime ? S.regime.density_ref : null, richness: rec.richness,
+    standing: rec.standing,
     defense: rec.defense, all_defense: rec.all_defense, front_orders: rec.front_orders, point_orders: rec.point_orders,
     stale: rec.stale, orders_held: rec.orders_held, lanes, journal: rec.f,
   };
@@ -1368,10 +1368,9 @@ function renderRegime() {
   const when = r && r.journal !== undefined ? `as of ${fmtTime(r.journal)}` : (S.live && S.follow && r ? 'live' : '');
   box.replaceChildren(foldHead('regime', 'Regime', when));
   if (!r) {
-    box.append(el('div', 'empty', S.regimeError || (S.live ? 'waiting for the AI…' : 'This journal has no posture records (an older build, or posture off).')));
+    box.append(el('div', 'empty', S.regimeError || (S.live ? 'waiting for the AI…' : 'This journal has no regime records (an older build).')));
     return;
   }
-  if (r.posture === false) { box.append(el('div', 'empty', r.note || 'The posture is off in this game: lanes and density are not measured.')); return; }
   const lanes = r.lanes || [];
   const tiers = r.enemy_tiers && r.enemy_tiers.length ? ` (enemy army: ${r.enemy_tiers.join(', ')})` : '';
   box.append(mrow('deciding tier', (r.tier || 'none yet') + tiers));
@@ -1398,9 +1397,7 @@ function renderRegime() {
   const top = Math.max(ref * 2, (r.density || 0) * 1.1);
   box.append(mrow('density', `${fmtNum(r.density)} / ${fmtNum(ref)} metal per km²`), meter((r.density || 0) / top, ref / top, colors.series2));
   box.append(el('div', 'sub', `standing metal of both sides (the enemy's as known) per usable km²; the mark: the reference${r.richness !== undefined ? ` · map richness ${fmtNum(r.richness, 2)} metal/s per km²` : ''}`));
-  const cap = r.cap || 0.25;
-  box.append(mrow('defense share', `${Math.round((r.share || 0) * 100)}% of ${fmtNum(r.standing)} standing (cap ${Math.round(cap * 100)}%)`), meter((r.share || 0) / Math.max(cap, 0.01), null));
-  box.append(el('div', 'sub', `posture turrets ${fmtNum(r.defense)} of a ${fmtNum(r.budget)} budget · all fixed defenses ${fmtNum(r.all_defense)} · orders ${r.front_orders || 0} front, ${r.point_orders || 0} point, ${r.stale || 0} stale`));
+  box.append(mrow('our standing metal', fmtNum(r.standing)));
 }
 
 // ---------------------------------------------------------------- intel
@@ -1595,8 +1592,8 @@ function renderTimeline() {
 }
 
 // ---------------------------------------------------------------- events
-const KIND_GROUP = { posture: 'log', links: 'log', log: 'log', 'unit+': 'units', 'unit-': 'units', given: 'units', idle: 'operator', kill: 'combat', 'enemy+': 'combat', op: 'operator', note: 'operator', say: 'chat', chat: 'chat', error: 'log', end: 'operator', issue: 'operator' };
-const KIND_LABEL = { posture: 'posture', links: 'links', 'unit+': 'built', 'unit-': 'lost', given: 'given', idle: 'idle', kill: 'kill', 'enemy+': 'spotted', op: 'operator', note: 'note', say: 'said', chat: 'chat', end: 'end', issue: 'issue' };
+const KIND_GROUP = { posture: 'log', regime: 'log', links: 'log', log: 'log', 'unit+': 'units', 'unit-': 'units', given: 'units', idle: 'operator', kill: 'combat', 'enemy+': 'combat', op: 'operator', note: 'operator', say: 'chat', chat: 'chat', error: 'log', end: 'operator', issue: 'operator' };
+const KIND_LABEL = { posture: 'regime', regime: 'regime', links: 'links', 'unit+': 'built', 'unit-': 'lost', given: 'given', idle: 'idle', kill: 'kill', 'enemy+': 'spotted', op: 'operator', note: 'note', say: 'said', chat: 'chat', end: 'end', issue: 'issue' };
 function evText(e) {
   switch (e.k) {
     case 'log': return e.msg;
@@ -1615,7 +1612,7 @@ function evText(e) {
     case 'say': return e.text;
     case 'chat': return `player ${e.player}: ${e.text}`;
     case 'end': return `run ended at ${e.time} (${e.state})`;
-    case 'posture': return `${e.event}: ${e.tier || 'no tier yet'}, laneness ${fmtNum(e.laneness, 2)}, density ${fmtNum(e.density)}, defense share ${Math.round((e.share || 0) * 100)}% (${fmtNum(e.defense)} of ${fmtNum((e.share || 0) * (e.standing || 0))} metal)${e.lanes ? ' · lanes: ' + e.lanes.map((l) => `${l.tier} ${fmtNum(l.openness, 2)}`).join(', ') : ''}`;
+    case 'posture': case 'regime': return `${e.event}: ${e.tier || 'no tier yet'}, laneness ${fmtNum(e.laneness, 2)}, density ${fmtNum(e.density)}${e.lanes ? ' · lanes: ' + e.lanes.map((l) => `${l.tier} ${fmtNum(l.openness, 2)}`).join(', ') : ''}`;
     case 'links': { const g = e.ground || []; return `${g.filter((x) => x).length} of ${g.length} spot links walked by ground forces`; }
     default: return JSON.stringify(e);
   }

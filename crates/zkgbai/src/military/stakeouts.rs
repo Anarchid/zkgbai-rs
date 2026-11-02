@@ -52,29 +52,23 @@
 //! holds like a picket that cannot cloak until it has gone `SPOOK_FOR`
 //! without stepping back or following, and only then stands to cloak
 //! again. It follows only what a picket that cannot cloak may follow.
-//! `disable=spook` keeps the old Flea: it moves only for the decloak
-//! radius, stands as soon as the enemy is out of it plus a margin (so its
-//! step back ends within a tick), and follows under its cloak's rules.
 //! One that cannot cloak (the Dart, the
 //! Dirtbag, the raiders) is seen wherever it stands, so it holds every
 //! armed enemy at the edge of its own sight, or farther where the enemy's
 //! reach leaves no safe band inside it: it steps back as soon as an enemy
 //! comes nearer, picking the way that keeps clear of every enemy about,
 //! not only the one it watches. The retreat handler pulls it home at the
-//! first scratch. With `disable=edgehold` it runs instead, like any coward,
-//! once an enemy comes within its reach: to the nearest haven, looking
-//! again only after a while (a Dart stood still for most of that while:
-//! the run is only two path steps long).
+//! first scratch.
 //!
 //! The factory keeps a scout short of a post or a looker (see
 //! `fac_assign_factory_task`), unless pickets have been dying fast lately: a
 //! lane that eats pickets is not a lane to picket. Spider and vehicle
 //! factories build scouts only for the stakeouts; others build for them
-//! while they are short (feature `anyscout`), the opening scout included,
+//! while they are short, the opening scout included,
 //! which so looks for the enemy rather than waiting at home. An opening
 //! jump, tank or ship factory of a 1v1 builds a wave of them first while
-//! the map is sparse, then a wave more per so many raiders (feature
-//! `openscouts`, see `fac_opening_scout`). Either way the unit comes from
+//! the map is sparse, then a wave more per so many raiders (see
+//! `fac_opening_scout`). Either way the unit comes from
 //! the factory's [`scout_roster`]. A unit built for the stakeouts is theirs alone (see
 //! `roles`). `disable=stakeouts` leaves the scouts to the factory's old
 //! scout budget.
@@ -177,7 +171,7 @@ const KEEP_MIN: f32 = 300.0;
 /// ...one that cloaks when still cannot be seen standing, so it moves only
 /// when an enemy would come this much closer than its decloak radius...
 const DECLOAK_MARGIN: f32 = 100.0;
-/// ...or (`spook`) this much outside a mobile enemy's reach: it is seen as
+/// ...or this much outside a mobile enemy's reach: it is seen as
 /// soon as it moves.
 const CLOAK_RANGE_MARGIN: f32 = 100.0;
 /// A static weapon (a turret) shoots a moving picket within its range plus
@@ -187,7 +181,7 @@ const TURRET_MARGIN: f32 = 100.0;
 /// enemy: one decisive step, then it stands (and cloaks).
 const BACK_TO: f32 = 60.0;
 /// A picket that cannot cloak steps back once an enemy comes this much
-/// nearer than the distance it holds at (`edgehold`)...
+/// nearer than the distance it holds at...
 const HOLD_SLACK: f32 = 100.0;
 /// ...turning off the line straight away from the enemy by one of these
 /// (degrees) where that ground is not ours or another enemy is nearer...
@@ -195,7 +189,7 @@ const STEP_TURNS: [f32; 7] = [0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0];
 /// ...counting the enemies within this of it.
 const STEP_SCAN: f32 = 2000.0;
 /// A picket that cloaks, spooked, holds like one that cannot for this long
-/// (frames) after it last stepped back or followed (`spook`).
+/// (frames) after it last stepped back or followed.
 const SPOOK_FOR: i32 = 30 * 30;
 /// Following, it stops this much inside its own sight.
 const FOLLOW_TO: f32 = 100.0;
@@ -214,8 +208,7 @@ const SORTIE_RECENT: i32 = 90;
 
 /// A stakeout follows an enemy only with this much speed in hand: a chase
 /// at equal speed is a death if the enemy turns (a cloaker that stands
-/// again vanishes). Without `edgehold` one that cannot cloak does not
-/// shadow at all (it runs, see `stakeouts_flee`).
+/// again vanishes).
 const SPEED_PARITY: f32 = 1.05;
 
 /// A looked-at spot counts as fresh this long (frames).
@@ -241,10 +234,7 @@ const DRONE_REACH: f32 = 400.0;
 /// and the lookers' targets from them).
 const SUMMARY_PERIOD: i32 = 30 * 30;
 
-/// Without `edgehold`, a picket that cannot cloak runs from an enemy for
-/// this long (frames) before it looks again...
-const FLEE_FOR: i32 = 30 * 8;
-/// ...and its courage outside a squad: with the retreat level of a light
+/// A picket's courage outside a squad: with the retreat level of a light
 /// unit (0.5), it runs home for repairs below 95% health.
 const PICKET_COURAGE: f32 = 0.5;
 
@@ -291,9 +281,6 @@ struct Stakeout {
     decloak: f32,
     /// Has a weapon (sorties); the Dirtbag has none.
     armed: bool,
-    /// Running from an enemy until this frame (pickets that cannot cloak,
-    /// without `edgehold`).
-    fleeing_until: i32,
     /// Where a picket that cannot cloak is stepping back to: it is not
     /// stopped short of there while the enemy stays outside its band.
     step_to: Option<Vec3>,
@@ -433,24 +420,23 @@ fn soft(e: &Enemy) -> bool {
 
 /// How close a mobile enemy of `reach` may come to a picket that cloaks
 /// standing (decloak radius `decloak`): it cannot see the picket outside
-/// that radius, but a `wary` picket (`spook`) also keeps out of its reach,
-/// since stepping back decloaks it.
-fn cloaked_keep(decloak: f32, reach: f32, wary: bool) -> f32 {
-    let keep = decloak + DECLOAK_MARGIN;
-    if wary { keep.max(reach + CLOAK_RANGE_MARGIN) } else { keep }
+/// that radius, but it also keeps out of its reach, since stepping back
+/// decloaks it.
+fn cloaked_keep(decloak: f32, reach: f32) -> f32 {
+    (decloak + DECLOAK_MARGIN).max(reach + CLOAK_RANGE_MARGIN)
 }
 
 /// How close an enemy may come to a picket: a turret shoots a moving
 /// picket within its range; a mobile enemy cannot see a cloaked one
 /// standing (`cloaks`, see `cloaked_keep`); a picket that cannot cloak
 /// stays out of weapon range.
-fn keep_from(e: &Enemy, cloaks: Option<f32>, wary: bool) -> f32 {
+fn keep_from(e: &Enemy, cloaks: Option<f32>) -> f32 {
     if e.is_static {
         e.threat_radius + TURRET_MARGIN
     } else if e.is_com {
         e.threat_radius + DRONE_REACH
     } else if let Some(decloak) = cloaks {
-        cloaked_keep(decloak, e.threat_radius, wary)
+        cloaked_keep(decloak, e.threat_radius)
     } else {
         (e.threat_radius + RANGE_MARGIN).max(KEEP_MIN)
     }
@@ -471,8 +457,8 @@ fn hold_within(keep: f32, sight: f32) -> f32 {
 
 /// How near an enemy may come before a picket steps back: `keep_from`, or
 /// for one that holds at the edge of its sight (`holds`), `hold_within`.
-fn back_off_within(e: &Enemy, cloaks: Option<f32>, wary: bool, sight: f32, holds: bool) -> f32 {
-    let keep = keep_from(e, cloaks, wary);
+fn back_off_within(e: &Enemy, cloaks: Option<f32>, sight: f32, holds: bool) -> f32 {
+    let keep = keep_from(e, cloaks);
     if holds { hold_within(keep, sight) } else { keep }
 }
 
@@ -550,7 +536,6 @@ impl Ai {
                 cloaks: def.custom_param("idle_cloak").is_some() || (def.is_able_to_cloak() && def.cloak_cost() <= 0.0),
                 decloak: Some(def.decloak_distance()).filter(|&d| d > 0.0).unwrap_or(130.0),
                 armed: !def.weapon_mounts().is_empty(),
-                fleeing_until: 0,
                 step_to: None,
                 spooked_until: 0,
                 displacement: Displacement::default(),
@@ -613,11 +598,11 @@ impl Ai {
         }
     }
 
-    /// Armed pickets a raider gang may borrow (see `coalesce`): not running
-    /// from an enemy and not pulled home for repairs.
-    pub(crate) fn stakeouts_borrowable(&self, frame: i32) -> Vec<(i32, Unit)> {
+    /// Armed pickets a raider gang may borrow (see `coalesce`): not pulled
+    /// home for repairs.
+    pub(crate) fn stakeouts_borrowable(&self) -> Vec<(i32, Unit)> {
         (self.stakeouts.members.iter())
-            .filter(|(_, m)| m.armed && frame >= m.fleeing_until && !m.f.is_dead())
+            .filter(|(_, m)| m.armed && !m.f.is_dead())
             .filter(|(_, m)| !self.retreat_handler.is_retreating(m.f.id))
             .map(|(&id, m)| (id, m.f.unit))
             .collect()
@@ -643,10 +628,9 @@ impl Ai {
 
     /// How many units a factory of this kind should build for the
     /// stakeouts: what they are short of (less those being built), if its
-    /// scout is one of theirs or, with `anyscout`, it has a unit for them.
+    /// scout is one of theirs or it has a unit for them.
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
-        let builds = self.stakeouts_own(kind)
-            || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && !scout_roster(kind).is_empty());
+        let builds = self.stakeouts_own(kind) || (!self.dev_off("stakeouts") && !scout_roster(kind).is_empty());
         if !builds || self.stakeouts_hot() {
             return 0;
         }
@@ -832,9 +816,6 @@ impl Ai {
             self.stakeouts_displaced(id);
             return;
         }
-        if frame < m.fleeing_until {
-            return;
-        }
         if standing && self.stakeouts.near_home(p) {
             let raid = self.war.targets.values().any(|e| {
                 !e.is_dead
@@ -862,9 +843,8 @@ impl Ai {
         }
         // One that cannot cloak holds what it sees at the edge of its sight,
         // and so does a spooked one that can (counting on no cloak).
-        let holds = (cloaks.is_none() && !self.dev_off("edgehold")) || spooked;
+        let holds = cloaks.is_none() || spooked;
         let cloaks = cloaks.filter(|_| !spooked);
-        let wary = !self.dev_off("spook");
 
         // The nearest armed enemy that could shoot us, else the nearest
         // mobile one in or near our sight (the one we shadow a while
@@ -881,7 +861,7 @@ impl Ai {
                 continue;
             }
             let d = distance(p, e.position);
-            let keep = back_off_within(e, cloaks, wary, sight, holds);
+            let keep = back_off_within(e, cloaks, sight, holds);
             if d < keep && danger.is_none_or(|(_, b)| d - keep < b) {
                 danger = Some((e.unit_id, d - keep));
             }
@@ -934,23 +914,14 @@ impl Ai {
             }
             // A cloaker that must step back is spooked (and steps back by
             // the rules it now holds by).
-            if danger.is_some() && cloaks.is_some() && wary {
+            if danger.is_some() && cloaks.is_some() {
                 if let Some(m) = self.stakeouts.members.get_mut(&id) {
                     m.spooked_until = frame + SPOOK_FOR;
                 }
                 self.stakeouts.stats.spooks += 1;
             }
-            if cloaks.is_some() || holds {
-                self.stakeouts_shadow(id, eid, frame);
-                return;
-            }
-            // One that cannot cloak runs from what could shoot it, and
-            // otherwise only notes what it sees and keeps to its duty.
-            if danger.is_some() {
-                self.stakeouts_flee(id, eid, frame);
-                return;
-            }
-            self.stakeouts_sighted(id, eid, frame, false);
+            self.stakeouts_shadow(id, eid, frame);
+            return;
         }
 
         // Nothing about: back from shadowing to the duty we had.
@@ -1146,31 +1117,12 @@ impl Ai {
         );
     }
 
-    /// A picket that cannot cloak runs from an enemy like any coward: to
-    /// the nearest haven, and on for a while (no turning back at the rim of
-    /// the enemy's reach).
-    fn stakeouts_flee(&mut self, id: i32, eid: i32, frame: i32) {
-        self.stakeouts_displaced(id);
-        self.stakeouts_sighted(id, eid, frame, false);
-        let Some(m) = self.stakeouts.members.get(&id) else { return };
-        let haven = self.graph_get_closest_haven(m.f.get_pos());
-        self.stakeouts.stats.flights += 1;
-        let mut nav = nav!(self);
-        if let Some(m) = self.stakeouts.members.get_mut(&id) {
-            m.fleeing_until = frame + FLEE_FOR;
-            m.standing = false;
-            m.moved = frame;
-            m.sortie = None;
-            m.f.sneak(haven, &mut nav);
-        }
-    }
-
     /// Keep an enemy at a distance: outside its reach, inside our sight;
     /// follow it if we are faster, else let it go. A picket that cannot
     /// cloak, or is spooked, steps back whenever the enemy comes nearer
     /// than the edge of its sight, the way that keeps clear of every enemy
     /// about; none follows into another's reach. A cloaker that moves for
-    /// an enemy is spooked (`spook`).
+    /// an enemy is spooked.
     fn stakeouts_shadow(&mut self, id: i32, eid: i32, frame: i32) {
         let Some(e) = self.war.targets.get(&eid) else { return };
         // (`Enemy::speed` is elmos per frame; ours per second.)
@@ -1180,18 +1132,17 @@ impl Ai {
         let (cloaker, spooked) = (m.cloaks, frame < m.spooked_until);
         let cloaks = m.cloaks.then_some(m.decloak).filter(|_| !spooked);
         let holds = cloaks.is_none();
-        let wary = !self.dev_off("spook");
         let d = distance(p, epos);
-        let keep = keep_from(e, cloaks, wary);
+        let keep = keep_from(e, cloaks);
         let back_to = hold_at(keep, sight);
-        let within = back_off_within(e, cloaks, wary, sight, holds);
+        let within = back_off_within(e, cloaks, sight, holds);
         let follow_to = sight - FOLLOW_TO;
-        // A follower moves, and is seen: a wary cloaker follows only what one
+        // A follower moves, and is seen: a cloaker follows only what one
         // that cannot cloak may.
-        let follow_keep = if wary { keep_from(e, None, false) } else { keep };
+        let follow_keep = keep_from(e, None);
         let follows = speed >= SPEED_PARITY * espeed && !e.is_static && follow_keep + 150.0 <= follow_to;
         self.stakeouts_sighted(id, eid, frame, follows);
-        let threats = if holds || wary { self.stakeouts_threats(p, sight, eid, frame) } else { Vec::new() };
+        let threats = self.stakeouts_threats(p, sight, eid, frame);
         let start = self.graph.get_start_pos();
         let target = if d < within {
             let away = if holds {
@@ -1232,7 +1183,7 @@ impl Ai {
                     s.follows += 1;
                 }
                 // On the move it is seen: spooked from its last move.
-                let spooks = cloaker && wary;
+                let spooks = cloaker;
                 if spooks && !spooked {
                     s.spooks += 1;
                 }
@@ -1277,8 +1228,8 @@ impl Ai {
             .filter(|e| distance(p, e.position) < STEP_SCAN)
             .map(|e| Threat {
                 pos: e.position,
-                within: back_off_within(e, None, false, sight, true),
-                keep: keep_from(e, None, false),
+                within: back_off_within(e, None, sight, true),
+                keep: keep_from(e, None),
             })
             .collect()
     }
@@ -1570,14 +1521,12 @@ mod tests {
     }
 
     #[test]
-    fn wary_cloaker_keeps_out_of_reach() {
+    fn cloaker_keeps_out_of_reach() {
         // A Flea (decloak 130) on a Glaive (range 185) and a Bandit (232).
-        assert_eq!(cloaked_keep(130.0, 185.0, false), 230.0);
-        assert_eq!(cloaked_keep(130.0, 232.0, false), 230.0);
-        assert_eq!(cloaked_keep(130.0, 185.0, true), 285.0);
-        assert_eq!(cloaked_keep(130.0, 232.0, true), 332.0);
+        assert_eq!(cloaked_keep(130.0, 185.0), 285.0);
+        assert_eq!(cloaked_keep(130.0, 232.0), 332.0);
         // Unidentified: no known reach.
-        assert_eq!(cloaked_keep(130.0, 0.0, true), 230.0);
+        assert_eq!(cloaked_keep(130.0, 0.0), 230.0);
     }
 
     #[test]

@@ -12,7 +12,7 @@
 -- them, how long ago, and the reach of remembered defenses), its view of the
 -- metal spots and the Delaunay links between them along which it infers who
 -- holds a spot unseen (dimmed where ground forces do not walk the link, so
--- nothing is inferred along it), the defense posture's lane fronts, and its
+-- nothing is inferred along it), the regime's lane fronts, and its
 -- log. On the ground, by shaders (screen-space over the
 -- map's deferred depth when AllowDeferredMapRendering is on, else a mesh
 -- draped on the terrain): one of its threat or value maps, smooth with
@@ -28,7 +28,7 @@
 --
 -- Controls: the panel's "controls" button opens a window of the AI's settings
 -- an operator may turn while it plays (greed, build power, the army's line,
--- the home defense, the defense posture), as sliders, choices and switches
+-- the home defense, the map regime), as sliders, choices and switches
 -- drawn from the AI's own list of them, and its features (the dev switches).
 --
 -- Intel: the panel's "intel" button opens a window of the AI's readouts: the
@@ -1516,7 +1516,7 @@ local function drawGround(inst)
 	end
 end
 
--- The defense posture's lane fronts for the deciding movement tier: a ring
+-- The regime's lane fronts for the deciding movement tier: a ring
 -- as wide as the front, a diamond at each of its defense sites.
 local function drawFronts(inst)
 	local r = inst.regime
@@ -1775,10 +1775,10 @@ local function statusLines(inst)
 		army and floor(army.value) or "?", army and floor(army.enemy_fighter_value) or "?", #s.squads,
 		terr and terr.spots_ours or "?", terr and terr.spots_enemy or "?", held, timeText(s.frame or 0))
 	local r = inst.regime
-	if r and r.posture ~= false then
+	if r then
 		local l = decidingLanes(r)
-		text = text .. format("\n%s openness %s · density %s/%s · defense %s",
-			r.tier or "no tier yet", l and n2(l.openness) or "-", n0(r.density), n0(r.density_ref), pct(r.share))
+		text = text .. format("\n%s openness %s · density %s/%s",
+			r.tier or "no tier yet", l and n2(l.openness) or "-", n0(r.density), n0(r.density_ref))
 	end
 	return text
 end
@@ -2066,9 +2066,6 @@ local function regimeLines(inst, add)
 	if not r then
 		add(GREY .. (inst.regimeError and ("this AI has no regime readout: " .. inst.regimeError) or "asking the AI…"))
 		return
-	elseif r.posture == false then
-		add(GREY .. (r.note or "the posture is off in this game: lanes and density are not measured"))
-		return
 	end
 	local enemy = (r.enemy_tiers and #r.enemy_tiers > 0) and (GREY .. "  (enemy army: " .. table.concat(r.enemy_tiers, ", ") .. ")") or ""
 	add(GREY .. "deciding tier " .. WHITE .. tostring(r.tier or "none yet") .. enemy)
@@ -2080,9 +2077,7 @@ local function regimeLines(inst, add)
 			n2(l.openness), n2(l.perimeter), n2(l.closure), n2(l.laneness), #(l.fronts or {}), l.spots_kept or 0, l.spots_ours or 0))
 	end
 	add(GREY .. "density " .. WHITE .. n0(r.density) .. GREY .. " of " .. n0(r.density_ref) .. " metal per sq km (both sides' standing metal over usable ground) · map richness " .. n2(r.richness))
-	add(GREY .. "defense share " .. WHITE .. pct(r.share) .. GREY .. " of " .. n0(r.standing) .. " standing (cap " .. pct(r.cap) .. "): posture turrets "
-		.. WHITE .. n0(r.defense) .. GREY .. " of a " .. n0(r.budget) .. " budget · all fixed defenses " .. n0(r.all_defense))
-	add(GREY .. format("posture orders: %d front, %d point, %d stale", r.front_orders or 0, r.point_orders or 0, r.stale or 0))
+	add(GREY .. "our standing metal " .. WHITE .. n0(r.standing))
 end
 
 local function intelLines(inst, add)
@@ -2149,7 +2144,7 @@ local function makeIntel(Chili, font)
 	end)
 	c.header = Chili.Label:New{parent = window, x = 4, y = 18, right = 28, height = 18, caption = "", objectOverrideFont = font}
 	c.density = Chili.Progressbar:New{parent = window, x = 4, y = 40, right = 4, height = 18, min = 0, max = 3000, value = 0, caption = "density", color = {0.85, 0.35, 0.15, 1}}
-	c.share = Chili.Progressbar:New{parent = window, x = 4, y = 62, right = 4, height = 18, min = 0, max = 1, value = 0, caption = "defense share", color = {0.10, 0.62, 0.44, 1}}
+	c.lanes = Chili.Progressbar:New{parent = window, x = 4, y = 62, right = 4, height = 18, min = 0, max = 1, value = 0, caption = "laneness", color = {0.10, 0.62, 0.44, 1}}
 	local scroll = Chili.ScrollPanel:New{parent = window, x = 4, y = 86, right = 4, bottom = 4, horizontalScrollbar = false}
 	c.text = Chili.TextBox:New{parent = scroll, x = 0, y = 0, right = 0, text = "", fontsize = 12}
 	local shown
@@ -2157,21 +2152,19 @@ local function makeIntel(Chili, font)
 	function c.update(inst)
 		c.header:SetCaption(format("team %d · port %d", inst.team, inst.port))
 		local r = inst.regime
-		if r and r.posture ~= false then
+		if r then
 			local ref = r.density_ref or 1500
 			local top = max(ref * 2, (r.density or 0) * 1.1)
 			c.density:SetMinMax(0, top)
 			c.density:SetValue(r.density or 0)
 			c.density:SetCaption(format("density %s of %s (the bar runs to twice it)", n0(r.density), n0(ref)))
-			local cap = (r.cap and r.cap > 0) and r.cap or 0.25
-			c.share:SetMinMax(0, cap)
-			c.share:SetValue(min(cap, r.share or 0))
-			c.share:SetCaption(format("defense share %s of a %s cap", pct(r.share), pct(cap)))
+			c.lanes:SetValue(r.laneness or 0)
+			c.lanes:SetCaption(format("laneness %s (how much the deciding tier's ground is lanes)", n2(r.laneness)))
 		else
 			c.density:SetValue(0)
 			c.density:SetCaption("density: no readout")
-			c.share:SetValue(0)
-			c.share:SetCaption("defense share: no readout")
+			c.lanes:SetValue(0)
+			c.lanes:SetCaption("laneness: no readout")
 		end
 		local lines = {}
 		local function add(text)

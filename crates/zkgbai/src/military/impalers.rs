@@ -31,7 +31,7 @@
 //! that kill guns left alone, and Crashers against air, orbiting a gun.
 //! While a battery is short of its screen, Rover factories build Levelers
 //! more often. Escorts whose battery is gone join the next one short of
-//! them, or the army. `disable=escorts` keeps batteries alone.
+//! them, or the army. `disable=impaler` keeps batteries alone.
 //!
 //! A gun's reload tells each shot. The engine reports our hits on what our
 //! radar or sight covers, so a missile due at a covered target that did
@@ -553,9 +553,9 @@ impl Ai {
     }
 
     /// The doctrine batteries take escorts by: `impaler`, unless switched
-    /// off (or `disable=escorts`).
+    /// off (`disable=impaler`).
     fn impalers_doctrine(&self) -> Option<&Doctrine> {
-        if self.dev_off("escorts") { None } else { self.taskforces.doctrine("impaler") }
+        self.taskforces.doctrine("impaler")
     }
 
     /// How many escorts of role `role` battery `bid` lacks, by the role's

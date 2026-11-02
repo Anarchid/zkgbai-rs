@@ -248,7 +248,7 @@ impl Ai {
         }
         // An advanced plant without its box (one that came another way, or
         // whose box went up before the morph failed and was tried again).
-        if self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after && !self.dev_off("geobox") {
+        if self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
             let unboxed = (self.eco.geos.iter())
                 .find(|&&g| {
                     self.defs.name_of(g) == ADVANCED && !self.eco.geo.boxed.iter().any(|&b| distance(b, g.pos()) < 50.0)
@@ -286,7 +286,7 @@ impl Ai {
     /// the singularity reactor the fusion planner is about to order. Returns
     /// whether an upgrade started.
     pub(super) fn eco_upgrade_geo(&mut self, frame: i32) -> bool {
-        if self.eco.geo.morph.is_some() || frame < self.eco.geo.upgrade_after || self.dev_off("advgeo") {
+        if self.eco.geo.morph.is_some() || frame < self.eco.geo.upgrade_after {
             return false;
         }
         let Some(advanced) = self.defs.get(ADVANCED) else { return false };
@@ -340,7 +340,7 @@ impl Ai {
             eco.fusions.len()
         ));
         self.eco_link_geo(pos, advanced.id());
-        if !self.dev_off("geobox") && self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
+        if self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
             self.eco_box_geo(pos, frame);
         }
         true

@@ -200,8 +200,8 @@ Further requests are deferred and pool their nominal metal cost toward a Stinger
 covers them; when both have affordable, safe sites, a fair coin chooses the type, using its best
 site. Both become eligible at 25 metal income, subject to the pooled budget. Repeated checks of
 one request do not add credit. Planned upgrades reserve demand,
-and cancelled upgrades release it. Placement still requires a safe constructor route and, when
-posture is enabled, sufficient posture budget. Lower standing-metal density and a larger share
+and cancelled upgrades release it. Placement still requires a safe constructor route. Lower
+standing-metal density and a larger share
 of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
 pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
 so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
@@ -216,8 +216,8 @@ in `crates/zkgbai/src/economy/fortify.rs`.
 
 The `fortify` feature is on by default. Set `disable=fortify` (or
 `ZKGBAI_DISABLE=fortify`) to restore the previous gate planner; it can also be
-toggled live with the operator feature switch. The new planner respects the
-posture defense budget and the existing `detour` ditch-value and job-cost checks.
+toggled live with the operator feature switch. Ditches are valued by how much longer they
+make the enemy's way to our metal and priced against constructors' jobs.
 
 ### Shield and cloak support
 
@@ -241,11 +241,11 @@ known and inferred enemy static metal and observed battlefield density exceeds t
 **Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
 step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
 requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
-Density is `posture.density`: our standing metal plus known enemy metal, divided by usable
+Density is `regime.density`: our standing metal plus known enemy metal, divided by usable
 ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
 remembered live statics remain counted. Coverage and battlefield density are separate gates;
-the missile firing disk is not the density denominator. Density and lanes are measured even
-with defense posture disabled; before lanes are available the full slider threshold applies.
+the missile firing disk is not the density denominator. Before lanes are available the full
+slider threshold applies.
 Decision logs and the operator `regime` view report the adjusted threshold. Static value
 includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
 confidence), without double-counting known mexes or assigning locations to unobserved spending.
@@ -257,7 +257,7 @@ and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
 Colonization discounts a candidate's metal value by its distance from the enemy
 centroid relative to the distance from our start to that centroid (capped at one).
 Its constructor job bonus also gets that discount, multiplied by
-`clamp(posture.density / 400, 0, 1)`. This is the same global standing-metal per
+`clamp(regime.density / 400, 0, 1)`. This is the same global standing-metal per
 usable square kiloelmo estimate used for missile-silo eligibility. Both adjustments
 are on by default: `colonize_policy=combined`. Use `enemy_distance` or `density`
 to keep only one, or `baseline` for the original scoring and bonus.

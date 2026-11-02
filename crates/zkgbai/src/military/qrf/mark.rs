@@ -510,7 +510,7 @@ impl Ai {
         // rest split off, free for the next raid or the screen (user,
         // 2026-10-26: four Pyros chased one Flea, and the next Flea found
         // the whole force deciding where to go).
-        if !predicted && !self.dev_off("justenough") {
+        if !predicted {
             for &(team, ti) in &plan {
                 if team >= MOON || self.qrf.roles.contains_key(&team) {
                     continue;
@@ -936,7 +936,7 @@ impl Ai {
         }
         // Not while raids are about: a team split down to just enough for a
         // raid (see `qrf_mark_split`) would merge straight back.
-        if !self.dev_off("justenough") && !self.qrf.groups.is_empty() {
+        if !self.qrf.groups.is_empty() {
             return;
         }
         // In normal play only into a team with room: recruits come one by

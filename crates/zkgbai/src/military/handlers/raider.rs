@@ -71,8 +71,7 @@ struct FriendlyStuns {
 /// A raider squad's memory between decisions, so it does not flip-flop
 /// (user, 2026-10-26; traced in `squad_trace`: rally points two choices
 /// apart swapped every second as the squad walked between them, and squads
-/// bounced haven-target-haven at a threat disc's rim). `disable=squadhyst`
-/// forgets.
+/// bounced haven-target-haven at a threat disc's rim).
 #[derive(Default, Clone)]
 pub(crate) struct SquadMemo {
     /// The rally point, and since when.
@@ -107,7 +106,7 @@ const SHUN_RADIUS: f32 = 300.0;
 /// Venom squads attack from this far inside their range, elmos, and no
 /// nearer. A Venom's stun blast (128 across, not friendly-safe) paralyzes the
 /// Venoms beside its target: a squad walked onto a mex, as Scorchers are, and
-/// stunlocked itself (user, 2026-10-28). `disable=venomstand` walks on.
+/// stunlocked itself (user, 2026-10-28).
 const STAND_SHORT: f32 = 40.0;
 
 impl RaiderHandler {
@@ -875,9 +874,6 @@ impl Ai {
     /// 2026-10-26: four Pyros went for one Flea; in self-play two of three
     /// solo Pyros sat on one).
     fn raider_handled(&self, except: i32) -> Vec<Vec3> {
-        if self.dev_off("justenough") {
-            return Vec::new();
-        }
         let frame = self.frame;
         let h = &self.raider_handler;
         let claims: Vec<(Vec3, f32)> = (h.solo_raiders.iter().chain(h.kodachis.iter()))
@@ -1260,7 +1256,7 @@ impl Ai {
     /// The rally point squad `sid` goes to: the one it has, for
     /// [`RALLY_COMMIT`], else `fresh` (see [`SquadMemo`]).
     fn raider_squad_rally(&mut self, sid: SquadId, fresh: Vec3) -> Vec3 {
-        if self.dev_off("squadhyst") || fresh == NULLPOS {
+        if fresh == NULLPOS {
             return fresh;
         }
         let frame = self.frame;
@@ -1362,8 +1358,7 @@ impl Ai {
         // Get targets for actively raiding squads.
         let threat = view.get_friendly_raider_threat(pos);
         let danger = |p: Vec3| view.get_threat(p) * (1.0 + view.get_riot_threat(p));
-        let hyst = !self.dev_off("squadhyst");
-        let over_threat = if hyst {
+        let over_threat = {
             // The target, the squad's middle, or half its members in danger:
             // one straggler's cell does not pull the squad back.
             // What can shoot a member now, not the painted disc round it
@@ -1382,8 +1377,6 @@ impl Ai {
             let holding = (self.raider_handler.memo.get(&sid).and_then(|m| m.bailed))
                 .is_some_and(|(f, _)| self.frame - f < BAIL_HOLD);
             fresh || holding
-        } else {
-            danger(rs_target) > threat || members.iter().any(|&(rpos, cloaked)| !cloaked && danger(rpos) > threat)
         };
         if over_threat {
             // What tripped it (see `squad_trace`).
@@ -1393,13 +1386,11 @@ impl Ai {
                 .max_by(|a, b| a.0.total_cmp(&b.0))
                 .unwrap_or((0.0, 0.0));
             let bail = Bail { at_target: danger(rs_target), at_member: worst.0, own: threat, straggle: worst.1 };
-            if hyst {
-                let frame = self.frame;
-                let m = self.raider_handler.memo.entry(sid).or_default();
-                if m.bailed.is_none() && rs_target != NULLPOS {
-                    m.bailed = Some((frame, rs_target));
-                    m.shun.push((rs_target, frame + BAIL_SHUN));
-                }
+            let frame = self.frame;
+            let m = self.raider_handler.memo.entry(sid).or_default();
+            if m.bailed.is_none() && rs_target != NULLPOS {
+                m.bailed = Some((frame, rs_target));
+                m.shun.push((rs_target, frame + BAIL_SHUN));
             }
             // Try to keep raider squads from suiciding.
             let haven = self.graph_get_closest_raider_haven(pos);
@@ -1478,7 +1469,7 @@ impl Ai {
         // TODO: also defend against enemy raiders?
 
         let mut porc = false;
-        let memo = if self.dev_off("squadhyst") { None } else { self.raider_handler.memo.get(&sid).cloned() };
+        let memo = self.raider_handler.memo.get(&sid).cloned();
         let shunned =
             |p: Vec3| memo.as_ref().is_some_and(|m| m.shun.iter().any(|&(s, _)| distance(s, p) < SHUN_RADIUS));
         let last = memo.as_ref().and_then(|m| m.target);
@@ -1566,7 +1557,7 @@ impl Ai {
     /// Where the raider squad led by `leader` walks to attack `target`: the
     /// target itself, but Venoms stop [`STAND_SHORT`] inside their range.
     fn raider_stand_point(&self, leader: Unit, leader_pos: Vec3, target: Vec3) -> Vec3 {
-        if self.dev_off("venomstand") || self.defs.name_of(leader) != "spideremp" {
+        if self.defs.name_of(leader) != "spideremp" {
             return target;
         }
         let range = leader.def().map_or(0.0, |d| d.max_weapon_range());

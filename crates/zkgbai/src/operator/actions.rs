@@ -25,29 +25,13 @@ use crate::util::NULLPOS;
 /// set).
 pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
-    ("clients", "Economy", "pylons, requisitioned factories and anti-nukes tracked as valued issues"),
-    ("pause", "Economy", "an urgent issue holds back the metal of other construction"),
-    ("currency", "Economy", "a job's raid danger priced in metal against its crew's bonus"),
-    ("pairs", "Economy", "Constables pair up on builds"),
-    ("earlycons", "Economy", "an early second Constable in the opening"),
-    ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
-    ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     ("colonize", "Economy", "colonists sent to far free metal"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
-    ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
-    ("odphase", "Energy", "the overdrive phase by energy, free spots and fusions (off: two fusions)"),
-    ("ecoladder", "Energy", "fusions and singularities opened by income or the map's density"),
     ("densgate", "Economy", "phase gates on the map's density clock, not time and income"),
-    ("stallgate", "Energy", "no storage or superweapon while energy stalls"),
-    ("storagegate", "Energy", "storages wait for energy first"),
     ("wind", "Energy", "turbines where they beat solars locally"),
-    ("geo", "Energy", "geothermal plants on our vents"),
-    ("advgeo", "Energy", "advanced geothermal in place of a singularity"),
-    ("geobox", "Energy", "a guard box around an advanced geothermal"),
-    ("posture", "Defense", "the defense posture: a fixed-defense budget from lanes and density"),
-    ("turretcredit", "Defense", "the home defense counts the posture's turrets against raids"),
+    ("geo", "Energy", "geothermal plants on our vents, upgraded in place of a singularity, walled once advanced"),
     ("porc", "Defense", "no ground defenses in regions the enemy's ground army cannot reach"),
     ("mexporc", "Defense", "a turret by every mex and link"),
     ("ditch", "Defense", "ditches across chokepoints we fortify"),
@@ -55,11 +39,6 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "fortify",
         "Defense",
         "shared gate defenses and ground-route leyline priorities, with distance, density and constructor support checks (off: legacy gate planning)",
-    ),
-    (
-        "detour",
-        "Defense",
-        "ditches by how much longer the enemy's way to our metal gets, priced against workers' jobs; gate turrets priced as light porc; chokepoints held for our own metal only",
     ),
     ("refuge", "Defense", "workers flee raids to refuges ahead of them"),
     ("qrf", "Defense", "the home defense force answering raids"),
@@ -78,12 +57,6 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "stakeoutqrf",
         "Defense",
         "pickets that can arrive and kill an economic attacker before its victim dies join QRF (default on)",
-    ),
-    ("anyscout", "Defense", "stakeouts take any factory's scout"),
-    (
-        "openscouts",
-        "Defense",
-        "a 1v1 jump, tank or ship opening builds a 200-metal wave of scouts first, then one per 8 raiders",
     ),
     ("airstrikes", "Military", "mission-driven aircraft production, strikes and interception"),
     (
@@ -113,31 +86,18 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "aircraft skip route waypoints inside their real turning circle instead of orbiting them (default on)",
     ),
     ("firefighters", "Defense", "airborne quick-reaction squads against raids on our eco"),
-    ("airfire", "Defense", "an air factory for the firefighters"),
-    ("airtempo", "Army", "an air factory weighed up by the clock and the map's size"),
-    ("permanence", "Army", "unseen enemy fighters kept on their likely way in"),
     ("reach", "Army", "reachability checks by the terrain model"),
     ("precision", "Army", "raiders shoot from where defenses cannot shoot back"),
-    ("squadhyst", "Army", "raider squads keep their rally point a while"),
     ("qrfpredict", "Army", "predict small QRF assignments including asset losses and arrival times"),
-    ("justenough", "Army", "one raider claim per target; QRF teams sized to the raid"),
-    ("venomraid", "Army", "Venoms raid after the opening, Fleas left to the stakeouts"),
-    (
-        "venomstand",
-        "Army",
-        "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
-    ),
     ("jumps", "Army", "jumpjets jump"),
     (
         "lobsters",
         "Army",
         "optional Lobster squad throws and one launcher per 2500 metal of non-raider armed amphs; default on",
     ),
-    ("jumppath", "Army", "jumpjets' ways jump cliffs they would walk round"),
     ("stomp", "Army", "Jugglenauts escape and jump cliffs only where their landing spares our and allied units"),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
-    ("escorts", "Army", "escorts for Impaler batteries (the impaler doctrine)"),
     ("lance", "Army", "Lances in taskforces with a Mace guarding each (the lance doctrine)"),
     (
         "ravager",
@@ -145,16 +105,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Ravager packs from the middle game: in formation, always moving, passing over what they dive, a Ripper screen behind",
     ),
     ("minotaur", "Army", "Minotaur packs, from two Minotaurs, an Ogre screen behind"),
-    ("scorcher", "Army", "Scorcher packs (the Ravagers' conduct, from the start, no screen)"),
-    ("dagger", "Army", "Dagger packs (the Ravagers' conduct, from the start, no screen)"),
-    ("blitz", "Army", "Blitz packs (the Ravagers' conduct, from the start, no screen)"),
     ("jaeger", "Army", "anti-heavy hunters once enemy heavies show"),
-    ("widowcap", "Army", "jaeger Widows kept to a quarter of the rest of the army's metal"),
-    ("pounce", "Army", "jaeger Skuttles jump on any heavy in reach, their mark or not"),
-    ("lead", "Army", "jumps and Lobster throws at enemies land where they will be by then (off: where they are)"),
-    ("ambush", "Army", "jaegers lie in wait on a heavy's way; Widows stun only where the army can finish"),
-    ("dodge", "Army", "cloaked jaegers step (Skuttles jump) out of sight of enemies coming their way"),
-    ("jaegerreserve", "Army", "the energy reserve asked of the game covers the jaegers' cloaks"),
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
     (
         "strikefragile",
@@ -195,7 +146,6 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("radar", "Intel", "watchtowers: advanced radar on raised ground"),
     ("reanalysis", "Intel", "the terrain re-analysed now and then (walls, ditches)"),
     ("nukes", "Superweapons", "nuke silos and strikes"),
-    ("nukeclear", "Superweapons", "our units keep clear of the blast of our missile in flight"),
     ("missiles", "Superweapons", "tactical missile silos"),
 ];
 
@@ -414,20 +364,15 @@ pub fn dial(ai: &mut Ai, a: &Args) -> Out {
                 ai.op.over.buildpower = v.clamp(0.5, 3.0);
             }
         }
-        key if super::POSTURE_SETTINGS.iter().any(|(k, _, _)| *k == key) => {
-            let slot = super::POSTURE_SETTINGS.iter().find(|(k, _, _)| *k == key).map(|s| s.2);
-            if let Some(slot) = slot {
-                // A negative value puts the lever back to the AI's own.
-                *slot(&mut ai.op.over) = match a.opt_f32("value")? {
-                    Some(v) if v >= 0.0 => Some(super::posture_clamp(key, v)),
-                    _ => None,
-                };
-            }
+        "density_ref" => {
+            // A negative value puts the lever back to the AI's own.
+            ai.op.over.density_ref = match a.opt_f32("value")? {
+                Some(v) if v >= 0.0 => Some(super::density_ref_clamp(v)),
+                _ => None,
+            };
         }
         other => {
-            return Err(format!(
-                "unknown dial '{other}': greed, line, buildpower, defense_floor, defense_lane, defense_density, defense_cap, density_ref"
-            ));
+            return Err(format!("unknown dial '{other}': greed, line, buildpower, density_ref"));
         }
     }
     Ok(json!({"dials": {"greed": ai.op_greed(), "line": ai.op.over.line, "buildpower": ai.op_buildpower(),

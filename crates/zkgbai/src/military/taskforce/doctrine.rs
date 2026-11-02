@@ -1454,28 +1454,6 @@ pub fn seeds() -> Vec<Doctrine> {
     };
     minotaur.name = "minotaur".into();
 
-    // Raider packs, a side experiment (user, 2026-10-28): the same conduct,
-    // no screen, awake from the start.
-    let raiders = |name: &str, unit: &str, pace: f32, orbit: f32, go: u32| Doctrine {
-        name: name.into(),
-        note: format!(
-            "A {name} pack, as the Ravagers' (see `ravager`) but awake from the start, no screen, {go} or more \
-             going in. Off by default: enable={name}."
-        ),
-        core: vec![unit.into()],
-        core_orbit: orbit,
-        roles: Vec::new(),
-        pace,
-        cores_to_go: go,
-        cores_to_stay: 2,
-        rip_value: 0.0,
-        wake_share: 0.0,
-        ..ravager.clone()
-    };
-    let scorcher = raiders("scorcher", "vehraid", 100.0, 45.0, 4);
-    let dagger = raiders("dagger", "hoverraid", 130.0, 45.0, 4);
-    let blitz = raiders("blitz", "tankheavyraid", 88.0, 55.0, 3);
-
     let mut crab = Doctrine::new("crab");
     crab.note = "A survival-first Crab with 2-4 dedicated Weavers: repair each other, the Crab, nearby allies, then reclaim wreckage. Raise a protective pedestal when facing 1500 nearby enemy metal; add small turrets when idle.".into();
     crab.enabled = true;
@@ -1515,10 +1493,7 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.engage_value = 600.0;
     ghostbombs.muster = 90.0;
 
-    vec![
-        felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger, blitz, crab,
-        ghostbombs,
-    ]
+    vec![felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, crab, ghostbombs]
 }
 
 fn string(k: &str, v: &Value) -> Result<String, String> {
@@ -1766,18 +1741,13 @@ mod tests {
     }
 
     #[test]
-    fn minotaurs_and_raiders_pack_too() {
+    fn minotaurs_pack_too() {
         let seeds = seeds();
         let get = |n: &str| seeds.iter().find(|d| d.name == n).unwrap();
         let m = get("minotaur");
         assert_eq!((m.core[0].as_str(), m.aim, m.cores_to_go, m.cores_to_stay), ("tankassault", Aim::Pack, 2, 2));
         assert_eq!((m.role("screen").unwrap().units[0].as_str(), m.wake_share), ("tankriot", 0.5));
         assert_eq!(m.attack, Attack::Pass);
-        for (n, unit, go) in [("scorcher", "vehraid", 4), ("dagger", "hoverraid", 4), ("blitz", "tankheavyraid", 3)] {
-            let d = get(n);
-            assert_eq!((d.core[0].as_str(), d.cores_to_go, d.wake_share), (unit, go, 0.0));
-            assert!(d.roles.is_empty() && d.aim == Aim::Pack && d.core_keep == Keep::Formation);
-        }
     }
 
     #[test]

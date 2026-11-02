@@ -126,7 +126,7 @@ impl Ai {
         if let Some(c) = &self.eco.colony {
             let scale = c.policy.utility_scale(
                 enemy_distance_scale(c.center, self.graph.get_enemy_center(), self.graph.get_start_pos()),
-                self.posture.density,
+                self.regime.density,
             );
             self.eco.colony.as_mut().unwrap().scale = scale;
         }
@@ -159,11 +159,11 @@ impl Ai {
         }
         let policy = Policy::parse(self.cb.option("colonize_policy").as_deref());
         // Use the same global standing-metal / usable-area estimate as
-        // missile-silo eligibility, refreshed even when posture is disabled.
-        let density = policy.uses_density().then_some(self.posture.density);
+        // missile-silo eligibility (see `regime`).
+        let density = policy.uses_density().then_some(self.regime.density);
         let distance_at =
             |center| enemy_distance_scale(center, self.graph.get_enemy_center(), self.graph.get_start_pos());
-        let scale_at = |center| policy.utility_scale(distance_at(center), self.posture.density);
+        let scale_at = |center| policy.utility_scale(distance_at(center), self.regime.density);
         let workers: Vec<Vec3> = self.eco.workers.values().map(|w| w.get_pos()).collect();
         let near = |p: Vec3| workers.iter().map(|&w| distance(w, p)).fold(f32::INFINITY, f32::min);
         let free: Vec<(Vec3, f32)> = (self.graph.get_neutral_spots().iter())

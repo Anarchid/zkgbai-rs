@@ -28,18 +28,13 @@ use zk_terrain::{Pos, Tier};
 use crate::Ai;
 use crate::military::{DefenseTarget, SquadId};
 use crate::terrain::{pos, tier_of};
-use crate::util::{distance, get_directional_point};
+use crate::util::distance;
 
 /// Frames between re-assessments.
 const PERIOD: i32 = 30;
 
 /// Enemy units seen within this many frames count.
 const RECENT: i32 = 60;
-/// How long a group stays in the planner after it was last seen, dead
-/// reckoned toward the nearest of our assets at its speed (object
-/// permanence: a raid does not stop existing when it leaves our sight).
-/// `disable=permanence` restores the sight-only planner.
-const MEMORY: i32 = 1350;
 
 /// Groups weaker than this (a couple of raiders) are left to our defenses
 /// and the squads nearby.
@@ -163,45 +158,18 @@ impl Ai {
         self.incursions.orders.retain(|_, o| o.until > frame);
         let Some(terrain) = self.terrain.get() else { return };
 
-        // Enemy fighters by tier and region. A fighter out of sight for a
-        // while is placed where it would be by now if it kept coming for
-        // our nearest asset, and counts for less the longer it is unseen.
-        let permanence = !self.dev_off("permanence");
-        let horizon = if permanence { MEMORY } else { RECENT };
-        let ally_assets: Vec<Vec3> = if permanence {
-            self.strategy_assets().iter().filter(|a| a.side == Side::Ally).map(|a| Vec3::xz(a.pos.x, a.pos.z)).collect()
-        } else {
-            Vec::new()
-        };
+        // Enemy fighters seen lately, by tier and region.
         let mut groups: BTreeMap<(Tier, usize), Vec<Member>> = BTreeMap::new();
         for e in self.war.targets.values() {
             let unseen = frame - e.last_seen;
-            if !e.identified
-                || e.is_dead
-                || e.is_static
-                || e.can_fly()
-                || (e.is_worker && !e.is_com)
-                || unseen > horizon
+            if !e.identified || e.is_dead || e.is_static || e.can_fly() || (e.is_worker && !e.is_com) || unseen > RECENT
             {
                 continue;
             }
             // What it can do to what is above water from where it is (a
             // submerged Duck: nothing; see `water`).
-            let mut danger = e.surface_danger(e.is_submerged());
-            let mut position = e.position;
-            if unseen > RECENT {
-                let age = unseen as f32 / 30.0;
-                if let Some(target) = ally_assets
-                    .iter()
-                    .copied()
-                    .min_by(|a, b| distance(*a, e.position).total_cmp(&distance(*b, e.position)))
-                {
-                    let reach = distance(e.position, target);
-                    let step = (e.def_speed() * age).min((reach - 100.0).max(0.0));
-                    position = get_directional_point(e.position, target, step);
-                }
-                danger *= (1.0 - age / (MEMORY as f32 / 30.0)).max(0.3);
-            }
+            let danger = e.surface_danger(e.is_submerged());
+            let position = e.position;
             let Some(tier) = e.ud.and_then(tier_of).filter(|_| danger > 0.0) else { continue };
             let Some(r) = terrain.tier(tier).and_then(|m| m.region_near(pos(position), SNAP)) else { continue };
             groups.entry((tier, r)).or_default().push((position, e.def_speed(), danger));

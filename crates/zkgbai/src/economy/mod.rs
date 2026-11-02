@@ -184,9 +184,6 @@ pub struct EconomyManager {
     /// (see `planning::NEW_FAC_INCOME`).
     pub new_fac_at: Option<i32>,
     pub new_fac_due: bool,
-    /// Whether an air factory was taken for firefighters or for tempo (see
-    /// `planning::is_air_requisition`): once a game.
-    pub air_asked: bool,
     /// Terraform commands issued (for their tags).
     pub terraform_tags: i32,
     /// Development aid: the terraform test, when on.
@@ -198,9 +195,10 @@ pub struct EconomyManager {
     lotus_demand: Vec<lotus::Demand>,
     pub ditched: Vec<Vec3>,
     pub ditch_tries: Vec<(Vec3, i32)>,
-    /// When a ditch none was worth digging was last journaled (`detour`).
+    /// When a ditch none was worth digging was last journaled (see `terraform`).
     pub ditch_noted: i32,
-    /// Turrets ordered for the chokepoints we fortify (see `detour`).
+    /// Turrets ordered for the chokepoints we fortify (priced as light porc,
+    /// see `assign`).
     pub fortify_tasks: BTreeSet<TaskId>,
     /// A watchtower for our strikes going up, and when to plan the next.
     watchtower: Option<watchtower::Watchtower>,
@@ -401,7 +399,6 @@ impl EconomyManager {
             requisition_logged: None,
             new_fac_at: None,
             new_fac_due: false,
-            air_asked: false,
             terraform_tags: 0,
             terraform_test: None,
             ditch: None,
@@ -593,8 +590,8 @@ const OD_FREE_INCOME: f32 = 20.0;
 
 /// Cross-module economy logic and module events.
 impl Ai {
-    /// `energycrew` (`disable=energycrew` stops it): metal floats for want of
-    /// energy, so greedy constructors build energy too. Energy jobs are made only by
+    /// Metal floats for want of energy, so greedy constructors build energy
+    /// too. Energy jobs are made only by
     /// non-greedy workers and greedy ones pay 10000 for them; early on
     /// nearly every constructor is greedy, so the commander alone builds
     /// energy, and on Horus a commander on a Fusion at 17 energy (horus/fix
@@ -602,15 +599,12 @@ impl Ai {
     /// floating) stalled the whole economy.
     pub(crate) fn eco_floating_on_energy(&self) -> bool {
         let eco = &self.eco;
-        !self.dev_off("energycrew") && eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage
+        eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage
     }
 
     /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
-    /// begun it stays. `disable=odphase` keeps the old rule: two fusions.
+    /// begun it stays.
     pub(crate) fn eco_overdrive_phase(&self) -> bool {
-        if self.dev_off("odphase") {
-            return self.eco.fusions.len() >= 2;
-        }
         self.eco.od_phase.is_some()
     }
 
@@ -745,7 +739,7 @@ impl Ai {
     /// 80% of storage is what a stall produces, and it used to call for a
     /// storage). Energy comes first.
     pub fn eco_energy_starved(&self) -> bool {
-        !self.dev_off("stallgate") && self.eco.estalled && self.eco.metal > 200.0
+        self.eco.estalled && self.eco.metal > 200.0
     }
 
     pub fn eco_update(&mut self, frame: i32) {
@@ -834,7 +828,6 @@ impl Ai {
         self.eco_check_overdrive_phase();
         let merged = self.merged_allies as f32;
         let odreserve = !self.dev_off("odreserve");
-        let odphase_off = self.dev_off("odphase");
         // (Overdrive storage from 5 min of the phase clock: `densgate`.)
         let od_storage_time = self.phase_frame() > OD_STORAGE_FROM;
         let (m, e) = (self.metal, self.energy);
@@ -915,7 +908,7 @@ impl Ai {
         // when stalled leaves almost none (CircuitAI: 37 E/s on overdrive at
         // minute 10 against our 13; energy 1.9x mex income at minute 5 to
         // our 1.3, 2.9x to 2.1 at minute 15).
-        let fusions = eco.fusions.len().max(if eco.od_phase.is_some() && !odphase_off { 2 } else { 0 });
+        let fusions = eco.fusions.len().max(if eco.od_phase.is_some() { 2 } else { 0 });
         let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + fusions as f32;
         eco.energy_target = eco.raw_mex_income * eratio;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
@@ -1579,17 +1572,6 @@ impl Ai {
             }
         }
         farthest
-    }
-
-    pub fn eco_get_fusion_dist(&self, position: Vec3) -> f32 {
-        let mut dist = 65535.0;
-        for f in &self.eco.fusions {
-            let tdist = distance(position, f.pos());
-            if tdist < dist {
-                dist = tdist;
-            }
-        }
-        dist
     }
 
     fn eco_check_nanos(&mut self) {

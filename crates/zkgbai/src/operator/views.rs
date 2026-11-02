@@ -470,19 +470,17 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
     }))
 }
 
-/// The map's regime as the posture reads it: structural openness per
-/// movement tier (lanes), the deciding tier, density, and the fixed-defense
-/// budget they set (see `crate::posture`).
+/// The map's regime: structural openness per movement tier (lanes), the
+/// deciding tier and density (see `crate::regime`).
 pub fn regime(ai: &mut Ai, _: &Args) -> Out {
-    use crate::posture;
-    let p = &ai.posture;
-    let levers = ai.posture_levers();
+    use crate::regime;
+    let p = &ai.regime;
     let decisive = p.decisive().map(|l| l.tier);
     let lanes: Vec<Value> = p
         .lanes
         .iter()
         .map(|l| {
-            let (lane, open) = posture::thresholds(l.tier);
+            let (lane, open) = regime::thresholds(l.tier);
             let fronts: Vec<Value> = (l.perimeter.fronts.iter())
                 .map(|f| {
                     json!({"pos": [f.center.x.round(), f.center.z.round()], "span": f.span.round(),
@@ -493,7 +491,7 @@ pub fn regime(ai: &mut Ai, _: &Args) -> Out {
             json!({
                 "tier": l.tier.name(), "decides": decisive == Some(l.tier),
                 "openness": r2(l.openness), "perimeter": r2(l.perimeter.openness), "closure": r2(l.closure),
-                "laneness": r2(posture::laneness(l.tier, l.openness)), "thresholds": [lane, open],
+                "laneness": r2(regime::laneness(l.tier, l.openness)), "thresholds": [lane, open],
                 "usable_km2": r1(l.usable_km2),
                 "spots_ours": l.ours.iter().filter(|&&o| o).count(),
                 "spots_kept": l.perimeter.kept.iter().filter(|&&k| k).count(),
@@ -501,35 +499,22 @@ pub fn regime(ai: &mut Ai, _: &Args) -> Out {
             })
         })
         .collect();
-    let on = ai.posture_on();
     let siege = ai.missiles_siege_readiness();
     Ok(json!({
-        "posture": on,
         "measured": !p.lanes.is_empty(),
         "tier": decisive.map(|t| t.name()),
         "enemy_tiers": ai.enemy_ground_tiers().iter().map(|t| t.name()).collect::<Vec<_>>(),
         "laneness": r2(p.laneness()),
         "density": p.density.round(),
-        "density_ref": levers.density_ref.round(),
+        "density_ref": ai.regime_density_ref().round(),
         "missile_silo_density_threshold": siege.threshold.round(),
         "richness": r2(p.richness),
-        "share": r2(p.share),
-        "cap": r2(levers.cap),
         "standing": p.standing.round(),
-        "budget": (p.share * p.standing).round(),
-        "defense": p.defense.round(),
-        "all_defense": p.all_defense.round(),
-        "orders_held": p.orders.len(),
-        "front_orders": p.stats.front_orders,
-        "point_orders": p.stats.point_orders,
-        "stale": p.stats.stale,
         "lanes": lanes,
         "note": "openness: 0 closed off by narrow fronts for free, 1 no lane worth holding (perimeter and closure \
              averaged); laneness: how much the deciding tier's openness counts as lanes; density: standing metal \
-             (ours and the enemy's as known) per square kilo-elmo of usable ground (F12 label 1500); share: of our \
-             standing metal the posture keeps in its fixed defenses. Density is measured with posture off; \
-             missiles also measure lanes without enabling the defense budget. Before lanes are measured, \
-             the silo uses the full density threshold.",
+             (ours and the enemy's as known) per square kilo-elmo of usable ground (F12 label 1500). Before \
+             lanes are measured, the silo uses the full density threshold.",
     }))
 }
 
@@ -1266,9 +1251,8 @@ pub fn tick_value(ai: &Ai) -> Value {
         "spots": [ai.graph.get_owned_spots().len(), ai.graph.get_enemy_spots().len()],
         "produced": ai.intel.produced.round() as i64,
         "unaccounted": ai.intel.unaccounted().round() as i64,
-        "density": ai.posture.density.round() as i64,
-        "laneness": r2(ai.posture.laneness()),
-        "share": r2(ai.posture.share),
+        "density": ai.regime.density.round() as i64,
+        "laneness": r2(ai.regime.laneness()),
         "forecast": ai.projected_metal_density().round() as i64,
         // `densgate`: phase minute, income scale, phase income, map diagonal.
         "phase": if ai.phase_on() {

@@ -8,22 +8,15 @@
 //! value, and hands each crew member's share of it to the assignment loop
 //! as a bonus ([`Ai::logistics_bonus`]). While an urgent issue is under way
 //! it can also hold back the metal of other construction and of the
-//! factories (Zero-K build priority; the `pause` feature).
+//! factories (Zero-K build priority).
 //!
 //! The first client is defense against incursions the terrain model
 //! forecasts (`incursions`): at the first of our assets an enemy group can
 //! reach, a turret sized to the group, if one can stand in time and the
-//! value at risk pays for it. The others (feature `clients`) are capital
-//! that waits: pylons while a building waits for its site to have power
+//! value at risk pays for it. The others are capital that waits: pylons while a building waits for its site to have power
 //! (`grid`), a factory a module requisitioned, an anti-nuke; each worth
 //! what it unlocks or saves, less a share of it for every second it is
 //! late. The operator can open issues of its own (tool `issue`).
-//!
-//! The crew's bonus is in metal, so the danger of the job can be too
-//! (feature `currency`, off by default: it lost its mirrors): what sending
-//! the worker risks is its cost times the chance of losing it there, and a
-//! worker whose share is more than that stays on the job where it would
-//! otherwise run.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,7 +25,7 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
 use crate::Ai;
 use crate::defs::cmd;
-use crate::economy::{TaskId, Worker};
+use crate::economy::TaskId;
 use crate::military::wrappers::weapon_power;
 use crate::util::{distance, get_directional_point};
 
@@ -156,9 +149,6 @@ impl Worth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Defense,
-    /// A turret the posture ordered (see `posture`): crewed like a defense,
-    /// but never urgent enough to hold back the rest (no pause).
-    Posture,
     Grid,
     Factory,
     Antinuke,
@@ -170,7 +160,6 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Defense => "defense",
-            Kind::Posture => "posture",
             Kind::Grid => "grid",
             Kind::Factory => "factory",
             Kind::Antinuke => "antinuke",
@@ -363,9 +352,7 @@ impl Ai {
         self.logistics_defenses(now);
         self.logistics_grid(now);
         self.logistics_forecast(now);
-        if !self.dev_off("pause") {
-            self.logistics_pause(now);
-        }
+        self.logistics_pause(now);
         if frame / STATS_PERIOD != self.logistics.frame / STATS_PERIOD {
             self.logistics_summary();
         }
@@ -403,32 +390,6 @@ impl Ai {
     /// Whether `task` is an open issue.
     pub fn logistics_tracks(&self, task: TaskId) -> bool {
         self.logistics.issues.contains_key(&task)
-    }
-
-    /// What sending worker `w` to `p` risks, in metal: its cost times the
-    /// chance of losing it to the enemy power there (or seen near there
-    /// lately, `raiders_near`: the raid memory) against ours.
-    pub fn logistics_risk(&self, w: &Worker, p: Vec3, raiders_near: f32) -> f32 {
-        let Some(cost) = w.unit.def().map(|d| d.cost(self.metal)) else { return 0.0 };
-        let enemy = self.war.get_enemy_power(p).max(raiders_near);
-        cost * loss_chance(enemy, self.war.get_total_friendly_power(p))
-    }
-
-    /// Whether worker `wid` stays on its job in danger: it is on the crew
-    /// of the issue its job is, and its share of the value is more than
-    /// what it risks. (Commanders never: they are worth more than they
-    /// cost.)
-    pub fn logistics_holds(&self, wid: i32) -> bool {
-        if self.dev_off("currency") {
-            return false;
-        }
-        let Some(w) = self.eco.workers.get(&wid) else { return false };
-        if w.is_com {
-            return false;
-        }
-        let Some(share) = w.task.and_then(|t| self.logistics_bonus(wid, t)) else { return false };
-        let p = w.get_pos();
-        share > self.logistics_risk(w, p, self.eco_raiders_near(p))
     }
 
     /// Open an issue on construction task `task` (or re-value one).
@@ -644,9 +605,6 @@ impl Ai {
     /// what waits is capital idle, worth its cost less a [`PAYBACK`] share
     /// of it for every second late.
     fn logistics_grid(&mut self, now: f32) {
-        if self.dev_off("clients") {
-            return;
-        }
         let Some((def, pos)) = self.eco_awaiting() else {
             let powered: Vec<TaskId> =
                 self.logistics.issues.values().filter(|i| i.kind == Kind::Grid).map(|i| i.task).collect();
@@ -669,7 +627,7 @@ impl Ai {
     /// share of the `value` it answers, less a [`PAYBACK`] share of that
     /// for every second it is not there.
     pub fn logistics_factory(&mut self, task: TaskId, value: f32, why: &str) {
-        if self.dev_off("logistics") || self.dev_off("clients") || value <= 0.0 {
+        if self.dev_off("logistics") || value <= 0.0 {
             return;
         }
         let value = value * VAR_UTILITY;
@@ -681,7 +639,7 @@ impl Ai {
     /// its energy would cost in solars), less a [`PAYBACK`] share of that
     /// for every second it is not there.
     pub fn logistics_energy(&mut self, task: TaskId, value: f32, why: &str) {
-        if self.dev_off("logistics") || self.dev_off("clients") || value <= 0.0 {
+        if self.dev_off("logistics") || value <= 0.0 {
             return;
         }
         let now = self.frame as f32 / 30.0;
@@ -693,7 +651,7 @@ impl Ai {
     /// suspicion), less that again for every missile's worth of the
     /// enemy's income late.
     pub fn logistics_antinuke(&mut self, task: TaskId, sure: bool) {
-        if self.dev_off("logistics") || self.dev_off("clients") {
+        if self.dev_off("logistics") {
             return;
         }
         let blast = self.nukes_worst_blast();

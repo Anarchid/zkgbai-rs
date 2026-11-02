@@ -6,13 +6,12 @@
 //!
 //! The economy's own pylon building links metal spots as the territory
 //! grows. On top of it, this planner links buildings starved of power to
-//! the strongest grid, and late in the game joins every grid that makes
-//! energy (or needs it) into one along a minimum spanning tree of pylon
-//! chains. Chains are laid a pylon at a time and checked against the grid
-//! as built, so a misplaced pylon is made up for next time.
+//! the strongest grid, and in the overdrive phase links grids by the
+//! overdrive they gain (below). Chains are laid a pylon at a time and
+//! checked against the grid as built, so a misplaced pylon is made up for
+//! next time.
 //!
-//! Overdrive (feature `gridmex`, on by default): late in the game the
-//! economy's own linking stops short. Its small energy goes up only while
+//! Overdrive: late in the game the economy's own linking stops short. Its small energy goes up only while
 //! energy stalls, which the plants end early, and its pylons stay within
 //! 1500 of a plant, all in the base: on Folsom 20 of 33 mexes stood on no
 //! grid next to three singularities (2026-10-27). So in the overdrive
@@ -61,11 +60,11 @@ const PYLON_SAME: f32 = 250.0;
 const POWER_WAIT: i32 = 30 * 180;
 
 /// Seconds a link's pylons may take to pay for themselves in overdrive
-/// metal (`gridmex`).
+/// metal.
 const MEX_PAYBACK: f32 = 600.0;
 
 /// Share of the energy made that overdrive gets at least, whatever the
-/// spending of the moment (`gridmex`).
+/// spending of the moment.
 const MIN_SPARE: f32 = 0.25;
 
 /// A building that needs power, waiting for its site to be linked.
@@ -329,20 +328,8 @@ impl Ai {
             enough
                 .or(strongest)
                 .map(|o| (o.2, format!("{} needing {needs:.0} energy (has {:.0})", members[s].what, capacity[g])))
-        } else if self.eco_overdrive_phase() && !self.dev_off("gridmex") {
+        } else if self.eco_overdrive_phase() {
             self.eco_overdrive_link(&members, &all, &capacity, pr)
-        } else if self.eco_overdrive_phase() && nodes.len() > 1 {
-            // Late game: the cheapest link of a minimum spanning tree over
-            // the grids (Kruskal; the tree's other links come later).
-            let mut edges = Vec::new();
-            for (k, &a) in nodes.iter().enumerate() {
-                for &b in &nodes[k + 1..] {
-                    let (pylons, ends) = link(a, b);
-                    edges.push((pylons, ends, a, b));
-                }
-            }
-            edges.sort_by(|x, y| x.0.total_cmp(&y.0));
-            edges.first().map(|e| (e.1, format!("grids making {:.0} and {:.0} energy", capacity[e.2], capacity[e.3])))
         } else {
             None
         };
@@ -352,7 +339,7 @@ impl Ai {
         self.eco_lay_pylons(a.pos, a.range, b.pos, b.range, &why);
     }
 
-    /// The overdrive link (`gridmex`): of the links between a grid making
+    /// The overdrive link: of the links between a grid making
     /// energy and another grid with mexes (or energy), the one gaining the
     /// most overdrive metal per pylon, if it pays back in [`MEX_PAYBACK`];
     /// none under enemy porc, none already being laid.

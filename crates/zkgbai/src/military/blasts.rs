@@ -1,4 +1,4 @@
-//! Keeping our units clear of blasts we know are coming (`nukeclear`): our
+//! Keeping our units clear of blasts we know are coming: our
 //! own nuke in flight (see `nukes`), and every missile Zero-K tells us of,
 //! ours or an ally's, as allied players see them: "MISSILE_FIRED:id,team,
 //! weapon,x,y,z,frame" (its projectile, owner team, weapon, predicted
@@ -83,9 +83,6 @@ fn parse_fired(data: &str) -> Option<(i32, i32, &str, Vec3, i32)> {
 impl Ai {
     /// The blasts to keep clear of now: whose, centre and radius kept.
     fn blasts_now(&self) -> Vec<(Blast, Vec3, f32)> {
-        if self.dev_off("nukeclear") {
-            return Vec::new();
-        }
         let ours = self.nukes_flight().map(|(fired, at, r)| (Blast::Ours(fired), at, r + KEEP_MARGIN));
         let missiles = self.blasts.missiles.iter().map(|(&id, m)| (Blast::Missile(id), m.aim, m.radius + KEEP_MARGIN));
         ours.into_iter().chain(missiles).collect()

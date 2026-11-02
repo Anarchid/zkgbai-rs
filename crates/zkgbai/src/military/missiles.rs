@@ -324,7 +324,7 @@ impl Ai {
 
     pub(crate) fn missiles_siege_readiness(&self) -> SiegeReadiness {
         let minimum = siege_density_option(self.cb.option("missile_silo_density").as_deref());
-        SiegeReadiness::new(self.posture.density, minimum, self.posture.laneness())
+        SiegeReadiness::new(self.regime.density, minimum, self.regime.laneness())
     }
 
     pub fn missiles_silo(&self) -> Option<Unit> {

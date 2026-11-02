@@ -84,59 +84,6 @@ const NEW_FAC_PER: f32 = 25.0;
 /// Income before investing in a gunship factory for a viable riot drop.
 const DROP_INCOME: f32 = 30.0;
 
-/// Air tempo: as a game runs on, and more so on larger maps, the speed of
-/// aircraft converts more of the enemy's value (raids across the map,
-/// strikes on whatever moves out). A dose (see [`air_tempo_dose`]) is
-/// zero before `AIR_TEMPO_FROM_MIN` minutes, rises to one by
-/// `AIR_TEMPO_FULL_MIN`, and scales with the map's diagonal (heightmap
-/// squares) against `AIR_TEMPO_DIAG` (a 14x14 map), between
-/// `AIR_TEMPO_DIAG_MIN` and `AIR_TEMPO_DIAG_MAX`. Two uses: the ordinary
-/// factory switch (the random pick of the next factory, and the roll of
-/// a new type) weighs the air factory it prefers 1 + `AIR_TEMPO_PICK` x
-/// dose against 1 for every other candidate; and when nothing else asks
-/// for a factory, an air factory is asked for once per game, if none
-/// stands or is going up, worth `AIR_TEMPO_SHARE` of the enemy's standing
-/// value times the dose, once that is worth the factory's cost. Planes
-/// rather than gunships where static anti-air worth `AIR_TEMPO_AA_PLANES`
-/// or an enemy air force worth `AIR_TEMPO_AIR_PLANES` was seen.
-/// Off by default (unverified): `enable=airtempo` turns both on.
-const AIR_TEMPO_SHARE: f32 = 0.15;
-const AIR_TEMPO_PICK: f32 = 3.0;
-const AIR_TEMPO_FROM_MIN: f32 = 10.0;
-const AIR_TEMPO_FULL_MIN: f32 = 30.0;
-const AIR_TEMPO_DIAG: f32 = 1270.0;
-const AIR_TEMPO_DIAG_MIN: f32 = 0.5;
-const AIR_TEMPO_DIAG_MAX: f32 = 1.5;
-const AIR_TEMPO_AA_PLANES: f32 = 800.0;
-const AIR_TEMPO_AIR_PLANES: f32 = 1000.0;
-/// How an air tempo requisition's reason starts (the consumer knows it
-/// by this).
-pub(super) const AIR_TEMPO_WHY: &str = "air tempo";
-
-/// Air fire: raids that cost us mexes and power where no home defense
-/// team was near (see `firefighters::UNANSWERED_DIST`) are what aircraft
-/// answer, and the firefighters only wait for an air factory. With none
-/// owned or going up, once the unanswered losses of the last five
-/// minutes weigh `firefighters::WANTED_AT`, an air factory is asked for,
-/// ahead of the Widow scout, worth the metal of those losses (a mex's
-/// income over the memory counted) continued over the payback. Once a
-/// game. `disable=airfire`.
-pub(super) const AIR_FIRE_WHY: &str = "air fire";
-
-/// Whether a requisition's reason is one of the air ones (fire or tempo).
-pub(super) fn is_air_requisition(why: &str) -> bool {
-    why.starts_with(AIR_FIRE_WHY) || why.starts_with(AIR_TEMPO_WHY)
-}
-
-/// The air tempo dose `minutes` into the game on a map of diagonal
-/// `map_diag` heightmap squares: zero before `AIR_TEMPO_FROM_MIN`, then
-/// growing with time and with the map's size (see `AIR_TEMPO_SHARE`).
-pub(super) fn air_tempo_dose(minutes: f32, map_diag: f32) -> f32 {
-    let time = ((minutes - AIR_TEMPO_FROM_MIN) / (AIR_TEMPO_FULL_MIN - AIR_TEMPO_FROM_MIN)).clamp(0.0, 1.0);
-    let size = (map_diag / AIR_TEMPO_DIAG).clamp(AIR_TEMPO_DIAG_MIN, AIR_TEMPO_DIAG_MAX);
-    time * size
-}
-
 /// One of `list` for the roll `roll` in [0, 1), each name's odds in
 /// proportion to `weight(name)` (uniform when all weigh the same).
 fn weighted_pick(list: &BTreeSet<String>, weight: impl Fn(&str) -> f64, roll: f64) -> Option<String> {
@@ -209,54 +156,6 @@ pub(super) fn factory_tier(name: &str) -> Option<Tier> {
         _ => None,
     }
 }
-
-/// Metal income from which fusions may be built, and energy income from
-/// which singularities may (also with two fusions standing); see
-/// `eco_create_fusion_task`.
-const FUSION_INCOME: f32 = 30.0;
-const SINGU_ENERGY: f32 = 150.0;
-
-/// A turret this near a mex covers it (point defense), elmos.
-const POINT_COVER: f32 = 350.0;
-/// Distance from the enemy at which a spot counts as plainly exposed: nearer
-/// counts more (up to 4x), farther less.
-const EXPOSURE_REF: f32 = 2000.0;
-/// A spot on our side not yet taken, against an owned mex.
-const FUTURE_WORTH: f32 = 0.25;
-/// What a posture turret is worth to the project tracker, in multiples of
-/// its cost.
-const POSTURE_WORTH: f32 = 2.0;
-/// Turret kinds a posture zone mixes, in order, with the income (metal/s)
-/// each wants: Lotus, Picket, Stardust, Stinger, Faraday, Gauss, Desolator.
-/// At most [`SAME_KIND`] of a kind per zone (user, 2026-10-26: no more
-/// stacks of Lotuses).
-const ZONE_MIX: [(&str, f32); 7] = [
-    ("turretlaser", 0.0),
-    ("turretmissile", 0.0),
-    ("turretriot", 10.0),
-    ("turretheavylaser", 15.0),
-    ("turretemp", 25.0),
-    ("turretgauss", 40.0),
-    ("turretheavy", 80.0),
-];
-const SAME_KIND: usize = 2;
-/// Posture turrets keep this far from every turret of ours (splash), elmos.
-const TURRET_SPACING: f32 = 150.0;
-/// A posture turret goes only where fewer than this many turrets of ours
-/// reach within a Lotus's range: nowhere under more than two Lotus circles
-/// (the posture keeps us from being naked, no more; Circuit overporcs, we
-/// should not).
-const MAX_OVERLAP: usize = 2;
-const LOTUS_REACH: f32 = 460.0;
-/// A turret must take at least this much spot-exposure off (a well covered
-/// mex far from the enemy is not worth another).
-const MIN_GAIN: f32 = 0.06;
-/// Point defense stands this far from its mex towards the enemy, elmos,
-/// and at most [`POINT_SHIFT`] from there.
-const POINT_FORWARD: f32 = 110.0;
-const POINT_SHIFT: f32 = 200.0;
-/// Candidates tried per call, best first, before giving up for now.
-const PLACE_TRIES: usize = 4;
 
 /// Turrets within this distance of a chokepoint's defense position count as
 /// its defenses.
@@ -399,14 +298,10 @@ impl Ai {
                 || (frame > 900 && !has_plop && nfac < 1 + merged && no_fac_tasks)
                 // a factory a module asked for (that we have none of: it may be
                 // stale, asked for before one went up another way)
-                // (an air factory for tempo past the usual cap, with the room
-                // a factory of a new type gets)
                 || (eco.requisition.as_ref().is_some_and(|(f, _)| !self.eco_has_factory(f))
                     && phase_static > REQUISITION_INCOME
                     && nfac >= 1
-                    && (nfac < 3 + merged
-                        || (eco.requisition.as_ref().is_some_and(|(_, why)| is_air_requisition(why))
-                            && (nfac as f32) < 1.0 + phase_static / NEW_FAC_PER))
+                    && nfac < 3 + merged
                     && no_fac_tasks)
                 || (phase_static > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
                 // a factory of a new type, now and then
@@ -443,7 +338,7 @@ impl Ai {
         }
 
         // is there sufficient energy to cover metal income? (Greedy workers
-        // too while metal floats for want of it: `energycrew`.)
+        // too while metal floats for want of it.)
         if (!is_greedy || self.eco_floating_on_energy())
             && self.eco.estalled
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
@@ -473,7 +368,7 @@ impl Ai {
         //do we need storages?
         if frame > 600
             && !self.fac.factories.is_empty()
-            && (!self.eco_energy_starved() || self.dev_off("storagegate"))
+            && !self.eco_energy_starved()
             && (self.eco.metal / self.eco.max_storage > 0.8
                 || ((self.eco.commanders.len() + self.eco.storages.len()) as i32) < 1 + self.merged_allies)
             && self.eco.storage_tasks.is_empty()
@@ -500,34 +395,18 @@ impl Ai {
             self.eco_create_radar_task(wid);
         }
 
-        // The posture's budget and sites (see `posture`): its own queue, not
-        // the rest's (its orders would crowd out theirs, and theirs its).
-        if self.posture_on() && self.eco.defended_fac {
-            // Shared gate sites spend the same posture budget. If none is
-            // safe or useful, retain its ordinary point-defense planner.
-            if self.dev_off("fortify") || !self.eco_defend_shared_chokes() {
-                self.eco_defend_posture();
-            }
-        }
         // porc push against nearby enemy porc and defend the front line
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
-            // Without the posture, the terrain analysis's chokepoints.
-            if !self.posture_on() {
-                self.eco_defend_chokes();
-            }
+            // The terrain analysis's chokepoints.
+            self.eco_defend_chokes();
             self.eco_porc_push(position);
             if self.graph.eminent_territory {
                 self.eco_defend_front(position);
             }
         }
 
-        // do we need pylons? (in the overdrive phase, see
-        // `eco_overdrive_phase`; it was two fusions). With `gridmex` the
-        // grid planner links the mexes instead (see `grid`).
-        if self.eco_overdrive_phase() && self.dev_off("gridmex") {
-            // (the C++ port lowered this from > 3, since grid requirements exist)
-            self.eco_create_grid_task(position);
-        }
+        // Pylons in the overdrive phase: the grid planner links the mexes
+        // (see `grid`).
 
         if self.eco.big_map
             && self.eco.super_weps.len() > 3
@@ -933,18 +812,10 @@ impl Ai {
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
         } else if (nfac as i32) < 1 + merged.max(1) || has_striders || is_plop || self.eco.pylons.is_empty() {
-            // (The air factory for tempo weighs more as the game runs on.)
-            let (gunship, plane) = self.eco_air_tempo_weights();
             // An air plop only by its own roll above (see `plop`).
             let ground = choices.iter().any(|f| !super::plop::AIR_FACTORIES.contains(&f.as_str()));
-            let weight = |f: &str| match f {
-                _ if is_plop && ground && super::plop::AIR_FACTORIES.contains(&f) => 0.0,
-                "factorygunship" => gunship,
-                "factoryplane" => plane,
-                _ => 1.0,
-            };
+            let weight = |f: &str| if is_plop && ground && super::plop::AIR_FACTORIES.contains(&f) { 0.0 } else { 1.0 };
             fac_name = weighted_pick(&choices, weight, kgb_rand()).unwrap_or_default();
-            self.eco_air_tempo_rolled(&fac_name, weight(&fac_name));
             // The opening rolled at the start (the commander suits it).
             if let Some(opening) = self.eco.opening.take().filter(|f| nfac == 0 && choices.contains(f)) {
                 fac_name = opening;
@@ -987,9 +858,6 @@ impl Ai {
                     && *f == fac_name
                 {
                     self.logistics_factory(id, asked_value, why);
-                    if is_air_requisition(why) {
-                        self.eco.air_asked = true;
-                    }
                 }
                 return;
             }
@@ -1129,9 +997,6 @@ impl Ai {
                 && *f == fac_name
             {
                 self.logistics_factory(id, asked_value, why);
-                if is_air_requisition(why) {
-                    self.eco.air_asked = true;
-                }
             }
         } else {
             restore(self, &fac_name);
@@ -1413,14 +1278,7 @@ impl Ai {
         if types.is_empty() {
             return None;
         }
-        // (The air factory for tempo weighs more as the game runs on.)
-        let (gunship, plane) = self.eco_air_tempo_weights();
-        let weight = |f: &str| match f {
-            "factorygunship" => gunship,
-            "factoryplane" => plane,
-            _ => 1.0,
-        };
-        weighted_pick(&types.into_iter().collect(), weight, kgb_rand())
+        weighted_pick(&types.into_iter().collect(), |_: &str| 1.0, kgb_rand())
     }
 
     fn eco_reach_gap(&self) -> Option<(&'static str, f32, f32)> {
@@ -1556,11 +1414,6 @@ impl Ai {
                 value,
             ));
         }
-        // (Ahead of the Widow scout, which otherwise takes the second
-        // factory in nearly every game.)
-        if let Some(r) = self.eco_air_fire() {
-            return Some(r);
-        }
         let scouts = self.scouts_policy();
         if !self.dev_off("scouts") && scouts.owls > 0 && !owned("factoryplane") {
             return Some((
@@ -1606,146 +1459,7 @@ impl Ai {
                 prospect,
             ));
         }
-        self.eco_air_tempo()
-    }
-
-    /// The air tempo dose now (see [`AIR_TEMPO_SHARE`]); zero when off.
-    fn eco_air_tempo_dose(&self) -> f32 {
-        if self.dev_off("airtempo") {
-            return 0.0;
-        }
-        air_tempo_dose(self.phase_minutes(), self.map_diag)
-    }
-
-    /// The enemy's standing value (the production estimate less what
-    /// died, or at least what we have seen and not seen die), the static
-    /// anti-air seen, and whether that or the enemy's air force calls for
-    /// planes rather than gunships.
-    fn eco_air_tempo_enemy(&self) -> (f32, f32, bool) {
-        let (mut seen, mut static_aa) = (0.0f32, 0.0f32);
-        for e in self.war.targets.values().filter(|e| e.identified && !e.is_dead) {
-            seen += e.value;
-            if e.is_static && e.is_aa {
-                static_aa += e.value;
-            }
-        }
-        let enemy = (self.intel.produced - self.intel.killed).max(seen);
-        let planes = static_aa >= AIR_TEMPO_AA_PLANES || self.war.max_enemy_air_value >= AIR_TEMPO_AIR_PLANES;
-        (enemy, static_aa, planes)
-    }
-
-    /// The weights of the gunship and the plane factory in the ordinary
-    /// switch's roll (every other candidate weighs 1): the one air tempo
-    /// prefers at 1 + `AIR_TEMPO_PICK` x dose.
-    fn eco_air_tempo_weights(&self) -> (f64, f64) {
-        let dose = self.eco_air_tempo_dose();
-        if dose <= 0.0 {
-            return (1.0, 1.0);
-        }
-        let w = 1.0 + f64::from(AIR_TEMPO_PICK * dose);
-        if self.eco_air_tempo_enemy().2 { (1.0, w) } else { (w, 1.0) }
-    }
-
-    /// Log an air factory the ordinary switch rolled with air tempo's
-    /// weight on it.
-    fn eco_air_tempo_rolled(&self, name: &str, weight: f64) {
-        if weight > 1.0 && matches!(name, "factorygunship" | "factoryplane") {
-            self.log(&format!(
-                "economy: {AIR_TEMPO_WHY} {:.2} weighed the roll: {name} at {weight:.1} to 1 ({:.0} min, map diagonal {:.0})",
-                self.eco_air_tempo_dose(),
-                self.frame as f32 / 1800.0,
-                self.map_diag
-            ));
-        }
-    }
-
-    /// Whether an air factory may be asked for: none stands or is going
-    /// up, and none was asked for this way before.
-    fn eco_air_open(&self) -> bool {
-        !self.eco.air_asked && !self.eco_has_factory("factorygunship") && !self.eco_has_factory("factoryplane")
-    }
-
-    /// An air factory for the firefighters (see [`AIR_FIRE_WHY`]): which,
-    /// why, and what it is worth in metal.
-    fn eco_air_fire(&self) -> Option<(String, String, f32)> {
-        use crate::military::firefighters::{MEMORY, UNANSWERED_DIST, WANTED_AT};
-        if self.dev_off("airfire") || self.dev_off("firefighters") || !self.eco_air_open() {
-            return None;
-        }
-        let (weight, metal) = self.firefighters_unanswered();
-        if weight < WANTED_AT {
-            return None;
-        }
-        let value = metal * crate::logistics::PAYBACK / (MEMORY as f32 / 30.0);
-        let (_, static_aa, planes) = self.eco_air_tempo_enemy();
-        let name = if planes { "factoryplane" } else { "factorygunship" };
-        self.defs.get(name)?;
-        let kind = if planes {
-            format!(
-                "planes, past {static_aa:.0} metal of anti-air and {:.0} of aircraft seen",
-                self.war.max_enemy_air_value
-            )
-        } else {
-            "gunships".to_owned()
-        };
-        Some((
-            name.to_owned(),
-            format!(
-                "{AIR_FIRE_WHY} {weight:.1}: {metal:.0} metal of mexes and power lost to raids in the last {:.0} min with no \
-                 home defense team within {UNANSWERED_DIST:.0}; firefighters, {kind}",
-                MEMORY as f32 / 1800.0
-            ),
-            value,
-        ))
-    }
-
-    /// An air factory for tempo (see [`AIR_TEMPO_SHARE`]): which, why, and
-    /// what it is worth in metal; none while one stands or is going up,
-    /// after one was taken this way, or before it pays for itself.
-    fn eco_air_tempo(&self) -> Option<(String, String, f32)> {
-        if !self.eco_air_open() {
-            return None;
-        }
-        let dose = self.eco_air_tempo_dose();
-        if dose <= 0.0 {
-            return None;
-        }
-        let (enemy, static_aa, planes) = self.eco_air_tempo_enemy();
-        // Our share of the enemy: of its army seen, what is ours to answer
-        // (see `military::Faced`); an even share before any is seen.
-        let share = if self.allies.is_empty() {
-            1.0
-        } else if self.war.enemy_fighter_value > 0.0 {
-            self.war.faced.fighter / self.war.enemy_fighter_value
-        } else {
-            1.0 / (1 + self.allies.len()) as f32
-        };
-        let enemy = enemy * share;
-        let value = AIR_TEMPO_SHARE * enemy * dose;
-        let name = if planes { "factoryplane" } else { "factorygunship" };
-        let cost = self.defs.get(name)?.cost(self.metal);
-        if value < cost {
-            return None;
-        }
-        let kind = if planes {
-            format!(
-                "planes, past {static_aa:.0} metal of anti-air and {:.0} of aircraft seen",
-                self.war.max_enemy_air_value
-            )
-        } else {
-            "gunships".to_owned()
-        };
-        Some((
-            name.to_owned(),
-            format!(
-                "{AIR_TEMPO_WHY} {dose:.2} ({:.0} min, map diagonal {:.0}): {:.0}% of the enemy's {enemy:.0} metal \
-                 standing is what aircraft would convert; {kind}",
-                self.frame as f32 / 1800.0,
-                self.map_diag,
-                100.0 * AIR_TEMPO_SHARE
-            ),
-            value,
-        ))
+        None
     }
 
     /// An Urchin where enemies were seen under water lately, by the nearest
@@ -2108,220 +1822,6 @@ impl Ai {
         }
     }
 
-    /// Metal in our fixed defenses: built, and under way or planned.
-    pub(crate) fn eco_defense_value(&self) -> f32 {
-        let built: f32 = self.eco.porcs.iter().filter_map(|u| u.def()).map(|d| d.cost(self.metal)).sum();
-        let planned: f32 = (self.eco.porc_tasks.iter())
-            .filter_map(|&id| self.eco.tasks.get(id).and_then(|t| t.as_construction()))
-            .filter(|c| c.target.is_none_or(|u| !self.eco.porcs.iter().any(|p| p.id() == u.id())))
-            .map(|c| c.build_type.cost(self.metal))
-            .sum();
-        built + planned
-    }
-
-    /// Spend the posture's budget (see `posture`): one turret per call while
-    /// the posture's own turrets hold less than their share, where it takes
-    /// the most raid exposure off our metal per metal.
-    ///
-    /// A spot's exposure is its worth (an owned mex 1, a spot on our side
-    /// not yet taken a quarter) by how near the enemy it is, halved by every
-    /// turret covering it (any turret, the rest of the AI's too): one within
-    /// [`POINT_COVER`] of it, or one at the front site its raid route crosses
-    /// (see `zk_terrain::lanes`). A front site takes half the exposure of
-    /// every spot routed through it, a point site half of its mex's and its
-    /// neighbours': chokepoints win where many routes cross, point defense
-    /// for a mex no front guards.
-    fn eco_defend_posture(&mut self) {
-        if self.eco.adjusted_income < 6.0 || self.posture_deficit() <= 0.0 {
-            return;
-        }
-        // At most so many orders waiting for a crew.
-        if self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize {
-            return;
-        }
-        let enemy = self.graph.get_enemy_center();
-        if enemy.is_zero() {
-            return;
-        }
-        let spots: Vec<(Vec3, bool)> = self.graph.metal_spots.iter().map(|s| (s.position, s.owned)).collect();
-        let metal: Vec<f32> = self.graph.metal_spots.iter().map(|s| s.value).collect();
-        let mean_metal = (metal.iter().sum::<f32>() / metal.len().max(1) as f32).max(0.01);
-        let decisive = self.posture.decisive();
-        let lanes = decisive.filter(|_| self.posture.laneness() > 0.0);
-        let ours = |i: usize| lanes.is_some_and(|l| l.ours.get(i).copied().unwrap_or(false));
-        // How far a raid has to come: by ground from the enemy's start where
-        // the lanes measured it (a maze corner is far by any route), else
-        // as the crow flies from their center.
-        let reach = |i: usize| {
-            decisive
-                .and_then(|l| l.enemy_ground.get(i).copied())
-                .filter(|d| d.is_finite())
-                .unwrap_or_else(|| distance(spots[i].0, enemy))
-        };
-        let worth: Vec<f32> = (0..spots.len())
-            .map(|i| {
-                let near = (EXPOSURE_REF / reach(i).max(EXPOSURE_REF * 0.25)).min(4.0);
-                let w = if spots[i].1 {
-                    1.0
-                } else if ours(i) {
-                    FUTURE_WORTH
-                } else {
-                    0.0
-                };
-                w * near * metal[i] / mean_metal
-            })
-            .collect();
-        // Front sites: (site, width per site, spots routed through it).
-        let fronts: Vec<(Vec3, f32, Vec<usize>)> = lanes
-            .map(|l| {
-                (l.perimeter.fronts.iter())
-                    .flat_map(|f| {
-                        let width = f.span / f.sites.len().max(1) as f32;
-                        (f.sites.iter().zip(&f.routes)).map(move |(s, r)| (Vec3::xz(s.x, s.z), width, r.clone()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Turrets covering each spot.
-        let mut cover: Vec<u32> = spots.iter().map(|&(p, _)| self.eco_porc_count(p, POINT_COVER) as u32).collect();
-        for (site, _, routed) in &fronts {
-            let n = self.eco_porc_count(*site, CHOKE_PORC_RADIUS) as u32;
-            for &i in routed {
-                if let Some(c) = cover.get_mut(i) {
-                    *c += n;
-                }
-            }
-        }
-        let left = |i: usize| worth[i] * 0.5f32.powi(cover[i].min(16) as i32);
-        // Not naked, not much more (user, 2026-10-26): no site where two of
-        // our turrets' Lotus circles already meet.
-        let safe = |ai: &Ai, p: Vec3| {
-            ai.war.get_porc_threat(p) <= 0.0
-                && ai.war.get_effective_threat(p) <= ai.war.get_total_friendly_threat(p)
-                && !ai.posture_shuns(p)
-                && ai.eco_porc_count(p, LOTUS_REACH) < MAX_OVERLAP
-        };
-        let budget = self.posture_deficit();
-        // Candidates: (gain per metal, gain, site, zone radius, front width
-        // or none for a point, how far the turret may stand from the site).
-        let mut candidates: Vec<(f32, f32, Vec3, f32, Option<f32>, f32)> = Vec::new();
-        for (site, width, routed) in &fronts {
-            let gain: f32 = routed.iter().map(|&i| 0.5 * left(i)).sum();
-            if gain >= MIN_GAIN && safe(self, *site) {
-                candidates.push((0.0, gain, *site, CHOKE_PORC_RADIUS, Some(*width), CHOKE_PORC_RADIUS * 0.6));
-            }
-        }
-        for (i, &(p, owned)) in spots.iter().enumerate() {
-            if !owned || worth[i] <= 0.0 {
-                continue;
-            }
-            let gain: f32 = (0..spots.len())
-                .filter(|&j| spots[j].1 && distance(spots[j].0, p) < POINT_COVER)
-                .map(|j| 0.5 * left(j))
-                .sum();
-            // From the value towards the enemy: between the mex and where
-            // a raid on it comes from.
-            let site = get_directional_point(p, enemy, POINT_FORWARD);
-            if gain >= MIN_GAIN && safe(self, site) {
-                // Within [`POINT_SHIFT`] of the site, so well inside the
-                // cover that counts it (a turret pushed out of it was never
-                // counted, and the spot drew turret after turret: fourteen
-                // Lotuses in a Hide and Seek corner).
-                candidates.push((0.0, gain, site, POINT_COVER, None, POINT_SHIFT));
-            }
-        }
-        // Each candidate's turret: the zone's next kind (see `ZONE_MIX`).
-        let mut priced: Vec<(f32, f32, Vec3, UnitDef, bool, f32)> = (candidates.into_iter())
-            .filter_map(|(_, gain, site, radius, width, shift)| {
-                let turret = self.eco_zone_turret(site, radius, width, budget)?;
-                Some((gain / turret.cost(self.metal).max(1.0), gain, site, turret, width.is_some(), shift))
-            })
-            .collect();
-        priced.sort_by(|a, b| b.0.total_cmp(&a.0));
-        for (_, gain, site, turret, front, shift) in priced.into_iter().take(PLACE_TRIES) {
-            // Spread out: no turret of ours within [`TURRET_SPACING`].
-            let Some(at) = self.eco_spaced_site(turret, site, shift) else { continue };
-            // Unstamped (`frame_issued` 0): stamped porc nobody took up is
-            // dropped after 20 s (`eco_clean_orders`), before a crew from
-            // far away can get there; the posture's ledger keeps its own
-            // time.
-            let Some(task) = self.eco_add_simple(turret, at, List::Porc, Some(List::Porc)) else { continue };
-            let cost = turret.cost(self.metal);
-            if front {
-                self.posture.stats.front_orders += 1;
-            } else {
-                self.posture.stats.point_orders += 1;
-            }
-            let why = format!(
-                "posture: {} {} takes {:.2} spot-exposure off ({:.0}% share)",
-                if front { "front" } else { "point" },
-                turret.name(),
-                gain,
-                self.posture.share * 100.0
-            );
-            self.posture_ordered(task, at, cost, cost * POSTURE_WORTH, &why);
-            return;
-        }
-    }
-
-    /// The next turret for a posture zone (within `radius` of `at`): the
-    /// first kind of [`ZONE_MIX`] the income allows, the zone has fewer
-    /// than [`SAME_KIND`] of (built or planned), and `budget` covers (a
-    /// Lotus always fits). A narrow front (`width` under 250) starts with
-    /// the riot turret.
-    fn eco_zone_turret(&self, at: Vec3, radius: f32, width: Option<f32>, budget: f32) -> Option<UnitDef> {
-        let income = self.eco.adjusted_income;
-        let mut kinds: Vec<&(&str, f32)> = ZONE_MIX.iter().collect();
-        if width.is_some_and(|w| w < 250.0) {
-            kinds.sort_by_key(|(name, _)| *name != "turretriot");
-        }
-        let count = |id: i32| {
-            let built = (self.eco.porcs.iter())
-                .filter(|u| distance(u.pos(), at) < radius && u.def().is_some_and(|d| d.id() == id))
-                .count();
-            let planned = (self.eco.porc_tasks.iter())
-                .filter(|&&t| distance(self.eco.task_pos(t), at) < radius)
-                .filter(|&&t| {
-                    self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == id)
-                })
-                .count();
-            built + planned
-        };
-        let lotus = self.defs.get("turretlaser").map_or(90.0, |d| d.cost(self.metal));
-        (kinds.into_iter())
-            .filter(|(_, wants)| income >= *wants)
-            .filter_map(|(name, _)| self.defs.get(name))
-            .find(|d| count(d.id()) < SAME_KIND && d.cost(self.metal) <= budget.max(lotus))
-    }
-
-    /// A legal site for `def` within `shift` of `near` with no turret of
-    /// ours (built or planned) within [`TURRET_SPACING`]: splash then hits
-    /// one at a time. Tries rings round `near`, nearest first.
-    fn eco_spaced_site(&self, def: UnitDef, near: Vec3, shift: f32) -> Option<Vec3> {
-        let others: Vec<Vec3> = (self.eco.porcs.iter().map(|u| u.pos()))
-            .chain(self.eco.porc_tasks.iter().map(|&t| self.eco.task_pos(t)))
-            .collect();
-        let map = self.cb.map();
-        let mut r = 0.0;
-        while r <= shift {
-            let steps = if r == 0.0 { 1 } else { 8 };
-            for k in 0..steps {
-                let a = k as f32 * std::f32::consts::TAU / steps as f32;
-                let p = Vec3::new(near.x + r * a.cos(), near.y, near.z + r * a.sin());
-                let site = map.find_closest_build_site(def, p, 48.0, 3, 0);
-                if site.x < 0.0 || distance(site, near) > shift {
-                    continue;
-                }
-                let overlap = others.iter().filter(|&&o| distance(o, site) < LOTUS_REACH).count();
-                if overlap < MAX_OVERLAP && others.iter().all(|&o| distance(o, site) >= TURRET_SPACING) {
-                    return Some(site);
-                }
-            }
-            r += 70.0;
-        }
-        None
-    }
-
     /// The `nth` turret for a chokepoint `width` elmos wide: a riot turret
     /// for narrow gates or an LLT first, then an HLT, then heavier porc.
     fn eco_choke_turret(&self, width: f32, nth: usize) -> Option<UnitDef> {
@@ -2625,30 +2125,13 @@ impl Ai {
             .filter(|&&ft| eco.tasks.get(ft).and_then(|t| t.as_construction()).is_some_and(|c| c.target.is_some()))
             .count() as i32;
         let (nft, nfus) = (eco.fusion_tasks.len() as i32, eco.fusions.len() as i32);
-        // Which plants the economy may build. The old ladder wanted eminent
-        // territory (40% of the spots owned, rare on a contested map) and 35
-        // energy for a fusion, three fusions for a singularity; geothermal
-        // and wind counted for nothing. The plants are for overdrive (a
-        // surplus), so they open with the economy instead (user,
-        // 2026-10-26): fusions from [`FUSION_INCOME`], singularities from
-        // [`SINGU_ENERGY`] energy income or two fusions, or either from the
-        // map's density. Off by default since 2026-10-27 (`enable=ecoladder`,
-        // see `ai::OFF_BY_DEFAULT`): the old ladder.
-        // Density opens them too, on any income (a 16v16 on a small map):
-        // standing metal per usable area (see `posture`), one fusion per
-        // density reference, a singularity from twice it.
-        let dense = self.posture.density / self.posture_levers().density_ref.max(1.0);
-        let (fusion_open, singu_open, allowed) = if self.dev_off("ecoladder") {
-            let eminent = self.graph.eminent_territory;
-            (eco.effective_income > 35.0 && eminent, nfus > 2 && eminent, (eco.static_income / 27.5).floor())
-        } else {
-            let fusions = (eco.fusions.iter()).filter(|u| self.defs.name_of(**u) == "energyfusion").count();
-            (
-                eco.static_income > FUSION_INCOME || dense >= 1.0,
-                eco.effective_income_energy >= SINGU_ENERGY || fusions >= 2 || dense >= 2.0,
-                (eco.static_income / 27.5).floor().max(dense.floor()),
-            )
-        };
+        // Which plants the economy may build: a fusion from 35 metal income
+        // with eminent territory (40% of the spots owned), a singularity from
+        // three fusions with it. (An income and density ladder, `ecoladder`,
+        // lost the 2026-10-27 Eye of Horus mirror and was removed.)
+        let eminent = self.graph.eminent_territory;
+        let (fusion_open, singu_open, allowed) =
+            (eco.effective_income > 35.0 && eminent, nfus > 2 && eminent, (eco.static_income / 27.5).floor());
 
         let name = if fusion_open
             && allowed > nfus as f32
@@ -2680,47 +2163,6 @@ impl Ai {
 
         let Some(position) = self.eco_reactor_site(def) else { return };
         self.eco_add_construction(WorkerTask::construction(def, position, 0), None, Some(List::Fusion));
-    }
-
-    fn eco_create_grid_task(&mut self, position: Vec3) {
-        let Some(pylon) = self.defs.get("energypylon") else {
-            return;
-        };
-
-        let mut fdist = 65535.0;
-        let mut best = position;
-        for f in &self.eco.fusions {
-            let fpos = f.pos();
-            let tmpdist = distance(fpos, position);
-            if tmpdist < fdist {
-                fdist = tmpdist;
-                best = fpos;
-            }
-        }
-
-        best = self.graph.get_overdrive_sweet_spot(best, "energypylon");
-        if best == NULLPOS {
-            return;
-        }
-        best = self.eco_build_site(pylon, best, 0);
-        // don't build pylons in the middle of nowhere
-        if self.eco_get_fusion_dist(best) > 1500.0 {
-            return;
-        }
-
-        // check the build site for existing pylons, since getOverdriveSweetSpot may cluster them.
-        let gdist = self
-            .eco
-            .pylons
-            .iter()
-            .map(|u| distance(best, u.pos()))
-            .chain(self.eco.pylon_tasks.iter().map(|&c| distance(best, self.eco.task_pos(c))))
-            .fold(65535.0f32, f32::min);
-        if gdist <= 750.0 {
-            return; // Already have one
-        }
-
-        self.eco_add_simple(pylon, best, List::Pylon, Some(List::Pylon));
     }
 
     pub(super) fn eco_create_nano_turret_task(&mut self, wid: i32, target: Unit) {
@@ -2934,37 +2376,6 @@ mod tests {
             assert_eq!(picked_factory(&with, k), picked_factory(&without, k));
         }
         assert_eq!(picked_factory(&list(&["factoryjump"]), 3), "factoryjump");
-    }
-
-    #[test]
-    fn air_tempo_dose_grows_with_time_and_map_size() {
-        // Nothing before the threshold, on any map.
-        for diag in [724.0, 1086.0, 1448.0, 2172.0] {
-            assert_eq!(air_tempo_dose(0.0, diag), 0.0);
-            assert_eq!(air_tempo_dose(AIR_TEMPO_FROM_MIN - 0.1, diag), 0.0);
-            assert!(air_tempo_dose(AIR_TEMPO_FROM_MIN + 1.0, diag) > 0.0);
-        }
-        // Monotone in time (non-decreasing, strictly while ramping).
-        let mut last = 0.0;
-        for m in 0..60 {
-            let d = air_tempo_dose(m as f32, 1448.0);
-            assert!(d >= last, "minute {m}: {d} < {last}");
-            if (m as f32) > AIR_TEMPO_FROM_MIN && (m as f32) <= AIR_TEMPO_FULL_MIN {
-                assert!(d > last, "minute {m} should still ramp");
-            }
-            last = d;
-        }
-        assert_eq!(air_tempo_dose(AIR_TEMPO_FULL_MIN, AIR_TEMPO_DIAG), 1.0);
-        assert_eq!(air_tempo_dose(90.0, AIR_TEMPO_DIAG), 1.0);
-        // Monotone in the map's diagonal, bounded both ways.
-        let mut last = 0.0;
-        for diag in (400..3000).step_by(100) {
-            let d = air_tempo_dose(AIR_TEMPO_FULL_MIN, diag as f32);
-            assert!(d >= last, "diagonal {diag}: {d} < {last}");
-            assert!((AIR_TEMPO_DIAG_MIN..=AIR_TEMPO_DIAG_MAX).contains(&d));
-            last = d;
-        }
-        assert!(air_tempo_dose(20.0, 2172.0) > air_tempo_dose(20.0, 724.0));
     }
 
     #[test]
