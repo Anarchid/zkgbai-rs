@@ -28,8 +28,8 @@
 use std::collections::HashMap;
 
 use super::{
-    DT, FateMode, FightSnapshot, HORIZON, Hazard, HitTables, MechOutcome, Model, RBANDS, SimUnit, UnitFate, ZoiBeta,
-    data_lines, expit, logit, parse_f64, project, speed_band, take,
+    DT, FateMode, FightSnapshot, HORIZON, Hazard, HitTables, MechOutcome, Model, RBANDS, SimFlags, SimUnit, UnitFate,
+    ZoiBeta, data_lines, expit, logit, parse_f64, plane, project, speed_band, take,
 };
 
 const MECH_TSV: &str = include_str!("../../../data/fightsim_mech.tsv");
@@ -117,10 +117,52 @@ struct Death {
     paralyzer: bool,
 }
 
+/// A splash weapon in the plane fight (mech.py `_aoe_info`, aoe_fit.py).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Splash {
+    /// Blast radius (elmos) and the engine's damage falloff at its edge.
+    radius: f64,
+    edge: f64,
+    /// Share of the engine falloff damage landed on units of the target's
+    /// side and of the shooter's side (fitted by weapon class).
+    kappa_target: f64,
+    kappa_shooter: f64,
+    /// Splash per shot its training shots landed on others, as a share of
+    /// nominal: the hit tables' damage per hit includes it, so the target
+    /// is charged that much less.
+    geo: f64,
+}
+
+/// One fight's calibration: P(A wins), the killed shares' means, and the
+/// per-unit fates' recalibration.
+#[derive(Clone, Debug)]
+pub struct Calibration {
+    /// P(A wins) = expit(w0 + w1 (killed_b - killed_a)) on the mechanics outputs.
+    pub win: [f64; 2],
+    pub cal_a: ZoiBeta,
+    pub cal_b: ZoiBeta,
+    /// A unit's P(dead by the horizon) recalibrated: expit(t0 + t1 logit(raw)
+    /// + t2 static + t3 ln(horizon / 150)) (tools/predictor/score_fates.py).
+    pub fate: [f64; 4],
+}
+
+impl Calibration {
+    fn take(cal: &[(String, f64)], prefix: &str) -> Result<Calibration, String> {
+        Ok(Calibration {
+            win: take(cal, &format!("{prefix}win."))?,
+            cal_a: ZoiBeta { theta: take(cal, &format!("{prefix}zoibA."))? },
+            cal_b: ZoiBeta { theta: take(cal, &format!("{prefix}zoibB."))? },
+            fate: take(cal, &format!("{prefix}fate."))?,
+        })
+    }
+}
+
 /// The fitted mechanics and their calibration.
 pub struct MechTables {
     weapons: HashMap<String, WeaponMech>,
     death: HashMap<String, Death>,
+    /// Splash weapons, for the plane fight.
+    splash: HashMap<String, Splash>,
     engage: [f64; 13],
     /// Seconds of stun past full paralysis the build-up is capped at.
     stun_cap_s: f64,
@@ -131,6 +173,10 @@ pub struct MechTables {
     /// A unit's P(dead by the horizon) recalibrated: expit(t0 + t1 logit(raw)
     /// + t2 static + t3 ln(horizon / 150)) (tools/predictor/score_fates.py).
     pub fate: [f64; 4],
+    /// The `fightfocus` and `fight2d` fights' own calibrations (rows
+    /// `cal focus.*` and `cal 2d.*`).
+    pub focus_cal: Option<Calibration>,
+    pub twod_cal: Option<Calibration>,
     /// The data file's fitting header.
     pub fitted: String,
 }
@@ -140,9 +186,25 @@ impl MechTables {
         MechTables::parse(MECH_TSV)
     }
 
+    /// The calibration of the fight `flags` asks for; the base one when the
+    /// variant has none in the tables.
+    pub fn calibration(&self, flags: SimFlags) -> Calibration {
+        let base =
+            || Calibration { win: self.win, cal_a: self.cal_a.clone(), cal_b: self.cal_b.clone(), fate: self.fate };
+        let variant = if flags.twod {
+            self.twod_cal.as_ref()
+        } else if flags.focus {
+            self.focus_cal.as_ref()
+        } else {
+            None
+        };
+        variant.cloned().unwrap_or_else(base)
+    }
+
     fn parse(tsv: &str) -> Result<MechTables, String> {
         let mut weapons = HashMap::new();
         let mut death = HashMap::new();
+        let mut splash = HashMap::new();
         let mut dyn_frac: HashMap<String, [Option<f64>; RBANDS as usize + 1]> = HashMap::new();
         let mut engage = Vec::new();
         let mut cal = Vec::new();
@@ -178,6 +240,16 @@ impl MechTables {
                     }
                     dyn_frac.entry(name).or_default()[rb] = Some(num(3)?);
                 }
+                "aoe" => {
+                    let s = Splash {
+                        radius: num(2)?,
+                        edge: num(3)?,
+                        kappa_target: num(4)?,
+                        kappa_shooter: num(5)?,
+                        geo: num(6)?,
+                    };
+                    splash.insert(name, s);
+                }
                 "engage" => engage.push((name, num(2)?)),
                 "const" if name == "stun_cap_s" => stun_cap_s = Some(num(2)?),
                 "cal" => cal.push((name, num(2)?)),
@@ -194,15 +266,23 @@ impl MechTables {
         for (w, (_, v)) in w.iter_mut().zip(&engage) {
             *w = *v;
         }
+        let base = Calibration::take(&cal, "")?;
+        let variant = |v: &str| {
+            let p = format!("{v}.");
+            cal.iter().any(|(k, _)| k.starts_with(&p)).then(|| Calibration::take(&cal, &p)).transpose()
+        };
         Ok(MechTables {
             weapons,
             death,
+            splash,
             engage: w,
             stun_cap_s: stun_cap_s.ok_or("mech: no stun_cap_s")?,
-            win: take(&cal, "win.")?,
-            cal_a: ZoiBeta { theta: take(&cal, "zoibA.")? },
-            cal_b: ZoiBeta { theta: take(&cal, "zoibB.")? },
-            fate: take(&cal, "fate.")?,
+            win: base.win,
+            cal_a: base.cal_a,
+            cal_b: base.cal_b,
+            fate: base.fate,
+            focus_cal: variant("focus")?,
+            twod_cal: variant("2d")?,
             fitted: tsv.lines().next().unwrap_or_default().trim_start_matches('#').trim().to_owned(),
         })
     }
@@ -231,8 +311,14 @@ pub(super) struct MechUnit {
     ovs: f64,
     /// (last frame, damage per frame).
     burns: Vec<(i32, f64)>,
-    /// Lateral coordinate: 0 except in a fates query's pass mode.
+    /// Lateral coordinate: 0 except in a fates query's pass mode, a defense
+    /// rollout and the plane fight.
     lat: f64,
+    /// Unit radius (elmos): the plane fight keeps units this far apart and
+    /// measures splash from their edge.
+    rad: f64,
+    /// Per weapon, in `u.weapons` order: its splash in the plane fight.
+    splash: Vec<Option<Splash>>,
 }
 
 impl MechUnit {
@@ -321,6 +407,10 @@ struct Run<'a> {
     /// Per-unit bookkeeping for a fates query; the fight then goes on to
     /// the horizon while one side has an armed unit and the other anything.
     track: Option<Track>,
+    /// The plane fight: moves in the plane, no overlaps, splash.
+    twod: bool,
+    /// Shots go to the least-health target in range.
+    least_health: bool,
 }
 
 /// mech.py's fates bookkeeping: the Bernoulli variance of the hits each
@@ -362,9 +452,10 @@ impl Model {
     /// the a-move calibrated.
     pub(super) fn mech_outcome(&self, snap: &FightSnapshot) -> MechOutcome {
         let units = self.mech_units(snap);
-        let (t, s) = (&self.mech, self.mech.stun_cap_s);
-        let (ka, kb) = simulate_mech(&units, &self.hits, s, Some(&self.hazard), false);
-        let (wa, wb) = simulate_mech(&units, &self.hits, s, Some(&self.hazard), true);
+        let (s, f) = (self.mech.stun_cap_s, snap.flags);
+        let t = self.mech.calibration(f);
+        let (ka, kb) = simulate_mech_flags(&units, &self.hits, s, Some(&self.hazard), false, f);
+        let (wa, wb) = simulate_mech_flags(&units, &self.hits, s, Some(&self.hazard), true, f);
         MechOutcome {
             killed_a: ka as f32,
             killed_b: kb as f32,
@@ -471,6 +562,9 @@ impl Model {
             FateMode::Assassinate { target } => Some(target),
             _ => None,
         };
+        // Pass mode stays on its lines (mech.py has no plane pass); it keeps
+        // the targeting.
+        let flags = if pass { SimFlags { twod: false, focus: snap.flags.least_health() } } else { snap.flags };
         let mut run = Run {
             defense,
             defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
@@ -481,10 +575,13 @@ impl Model {
             insertion,
             horizon,
             track: Some(track),
+            twod: flags.twod,
+            least_health: flags.least_health(),
         };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let Some(tr) = run.track else { return Vec::new() };
-        let c = &self.mech.fate;
+        let cal = self.mech.calibration(flags);
+        let c = &cal.fate;
         let ln_h = (horizon.max(1) as f64 / 150.0).ln();
         units
             .iter()
@@ -509,24 +606,27 @@ impl Model {
     /// weapons); weapons doing neither are dropped.
     pub(super) fn mech_units(&self, snap: &FightSnapshot) -> Vec<MechUnit> {
         let t = &self.mech;
-        let xs = project(snap);
+        let twod = snap.flags.twod;
+        let pos: Vec<(f64, f64)> =
+            if twod { plane(snap) } else { project(snap).into_iter().map(|x| (x, 0.0)).collect() };
         let mut us: Vec<MechUnit> = snap
             .units
             .iter()
-            .zip(xs)
-            .map(|(su, x)| {
+            .zip(pos)
+            .map(|(su, (x, lat))| {
                 let ws: Vec<(&super::WeaponSpec, WeaponMech)> =
                     su.spec.weapons.iter().map(|w| (w, t.weapon(&w.name))).collect();
                 let ordered = ws
                     .iter()
                     .filter(|(w, m)| !m.paralyzer && w.damage > 0.0)
                     .chain(ws.iter().filter(|(_, m)| m.paralyzer));
-                let (mut weapons, mut mech) = (Vec::new(), Vec::new());
+                let (mut weapons, mut mech, mut splash) = (Vec::new(), Vec::new(), Vec::new());
                 for (w, m) in ordered {
                     let mut sw = self.sim_weapon(w);
                     if m.paralyzer {
                         sw.nominal = 0.0;
                     }
+                    splash.push(if twod && !sw.hitscan { t.splash.get(&w.name).copied() } else { None });
                     weapons.push(sw);
                     mech.push(*m);
                 }
@@ -544,7 +644,9 @@ impl Model {
                     slow_last: -1_000_000_000,
                     ovs: 0.0,
                     burns: Vec::new(),
-                    lat: 0.0,
+                    lat,
+                    rad: if su.spec.radius > 0.0 { su.spec.radius as f64 } else { 12.0 },
+                    splash,
                 }
             })
             .collect();
@@ -655,12 +757,26 @@ fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize) {
 /// heatray on: expected killed share of each side's armed cost, weighted
 /// over the stopping time when a hazard is given. `withdraw`: every mobile
 /// A unit turns away from B at its (slowed) speed instead of fighting.
+#[cfg(test)]
 pub(super) fn simulate_mech(
     template: &[MechUnit],
     hits: &HitTables,
     stun_cap_s: f64,
     hazard: Option<&Hazard>,
     withdraw: bool,
+) -> (f64, f64) {
+    simulate_mech_flags(template, hits, stun_cap_s, hazard, withdraw, SimFlags::default())
+}
+
+/// [`simulate_mech`] in the fight `flags` asks for (the units laid out by
+/// [`Model::mech_units`] with the same flags).
+pub(super) fn simulate_mech_flags(
+    template: &[MechUnit],
+    hits: &HitTables,
+    stun_cap_s: f64,
+    hazard: Option<&Hazard>,
+    withdraw: bool,
+    flags: SimFlags,
 ) -> (f64, f64) {
     let mut run = Run {
         defense: None,
@@ -672,8 +788,73 @@ pub(super) fn simulate_mech(
         insertion: None,
         horizon: HORIZON,
         track: None,
+        twod: flags.twod,
+        least_health: flags.least_health(),
     };
     run_mech(template, hits, stun_cap_s, &mut run).0
+}
+
+/// mech.py `toward` / `away`: move unit `i` `step` towards (`dir` 1) or away
+/// from (`dir` -1) the point (`nx`, `nz`): along the axis, or in the plane.
+fn step_to(m: &mut MechUnit, nx: f64, nz: f64, step: f64, dir: f64, twod: bool) {
+    if !twod {
+        m.u.x += dir * if nx > m.u.x { step } else { -step };
+        return;
+    }
+    let (dx, dy) = (nx - m.u.x, nz - m.lat);
+    let d = dx.hypot(dy);
+    if d <= 1e-9 {
+        m.u.x += dir * if m.u.side == 0 { step } else { -step };
+        return;
+    }
+    m.u.x += dir * step * dx / d;
+    m.lat += dir * step * dy / d;
+}
+
+/// mech.py `_separate`: ground units do not overlap. Every pair of them
+/// closer than the sum of their radii is pushed apart along the line
+/// between them (coincident ones across the axis, by index order), the
+/// overlap shared between mobile units, none for a static; one pass, from
+/// the positions at its start.
+fn separate(us: &mut [MechUnit], alive: &[usize]) {
+    let gs: Vec<usize> = alive.iter().copied().filter(|&i| !us[i].air).collect();
+    let n = gs.len();
+    if n < 2 {
+        return;
+    }
+    let mut moves = vec![(0.0f64, 0.0f64); n];
+    let mut any = false;
+    for (a, &i) in gs.iter().enumerate() {
+        for (b, &j) in gs.iter().enumerate() {
+            if a == b {
+                continue;
+            }
+            let (dx, dy) = (us[i].u.x - us[j].u.x, us[i].lat - us[j].lat);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let over = us[i].rad + us[j].rad - dist;
+            if over <= 0.0 {
+                continue;
+            }
+            any = true;
+            let share = match (us[i].u.mobile, us[j].u.mobile) {
+                (false, _) => 0.0,
+                (true, true) => 0.5,
+                (true, false) => 1.0,
+            };
+            let (ux, uy) = if dist > 1e-6 { (dx / dist, dy / dist) } else { (0.0, if a > b { 1.0 } else { -1.0 }) };
+            moves[a].0 += over * share * ux;
+            moves[a].1 += over * share * uy;
+        }
+    }
+    if !any {
+        return;
+    }
+    for (a, &i) in gs.iter().enumerate() {
+        if us[i].u.mobile && (moves[a].0 != 0.0 || moves[a].1 != 0.0) {
+            us[i].u.x += moves[a].0;
+            us[i].lat += moves[a].1;
+        }
+    }
 }
 
 /// The mechanics fight as `run` asks: the killed shares, and the units at
@@ -719,6 +900,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             && engagement_members != alive
         {
             let active = FightSnapshot {
+                flags: Default::default(),
                 units: alive
                     .iter()
                     .map(|&i| {
@@ -855,9 +1037,8 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 continue;
             }
             if withdraw && side == 0 {
-                let u = &mut us[i].u;
-                u.x -= if nx > u.x { speed * dt } else { -speed * dt };
-                u.moving = true;
+                step_to(&mut us[i], nx, nz, speed * dt, -1.0, run.twod);
+                us[i].u.moving = true;
                 moved = true;
                 continue;
             }
@@ -881,23 +1062,26 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     kill(&mut us, &mut killed, i);
                     continue;
                 }
-                let u = &mut us[i].u;
                 let step = (speed * dt).min(dist);
-                u.x += if nx > u.x { step } else { -step };
-                u.moving = true;
+                step_to(&mut us[i], nx, nz, step, 1.0, run.twod);
+                us[i].u.moving = true;
                 moved = true;
                 continue;
             }
-            let u = &mut us[i].u;
-            if !u.armed {
+            if !us[i].u.armed {
                 continue;
             }
-            if dist > u.max_range * 0.95 {
-                let step = (speed * dt).min(dist - u.max_range * 0.9);
-                u.x += if nx > u.x { step } else { -step };
-                u.moving = true;
+            if dist > us[i].u.max_range * 0.95 {
+                let step = (speed * dt).min(dist - us[i].u.max_range * 0.9);
+                step_to(&mut us[i], nx, nz, step, 1.0, run.twod);
+                us[i].u.moving = true;
                 moved = true;
             }
+        }
+        // mech.py runs the overlap pass on the step's opening list (a
+        // kamikaze that blew up in the moves still pushes).
+        if run.twod {
+            separate(&mut us, &alive);
         }
         alive.retain(|&i| us[i].u.alive);
         // Fire: every reloaded weapon at its nearest living target in range
@@ -937,10 +1121,18 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 for &j in &foes {
                     let e = &us[j];
                     let d = apart(e, &us[i]);
+                    // focus: the least health left first, then the nearest (mech.py `focus`)
+                    let better = |t: (f64, usize)| {
+                        if run.least_health {
+                            e.u.hp < us[t.1].u.hp || (e.u.hp == us[t.1].u.hp && d < t.0)
+                        } else {
+                            d < t.0
+                        }
+                    };
                     if e.u.alive
                         && d <= range
                         && (if e.air { m.can_air } else { m.can_ground })
-                        && target.is_none_or(|t| d < t.0)
+                        && target.is_none_or(better)
                     {
                         target = Some((d, j));
                     }
@@ -953,7 +1145,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 let hit = hits.lookup(key, us[j].u.target, rb as u8, sb);
                 let frac = m.dyn_frac.and_then(|d| d[rb as usize]).unwrap_or(hit.frac);
                 let shots = if hitscan { 1.0 } else { salvo as f64 };
-                let dmg = hit.p_tgt * frac * nominal * shots * eff;
+                // The plane fight lands splash on the units around the target
+                // below; the hit tables' damage per hit already holds it, so
+                // the target is charged that much less (mech.py `aoe`).
+                let splash = if run.twod { us[i].splash[wi] } else { None };
+                let frac_t = splash.map_or(frac, |sp| (frac - sp.geo / hit.p_any.max(0.05)).max(0.0));
+                let dmg = hit.p_tgt * frac_t * nominal * shots * eff;
                 let t = &mut us[j];
                 if m.burn > 0.0 && m.burn_frames > 0 {
                     t.burns.push((f + m.burn_frames, m.burn * hit.p_tgt * shots * eff / m.burn_frames as f64));
@@ -968,9 +1165,31 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     t.cap_slow();
                     t.slow_last = f;
                 }
+                if let Some(sp) = splash {
+                    // engine falloff from each unit's edge, kappa by side; the
+                    // target's domain only, never the shooter
+                    let t_air = us[j].air;
+                    for o in 0..n {
+                        if o == j || o == i || !us[o].u.alive || us[o].air != t_air {
+                            continue;
+                        }
+                        let dd = apart(&us[o], &us[j]) - us[o].rad;
+                        if dd >= sp.radius {
+                            continue;
+                        }
+                        let dd = dd.max(0.0);
+                        let den = sp.radius - dd * sp.edge;
+                        let falloff = if den > 1e-6 { (sp.radius - dd) / den } else { 1.0 };
+                        let kappa = if us[o].u.side == us[j].u.side { sp.kappa_target } else { sp.kappa_shooter };
+                        let v = kappa * falloff * nominal * shots * eff;
+                        if v > 0.0 {
+                            hurt(&mut us, &mut killed, o, v);
+                        }
+                    }
+                }
                 if dmg > 0.0 {
                     if let Some(tr) = run.track.as_mut() {
-                        let (p, d1) = (hit.p_tgt * eff, frac * nominal);
+                        let (p, d1) = (hit.p_tgt * eff, frac_t * nominal);
                         tr.var[j] += shots * p * (1.0 - p) * d1 * d1;
                     }
                     hurt(&mut us, &mut killed, j, dmg);
@@ -1007,11 +1226,27 @@ mod tests {
     const UNITS: &str = include_str!("testdata/mech_parity_units.tsv");
     const CASES: &str = include_str!("testdata/mech_parity_cases.tsv");
     const FATES: &str = include_str!("testdata/mech_fates_cases.tsv");
+    const VARIANT_UNITS: &str = include_str!("testdata/mech_variants_units.tsv");
+    const VARIANT_CASES: &str = include_str!("testdata/mech_variants_cases.tsv");
+    const VARIANT_FATES: &str = include_str!("testdata/mech_variants_fates.tsv");
+
+    /// export_mech.VARIANTS by name.
+    fn variant(name: &str) -> SimFlags {
+        match name {
+            "focus" => SimFlags::from_switches(false, true),
+            "2d" => SimFlags::from_switches(true, false),
+            v => panic!("variant {v:?}"),
+        }
+    }
     /// Absolute tolerance on killed shares against the Python model.
     const TOL: f64 = 1e-3;
 
     fn specs() -> HashMap<String, Arc<UnitSpec>> {
-        data_lines(UNITS)
+        specs_from(UNITS)
+    }
+
+    fn specs_from(units: &str) -> HashMap<String, Arc<UnitSpec>> {
+        data_lines(units)
             .map(|l| {
                 let f: Vec<&str> = l.split('\t').collect();
                 let weapons = f[9]
@@ -1061,7 +1296,7 @@ mod tests {
                 }
             })
             .collect();
-        FightSnapshot { units }
+        FightSnapshot { flags: Default::default(), units }
     }
 
     fn cases() -> Vec<(String, FightSnapshot, [f64; 6])> {
@@ -1083,6 +1318,7 @@ mod tests {
         let model = Model::load().unwrap();
         let defs = specs();
         let mut snap = FightSnapshot {
+            flags: Default::default(),
             units: vec![
                 SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0 },
                 SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 820.0, x: 100.0, z: 0.0 },
@@ -1108,6 +1344,7 @@ mod tests {
         let model = Model::load().unwrap();
         let defs = specs();
         let snap = FightSnapshot {
+            flags: Default::default(),
             units: vec![
                 SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0 },
                 SnapUnit { side: 1, spec: defs["cloakcon"].clone(), hp: 600.0, x: 1000.0, z: 0.0 },
@@ -1169,6 +1406,7 @@ mod tests {
             }],
         });
         let mut snap = FightSnapshot {
+            flags: Default::default(),
             units: (0..4)
                 .map(|i| SnapUnit { side: 0, spec: buoy.clone(), hp: 1250.0, x: i as f32 * 30.0 - 45.0, z: 0.0 })
                 .collect(),
@@ -1241,6 +1479,7 @@ mod tests {
         let model = Model::load().unwrap();
         let defs = specs();
         let snap = FightSnapshot {
+            flags: Default::default(),
             units: vec![
                 SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 30.0, x: 0.0, z: 0.0 },
                 SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 100000.0, x: 100.0, z: 0.0 },
@@ -1268,6 +1507,7 @@ mod tests {
         decoy.health = 1.0;
         let decoy = Arc::new(decoy);
         let snap = FightSnapshot {
+            flags: Default::default(),
             units: vec![
                 SnapUnit { side: 0, spec: ours, hp: 1450.0, x: 0.0, z: 0.0 },
                 SnapUnit { side: 1, spec: decoy.clone(), hp: 1.0, x: 50.0, z: 0.0 },
@@ -1312,6 +1552,104 @@ mod tests {
         assert!(n >= 7);
     }
 
+    /// The `fightfocus` / `fight2d` fights against mech.simulate_mech with
+    /// their opts (testdata/mech_variants_cases.tsv, `export_mech.py ...
+    /// variants`): the parity crowds and line, rings round a Kodachi, spread
+    /// Scorchers and a splash blob, without and with the hazard and with A
+    /// withdrawing.
+    #[test]
+    fn variants_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(VARIANT_UNITS);
+        let s = m.mech.stun_cap_s;
+        let (mut n, mut worst_all) = (0, 0.0f64);
+        for l in data_lines(VARIANT_CASES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let flags = variant(f[1]);
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = flags;
+            let units = m.mech_units(&snap);
+            let want: Vec<f64> = f[3..9].iter().map(|v| v.parse().unwrap()).collect();
+            let dps = simulate_mech_flags(&units, &m.hits, s, None, false, flags);
+            let stop = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), false, flags);
+            let wd = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), true, flags);
+            let got = [dps.0, dps.1, stop.0, stop.1, wd.0, wd.1];
+            let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0, f64::max);
+            assert!(worst <= TOL, "{} {}: got {got:?}, python {want:?}", f[0], f[1]);
+            worst_all = worst_all.max(worst);
+            let out = m.predict_with(&snap, true).mech.unwrap();
+            assert!((out.killed_a as f64 - stop.0).abs() < 1e-6 && (out.withdraw_b as f64 - wd.1).abs() < 1e-6);
+            n += 1;
+        }
+        eprintln!("variant parity: {n} cases, worst |rust - python| = {worst_all:.2e}");
+        assert!(n >= 40);
+    }
+
+    /// The variants' fates against mech.simulate_mech(fates=...) with their
+    /// opts (testdata/mech_variants_fates.tsv).
+    #[test]
+    fn variant_fates_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(VARIANT_UNITS);
+        let mut n = 0;
+        for l in data_lines(VARIANT_FATES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = variant(f[1]);
+            let got = m.fates(&snap, f[3].parse().unwrap(), FateMode::AMove);
+            let want: Vec<Vec<&str>> = f[4].split(';').map(|u| u.split(':').collect()).collect();
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let death: i32 = w[1].parse().unwrap();
+                let (hp, pd): (f64, f64) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                assert_eq!(g.dead, w[0] == "1", "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert_eq!(g.death_frame, (death >= 0).then_some(death), "{} {} unit {i}", f[0], f[1]);
+                assert!((g.hp_left as f64 - hp).abs() <= 0.5 + 1e-3 * hp, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert!((g.p_raw as f64 - pd).abs() <= TOL, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+            }
+            n += 1;
+        }
+        assert!(n >= 12);
+    }
+
+    /// Off, both switches leave every answer as it was: the base parity
+    /// cases' fight and fates are bit-identical with default flags.
+    #[test]
+    fn switches_off_are_the_frozen_fight() {
+        let m = Model::load().unwrap();
+        let t = MechTables::load().unwrap();
+        assert!(t.focus_cal.is_some() && t.twod_cal.is_some(), "variant calibrations in the tables");
+        assert!(t.splash.contains_key("tankraid_napalm_bomblet"));
+        assert_eq!(t.calibration(SimFlags::default()).win, t.win);
+        for (name, snap, _) in cases() {
+            assert_eq!(snap.flags, SimFlags::default());
+            let a = m.predict_with(&snap, true);
+            let b = m.predict_with(&FightSnapshot { flags: SimFlags::default(), units: snap.units.clone() }, true);
+            assert_eq!(a, b, "{name}");
+        }
+    }
+
+    /// A ring of Glaives round a Kodachi: the plane puts them round it, the
+    /// axis on two points (a centred ring collapses onto one).
+    #[test]
+    fn a_ring_keeps_its_shape_in_the_plane() {
+        let specs = specs_from(VARIANT_UNITS);
+        let (g, k) = (specs["cloakraid"].clone(), specs["tankraid"].clone());
+        let mut units: Vec<SnapUnit> = (0..4)
+            .map(|i| {
+                let a = std::f32::consts::FRAC_PI_2 * i as f32;
+                SnapUnit { side: 0, spec: g.clone(), hp: 230.0, x: 300.0 * a.cos(), z: 300.0 * a.sin() }
+            })
+            .collect();
+        units.push(SnapUnit { side: 1, spec: k, hp: 660.0, x: 0.0, z: 0.0 });
+        let snap = FightSnapshot { flags: SimFlags::from_switches(true, false), units };
+        let p = plane(&snap);
+        for (x, z) in &p[..4] {
+            assert!(((x * x + z * z).sqrt() - 300.0).abs() < 1e-3, "{p:?}");
+        }
+        assert!(project(&snap).iter().all(|x| x.abs() < 1e-3));
+    }
+
     #[test]
     fn erf_matches_known_values() {
         for (x, want) in [(0.0, 0.0), (0.5, 0.5204998778), (1.0, 0.8427007929), (-2.0, -0.9953222650)] {
@@ -1336,8 +1674,10 @@ mod tests {
         let specs = specs();
         let unit = |side, def: &str, x, z| SnapUnit { side, spec: specs[def].clone(), hp: 100.0, x, z };
         // A Rogue behind a file of Glaives, facing one Bandit 400 out.
-        let mut snap =
-            FightSnapshot { units: vec![unit(0, "cloakskirm", 0.0, 0.0), unit(1, "shieldraid", 400.0, 0.0)] };
+        let mut snap = FightSnapshot {
+            flags: Default::default(),
+            units: vec![unit(0, "cloakskirm", 0.0, 0.0), unit(1, "shieldraid", 400.0, 0.0)],
+        };
         let alone = engage_features(&snap, 0, 455.0);
         for k in 1..4 {
             snap.units.push(unit(0, "cloakraid", 30.0 * k as f32, 2.0));
@@ -1379,5 +1719,52 @@ mod tests {
             big.units.len()
         );
         assert!(with < 50_000.0 && fates < 50_000.0);
+    }
+
+    /// What the switches cost per fates query (10 s a-move) and per
+    /// `predict_with` (a-move and withdrawal under the hazard), by size:
+    /// `cargo test --release variant_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing; prints"]
+    fn variant_cost() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(VARIANT_UNITS);
+        for per_side in [5usize, 10, 30] {
+            let mut units = Vec::new();
+            for i in 0..per_side {
+                let (row, col) = ((i / 5) as f32, (i % 5) as f32);
+                units.push(SnapUnit {
+                    side: 0,
+                    spec: specs["cloakraid"].clone(),
+                    hp: 230.0,
+                    x: -40.0 * row,
+                    z: 30.0 * col,
+                });
+                let def = if i % 3 == 0 { "tankraid" } else { "shieldraid" };
+                let hp = specs[def].health;
+                units.push(SnapUnit { side: 1, spec: specs[def].clone(), hp, x: 350.0 + 40.0 * row, z: 30.0 * col });
+            }
+            let mut line = format!("{per_side:2} a side:");
+            for (name, flags) in [
+                ("base", SimFlags::default()),
+                ("focus", SimFlags::from_switches(false, true)),
+                ("2d", SimFlags::from_switches(true, false)),
+            ] {
+                let snap = FightSnapshot { flags, units: units.clone() };
+                let n = if per_side >= 30 { 20 } else { 100 };
+                let t0 = std::time::Instant::now();
+                for _ in 0..n {
+                    let _ = m.fates(&snap, 300, FateMode::AMove);
+                }
+                let fates = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+                let t0 = std::time::Instant::now();
+                for _ in 0..n {
+                    let _ = m.predict_with(&snap, true);
+                }
+                let with = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+                line += &format!("  {name} fates {fates:.0} us, predict_with {with:.0} us;");
+            }
+            eprintln!("{line}");
+        }
     }
 }

@@ -183,6 +183,7 @@ mod tests {
     fn round_trip_and_full_queue() {
         let mut w = FightWorker::start(Model::load().unwrap()).unwrap();
         let snap = FightSnapshot {
+            flags: Default::default(),
             units: (0..6)
                 .map(|i| SnapUnit {
                     side: (i % 2) as u8,

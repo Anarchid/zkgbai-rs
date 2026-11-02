@@ -193,7 +193,7 @@ impl Ai {
         ground_target: Option<UnitDef>,
         stun_required: bool,
     ) -> Option<Request> {
-        let mut snapshot = FightSnapshot::default();
+        let mut snapshot = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         for id in members {
             let f = self.fighters.get(id)?;
             let def = f.unit.def()?;

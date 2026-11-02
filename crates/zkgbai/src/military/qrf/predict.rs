@@ -12,7 +12,7 @@ use super::{field::Field, mark::Target};
 use crate::Ai;
 use crate::kgbutil::worker::Worker;
 use crate::military::fightsim::mech::{Defense, RaidAim};
-use crate::military::fightsim::{FightSnapshot, Model, SnapUnit, UnitFate};
+use crate::military::fightsim::{FightSnapshot, Model, SimFlags, SnapUnit, UnitFate};
 use crate::util::distance;
 
 pub(super) const MAX_TEAMS: usize = 4;
@@ -57,6 +57,8 @@ struct Request {
     frame: i32,
     teams: Vec<usize>,
     raids: Vec<Raid>,
+    /// The fight the AI's switches ask for (`fight2d`, `fightfocus`).
+    flags: SimFlags,
     /// Whom the rollouts' raiders shoot (`raidfire`).
     raid_aim: RaidAim,
 }
@@ -141,8 +143,13 @@ fn choose(costs: &[Vec<f32>], teams: usize) -> (f32, Vec<usize>) {
     best
 }
 
-fn losses(model: &Model, raid: &Raid, mask: usize, raid_aim: RaidAim) -> f32 {
-    let (snap, fates, weights) = rollout(model, raid, mask, raid_aim);
+#[cfg(test)]
+fn losses(model: &Model, raid: &Raid, mask: usize) -> f32 {
+    losses_with(model, raid, mask, SimFlags::default(), RaidAim::Assets)
+}
+
+fn losses_with(model: &Model, raid: &Raid, mask: usize, flags: SimFlags, raid_aim: RaidAim) -> f32 {
+    let (snap, fates, weights) = rollout(model, raid, mask, flags, raid_aim);
     snap.units
         .iter()
         .zip(&fates)
@@ -159,8 +166,14 @@ fn losses(model: &Model, raid: &Raid, mask: usize, raid_aim: RaidAim) -> f32 {
 /// One raid's rollout with the teams in `mask`: the snapshot (assets, then
 /// raiders, then defenders), each unit's fate, and each unit's weight in
 /// the loss (raiders 0).
-fn rollout(model: &Model, raid: &Raid, mask: usize, raid_aim: RaidAim) -> (FightSnapshot, Vec<UnitFate>, Vec<f32>) {
-    let mut snap = FightSnapshot::default();
+fn rollout(
+    model: &Model,
+    raid: &Raid,
+    mask: usize,
+    flags: SimFlags,
+    raid_aim: RaidAim,
+) -> (FightSnapshot, Vec<UnitFate>, Vec<f32>) {
+    let mut snap = FightSnapshot { flags, ..Default::default() };
     let mut defense = Defense { raid_aim, ..Default::default() };
     let mut paralysis = Vec::new();
     let mut weights = Vec::new();
@@ -212,7 +225,7 @@ fn compute(request: Request) -> Answer {
                             return f32::INFINITY;
                         }
                         simulations += 1;
-                        losses(model, r, mask, request.raid_aim)
+                        losses_with(model, r, mask, request.flags, request.raid_aim)
                     })
                     .collect()
             })
@@ -335,7 +348,13 @@ impl Ai {
             }
             raids.push(Raid { enemies, assets, weights, defenders: candidates, allowed: allowed_mask, kept, focus });
         }
-        let request = Request { frame: self.frame, teams: team_ids.to_vec(), raids, raid_aim: self.raid_aim() };
+        let request = Request {
+            frame: self.frame,
+            teams: team_ids.to_vec(),
+            raids,
+            flags: self.sim_flags(),
+            raid_aim: self.raid_aim(),
+        };
         let state = &mut self.qrf.predict;
         let worker = state.worker.get_or_insert_with(|| Worker::new("qrf-predict", compute));
         if let Some((result, elapsed)) = worker.poll() {
@@ -495,7 +514,13 @@ mod regression {
         let mut raid = bombardment(2);
         // A responder on the mex side can interrupt the bombardment.
         raid.defenders[0][0].0.unit.x = 240.0;
-        let request = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()], raid_aim: RaidAim::Assets };
+        let request = Request {
+            frame: 0,
+            teams: vec![0],
+            raids: vec![raid.clone()],
+            flags: SimFlags::default(),
+            raid_aim: RaidAim::Assets,
+        };
         let decision = compute(request).1.unwrap();
         eprintln!("Rogue bombardment: {decision:?}");
         assert_eq!(decision.masks, vec![1], "a non-raider attack can be worth intercepting");
@@ -504,19 +529,33 @@ mod regression {
         late.defenders[0][0].1 = HORIZON;
         let model = Model::load().unwrap();
         assert_eq!(
-            losses(&model, &late, 0, RaidAim::Assets),
-            losses(&model, &late, 1, RaidAim::Assets),
+            losses(&model, &late, 0),
+            losses(&model, &late, 1),
             "an absent responder must not even alter the enemy engagement estimate"
         );
-        let decision =
-            compute(Request { frame: 0, teams: vec![0], raids: vec![late], raid_aim: RaidAim::Assets }).1.unwrap();
+        let decision = compute(Request {
+            frame: 0,
+            teams: vec![0],
+            raids: vec![late],
+            flags: SimFlags::default(),
+            raid_aim: RaidAim::Assets,
+        })
+        .1
+        .unwrap();
         assert_eq!(decision.masks, vec![0], "do not send a responder after the assets are lost");
     }
     #[test]
     fn overwhelming_bombardment_is_evaluated_without_forcing_an_attack() {
         let raid = bombardment(12);
-        let decision =
-            compute(Request { frame: 0, teams: vec![0], raids: vec![raid], raid_aim: RaidAim::Assets }).1.unwrap();
+        let decision = compute(Request {
+            frame: 0,
+            teams: vec![0],
+            raids: vec![raid],
+            flags: SimFlags::default(),
+            raid_aim: RaidAim::Assets,
+        })
+        .1
+        .unwrap();
         eprintln!("Overwhelming bombardment: {decision:?}");
         assert_eq!(decision.masks, vec![0]);
     }
@@ -524,13 +563,13 @@ mod regression {
     fn adansonia_nearby_venom_is_not_equivalent_to_a_distant_assignment() {
         let model = Model::load().unwrap();
         let raid = incident();
-        let costs: Vec<_> = (0..4).map(|mask| losses(&model, &raid, mask, RaidAim::Assets)).collect();
+        let costs: Vec<_> = (0..4).map(|mask| losses(&model, &raid, mask)).collect();
         eprintln!("Adansonia predicted loss [none, near, far, both]: {costs:?}");
         assert!(costs[1] + 20.0 < costs[2], "arrival must change the defense outcome");
         let mut delayed = raid.clone();
         delayed.defenders[0][0].1 = HORIZON;
         assert!(
-            (losses(&model, &delayed, 1, RaidAim::Assets) - costs[0]).abs() < 0.01,
+            (losses(&model, &delayed, 1) - costs[0]).abs() < 0.01,
             "a defender that arrives after the horizon cannot save anything"
         );
         // Do not force a save when the actual damaged mexes are already
@@ -540,7 +579,7 @@ mod regression {
         for a in &mut early.assets {
             a.unit.hp = a.unit.spec.health;
         }
-        let early_costs: Vec<_> = (0..4).map(|mask| losses(&model, &early, mask, RaidAim::Assets)).collect();
+        let early_costs: Vec<_> = (0..4).map(|mask| losses(&model, &early, mask)).collect();
         eprintln!("Healthy triplet at the same positions: {early_costs:?}");
         let (_, masks) = choose(&[early_costs, vec![25.0, 0.0, 10.0, 0.0]], 2);
         assert!(masks[0] & 1 != 0, "keep the nearby defender when it can save the mexes");
@@ -597,14 +636,15 @@ mod regression {
     fn daggers_trickling_into_a_mace_are_priced_as_dying() {
         let model = Model::load().unwrap();
         let raid = mace_on_mexes(&[1100.0, 1600.0, 2100.0]);
+        let focus = SimFlags::from_switches(false, true);
         // Expected Dagger metal dead, and the plan, by raid aim.
         let run = |aim| {
-            let (snap, fates, _) = rollout(&model, &raid, 1, aim);
+            let (snap, fates, _) = rollout(&model, &raid, 1, focus, aim);
             let dead: f32 = (snap.units.iter().zip(&fates))
                 .filter(|(u, _)| u.spec.def == "hoverraid")
                 .map(|(u, f)| if f.hp_left < u.hp { u.spec.cost * f.p_dead } else { 0.0 })
                 .sum();
-            let r = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()], raid_aim: aim };
+            let r = Request { frame: 0, teams: vec![0], raids: vec![raid.clone()], flags: focus, raid_aim: aim };
             (dead, compute(r).1.unwrap())
         };
         let (assets, hold, free) = (run(RaidAim::Assets), run(RaidAim::Hold), run(RaidAim::Free));
@@ -616,7 +656,13 @@ mod regression {
     }
     #[test]
     fn stale_health_membership_and_eligibility_invalidate_answers() {
-        let req = Request { frame: 10, teams: vec![0, 1], raids: vec![incident()], raid_aim: RaidAim::Assets };
+        let req = Request {
+            frame: 10,
+            teams: vec![0, 1],
+            raids: vec![incident()],
+            flags: SimFlags::default(),
+            raid_aim: RaidAim::Assets,
+        };
         assert!(req.reusable(&req));
         let mut now = req.clone();
         now.frame += STALE + 1;
@@ -633,7 +679,13 @@ mod regression {
     }
     #[test]
     fn local_predictor_cost_is_bounded() {
-        let request = Request { frame: 0, teams: vec![0, 1], raids: vec![incident()], raid_aim: RaidAim::Assets };
+        let request = Request {
+            frame: 0,
+            teams: vec![0, 1],
+            raids: vec![incident()],
+            flags: SimFlags::default(),
+            raid_aim: RaidAim::Assets,
+        };
         let (_, result) = compute(request.clone());
         assert!(result.is_ok());
         let start = std::time::Instant::now();

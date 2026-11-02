@@ -71,7 +71,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `permanence`, `airtempo`, `airfire`, `posture`, `ecoladder`, the
 /// `scorcher`, `dagger` and `blitz` packs); their results are in the
 /// history of this comment.
-pub(crate) const OFF_BY_DEFAULT: [&str; 9] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 11] = [
     "mexporc",
     "firesquads",
     "coalesceshadow",
@@ -81,6 +81,8 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 9] = [
     "chatcommands",
     "densgate",
     "regionsplit",
+    "fight2d",
+    "fightfocus",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -1187,6 +1189,14 @@ impl Ai {
     pub fn raid_aim(&self) -> crate::military::fightsim::mech::RaidAim {
         use crate::military::fightsim::mech::RaidAim;
         if self.dev_off("raidfire") { RaidAim::Assets } else { RaidAim::Hold }
+    }
+
+    /// The fight predictor's mechanics fight as the switches ask for it, on
+    /// every snapshot this AI builds: `fight2d` (units keep their places in
+    /// the plane, no overlaps, splash, least-health targeting) and
+    /// `fightfocus` (least-health targeting on the axis), both off by default.
+    pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
+        crate::military::fightsim::SimFlags::from_switches(!self.dev_off("fight2d"), !self.dev_off("fightfocus"))
     }
 
     pub fn features_off(&self) -> Vec<String> {

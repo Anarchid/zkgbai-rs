@@ -108,6 +108,7 @@ impl Local {
         let keep: Vec<bool> = self.ours.iter().map(|o| !ids.contains(&o.id)).collect();
         let n = self.ours.len();
         let snap = FightSnapshot {
+            flags: Default::default(),
             units: (self.snap.units.iter().enumerate())
                 .filter(|(i, _)| *i >= n || keep[*i])
                 .map(|(_, u)| u.clone())
@@ -264,7 +265,8 @@ impl Ai {
         if ours.len() + theirs.len() > MAX_UNITS {
             return None;
         }
-        let mut local = Local { snap: FightSnapshot::default(), ours: Vec::new(), theirs: Vec::new(), unknown };
+        let snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
+        let mut local = Local { snap, ours: Vec::new(), theirs: Vec::new(), unknown };
         for (u, def, hp) in ours {
             let spec = self.fight_spec(def);
             let p = u.pos();

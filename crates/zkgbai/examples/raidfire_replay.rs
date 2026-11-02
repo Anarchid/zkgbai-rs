@@ -1,6 +1,6 @@
 //! Replay recorded raid-defense rollouts offline under every raid-aim rule
-//! (`mech::RaidAim`) (2026-11-02, zkgbai-runs/raidfire; the wip line also
-//! runs each with least-health targeting). Each stdin line is one rollout, each stdout line
+//! (`mech::RaidAim`), with and without `fightsim::SimFlags::focus` (2026-11-02,
+//! zkgbai-runs/raidfire). Each stdin line is one rollout, each stdout line
 //! its fates per variant.
 //!
 //! usage: raidfire_replay SPECS.tsv [THREADS] < sims.jsonl > fates.jsonl
@@ -20,10 +20,17 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 use zkgbai::military::fightsim::mech::{Defense, RaidAim};
-use zkgbai::military::fightsim::{FightSnapshot, Model, SnapUnit, UnitSpec, WeaponSpec};
+use zkgbai::military::fightsim::{FightSnapshot, Model, SimFlags, SnapUnit, UnitSpec, WeaponSpec};
 
-/// The variants: name, raid aim.
-const VARIANTS: [(&str, RaidAim); 3] = [("base", RaidAim::Assets), ("hold", RaidAim::Hold), ("free", RaidAim::Free)];
+/// The variants: name, least-health targeting, raid aim.
+const VARIANTS: [(&str, bool, RaidAim); 6] = [
+    ("base", false, RaidAim::Assets),
+    ("hold", false, RaidAim::Hold),
+    ("free", false, RaidAim::Free),
+    ("focus", true, RaidAim::Assets),
+    ("focus_hold", true, RaidAim::Hold),
+    ("focus_free", true, RaidAim::Free),
+];
 
 fn specs(path: &str) -> HashMap<String, Arc<UnitSpec>> {
     let text = std::fs::read_to_string(path).expect("specs");
@@ -92,9 +99,10 @@ fn run(model: &Model, specs: &HashMap<String, Arc<UnitSpec>>, line: &str) -> Val
         .collect();
     let horizon = v["horizon"].as_i64().unwrap_or(900) as i32;
     let mut out = Map::new();
-    for (name, raid_aim) in VARIANTS {
+    for (name, least_health, raid_aim) in VARIANTS {
         let defense = Defense { arrivals: arrivals.clone(), assets: assets.clone(), focus: focus.clone(), raid_aim };
-        let snap = FightSnapshot { units: units.clone() };
+        let flags = SimFlags::from_switches(false, least_health);
+        let snap = FightSnapshot { units: units.clone(), flags };
         let fates = model.defense_fates(&snap, horizon, &defense, &paralysis);
         let rows: Vec<Value> =
             fates.iter().map(|f| json!([f.p_dead, f.hp_left, f.p_raw, f.death_frame.unwrap_or(-1)])).collect();
