@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use zkta::analyzer::{NoopRenderer, analyze_bitmap};
 use zkta::geometry::Point;
 
-use crate::{CELL, Choke, ChokeKind, MoveClass, NONE, Pos, Region, SpringMapData, Tier, TierMap, borders};
+use crate::{CELL, Choke, ChokeKind, MoveClass, NONE, Pos, Region, SpringMapData, Tier, TierMap, borders, split};
 
 /// Passable components smaller than this (cells) get no region of their own:
 /// specks between steep slopes that no unit meaningfully occupies.
@@ -20,7 +20,7 @@ const MIN_TERRACE_CELLS: usize = 128;
 /// which can sit a few cells off the raster obstacle boundary.
 const GATE_EXTENSION: i32 = 12;
 
-pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass) -> TierMap {
+pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass, spots: &[Pos]) -> TierMap {
     // Hard obstacles: where the engine stops units (connectivity). Soft
     // obstacles additionally include slopes units only crawl up (see
     // `MoveClass::soft`); the region decomposition works on those.
@@ -54,7 +54,14 @@ pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass) -> Ti
         .regions
         .iter()
         .enumerate()
-        .map(|(i, r)| Region { id: i, center: cell_point(r.center), cells: 0, component: NONE, chokes: Vec::new() })
+        .map(|(i, r)| Region {
+            id: i,
+            center: cell_point(r.center),
+            cells: 0,
+            component: NONE,
+            chokes: Vec::new(),
+            whole: i,
+        })
         .collect();
     map.chokes = analysis
         .chokepoints
@@ -88,6 +95,7 @@ pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass) -> Ti
     let seeds: Vec<Option<usize>> =
         analysis.regions.iter().map(|r| seed_cell(r.center, r.radius, &soft, &walls, width, height)).collect();
     assign_regions(&mut map, &soft, &obstacles, &walls, &seeds);
+    split::split(&mut map, spots);
     borders::link(&mut map, &ground, &soft, &walls);
     map
 }
@@ -419,7 +427,14 @@ fn new_regions(map: &mut TierMap, open: impl Fn(usize) -> bool, min_cells: usize
             .map(|&c| map_cell_center(c, width))
             .min_by(|a, b| a.distance(centroid).total_cmp(&b.distance(centroid)))
             .unwrap_or(centroid);
-        map.regions.push(Region { id: id as usize, center, cells: 0, component: NONE, chokes: Vec::new() });
+        map.regions.push(Region {
+            id: id as usize,
+            center,
+            cells: 0,
+            component: NONE,
+            chokes: Vec::new(),
+            whole: id as usize,
+        });
         claimed.extend(cells);
     }
     for c in small {
@@ -465,7 +480,7 @@ mod tests {
 
     #[test]
     fn rooms_and_corridor() {
-        let t = tier_map(&two_rooms(), Tier::Vehicle, Tier::Vehicle.zero_k_class());
+        let t = tier_map(&two_rooms(), Tier::Vehicle, Tier::Vehicle.zero_k_class(), &[]);
         let left = Pos::new(10.0 * CELL, 24.0 * CELL);
         let right = Pos::new(70.0 * CELL, 40.0 * CELL);
         let island = Pos::new(86.0 * CELL, 10.0 * CELL);
@@ -488,8 +503,8 @@ mod tests {
 
     #[test]
     fn deterministic() {
-        let a = tier_map(&two_rooms(), Tier::Bot, Tier::Bot.zero_k_class());
-        let b = tier_map(&two_rooms(), Tier::Bot, Tier::Bot.zero_k_class());
+        let a = tier_map(&two_rooms(), Tier::Bot, Tier::Bot.zero_k_class(), &[]);
+        let b = tier_map(&two_rooms(), Tier::Bot, Tier::Bot.zero_k_class(), &[]);
         assert_eq!(a.region, b.region);
         assert_eq!(a.chokes.len(), b.chokes.len());
     }

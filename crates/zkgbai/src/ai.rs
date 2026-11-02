@@ -59,6 +59,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// named (Phantoms are worth the friendly fire).
 /// `densgate` (phase gates on the map's density clock) waits for its A/B
 /// (enable=densgate to opt in).
+/// `regionsplit` (terrain regions holding many metal spots cut into pieces
+/// around clusters of them, 2026-11-02) waits for its A/B
+/// (enable=regionsplit to opt in).
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
@@ -68,8 +71,17 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `permanence`, `airtempo`, `airfire`, `posture`, `ecoladder`, the
 /// `scorcher`, `dagger` and `blitz` packs); their results are in the
 /// history of this comment.
-pub(crate) const OFF_BY_DEFAULT: [&str; 8] =
-    ["mexporc", "firesquads", "coalesceshadow", "stayshadow", "carpetspare", "stayveto", "chatcommands", "densgate"];
+pub(crate) const OFF_BY_DEFAULT: [&str; 9] = [
+    "mexporc",
+    "firesquads",
+    "coalesceshadow",
+    "stayshadow",
+    "carpetspare",
+    "stayveto",
+    "chatcommands",
+    "densgate",
+    "regionsplit",
+];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
 
@@ -271,7 +283,12 @@ impl SkirmishAi for Ai {
             (cb.ai_id() as u64) << 32 ^ entropy.unwrap_or(std::process::id() as u64 ^ clock) ^ game.my_team() as u64;
         seed_rand(seed ^ 0x2545_F491_4F6C_DD1D);
         let pathfinder = Pathfinder::new(cb, &defs);
-        let terrain = TerrainModel::start(cb, &defs);
+        // The switches and metal spots first: `regionsplit` cuts the terrain
+        // model's regions around the spots.
+        let disabled = dev_features(cb);
+        let graph = GraphManager::new(cb);
+        let terrain =
+            TerrainModel::start(cb, &defs, crate::terrain::split_spots(&graph, !disabled.contains("regionsplit")));
         Ai {
             cb,
             team_id: game.my_team(),
@@ -289,7 +306,7 @@ impl SkirmishAi for Ai {
             energy: cb.resource_by_name("Energy").expect("game has no Energy resource"),
             unit_classes: UnitClasses::new(),
             los: LosManager::new(cb),
-            graph: GraphManager::new(cb),
+            graph,
             eco: EconomyManager::new(cb),
             war: MilitaryManager::new(cb),
             fac: FactoryManager::new(cb),
@@ -339,7 +356,7 @@ impl SkirmishAi for Ai {
             enemy_ally_teams: BTreeSet::new(),
             debug_activated: false,
             test: cb.option("test"),
-            disabled: dev_features(cb),
+            disabled,
             banter: None,
             resigned: false,
             reads_lost: false,

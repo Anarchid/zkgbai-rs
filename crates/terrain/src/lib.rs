@@ -15,7 +15,10 @@
 //!   "can units of this tier get from A to B at all" is a lookup;
 //! - the region graph (regions as nodes, chokepoints as edges), with
 //!   shortest ground routes over it ([`paths`]), uphill crossings counting
-//!   the time they take.
+//!   the time they take;
+//! - optionally ([`Terrain::build_with_spots`]), regions that hold many
+//!   metal spots cut into pieces around clusters of them ([`split`]), so
+//!   that region-level reads do not lump together spots kilometres apart.
 //!
 //! On top of the model, [`strategy`] analyses the game's territory (what
 //! guards what, which chokepoints to hold or wall, where bridges, drops and
@@ -34,6 +37,7 @@ mod graph;
 pub mod lanes;
 pub mod occupancy;
 pub mod paths;
+pub mod split;
 pub mod strategy;
 #[cfg(test)]
 mod testmaps;
@@ -77,6 +81,9 @@ pub struct Region {
     pub component: u32,
     /// Ids of chokepoints on this region's boundary.
     pub chokes: Vec<usize>,
+    /// The region this one is a piece of (see [`split`]): its own id unless
+    /// it was cut out of a bigger one. Pieces of one region meet at seams.
+    pub whole: usize,
 }
 
 /// What kind of passage a chokepoint is.
@@ -89,6 +96,11 @@ pub enum ChokeKind {
     /// units cross slowly (see [`Choke::climb`]), sometimes open ground the
     /// decomposition split without one.
     Border,
+    /// Where two pieces of a region cut up around its metal spots meet (see
+    /// [`split`]): no terrain feature, just ground equally far from two
+    /// clusters of spots. Routes and occupancy cross it like a border, but
+    /// there is nothing to hold or wall there (see [`Choke::hold_width`]).
+    Seam,
 }
 
 /// A passage between regions: an edge of the region graph.
@@ -142,8 +154,12 @@ impl Choke {
 
     /// How wide a front defenses keeping enemies out of `region` here must
     /// cover: a gate's width if going round it is no option, more of its
-    /// wall the easier going round is; a border's length.
+    /// wall the easier going round is; a border's length; for a seam
+    /// `INFINITY`, since the open ground it runs over is all front.
     pub fn hold_width(&self, region: usize) -> f32 {
+        if self.kind == ChokeKind::Seam {
+            return f32::INFINITY;
+        }
         let bypass = self.bypass_into(region);
         if !bypass.is_finite() {
             return self.width;
@@ -318,7 +334,14 @@ impl Terrain {
     /// Analyse `data` for explicit movement classes (e.g. taken from the
     /// game's actual unit definitions).
     pub fn build_with(data: &SpringMapData, classes: &[(Tier, MoveClass)]) -> Terrain {
-        Terrain { tiers: classes.iter().map(|&(t, c)| build::tier_map(data, t, c)).collect() }
+        Terrain::build_with_spots(data, classes, &[])
+    }
+
+    /// Like [`build_with`](Self::build_with), and cut regions holding many
+    /// of the metal `spots` into pieces around clusters of them (see
+    /// [`split`]); no spots, no cuts.
+    pub fn build_with_spots(data: &SpringMapData, classes: &[(Tier, MoveClass)], spots: &[Pos]) -> Terrain {
+        Terrain { tiers: classes.iter().map(|&(t, c)| build::tier_map(data, t, c, spots)).collect() }
     }
 
     pub fn tier(&self, tier: Tier) -> Option<&TierMap> {

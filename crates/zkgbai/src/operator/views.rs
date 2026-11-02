@@ -958,7 +958,7 @@ pub fn terrain_map(ai: &mut Ai, a: &Args) -> Out {
         .map(|c| {
             let mut v = json!({
                 "id": c.id,
-                "kind": if c.kind == ChokeKind::Gate { "gate" } else { "border" },
+                "kind": match c.kind { ChokeKind::Gate => "gate", ChokeKind::Border => "border", ChokeKind::Seam => "seam" },
                 "pos": [c.pos.x.round() as i32, c.pos.z.round() as i32],
                 "width": r1(c.width),
                 "gate": c.gate.map(|g| g.map(|p| [p.x.round() as i32, p.z.round() as i32])),

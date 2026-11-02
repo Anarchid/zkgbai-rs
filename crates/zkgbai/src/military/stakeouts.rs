@@ -81,7 +81,7 @@ use serde_json::json;
 use springai::{Unit, UnitDef, Vec3};
 use zk_terrain::paths::SNAP;
 use zk_terrain::strategy::MAX_HOLD_WIDTH;
-use zk_terrain::{Pos, TierMap};
+use zk_terrain::{ChokeKind, Pos, TierMap};
 
 use crate::Ai;
 use crate::economy::factory::FacKind;
@@ -706,9 +706,11 @@ impl Ai {
                     *spots.entry(r).or_default() += 1;
                 }
             }
+            // Seams (regions cut around their spots) run over open ground:
+            // nothing there to post a picket at.
             let gate = |c: usize| {
                 let ch = &map.chokes[c];
-                ch.width <= MAX_HOLD_WIDTH && ch.regions.len() == 2
+                ch.kind != ChokeKind::Seam && ch.width <= MAX_HOLD_WIDTH && ch.regions.len() == 2
             };
             let from_enemy =
                 |x: &usize, y: &usize| a.choke_distance(map, *x, false).total_cmp(&a.choke_distance(map, *y, false));

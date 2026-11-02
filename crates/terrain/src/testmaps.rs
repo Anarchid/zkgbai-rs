@@ -51,6 +51,7 @@ pub fn grid_map(rows: &[&str], chokes: &[(char, char, f32, f32, f32)]) -> TierMa
                 cells: cells.len(),
                 component: component[cells[0]],
                 chokes: Vec::new(),
+                whole: r,
             }
         })
         .collect();

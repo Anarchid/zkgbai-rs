@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 
 use crate::graph::{FlowNet, HeapItem};
 use crate::paths::{Paths, SNAP};
-use crate::{CELL, Choke, NONE, Pos, TierMap};
+use crate::{CELL, Choke, ChokeKind, NONE, Pos, TierMap};
 
 /// Whose an asset is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,8 +284,12 @@ impl Analysis {
     /// on our side (nearer our base than theirs) can be walled: walls at the
     /// enemy's doorstep would not survive, so the cut must not simply box
     /// them in.
+    /// Seams cannot be walled: a wall across open ground is just in the
+    /// way.
     fn seal_walls(&self, map: &TierMap) -> Vec<usize> {
-        self.value_cut(map, |choke, _, typical| Some(choke.wall * typical / WALL_ELMOS_PER_ASSET))
+        self.value_cut(map, |choke, _, typical| {
+            (choke.kind != ChokeKind::Seam).then(|| choke.wall * typical / WALL_ELMOS_PER_ASSET)
+        })
     }
 
     /// Holding a chokepoint against crossings into `region` costs more the
@@ -463,6 +467,9 @@ pub fn ground_distance(map: &TierMap, a: Pos, b: Pos) -> Option<f32> {
 struct RegionGraph {
     /// Per region: (neighbour, choke, travel distance through the choke).
     adj: Vec<Vec<(usize, usize, f32)>>,
+    /// Per chokepoint: a seam (no guard however routes run; see
+    /// [`ChokeKind::Seam`]).
+    seam: Vec<bool>,
 }
 
 impl RegionGraph {
@@ -477,7 +484,7 @@ impl RegionGraph {
                 }
             }
         }
-        RegionGraph { adj }
+        RegionGraph { adj, seam: map.chokes.iter().map(|c| c.kind == ChokeKind::Seam).collect() }
     }
 
     /// Dijkstra from `src`, optionally ignoring one chokepoint.
@@ -542,7 +549,7 @@ impl RegionGraph {
     fn guards_impl(&self, src: usize, extra: Option<(usize, usize)>) -> Vec<Vec<usize>> {
         let base = self.reachable(src, None, extra);
         let mut guards = vec![Vec::new(); self.adj.len()];
-        let mut chokes: Vec<usize> = self.adj.iter().flatten().map(|&(_, c, _)| c).collect();
+        let mut chokes: Vec<usize> = self.adj.iter().flatten().map(|&(_, c, _)| c).filter(|&c| !self.seam[c]).collect();
         chokes.sort_unstable();
         chokes.dedup();
         for c in chokes {

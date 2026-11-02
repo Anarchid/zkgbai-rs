@@ -232,9 +232,24 @@ impl<'a> Pair<'a> {
     /// The quickest way from open ground of region `from` (index into
     /// `regions`) to open ground of the other, crossing between them only
     /// at contacts `through`; searched within [`SEARCH_PAD`] cells of them.
+    /// Pieces of the same region as either (see `split`) count as its
+    /// ground: cutting a region must not change how its gates measure.
     fn cross(&self, through: &[usize], from: usize) -> Option<Crossing> {
         let (w, h) = (self.map.width, self.map.height);
         let (rf, rt) = (self.regions[from], self.regions[1 - from]);
+        let whole = |r: usize| self.map.regions[r].whole;
+        let grouped = whole(rf) != whole(rt);
+        // 0: the side crossed from, 1: the side crossed into.
+        let side = |r: Option<usize>| {
+            let r = r?;
+            if r == rf || (grouped && whole(r) == whole(rf)) {
+                Some(0)
+            } else if r == rt || (grouped && whole(r) == whole(rt)) {
+                Some(1)
+            } else {
+                None
+            }
+        };
         let cells = through.iter().flat_map(|&i| [self.contacts[i].a, self.contacts[i].b]);
         let (mut x0, mut z0, mut x1, mut z1) = (usize::MAX, usize::MAX, 0, 0);
         for c in cells {
@@ -249,11 +264,11 @@ impl<'a> Pair<'a> {
 
         let gates: HashSet<(usize, usize)> =
             through.iter().map(|&i| (self.contacts[i].a, self.contacts[i].b)).collect();
-        let open = |l: usize, r: usize| region(l) == Some(r) && !self.soft[global(l)];
-        let any_open = |r: usize| (0..n).any(|l| open(l, r));
-        let (open_from, open_to) = (any_open(rf), any_open(rt));
-        let is_source = |l: usize| if open_from { open(l, rf) } else { region(l) == Some(rf) };
-        let is_target = |l: usize| if open_to { open(l, rt) } else { region(l) == Some(rt) };
+        let open = |l: usize, s: usize| side(region(l)) == Some(s) && !self.soft[global(l)];
+        let any_open = |s: usize| (0..n).any(|l| open(l, s));
+        let (open_from, open_to) = (any_open(0), any_open(1));
+        let is_source = |l: usize| if open_from { open(l, 0) } else { side(region(l)) == Some(0) };
+        let is_target = |l: usize| if open_to { open(l, 1) } else { side(region(l)) == Some(1) };
 
         let mut time = vec![f32::INFINITY; n];
         let mut length = vec![0.0f32; n];
@@ -271,7 +286,7 @@ impl<'a> Pair<'a> {
                 return Some(Crossing { time: t, length: length[l], contact: crossed[l] });
             }
             let (lx, lz) = (l % bw, l / bw);
-            let here = region(l);
+            let here = side(region(l));
             let neighbours = [
                 (lx > 0).then(|| l - 1),
                 (lx + 1 < bw).then(|| l + 1),
@@ -279,8 +294,8 @@ impl<'a> Pair<'a> {
                 (l + bw < n).then(|| l + bw),
             ];
             for m in neighbours.into_iter().flatten() {
-                let there = region(m);
-                if there != Some(rf) && there != Some(rt) {
+                let there = side(region(m));
+                if there.is_none() {
                     continue;
                 }
                 let mut via = crossed[l];
@@ -316,9 +331,12 @@ impl<'a> Pair<'a> {
             .min_by(|x, y| x.time.total_cmp(&y.time))
             .map_or(piece[0], |c| if c.contact == usize::MAX { piece[0] } else { c.contact });
         let width = length + CELL;
+        let [ra, rb] = [self.regions[0], self.regions[1]];
+        // Pieces of one region (see `split`) meet at seams.
+        let seam = self.map.regions[ra].whole == self.map.regions[rb].whole;
         Choke {
             id: 0,
-            kind: ChokeKind::Border,
+            kind: if seam { ChokeKind::Seam } else { ChokeKind::Border },
             pos: self.mid(easiest),
             width,
             gate: Some([self.mid(a), self.mid(b)]),
@@ -357,7 +375,7 @@ fn measure_gate(choke: &Choke, pair: &Pair, line: &[usize], sides: &[usize]) -> 
 }
 
 /// Distance from `p` to the segment `a`-`b`.
-fn segment_distance(p: Pos, a: Pos, b: Pos) -> f32 {
+pub(crate) fn segment_distance(p: Pos, a: Pos, b: Pos) -> f32 {
     let (dx, dz) = (b.x - a.x, b.z - a.z);
     let len2 = dx * dx + dz * dz;
     if len2 <= f32::EPSILON {
@@ -418,7 +436,7 @@ mod tests {
             28..36 => (0.3, 50.0 + r * (x - 27) as f32),
             _ => (0.0, 50.0 + r * 8.0),
         });
-        let t = tier_map(&data, Tier::Bot, Tier::Bot.zero_k_class());
+        let t = tier_map(&data, Tier::Bot, Tier::Bot.zero_k_class(), &[]);
         let (low, high) = (t.region_at(at(10.0, 16.0)).unwrap(), t.region_at(at(54.0, 16.0)).unwrap());
         assert_ne!(low, high);
         let between: Vec<&Choke> =
@@ -462,13 +480,13 @@ mod tests {
                 .clone()
         };
 
-        let cliffs = tier_map(&ridge(1.0), Tier::Bot, Tier::Bot.zero_k_class());
+        let cliffs = tier_map(&ridge(1.0), Tier::Bot, Tier::Bot.zero_k_class(), &[]);
         let gate = gate_between(&cliffs);
         assert!(gate.bypass.iter().all(|b| b.is_infinite()), "{gate:?}");
         assert!(gate.wall < gate.width + 2.0 * GATE_MARGIN + 2.0 * CELL, "{gate:?}");
         assert!(gate.climb.iter().all(|&c| c < 1.0), "{gate:?}");
 
-        let slopes = tier_map(&ridge(0.3), Tier::Bot, Tier::Bot.zero_k_class());
+        let slopes = tier_map(&ridge(0.3), Tier::Bot, Tier::Bot.zero_k_class(), &[]);
         let gate = gate_between(&slopes);
         assert!(gate.bypass.iter().all(|b| b.is_finite() && *b > 50.0), "{gate:?}");
         assert!(gate.wall > gate.width + 2.0 * FLANK_REACH - 4.0 * CELL, "{gate:?}");
