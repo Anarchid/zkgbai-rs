@@ -34,6 +34,18 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     ("colonize", "Economy", "colonists sent to far free metal"),
+    (
+        "conquest",
+        "Economy",
+        "the commander walks to forward ground a few turrets can hold, takes its metal and fortifies it when the denial pays",
+    ),
+    (
+        "conquestsym",
+        "Economy",
+        "conquest measures both sides' walks to an objective from the middle of their start boxes' metal",
+    ),
+    ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
+    ("conquestseq", "Economy", "a held objective sends the commander on to the next"),
     ("artemis", "Economy", "an Artemis against over 4000 metal of enemy air when one reaches our whole front"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
