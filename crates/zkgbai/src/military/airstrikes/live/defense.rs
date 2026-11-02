@@ -98,7 +98,8 @@ impl Ai {
                     pos: e.position,
                     radius: if e.is_static { w.range() + 64.0 } else { w.range() * 1.25 + 32.0 },
                     band: if e.is_static { 0.0 } else { e.def_speed() * 3.0 },
-                    dps: burst / w.reload().max(0.1),
+                    // Tube weapons (Picket, Hacksaw, ...) at their tubes' rate.
+                    dps: burst * crate::military::wrappers::shot_rate(w).min(10.0),
                     burst,
                 });
             }

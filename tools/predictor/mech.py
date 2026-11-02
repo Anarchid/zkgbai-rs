@@ -47,6 +47,13 @@ def load_shield(path, hitcells=None):
                 M["dynfrac"].setdefault(wd, {})[int(rb)] = float(r["dmg"] / r["hit_any"] / (r["nominal"] / r["n"]))
 
 
+def load_sreload(path):
+    """Script-reload weapons (sreload.json from sreload.lua over the unit defs' customParams): weapon ->
+    (tubes, frames each tube takes to reload)."""
+    import json
+    M["sreload"] = {k: (int(v[0]), int(round(float(v[1]) * 30))) for k, v in json.load(open(path)).items()}
+
+
 def load_water(path):
     """Water domain (water_dump.py): journal heightmaps, waterweapon flags, floaters, move classes,
     target categories, engine heights and water depth limits per def."""
@@ -454,6 +461,11 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     slow2 = M.get("slow2", {}) if opts.get("slow2") else None
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
+    # sreload (2026-11-02, user: Picket reload): ZK scriptReload.lua weapons fire from `burst` tubes, each
+    # reloading `script_reload` s after it fires; the engine reloadtime is only the spacing between tubes.
+    # Tubes start loaded. Per weapon: ready frame of each tube.
+    sre = M.get("sreload", {}) if opts.get("sreload") else {}
+    tubes = {id(w): [0] * sre[w.name][0] for u in us for w in u.weapons if w.name in sre}
     # 2-D round (zkgbai-runs/predictor/twod): units keep their offset across the fight axis and move in
     # the plane; `sep` keeps them from overlapping, `aoe` lands splash on the units around a target.
     twod = bool(opts.get("twod") or opts.get("sep") or opts.get("aoe"))
@@ -806,6 +818,15 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                             or ((water_w or not dom[id(e)][1]) and (not torpedo or dom[id(e)][0])))))]
                 if not inr:
                     continue
+                tub = tubes.get(id(w))
+                if tub is not None:
+                    # script reload (sreload): fire only from a loaded tube; it reloads on its own clock
+                    k = min(range(len(tub)), key=tub.__getitem__)
+                    if tub[k] > f:
+                        w.next = tub[k]
+                        continue
+                    sr = M["sreload"][w.name][1]
+                    tub[k] = f + (int(sr / (1.0 - sf)) if sf > 0 else sr)
                 if opts.get("shield") and ux.drain > 0:
                     g = groups.get(id(u))
                     shots_ = 1 if w.hitscan else w.salvo

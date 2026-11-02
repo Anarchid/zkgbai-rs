@@ -1,0 +1,9 @@
+# unit specs for the sreload parity cases, as mech_parity_units.tsv
+def	cost	health	speed	mobile	air	builder	com	radius	weapons
+cloakraid	65	230	3.85	1	0	0	0	9	cloakraid_emg:Cannon:185:0.3:3:10.5
+hoverraid	80	300	4.8	1	0	0	0	18	hoverraid_gauss:Cannon:212:2.83:1:110
+shieldassault	175	960	2	1	0	0	0	12	shieldassault_thud_weapon:Cannon:280:3.9:1:180
+staticmex	85	560	0	0	0	0	0	20	
+tankraid	170	660	3.55	1	0	0	0	17	tankraid_napalm_bomblet:Cannon:210:0.5:1:40
+tankriot	500	1950	2.3	1	0	0	0	16	tankriot_tawf_banisher:MissileLauncher:320:0.3:1:240.1
+turretmissile	95	375	0	0	0	0	0	12	turretmissile_armrl_missile:MissileLauncher:610:1.2:1:104
