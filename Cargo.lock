@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "zkgbai"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "delaunator",
  "png",

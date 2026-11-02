@@ -2,9 +2,9 @@
 //! doctrine (see `doctrine`), with wants written as expressions over what
 //! the force has (see `expr`). On by default: `felon` (the shield ball),
 //! `impaler` (the escorts of Impaler batteries, see `military::impalers`)
-//! and `lance` (escorted Lances, marksmen: see `marksman`); `ravager`
-//! (packs, see `pack`) is off by default (`enable=ravager`), `phantom` and
-//! `envoy` are seeded off; the rest wait for conducts of their own. The
+//! and `lance` (escorted Lances, marksmen: see `marksman`), plus `ravager`
+//! and `minotaur` (packs, see `pack`). `phantom` and `envoy` are seeded
+//! off; the rest wait for conducts of their own. The
 //! `disable` option switches off doctrines it names (`disable=lance`).
 //! Siege artillery unlocks after a stable dense front (see `sitzkrieg`).
 //! Crab ownership unlocks its protective pedestal and persistent Weaver escort.

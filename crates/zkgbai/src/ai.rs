@@ -14,6 +14,7 @@ use crate::kgbutil::Pathfinder;
 use crate::logistics::Logistics;
 use crate::los::LosManager;
 use crate::military::blasts::Blasts;
+use crate::military::coalesce::Coalesce;
 use crate::military::drops::Drops;
 use crate::military::handlers::{BomberHandler, MiscHandler, RaiderHandler, RetreatHandler, SquadHandler};
 use crate::military::incursions::Incursions;
@@ -25,6 +26,7 @@ use crate::military::nukes::Nukes;
 use crate::military::puppies::Puppies;
 use crate::military::scouts::Scouts;
 use crate::military::stakeouts::Stakeouts;
+use crate::military::stayveto::StayVeto;
 use crate::military::strikes::Strikes;
 use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
@@ -58,32 +60,41 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// both off went 9-0-1 against 3-3-4 with both on, with the old economy at
 /// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
 /// better than both, each taking up the metal the other left.
-/// `fightsim` (the crushing-defeat veto) waits until its effect has been
-/// seen in play. Ravager packs are on, asleep until the middle game;
-/// Minotaur and raider packs and organic fire squads remain opt-in.
-/// `densgate` (phase gates on map density) waits for its A/B.
+/// The crushing-defeat veto (`fightsim`) is on. Raider packs and organic
+/// fire squads remain opt-in. Ravager and Minotaur packs are on for WIP
+/// observation (disable=ravager,minotaur to opt out). `coalesce` (raider
+/// gangs judged by the fight predictor) is on for WIP observation
+/// (2026-10-31, disable=coalesce to opt out). `stayveto` (retreats the
+/// predictor says throw a won fight away) is off since the 2026-11-01
+/// batteries (zkgbai-runs/coalesce/RESULTS.md): it lost its mirror 3-15
+/// and changed nothing against Circuit or Wires, and its standing units
+/// died more without killing more (enable=stayveto to opt in). The shadow
+/// switches (journal only) stay off.
+/// `densgate` (phase gates on the map's density clock) waits for its A/B
+/// (enable=densgate to opt in).
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 17] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
     "pairs",
     "currency",
     "permanence",
     "mexporc",
     "airtempo",
     "airfire",
-    "fightsim",
     "posture",
     "ecoladder",
-    "minotaur",
     "scorcher",
     "dagger",
     "blitz",
     "firesquads",
+    "coalesceshadow",
+    "stayshadow",
     "carpetspare",
-    "densgate",
+    "stayveto",
     "chatcommands",
+    "densgate",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -210,6 +221,10 @@ pub struct Ai {
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
     pub stakeouts: Stakeouts,
+    /// Raider gangs judged by the fight predictor (`coalesce`).
+    pub coalesce: Coalesce,
+    /// Retreats judged by the fight predictor (`stayveto`).
+    pub stayveto: StayVeto,
     /// Which handler each unit belongs to (see `military::roles`).
     pub roles: crate::military::roles::Roles,
     pub air_intel: crate::military::air_intel::AirIntel,
@@ -330,6 +345,8 @@ impl SkirmishAi for Ai {
             iq: Default::default(),
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
+            coalesce: Coalesce::default(),
+            stayveto: StayVeto::default(),
             roles: Default::default(),
             air_intel: Default::default(),
             precision: Default::default(),

@@ -158,6 +158,11 @@ impl Coward {
         retreat
     }
 
+    /// Whether the shield (if any) is not what sent it home.
+    pub fn shield_ok(&self) -> bool {
+        self.shield.is_none_or(|s| s.shield_power() >= 0.25 * self.shield_max_power)
+    }
+
     pub fn is_dead(&self) -> bool {
         self.unit.health() <= 0.0 || self.unit.team() != self.team
     }

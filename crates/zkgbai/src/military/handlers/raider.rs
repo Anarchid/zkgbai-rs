@@ -339,7 +339,7 @@ impl Ai {
                     self.raider_discard(id);
                     continue;
                 }
-                if self.raider_needs_squad(id) {
+                if self.raider_needs_squad(id) && !self.coalesce_owns(id) {
                     self.raider_assign_small_raider(id);
                 }
             }
@@ -351,7 +351,7 @@ impl Ai {
                     self.raider_discard(id);
                     continue;
                 }
-                if self.raider_needs_squad(id) {
+                if self.raider_needs_squad(id) && !self.coalesce_owns(id) {
                     self.raider_assign_medium_raider(id);
                 }
             }
@@ -407,7 +407,7 @@ impl Ai {
         // waiting out a blast of ours).
         if frame % 30 == (offset + 1) % 30 {
             let mut small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
-            small.retain(|id| !self.squad_strike_owns(*id));
+            small.retain(|id| !self.squad_strike_owns(*id) && !self.coalesce_owns(*id));
             small.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in small {
                 if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
@@ -418,7 +418,7 @@ impl Ai {
 
         if frame % 30 == (offset + 5) % 30 {
             let mut medium: Vec<i32> = self.raider_handler.medium_raiders.iter().copied().collect();
-            medium.retain(|id| !self.squad_strike_owns(*id));
+            medium.retain(|id| !self.squad_strike_owns(*id) && !self.coalesce_owns(*id));
             medium.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in medium {
                 let Some(f) = self.fighters.get_mut(&id) else {
@@ -440,7 +440,7 @@ impl Ai {
             let mut ids: Vec<i32> = self.raider_handler.solo_raiders.iter().copied().collect();
             ids.extend(self.raider_handler.kodachis.iter().copied());
             // Raiders parked at a precision spot stand still on purpose.
-            ids.retain(|id| !self.precision.missions.contains_key(id));
+            ids.retain(|id| !self.precision.missions.contains_key(id) && !self.coalesce_owns(*id));
             ids.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
             for id in ids {
                 if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
@@ -468,7 +468,7 @@ impl Ai {
     /// Dodge away from an attacker that just damaged raider `h`.
     pub fn raider_avoid_enemies(&mut self, h: Unit, attacker: Option<Unit>, dir: Vec3) {
         let id = h.id();
-        if !self.raider_handler.small_raiders.contains(&id) || self.squad_strike_owns(id) {
+        if !self.raider_handler.small_raiders.contains(&id) || self.squad_strike_owns(id) || self.coalesce_owns(id) {
             return;
         }
         let frame = self.frame;
@@ -853,7 +853,7 @@ impl Ai {
             let Some(f) = self.fighters.get(&id) else {
                 continue;
             };
-            if f.unit.is_being_built() || self.retreat_is_retreating(f.unit) {
+            if f.unit.is_being_built() || self.retreat_is_retreating(f.unit) || self.coalesce_owns(id) {
                 self.raider_handler.solo_raiders.push_back(id);
             } else if frame - f.last_task_frame < 15 {
                 self.raider_handler.solo_raiders.push_front(id);
@@ -1149,7 +1149,12 @@ impl Ai {
                 continue;
             };
             let u = r.unit;
-            if u.is_being_built() || u.health() <= 0.0 || u.team() != self.team_id || self.retreat_is_retreating(u) {
+            if u.is_being_built()
+                || u.health() <= 0.0
+                || u.team() != self.team_id
+                || self.retreat_is_retreating(u)
+                || self.coalesce_owns(id)
+            {
                 continue;
             }
 
@@ -1287,6 +1292,10 @@ impl Ai {
         }
         if let Some(target) = self.squad_strike(sid) {
             self.squad_note(sid, Branch::Strike, target, here, None);
+            return;
+        }
+        // Its raiders fight with others in a gang for now (see `coalesce`).
+        if self.coalesce_owns_squad(sid) {
             return;
         }
         let Some(rs) = self.squads.get(sid) else {

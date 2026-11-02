@@ -35,7 +35,7 @@ use crate::Ai;
 use crate::military::{SquadId, SquadKind};
 use crate::util::{NULLPOS, distance};
 
-/// Opt-in veto (`enable=fightsim`; off, the ordinary threat policy decides).
+/// Default-on veto (`disable=fightsim` restores ordinary threat policy).
 pub const FEATURE: &str = "fightsim";
 /// The ordinary shadow switch; fire squads also need the worker.
 pub const SHADOW: &str = "fightshadow";
@@ -132,6 +132,9 @@ pub struct FightSim {
     pub agreements: u64,
     last_report: i32,
     reported: (u64, u64, u64),
+    /// The model for synchronous local judgements (see `local`), loaded
+    /// once on first use.
+    pub(crate) local_model: Option<Option<Arc<Model>>>,
 }
 
 /// Side A of a snapshot as the window needs it, and the sides' metal.
@@ -637,8 +640,8 @@ mod veto_tests {
     }
 
     #[test]
-    fn veto_is_opt_in_and_never_replaces_the_normal_retreat_rule() {
-        assert!(crate::ai::OFF_BY_DEFAULT.contains(&FEATURE));
+    fn veto_is_default_on_and_never_replaces_the_normal_retreat_rule() {
+        assert!(!crate::ai::OFF_BY_DEFAULT.contains(&FEATURE));
         for flat in [false, true] {
             assert_eq!(apply_veto(flat, false, true), flat);
             assert_eq!(apply_veto(flat, true, false), flat);

@@ -1404,7 +1404,7 @@ pub fn seeds() -> Vec<Doctrine> {
                     most guns within 70% of their reach, unless health forces an immediate retreat; at what \
                     the threat maps say they survive. From raiders they fall back to their Ripper screen, which trails them \
                     home-side at its own pace; below half their original core strength they park until survivors \
-                    heal to 90%. Off by default: enable=ravager (Ravagers otherwise fight in the vehicle assault squads)."
+                    heal to 90%. On by default: disable=ravager returns Ravagers to the vehicle assault squads."
         .into();
     ravager.core = vec!["vehassault".into()];
     ravager.core_keep = Keep::Formation;
@@ -1441,7 +1441,7 @@ pub fn seeds() -> Vec<Doctrine> {
     // Minotaurs go in and stay out with at least two cores; Ogres screen them.
     let mut minotaur = Doctrine {
         note: "A Minotaur pack, as the Ravagers' (see `ravager`) but two or more go in, always passing tangentially, an Ogre screen \
-               trailing. Off by default: enable=minotaur."
+               trailing. On by default: disable=minotaur returns Minotaurs to the tank assault squads."
             .into(),
         core: vec!["tankassault".into()],
         core_orbit: 75.0,

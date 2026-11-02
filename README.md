@@ -289,8 +289,7 @@ and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assig
 
 ### Fight predictor veto
 
-With `enable=fightsim`, ordinary ground assault and raider squads use the predictor as a veto
-(off by default until its effect has been seen in play).
+Ordinary ground assault and raider squads use the predictor as a default-on veto.
 Only predicted crushing defeats add a refusal: at least 75% of our armed metal
 lost, at most 5% of theirs, and enemy metal losses no greater than one tenth of
 ours. Otherwise the ordinary threat policy decides; a predicted win is never
@@ -305,11 +304,32 @@ along the next 1200 elmos of the approach plus their weapon reach. Fights above
 96 units are skipped, never truncated. Shield support, submerged combat and
 cloaked/bomb squads are excluded where the model cannot represent the tactic.
 Strike missions, explicit operator orders and specialized controllers retain
-their conduct. `enable=fightsim`, `ZKGBAI_ENABLE=fightsim`, or the operator's
-`feature` tool with `{"name":"fightsim","off":false}` enables the veto. With
+their conduct. `disable=fightsim`, `ZKGBAI_DISABLE=fightsim`, or the operator's
+`feature` tool with `{"name":"fightsim","off":true}` disables the veto. With
 `fightshadow` enabled, predictions still appear in the journal. Verdict records
 use mode `veto` and report `veto`, `armed_metal`, predicted casualties and the
 baseline threat decision, so actual refusals can be compared against losses.
+
+### Raider gangs and the stay veto
+
+`coalesce` (on by default, `disable=coalesce`) lets raiders that stand near one
+another take a local fight together whoever drives them: solo raiders, Kodachis,
+raider-squad members and armed stakeout pickets. Twice a second it clusters the
+raiders free to be borrowed and asks the predictor (`fightsim::local`) about each
+cluster's fight: a clean a-move that kills every armed enemy for little loss, or
+a dive on one prize (commander, factory, heavy, big economy) worth several times
+what it costs. A plan that passes forms a gang; its members skip their own
+controllers and do not retreat to repair until the gang breaks up (prize dead,
+no armed enemy left, the forecast turned, or its time up).
+
+`stayveto` (off by default, `enable=stayveto`) keeps units about to run home for
+repairs in their fight when the predictor says staying wins far more than it
+risks. It is off since the 2026-11-01 batteries: it lost its mirror 3-15 and
+changed nothing against Circuit or Wires.
+
+With either switched off, `coalesceshadow` and `stayshadow` journal what it would
+have done (`k=coalesce`, `k=stayveto`), with the same windows, for the off arm of
+an A/B.
 
 ### Lobster throws
 
