@@ -18,6 +18,28 @@
 //! its price now (4x up to 4:00 falling to 1x at 7:00: metal early grows
 //! into more), times the gain dial (`conquest_gain`, `always` = build).
 //!
+//! While the commander is away, the constructor nearest home builds the
+//! energy (`energy` records): the commander is the opening's energy
+//! builder, greedy constructors never build any, and without a stand-in the
+//! first battery stalled (energy bank 19-45 against 137-331 at 2-4 min).
+//!
+//! The commander's station is the objective, from setting out until the
+//! game ends, unless the objective fails or the commander dies. With
+//! `conquestleash` (off by default; user, 2026-11-02) its jobs cost
+//! `LEASH_COST` per elmo beyond `LEASH_RADIUS` of the station: in b2 it
+//! spent 12-21% of the time after a hold over 1500 elmos away, on fusions,
+//! repairs and far mexes the constructors could have built.
+//!
+//! Two switches of 2026-11-02 (user: "let's try both"), off by default:
+//! `conquestsym` measures both sides' walks from the same kind of place, the
+//! center of the metal spots in each side's start box: before, ours came
+//! from our start and theirs from their presumed territory, some 750 elmos
+//! nearer the middle on Wanderlust, so every middle objective looked like a
+//! race we lose. (The presumed territories are no fix: the enemy's is what
+//! is hostile or shadowed, ours what we own or shadow, 16 spots against 9
+//! at 1:00 there.) `conquestseq` sends the commander on to the next open
+//! objective once one is held, until `SEQ_UNTIL`.
+//!
 //! Every decision goes to the journal (`conquest` records).
 
 use std::sync::mpsc;
@@ -79,6 +101,18 @@ const MAX_RETRIES: u8 = 2;
 /// A built turret of ours this near its site is the site's.
 const BUILT_RADIUS: f32 = 150.0;
 const DEFAULT_TURRET: &str = "turretheavylaser";
+/// Job-cost bonus of energy jobs for the energy worker (above the
+/// caretakers' 1000, below a factory's plop).
+const ENERGY_BONUS: f32 = 1500.0;
+/// The energy worker hands energy back once a commander is this near home.
+const HOME_RADIUS: f32 = 1500.0;
+/// With `conquestleash`, the commander's jobs farther than this from its
+/// station cost this much more per elmo beyond (ordinary jobs weigh a
+/// walk at a quarter to a half per elmo).
+const LEASH_RADIUS: f32 = 1200.0;
+const LEASH_COST: f32 = 1.0;
+/// With `conquestseq`, no objective is set out for after this frame.
+const SEQ_UNTIL: i32 = 30 * 60 * 18;
 
 #[derive(Default)]
 pub struct Conquest {
@@ -90,6 +124,25 @@ pub struct Conquest {
     pub seen: Vec<(i32, Vec<(Tier, f32)>)>,
     pub op: Option<Op>,
     pub done: bool,
+    /// The constructor building energy at home while the commander is away.
+    pub energy: Option<EnergyWorker>,
+    /// Where the commander belongs: its objective (see `conquest_leash`).
+    pub station: Option<Station>,
+    /// Objectives held, in order (with `conquestseq`, the next is sought).
+    pub taken: Vec<usize>,
+}
+
+pub struct Station {
+    pub crew: i32,
+    pub center: Vec3,
+    pub since: i32,
+}
+
+pub struct EnergyWorker {
+    pub id: i32,
+    /// Greedy before (made greedy again when the commander is home).
+    pub was_greedy: bool,
+    pub since: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,6 +205,7 @@ impl Ai {
             if self.eco.conquest.op.is_some() {
                 self.conquest_end("switched off", false);
             }
+            self.conquest_energy_release("switched off", true);
             return;
         }
         self.conquest_plan(frame);
@@ -161,6 +215,130 @@ impl Ai {
         } else if !self.eco.conquest.done {
             self.conquest_start(frame);
         }
+        self.conquest_energy(frame);
+        if self.eco.conquest.station.as_ref().is_some_and(|s| !self.eco.workers.contains_key(&s.crew)) {
+            self.conquest_station_clear("commander lost");
+        }
+    }
+
+    fn conquest_station_clear(&mut self, why: &str) {
+        let Some(s) = self.eco.conquest.station.take() else { return };
+        self.log(&format!("conquest: commander {} leaves its station ({why})", s.crew));
+        self.op_emit(
+            "conquest",
+            json!({"event": "station", "t": self.frame / 30, "what": "clear", "why": why, "crew": s.crew,
+                   "secs": (self.frame - s.since) / 30}),
+        );
+    }
+
+    /// Extra job cost for worker `wid` working at `p` (see
+    /// `eco_cost_of_job`): with `conquestleash`, the commander's jobs far
+    /// from its station, unless it is hurt.
+    pub(crate) fn conquest_leash(&self, wid: i32, p: Vec3) -> f32 {
+        let Some(s) = self.eco.conquest.station.as_ref().filter(|s| s.crew == wid) else { return 0.0 };
+        if self.dev_off("conquestleash") {
+            return 0.0;
+        }
+        let hurt =
+            self.eco.workers.get(&wid).is_none_or(|w| w.unit.health() < CREW_HEALTH * w.unit.max_health().max(1.0));
+        if hurt {
+            return 0.0;
+        }
+        LEASH_COST * (distance(p, s.center) - LEASH_RADIUS).max(0.0)
+    }
+
+    /// Where the energy worker stays: our first factory, else our start.
+    fn conquest_home(&self) -> Vec3 {
+        self.fac.factories.values().next().map_or_else(|| self.graph.get_start_pos(), |f| f.get_pos())
+    }
+
+    /// Whether worker `wid` is the energy worker and `task` an energy job
+    /// (see `eco_cost_of_job_alone`).
+    fn conquest_energy_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
+        let e = self.eco.conquest.energy.as_ref()?;
+        if e.id != wid {
+            return None;
+        }
+        let ids = &self.eco.build_ids;
+        let t = self.eco.tasks.get(task)?;
+        let id = t.as_construction()?.build_type.id();
+        // Energy at home: not the commander's out at the objective.
+        ((id == ids.solar_id || id == ids.wind_id) && distance(t.get_pos(), self.conquest_home()) <= HOME_RADIUS)
+            .then_some(ENERGY_BONUS)
+    }
+
+    /// While the commander is away, the constructor nearest home becomes
+    /// non-greedy (greedy ones never build energy) and puts energy first;
+    /// once a commander is home again it goes back to what it was. If the
+    /// commanders are all gone, it stays on (non-greedy).
+    fn conquest_energy(&mut self, frame: i32) {
+        if self.eco.conquest.energy.as_ref().is_some_and(|e| !self.eco.workers.contains_key(&e.id)) {
+            let id = self.eco.conquest.energy.take().map_or(0, |e| e.id);
+            self.op_emit("conquest", json!({"event": "energy", "t": frame / 30, "what": "lost", "worker": id}));
+        }
+        let home = self.conquest_home();
+        if self.eco.conquest.op.is_some() {
+            if self.eco.conquest.energy.is_none() {
+                self.conquest_energy_pick(frame, home);
+            }
+            return;
+        }
+        if self.eco.conquest.energy.is_none() {
+            return;
+        }
+        let commanders: Vec<Vec3> =
+            self.eco.commanders.iter().filter_map(|id| self.eco.workers.get(id)).map(|w| w.get_pos()).collect();
+        if commanders.is_empty() {
+            self.conquest_energy_release("no commander", false);
+        } else if commanders.iter().any(|&p| distance(p, home) <= HOME_RADIUS) {
+            self.conquest_energy_release("commander home", true);
+        }
+    }
+
+    fn conquest_energy_pick(&mut self, frame: i32, home: Vec3) {
+        let team = self.team_id;
+        let pick = (self.eco.workers.values())
+            .filter(|w| !w.is_com && w.unit.health() > 0.0 && w.unit.team() == team)
+            .map(|w| (w.id, w.is_greedy, distance(w.get_pos(), home)))
+            .min_by(|a, b| a.2.total_cmp(&b.2));
+        let Some((id, was_greedy, dist)) = pick else { return };
+        if let Some(w) = self.eco.workers.get_mut(&id)
+            && w.is_greedy
+        {
+            w.is_greedy = false;
+            self.eco.greed -= 1.0;
+        }
+        self.eco.conquest.energy = Some(EnergyWorker { id, was_greedy, since: frame });
+        self.log(&format!(
+            "conquest: worker {id} builds energy at home while the commander is away ({dist:.0} from home, was greedy {was_greedy})"
+        ));
+        self.op_emit(
+            "conquest",
+            json!({"event": "energy", "t": frame / 30, "what": "pick", "worker": id, "was_greedy": was_greedy, "dist": dist.round()}),
+        );
+    }
+
+    /// Drop the energy worker's role; `restore`: greedy again if it was.
+    fn conquest_energy_release(&mut self, why: &str, restore: bool) {
+        let Some(e) = self.eco.conquest.energy.take() else { return };
+        if restore
+            && e.was_greedy
+            && let Some(w) = self.eco.workers.get_mut(&e.id)
+            && !w.is_greedy
+        {
+            w.is_greedy = true;
+            self.eco.greed += 1.0;
+        }
+        self.log(&format!(
+            "conquest: worker {} hands energy back ({why}) after {} s",
+            e.id,
+            (self.frame - e.since) / 30
+        ));
+        self.op_emit(
+            "conquest",
+            json!({"event": "energy", "t": self.frame / 30, "what": "release", "why": why, "worker": e.id,
+                   "secs": (self.frame - e.since) / 30}),
+        );
     }
 
     fn conquest_turret(&self) -> Option<UnitDef> {
@@ -199,7 +377,14 @@ impl Ai {
             return;
         }
         let Some(terrain) = self.terrain.get() else { return };
-        let Some((ally, enemy)) = self.strategy_bases() else { return };
+        let Some((mut ally, mut enemy)) = self.strategy_bases() else { return };
+        let box_ally = Some(self.graph.get_ally_base()).filter(|b| !b.is_zero());
+        if !self.dev_off("conquestsym")
+            && let (Some(a), Some(e)) = (box_ally, self.graph.get_enemy_base())
+        {
+            // Both walks from the same kind of place (see the module notes).
+            (ally, enemy) = (a, e);
+        }
         let maps: Vec<TierMap> = TIERS.iter().filter_map(|&t| terrain.tier(t).cloned()).collect();
         let Some(walk) = terrain.tier(Tier::Bot).cloned() else { return };
         let assets = self.strategy_assets();
@@ -350,18 +535,28 @@ impl Ai {
         if self.eco.mexes.len() < OPENING_MEXES && frame < OPENING_LATEST {
             return;
         }
+        if !c.taken.is_empty() && frame > SEQ_UNTIL {
+            self.eco.conquest.done = true;
+            self.log("conquest: too late for another objective");
+            return;
+        }
+        // A later objective waits for a healthy commander.
+        let need = if c.taken.is_empty() { 0.0 } else { CREW_HEALTH };
         let Some(crew) = self.eco.commanders.iter().copied().find(|id| {
-            self.eco
-                .workers
-                .get(id)
-                .is_some_and(|w| !w.has_plop() && w.unit.health() > 0.0 && w.unit.team() == self.team_id)
+            self.eco.workers.get(id).is_some_and(|w| {
+                !w.has_plop()
+                    && w.unit.health() > 0.0
+                    && w.unit.health() >= need * w.unit.max_health()
+                    && w.unit.team() == self.team_id
+            })
         }) else {
             return;
         };
         let best = (0..c.objectives.len())
             .filter(|&i| {
                 let o = &c.objectives[i];
-                o.walk <= MAX_WALK
+                !c.taken.contains(&i)
+                    && o.walk <= MAX_WALK
                     && !o.spots.iter().filter_map(|&k| c.assets.get(k)).all(|a| self.conquest_spot_hostile(a.pos))
                     && o.sites.iter().all(|&s| self.war.get_porc_threat(self.conquest_v3(s)) <= 0.0)
             })
@@ -395,6 +590,7 @@ impl Ai {
         let o = &self.eco.conquest.objectives[idx];
         let (worth, cost, ratio) = self.conquest_value(o);
         let center = o.center();
+        self.eco.conquest.station = Some(Station { crew, center: self.conquest_v3(center), since: frame });
         self.log(&format!(
             "conquest: commander {crew} sets out for objective {idx} at ({:.0},{:.0}): {} spots, expected denial {expected:.1}/s, turrets now {ratio:.2} (worth {worth:.0} / cost {cost:.0})",
             center.x,
@@ -405,7 +601,8 @@ impl Ai {
         self.op_emit(
             "conquest",
             json!({"event": "go", "t": frame / 30, "objective": idx, "crew": crew, "expected": expected,
-                   "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len()}),
+                   "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len(),
+                   "taken": self.eco.conquest.taken.len()}),
         );
     }
 
@@ -450,6 +647,9 @@ impl Ai {
     /// `eco_cost_of_job_alone`): the objective's jobs for its commander,
     /// its turrets for builders near them.
     pub(crate) fn conquest_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
+        if let Some(bonus) = self.conquest_energy_bonus(wid, task) {
+            return Some(bonus);
+        }
         let op = self.eco.conquest.op.as_ref()?;
         if op.mex_tasks.contains(&task) {
             return (wid == op.crew).then_some(BONUS);
@@ -621,7 +821,11 @@ impl Ai {
     /// Release the commander; drop turret jobs not yet started.
     fn conquest_end(&mut self, why: &str, success: bool) {
         let Some(op) = self.eco.conquest.op.take() else { return };
-        self.eco.conquest.done = true;
+        if success {
+            self.eco.conquest.taken.push(op.idx);
+        }
+        // With `conquestseq` a held objective leads on to the next.
+        self.eco.conquest.done = !success || self.dev_off("conquestseq");
         let mut dropped = 0;
         for t in &op.turrets {
             if let Some(id) = t.task
@@ -632,6 +836,9 @@ impl Ai {
             }
         }
         let built = op.turrets.iter().filter(|t| t.built).count();
+        if !success {
+            self.conquest_station_clear(why);
+        }
         self.log(&format!(
             "conquest: objective {} ends ({why}) after {} s in {}: {built} turrets standing, {dropped} unstarted dropped",
             op.idx,
@@ -651,7 +858,10 @@ impl Ai {
         json!({
             "objectives": c.objectives.len(),
             "done": c.done,
+            "taken": c.taken,
             "belief": self.conquest_belief_json(),
+            "energy_worker": c.energy.as_ref().map(|e| json!({"worker": e.id, "was_greedy": e.was_greedy, "since": e.since / 30})),
+            "station": c.station.as_ref().map(|s| json!({"crew": s.crew, "x": s.center.x.round(), "z": s.center.z.round(), "since": s.since / 30, "leash": !self.dev_off("conquestleash")})),
             "op": c.op.as_ref().map(|op| json!({
                 "objective": op.idx, "crew": op.crew, "stage": op.stage.name(), "since": op.started / 30,
                 "mex_jobs": op.mex_tasks.len(),
@@ -664,6 +874,156 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use springai::Unit;
+    use std::cell::Cell;
+
+    thread_local! {
+        static COMMANDER_HOME: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Commander 10 (out, or home), constructors 11 (far from home) and
+    /// 12 (near), both greedy; home is our start at (1000, 1000).
+    fn energy_ai() -> Ai {
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            1000.0
+        }
+        unsafe extern "C" fn bp(_: i32, _: i32) -> f32 {
+            5.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn pos(_: i32, id: i32, out: *mut f32) {
+            let p = match id {
+                10 if COMMANDER_HOME.with(Cell::get) => [1200.0, 0.0, 1000.0],
+                10 => [4000.0, 0.0, 4000.0],
+                11 => [2400.0, 0.0, 1000.0],
+                _ => [1300.0, 0.0, 1100.0],
+            };
+            unsafe { std::ptr::copy_nonoverlapping(p.as_ptr(), out, 3) };
+        }
+        COMMANDER_HOME.with(|h| h.set(false));
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(health);
+            t.Unit_getPos = Some(pos);
+            t.UnitDef_getBuildSpeed = Some(bp);
+            t.Unit_getMaxHealth = Some(health);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.Unit_getWeapons = Some(zero);
+        });
+        ai.graph.set_start_pos(Vec3::new(1000.0, 0.0, 1000.0));
+        for (id, com, greedy) in [(10, true, false), (11, false, true), (12, false, true)] {
+            let mut w = super::super::Worker::new(Unit::from_id(ai.cb, id).unwrap(), ai.team_id);
+            w.is_com = com;
+            w.is_greedy = greedy;
+            ai.eco.insert_worker(w);
+        }
+        ai.eco.commanders.push(10);
+        ai.eco.greed = 2.0;
+        ai
+    }
+
+    fn walking() -> Op {
+        Op {
+            idx: 0,
+            crew: 10,
+            stage: Stage::Walk,
+            mex_tasks: vec![],
+            turrets: vec![],
+            started: 0,
+            fortify_from: 0,
+            danger: 0,
+        }
+    }
+
+    fn greedy(ai: &Ai, id: i32) -> bool {
+        ai.eco.workers.get(&id).unwrap().is_greedy
+    }
+
+    #[test]
+    fn the_constructor_nearest_home_builds_energy_until_the_commander_is_back() {
+        let mut ai = energy_ai();
+        ai.eco.conquest.op = Some(walking());
+        ai.conquest_energy(600);
+        let e = ai.eco.conquest.energy.as_ref().expect("an energy worker");
+        assert_eq!((e.id, e.was_greedy), (12, true));
+        assert!(!greedy(&ai, 12) && greedy(&ai, 11));
+        assert_eq!(ai.eco.greed, 1.0);
+        // The objective over, the commander still out: it stays on.
+        ai.eco.conquest.op = None;
+        ai.conquest_energy(900);
+        assert!(ai.eco.conquest.energy.is_some());
+        // The commander home: greedy again.
+        COMMANDER_HOME.with(|h| h.set(true));
+        ai.conquest_energy(1200);
+        assert!(ai.eco.conquest.energy.is_none());
+        assert!(greedy(&ai, 12));
+        assert_eq!(ai.eco.greed, 2.0);
+    }
+
+    #[test]
+    fn without_a_commander_the_energy_worker_stays_non_greedy() {
+        let mut ai = energy_ai();
+        ai.eco.conquest.op = Some(walking());
+        ai.conquest_energy(600);
+        ai.eco.conquest.op = None;
+        ai.eco.commanders.clear();
+        ai.conquest_energy(900);
+        assert!(ai.eco.conquest.energy.is_none());
+        assert!(!greedy(&ai, 12));
+        assert_eq!(ai.eco.greed, 1.0);
+    }
+
+    #[test]
+    fn the_leash_prices_the_commanders_far_jobs() {
+        let mut ai = energy_ai();
+        assert!(ai.dev_off("conquestleash"), "off by default");
+        ai.set_feature_off("conquestleash", false);
+        let center = Vec3::new(4000.0, 0.0, 4000.0);
+        ai.eco.conquest.station = Some(Station { crew: 10, center, since: 0 });
+        // Near the station, and anyone else's job: nothing.
+        assert_eq!(ai.conquest_leash(10, Vec3::new(4000.0, 0.0, 5000.0)), 0.0);
+        assert_eq!(ai.conquest_leash(12, Vec3::new(1000.0, 0.0, 1000.0)), 0.0);
+        // Home, 4243 elmos away: the walk past the radius.
+        let home = ai.conquest_leash(10, Vec3::new(1000.0, 0.0, 1000.0));
+        assert!((home - LEASH_COST * (3000.0 * 2f32.sqrt() - LEASH_RADIUS)).abs() < 1.0, "{home}");
+        // Switched off: nothing.
+        ai.set_feature_off("conquestleash", true);
+        assert_eq!(ai.conquest_leash(10, Vec3::new(1000.0, 0.0, 1000.0)), 0.0);
+    }
+
+    #[test]
+    fn a_failed_objective_frees_the_commander_a_held_one_keeps_it() {
+        let mut ai = energy_ai();
+        for (why, success, kept) in [("held", true, true), ("commander hurt", false, false)] {
+            ai.eco.conquest.op = Some(walking());
+            ai.eco.conquest.station = Some(Station { crew: 10, center: Vec3::new(4000.0, 0.0, 4000.0), since: 0 });
+            ai.conquest_end(why, success);
+            assert_eq!(ai.eco.conquest.station.is_some(), kept, "{why}");
+        }
+    }
+
+    #[test]
+    fn with_conquestseq_a_held_objective_leads_on_and_a_failed_one_stops() {
+        let mut ai = energy_ai();
+        let mut op = walking();
+        op.idx = 2;
+        ai.eco.conquest.op = Some(op);
+        ai.conquest_end("held", true);
+        assert_eq!((ai.eco.conquest.done, ai.eco.conquest.taken.clone()), (true, vec![2]), "off by default: one");
+        ai.set_feature_off("conquestseq", false);
+        ai.eco.conquest.done = false;
+        ai.eco.conquest.op = Some(walking());
+        ai.conquest_end("held", true);
+        assert_eq!((ai.eco.conquest.done, ai.eco.conquest.taken.clone()), (false, vec![2, 0]));
+        ai.eco.conquest.op = Some(walking());
+        ai.conquest_end("commander hurt", false);
+        assert_eq!((ai.eco.conquest.done, ai.eco.conquest.taken.len()), (true, 2));
+    }
 
     #[test]
     fn metal_is_dear_early_and_at_par_from_seven_minutes() {

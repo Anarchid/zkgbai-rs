@@ -592,7 +592,12 @@ impl Ai {
 
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         let cost = self.eco_cost_of_job_alone(worker, wpos, task);
-        if cost >= NEVER || self.dev_off("pairs") || self.defs.name_of(worker.unit) != PAIRED_CON {
+        if cost >= NEVER {
+            return cost;
+        }
+        // A commander holding conquered ground stays near it (`conquestleash`).
+        let cost = cost + self.conquest_leash(worker.id, task.get_pos());
+        if self.dev_off("pairs") || self.defs.name_of(worker.unit) != PAIRED_CON {
             return cost;
         }
         let partner = (task.assigned_workers.iter())
@@ -663,7 +668,9 @@ impl Ai {
                 }
 
                 // A conquest objective's job: its commander's first, and
-                // its turrets' for builders near them (see `conquest`).
+                // its turrets' for builders near them; energy at home for
+                // the energy worker while the commander is away (see
+                // `conquest`).
                 if let Some(bonus) = self.conquest_bonus(worker.id, task.id) {
                     return (dist / 4.0) - bonus + (400.0 * (cost_mod - 1.0)).max(0.0);
                 }

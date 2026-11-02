@@ -163,7 +163,7 @@ impl Ai {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use springai::{Callback, SkirmishAi, Unit, UnitDef, ffi};
     use std::cell::{Cell, RefCell};
@@ -325,7 +325,8 @@ mod tests {
         ai
     }
 
-    fn test_ai_with(customize: impl FnOnce(&mut ffi::SSkirmishAICallback)) -> Ai {
+    /// A bare `Ai` over a stub callback (`customize` overrides entries).
+    pub(crate) fn test_ai_with(customize: impl FnOnce(&mut ffi::SSkirmishAICallback)) -> Ai {
         use std::ffi::{CStr, c_char, c_void};
         unsafe extern "C" fn size(_: i32) -> i32 {
             32

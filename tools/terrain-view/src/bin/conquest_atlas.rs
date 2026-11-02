@@ -3,13 +3,15 @@
 //!
 //! usage: conquest_atlas <map.zktamap> <scenario.json> [range=620] [sites=2] [--png out.png]
 //!        [--eval "x,z x,z"]   (value these sites instead of searching)
+//!        [--lattice elmos] [--per-tier n] [--shortlist n] [--band lo,hi]   (search variants)
+//!        [--json out.json]    (objectives, shortlists, band shares, spots, bases)
 //!
 //! The scenario is the AI's dump (`ZKGBAI_DUMP_TERRAIN`); its spot sides are
 //! as the AI saw them at the dump's frame, so dump early (frame 1800).
 use std::path::Path;
 
 use image::{Rgb, RgbImage};
-use zk_terrain::conquest::{Params, covered, evaluate, objectives};
+use zk_terrain::conquest::{Params, covered, evaluate, objectives, shares, shortlists};
 use zk_terrain::strategy::{Asset, Side};
 use zk_terrain::{CELL, Pos, SpringMapData, Terrain, Tier};
 
@@ -23,6 +25,14 @@ fn main() {
         })
     };
     let png = flag("--png");
+    let json_out = flag("--json");
+    let lattice: f32 = flag("--lattice").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let per_tier: usize = flag("--per-tier").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let short: Option<usize> = flag("--shortlist").and_then(|s| s.parse().ok());
+    let band: Option<[f32; 2]> = flag("--band").and_then(|s| {
+        let v: Vec<f32> = s.split(',').filter_map(|x| x.parse().ok()).collect();
+        (v.len() == 2).then(|| [v[0], v[1]])
+    });
     let eval: Option<Vec<Pos>> = flag("--eval").map(|s| {
         s.split_whitespace()
             .map(|xz| {
@@ -64,7 +74,13 @@ fn main() {
     let built = t0.elapsed();
     let maps: Vec<_> = tiers.iter().filter_map(|&t| terrain.tier(t)).collect();
     let walk = terrain.tier(Tier::Bot).expect("bot tier");
-    let p = Params { range, max_sites, ..Params::default() };
+    let mut p = Params { range, max_sites, lattice, per_tier, ..Params::default() };
+    if let Some(n) = short {
+        p.shortlist = n;
+    }
+    if let Some(b) = band {
+        p.band = b;
+    }
     let t1 = std::time::Instant::now();
     let found = match &eval {
         Some(sites) => vec![evaluate(&maps, walk, ally, &[enemy], &assets, sites, &p)],
@@ -105,6 +121,46 @@ fn main() {
                 o.spots.len()
             );
         }
+    }
+    if let Some(out) = &json_out {
+        let pj = |q: Pos| serde_json::json!([q.x.round(), q.z.round()]);
+        let objs: Vec<serde_json::Value> = found
+            .iter()
+            .map(|o| {
+                serde_json::json!({
+                    "design": o.design.name(), "score": o.score, "income": o.income,
+                    "walk": o.walk, "enemy_walk": o.enemy_walk,
+                    "sites": o.sites.iter().map(|&q| pj(q)).collect::<Vec<_>>(),
+                    "spots": o.spots,
+                    "denial": o.denial.iter().map(|d| serde_json::json!({
+                        "tier": d.tier.name(), "worth": d.worth, "own": d.own, "sealed": d.sealed})).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let lists: serde_json::Map<String, serde_json::Value> = shortlists(&maps, walk, ally, &[enemy], &assets, &p)
+            .into_iter()
+            .map(|(t, l)| {
+                (
+                    t.name().to_string(),
+                    serde_json::json!(l.iter().map(|(v, q)| [q.x.round(), q.z.round(), *v]).collect::<Vec<_>>()),
+                )
+            })
+            .collect();
+        let step = 64.0;
+        let (nx, nz, sh) = shares(walk, ally, &[enemy], step);
+        let out_v = serde_json::json!({
+            "map": v["map"], "size": [data.map_width * 8, data.map_height * 8],
+            "ally": pj(ally), "enemy": pj(enemy), "range": range,
+            "params": {"lattice": p.lattice, "per_tier": p.per_tier, "shortlist": p.shortlist, "band": p.band},
+            "assets": assets.iter().map(|a| serde_json::json!({"x": a.pos.x, "z": a.pos.z, "value": a.value,
+                "side": match a.side { Side::Ally => "ally", Side::Enemy => "enemy", Side::Neutral => "neutral" }})).collect::<Vec<_>>(),
+            "objectives": objs, "shortlists": lists,
+            "shares": {"step": step, "nx": nx, "nz": nz,
+                       "v": sh.iter().map(|s| s.map(|x| (x * 1000.0).round() / 1000.0)).collect::<Vec<_>>()},
+            "ms": t1.elapsed().as_secs_f64() * 1e3,
+        });
+        std::fs::write(out, serde_json::to_string(&out_v).expect("json")).expect("cannot write json");
+        println!("wrote {out}");
     }
     if let Some(out) = png {
         let (w, h) = (data.map_width * 8 / 16, data.map_height * 8 / 16);

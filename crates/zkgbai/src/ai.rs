@@ -81,8 +81,11 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// our debug output.
 /// `conquest` (the commander walks to forward ground a few turrets hold,
 /// takes its metal, and fortifies it when the denial pays) is a 2026-10-31
-/// experiment, installed as ZKGBAI conquest for its first battery.
-pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
+/// experiment, installed as ZKGBAI conquest for its first battery;
+/// `conquestleash` keeps its commander near the ground it took, `conquestsym`
+/// measures both sides' walks alike, `conquestseq` goes on to the next
+/// objective (2026-11-02).
+pub(crate) const OFF_BY_DEFAULT: [&str; 22] = [
     "pairs",
     "currency",
     "permanence",
@@ -102,6 +105,9 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
     "densgate",
     "fight2d",
     "conquest",
+    "conquestleash",
+    "conquestsym",
+    "conquestseq",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.

@@ -22,7 +22,7 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use crate::strategy::{Asset, Side};
-use crate::{Pos, Tier, TierMap};
+use crate::{CELL, Pos, Tier, TierMap};
 
 /// How objectives are looked for.
 #[derive(Clone, Copy, Debug)]
@@ -45,6 +45,14 @@ pub struct Params {
     /// Sites of one objective stand at most this far from the first, elmos:
     /// one place one commander fortifies, not both ends of the middle.
     pub cluster: f32,
+    /// Also seed a lattice over the contested band about this many elmos
+    /// apart, laid out the same from every side of the map (0: seeds come
+    /// from the terrain model's chokepoints and spots only, which need not
+    /// be symmetric where the map is).
+    pub lattice: f32,
+    /// Objectives kept per design tier, each further one clear of the
+    /// earlier ones' sites by `range` (1: the best only).
+    pub per_tier: usize,
 }
 
 impl Default for Params {
@@ -58,6 +66,8 @@ impl Default for Params {
             band: [0.33, 0.67],
             shortlist: 48,
             cluster: 1000.0,
+            lattice: 0.0,
+            per_tier: 1,
         }
     }
 }
@@ -306,6 +316,136 @@ fn taken(assets: &[Asset], sites: &[Pos], p: &Params) -> Vec<usize> {
         .collect()
 }
 
+/// Walks on the commander's tier from our start and the enemies': the
+/// contested band and the objectives' walks are measured on them.
+struct Band {
+    grid: Grid,
+    ours: Vec<u32>,
+    theirs: Vec<Vec<u32>>,
+}
+
+impl Band {
+    fn new(walk: &TierMap, ally: Pos, enemies: &[Pos]) -> Band {
+        let grid = Grid::new(walk);
+        let ours = grid.costs(ally, None);
+        let theirs = enemies.iter().map(|&e| grid.costs(e, None)).collect();
+        Band { grid, ours, theirs }
+    }
+
+    fn elmos(c: u32) -> f32 {
+        if c == UNREACHED { f32::INFINITY } else { c as f32 * GRID / STRAIGHT as f32 }
+    }
+
+    fn ours_to(&self, q: Pos) -> f32 {
+        Self::elmos(self.ours[self.grid.cell(q)])
+    }
+
+    fn theirs_to(&self, q: Pos) -> f32 {
+        self.theirs.iter().map(|t| Self::elmos(t[self.grid.cell(q)])).fold(f32::INFINITY, f32::min)
+    }
+
+    /// Our share of the way between us and the nearest enemy.
+    fn share(&self, q: Pos) -> Option<f32> {
+        let (a, e) = (self.ours_to(q), self.theirs_to(q));
+        (a.is_finite() && e.is_finite()).then(|| a / (a + e).max(1.0))
+    }
+
+    fn in_band(&self, q: Pos, p: &Params) -> bool {
+        self.share(q).is_some_and(|s| s >= p.band[0] && s <= p.band[1])
+    }
+}
+
+/// The share of the way from our start to the nearest enemy's at points
+/// `step` elmos apart over the walking tier's map, row by row (`None`
+/// where either cannot walk): the contested band is where it lies within
+/// the band's bounds.
+pub fn shares(walk: &TierMap, ally: Pos, enemies: &[Pos], step: f32) -> (usize, usize, Vec<Option<f32>>) {
+    let band = Band::new(walk, ally, enemies);
+    let (w, h) = (walk.width as f32 * CELL, walk.height as f32 * CELL);
+    let (nx, nz) = ((w / step).ceil() as usize, (h / step).ceil() as usize);
+    let mut out = Vec::with_capacity(nx * nz);
+    for j in 0..nz {
+        for i in 0..nx {
+            let q = Pos::new((i as f32 + 0.5) * step, (j as f32 + 0.5) * step);
+            out.push(if walk.is_passable(q) { band.share(q) } else { None });
+        }
+    }
+    (nx, nz, out)
+}
+
+/// One design tier's seeds after the first look, best first: contested
+/// chokepoints and their setbacks, contested spots, midpoints of pairs one
+/// turret could cover together, and with `lattice` a lattice over the band.
+fn shortlist(design: &TierMap, walk: &TierMap, band: &Band, assets: &[Asset], p: &Params) -> Vec<(f32, Pos)> {
+    let in_band = |q: Pos| band.in_band(q, p);
+    let mut seeds: Vec<Pos> = Vec::new();
+    for c in &design.chokes {
+        if !in_band(c.pos) {
+            continue;
+        }
+        seeds.push(c.pos);
+        for &r in &c.regions {
+            seeds.push(design.setback(c.id, r, 160.0));
+        }
+    }
+    for a in assets.iter().filter(|a| a.side == Side::Neutral && in_band(a.pos)) {
+        seeds.push(a.pos);
+    }
+    let base = seeds.len();
+    for i in 0..base {
+        for j in i + 1..base {
+            if seeds[i].distance(seeds[j]) <= 1.6 * p.range {
+                seeds.push(Pos::new((seeds[i].x + seeds[j].x) * 0.5, (seeds[i].z + seeds[j].z) * 0.5));
+            }
+        }
+    }
+    if p.lattice > 0.0 {
+        // Spaced evenly between the map's edges, so the lattice mirrors
+        // onto itself under the map's symmetries.
+        let (w, h) = (design.width as f32 * CELL, design.height as f32 * CELL);
+        let (nx, nz) = ((w / p.lattice).round().max(1.0), (h / p.lattice).round().max(1.0));
+        for j in 0..nz as usize {
+            for i in 0..nx as usize {
+                seeds.push(Pos::new((i as f32 + 0.5) * w / nx, (j as f32 + 0.5) * h / nz));
+            }
+        }
+    }
+    seeds.retain(|&s| design.is_passable(s) && walk.is_passable(s) && in_band(s));
+    let mut kept: Vec<Pos> = Vec::new();
+    for s in seeds {
+        if kept.iter().all(|k| k.distance(s) >= 64.0) {
+            kept.push(s);
+        }
+    }
+    // First look: neutral income near the seed and chokepoints it covers.
+    let typical = assets.iter().map(|a| a.value.max(0.0)).sum::<f32>() / assets.len().max(1) as f32;
+    let mut ranked: Vec<(f32, Pos)> = kept
+        .into_iter()
+        .map(|s| {
+            let income: f32 = taken(assets, &[s], p).iter().map(|&i| assets[i].value.max(0.0)).sum();
+            let gates = covered(design, &[s], p.range).len() as f32;
+            (income + typical * gates, s)
+        })
+        .filter(|(v, _)| *v > 0.0)
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.truncate(p.shortlist);
+    ranked
+}
+
+/// The seeds each design tier's search values in full (for the atlas).
+pub fn shortlists(
+    maps: &[&TierMap],
+    walk: &TierMap,
+    ally: Pos,
+    enemies: &[Pos],
+    assets: &[Asset],
+    p: &Params,
+) -> Vec<(Tier, Vec<(f32, Pos)>)> {
+    let band = Band::new(walk, ally, enemies);
+    maps.iter().map(|m| (m.tier, shortlist(m, walk, &band, assets, p))).collect()
+}
+
 /// Objectives against ground forces from `enemies`: sites chosen on each of
 /// `maps` in turn (the design tier), every objective then valued on all of
 /// them. `walk` is the commander's tier (bots), on which the contested
@@ -321,22 +461,12 @@ pub fn objectives(
     if enemies.is_empty() {
         return Vec::new();
     }
-    let wg = Grid::new(walk);
-    let ours = wg.costs(ally, None);
-    let theirs: Vec<Vec<u32>> = enemies.iter().map(|&e| wg.costs(e, None)).collect();
-    let elmos = |c: u32| if c == UNREACHED { f32::INFINITY } else { c as f32 * GRID / STRAIGHT as f32 };
-    let ours_to = |q: Pos| elmos(ours[wg.cell(q)]);
-    let theirs_to = |q: Pos| theirs.iter().map(|t| elmos(t[wg.cell(q)])).fold(f32::INFINITY, f32::min);
-    let share = |q: Pos| -> Option<f32> {
-        let (a, e) = (ours_to(q), theirs_to(q));
-        (a.is_finite() && e.is_finite()).then(|| a / (a + e).max(1.0))
-    };
-    let in_band = |q: Pos| share(q).is_some_and(|s| s >= p.band[0] && s <= p.band[1]);
+    let band = Band::new(walk, ally, enemies);
     // Our metal: our spots and the neutral ones on our side of the middle.
     let mine: Vec<usize> = (0..assets.len())
         .filter(|&i| match assets[i].side {
             Side::Ally => true,
-            Side::Neutral => share(assets[i].pos).is_some_and(|s| s < 0.5),
+            Side::Neutral => band.share(assets[i].pos).is_some_and(|s| s < 0.5),
             Side::Enemy => false,
         })
         .collect();
@@ -350,50 +480,7 @@ pub fn objectives(
     let mut found: Vec<Objective> = Vec::new();
     for case in &cases {
         let design = case.map;
-        // Seeds: contested chokepoints and their setbacks, contested spots,
-        // and midpoints of pairs one turret could cover together.
-        let mut seeds: Vec<Pos> = Vec::new();
-        for c in &design.chokes {
-            if !in_band(c.pos) {
-                continue;
-            }
-            seeds.push(c.pos);
-            for &r in &c.regions {
-                seeds.push(design.setback(c.id, r, 160.0));
-            }
-        }
-        for a in assets.iter().filter(|a| a.side == Side::Neutral && in_band(a.pos)) {
-            seeds.push(a.pos);
-        }
-        let base = seeds.len();
-        for i in 0..base {
-            for j in i + 1..base {
-                if seeds[i].distance(seeds[j]) <= 1.6 * p.range {
-                    seeds.push(Pos::new((seeds[i].x + seeds[j].x) * 0.5, (seeds[i].z + seeds[j].z) * 0.5));
-                }
-            }
-        }
-        seeds.retain(|&s| design.is_passable(s) && walk.is_passable(s) && in_band(s));
-        let mut kept: Vec<Pos> = Vec::new();
-        for s in seeds {
-            if kept.iter().all(|k| k.distance(s) >= 64.0) {
-                kept.push(s);
-            }
-        }
-        // First look: neutral income near the seed and chokepoints it covers.
-        let typical = assets.iter().map(|a| a.value.max(0.0)).sum::<f32>() / assets.len().max(1) as f32;
-        let mut ranked: Vec<(f32, Pos)> = kept
-            .into_iter()
-            .map(|s| {
-                let income: f32 = taken(assets, &[s], p).iter().map(|&i| assets[i].value.max(0.0)).sum();
-                let gates = covered(design, &[s], p.range).len() as f32;
-                (income + typical * gates, s)
-            })
-            .filter(|(v, _)| *v > 0.0)
-            .collect();
-        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
-        ranked.truncate(p.shortlist);
-
+        let ranked = shortlist(design, walk, &band, assets, p);
         let score = |sites: &[Pos]| -> f32 {
             let own = taken(assets, sites, p);
             if own.is_empty() {
@@ -402,53 +489,59 @@ pub fn objectives(
             let counted = counted(&own);
             (0..enemies.len()).map(|k| case.denial(k, sites, assets, &counted, &own, p).0).sum()
         };
-        let mut sites: Vec<Pos> = Vec::new();
-        let mut best = 0.0f32;
-        while sites.len() < p.max_sites {
-            let mut pick: Option<(Pos, f32)> = None;
-            for &(_, s) in &ranked {
-                if sites.iter().any(|t| t.distance(s) < 300.0)
-                    || sites.first().is_some_and(|f| f.distance(s) > p.cluster)
-                {
-                    continue;
+        // Sites of this tier's objectives so far: a further one keeps clear.
+        let mut placed: Vec<Pos> = Vec::new();
+        for _ in 0..p.per_tier.max(1) {
+            let mut sites: Vec<Pos> = Vec::new();
+            let mut best = 0.0f32;
+            while sites.len() < p.max_sites {
+                let mut pick: Option<(Pos, f32)> = None;
+                for &(_, s) in &ranked {
+                    if sites.iter().any(|t| t.distance(s) < 300.0)
+                        || sites.first().is_some_and(|f| f.distance(s) > p.cluster)
+                        || placed.iter().any(|t| t.distance(s) <= p.range)
+                    {
+                        continue;
+                    }
+                    let mut trial = sites.clone();
+                    trial.push(s);
+                    let v = score(&trial);
+                    // A further site must add a tenth.
+                    if v > best * 1.1 + 0.05 && pick.is_none_or(|(_, pv)| v > pv) {
+                        pick = Some((s, v));
+                    }
                 }
-                let mut trial = sites.clone();
-                trial.push(s);
-                let v = score(&trial);
-                // A further site must add a tenth.
-                if v > best * 1.1 + 0.05 && pick.is_none_or(|(_, pv)| v > pv) {
-                    pick = Some((s, v));
+                let Some((s, v)) = pick else { break };
+                sites.push(s);
+                best = v;
+            }
+            if sites.is_empty() {
+                break;
+            }
+            placed.extend(sites.iter().copied());
+            let spots = taken(assets, &sites, p);
+            let income: f32 = spots.iter().map(|&i| assets[i].value.max(0.0)).sum();
+            let all = counted(&spots);
+            let mut denials = Vec::new();
+            for c in &cases {
+                for k in 0..enemies.len() {
+                    let (worth, own, sealed) = c.denial(k, &sites, assets, &all, &spots, p);
+                    denials.push(Denial { tier: c.map.tier, enemy: k, worth, own, sealed });
                 }
             }
-            let Some((s, v)) = pick else { break };
-            sites.push(s);
-            best = v;
+            let walk_to = sites.iter().map(|&s| band.ours_to(s)).fold(f32::INFINITY, f32::min);
+            let enemy_walk = sites.iter().map(|&s| band.theirs_to(s)).fold(f32::INFINITY, f32::min);
+            found.push(Objective {
+                sites,
+                spots,
+                income,
+                denial: denials,
+                design: design.tier,
+                walk: walk_to,
+                enemy_walk,
+                score: best,
+            });
         }
-        if sites.is_empty() {
-            continue;
-        }
-        let spots = taken(assets, &sites, p);
-        let income: f32 = spots.iter().map(|&i| assets[i].value.max(0.0)).sum();
-        let all = counted(&spots);
-        let mut denials = Vec::new();
-        for c in &cases {
-            for k in 0..enemies.len() {
-                let (worth, own, sealed) = c.denial(k, &sites, assets, &all, &spots, p);
-                denials.push(Denial { tier: c.map.tier, enemy: k, worth, own, sealed });
-            }
-        }
-        let walk_to = sites.iter().map(|&s| ours_to(s)).fold(f32::INFINITY, f32::min);
-        let enemy_walk = sites.iter().map(|&s| theirs_to(s)).fold(f32::INFINITY, f32::min);
-        found.push(Objective {
-            sites,
-            spots,
-            income,
-            denial: denials,
-            design: design.tier,
-            walk: walk_to,
-            enemy_walk,
-            score: best,
-        });
     }
     // One objective per place: the better of two whose centers are close.
     found.sort_by(|a, b| b.score.total_cmp(&a.score));
