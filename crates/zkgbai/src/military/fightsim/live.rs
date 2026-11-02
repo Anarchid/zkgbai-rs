@@ -1,36 +1,47 @@
 //! The fight predictor in play: snapshots from the AI's own state, the
-//! worker's answers, ordinary danger checks and fire-squad commitments.
+//! crushing-defeat veto on ordinary squads, and fire-squad commitments.
 //!
 //! `fightsim`, on by default, vetoes only crushing defeats: at least 75%
 //! of our armed metal lost, at most 5% of theirs, and a return no greater
-//! than one tenth of our losses. It never overrides an existing threat
-//! retreat or requires an otherwise acceptable attack to predict a win.
-//! `fightshadow` keeps logging when the veto is disabled; `fightmech`
-//! selects the mechanics answer when available (the base model otherwise).
-//! Ordinary assault/raider attacks use this veto, including on home ground.
-//! Strike missions and other special controllers keep their own conduct.
-//! Side A includes nearby friendly support; side B is fresh identified
-//! opposition on the approach. Stale or changed encounters cannot veto.
-//! Fire squads separately use committed per-unit fates; their policy is
+//! than one tenth of our losses, over [`VETO_HORIZON`] (15 s) of the
+//! mechanics fight with no stopping rule and ZK's tactical unit AI moving
+//! the units it governs ([`Model::kiting_fates`]: a Scalpel keeps its
+//! range from a Knight). Losses are the units' raw death probabilities
+//! weighted by metal. The fight is judged on the game thread at every
+//! check, so a moving squad always has an answer. The veto never overrides
+//! an existing threat retreat or requires an otherwise acceptable attack
+//! to predict a win.
+//!
+//! A veto latches: the squad keeps retreating for at least [`LATCH_MIN`],
+//! then while the fight against the enemies that set it (remembered for
+//! [`LATCH_MEMORY`] after last seen, wherever they are), judged as if the
+//! squad alone stood again where the veto stopped it, is still crushing,
+//! for at most [`LATCH_MAX`]: the squad growing or the enemy leaving ends
+//! it; the retreat's own distance and what stands by it at the haven do not. `fightshadow` keeps judging and logging when
+//! the veto is disabled. Ordinary assault/raider attacks use this veto,
+//! including on home ground. Strike missions and other special controllers
+//! keep their own conduct. Side A includes nearby friendly support; side B
+//! is fresh identified opposition on the approach. Fire squads separately
+//! use committed per-unit fates from the worker thread; their policy is
 //! unaffected, and `firesquads` can keep the worker running independently.
 //!
 //! Journal (`k=fightsim`): `event: cost` every minute; `event: verdict`
-//! whenever the two rules disagree, with both answers and the fight as the
-//! predictor saw it (`agree: false`), and for one agreement in
-//! [`AGREE_SAMPLE`] the same record with `agree: true`; `event: window`
-//! 30 s after each verdict record with the squad's metal lost meanwhile
-//! and what the enemies in the snapshot lost (seen dying), the mechanism
-//! the arm reads.
+//! whenever the veto and the flat rule disagree, with the judged losses
+//! and the fight as it was seen (`agree: false`), and for one agreement in
+//! [`AGREE_SAMPLE`] the same record with `agree: true`; `event: release`
+//! when a latch ends; `event: window` 30 s after each verdict record with
+//! the squad's metal lost meanwhile and what the enemies in the snapshot
+//! lost (seen dying), the mechanism the arm reads.
 
 use std::collections::{BTreeMap, HashMap};
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use serde_json::json;
 use springai::{UnitDef, Vec3};
 
 use super::worker::{FightAnswer, FightRequest, FightWorker};
-use super::{FightSnapshot, Model, SnapUnit, UnitSpec, WeaponSpec};
+use super::{FightSnapshot, Model, SnapUnit, UnitFate, UnitSpec, WeaponSpec};
 use crate::Ai;
 use crate::military::{SquadId, SquadKind};
 use crate::util::{NULLPOS, distance};
@@ -39,8 +50,6 @@ use crate::util::{NULLPOS, distance};
 pub const FEATURE: &str = "fightsim";
 /// The ordinary shadow switch; fire squads also need the worker.
 pub const SHADOW: &str = "fightshadow";
-/// The mechanics model beside the base one (`disable=fightmech`).
-pub const MECH: &str = "fightmech";
 /// Frames an answer stays usable (3 s).
 pub const STALE: i32 = 90;
 /// Enemies within this of the squad are in the fight.
@@ -62,6 +71,16 @@ const MAX_RETURN: f32 = 0.10;
 const WINDOW: i32 = 900;
 /// One agreement with the flat rule in this many is logged, with a window.
 const AGREE_SAMPLE: u64 = 5;
+/// Frames of fight the veto judges (15 s): long enough for an outranged
+/// squad to be shot to pieces, short enough to leave a slow fight alone.
+pub const VETO_HORIZON: i32 = 450;
+/// A vetoed squad keeps retreating at least this long (frames, 10 s) ...
+pub const LATCH_MIN: i32 = 300;
+/// ... and is judged afresh, as on first contact, after at most this long.
+pub const LATCH_MAX: i32 = 1800;
+/// A latch remembers the enemies that set it this long after they were
+/// last seen (frames, 20 s).
+pub const LATCH_MEMORY: i32 = 600;
 
 fn crushing_defeat(ours: f32, theirs: f32, metal: [f32; 2]) -> bool {
     [ours, theirs].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
@@ -79,12 +98,48 @@ fn ordinary_veto_kind(kind: SquadKind, air: bool, strike: bool) -> bool {
     !air && !strike && matches!(kind, SquadKind::Assault | SquadKind::Hover | SquadKind::Raider)
 }
 
-fn ordinary_answer_usable(a: &FightAnswer, frame: i32, stamp: u64) -> bool {
-    !a.commit && (0..=STALE).contains(&(frame - a.frame)) && a.stamp == stamp
+/// The veto's model, shared by every AI in the process and loaded once.
+fn veto_model() -> Result<&'static Model, &'static str> {
+    static MODEL: OnceLock<Result<Model, String>> = OnceLock::new();
+    MODEL.get_or_init(Model::load).as_ref().map_err(String::as_str)
 }
 
-fn hash_unit(h: &mut impl Hasher, side: u8, id: i32, def: i32, hp: f32, max_hp: f32, p: Vec3) {
-    (side, id, def, (hp / max_hp.max(1.0) * 10.0) as i32, (p.x / 256.0) as i32, (p.z / 256.0) as i32).hash(h);
+/// Killed share of each side's armed metal by the horizon, from the units'
+/// raw death probabilities (the calibrated ones are squeezed towards the
+/// middle), and each side's armed metal.
+fn kiting_losses(snap: &FightSnapshot, fates: &[UnitFate]) -> ([f32; 2], [f32; 2]) {
+    let (mut lost, mut metal) = ([0.0f32; 2], [0.0f32; 2]);
+    for (u, f) in snap.units.iter().zip(fates) {
+        if !u.spec.weapons.is_empty() {
+            metal[u.side as usize] += u.spec.cost;
+            lost[u.side as usize] += u.spec.cost * f.p_raw;
+        }
+    }
+    ([0, 1].map(|s| if metal[s] > 0.0 { lost[s] / metal[s] } else { 0.0 }), metal)
+}
+
+/// The veto's question: does side A a-moving into `snap`, the tactical AI
+/// moving what it governs, lose crushingly within [`VETO_HORIZON`]? The
+/// killed shares and the answer.
+pub(crate) fn judge(model: &Model, snap: &FightSnapshot) -> ([f32; 2], bool) {
+    let (loss, metal) = kiting_losses(snap, &model.kiting_fates(snap, VETO_HORIZON));
+    (loss, crushing_defeat(loss[0], loss[1], metal))
+}
+
+/// Whether a latched retreat `age` frames old goes on: always before
+/// [`LATCH_MIN`], then while the remembered fight is still crushing, never
+/// past [`LATCH_MAX`]. `crushing` is asked only when it matters.
+fn latch_holds(age: i32, crushing: impl FnOnce() -> bool) -> bool {
+    age < LATCH_MIN || (age < LATCH_MAX && crushing())
+}
+
+/// A vetoed squad's retreat.
+struct Latch {
+    since: i32,
+    /// The enemies of the vetoed fight.
+    enemies: Vec<i32>,
+    /// Where the squad was when vetoed.
+    at: Vec3,
 }
 
 /// Only the next stretch of an attack matters, including enemy firing reach.
@@ -117,9 +172,9 @@ pub struct FightSim {
     /// The model failed to load or start: stay on the flat rule.
     failed: bool,
     specs: HashMap<i32, Arc<UnitSpec>>,
-    /// The latest answer per squad.
-    answers: BTreeMap<SquadId, FightAnswer>,
     commits: BTreeMap<SquadId, FightAnswer>,
+    /// Squads held in retreat by a veto.
+    latches: BTreeMap<SquadId, Latch>,
     windows: Vec<Window>,
     next_vid: u64,
     /// Decisions asked of the predictor and how they were made.
@@ -130,6 +185,13 @@ pub struct FightSim {
     pub flat_retreats: u64,
     pub disagreements: u64,
     pub agreements: u64,
+    /// Checks a latch answered, and latches ended.
+    pub latch_holds: u64,
+    pub latch_releases: u64,
+    /// Fights judged on the game thread, their total and worst microseconds.
+    judged: u64,
+    judge_us: u64,
+    judge_max_us: u64,
     last_report: i32,
     reported: (u64, u64, u64),
     /// The model for synchronous local judgements (see `local`), loaded
@@ -144,7 +206,6 @@ struct SnapshotNotes {
     enemies: Vec<(i32, f32)>,
     metal: [f32; 2],
     armed_metal: [f32; 2],
-    stamp: u64,
     /// Share of B's metal in aircraft and in statics.
     air_share: f32,
     static_share: f32,
@@ -188,6 +249,10 @@ impl Ai {
                     let mode =
                         if self.fightsim_drives() { "crushing-defeat veto" } else { "ordinary squad checks in shadow" };
                     self.log(&format!("fightsim: on, {mode}; the predictor thread started"));
+                    // The veto judges on this thread: load its model now, not at first contact.
+                    if let Err(e) = veto_model() {
+                        self.log(&format!("fightsim: the veto's model failed ({e}); squads keep the flat rule"));
+                    }
                 }
                 Err(e) => {
                     self.war.fightsim.failed = true;
@@ -199,13 +264,13 @@ impl Ai {
         let fs = &mut self.war.fightsim;
         let Some(w) = fs.worker.as_mut() else { return };
         for a in w.drain() {
-            let answers = if a.commit { &mut fs.commits } else { &mut fs.answers };
-            if answers.get(&a.key).is_none_or(|old| a.frame >= old.frame) {
-                answers.insert(a.key, a);
+            if a.commit && fs.commits.get(&a.key).is_none_or(|old| a.frame >= old.frame) {
+                fs.commits.insert(a.key, a);
             }
         }
-        fs.answers.retain(|_, a| frame - a.frame <= 10 * STALE);
         fs.commits.retain(|_, a| frame - a.frame <= STALE);
+        // Squads gone: a living squad's latch ends at its next check, logged.
+        fs.latches.retain(|_, l| frame - l.since <= 2 * LATCH_MAX);
         self.fightsim_close_windows(frame);
         if frame - self.war.fightsim.last_report >= REPORT_PERIOD {
             self.fightsim_report(frame);
@@ -246,9 +311,10 @@ impl Ai {
         }
     }
 
-    /// The cost line: queries per minute, mean and worst microseconds per
-    /// query on the worker, refusals, fallbacks and disagreements with the
-    /// flat rule, since the last line.
+    /// The cost line: the worker's queries per minute (fire squads) with
+    /// their mean and worst microseconds, the veto's judgements on this
+    /// thread with theirs, refusals, fallbacks, disagreements with the flat
+    /// rule and latches.
     fn fightsim_report(&mut self, frame: i32) {
         let drives = self.fightsim_drives();
         let fs = &mut self.war.fightsim;
@@ -263,24 +329,28 @@ impl Ai {
             return;
         }
         let mean_us = if da > 0 { dm as f64 / da as f64 } else { 0.0 };
+        let judge_mean_us = if fs.judged > 0 { fs.judge_us as f64 / fs.judged as f64 } else { 0.0 };
         let data = json!({
             "event": "cost", "t": frame / 30, "mode": if drives { "veto" } else { "shadow" },
             "queries_per_min": dq as f64 / minutes, "mean_us": mean_us, "max_us": s.max_micros,
             "queue_full": s.full, "verdicts": fs.verdicts, "no_contact": fs.no_contact, "fallbacks": fs.fallbacks,
             "sim_retreats": fs.sim_retreats, "flat_retreats": fs.flat_retreats, "disagreements": fs.disagreements,
-            "agreements": fs.agreements,
+            "agreements": fs.agreements, "judged": fs.judged, "judge_mean_us": judge_mean_us,
+            "judge_max_us": fs.judge_max_us, "latch_holds": fs.latch_holds, "latch_releases": fs.latch_releases,
         });
         let line = format!(
-            "fightsim: {:.0} queries/min, {mean_us:.0} us mean ({} max); {} verdicts, {} without contact, {} fallbacks, {} queue-full; retreats sim {} flat {}, {} disagreements",
-            dq as f64 / minutes,
-            s.max_micros,
+            "fightsim: {} fights judged, {judge_mean_us:.0} us mean ({} max); {} verdicts, {} without contact, {} fallbacks; retreats sim {} flat {}, {} disagreements; latches held {} checks, {} released; worker {:.0} queries/min, {mean_us:.0} us mean",
+            fs.judged,
+            fs.judge_max_us,
             fs.verdicts,
             fs.no_contact,
             fs.fallbacks,
-            s.full,
             fs.sim_retreats,
             fs.flat_retreats,
-            fs.disagreements
+            fs.disagreements,
+            fs.latch_holds,
+            fs.latch_releases,
+            dq as f64 / minutes,
         );
         self.log(&line);
         self.op_emit("fightsim", data);
@@ -312,7 +382,10 @@ impl Ai {
                 name,
                 range,
                 reload: wd.reload(),
-                salvo: wd.salvo_size(),
+                // Shots per reload as the hit tables count them: projectiles per
+                // shot times the burst (a Scalpel fires two missiles a volley; the
+                // engine's salvo size alone, its burst, is one).
+                salvo: wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1),
                 damage,
                 weapon_type: wd.weapon_type(),
             });
@@ -335,9 +408,16 @@ impl Ai {
 
     /// The fight a squad at `pos` would be in now: the squad and our other
     /// fighters beside it against every identified enemy within reach as
-    /// last seen. `None` without an armed enemy in reach (nothing to
-    /// predict).
-    fn fight_snapshot(&mut self, sid: SquadId, pos: Vec3, target: Vec3) -> Option<(FightSnapshot, SnapshotNotes)> {
+    /// last seen, or (`only`) the squad alone against those enemies wherever
+    /// they were last seen within [`LATCH_MEMORY`]. `None` without an armed
+    /// enemy (nothing to predict).
+    fn fight_snapshot(
+        &mut self,
+        sid: SquadId,
+        pos: Vec3,
+        target: Vec3,
+        only: Option<&[i32]>,
+    ) -> Option<(FightSnapshot, SnapshotNotes)> {
         let frame = self.frame;
         let mut ours: Vec<(i32, UnitDef, f32, Vec3)> = Vec::new();
         let squad = self.squads.get(sid)?;
@@ -346,8 +426,12 @@ impl Ai {
         }
         let members: Vec<i32> = squad.fighters.iter().copied().chain(squad.leader).collect();
         for (id, f) in &self.fighters {
+            // A latched fight (`only`) is the squad's own: what stands by
+            // it at the haven does not walk back in with it.
             if !members.contains(id)
-                && (distance(f.get_pos(), pos) > FRIEND_REACH || self.retreat_handler.is_retreating(*id))
+                && (only.is_some()
+                    || distance(f.get_pos(), pos) > FRIEND_REACH
+                    || self.retreat_handler.is_retreating(*id))
             {
                 continue;
             }
@@ -375,11 +459,14 @@ impl Ai {
         }
         let mut theirs: Vec<(i32, UnitDef, f32, Vec3, bool, bool)> = Vec::new();
         for (&eid, e) in &self.war.targets {
-            if e.is_dead
-                || !e.identified
-                || frame - e.last_seen > SEEN_WITHIN
-                || !on_approach(e.position, pos, target, e.def_max_weapon_range().max(350.0) + 200.0)
-            {
+            let wanted = match only {
+                Some(ids) => ids.contains(&eid) && frame - e.last_seen <= LATCH_MEMORY,
+                None => {
+                    frame - e.last_seen <= SEEN_WITHIN
+                        && on_approach(e.position, pos, target, e.def_max_weapon_range().max(350.0) + 200.0)
+                }
+            };
+            if e.is_dead || !e.identified || !wanted {
                 continue;
             }
             let Some(def) = e.ud else { continue };
@@ -391,22 +478,18 @@ impl Ai {
         if ours.len() + theirs.len() > MAX_UNITS {
             return None;
         }
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        ((target.x / 256.0) as i32, (target.z / 256.0) as i32).hash(&mut hash);
         let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         let mut notes = SnapshotNotes {
             members: Vec::new(),
             enemies: Vec::new(),
             metal: [0.0; 2],
             armed_metal: [0.0; 2],
-            stamp: 0,
             air_share: 0.0,
             static_share: 0.0,
             n: [0; 2],
         };
         for (id, def, hp, p) in ours {
             let spec = self.fight_spec(def);
-            hash_unit(&mut hash, 0, id, def.id(), hp, spec.health, p);
             if !spec.weapons.is_empty() {
                 notes.armed_metal[0] += spec.cost;
             }
@@ -418,7 +501,6 @@ impl Ai {
         let (mut air, mut statics) = (0.0, 0.0);
         for (eid, def, hp, p, flies, is_static) in theirs {
             let spec = self.fight_spec(def);
-            hash_unit(&mut hash, 1, eid, def.id(), hp, spec.health, p);
             if !spec.weapons.is_empty() {
                 notes.armed_metal[1] += spec.cost;
             }
@@ -437,45 +519,83 @@ impl Ai {
             notes.air_share = air / notes.metal[1];
             notes.static_share = statics / notes.metal[1];
         }
-        notes.stamp = hash.finish();
         (snap.armed(0) > 0 && snap.armed(1) > 0).then_some((snap, notes))
+    }
+
+    /// Judge `snap` on this thread, counting the cost.
+    fn fightsim_judge(&mut self, model: &Model, snap: &FightSnapshot) -> ([f32; 2], bool) {
+        let t0 = Instant::now();
+        let out = judge(model, snap);
+        let us = t0.elapsed().as_micros() as u64;
+        let fs = &mut self.war.fightsim;
+        fs.judged += 1;
+        fs.judge_us += us;
+        fs.judge_max_us = fs.judge_max_us.max(us);
+        out
     }
 
     /// Add a veto for crushing defeats to the complete ordinary threat rule.
     /// An uncertain or merely losing fight never adds a refusal. `flat` must
     /// already include the caller's territorial exceptions, so home ground
-    /// cannot exempt an otherwise suicidal engagement from the veto.
+    /// cannot exempt an otherwise suicidal engagement from the veto. A veto
+    /// latches (see the module notes): the squad is told to retreat at every
+    /// check until the latch ends.
     pub fn fight_verdict(&mut self, sid: SquadId, pos: Vec3, target: Vec3, courage: f32, flat: bool) -> bool {
-        if self.war.fightsim.worker.is_none() {
+        if !self.fightsim_runs() {
             return flat;
         }
         let drives = self.fightsim_drives();
-        let mech = !self.dev_off(MECH);
         let frame = self.frame;
         self.war.fightsim.verdicts += 1;
         if flat {
             self.war.fightsim.flat_retreats += 1;
         }
-        let Some((snapshot, notes)) = self.fight_snapshot(sid, pos, target) else {
+        let Ok(model) = veto_model() else {
+            self.war.fightsim.fallbacks += 1;
+            return flat;
+        };
+        if let Some((since, enemies, at)) =
+            self.war.fightsim.latches.get(&sid).map(|l| (l.since, l.enemies.clone(), l.at))
+        {
+            let age = frame - since;
+            let mut judged = None;
+            let hold = latch_holds(age, || {
+                let r = self.fight_snapshot(sid, pos, target, Some(&enemies)).map(|(mut snap, _)| {
+                    // As if back where the veto stopped us: the retreat's
+                    // distance alone must not make the fight look winnable.
+                    let (dx, dz) = (at.x - pos.x, at.z - pos.z);
+                    for u in snap.units.iter_mut().filter(|u| u.side == 0) {
+                        u.x += dx;
+                        u.z += dz;
+                    }
+                    self.fightsim_judge(model, &snap)
+                });
+                judged = Some(r);
+                r.is_some_and(|(_, crushing)| crushing)
+            });
+            if hold && drives {
+                self.war.fightsim.latch_holds += 1;
+                return true;
+            }
+            self.war.fightsim.latches.remove(&sid);
+            self.war.fightsim.latch_releases += 1;
+            let loss = judged.flatten().map(|(loss, _)| loss);
+            self.op_emit(
+                "fightsim",
+                json!({
+                    "event": "release", "t": frame / 30, "squad": sid, "held_s": age / 30,
+                    "why": if age >= LATCH_MAX { "time" } else if loss.is_none() { "gone" } else { "not crushing" },
+                    "killed": loss,
+                }),
+            );
+        }
+        let Some((snapshot, notes)) = self.fight_snapshot(sid, pos, target, None) else {
             self.war.fightsim.no_contact += 1;
             return flat;
         };
         let armed = (snapshot.armed(0), snapshot.armed(1));
+        let (loss, retreat) = self.fightsim_judge(model, &snapshot);
         let fs = &mut self.war.fightsim;
-        if let Some(w) = fs.worker.as_mut() {
-            w.request(FightRequest { key: sid, frame, snapshot, mech, commit: false, stamp: notes.stamp });
-        }
-        let Some(a) = fs.answers.get(&sid).filter(|a| ordinary_answer_usable(a, frame, notes.stamp)) else {
-            fs.fallbacks += 1;
-            return flat;
-        };
-        let o = a.outcome;
-        let (loss_a, loss_b) = if mech {
-            o.mech.map_or((o.killed_a, o.killed_b), |m| (m.killed_a, m.killed_b))
-        } else {
-            (o.killed_a, o.killed_b)
-        };
-        let retreat = crushing_defeat(loss_a, loss_b, notes.armed_metal);
         if retreat {
             fs.sim_retreats += 1;
         }
@@ -488,34 +608,29 @@ impl Ai {
         if !agree || fs.agreements.is_multiple_of(AGREE_SAMPLE) {
             let vid = fs.next_vid;
             fs.next_vid += 1;
-            let age = frame - a.frame;
             let enemies = notes.enemies.iter().map(|&(id, metal)| (id, metal, false)).collect();
             fs.windows.push(Window {
                 vid,
                 squad: sid,
                 frame,
-                members: notes.members,
+                members: notes.members.clone(),
                 metal: notes.metal[0],
                 enemies,
                 agree,
             });
-            let mut rec = json!({
+            let rec = json!({
                 "event": "verdict", "vid": vid, "t": frame / 30, "squad": sid, "agree": agree,
-                "mode": if drives { "veto" } else { "shadow" },
-                "age": age, "n": notes.n, "armed": [armed.0, armed.1], "metal": notes.metal,
+                "mode": if drives { "veto" } else { "shadow" }, "horizon_s": VETO_HORIZON / 30,
+                "n": notes.n, "armed": [armed.0, armed.1], "metal": notes.metal,
                 "b_air_share": notes.air_share, "b_static_share": notes.static_share,
-                "p_a_wins": o.p_a_wins, "killed": [o.killed_a, o.killed_b], "mean": [o.mean_a, o.mean_b],
-                "withdraw": [o.withdraw_a, o.withdraw_b], "sim": retreat, "flat": flat, "courage": courage,
+                "killed": loss, "sim": retreat, "flat": flat, "courage": courage,
                 "armed_metal": notes.armed_metal, "veto": drives && retreat && !flat,
             });
-            if let Some(m) = o.mech {
-                rec["mech_p_a_wins"] = json!(m.p_a_wins);
-                rec["mech_killed"] = json!([m.killed_a, m.killed_b]);
-                rec["mech_mean"] = json!([m.mean_a, m.mean_b]);
-                rec["mech_withdraw"] = json!([m.withdraw_a, m.withdraw_b]);
-                rec["mech_sim"] = json!(crushing_defeat(m.killed_a, m.killed_b, notes.armed_metal));
-            }
             self.op_emit("fightsim", rec);
+        }
+        if drives && retreat {
+            let enemies = notes.enemies.iter().map(|e| e.0).collect();
+            self.war.fightsim.latches.insert(sid, Latch { since: frame, enemies, at: pos });
         }
         apply_veto(flat, drives, retreat)
     }
@@ -664,31 +779,6 @@ mod veto_tests {
     }
 
     #[test]
-    fn stale_changed_and_commit_answers_cannot_veto() {
-        let mut a =
-            FightAnswer { key: 1, frame: 100, commit: false, stamp: 42, outcome: Default::default(), micros: 0 };
-        assert!(ordinary_answer_usable(&a, 130, 42));
-        assert!(!ordinary_answer_usable(&a, 130, 43));
-        assert!(!ordinary_answer_usable(&a, 191, 42));
-        assert!(!ordinary_answer_usable(&a, 99, 42));
-        a.commit = true;
-        assert!(!ordinary_answer_usable(&a, 130, 42));
-    }
-
-    #[test]
-    fn casualties_reinforcements_damage_and_movement_change_the_stamp() {
-        let stamp = |id, hp, x| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            hash_unit(&mut h, 0, id, 1, hp, 100.0, Vec3::xz(x, 0.0));
-            h.finish()
-        };
-        let original = stamp(1, 100.0, 0.0);
-        assert_ne!(original, stamp(2, 100.0, 0.0));
-        assert_ne!(original, stamp(1, 70.0, 0.0));
-        assert_ne!(original, stamp(1, 100.0, 300.0));
-    }
-
-    #[test]
     fn approach_is_local_and_directional() {
         let o = Vec3::xz(0.0, 0.0);
         let t = Vec3::xz(5000.0, 0.0);
@@ -741,20 +831,40 @@ mod veto_tests {
         FightSnapshot { flags: Default::default(), units }
     }
 
+    /// The veto's purpose: an outranged, outrun squad walking into a kiting
+    /// group it cannot touch. Slow deaths (one Knight to two Scalpels takes
+    /// ~25 s) and even fights stay allowed, as does a crushing superiority.
     #[test]
-    fn scalpel_pack_prediction() {
+    fn hopeless_knights_are_vetoed_against_kiting_scalpels() {
         let model = Model::load().unwrap();
-        // A feeding case, an unfavorable but useful fight, and reinforcements
-        // turning the matchup around. Neither of the last two should veto.
-        for (ours, theirs, veto) in [(3, 20, true), (3, 10, false), (10, 3, false)] {
-            let snapshot = encounter(ours, theirs);
-            let out = model.predict_with(&snapshot, true).mech.unwrap();
-            let metal = [ours as f32 * 350.0, theirs as f32 * 220.0];
-            assert_eq!(
-                crushing_defeat(out.killed_a, out.killed_b, metal),
-                veto,
-                "{ours} Knights vs {theirs} Scalpels: {out:?}"
-            );
+        for (ours, theirs, veto) in
+            [(1, 5, true), (1, 3, true), (3, 20, true), (1, 2, false), (3, 3, false), (10, 3, false)]
+        {
+            let (loss, crushing) = judge(&model, &encounter(ours, theirs));
+            assert_eq!(crushing, veto, "{ours} Knights vs {theirs} Scalpels: killed {loss:?}");
+            if veto {
+                assert!(loss[1] < 0.01, "{ours} Knights vs {theirs} Scalpels touch them: {loss:?}");
+            }
         }
+    }
+
+    #[test]
+    fn a_latch_holds_its_minimum_then_while_crushing_never_past_its_maximum() {
+        let never = || -> bool { panic!("judged inside the minimum or past the maximum") };
+        assert!(latch_holds(0, never));
+        assert!(latch_holds(LATCH_MIN - 1, never));
+        assert!(latch_holds(LATCH_MIN, || true));
+        assert!(!latch_holds(LATCH_MIN, || false));
+        assert!(latch_holds(LATCH_MAX - 1, || true));
+        assert!(!latch_holds(LATCH_MAX, never));
+    }
+
+    #[test]
+    fn losses_are_armed_metal_weighted_death_chances() {
+        let snap = encounter(2, 1);
+        let fate = |p| UnitFate { dead: false, death_frame: None, hp_left: 0.0, p_dead: 0.5, p_raw: p };
+        let (loss, metal) = kiting_losses(&snap, &[fate(1.0), fate(0.0), fate(0.5)]);
+        assert_eq!(metal, [700.0, 220.0]);
+        assert_eq!(loss, [0.5, 0.5]);
     }
 }

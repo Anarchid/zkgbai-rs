@@ -25,6 +25,7 @@
 pub mod live;
 pub mod local;
 pub mod mech;
+pub mod scenario;
 pub mod worker;
 
 use std::collections::HashMap;

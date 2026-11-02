@@ -1,0 +1,15 @@
+# unit specs for the tactical AI parity cases, as mech_parity_units.tsv
+def	cost	health	speed	mobile	air	builder	com	radius	weapons
+cloakassault	350	2500	1.7	1	0	0	0	17.5	cloakassault_lightning:LightningCannon:340:2.2:1:230
+cloakcon	120	600	1.8	1	0	1	0	14	
+cloakraid	65	230	3.85	1	0	0	0	9	cloakraid_emg:Cannon:185:0.3:3:10.5
+cloakriot	210	820	1.75	1	0	0	0	13	cloakriot_warrior_weapon:Cannon:270:0.5:3:45
+cloakskirm	90	400	2.8	1	0	0	0	13	cloakskirm_bot_rocket:MissileLauncher:455:3.5:1:180
+hoverskirm	220	660	2.2	1	0	0	0	19	hoverskirm_missile:MissileLauncher:440:10:2:320
+shieldassault	175	960	2	1	0	0	0	12	shieldassault_thud_weapon:Cannon:280:3.9:1:180
+shieldraid	75	350	3.1	1	0	0	0	12	shieldraid_laser:LaserCannon:232:0.1:1:8.5
+shieldriot	250	1200	2	1	0	0	0	12	shieldriot_blast:Cannon:300:0.93:1:30
+shieldskirm	125	520	1.8	1	0	0	0	14	shieldskirm_storm_rocket:MissileLauncher:530:7:1:330
+spiderscout	25	40	4.8	1	0	0	0	10	spiderscout_laser:BeamLaser:150:0.23:1:12
+turretlaser	90	785	0	0	0	0	0	15	turretlaser_laser:BeamLaser:460:0.1:1:7.5
+vehscout	40	120	5.09	1	0	0	0	20	vehscout_disruptor:BeamLaser:150:1:1:32

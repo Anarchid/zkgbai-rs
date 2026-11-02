@@ -79,7 +79,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 18] = [
     "pairs",
     "currency",
     "permanence",
@@ -95,7 +95,6 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
     "coalesceshadow",
     "stayshadow",
     "carpetspare",
-    "stayveto",
     "chatcommands",
     "densgate",
     "fight2d",
@@ -632,6 +631,8 @@ impl Ai {
                     | "radarfort"
                     | "shadowprobe"
                     | "heavies"
+                    | "veto-scalpels"
+                    | "veto-scalpels10"
                     | "heavypush"
                     | "paladin"
                     | "farm"
