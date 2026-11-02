@@ -11,7 +11,7 @@
 //! near did not delay it.
 //!
 //! The raid expected is [`RAID_COUNT`] of the raider the enemy has shown
-//! most, else of the one its likeliest factory tier makes. The escort is
+//! the most metal of, else of the one its likeliest factory tier makes. The escort is
 //! the cheapest set of the recruit-class units our factories make that the
 //! predictor gives P(win) of at least [`WIN`] at an expected loss of at most
 //! [`LOSS`] of its metal, picked one at a time by the margin each adds per
@@ -131,16 +131,18 @@ impl Ai {
     /// The raid an escort is sized against: the raider the enemy has shown
     /// most, else the one its likeliest factory tier makes.
     fn escort_raid(&self) -> Option<(String, usize)> {
-        let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        // By metal seen, not count: a few Darts scouting would otherwise
+        // outvote the Scorchers that raid (smoke: the size swung between).
+        let mut seen: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
         for e in self.war.targets.values() {
             if e.is_dead || !e.identified || !e.is_raider || e.is_static {
                 continue;
             }
             if let Some(d) = e.ud {
-                *seen.entry(self.defs.name(d).to_owned()).or_default() += 1;
+                *seen.entry(self.defs.name(d).to_owned()).or_default() += d.cost(self.metal);
             }
         }
-        if let Some((name, _)) = seen.into_iter().max_by_key(|(_, n)| *n) {
+        if let Some((name, _)) = seen.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
             return Some((name, RAID_COUNT));
         }
         let belief = self.conquest_belief();
