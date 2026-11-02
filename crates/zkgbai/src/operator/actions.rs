@@ -129,6 +129,12 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("firesquads", "Army", "skirmisher-heavy assault squads keep formation and range, evade or commit together"),
     ("fightsim", "Army", "veto crushing defeats for ordinary ground squads (default on)"),
     ("fightmech", "Army", "use the mechanics model for the crushing-defeat veto"),
+    (
+        "fightfocus",
+        "Army",
+        "the fight predictor sends every shot to the target in range with the least health left (default on)",
+    ),
+    ("fight2d", "Army", "the fight predictor fights in the plane: positions kept, no overlaps, splash"),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),
