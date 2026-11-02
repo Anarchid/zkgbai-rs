@@ -1123,7 +1123,19 @@ impl Ai {
         } else if stuck && frame > 0 {
             self.conquest_end("turret sites lost", false);
         } else if since > FORTIFY_TIMEOUT {
-            self.conquest_end("fortify timed out", false);
+            // Some of its own turrets standing, it is held in part: kept
+            // among the held (attacks still add turrets there).
+            let some = self
+                .eco
+                .conquest
+                .op
+                .as_ref()
+                .is_some_and(|op| op.turrets[..op.sites.min(op.turrets.len())].iter().any(|t| t.built));
+            if some {
+                self.conquest_end("held in part", true);
+            } else {
+                self.conquest_end("fortify timed out", false);
+            }
         }
     }
 
