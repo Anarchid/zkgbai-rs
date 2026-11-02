@@ -47,7 +47,9 @@
 //! Lotus by our home mex nearest the enemy (the opening raid comes for the
 //! base mexes while it is away), unless one stands there (`prepare`); on
 //! arrival it puts one by the objective's spots, and the objective is not
-//! done until it stands. The price clock runs early: 2x until 2:00, 1x from
+//! done until it stands. Turrets stand on the enemy's side of what they
+//! hold: the objective's guard `GUARD_FORWARD` toward the enemy from its
+//! spots' middle, the turret sites `SITE_FORWARD` toward them. The price clock runs early: 2x until 2:00, 1x from
 //! 4:00 (it was 4x to 4:00, 1x at 7:00: the first loss at an objective came
 //! a median 2:45 after setting out, the first turret 6:00). An attack on
 //! our units within `ATTACK_RADIUS` of the objective, or of one held,
@@ -137,6 +139,12 @@ const GUARD_BONUS: f32 = 4000.0;
 const GUARD_TIMEOUT: i32 = 30 * 45;
 /// The home guard stands this far out from its mex, toward the enemy.
 const GUARD_OUT: f32 = 120.0;
+/// Turrets stand on the enemy's side of what they hold ("this side toward
+/// enemy", user 2026-11-03): the objective's guard this far from its spots'
+/// middle toward the enemy (inside a Lotus's 460 of them), the turret sites
+/// this far toward the enemy from where the search put them.
+const GUARD_FORWARD: f32 = 150.0;
+const SITE_FORWARD: f32 = 100.0;
 /// Attacks within this of an objective's center add turrets there (elmos),
 /// at most one per `ATTACK_GAP` frames and `MAX_ADDED` per objective.
 const ATTACK_RADIUS: f32 = 900.0;
@@ -631,7 +639,9 @@ impl Ai {
             self.op_emit("conquest", json!({"event": "none", "t": frame / 30}));
             return;
         };
-        let sites: Vec<Vec3> = self.eco.conquest.objectives[idx].sites.iter().map(|&s| self.conquest_v3(s)).collect();
+        let sites: Vec<Vec3> = (self.eco.conquest.objectives[idx].sites.iter())
+            .map(|&s| self.conquest_forward(self.conquest_v3(s), SITE_FORWARD))
+            .collect();
         let n_sites = sites.len();
         self.eco.conquest.op = Some(Op {
             idx,
@@ -887,7 +897,19 @@ impl Ai {
             let n = spots.len() as f32;
             Pos::new(spots.iter().map(|p| p.x).sum::<f32>() / n, spots.iter().map(|p| p.z).sum::<f32>() / n)
         };
-        Some(self.conquest_v3(p))
+        Some(self.conquest_forward(self.conquest_v3(p), GUARD_FORWARD))
+    }
+
+    /// `p` moved `by` elmos toward the enemy (the middle of the metal in
+    /// their start box, else their presumed center).
+    fn conquest_forward(&self, p: Vec3, by: f32) -> Vec3 {
+        let Some(enemy) = self.graph.get_enemy_base().or_else(|| self.strategy_bases().map(|b| b.1)) else { return p };
+        let d = distance(p, enemy);
+        if d < 1.0 {
+            return p;
+        }
+        let k = by.min(d) / d;
+        self.conquest_v3(Pos::new(p.x + (enemy.x - p.x) * k, p.z + (enemy.z - p.z) * k))
     }
 
     /// One turret: whether one of `def` stands within `BUILT_RADIUS` of its
