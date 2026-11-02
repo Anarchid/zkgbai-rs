@@ -1,4 +1,4 @@
-//! `stayveto` (off by default, `enable=stayveto`): units about to run home
+//! `stayveto` (on in the wip line, `disable=stayveto`): units about to run home
 //! for repairs stay in their fight when the fight predictor says staying
 //! wins far more than it risks.
 //!

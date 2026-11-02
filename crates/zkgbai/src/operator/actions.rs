@@ -198,7 +198,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "stayveto",
         "Army",
-        "a unit stays in its fight instead of retreating when the predictor says staying wins far more than it risks (default off)",
+        "a unit stays in its fight instead of retreating when the predictor says staying wins far more than it risks (default on in the wip line)",
     ),
     ("stayshadow", "Army", "with stayveto off, journal the retreats it would stop"),
     ("firesquads", "Army", "skirmisher-heavy assault squads keep formation and range, evade or commit together"),
