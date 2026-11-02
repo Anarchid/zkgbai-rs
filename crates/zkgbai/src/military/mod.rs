@@ -132,6 +132,9 @@ pub struct MilitaryManager {
     pub enemy_light_porc_value: f32,
     pub enemy_heavy_porc_value: f32,
     pub max_enemy_air_value: f32,
+    /// Armed enemy aircraft now (not air constructors, transports or
+    /// scouts; mobiles drop out a minute after last seen), metal.
+    pub enemy_air_armed: f32,
     pub faced: Faced,
     pub slasher_spam: i32,
     pub enemy_heavy_value: f32,
@@ -221,6 +224,7 @@ impl MilitaryManager {
             enemy_light_porc_value: 0.0,
             enemy_heavy_porc_value: 0.0,
             max_enemy_air_value: 0.0,
+            enemy_air_armed: 0.0,
             faced: Faced::default(),
             slasher_spam: 0,
             enemy_heavy_value: 0.0,
@@ -1726,6 +1730,7 @@ impl Ai {
         war.enemy_has_anti_nuke = false;
         war.enemy_has_nuke = false;
         let mut enemy_air_value = 0.0f32;
+        let mut enemy_air_armed = 0.0f32;
         let mut faced_air = 0.0f32;
         war.faced = Faced { max_air: war.faced.max_air, ..Faced::default() };
         war.enemy_heavy_value = 0.0;
@@ -1781,13 +1786,16 @@ impl Ai {
                     war.enemy_heavy_value += cost;
                 }
                 _ if t.can_fly() && !t.is_nano_spam => {
+                    let armed = t.can_attack() && !t.is_worker;
                     if matches!(name, "dronelight" | "droneheavyslow" | "dronecarry") {
                         if count_commander_drones || name == "dronecarry" {
                             enemy_air_value += 25.0;
+                            enemy_air_armed += if armed { 25.0 } else { 0.0 };
                             faced_air += if mine { 25.0 } else { 0.0 };
                         }
                     } else {
                         enemy_air_value += cost;
+                        enemy_air_armed += if armed { cost } else { 0.0 };
                         faced_air += if mine { cost } else { 0.0 };
                     }
                 }
@@ -1844,6 +1852,7 @@ impl Ai {
         war.outranging_share = if mobile_value > 0.0 { outranging_value / mobile_value } else { 0.0 };
 
         war.max_enemy_air_value = enemy_air_value.max(war.max_enemy_air_value);
+        war.enemy_air_armed = enemy_air_armed;
         war.faced.max_air = faced_air.max(war.faced.max_air);
 
         war.target_markers.retain(|tm| frame - tm.frame <= 150);

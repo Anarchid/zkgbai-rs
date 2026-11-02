@@ -34,6 +34,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     ("colonize", "Economy", "colonists sent to far free metal"),
+    ("artemis", "Economy", "an Artemis against over 4000 metal of enemy air when one reaches our whole front"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
