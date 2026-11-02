@@ -79,7 +79,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "cpp_map"
 version = "0.2.0"
-source = "git+https://github.com/Anarchid/zkta-rust?rev=828d873#828d87341c2c690b9eee33645257d75f035f57ab"
+source = "git+https://github.com/Anarchid/zkta-rust?rev=ed881bd#ed881bde99d3343940f64965a6caf0c494283ede"
 dependencies = [
  "rand",
  "smallvec",
@@ -826,7 +826,7 @@ dependencies = [
 [[package]]
 name = "zkta-rs"
 version = "0.1.0"
-source = "git+https://github.com/Anarchid/zkta-rust?rev=828d873#828d87341c2c690b9eee33645257d75f035f57ab"
+source = "git+https://github.com/Anarchid/zkta-rust?rev=ed881bd#ed881bde99d3343940f64965a6caf0c494283ede"
 dependencies = [
  "boostvoronoi",
  "geo",
