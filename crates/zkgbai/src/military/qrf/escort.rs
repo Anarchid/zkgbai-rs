@@ -94,6 +94,15 @@ pub struct Escort {
     pub pending: Vec<(i32, String)>,
 }
 
+/// An escort as sized: the units by name, the predicted P(win) and loss
+/// share, and the raid (unit name, count) it was sized against.
+struct EscortSize {
+    want: Vec<String>,
+    p_win: f32,
+    loss: f32,
+    raid: (String, usize),
+}
+
 fn model() -> Option<&'static Model> {
     static MODEL: OnceLock<Option<Model>> = OnceLock::new();
     MODEL.get_or_init(|| Model::load().ok()).as_ref()
@@ -154,8 +163,8 @@ impl Ai {
         out
     }
 
-    /// Size an escort now: (unit names, P(win), expected loss share, raid).
-    fn escort_size(&mut self) -> Option<(Vec<String>, f32, f32, (String, usize))> {
+    /// Size an escort now.
+    fn escort_size(&mut self) -> Option<EscortSize> {
         let model = model()?;
         let raid = self.escort_raid()?;
         let raid_def = self.defs.get(&raid.0)?;
@@ -173,8 +182,8 @@ impl Ai {
         if specs.is_empty() {
             return None;
         }
-        let (pick, p, loss) = size_escort(model, &raid_specs, &specs, self.sim_flags());
-        Some((pick.into_iter().map(|k| kept[k].clone()).collect(), p, loss, raid))
+        let (pick, p_win, loss) = size_escort(model, &raid_specs, &specs, self.sim_flags());
+        Some(EscortSize { want: pick.into_iter().map(|k| kept[k].clone()).collect(), p_win, loss, raid })
     }
 
     /// The commander sets out for an objective centred at `center`: open
@@ -187,7 +196,7 @@ impl Ai {
             self.escort_close("a new objective");
         }
         let frame = self.frame;
-        let Some((want, p_win, loss, raid)) = self.escort_size() else {
+        let Some(EscortSize { want, p_win, loss, raid }) = self.escort_size() else {
             self.log("escort: no escort (nothing to size it with)");
             return;
         };
@@ -248,7 +257,7 @@ impl Ai {
             return;
         }
         let team = e.team;
-        let Some((sized_for, p_win, loss, raid)) = self.escort_size() else { return };
+        let Some(EscortSize { want: sized_for, p_win, loss, raid }) = self.escort_size() else { return };
         let mut have: Vec<String> =
             self.escort_members(team).iter().map(|m| self.defs.name(m.def).to_owned()).collect();
         let pending: Vec<String> =
