@@ -223,7 +223,9 @@ pub struct Op {
     /// (with when each was asked for).
     pub home_guard: Option<(Turret, i32)>,
     pub guard: Option<(Turret, i32)>,
-    /// Turrets added for attacks, and when the last attack counted.
+    /// Turrets added for attacks (after the objective's own, the first
+    /// `sites`), and when the last attack counted.
+    pub sites: usize,
     pub added: u32,
     pub last_attack: i32,
 }
@@ -629,6 +631,7 @@ impl Ai {
             return;
         };
         let sites: Vec<Vec3> = self.eco.conquest.objectives[idx].sites.iter().map(|&s| self.conquest_v3(s)).collect();
+        let n_sites = sites.len();
         self.eco.conquest.op = Some(Op {
             idx,
             crew,
@@ -640,6 +643,7 @@ impl Ai {
             danger: 0,
             home_guard: None,
             guard: None,
+            sites: n_sites,
             added: 0,
             last_attack: 0,
         });
@@ -810,17 +814,24 @@ impl Ai {
             }
         };
         let fresh = slot.is_none();
-        let t = self.conquest_turret_order(t, def);
+        // A Lotus whose reach overlaps another's is refused (pooled into a
+        // stronger turret, see `lotus`): that ground has its Lotus.
+        let covered = !t.built && t.task.is_none() && self.eco_lotus_crowded(t.site);
+        let t = if covered { Turret { built: true, ..t } } else { self.conquest_turret_order(t, def) };
         let done = t.built || frame - asked > GUARD_TIMEOUT || (t.task.is_none() && t.retries >= MAX_RETRIES);
         if fresh
             || (done && !slot.is_some_and(|(o, _)| o.built == t.built && o.retries == t.retries && o.task == t.task))
         {
-            let what = if t.built {
+            let what = if covered {
+                "covered by a Lotus near"
+            } else if t.built {
                 "up"
             } else if done {
                 "given up"
-            } else {
+            } else if t.task.is_some() {
                 "ordered"
+            } else {
+                "asked"
             };
             self.log(&format!(
                 "conquest: {} guard ({GUARD_TURRET}) at ({:.0},{:.0}): {what}",
@@ -1098,10 +1109,8 @@ impl Ai {
             }
         }
         let (all_built, stuck) = self.eco.conquest.op.as_ref().map_or((false, true), |op| {
-            (
-                op.turrets.iter().all(|t| t.built),
-                op.turrets.iter().all(|t| t.built || (t.task.is_none() && t.retries >= MAX_RETRIES)),
-            )
+            let own = &op.turrets[..op.sites.min(op.turrets.len())];
+            (own.iter().all(|t| t.built), own.iter().all(|t| t.built || (t.task.is_none() && t.retries >= MAX_RETRIES)))
         });
         let since = self.eco.conquest.op.as_ref().map_or(0, |op| frame - op.fortify_from);
         let guarded = self.eco.conquest.op.as_ref().is_none_or(|op| {
@@ -1132,7 +1141,11 @@ impl Ai {
         self.eco.conquest.done = !success || self.dev_off("conquestseq");
         let mut dropped = 0;
         let guards = [op.home_guard, op.guard].into_iter().flatten().map(|(t, _)| t);
-        for t in op.turrets.iter().copied().chain(guards).collect::<Vec<_>>().iter() {
+        // A held objective keeps what is still to come (turrets added for
+        // attacks); a lost one drops what was not started.
+        let pending: Vec<Turret> =
+            if success { Vec::new() } else { op.turrets.iter().copied().chain(guards).collect() };
+        for t in pending.iter() {
             if let Some(id) = t.task
                 && self.eco.tasks.get(id).is_some_and(|task| task.as_construction().is_some_and(|c| c.target.is_none()))
             {
@@ -1251,6 +1264,7 @@ mod tests {
             danger: 0,
             home_guard: None,
             guard: None,
+            sites: 0,
             added: 0,
             last_attack: 0,
         }
