@@ -27,6 +27,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     ("colonize", "Economy", "colonists sent to far free metal"),
+    ("artemis", "Economy", "an Artemis against over 4000 metal of enemy air when one reaches our whole front"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
     ("densgate", "Economy", "phase gates on the map's density clock, not time and income"),

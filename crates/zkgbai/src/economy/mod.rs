@@ -3,6 +3,7 @@
 
 mod allied;
 mod army_support;
+mod artemis;
 mod assign;
 pub mod build_ids;
 mod colonize;
@@ -207,6 +208,10 @@ pub struct EconomyManager {
     /// Wind turbines: the model, hill sites.
     wind: wind::Wind,
     watchtower_after: i32,
+    /// When to look again whether an Artemis is wanted, and why the last
+    /// look built none (logged when it changes; see `artemis`).
+    artemis_after: i32,
+    artemis_why: Option<&'static str>,
     /// A colony being taken, and when to look for the next.
     colony: Option<colonize::Colony>,
     colony_after: i32,
@@ -410,6 +415,8 @@ impl EconomyManager {
             fortify_tasks: BTreeSet::new(),
             watchtower: None,
             watchtower_after: 0,
+            artemis_after: 0,
+            artemis_why: None,
             geo: geo::Geothermal::default(),
             wind: wind::Wind::default(),
             colony: None,
@@ -807,6 +814,7 @@ impl Ai {
             }
 
             self.eco_plan_geo(frame);
+            self.eco_plan_artemis();
             self.eco.terraform_hold.retain(|_, &mut until| until > frame);
 
             if self.scouts_air_needed(crate::military::scouts::SPARROW, self.scouts_policy().sparrows) {

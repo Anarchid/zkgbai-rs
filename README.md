@@ -91,6 +91,7 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
+`artemis` (an Artemis against over 4000 metal of enemy air when one reaches our whole front),
 `mexporc` (the turret by every mex and link, the "porc tax").
 `ZKGBAI_MUTE` (or the AI option `mute`) silences modules: `eco`, `fac`, `raider`, `squad`, `scouts`, ... (the
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
