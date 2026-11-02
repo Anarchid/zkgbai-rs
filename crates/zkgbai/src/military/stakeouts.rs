@@ -230,6 +230,11 @@ const START_RADIUS: f32 = 900.0;
 /// With this many stakeouts lost within [`LOSS_RECALL`] frames, no more
 /// are asked for...
 const LOSS_CAP: usize = 4;
+/// `picketloan` applies to pickets costing this much or more (Kodachi 170;
+/// every other roster scout is 85 or less): the conveyor of cheap scouts
+/// into solo raiders paid for itself against Wires v2 (battery-v1, 11-02),
+/// the Kodachi one did not.
+const PICKET_LOAN_COST: f32 = 120.0;
 const LOSS_RECALL: i32 = 30 * 60 * 5;
 /// ...and none within this many frames of the last loss: the lane that
 /// killed the picket is still hot.
@@ -522,6 +527,12 @@ fn post_position(map: &TierMap, choke: usize, home: usize) -> Pos {
 }
 
 impl Ai {
+    /// Whether `picketloan` holds for a picket of this def (see
+    /// [`PICKET_LOAN_COST`]).
+    fn picket_loans(&self, def: UnitDef) -> bool {
+        !self.dev_off("picketloan") && def.cost(self.metal) >= PICKET_LOAN_COST
+    }
+
     /// Whether a new unit is a stakeout's: a scout, or one of theirs on loan
     /// coming back (`picketloan`).
     pub fn stakeouts_claims(&self, id: i32, name: &str) -> bool {
@@ -613,7 +624,7 @@ impl Ai {
     /// `picketloan` it stays on the books until it comes back or dies.
     pub(crate) fn stakeouts_forget(&mut self, unit: Unit) {
         let Some(m) = self.stakeouts.members.remove(&unit.id()) else { return };
-        if !self.dev_off("picketloan") {
+        if self.picket_loans(m.def) {
             self.stakeouts.loaned.insert(unit.id());
         }
         if let Some(p) = m.post.and_then(|i| self.stakeouts.posts.get_mut(i)) {
@@ -914,7 +925,8 @@ impl Ai {
             // solo raider it would never come back and the factory would
             // build another (the "conveyor" that fills a tank army with
             // Kodachis).
-            let role = if self.dev_off("picketloan") { displaced_role(kgb_rand()) } else { Role::Stakeout };
+            let dear = self.stakeouts.members.get(&id).is_some_and(|m| self.picket_loans(m.def));
+            let role = if dear { Role::Stakeout } else { displaced_role(kgb_rand()) };
             self.op_emit("stakeout", json!({"event": "displaced", "t": frame / 30, "unit": id, "to": role.name()}));
             if role == Role::SoloRaider {
                 unit.stop(0);
