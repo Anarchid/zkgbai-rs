@@ -684,7 +684,7 @@ impl Ai {
             return;
         }
         // Scouts picket the lanes to our economy (see `stakeouts`).
-        if self.stakeouts_claims(name) {
+        if self.stakeouts_claims(unit.id(), name) {
             self.assign_role(unit, Role::Stakeout);
             return;
         }
