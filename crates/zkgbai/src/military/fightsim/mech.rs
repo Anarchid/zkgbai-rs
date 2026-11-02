@@ -654,7 +654,11 @@ impl Model {
         };
         // Pass mode stays on its lines (mech.py has no plane pass); it keeps
         // the targeting.
-        let flags = if pass { SimFlags { twod: false, focus: snap.flags.least_health() } } else { snap.flags };
+        let flags = if pass {
+            SimFlags { twod: false, focus: snap.flags.least_health(), sreload: snap.flags.sreload }
+        } else {
+            snap.flags
+        };
         let mut run = Run {
             defense,
             defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
@@ -742,7 +746,7 @@ impl Model {
                     .chain(ws.iter().filter(|(_, m)| m.paralyzer));
                 let (mut weapons, mut mech, mut splash) = (Vec::new(), Vec::new(), Vec::new());
                 for (w, m) in ordered {
-                    let mut sw = self.sim_weapon(w);
+                    let mut sw = self.sim_weapon(w, snap.flags);
                     if m.paralyzer {
                         sw.nominal = 0.0;
                     }
@@ -1289,6 +1293,10 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     }
                 }
                 let Some((dist, j)) = target else { continue };
+                // Tube weapons (`sreload`) fire only from a loaded tube.
+                if !us[i].u.weapons[wi].take_tube(f, sf) {
+                    continue;
+                }
                 us[i].u.weapons[wi].next = f + if sf > 0.0 { (reload as f64 / (1.0 - sf)) as i32 } else { reload };
                 shot_fired = true;
                 let rb = if range > 0.0 { ((RBANDS as f64 * dist / range) as i32).min(RBANDS) } else { RBANDS };
@@ -1382,12 +1390,15 @@ mod tests {
     const VARIANT_UNITS: &str = include_str!("testdata/mech_variants_units.tsv");
     const VARIANT_CASES: &str = include_str!("testdata/mech_variants_cases.tsv");
     const VARIANT_FATES: &str = include_str!("testdata/mech_variants_fates.tsv");
+    const SRELOAD_UNITS: &str = include_str!("testdata/mech_sreload_units.tsv");
+    const SRELOAD_CASES: &str = include_str!("testdata/mech_sreload_cases.tsv");
+    const SRELOAD_FATES: &str = include_str!("testdata/mech_sreload_fates.tsv");
 
-    /// export_mech.VARIANTS by name.
+    /// export_mech.VARIANTS by name (both with `sreload` since 2026-11-03).
     fn variant(name: &str) -> SimFlags {
         match name {
-            "focus" => SimFlags::from_switches(false, true),
-            "2d" => SimFlags::from_switches(true, false),
+            "focus" => SimFlags::from_switches(false, true, true),
+            "2d" => SimFlags::from_switches(true, false, true),
             v => panic!("variant {v:?}"),
         }
     }
@@ -1828,6 +1839,70 @@ mod tests {
         assert!(n >= 12);
     }
 
+    /// `sreload` (tube weapons fire from tubes that each reload on their own
+    /// clock) against mech.simulate_mech with each variant's opts + sreload
+    /// (testdata/mech_sreload_cases.tsv, `export_sreload.py`): Pickets and
+    /// Ogres against raiders and assaults, crowded and ringed, ours and theirs.
+    /// Each case also carries Python's answer with the switch off.
+    #[test]
+    fn sreload_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(SRELOAD_UNITS);
+        let s = m.mech.stun_cap_s;
+        let (mut n, mut changed, mut worst_all) = (0, 0, 0.0f64);
+        for l in data_lines(SRELOAD_CASES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let flags = SimFlags { sreload: true, ..variant(f[1]) };
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = flags;
+            let units = m.mech_units(&snap);
+            let want: Vec<f64> = f[3..11].iter().map(|v| v.parse().unwrap()).collect();
+            let dps = simulate_mech_flags(&units, &m.hits, s, None, false, flags);
+            let stop = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), false, flags);
+            let wd = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), true, flags);
+            let mut off = snap.clone();
+            off.flags.sreload = false;
+            let o = simulate_mech_flags(&m.mech_units(&off), &m.hits, s, None, false, off.flags);
+            let got = [dps.0, dps.1, stop.0, stop.1, wd.0, wd.1, o.0, o.1];
+            let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0, f64::max);
+            assert!(worst <= TOL, "{} {}: got {got:?}, python {want:?}", f[0], f[1]);
+            worst_all = worst_all.max(worst);
+            changed += usize::from((o.0 - dps.0).abs() + (o.1 - dps.1).abs() > 1e-6);
+            n += 1;
+        }
+        eprintln!(
+            "sreload parity: {n} cases ({changed} changed by the switch), worst |rust - python| = {worst_all:.2e}"
+        );
+        assert!(n >= 12 && changed >= 4);
+    }
+
+    /// The `sreload` fates against mech.simulate_mech(fates=...) with each
+    /// variant's opts + sreload (testdata/mech_sreload_fates.tsv).
+    #[test]
+    fn sreload_fates_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(SRELOAD_UNITS);
+        let mut n = 0;
+        for l in data_lines(SRELOAD_FATES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = SimFlags { sreload: true, ..variant(f[1]) };
+            let got = m.fates(&snap, f[3].parse().unwrap(), FateMode::AMove);
+            let want: Vec<Vec<&str>> = f[4].split(';').map(|u| u.split(':').collect()).collect();
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let death: i32 = w[1].parse().unwrap();
+                let (hp, pd): (f64, f64) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                assert_eq!(g.dead, w[0] == "1", "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert_eq!(g.death_frame, (death >= 0).then_some(death), "{} {} unit {i}", f[0], f[1]);
+                assert!((g.hp_left as f64 - hp).abs() <= 0.5 + 1e-3 * hp, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert!((g.p_raw as f64 - pd).abs() <= TOL, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+            }
+            n += 1;
+        }
+        assert!(n >= 10);
+    }
+
     /// Off, both switches leave every answer as it was: the base parity
     /// cases' fight and fates are bit-identical with default flags.
     #[test]
@@ -1858,7 +1933,7 @@ mod tests {
             })
             .collect();
         units.push(SnapUnit { side: 1, spec: k, hp: 660.0, x: 0.0, z: 0.0 });
-        let snap = FightSnapshot { flags: SimFlags::from_switches(true, false), units };
+        let snap = FightSnapshot { flags: SimFlags::from_switches(true, false, false), units };
         let p = plane(&snap);
         for (x, z) in &p[..4] {
             assert!(((x * x + z * z).sqrt() - 300.0).abs() < 1e-3, "{p:?}");
@@ -1963,8 +2038,8 @@ mod tests {
             let mut line = format!("{per_side:2} a side:");
             for (name, flags) in [
                 ("base", SimFlags::default()),
-                ("focus", SimFlags::from_switches(false, true)),
-                ("2d", SimFlags::from_switches(true, false)),
+                ("focus", SimFlags::from_switches(false, true, false)),
+                ("2d", SimFlags::from_switches(true, false, false)),
             ] {
                 let snap = FightSnapshot { flags, units: units.clone() };
                 let n = if per_side >= 30 { 20 } else { 100 };

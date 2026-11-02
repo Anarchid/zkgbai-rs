@@ -1,0 +1,13 @@
+# fightsim script reload: 2026-11-03 from the ZK unit defs' weapon customParams (zkgbai-runs/fight2d/sreload/sreload.lua over zk_sdd_orig/units)
+weapon	tubes	seconds (each tube reloads this long after it fires; the engine reload is only the spacing between tubes)
+amphaa_missile	4	12.0
+gunshipaa_aa_missile	3	10.0
+raveparty_blue_shocker	1	6.0
+raveparty_green_stamper	1	6.0
+raveparty_orange_roaster	1	6.0
+raveparty_red_killer	1	6.0
+raveparty_violet_slugger	1	6.0
+raveparty_yellow_slammer	1	6.0
+tankriot_tawf_banisher	2	2.3
+turretaaclose_missile	2	15.0
+turretmissile_armrl_missile	3	12.5

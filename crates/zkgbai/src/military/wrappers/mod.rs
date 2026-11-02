@@ -14,8 +14,29 @@ pub use squad::{Squad, SquadId, SquadKind, Squads};
 
 use springai::WeaponDef;
 
+/// Seconds over which a tube weapon's rate of fire is counted, from loaded
+/// (the fight predictor's live horizon).
+const TUBE_WINDOW: f32 = 10.0;
+
+/// Shots per second over a weapon's first [`TUBE_WINDOW`] seconds from
+/// loaded: 1 / reload for most weapons. Tube weapons (ZK scriptReload.lua:
+/// customParams `script_burst` tubes, each reloading `script_reload` s after
+/// it fires; the engine reload only spaces the tubes) fire far less: a
+/// Picket 3 in 10 s, not 9; a Hacksaw 2, not 50.
+pub fn shot_rate(wd: WeaponDef) -> f32 {
+    rate_from(wd.reload(), &wd.custom_params())
+}
+
+fn rate_from(reload: f32, params: &[(String, String)]) -> f32 {
+    let base = if reload > 0.0 { 1.0 / reload } else { 1.0 };
+    let param = |key: &str| params.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.parse::<f32>().ok());
+    let Some(tube_reload) = param("script_reload").filter(|r| *r > 0.0) else { return base };
+    let tubes = param("script_burst").unwrap_or(1.0).max(1.0);
+    base.min(tubes * (TUBE_WINDOW / tube_reload).ceil() / TUBE_WINDOW)
+}
+
 /// Sustained damage estimate of one weapon: burst damage (against armor
-/// class 1) adjusted for Zero-K special effects, divided by reload time.
+/// class 1) adjusted for Zero-K special effects, times its [`shot_rate`].
 ///
 /// `paralyzer_bonus` doubles paralyzer weapons (static defenses count EMP
 /// higher). Used by fighters, porc and enemy power estimates.
@@ -26,6 +47,7 @@ pub fn weapon_power(wd: WeaponDef, paralyzer_bonus: bool) -> f32 {
     // that order.
     let mut params = wd.custom_params();
     params.sort();
+    let rate = rate_from(wd.reload(), &params);
     for (k, v) in params {
         let v: f32 = v.parse().unwrap_or(0.0);
         match k.as_str() {
@@ -41,8 +63,7 @@ pub fn weapon_power(wd: WeaponDef, paralyzer_bonus: bool) -> f32 {
         shot *= 2.0;
     }
     shot *= 1.0 + wd.area_of_effect() / 100.0;
-    let reload = wd.reload();
-    if reload > 0.0 { shot / reload } else { shot }
+    shot * rate
 }
 
 /// Worth of slow damage against real damage: a slowed unit moves and
@@ -62,6 +83,30 @@ fn slow_bonus(factor: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::slow_bonus;
+
+    #[test]
+    fn tube_weapons_fire_at_their_tubes_rate() {
+        use super::rate_from;
+        let tubes = |reload: &str, burst: Option<&str>| {
+            let mut p = vec![("script_reload".to_owned(), reload.to_owned())];
+            if let Some(b) = burst {
+                p.push(("script_burst".to_owned(), b.to_owned()));
+            }
+            p
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // Picket: 3 tubes of 12.5 s, 1.2 s apart -> 3 shots in 10 s, not 9.
+        assert!(near(rate_from(1.2, &tubes("12.5", Some("3"))), 0.3));
+        // Ogre: 2 tubes of 2.3 s -> 10 shots in 10 s, not 34.
+        assert!(near(rate_from(0.3, &tubes("2.3", Some("2"))), 1.0));
+        // Hacksaw: 2 tubes of 15 s -> 2 shots, not 50.
+        assert!(near(rate_from(0.2, &tubes("15", Some("2"))), 0.2));
+        // Disco Rave Party guns: no burst given = one tube.
+        assert!(near(rate_from(1.0, &tubes("6", None)), 0.2));
+        // Everything else: the engine reload.
+        assert!(near(rate_from(1.5, &[]), 1.0 / 1.5));
+        assert!(near(rate_from(0.0, &[]), 1.0));
+    }
 
     #[test]
     fn slow_counts_more_but_saturates() {

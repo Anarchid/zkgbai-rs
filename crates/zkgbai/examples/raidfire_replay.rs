@@ -101,7 +101,7 @@ fn run(model: &Model, specs: &HashMap<String, Arc<UnitSpec>>, line: &str) -> Val
     let mut out = Map::new();
     for (name, least_health, raid_aim) in VARIANTS {
         let defense = Defense { arrivals: arrivals.clone(), assets: assets.clone(), focus: focus.clone(), raid_aim };
-        let flags = SimFlags::from_switches(false, least_health);
+        let flags = SimFlags::from_switches(false, least_health, false); // the frozen fights, no tubes
         let snap = FightSnapshot { units: units.clone(), flags };
         let fates = model.defense_fates(&snap, horizon, &defense, &paralysis);
         let rows: Vec<Value> =
