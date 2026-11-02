@@ -992,6 +992,10 @@ impl Ai {
         paralyzer: bool,
     ) {
         self.raider_friendly_hit(unit, attacker, paralyzer);
+        // Turrets for objectives under attack (see `economy::conquest`).
+        if unit.team() == self.team_id {
+            self.conquest_attacked(unit, attacker);
+        }
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_damaged(unit, weapon);
         }

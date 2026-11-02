@@ -15,7 +15,7 @@
 //! second until they pay:
 //!
 //! `worth = HORIZON x RAID_LOSS x E[denial]`, against the turrets' metal at
-//! its price now (4x up to 4:00 falling to 1x at 7:00: metal early grows
+//! its price now (2x up to 2:00 falling to 1x at 4:00: metal early grows
 //! into more), times the gain dial (`conquest_gain`, `always` = build).
 //!
 //! While the commander is away, the constructor nearest home builds the
@@ -39,6 +39,20 @@
 //! is hostile or shadowed, ours what we own or shadow, 16 spots against 9
 //! at 1:00 there.) `conquestseq` sends the commander on to the next open
 //! objective once one is held, until `SEQ_UNTIL`.
+//!
+//! Guards and attacks (user, 2026-11-03: "always build at least a Lotus
+//! before leaving main and before leaving the objective; nodal zones should
+//! request defenses earlier; if they get attacked, the turrets get to shoot,
+//! so more turrets each time"). Before it sets out, the commander puts a
+//! Lotus by our home mex nearest the enemy (the opening raid comes for the
+//! base mexes while it is away), unless one stands there (`prepare`); on
+//! arrival it puts one by the objective's spots, and the objective is not
+//! done until it stands. The price clock runs early: 2x until 2:00, 1x from
+//! 4:00 (it was 4x to 4:00, 1x at 7:00: the first loss at an objective came
+//! a median 2:45 after setting out, the first turret 6:00). An attack on
+//! our units within `ATTACK_RADIUS` of the objective, or of one held,
+//! commits the turrets at once and orders one more there, at most one per
+//! `ATTACK_GAP` and `MAX_ADDED` per objective.
 //!
 //! Every decision goes to the journal (`conquest` records).
 
@@ -114,6 +128,21 @@ const LEASH_COST: f32 = 1.0;
 /// With `conquestseq`, no objective is set out for after this frame.
 const SEQ_UNTIL: i32 = 30 * 60 * 18;
 
+/// The guard: the cheap turret the commander puts up before it leaves home
+/// and by the objective's spots on arrival.
+const GUARD_TURRET: &str = "turretlaser";
+/// The guard's job comes before everything: this on top of the crew's.
+const GUARD_BONUS: f32 = 4000.0;
+/// A guard not up this long after it was asked for is given up (frames).
+const GUARD_TIMEOUT: i32 = 30 * 45;
+/// The home guard stands this far out from its mex, toward the enemy.
+const GUARD_OUT: f32 = 120.0;
+/// Attacks within this of an objective's center add turrets there (elmos),
+/// at most one per `ATTACK_GAP` frames and `MAX_ADDED` per objective.
+const ATTACK_RADIUS: f32 = 900.0;
+const ATTACK_GAP: i32 = 30 * 20;
+const MAX_ADDED: u32 = 4;
+
 #[derive(Default)]
 pub struct Conquest {
     job: Option<mpsc::Receiver<Vec<Objective>>>,
@@ -130,6 +159,17 @@ pub struct Conquest {
     pub station: Option<Station>,
     /// Objectives held, in order (with `conquestseq`, the next is sought).
     pub taken: Vec<usize>,
+    /// Held objectives, watched for attacks (turrets are added there).
+    pub held: Vec<Held>,
+    /// Our units hit near an objective lately: (frame, where).
+    pub attacks: Vec<(i32, Vec3)>,
+}
+
+pub struct Held {
+    pub idx: usize,
+    pub center: Vec3,
+    pub added: u32,
+    pub last_attack: i32,
 }
 
 pub struct Station {
@@ -147,6 +187,8 @@ pub struct EnergyWorker {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
+    /// The commander puts up the home guard before it sets out.
+    Prepare,
     /// The commander goes there and takes the spots.
     Walk,
     /// Arrived, the turrets did not pay yet: asked again every update.
@@ -158,6 +200,7 @@ pub enum Stage {
 impl Stage {
     fn name(self) -> &'static str {
         match self {
+            Stage::Prepare => "prepare",
             Stage::Walk => "walk",
             Stage::Watch => "watch",
             Stage::Fortify => "fortify",
@@ -176,8 +219,16 @@ pub struct Op {
     /// When the turrets were committed.
     pub fortify_from: i32,
     danger: u32,
+    /// The guards: at home before setting out, by the spots on arrival
+    /// (with when each was asked for).
+    pub home_guard: Option<(Turret, i32)>,
+    pub guard: Option<(Turret, i32)>,
+    /// Turrets added for attacks, and when the last attack counted.
+    pub added: u32,
+    pub last_attack: i32,
 }
 
+#[derive(Clone, Copy, Debug)]
 pub struct Turret {
     pub site: Vec3,
     pub task: Option<TaskId>,
@@ -185,10 +236,11 @@ pub struct Turret {
     pub built: bool,
 }
 
-/// Metal now against metal later: 4x until 4:00, 1x from 7:00.
+/// Metal now against metal later: 2x until 2:00, 1x from 4:00 (it was 4x
+/// to 4:00 and 1x at 7:00; see the module notes).
 fn metal_price(frame: i32) -> f32 {
     let minutes = frame as f32 / 1800.0;
-    1.0 + 3.0 * ((7.0 - minutes) / 3.0).clamp(0.0, 1.0)
+    1.0 + ((4.0 - minutes) / 2.0).clamp(0.0, 1.0)
 }
 
 fn prior() -> Vec<(Tier, f32)> {
@@ -210,6 +262,7 @@ impl Ai {
         }
         self.conquest_plan(frame);
         self.conquest_observe();
+        self.conquest_attacks(frame);
         if self.eco.conquest.op.is_some() {
             self.conquest_step(frame);
         } else if !self.eco.conquest.done {
@@ -579,12 +632,16 @@ impl Ai {
         self.eco.conquest.op = Some(Op {
             idx,
             crew,
-            stage: Stage::Walk,
+            stage: Stage::Prepare,
             mex_tasks: Vec::new(),
             turrets: sites.into_iter().map(|site| Turret { site, task: None, retries: 0, built: false }).collect(),
             started: frame,
             fortify_from: 0,
             danger: 0,
+            home_guard: None,
+            guard: None,
+            added: 0,
+            last_attack: 0,
         });
         self.conquest_refresh_mexes();
         let o = &self.eco.conquest.objectives[idx];
@@ -654,6 +711,14 @@ impl Ai {
         if op.mex_tasks.contains(&task) {
             return (wid == op.crew).then_some(BONUS);
         }
+        let guard = [op.home_guard, op.guard].into_iter().flatten().find(|(t, _)| t.task == Some(task));
+        if let Some((t, _)) = guard {
+            if wid == op.crew {
+                return Some(BONUS + GUARD_BONUS);
+            }
+            let w = self.eco.workers.get(&wid)?;
+            return (distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS);
+        }
         let t = op.turrets.iter().find(|t| t.task == Some(task))?;
         if wid == op.crew {
             return Some(BONUS);
@@ -697,6 +762,14 @@ impl Ai {
         }
         self.conquest_refresh_mexes();
         match stage {
+            Stage::Prepare => {
+                if self.conquest_guard_step(frame, true)
+                    && let Some(op) = &mut self.eco.conquest.op
+                {
+                    op.stage = Stage::Walk;
+                    op.started = frame;
+                }
+            }
             Stage::Walk => {
                 let near = self.eco.workers.get(&crew).is_some_and(|w| distance(w.get_pos(), center) <= ARRIVE);
                 if near || frame - started > WALK_TIMEOUT {
@@ -704,13 +777,231 @@ impl Ai {
                 }
             }
             Stage::Watch => {
-                if frame > WATCH_UNTIL {
+                let guarded = self.conquest_guard_step(frame, false);
+                if frame > WATCH_UNTIL && guarded {
                     self.conquest_end("turrets never paid", true);
-                } else {
+                } else if frame <= WATCH_UNTIL {
                     self.conquest_decide(frame, "watch");
                 }
             }
-            Stage::Fortify => self.conquest_fortify(frame),
+            Stage::Fortify => {
+                self.conquest_guard_step(frame, false);
+                self.conquest_fortify(frame);
+            }
+        }
+    }
+
+    /// The guard of the op (`home`: the one before setting out): asked for
+    /// once, ordered (again) until it stands; true once it stands or was
+    /// given up (`GUARD_TIMEOUT`, or no site).
+    fn conquest_guard_step(&mut self, frame: i32, home: bool) -> bool {
+        let Some(def) = self.defs.get(GUARD_TURRET) else { return true };
+        let Some(op) = &self.eco.conquest.op else { return true };
+        let slot = if home { op.home_guard } else { op.guard };
+        let (t, asked) = match slot {
+            Some(g) => g,
+            None => {
+                let Some(site) =
+                    (if home { self.conquest_home_guard_site() } else { self.conquest_guard_site(op.idx) })
+                else {
+                    return true;
+                };
+                (Turret { site, task: None, retries: 0, built: false }, frame)
+            }
+        };
+        let fresh = slot.is_none();
+        let t = self.conquest_turret_order(t, def);
+        let done = t.built || frame - asked > GUARD_TIMEOUT || (t.task.is_none() && t.retries >= MAX_RETRIES);
+        if fresh
+            || (done && !slot.is_some_and(|(o, _)| o.built == t.built && o.retries == t.retries && o.task == t.task))
+        {
+            let what = if t.built {
+                "up"
+            } else if done {
+                "given up"
+            } else {
+                "ordered"
+            };
+            self.log(&format!(
+                "conquest: {} guard ({GUARD_TURRET}) at ({:.0},{:.0}): {what}",
+                if home { "home" } else { "objective" },
+                t.site.x,
+                t.site.z
+            ));
+            self.op_emit(
+                "conquest",
+                json!({"event": "guard", "t": frame / 30, "where": if home { "home" } else { "objective" }, "what": what,
+                       "x": t.site.x.round(), "z": t.site.z.round()}),
+            );
+        }
+        if let Some(op) = &mut self.eco.conquest.op {
+            if home {
+                op.home_guard = Some((t, asked));
+            } else {
+                op.guard = Some((t, asked));
+            }
+        }
+        done
+    }
+
+    /// Where the home guard goes: by our home mex nearest the enemy, out
+    /// toward them; none if one of its kind stands there already.
+    fn conquest_home_guard_site(&self) -> Option<Vec3> {
+        let home = self.conquest_home();
+        let (_, enemy) = self.strategy_bases()?;
+        let mex = (self.eco.mexes.iter())
+            .map(|m| m.pos())
+            .filter(|&p| distance(p, home) <= HOME_RADIUS)
+            .min_by(|a, b| distance(*a, enemy).total_cmp(&distance(*b, enemy)))
+            .unwrap_or(home);
+        let d = distance(mex, enemy).max(1.0);
+        let site =
+            Vec3::new(mex.x + (enemy.x - mex.x) * GUARD_OUT / d, mex.y, mex.z + (enemy.z - mex.z) * GUARD_OUT / d);
+        let guarded = (self.eco.porcs.iter())
+            .any(|u| distance(u.pos(), site) <= 300.0 && u.def().is_some_and(|d| self.defs.name(d) == GUARD_TURRET));
+        (!guarded).then_some(site)
+    }
+
+    /// Where the objective's guard goes: among its spots (else its center).
+    fn conquest_guard_site(&self, idx: usize) -> Option<Vec3> {
+        let o = self.eco.conquest.objectives.get(idx)?;
+        let spots: Vec<Pos> = o.spots.iter().filter_map(|&k| self.eco.conquest.assets.get(k)).map(|a| a.pos).collect();
+        let p = if spots.is_empty() {
+            o.center()
+        } else {
+            let n = spots.len() as f32;
+            Pos::new(spots.iter().map(|p| p.x).sum::<f32>() / n, spots.iter().map(|p| p.z).sum::<f32>() / n)
+        };
+        Some(self.conquest_v3(p))
+    }
+
+    /// One turret: whether one of `def` stands within `BUILT_RADIUS` of its
+    /// site, else its construction ordered (again, up to `MAX_RETRIES`).
+    fn conquest_turret_order(&mut self, mut t: Turret, def: UnitDef) -> Turret {
+        if t.built {
+            return t;
+        }
+        let standing = self.eco.porcs.iter().any(|u| {
+            distance(u.pos(), t.site) <= BUILT_RADIUS
+                && u.def().is_some_and(|d| d.id() == def.id())
+                && !u.is_being_built()
+        });
+        if standing {
+            t.built = true;
+            t.task = None;
+            return t;
+        }
+        if t.task.is_some_and(|id| self.eco.tasks.get(id).is_some()) || (t.task.is_some() && t.retries >= MAX_RETRIES) {
+            return t;
+        }
+        let at = self.cb.map().find_closest_build_site(def, t.site, 250.0, 3, 0);
+        let id = (at.x >= 0.0)
+            .then(|| {
+                self.eco_add_construction(WorkerTask::construction(def, at, 0), Some(List::Porc), Some(List::Porc))
+            })
+            .flatten();
+        if t.task.is_some() || id.is_none() {
+            t.retries += 1;
+        }
+        t.task = id;
+        if let Some(id) = id {
+            self.log(&format!("conquest: {} ordered at ({:.0},{:.0}) (task {id})", def.name(), at.x, at.z));
+        }
+        t
+    }
+
+    /// Our unit was hit: if near an objective (ours now, or held), note it
+    /// (see `conquest_attacks`).
+    pub(crate) fn conquest_attacked(&mut self, unit: springai::Unit, attacker: Option<springai::Unit>) {
+        let Some(a) = attacker else { return };
+        if !self.war.targets.contains_key(&a.id()) {
+            return;
+        }
+        let c = &self.eco.conquest;
+        if c.op.is_none() && c.held.is_empty() {
+            return;
+        }
+        let p = unit.pos();
+        let op_center = c.op.as_ref().and_then(|op| c.objectives.get(op.idx)).map(|o| self.conquest_v3(o.center()));
+        let near = op_center.is_some_and(|q| distance(q, p) <= ATTACK_RADIUS)
+            || c.held.iter().any(|h| distance(h.center, p) <= ATTACK_RADIUS);
+        if near && self.eco.conquest.attacks.len() < 32 {
+            self.eco.conquest.attacks.push((self.frame, p));
+        }
+    }
+
+    /// Attacks at an objective: the turrets go up now (they will shoot) and
+    /// one more is ordered by where it came, at most one per `ATTACK_GAP`
+    /// and `MAX_ADDED` per objective; held objectives get theirs from the
+    /// usual builders.
+    fn conquest_attacks(&mut self, frame: i32) {
+        let attacks = std::mem::take(&mut self.eco.conquest.attacks);
+        if attacks.is_empty() {
+            return;
+        }
+        let Some(def) = self.conquest_turret() else { return };
+        let toward = |p: Vec3, c: Vec3| Vec3::new(p.x + (c.x - p.x) * 0.4, p.y, p.z + (c.z - p.z) * 0.4);
+        if let Some(op) = &self.eco.conquest.op
+            && matches!(op.stage, Stage::Watch | Stage::Fortify)
+            && op.added < MAX_ADDED
+            && frame - op.last_attack >= ATTACK_GAP
+        {
+            let center = self.conquest_v3(self.eco.conquest.objectives[op.idx].center());
+            if let Some(&(_, p)) = attacks.iter().rev().find(|(_, p)| distance(*p, center) <= ATTACK_RADIUS) {
+                let watching = op.stage == Stage::Watch;
+                let site = toward(p, center);
+                if let Some(op) = &mut self.eco.conquest.op {
+                    op.added += 1;
+                    op.last_attack = frame;
+                    op.turrets.push(Turret { site, task: None, retries: 0, built: false });
+                    if watching {
+                        op.stage = Stage::Fortify;
+                        op.fortify_from = frame;
+                    }
+                }
+                let idx = self.eco.conquest.op.as_ref().map_or(0, |op| op.idx);
+                self.log(&format!(
+                    "conquest: objective {idx} attacked at ({:.0},{:.0}): {}one more {} ordered",
+                    p.x,
+                    p.z,
+                    if watching { "turrets go up, " } else { "" },
+                    def.name()
+                ));
+                self.op_emit(
+                    "conquest",
+                    json!({"event": "attack", "t": frame / 30, "objective": idx, "x": p.x.round(), "z": p.z.round(),
+                           "commit": watching, "held": false}),
+                );
+                if watching {
+                    self.conquest_fortify(frame);
+                }
+            }
+        }
+        for i in 0..self.eco.conquest.held.len() {
+            let h = &self.eco.conquest.held[i];
+            if h.added >= MAX_ADDED || frame - h.last_attack < ATTACK_GAP {
+                continue;
+            }
+            let Some(&(_, p)) = attacks.iter().rev().find(|(_, p)| distance(*p, h.center) <= ATTACK_RADIUS) else {
+                continue;
+            };
+            let (idx, center) = (h.idx, h.center);
+            let t = Turret { site: toward(p, center), task: None, retries: 0, built: false };
+            let t = self.conquest_turret_order(t, def);
+            let h = &mut self.eco.conquest.held[i];
+            h.added += 1;
+            h.last_attack = frame;
+            self.log(&format!(
+                "conquest: held objective {idx} attacked at ({:.0},{:.0}): one more {} ordered",
+                p.x,
+                p.z,
+                def.name()
+            ));
+            self.op_emit(
+                "conquest",
+                json!({"event": "attack", "t": frame / 30, "objective": idx, "x": p.x.round(), "z": p.z.round(),
+                       "held": true, "ordered": t.task.is_some()}),
+            );
         }
     }
 
@@ -742,6 +1033,10 @@ impl Ai {
             if go {
                 op.fortify_from = frame;
             }
+        }
+        // On arrival: the objective's guard first.
+        if stage == Stage::Walk {
+            self.conquest_guard_step(frame, false);
         }
         if go {
             self.conquest_fortify(frame);
@@ -809,7 +1104,12 @@ impl Ai {
             )
         });
         let since = self.eco.conquest.op.as_ref().map_or(0, |op| frame - op.fortify_from);
-        if all_built {
+        let guarded = self.eco.conquest.op.as_ref().is_none_or(|op| {
+            op.guard.is_none_or(|(t, asked)| {
+                t.built || frame - asked > GUARD_TIMEOUT || (t.task.is_none() && t.retries >= MAX_RETRIES)
+            })
+        });
+        if all_built && guarded {
             self.conquest_end("held", true);
         } else if stuck && frame > 0 {
             self.conquest_end("turret sites lost", false);
@@ -823,11 +1123,16 @@ impl Ai {
         let Some(op) = self.eco.conquest.op.take() else { return };
         if success {
             self.eco.conquest.taken.push(op.idx);
+            if let Some(o) = self.eco.conquest.objectives.get(op.idx) {
+                let center = self.conquest_v3(o.center());
+                self.eco.conquest.held.push(Held { idx: op.idx, center, added: op.added, last_attack: op.last_attack });
+            }
         }
         // With `conquestseq` a held objective leads on to the next.
         self.eco.conquest.done = !success || self.dev_off("conquestseq");
         let mut dropped = 0;
-        for t in &op.turrets {
+        let guards = [op.home_guard, op.guard].into_iter().flatten().map(|(t, _)| t);
+        for t in op.turrets.iter().copied().chain(guards).collect::<Vec<_>>().iter() {
             if let Some(id) = t.task
                 && self.eco.tasks.get(id).is_some_and(|task| task.as_construction().is_some_and(|c| c.target.is_none()))
             {
@@ -862,11 +1167,18 @@ impl Ai {
             "belief": self.conquest_belief_json(),
             "energy_worker": c.energy.as_ref().map(|e| json!({"worker": e.id, "was_greedy": e.was_greedy, "since": e.since / 30})),
             "station": c.station.as_ref().map(|s| json!({"crew": s.crew, "x": s.center.x.round(), "z": s.center.z.round(), "since": s.since / 30, "leash": !self.dev_off("conquestleash")})),
-            "op": c.op.as_ref().map(|op| json!({
+            "op": c.op.as_ref().map(|op| {
+                let guards: Vec<serde_json::Value> = (vec![("home", op.home_guard), ("objective", op.guard)].into_iter())
+                    .filter_map(|(w, g)| g.map(|(t, _)| json!({"where": w, "built": t.built, "task": t.task})))
+                    .collect();
+                json!({
                 "objective": op.idx, "crew": op.crew, "stage": op.stage.name(), "since": op.started / 30,
                 "mex_jobs": op.mex_tasks.len(),
                 "turrets": op.turrets.iter().map(|t| json!({"x": t.site.x.round(), "z": t.site.z.round(), "task": t.task, "built": t.built})).collect::<Vec<_>>(),
-            })),
+                "guards": guards,
+                "added": op.added,
+            })}),
+            "held": c.held.iter().map(|h| json!({"objective": h.idx, "added": h.added})).collect::<Vec<_>>(),
         })
     }
 }
@@ -937,7 +1249,20 @@ mod tests {
             started: 0,
             fortify_from: 0,
             danger: 0,
+            home_guard: None,
+            guard: None,
+            added: 0,
+            last_attack: 0,
         }
+    }
+
+    #[test]
+    fn the_price_clock_runs_from_two_to_one_between_two_and_four_minutes() {
+        assert_eq!(metal_price(0), 2.0);
+        assert_eq!(metal_price(30 * 120), 2.0);
+        assert!((metal_price(30 * 180) - 1.5).abs() < 1e-4);
+        assert_eq!(metal_price(30 * 240), 1.0);
+        assert_eq!(metal_price(30 * 600), 1.0);
     }
 
     fn greedy(ai: &Ai, id: i32) -> bool {
@@ -1023,15 +1348,6 @@ mod tests {
         ai.eco.conquest.op = Some(walking());
         ai.conquest_end("commander hurt", false);
         assert_eq!((ai.eco.conquest.done, ai.eco.conquest.taken.len()), (true, 2));
-    }
-
-    #[test]
-    fn metal_is_dear_early_and_at_par_from_seven_minutes() {
-        assert_eq!(metal_price(0), 4.0);
-        assert_eq!(metal_price(1800 * 4), 4.0);
-        assert!((metal_price(1800 * 5) - 3.0).abs() < 1e-4);
-        assert_eq!(metal_price(1800 * 7), 1.0);
-        assert_eq!(metal_price(1800 * 20), 1.0);
     }
 
     #[test]
