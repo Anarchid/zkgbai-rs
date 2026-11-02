@@ -76,7 +76,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
     "pairs",
     "currency",
     "permanence",
@@ -96,7 +96,6 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "chatcommands",
     "densgate",
     "fight2d",
-    "fightfocus",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -1194,7 +1193,8 @@ impl Ai {
     /// The fight predictor's mechanics fight as the switches ask for it, on
     /// every snapshot this AI builds: `fight2d` (units keep their places in
     /// the plane, no overlaps, splash, least-health targeting) and
-    /// `fightfocus` (least-health targeting on the axis), both off by default.
+    /// `fightfocus` (least-health targeting on the axis, on by default in the
+    /// wip line; `disable=fightfocus`). `fight2d` is off by default.
     pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
         crate::military::fightsim::SimFlags::from_switches(!self.dev_off("fight2d"), !self.dev_off("fightfocus"))
     }
