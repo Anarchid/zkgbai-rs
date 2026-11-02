@@ -5,6 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use zkta::analyzer::{NoopRenderer, analyze_bitmap};
 use zkta::geometry::Point;
 
+use crate::stable::{self, Built};
 use crate::{CELL, Choke, ChokeKind, MoveClass, NONE, Pos, Region, SpringMapData, Tier, TierMap, borders, split};
 
 /// Passable components smaller than this (cells) get no region of their own:
@@ -20,13 +21,30 @@ const MIN_TERRACE_CELLS: usize = 128;
 /// which can sit a few cells off the raster obstacle boundary.
 const GATE_EXTENSION: i32 = 12;
 
+#[cfg(test)]
 pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass, spots: &[Pos]) -> TierMap {
+    tier_map_since(data, tier, class, spots, None).expect("built without a prior")
+}
+
+/// The tier's model, unless its input is what `prior` was built from
+/// (`None`; see [`stable`]).
+pub(crate) fn tier_map_since(
+    data: &SpringMapData,
+    tier: Tier,
+    class: MoveClass,
+    spots: &[Pos],
+    prior: Option<&Built>,
+) -> Option<TierMap> {
     // Hard obstacles: where the engine stops units (connectivity). Soft
     // obstacles additionally include slopes units only crawl up (see
     // `MoveClass::soft`); the region decomposition works on those.
     let ground = Ground::new(data, class);
     let obstacles = ground.obstacles(class);
     let soft = ground.obstacles(class.soft());
+    let input = stable::fingerprint(class, &obstacles, &soft, spots);
+    if prior.is_some_and(|p| p.input == input) {
+        return None;
+    }
     let (width, height) = (ground.width, ground.height);
     let (w, h) = (width as u32, height as u32);
     let component = label_components(&obstacles, width, height);
@@ -41,9 +59,10 @@ pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass, spots
         region: vec![NONE; width * height],
         passable_fraction: passable as f32 / (width * height).max(1) as f32,
         component,
+        built: Built { input, caps: Vec::new() },
     };
     if passable == 0 {
-        return map;
+        return Some(map);
     }
 
     let analysis = analyze_bitmap(&soft, w, h, &NoopRenderer);
@@ -95,9 +114,9 @@ pub(crate) fn tier_map(data: &SpringMapData, tier: Tier, class: MoveClass, spots
     let seeds: Vec<Option<usize>> =
         analysis.regions.iter().map(|r| seed_cell(r.center, r.radius, &soft, &walls, width, height)).collect();
     assign_regions(&mut map, &soft, &obstacles, &walls, &seeds);
-    split::split(&mut map, spots);
+    split::split(&mut map, spots, prior.map_or(&[], |p| &p.caps));
     borders::link(&mut map, &ground, &soft, &walls);
-    map
+    Some(map)
 }
 
 fn map_cell_center(cell: usize, width: usize) -> Pos {

@@ -75,7 +75,17 @@ pub fn grid_map(rows: &[&str], chokes: &[(char, char, f32, f32, f32)]) -> TierMa
             }
         })
         .collect();
-    TierMap { tier: Tier::Vehicle, width: w, height: h, regions, chokes, component, region, passable_fraction: 1.0 }
+    TierMap {
+        tier: Tier::Vehicle,
+        width: w,
+        height: h,
+        regions,
+        chokes,
+        component,
+        region,
+        passable_fraction: 1.0,
+        built: Default::default(),
+    }
 }
 
 /// Scale a layout up: every character becomes a `k` x `k` block.
