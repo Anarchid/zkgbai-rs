@@ -180,8 +180,8 @@ targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
 `artemis` (an Artemis against over 4000 metal of enemy air when one reaches our whole front),
 `mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
-`regionsplit` (off by default, `enable=regionsplit`) has the terrain model cut regions holding many metal
-spots into pieces around clusters of them.
+`regionsplit` (on by default in the wip line, `disable=regionsplit`; off on main) has the terrain model cut regions
+holding many metal spots into pieces around clusters of them.
 `ZKGBAI_MUTE` (or the AI option `mute`) silences modules: `eco`, `fac`, `raider`, `squad`, `scouts`, ... (the
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
 that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are

@@ -73,13 +73,13 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `densgate` (phase gates on the map's density clock) waits for its A/B
 /// (enable=densgate to opt in).
 /// `regionsplit` (terrain regions holding many metal spots cut into pieces
-/// around clusters of them, 2026-11-02) waits for its A/B
-/// (enable=regionsplit to opt in).
+/// around clusters of them, 2026-11-02) is on in the wip line for
+/// eyeballing (disable=regionsplit); off on main until its A/B.
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 19] = [
     "pairs",
     "currency",
     "permanence",
@@ -99,7 +99,6 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "chatcommands",
     "densgate",
     "fight2d",
-    "regionsplit",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
