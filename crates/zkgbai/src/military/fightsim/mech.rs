@@ -287,6 +287,25 @@ pub struct Defense {
     pub arrivals: Vec<i32>,
     pub assets: Vec<usize>,
     pub focus: Vec<Option<usize>>,
+    /// Whom the raiders shoot and walk to.
+    pub raid_aim: RaidAim,
+}
+
+/// Whom the raiders of a raid-defense rollout shoot and walk to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RaidAim {
+    /// The asset each was seen shooting, then the nearest protected asset
+    /// left: raiders never turn on a defender while an asset of the rollout
+    /// lives (the frozen rollout). A lone Dagger then plinks a Mace for free.
+    #[default]
+    Assets,
+    /// The asset each was seen shooting, until it dies; then whatever the
+    /// fight's targeting picks (the nearest, or the least health left),
+    /// defenders included: an attack-moving raider holds its target, then
+    /// takes the engine's closest valid one (the AI's `raidfire`).
+    Hold,
+    /// No held asset: from the first frame like any unit.
+    Free,
 }
 
 struct Run<'a> {
@@ -747,20 +766,25 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             break;
         }
         // Raiders target the economy they came for, rather than abandoning
-        // a mex to chase a defender that is still on the other side of the map.
+        // a mex to chase a defender that is still on the other side of the map
+        // (`RaidAim::Assets`). With `Hold` they keep only the asset they were
+        // seen shooting, then pick like any unit (a defender that has not
+        // arrived is not on the field, so cannot draw fire); `Free` holds none.
         if let Some(d) = run.defense {
             raid_focus.fill(None);
             for &i in &sides[1] {
-                raid_focus[i] =
-                    d.focus.get(i).copied().flatten().filter(|j| d.assets.contains(j) && sides[0].contains(j)).or_else(
-                        || {
-                            d.assets
-                                .iter()
-                                .copied()
-                                .filter(|j| sides[0].contains(j))
-                                .min_by(|&a, &b| apart(&us[a], &us[i]).total_cmp(&apart(&us[b], &us[i])))
-                        },
-                    );
+                let held = d.focus.get(i).copied().flatten().filter(|j| d.assets.contains(j) && sides[0].contains(j));
+                raid_focus[i] = match d.raid_aim {
+                    RaidAim::Assets => held.or_else(|| {
+                        d.assets
+                            .iter()
+                            .copied()
+                            .filter(|j| sides[0].contains(j))
+                            .min_by(|&a, &b| apart(&us[a], &us[i]).total_cmp(&apart(&us[b], &us[i])))
+                    }),
+                    RaidAim::Hold => held,
+                    RaidAim::Free => None,
+                };
             }
         }
         // Status: burns tick, paralysis and slow wear off (units killed by a

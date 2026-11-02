@@ -1180,6 +1180,15 @@ impl Ai {
         self.disabled.contains(feature)
     }
 
+    /// Whom raiders shoot in the QRF predictor's raid-defense rollouts:
+    /// `raidfire` (on by default; `disable=raidfire` restores the frozen
+    /// rollout) lets them turn on our defenders once the asset they were seen
+    /// shooting is gone, so a lone raider sent at a riot is priced as dying.
+    pub fn raid_aim(&self) -> crate::military::fightsim::mech::RaidAim {
+        use crate::military::fightsim::mech::RaidAim;
+        if self.dev_off("raidfire") { RaidAim::Assets } else { RaidAim::Hold }
+    }
+
     pub fn features_off(&self) -> Vec<String> {
         self.disabled.iter().cloned().collect()
     }
