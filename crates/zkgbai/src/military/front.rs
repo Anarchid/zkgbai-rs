@@ -1,5 +1,5 @@
-//! `frontgate` (off by default; `enable=frontgate`): composition gates on
-//! the density of our fights (`zkgbai-runs/procure/DESIGN.md` §17).
+//! `frontgate` (on by default in the wip line; `disable=frontgate`):
+//! composition gates on the density of our fights (`zkgbai-runs/procure/DESIGN.md` §17).
 //!
 //! Fights get denser as the armies grow: on open 1v1 maps the density the
 //! average unit stands in is the total armed mobile metal over ~8 km-elmo²,
@@ -110,7 +110,8 @@ pub(crate) fn fight_density(ours: &[(f32, f32, f32)], foes: &[(f32, f32, f32)], 
 }
 
 impl Ai {
-    /// Whether composition follows the fight density (`enable=frontgate`).
+    /// Whether composition follows the fight density (`frontgate`, on in
+    /// the wip line; `disable=frontgate`).
     pub(crate) fn front_on(&self) -> bool {
         !self.dev_off("frontgate")
     }
