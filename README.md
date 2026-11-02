@@ -178,7 +178,7 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
-`artemis` (an Artemis against over 4000 metal of enemy air when one reaches our whole front),
+`artemis` (an Artemis at the centroid of our front against over 4000 metal of enemy air),
 `mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
 `regionsplit` (on by default in the wip line, `disable=regionsplit`; off on main) has the terrain model cut regions
 holding many metal spots into pieces around clusters of them.

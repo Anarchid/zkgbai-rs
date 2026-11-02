@@ -46,7 +46,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
     ("conquestseq", "Economy", "a held objective sends the commander on to the next"),
-    ("artemis", "Economy", "an Artemis against over 4000 metal of enemy air when one reaches our whole front"),
+    ("artemis", "Economy", "an Artemis at the centroid of our front against over 4000 metal of enemy air"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
