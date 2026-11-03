@@ -876,7 +876,10 @@ impl Model {
             })
             .collect();
         for (i, m) in us.iter_mut().enumerate() {
-            if m.u.armed && m.u.max_range > 0.0 {
+            if snap.flags.ordered && snap.units[i].side == 0 {
+                // under our order: fires for certain (SimFlags::ordered)
+                m.engage = 1.0;
+            } else if m.u.armed && m.u.max_range > 0.0 {
                 m.engage =
                     expit(engage_features(snap, i, m.u.max_range).iter().zip(&t.engage).map(|(a, b)| a * b).sum());
             }
@@ -1518,6 +1521,8 @@ mod tests {
     const SRELOAD_UNITS: &str = include_str!("testdata/mech_sreload_units.tsv");
     const SRELOAD_CASES: &str = include_str!("testdata/mech_sreload_cases.tsv");
     const SRELOAD_FATES: &str = include_str!("testdata/mech_sreload_fates.tsv");
+    const ORDERED_CASES: &str = include_str!("testdata/mech_ordered_cases.tsv");
+    const ORDERED_FATES: &str = include_str!("testdata/mech_ordered_fates.tsv");
     const BOMBS_UNITS: &str = include_str!("testdata/mech_bombs_units.tsv");
     const BOMBS_CASES: &str = include_str!("testdata/mech_bombs_cases.tsv");
     const BOMBS_FATES: &str = include_str!("testdata/mech_bombs_fates.tsv");
@@ -2056,6 +2061,70 @@ mod tests {
         assert!(n >= 10);
     }
 
+    /// `ordered` (side 0 fires for certain) against mech.simulate_mech with
+    /// each variant's opts + sreload + ordered, and without ordered
+    /// (testdata/mech_ordered_cases.tsv, export_ordered.py).
+    #[test]
+    fn ordered_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(SRELOAD_UNITS);
+        let s = m.mech.stun_cap_s;
+        let (mut n, mut changed, mut worst_all) = (0, 0, 0.0f64);
+        for l in data_lines(ORDERED_CASES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let flags = SimFlags { sreload: true, ordered: true, ..variant(f[1]) };
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = flags;
+            let units = m.mech_units(&snap);
+            let want: Vec<f64> = f[3..11].iter().map(|v| v.parse().unwrap()).collect();
+            let dps = simulate_mech_flags(&units, &m.hits, s, None, false, flags);
+            let stop = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), false, flags);
+            let wd = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), true, flags);
+            let mut off = snap.clone();
+            off.flags.ordered = false;
+            let o = simulate_mech_flags(&m.mech_units(&off), &m.hits, s, None, false, off.flags);
+            let got = [dps.0, dps.1, stop.0, stop.1, wd.0, wd.1, o.0, o.1];
+            let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0, f64::max);
+            assert!(worst <= TOL, "{} {}: got {got:?}, python {want:?}", f[0], f[1]);
+            worst_all = worst_all.max(worst);
+            changed += usize::from((o.0 - dps.0).abs() + (o.1 - dps.1).abs() > 1e-6);
+            n += 1;
+        }
+        eprintln!(
+            "ordered parity: {n} cases ({changed} changed by the switch), worst |rust - python| = {worst_all:.2e}"
+        );
+        // In most of these the raiders' engage prior is already near 1; 3 of
+        // 33 move (2026-11-03).
+        assert!(n >= 12 && changed >= 3);
+    }
+
+    /// The `ordered` fates against mech.simulate_mech(fates=...)
+    /// (testdata/mech_ordered_fates.tsv).
+    #[test]
+    fn ordered_fates_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(SRELOAD_UNITS);
+        let mut n = 0;
+        for l in data_lines(ORDERED_FATES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = SimFlags { sreload: true, ordered: true, ..variant(f[1]) };
+            let got = m.fates(&snap, f[3].parse().unwrap(), FateMode::AMove);
+            let want: Vec<Vec<&str>> = f[4].split(';').map(|u| u.split(':').collect()).collect();
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let death: i32 = w[1].parse().unwrap();
+                let (hp, pd): (f64, f64) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                assert_eq!(g.dead, w[0] == "1", "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert_eq!(g.death_frame, (death >= 0).then_some(death), "{} {} unit {i}", f[0], f[1]);
+                assert!((g.hp_left as f64 - hp).abs() <= 0.5 + 1e-3 * hp, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert!((g.p_raw as f64 - pd).abs() <= TOL, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+            }
+            n += 1;
+        }
+        assert!(n >= 10);
+    }
+
     /// `bombs` (kamikazeDistance per def, or touching) against
     /// mech.simulate_mech with each variant's opts + bombs
     /// (testdata/mech_bombs_cases.tsv, export_bombs.py).
@@ -2126,7 +2195,10 @@ mod tests {
     fn switches_off_are_the_frozen_fight() {
         let m = Model::load().unwrap();
         let t = MechTables::load().unwrap();
-        assert!(t.focus_cal.is_some() && t.twod_cal.is_some() && t.sr_cal.is_some(), "variant calibrations in the tables");
+        assert!(
+            t.focus_cal.is_some() && t.twod_cal.is_some() && t.sr_cal.is_some(),
+            "variant calibrations in the tables"
+        );
         assert!(t.splash.contains_key("tankraid_napalm_bomblet"));
         assert_eq!(t.calibration(SimFlags::default()).win, t.win);
         for (name, snap, _) in cases() {

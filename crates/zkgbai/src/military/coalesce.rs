@@ -384,7 +384,10 @@ impl Ai {
     /// Judge `units` (with their origins) as one gang: the best plan that
     /// passes, holding `hold` (the plan to keep) with the looser thresholds.
     fn coalesce_judge(&mut self, units: &[Unit], hold: Option<Plan>, budget: &mut Budget) -> Judged {
-        let Some(local) = self.local_fight(units) else { return Judged::NoFight };
+        let Some(mut local) = self.local_fight(units) else { return Judged::NoFight };
+        // A gang is borrowed, committed and ordered: it fires for certain
+        // (`ordered`, SimFlags::ordered).
+        local.snap.flags.ordered = !self.dev_off(crate::military::fightsim::ORDERED);
         if !local.armed_theirs() {
             return Judged::NoFight;
         }

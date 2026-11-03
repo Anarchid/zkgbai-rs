@@ -292,6 +292,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
     ),
     (
+        "ordered",
+        "Army",
+        "coalesce gangs are judged with their units firing for certain, not with the logs' odds that a unit fires at all (default on)",
+    ),
+    (
         "ammo",
         "Army",
         "hits on our units count the enemy tube weapons' shots: the fight predictor sees their empty tubes, and a lone raider beside an emptied Picket takes it (off by default: lost its A/B)",

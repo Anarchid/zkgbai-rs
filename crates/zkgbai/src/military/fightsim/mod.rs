@@ -115,6 +115,10 @@ pub struct SnapUnit {
     pub tubes: Vec<i32>,
 }
 
+/// Switch: coalesce gangs are judged with their units firing for certain
+/// ([`SimFlags::ordered`]; `disable=ordered`).
+pub const ORDERED: &str = "ordered";
+
 /// Which mechanics fight a consumer asks for (the AI's switches; both off
 /// = the frozen fight). `fight2d` (`twod`): units keep their places in the
 /// plane and move there, do not overlap, and splash weapons hit the units
@@ -137,12 +141,22 @@ pub struct SimFlags {
     /// Imp's radius and a Rogue's add up to 22), so there no bomb went off
     /// on contact. Set by the bomb-charge judgement ([`Model::bomb_charge`]).
     pub bombs: bool,
+    /// Side 0 is under our order and commits (a coalesce gang: borrowed,
+    /// committed, ordered): its units fire for certain, in place of the
+    /// engage prior (P(a unit fires at all), fitted on game logs where many
+    /// units never commit); side 1 keeps the prior (mech.py `ordered`). The
+    /// fight lab (zkgbai-runs/lab, 2026-11-03) found the prior made one or two
+    /// raiders ordered at a Picket look harmless: P(Picket dead in 10 s)
+    /// Brier 0.296 -> 0.183 with it off for the ordered side; on 20,522 live
+    /// coalesce forms the 10-s member-loss correlation rose +0.016 [+0.011,
+    /// +0.021] and the MAE fell 4.4 metal.
+    pub ordered: bool,
 }
 
 impl SimFlags {
     /// The flags as the AI's switches set them.
     pub fn from_switches(fight2d: bool, focus: bool, sreload: bool) -> SimFlags {
-        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false }
+        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false, ordered: false }
     }
 
     /// Whether shots go to the least-health target (always in the plane).
