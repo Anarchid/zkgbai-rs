@@ -1472,6 +1472,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     }
                     hurt(&mut us, &mut killed, j, dmg);
                 }
+                // The Puppy is its own missile (`SPENT_ON_FIRING`).
+                if us[i].u.spent {
+                    us[i].u.alive = false;
+                    killed[us[i].u.side as usize] += us[i].u.cost;
+                    break;
+                }
             }
         }
         if let Some(tr) = run.track.as_mut() {
