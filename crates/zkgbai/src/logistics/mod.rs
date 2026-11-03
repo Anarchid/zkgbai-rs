@@ -394,10 +394,19 @@ impl Ai {
     }
 
     /// The bonus worker `wid` gets in the assignment loop for task `task`:
-    /// its share of the issue's value, if it is on the crew.
+    /// its share of the issue's value, if it is on the crew; the whole value
+    /// if the job is already its own (on its way or at it). A split share
+    /// (140-380 among two to four) lost to every other bonus about: on
+    /// Agalta constructors walked 1300 elmos to a geothermal vent and left it
+    /// at 200-250 for conquest turrets, bonused mexes and home turbines, the
+    /// crew changing 25 times in five minutes (smokes of 2026-11-03).
     pub fn logistics_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
         let issue = self.logistics.issues.get(&task)?;
-        (issue.share > 0.0 && issue.crew.contains(&wid)).then_some(issue.share)
+        if issue.share <= 0.0 || !issue.crew.contains(&wid) {
+            return None;
+        }
+        let own = self.eco.workers.get(&wid).is_some_and(|w| w.task == Some(task));
+        Some(if own { issue.value.min(BONUS_CAP).max(issue.share) } else { issue.share })
     }
 
     /// Whether `task` is an open issue.
@@ -510,8 +519,9 @@ impl Ai {
     }
 
     /// Workers that could crew a job at `pos`, nearest first (the current
-    /// `crew` a little nearer than it is).
-    fn logistics_hands(&self, pos: Vec3, crew: &[i32]) -> Vec<Hand> {
+    /// `crew` a little nearer than it is; a worker whose job it already is,
+    /// `task`, first of all: see [`Ai::logistics_bonus`]).
+    fn logistics_hands(&self, pos: Vec3, crew: &[i32], task: Option<TaskId>) -> Vec<Hand> {
         let mut hands: Vec<Hand> = (self.eco.workers.values())
             .filter(|w| !w.is_chicken && w.bp > 0.0)
             .filter(|w| crew.contains(&w.id) || !self.eco_worker_held(w.id))
@@ -529,6 +539,10 @@ impl Ai {
                 let mut travel = (distance(wpos, pos) - range).max(0.0) / speed;
                 if crew.contains(&w.id) {
                     travel = (travel - HYSTERESIS).max(0.0);
+                }
+                // On its way or at it: it stays on the crew (ranked first).
+                if task.is_some() && w.task == task {
+                    travel = 0.0;
                 }
                 Some((w.id, travel, w.bp))
             })
@@ -591,7 +605,7 @@ impl Ai {
                 continue;
             }
             let by = now + p.seconds - MARGIN;
-            let hands = self.logistics_hands(p.pos, &[]);
+            let hands = self.logistics_hands(p.pos, &[], None);
             if hands.is_empty() {
                 continue;
             }
@@ -722,15 +736,25 @@ impl Ai {
             let Some(issue) = self.logistics.issues.get(&task) else { continue };
             let work = issue.build_time * (1.0 - progress);
             let cost = issue.cost * (1.0 - progress);
-            let hands = self.logistics_hands(issue.pos, &issue.crew);
+            let hands = self.logistics_hands(issue.pos, &issue.crew, Some(task));
             let (k, eta, value) = best_crew(&hands, work, cost, metal, income, &issue.worth, now);
             let hopeless = value <= 0.0 && !started && issue.worth.deadline().is_some_and(|by| now > by + DECAY);
             let Some(issue) = self.logistics.issues.get_mut(&task) else { continue };
             issue.started = started;
             issue.eta = eta;
             issue.value = value;
-            issue.crew = hands.iter().take(k).map(|h| h.0).collect();
-            issue.share = if k > 0 && value > 0.0 { (value / k as f32).min(BONUS_CAP) } else { 0.0 };
+            let crew: Vec<i32> = hands.iter().take(k).map(|h| h.0).collect();
+            let share = if k > 0 && value > 0.0 { (value / k as f32).min(BONUS_CAP) } else { 0.0 };
+            // Journaled when the crew changes or its bonus comes or goes.
+            let changed = crew != issue.crew || (share > 0.0) != (issue.share > 0.0);
+            issue.crew = crew;
+            issue.share = share;
+            if changed {
+                let note = json!({"event": "crew", "id": issue.id, "what": issue.what, "crew": issue.crew,
+                                  "share": share.round(), "value": value.round(), "eta": (eta * 10.0).round() / 10.0,
+                                  "hands": hands.iter().take(4).map(|h| json!([h.0, (h.1 * 10.0).round() / 10.0])).collect::<Vec<_>>()});
+                self.op_emit("issue", note);
+            }
             if hopeless {
                 abandon.push(task);
             }
