@@ -30,7 +30,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "walkin",
         "Defense",
-        "a turret at whatever we value that a known enemy force worth 1500+ metal gets to with nothing of ours to meet it there, on its way or in time (default on)",
+        "a turret at whatever we value that a known enemy force worth 800+ metal gets to with nothing of ours to meet it there, on its way or in time (default on)",
     ),
     ("currency", "Economy", "a job's raid danger priced in metal against its crew's bonus"),
     ("pairs", "Economy", "Constables pair up on builds"),

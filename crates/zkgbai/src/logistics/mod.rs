@@ -14,7 +14,7 @@
 //! forecasts (`incursions`): at the first of our assets an enemy group can
 //! reach, a turret sized to the group, if one can stand in time and the
 //! value at risk pays for it. The walk-in guard (`walkin`, see [`walkin`])
-//! fortifies whatever we value that a force worth 1500 metal or more gets
+//! fortifies whatever we value that a force worth 800 metal or more gets
 //! to with nothing of ours to meet it. The others (feature `clients`) are capital
 //! that waits: pylons while a building waits for its site to have power
 //! (`grid`), a factory a module requisitioned, an anti-nuke; each worth
@@ -422,7 +422,7 @@ impl Ai {
             let w = self.logistics.walkin.stats;
             self.log(&format!(
                 "walkin: {} force looks, {} with a place in reach, {} met everywhere, {} breaches: {} turrets opened, \
-                 {} already coming, {} capped, {} outranged, {} late, {} no site; {} stood down",
+                 {} already coming, {} capped, {} outranged, {} late, {} no site; {} stood down, {} bumped",
                 w.groups,
                 w.threats,
                 w.defended,
@@ -433,7 +433,8 @@ impl Ai {
                 w.outranged,
                 w.late,
                 w.nosite,
-                w.stood_down
+                w.stood_down,
+                w.bumped
             ));
         }
     }

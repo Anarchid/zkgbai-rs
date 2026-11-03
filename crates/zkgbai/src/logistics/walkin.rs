@@ -3,6 +3,14 @@
 //! The rule (user, 2026-11-03): is there an enemy force worth 1500 metal or
 //! more, known where it stands, that no force of ours would intercept
 //! before it gets to something we value? Then fortify that thing.
+//! Recalibrated 2026-11-04 (user: "it almost let a ravager ball into its
+//! factory, and the factory was never defended"): on Comet Catcher 4
+//! Ravagers and a Leveler (1000 metal seen at 8:20, 1240 at 8:25) drove
+//! into our factory, under the 1500 bar; a forming constructor 450 away
+//! and 3 caretakers stood by. The bar is [`MIN_VALUE`] = 800 now (raider
+//! packs of 300-700 stay under it), the dearest places are fortified
+//! first, and a place worth [`BUMP_RATIO`] times an unstarted turret's
+//! place takes its slot under [`MAX_OPEN`].
 //!
 //! - *A force*: identified enemy ground fighters (commanders too, not
 //!   constructors) seen within the last [`KNOWN`] frames, linked into
@@ -59,8 +67,9 @@ use crate::util::{distance, get_directional_point};
 /// The switch.
 pub const FEATURE: &str = "walkin";
 
-/// A force worth this much metal or more counts.
-pub const MIN_VALUE: f32 = 1500.0;
+/// A force worth this much metal or more counts (the user's 1500 until
+/// 2026-11-04, see the module notes).
+pub const MIN_VALUE: f32 = 800.0;
 
 /// Enemies seen within this many frames are known where they stand.
 const KNOWN: i32 = 300;
@@ -119,6 +128,10 @@ const DWELL_LINK: f32 = 300.0;
 
 /// Walk-in turrets under way at once, at most.
 const MAX_OPEN: usize = 2;
+
+/// With [`MAX_OPEN`] under way, a place worth this many times the place of
+/// an unstarted walk-in turret takes its slot (the cheapest such goes).
+const BUMP_RATIO: f32 = 1.5;
 
 /// Walk-in turrets per place (within [`CAP_RADIUS`]) per [`CAP_WINDOW`].
 const PLACE_CAP: usize = 3;
@@ -237,6 +250,7 @@ pub struct Stats {
     pub late: u32,
     pub nosite: u32,
     pub stood_down: u32,
+    pub bumped: u32,
 }
 
 impl Stats {
@@ -244,7 +258,7 @@ impl Stats {
         json!({
             "groups": self.groups, "threats": self.threats, "defended": self.defended, "breaches": self.breaches,
             "opened": self.opened, "pending": self.pending, "capped": self.capped, "outranged": self.outranged,
-            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down,
+            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped,
         })
     }
 }
@@ -282,6 +296,22 @@ fn stand(standing: &mut Vec<(Vec3, i32, i32)>, anchor: Vec3, frame: i32) -> f32 
             standing.push((anchor, frame, frame));
             0.0
         }
+    }
+}
+
+/// The open walk-in turret that gives way to a place worth `value`: of
+/// those not started, the one guarding the least, if `value` is
+/// [`BUMP_RATIO`] times that or more. `open`: (task, its place's worth,
+/// started).
+fn bump<T: Copy>(open: &[(T, f32, bool)], value: f32) -> Option<T> {
+    (open.iter()).filter(|o| !o.2 && o.1 * BUMP_RATIO <= value).min_by(|a, b| a.1.total_cmp(&b.1)).map(|o| o.0)
+}
+
+/// What an issue's worth stands for, undiscounted (walk-in turrets: their
+/// place's value).
+fn worth_value(w: &Worth) -> f32 {
+    match *w {
+        Worth::Flat(value) | Worth::Deadline { value, .. } | Worth::Stream { value, .. } => value,
     }
 }
 
@@ -366,6 +396,8 @@ impl Ai {
                 }
             }
         }
+        // The dearest places first: they get the turrets under the caps.
+        assessed.sort_by(|a, b| b.place.value.total_cmp(&a.place.value));
         for a in assessed {
             if a.breach {
                 self.logistics.walkin.stats.breaches += 1;
@@ -671,7 +703,22 @@ impl Ai {
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
             .count();
-        if under_way >= MAX_OPEN || here >= PLACE_CAP {
+        let bumped = if under_way >= MAX_OPEN && here < PLACE_CAP {
+            let open: Vec<(TaskId, f32, bool)> = (self.logistics.issues.values())
+                .filter(|i| i.kind == Kind::Walkin)
+                .map(|i| (i.task, worth_value(&i.worth), i.started))
+                .collect();
+            bump(&open, a.place.value)
+        } else {
+            None
+        };
+        if let Some(task) = bumped {
+            self.logistics.walkin.opened.retain(|o| o.2 != task);
+            self.logistics.walkin.called.remove(&task);
+            self.logistics.walkin.stats.bumped += 1;
+            self.logistics_close(task, "bumped");
+            self.eco.eco_logistics_drop(task);
+        } else if under_way >= MAX_OPEN || here >= PLACE_CAP {
             self.logistics.walkin.stats.capped += 1;
             self.walkin_note("capped", a, json!({"under_way": under_way, "here": here}));
             return;
@@ -941,6 +988,18 @@ mod tests {
         let frame = 600 + 30 * 100 + DWELL_GAP + 1;
         standing.retain(|&(_, _, last)| frame - last <= DWELL_GAP);
         assert_eq!(stand(&mut standing, base, frame), 0.0);
+    }
+
+    #[test]
+    fn a_dearer_place_takes_the_slot_of_the_cheapest_unstarted_turret() {
+        let open = [(1, 700.0, false), (2, 600.0, false), (3, 500.0, true)];
+        // The factory (2000): the cheapest unstarted goes, not the started one.
+        assert_eq!(bump(&open, 2000.0), Some(2));
+        // Not dear enough against either.
+        assert_eq!(bump(&open, 850.0), None);
+        assert_eq!(bump(&open, 900.0), Some(2));
+        // Everything started: no slot.
+        assert_eq!(bump(&[(1, 600.0, true)], 5000.0), None);
     }
 
     #[test]
