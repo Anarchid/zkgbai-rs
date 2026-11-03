@@ -33,15 +33,26 @@ const RELIABILITY: f32 = 0.8;
 /// solars).
 const LOCAL_EDGE: f32 = 1.15;
 
-/// Hill sites are sampled every so many elmos (one turbine each, packed
-/// close enough to link to each other: pylon range 63 each).
+/// The hills are surveyed every so many elmos (for a batch's first site).
 const CELL: f32 = 64.0;
+
+/// Lanes between the turbines of a batch, elmos. A turbine blocks 48x48
+/// (footprint 3, scaled by 2 squares), and a mobile footprint n needs
+/// 2n-1 free squares: commanders and constructors 3, upgraded commanders
+/// (AKBOT3) and most tanks 5. On the old 64-elmo grid the lanes were 16
+/// elmos, so a batch was a wall and a builder inside one was walled in
+/// (Fairyland, 2026-11-03). Batches stand on a lattice of footprint +
+/// [`LANE`] (96: neighbours still link, pylon range 63 each), and no
+/// turbine goes up with less than [`MIN_LANE`] to anything queued or
+/// built.
+const LANE: f32 = 48.0;
+const MIN_LANE: f32 = 40.0;
 
 /// Hill sites worth less than this (energy per turbine) are not looked at.
 const HILL_MIN_WORTH: f32 = 1.15;
 
-/// A batch on a hill: this many turbines, from sites this near the first
-/// and at most this much worse.
+/// A batch on a hill: this many turbines, from lattice sites this near
+/// the first and at most this much worse.
 const BATCH: usize = 8;
 const BATCH_REACH: f32 = 256.0;
 const BATCH_SLACK: f32 = 0.1;
@@ -60,6 +71,33 @@ const HILL_SHORTLIST: usize = 12;
 /// the engine's.
 pub fn energy_make(def: UnitDef) -> f32 {
     def.custom_param("income_energy").and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
+}
+
+/// Half the extents (x, z) of a building's footprint in elmos, by facing.
+fn footprint_half(def: UnitDef, facing: i32) -> (f32, f32) {
+    let (x, z) = (def.x_size() as f32 * 4.0, def.z_size() as f32 * 4.0);
+    if facing == 0 || facing == 2 { (x, z) } else { (z, x) }
+}
+
+/// The free lane between two footprints (centres and half extents),
+/// elmos: corner to corner for diagonal neighbours, else the gap along the
+/// axis they face each other on; negative where they overlap.
+fn lane_between(a: Vec3, ha: (f32, f32), b: Vec3, hb: (f32, f32)) -> f32 {
+    let gx = (a.x - b.x).abs() - ha.0 - hb.0;
+    let gz = (a.z - b.z).abs() - ha.1 - hb.1;
+    if gx > 0.0 && gz > 0.0 { gx.hypot(gz) } else { gx.max(gz) }
+}
+
+/// The points of a square lattice of `pitch` within `reach` of its centre,
+/// as offsets, nearest first (the centre left out).
+fn lattice(pitch: f32, reach: f32) -> Vec<(f32, f32)> {
+    let n = (reach / pitch) as i32;
+    let mut out: Vec<(f32, f32)> = (-n..=n)
+        .flat_map(|i| (-n..=n).map(move |j| (i as f32 * pitch, j as f32 * pitch)))
+        .filter(|&(dx, dz)| (dx != 0.0 || dz != 0.0) && dx.hypot(dz) <= reach)
+        .collect();
+    out.sort_by(|a, b| a.0.hypot(a.1).total_cmp(&b.0.hypot(b.1)));
+    out
 }
 
 /// The wind as the gadget makes it.
@@ -255,7 +293,8 @@ impl Ai {
         // the walk (there and back, shared by the batch).
         let walk = |p: Vec3| 2.0 * (distance(wpos, p) - here).max(0.0) / speed;
         let taken = self.eco_wind_taken();
-        let free = |p: Vec3| !taken.iter().any(|&t| distance(t, p) < CELL * 0.75);
+        let half = footprint_half(wind, 0);
+        let free = |p: Vec3| taken.iter().all(|&t| lane_between(p, half, t, half) >= MIN_LANE);
         let mut shortlist: Vec<(Vec3, f32, f32)> = (self.eco.wind.hills.iter())
             .filter(|&&(p, worth)| worth / wind_cost >= HILL_EDGE * local_rate && distance(wpos, p) <= HILL_REACH)
             .filter(|&&(p, _)| free(p) && self.eco_safe_ground(p))
@@ -287,35 +326,56 @@ impl Ai {
             return false;
         }
 
-        // The batch: the first site and the nearest good free ones by it.
-        let mut near: Vec<Vec3> = (self.eco.wind.hills.iter())
-            .filter(|&&(p, w)| p != first && w >= worth - BATCH_SLACK && distance(p, first) <= BATCH_REACH)
-            .filter(|&&(p, _)| free(p) && self.eco_safe_ground(p))
-            .map(|&(p, _)| p)
-            .collect();
-        near.sort_by(|a, b| distance(*a, first).total_cmp(&distance(*b, first)));
+        // The batch: the first site and the good free sites of a lattice
+        // round it with lanes between the turbines, nearest first (more
+        // than a batch: some may not take a turbine).
+        let Some(model) = self.eco.wind.model else { return false };
+        let map = self.cb.map();
+        let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
+        let pitch = 2.0 * half.0.max(half.1) + LANE;
         let mut sites = vec![first];
-        sites.extend(near.into_iter().take(BATCH - 1));
+        for (dx, dz) in lattice(pitch, BATCH_REACH) {
+            let (x, z) = (first.x + dx, first.z + dz);
+            if x < 0.0 || z < 0.0 || x >= w || z >= h {
+                continue;
+            }
+            let g = self.eco.height_map.height_at(x, z);
+            let p = Vec3::new(x, g, z);
+            if g > 0.0 && model.worth(g) >= worth - BATCH_SLACK && free(p) && self.eco_safe_ground(p) {
+                sites.push(p);
+            }
+        }
         let hill = Hill { sites, worth, walk: walk(first), link, wind_range };
         self.eco_queue_hill(wind, hill, local_worth, rate / local_rate)
     }
 
     fn eco_queue_hill(&mut self, wind: UnitDef, hill: Hill, local_worth: f32, edge: f32) -> bool {
         let map = self.cb.map();
-        let mut queued = 0;
+        // The engine keeps this many squares round the turbine clear of
+        // standing buildings and features; `eco_wind_lanes_clear` keeps
+        // the lanes to queued jobs.
+        let spacing = (MIN_LANE / 8.0).ceil() as i32;
+        let mut placed: Vec<Vec3> = Vec::new();
         for &p in &hill.sites {
-            let site = map.find_closest_build_site(wind, p, CELL / 2.0, 0, 0);
-            if site.x < 0.0 {
+            if placed.len() >= BATCH {
+                break;
+            }
+            let site = map.find_closest_build_site(wind, p, CELL / 2.0, spacing, 0);
+            if site.x < 0.0 || !self.eco_wind_lanes_clear(wind, site) {
+                continue;
+            }
+            // Each turbine links to one before it (else its energy could
+            // not overdrive).
+            let linked = hill.wind_range <= 0.0 || placed.iter().any(|&q| distance(q, site) < 2.0 * hill.wind_range);
+            if !placed.is_empty() && !linked {
                 continue;
             }
             if self.eco_add_simple(wind, site, List::Wind, Some(List::Wind)).is_some() {
-                queued += 1;
+                placed.push(site);
             }
         }
-        if queued == 0 {
-            return false;
-        }
-        let first = hill.sites[0];
+        let queued = placed.len();
+        let Some(&first) = placed.first() else { return false };
         if let Some(l) = hill.link.as_ref().filter(|l| l.pylons > 0) {
             self.eco_lay_pylons(first, hill.wind_range, l.to, l.range, "a turbine batch on a hill");
         }
@@ -341,6 +401,18 @@ impl Ai {
     fn eco_wind_taken(&self) -> Vec<Vec3> {
         let eco = &self.eco;
         (eco.windgens.iter().map(|u| u.pos())).chain(eco.wind_tasks.iter().map(|&t| eco.task_pos(t))).collect()
+    }
+
+    /// Whether a turbine at `site` keeps [`MIN_LANE`] to every queued job
+    /// and every turbine of ours (to the rest standing, the engine's
+    /// build-site spacing sees).
+    fn eco_wind_lanes_clear(&self, wind: UnitDef, site: Vec3) -> bool {
+        let eco = &self.eco;
+        let half = footprint_half(wind, 0);
+        let jobs = (eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)))
+            .filter_map(|t| t.as_construction().map(|c| (t.position, footprint_half(c.build_type, c.facing))));
+        let turbines = eco.windgens.iter().map(|u| (u.pos(), half));
+        jobs.chain(turbines).all(|(p, h)| lane_between(site, half, p, h) >= MIN_LANE)
     }
 
     /// Ground of ours, off the front, no enemy in sight of it: where
@@ -430,5 +502,31 @@ mod tests {
         assert_eq!(m.worth(-20.0), 1.2);
         // Shallow water: a turbine at sea level.
         assert_eq!(m.worth(-5.0), 1.0);
+    }
+
+    #[test]
+    fn batch_lanes() {
+        // A turbine: footprint 3, 6 squares, 48 elmos.
+        let t = (24.0, 24.0);
+        let at = |x: f32, z: f32| Vec3::new(x, 0.0, z);
+        // The old 64-elmo grid left 16-elmo lanes: a wall to anything but
+        // a footprint-1 unit (a commander needs 3 squares, 24 elmos).
+        assert_eq!(lane_between(at(0.0, 0.0), t, at(64.0, 0.0), t), 16.0);
+        // The lattice: 96 apart, so 48 to walk through, and neighbours
+        // still link (pylon range 63 each, 126 together).
+        let pitch = 2.0 * t.0 + LANE;
+        let l = lattice(pitch, BATCH_REACH);
+        assert_eq!(l.len(), 20);
+        assert!(l[..4].iter().all(|&(dx, dz)| dx.hypot(dz) == 96.0));
+        assert!(l[4..8].iter().all(|&(dx, dz)| (dx.hypot(dz) - 96.0 * 2f32.sqrt()).abs() < 1e-3));
+        assert!(pitch < 126.0);
+        for &(dx, dz) in &l {
+            assert!(lane_between(at(0.0, 0.0), t, at(dx, dz), t) >= LANE);
+        }
+        // Diagonal neighbours: corner to corner.
+        assert!((lane_between(at(0.0, 0.0), t, at(96.0, 96.0), t) - 48.0 * 2f32.sqrt()).abs() < 1e-3);
+        // Overlap is negative; a solar (80 wide) by a turbine.
+        assert!(lane_between(at(0.0, 0.0), t, at(30.0, 10.0), t) < 0.0);
+        assert_eq!(lane_between(at(0.0, 0.0), t, at(0.0, 104.0), (40.0, 40.0)), 40.0);
     }
 }
