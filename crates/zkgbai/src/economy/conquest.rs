@@ -89,6 +89,17 @@
 //! walking past metal; an objective is one turret site (the search plans
 //! single sites), and attacks add Lotuses only.
 //!
+//! Allies (user, 2026-11-03: "they build independent turrets instead of
+//! assisting each other; assisting ally turrets in our objective region when
+//! we want to build turrets might be good even if they're humans or
+//! Circuits"): before a conquest turret is ordered, an ally's turret of its
+//! kind standing at the site counts as ours, and an ally's turret frame
+//! within `ALLY_TURRET_REACH` is helped instead (any ally). With allied
+//! ZKGBAIs, an instance whose objectives the lower-numbered ones would all
+//! take goes as support: it walks out taking mexes as before, orders no
+//! turrets of its own and helps the allied turrets rising within
+//! `SUPPORT_RADIUS` of the objective, for `SUPPORT_FOR` after it arrives.
+//!
 //! Every decision goes to the journal (`conquest` records).
 
 use std::sync::mpsc;
@@ -137,6 +148,10 @@ const ENROUTE_DETOUR: f32 = 700.0;
 const ENROUTE_DETOUR_COST: f32 = 0.5;
 /// Turret sites an objective has (the search's `max_sites`).
 const SITES: usize = 1;
+/// Allies' turrets (see the module notes).
+const ALLY_TURRET_REACH: f32 = 400.0;
+const SUPPORT_RADIUS: f32 = 800.0;
+const SUPPORT_FOR: i32 = 30 * 180;
 /// Undecided objectives are given up at this game time.
 const WATCH_UNTIL: i32 = 30 * 60 * 12;
 /// Seconds the denial counts for, and the share of income at stake that
@@ -334,6 +349,10 @@ pub struct Op {
     /// (with when each was asked for).
     pub home_guard: Option<(Turret, i32)>,
     pub guard: Option<(Turret, i32)>,
+    /// Support: the allies' objective, no turrets of our own (see the module
+    /// notes); our jobs helping allied turrets there.
+    pub support: bool,
+    pub help: Vec<TaskId>,
     /// Turrets added for attacks (after the objective's own, the first
     /// `sites`), and when the last attack counted.
     pub sites: usize,
@@ -770,9 +789,12 @@ impl Ai {
         };
         let mut ranked = best;
         ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
-        let best =
-            if self.iq.peers.is_empty() { ranked.first().copied() } else { self.conquest_team_pick(crew, &ranked) };
-        let Some((idx, expected)) = best else {
+        let best = if self.iq.peers.is_empty() {
+            ranked.first().map(|&(i, e)| (i, e, false))
+        } else {
+            self.conquest_team_pick(crew, &ranked)
+        };
+        let Some((idx, expected, support)) = best else {
             self.eco.conquest.done = true;
             self.log("conquest: no objective is open");
             self.op_emit("conquest", json!({"event": "none", "t": frame / 30}));
@@ -796,6 +818,8 @@ impl Ai {
             danger: 0,
             home_guard: None,
             guard: None,
+            support,
+            help: Vec::new(),
             sites: n_sites,
             added: 0,
             last_attack: 0,
@@ -826,7 +850,7 @@ impl Ai {
     /// nearest its commander (user, 2026-11-03: "we typically spread around,
     /// so the closest to us is the pick; we can probe what they would pick,
     /// since we know where their commander is").
-    fn conquest_team_pick(&self, crew: i32, eligible: &[(usize, f32)]) -> Option<(usize, f32)> {
+    fn conquest_team_pick(&self, crew: i32, eligible: &[(usize, f32)]) -> Option<(usize, f32, bool)> {
         let c = &self.eco.conquest;
         let center = |i: usize| self.conquest_v3(c.objectives[i].center());
         let mut before: Vec<(i32, Vec3)> = (self.cb.friendly_units().into_iter())
@@ -849,12 +873,14 @@ impl Ai {
         let nearest = |pool: &mut dyn Iterator<Item = &(usize, f32)>| {
             pool.min_by(|a, b| distance(center(a.0), ours).total_cmp(&distance(center(b.0), ours))).copied()
         };
-        let pick = nearest(&mut eligible.iter().filter(|(i, _)| !claimed.contains(i)))
-            .or_else(|| nearest(&mut eligible.iter()));
+        // None left: support the allies at the nearest of theirs.
+        let pick = (nearest(&mut eligible.iter().filter(|(i, _)| !claimed.contains(i))).map(|(i, e)| (i, e, false)))
+            .or_else(|| nearest(&mut eligible.iter()).map(|(i, e)| (i, e, true)));
         self.log(&format!(
-            "conquest: allied ZKGBAIs on teams {:?} before us would take objectives {claimed:?}; ours: {:?}",
+            "conquest: allied ZKGBAIs on teams {:?} before us would take objectives {claimed:?}; ours: {:?}{}",
             before.iter().map(|b| b.0).collect::<Vec<_>>(),
-            pick.map(|p| p.0)
+            pick.map(|p| p.0),
+            if pick.is_some_and(|p| p.2) { " (support)" } else { "" }
         ));
         pick
     }
@@ -909,6 +935,9 @@ impl Ai {
         }
         if let Some(bonus) = self.conquest_enroute_bonus(op, wid, task) {
             return Some(bonus);
+        }
+        if op.help.contains(&task) {
+            return (wid == op.crew).then_some(BONUS);
         }
         let banked = self.eco.metal >= BANK_EMPTY;
         let guard = [op.home_guard, op.guard].into_iter().flatten().find(|(t, _)| t.task == Some(task));
@@ -973,8 +1002,19 @@ impl Ai {
             Stage::Walk => {
                 let near = self.eco.workers.get(&crew).is_some_and(|w| distance(w.get_pos(), center) <= ARRIVE);
                 if near || frame - started > WALK_TIMEOUT {
-                    self.conquest_decide(frame, if near { "arrived" } else { "walk timed out" });
+                    if self.eco.conquest.op.as_ref().is_some_and(|op| op.support) {
+                        if let Some(op) = &mut self.eco.conquest.op {
+                            op.stage = Stage::Watch;
+                            op.fortify_from = frame;
+                        }
+                        self.log(&format!("conquest: arrived to support the allies at objective {idx}"));
+                    } else {
+                        self.conquest_decide(frame, if near { "arrived" } else { "walk timed out" });
+                    }
                 }
+            }
+            Stage::Watch if self.eco.conquest.op.as_ref().is_some_and(|op| op.support) => {
+                self.conquest_support_step(frame, center);
             }
             Stage::Watch => {
                 let guarded = self.conquest_guard_step(frame, false);
@@ -1109,6 +1149,9 @@ impl Ai {
             t.built = true;
             t.task = None;
             return t;
+        }
+        if let Some(a) = self.conquest_turret_ally(t, def) {
+            return a;
         }
         if t.task.is_some_and(|id| self.eco.tasks.get(id).is_some()) || (t.task.is_some() && t.retries >= MAX_RETRIES) {
             return t;
@@ -1301,6 +1344,61 @@ impl Ai {
         self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0)
     }
 
+    /// Allies' turrets for one of ours (see the module notes): `Some` built,
+    /// when an ally's of its kind stands at its site; `Some` with a job on
+    /// it, when an ally's turret frame rises near; else `None` (ours).
+    fn conquest_turret_ally(&mut self, t: Turret, def: UnitDef) -> Option<Turret> {
+        if self.allies.is_empty() {
+            return None;
+        }
+        let near = self.cb.friendly_units_in_cylinder(t.site, ALLY_TURRET_REACH);
+        let allied =
+            |u: &springai::Unit| u.team() != self.team_id && self.allies.contains(&u.team()) && u.health() > 0.0;
+        if near.iter().any(|u| {
+            allied(u)
+                && !u.is_being_built()
+                && distance(u.pos(), t.site) <= BUILT_RADIUS
+                && u.def().is_some_and(|d| d.id() == def.id())
+        }) {
+            return Some(Turret { built: true, task: None, ..t });
+        }
+        if t.task.is_some_and(|id| self.eco.tasks.get(id).is_some()) {
+            return None;
+        }
+        let frame = near.into_iter().find(|u| {
+            allied(u) && u.is_being_built() && u.def().is_some_and(|d| self.defs.name(d).starts_with("turret"))
+        })?;
+        let id = self.eco_task_on(frame).or_else(|| self.eco_help_frame(frame, List::Porc))?;
+        Some(Turret { site: frame.pos(), task: Some(id), ..t })
+    }
+
+    /// Support (see the module notes): help the allied turrets rising near
+    /// the objective; done after `SUPPORT_FOR` with none left to help.
+    fn conquest_support_step(&mut self, frame: i32, center: Vec3) {
+        let frames: Vec<springai::Unit> = (self.cb.friendly_units_in_cylinder(center, SUPPORT_RADIUS).into_iter())
+            .filter(|u| {
+                u.team() != self.team_id
+                    && self.allies.contains(&u.team())
+                    && u.health() > 0.0
+                    && u.is_being_built()
+                    && u.def().is_some_and(|d| self.defs.name(d).starts_with("turret"))
+            })
+            .collect();
+        let mut help = Vec::new();
+        for u in &frames {
+            if let Some(id) = self.eco_task_on(*u).or_else(|| self.eco_help_frame(*u, List::Porc)) {
+                help.push(id);
+            }
+        }
+        let since = self.eco.conquest.op.as_ref().map_or(frame, |op| op.fortify_from);
+        if let Some(op) = &mut self.eco.conquest.op {
+            op.help = help;
+        }
+        if frames.is_empty() && frame - since > SUPPORT_FOR {
+            self.conquest_end("support done", true);
+        }
+    }
+
     /// Our unit was hit: if near an objective (ours now, or held), note it
     /// (see `conquest_attacks`).
     pub(crate) fn conquest_attacked(&mut self, unit: springai::Unit, attacker: Option<springai::Unit>) {
@@ -1481,6 +1579,14 @@ impl Ai {
                 continue;
             }
             if task.is_some() && retries >= MAX_RETRIES {
+                continue;
+            }
+            // An ally's turret here stands, or rises near: theirs or help.
+            let current = self.eco.conquest.op.as_ref().map(|op| op.turrets[i]);
+            if let Some(a) = current.and_then(|c| self.conquest_turret_ally(c, def)) {
+                if let Some(op) = &mut self.eco.conquest.op {
+                    op.turrets[i] = a;
+                }
                 continue;
             }
             // Within our means: one at a time, the objective's own spots
@@ -1680,6 +1786,8 @@ mod tests {
             danger: 0,
             home_guard: None,
             guard: None,
+            support: false,
+            help: Vec::new(),
             sites: 0,
             added: 0,
             last_attack: 0,
