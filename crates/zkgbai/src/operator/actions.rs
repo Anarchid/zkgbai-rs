@@ -124,6 +124,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Defense",
         "a 1v1 jump, tank or ship opening builds a 200-metal wave of scouts first, then one per 8 raiders",
     ),
+    (
+        "picketstrike",
+        "Defense",
+        "pickets near a contact fight it together when the fight predictor has them winning, instead of shadowing (default on)",
+    ),
     ("airstrikes", "Military", "mission-driven aircraft production, strikes and interception"),
     (
         "airspeculate",

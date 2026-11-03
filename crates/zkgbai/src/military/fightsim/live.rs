@@ -632,6 +632,51 @@ impl Ai {
         (snap.armed(0) > 0 && snap.armed(1) > 0).then_some((snap, notes))
     }
 
+    /// Our units `ours` against enemies `theirs` as they stand now, judged
+    /// as the veto judges (kiting losses over [`VETO_HORIZON`]): each
+    /// side's killed share of its armed metal. None without the predictor,
+    /// without an armed unit on each side, or with what the sim does not
+    /// do (shields, submerged fights, too many units).
+    pub(crate) fn fight_judge_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<[f32; 2]> {
+        if !self.fightsim_runs() {
+            return None;
+        }
+        let model = veto_model().ok()?;
+        let frame = self.frame;
+        let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
+        for u in ours {
+            let (Some(def), hp, p) = (u.def(), u.health(), u.pos()) else { continue };
+            if hp <= 0.0 {
+                continue;
+            }
+            if p.y < -5.0 || def.weapon_mounts().iter().filter_map(|m| m.weapon_def()).any(|w| w.is_shield()) {
+                return None;
+            }
+            let spec = self.fight_spec_of(u.id(), def);
+            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
+        }
+        let mut foes: Vec<(i32, UnitDef, f32, Vec3)> = Vec::new();
+        for eid in theirs {
+            let Some(e) = self.war.targets.get(eid) else { continue };
+            if e.is_dead || !e.identified || frame - e.last_seen > LATCH_MEMORY {
+                continue;
+            }
+            let Some(def) = e.ud else { continue };
+            if e.position.y < -5.0 {
+                return None;
+            }
+            foes.push((*eid, def, e.get_health() * e.def_health(), e.position));
+        }
+        for (eid, def, hp, p) in foes {
+            let spec = self.fight_spec_of(eid, def);
+            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z });
+        }
+        if snap.units.len() > MAX_UNITS || snap.armed(0) == 0 || snap.armed(1) == 0 {
+            return None;
+        }
+        Some(self.fightsim_judge(model, &snap).0)
+    }
+
     /// Judge `snap` on this thread, counting the cost.
     fn fightsim_judge(&mut self, model: &Model, snap: &FightSnapshot) -> ([f32; 2], bool) {
         let t0 = Instant::now();
