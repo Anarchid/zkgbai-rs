@@ -1096,9 +1096,6 @@ impl Ai {
         if let Some(bonus) = self.conquest_seized_bonus(wid, task) {
             return Some(bonus);
         }
-        if let Some(bonus) = self.conquest_route_bonus(wid, task) {
-            return Some(bonus);
-        }
         let op = self.eco.conquest.op.as_ref()?;
         // Before setting out the commander stays home on the home guard: the
         // objective's jobs and those on the way wait for it (it had walked

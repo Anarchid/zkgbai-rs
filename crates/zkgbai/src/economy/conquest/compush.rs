@@ -22,7 +22,9 @@
 //! picked as it would be, and the start is the spot of our box whose ground
 //! walk through three mexes (`ROUTE_MEXES`, spots within `ROUTE_RADIUS` of
 //! it) to the objective is shortest, the mexes in that walk's order. Until
-//! the commander sets out, the next of them not yet ours is its job first.
+//! the commander sets out, the next of them not yet ours is the commander's
+//! mex, its walk free and other mexes `ROUTE_DETOUR` dearer; energy
+//! competes with it as in any opening.
 
 use serde_json::json;
 use springai::Vec3;
@@ -32,7 +34,7 @@ use zk_terrain::paths::Paths;
 use super::super::{List, TaskId, Worker, WorkerTask};
 use super::{
     BANK_EMPTY, BONUS, BUILT_RADIUS, FORTIFY_TIMEOUT, GUARD_TURRET, HELP_BONUS, HELP_RADIUS, Held, MAX_RETRIES,
-    MEX_FIRST, SITE_FORWARD, Turret,
+    SITE_FORWARD, Turret,
 };
 use crate::Ai;
 use crate::terrain::pos;
@@ -50,6 +52,8 @@ const SEIZE_COOLDOWN: i32 = 30 * 120;
 /// The opening route: this many mexes, among the spots this near the start.
 const ROUTE_MEXES: usize = 3;
 const ROUTE_RADIUS: f32 = 1600.0;
+/// A commander's mex off the route, while it is walked: this much costlier.
+const ROUTE_DETOUR: f32 = 1000.0;
 /// A mex job this near a route spot is its.
 const ROUTE_JOB: f32 = 100.0;
 /// How long the start position waits for the terrain.
@@ -448,12 +452,22 @@ impl Ai {
         self.eco.conquest.route_next = next;
     }
 
-    /// With `conquestroute`, until the commander sets out: the route's next
-    /// mex is a commander's job first (see `conquest_route_step`).
-    pub(super) fn conquest_route_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
+    /// With `conquestroute`, until the commander sets out: a commander's
+    /// mex pull (added to the mex cluster term). The route's next mex walks
+    /// free (`dist` is the job's walk), the other mexes are the route's
+    /// detour; energy competes as in any opening (the next mex had been a
+    /// conquest job first, outbidding every Solar: first energy at 2-3
+    /// minutes against 15 s, 4-5 energy stalls by 10:00, wins 6% against
+    /// 57% with conquest off in battery b1).
+    pub(crate) fn conquest_route_pull(&self, wid: i32, task: TaskId, dist: f32) -> f32 {
         let c = &self.eco.conquest;
-        let (_, id) = c.route_next.filter(|_| c.op.is_none() && !c.done)?;
-        (id == task && self.eco.commanders.contains(&wid)).then_some(BONUS + MEX_FIRST)
+        let Some((_, id)) = c.route_next.filter(|_| c.op.is_none() && !c.done) else {
+            return 0.0;
+        };
+        if !self.eco.commanders.contains(&wid) {
+            return 0.0;
+        }
+        if id == task { dist / 4.0 } else { -ROUTE_DETOUR }
     }
 
     /// With `conquestroute` in a one-on-one (see the module notes): the
