@@ -15,7 +15,7 @@
 //! second until they pay:
 //!
 //! `worth = HORIZON x RAID_LOSS x E[denial]`, against the turrets' metal at
-//! its price now (2x up to 2:00 falling to 1x at 4:00: metal early grows
+//! its price now (2x up to 3:00 falling to 1x at 5:00: metal early grows
 //! into more), times the gain dial (`conquest_gain`, `always` = build).
 //!
 //! While the commander is away, the constructor nearest home builds the
@@ -49,12 +49,21 @@
 //! arrival it puts one by the objective's spots, and the objective is not
 //! done until it stands. Turrets stand on the enemy's side of what they
 //! hold: the objective's guard `GUARD_FORWARD` toward the enemy from its
-//! spots' middle, the turret sites `SITE_FORWARD` toward them. The price clock runs early: 2x until 2:00, 1x from
-//! 4:00 (it was 4x to 4:00, 1x at 7:00: the first loss at an objective came
-//! a median 2:45 after setting out, the first turret 6:00). An attack on
+//! spots' middle, the turret sites `SITE_FORWARD` toward them. The price clock runs early: 2x until 3:00, 1x from
+//! 5:00 (it was 4x to 4:00, 1x at 7:00: the first loss at an objective came
+//! a median 2:45 after setting out, the first turret 6:00; 2x to 2:00 and 1x
+//! at 4:00 committed two Stingers at 2:59 on 12 metal/s on Ravaged, user
+//! 2026-11-03: "the Stinger could wait a minute"). The turrets come within
+//! our means: one under construction at a time, the objective's own spots
+//! first (its turrets wait up to `OWN_SPOTS_WAIT` for them), each only while
+//! it costs at most `AFFORD_SECS` of our metal income (else the objective
+//! watches on), and builders near them are drawn in only while metal is
+//! banked (`BANK_EMPTY`): on Ravaged two to three Stingers crawled at once
+//! with the bank at 0 for four minutes and the mexes neglected. An attack on
 //! our units within `ATTACK_RADIUS` of the objective, or of one held,
-//! commits the turrets at once and orders one more there, at most one per
-//! `ATTACK_GAP` and `MAX_ADDED` per objective.
+//! commits the turrets at once and orders one more there (a Lotus when a
+//! Stinger is beyond our means), at most one per `ATTACK_GAP` and
+//! `MAX_ADDED` per objective.
 //!
 //! Conquered ground (user, 2026-11-03: "seizing critical junctions denies
 //! them to the enemy, and the ground behind them is ours to take; nothing
@@ -165,7 +174,13 @@ const SITE_FORWARD: f32 = 100.0;
 /// at most one per `ATTACK_GAP` frames and `MAX_ADDED` per objective.
 const ATTACK_RADIUS: f32 = 900.0;
 const ATTACK_GAP: i32 = 30 * 20;
-const MAX_ADDED: u32 = 4;
+const MAX_ADDED: u32 = 2;
+/// Within our means (see the module notes).
+const AFFORD_SECS: f32 = 30.0;
+const BANK_EMPTY: f32 = 30.0;
+const OWN_SPOTS_WAIT: i32 = 30 * 60;
+/// The crew's own spots at the objective come before its turrets.
+const MEX_FIRST: f32 = 1000.0;
 
 /// Conquered ground (see the module notes).
 const FORCE_RATIO: f32 = 1.5;
@@ -315,17 +330,20 @@ pub struct Op {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Turret {
+    /// A Lotus (an attack's addition when a Stinger is beyond our means),
+    /// not the conquest turret.
+    pub light: bool,
     pub site: Vec3,
     pub task: Option<TaskId>,
     pub retries: u8,
     pub built: bool,
 }
 
-/// Metal now against metal later: 2x until 2:00, 1x from 4:00 (it was 4x
-/// to 4:00 and 1x at 7:00; see the module notes).
+/// Metal now against metal later: 2x until 3:00, 1x from 5:00 (see the
+/// module notes).
 fn metal_price(frame: i32) -> f32 {
     let minutes = frame as f32 / 1800.0;
-    1.0 + ((4.0 - minutes) / 2.0).clamp(0.0, 1.0)
+    1.0 + ((5.0 - minutes) / 2.0).clamp(0.0, 1.0)
 }
 
 fn prior() -> Vec<(Tier, f32)> {
@@ -644,6 +662,23 @@ impl Ai {
         belief.iter().map(|(_, b)| b.iter().map(|&(t, p)| p * o.denial_for(t, 0)).sum::<f32>()).sum::<f32>() / n
     }
 
+    /// Whether a turret of `def` is within our means now: its metal at most
+    /// `AFFORD_SECS` of our metal income.
+    fn conquest_affordable(&self, def: UnitDef) -> bool {
+        def.cost(self.metal) <= AFFORD_SECS * self.eco.effective_income.max(0.0)
+    }
+
+    /// The turret an attack adds: the conquest turret if within our means,
+    /// else a Lotus if that is (`Some(true)`: the Lotus), else none.
+    fn conquest_attack_turret(&self) -> Option<(UnitDef, bool)> {
+        let heavy = self.conquest_turret()?;
+        if self.conquest_affordable(heavy) {
+            return Some((heavy, false));
+        }
+        let light = self.defs.get(GUARD_TURRET)?;
+        self.conquest_affordable(light).then_some((light, true))
+    }
+
     /// (worth, priced cost, ratio) of an objective's turrets now.
     fn conquest_value(&self, o: &Objective) -> (f32, f32, f32) {
         let worth = HORIZON * RAID_LOSS * self.conquest_expected(o);
@@ -726,7 +761,10 @@ impl Ai {
             crew,
             stage: Stage::Prepare,
             mex_tasks: Vec::new(),
-            turrets: sites.into_iter().map(|site| Turret { site, task: None, retries: 0, built: false }).collect(),
+            turrets: sites
+                .into_iter()
+                .map(|site| Turret { light: false, site, task: None, retries: 0, built: false })
+                .collect(),
             started: frame,
             fortify_from: 0,
             danger: 0,
@@ -841,22 +879,23 @@ impl Ai {
         }
         let op = self.eco.conquest.op.as_ref()?;
         if op.mex_tasks.contains(&task) {
-            return (wid == op.crew).then_some(BONUS);
+            return (wid == op.crew).then_some(BONUS + MEX_FIRST);
         }
+        let banked = self.eco.metal >= BANK_EMPTY;
         let guard = [op.home_guard, op.guard].into_iter().flatten().find(|(t, _)| t.task == Some(task));
         if let Some((t, _)) = guard {
             if wid == op.crew {
                 return Some(BONUS + GUARD_BONUS);
             }
             let w = self.eco.workers.get(&wid)?;
-            return (distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS);
+            return (banked && distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS);
         }
         let t = op.turrets.iter().find(|t| t.task == Some(task))?;
         if wid == op.crew {
             return Some(BONUS);
         }
         let w = self.eco.workers.get(&wid)?;
-        (distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS)
+        (banked && distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS)
     }
 
     fn conquest_step(&mut self, frame: i32) {
@@ -938,7 +977,7 @@ impl Ai {
                 else {
                     return true;
                 };
-                (Turret { site, task: None, retries: 0, built: false }, frame)
+                (Turret { light: false, site, task: None, retries: 0, built: false }, frame)
             }
         };
         let fresh = slot.is_none();
@@ -1262,7 +1301,8 @@ impl Ai {
         if attacks.is_empty() {
             return;
         }
-        let Some(def) = self.conquest_turret() else { return };
+        // The turret an attack adds: none when even a Lotus is beyond us.
+        let Some((def, light)) = self.conquest_attack_turret() else { return };
         let toward = |p: Vec3, c: Vec3| Vec3::new(p.x + (c.x - p.x) * 0.4, p.y, p.z + (c.z - p.z) * 0.4);
         if let Some(op) = &self.eco.conquest.op
             && matches!(op.stage, Stage::Watch | Stage::Fortify)
@@ -1271,12 +1311,20 @@ impl Ai {
         {
             let center = self.conquest_v3(self.eco.conquest.objectives[op.idx].center());
             if let Some(&(_, p)) = attacks.iter().rev().find(|(_, p)| distance(*p, center) <= ATTACK_RADIUS) {
-                let watching = op.stage == Stage::Watch;
+                let watching = op.stage == Stage::Watch && !light;
+                // A Lotus while the Stingers still wait is ordered now (the
+                // op's list is ordered only once it fortifies).
+                let direct = op.stage == Stage::Watch && light;
                 let site = toward(p, center);
+                if direct {
+                    self.conquest_turret_order(Turret { light, site, task: None, retries: 0, built: false }, def);
+                }
                 if let Some(op) = &mut self.eco.conquest.op {
                     op.added += 1;
                     op.last_attack = frame;
-                    op.turrets.push(Turret { site, task: None, retries: 0, built: false });
+                    if !direct {
+                        op.turrets.push(Turret { light, site, task: None, retries: 0, built: false });
+                    }
                     if watching {
                         op.stage = Stage::Fortify;
                         op.fortify_from = frame;
@@ -1309,7 +1357,7 @@ impl Ai {
                 continue;
             };
             let (idx, center) = (h.idx, h.center);
-            let t = Turret { site: toward(p, center), task: None, retries: 0, built: false };
+            let t = Turret { light, site: toward(p, center), task: None, retries: 0, built: false };
             let t = self.conquest_turret_order(t, def);
             let h = &mut self.eco.conquest.held[i];
             h.added += 1;
@@ -1335,14 +1383,17 @@ impl Ai {
         let o = &self.eco.conquest.objectives[idx];
         let (worth, cost, ratio) = self.conquest_value(o);
         let gain = self.conquest_gain();
-        let go = ratio >= gain;
+        let means = self.conquest_turret().is_some_and(|d| self.conquest_affordable(d));
+        let go = ratio >= gain && means;
         // Watching, record only the change (and the first look).
         if stage != Stage::Watch || go {
             let expected = self.conquest_expected(o);
             self.log(&format!(
-                "conquest: {why}: turrets {} at ratio {ratio:.2} (worth {worth:.0}, cost {cost:.0} at x{:.1}, gain {gain:.2}, expected denial {expected:.1}/s)",
+                "conquest: {why}: turrets {} at ratio {ratio:.2} (worth {worth:.0}, cost {cost:.0} at x{:.1}, gain {gain:.2}, expected denial {expected:.1}/s, income {:.1}{})",
                 if go { "go up" } else { "wait" },
-                metal_price(frame)
+                metal_price(frame),
+                self.eco.effective_income,
+                if means { "" } else { ": beyond our means" }
             ));
             let belief = self.conquest_belief_json();
             self.op_emit(
@@ -1367,22 +1418,21 @@ impl Ai {
     }
 
     fn conquest_fortify(&mut self, frame: i32) {
-        let Some(def) = self.conquest_turret() else {
+        let Some(heavy) = self.conquest_turret() else {
             self.conquest_end("no turret", false);
             return;
         };
+        let lotus = self.defs.get(GUARD_TURRET).unwrap_or(heavy);
         let n = self.eco.conquest.op.as_ref().map_or(0, |op| op.turrets.len());
         for i in 0..n {
-            let Some(t) = self
-                .eco
-                .conquest
-                .op
-                .as_ref()
-                .map(|op| (op.turrets[i].site, op.turrets[i].task, op.turrets[i].retries, op.turrets[i].built))
-            else {
+            let Some(t) = self.eco.conquest.op.as_ref().map(|op| {
+                let t = op.turrets[i];
+                (t.site, t.task, t.retries, t.built, t.light)
+            }) else {
                 return;
             };
-            let (site, task, retries, built) = t;
+            let (site, task, retries, built, light) = t;
+            let def = if light { lotus } else { heavy };
             if built {
                 continue;
             }
@@ -1402,6 +1452,16 @@ impl Ai {
                 continue;
             }
             if task.is_some() && retries >= MAX_RETRIES {
+                continue;
+            }
+            // Within our means: one at a time, the objective's own spots
+            // first (for a while), and only what our income bears.
+            let (busy, spots_pending) = self.eco.conquest.op.as_ref().map_or((true, false), |op| {
+                let busy = (op.turrets.iter().enumerate())
+                    .any(|(j, o)| j != i && !o.built && o.task.is_some_and(|id| self.eco.tasks.get(id).is_some()));
+                (busy, !op.mex_tasks.is_empty() && frame - op.fortify_from < OWN_SPOTS_WAIT)
+            });
+            if busy || spots_pending || !self.conquest_affordable(def) {
                 continue;
             }
             let at = self.cb.map().find_closest_build_site(def, site, 250.0, 3, 0);
@@ -1598,11 +1658,11 @@ mod tests {
     }
 
     #[test]
-    fn the_price_clock_runs_from_two_to_one_between_two_and_four_minutes() {
+    fn the_price_clock_runs_from_two_to_one_between_three_and_five_minutes() {
         assert_eq!(metal_price(0), 2.0);
-        assert_eq!(metal_price(30 * 120), 2.0);
-        assert!((metal_price(30 * 180) - 1.5).abs() < 1e-4);
-        assert_eq!(metal_price(30 * 240), 1.0);
+        assert_eq!(metal_price(30 * 180), 2.0);
+        assert!((metal_price(30 * 240) - 1.5).abs() < 1e-4);
+        assert_eq!(metal_price(30 * 300), 1.0);
         assert_eq!(metal_price(30 * 600), 1.0);
     }
 
