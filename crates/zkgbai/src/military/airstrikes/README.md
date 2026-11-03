@@ -52,7 +52,8 @@ Primary missions:
   fighter) with no AA or fighter within 1000 elmos of it, and little ground AA
   is on the way (risk <= 0.15), the Raptors that are ready go anyway, even
   one: they keep firing until it dies or flees, for up to 300 s instead of the
-  usual 150 (`disable=raptorwear`). Staged (`airstrike-raptors` vs
+  usual 150 (`disable=raptorwear`). A ready Magpie joins them as in the full
+  package: its EMG slows the quarry. Staged (`airstrike-raptors` vs
   `airstrike-revenants`, smoke runs in zkgbai-runs/gunships): two Raptors do
   ~28 damage/s to a hovering Revenant (strafing passes) and kill one in about
   three minutes. A Revenant is not harmless: its rocket salvos hit strafing
@@ -84,6 +85,22 @@ Primary missions:
   in the air; launch takes the cheapest package it can fill, so a Phoenix
   goes at a light raider only when no Magpie is ready. Raiders the
   firefighters are already on are left to them.
+- Airpads (`unit_refuel_pad_handler`): a landed aircraft rearms (Likho 25 s,
+  Odin 30 s), then sits until fully repaired at the pad's 2.5 buildpower, HP/s
+  = 2.5 x max HP / (0.5 x cost): a Likho 5.9 (30% takes ~120 s), an Odin 17
+  (one back at 43% sat 250 s on Agalta, 2026-11-03, flight and rearm
+  included), a Raptor 18 (measured 18.8). Zero-K's `noammo` reads
+  3 for that repair phase; the aircraft is armed again and any order lifts it
+  off. A primary mission may take it at 70% health or more when its own
+  survival check at current health passes (`disable=padlaunch`); secondary
+  ones wait for 95%. The economy puts a caretaker (15 repair buildpower, three
+  times the pad; HP/s = 15 x max HP / cost, a Raptor 55 as measured) beside
+  each airpad with a standing area repair over it once combat aircraft are
+  worth 1000 metal (`disable=padnano`), outside the one-per-10-income
+  caretaker budget. Staged with the `zk-padlab.sdd` mutator
+  (zkgbai-runs/padrepair, wounds team 0 Raptors to 35% every 120 s;
+  `airstrike-raptors-pad` vs `airstrike-revenants`): 40 s on the pad with
+  both off, 4-11 s with both on (`from_pad=1` launches at >= 70%).
 - Heavy aircraft in sight (Nimbus, Krow, Odin, Revenant): Likhos, as many as
   each adds 250 metal of damage value, when the target can be reached within
   25 seconds. ZK aims the bomb at the quarry's straight-line lead point, so

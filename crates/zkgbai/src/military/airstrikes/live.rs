@@ -41,6 +41,22 @@ struct Utilization {
     aborted: BTreeMap<&'static str, usize>,
 }
 
+/// Zero-K's `noammo` rules param (`unit_bomber_command`): 0 armed, 1 flying
+/// to a pad for ammo, 2 rearming on a pad, 3 armed again and sitting on the
+/// pad to be repaired (any new order lifts it off, armed).
+const PAD_REPAIRING: f32 = 3.0;
+fn needs_ammo(noammo: f32) -> bool {
+    noammo == 1.0 || noammo == 2.0
+}
+/// A rearmed aircraft still on the pad may leave for a primary mission at
+/// this much health (`padlaunch`), when the mission's own survival check at
+/// its current health passes too. An airpad repairs at 2.5 buildpower: a
+/// Likho takes ~120 s to mend 30%, an Odin back from 43% sat 250 s (with its
+/// flight home and 30 s rearm). Staged (zkgbai-runs/padrepair/smoke5):
+/// Raptors wounded to 35% sat 40 s on the pad alone, 4-11 s with this and
+/// a pad caretaker.
+pub(super) const PAD_LAUNCH_HEALTH: f32 = 0.7;
+
 fn readiness(reserved: bool, active: bool, empty: bool, healthy: bool, at_home: bool) -> &'static str {
     if reserved {
         "operator"
@@ -376,24 +392,43 @@ impl Ai {
         }
     }
 
-    /// Aircraft of this kind free for a new sortie: idle at home, loaded and
-    /// healthy, at most `n` of them.
-    fn airstrike_ready(&self, kind: Plane, busy: &BTreeSet<i32>, home: Vec3, n: usize) -> Vec<i32> {
-        self.bomber_handler
+    /// Aircraft of this kind free for a new sortie, at most `n` of them: idle
+    /// at home, loaded and healthy, and with `pad_floor` also those rearmed
+    /// on a pad and repaired to at least that share of their health (the
+    /// healthiest first, after the ones at home).
+    fn airstrike_ready(
+        &self,
+        kind: Plane,
+        busy: &BTreeSet<i32>,
+        home: Vec3,
+        n: usize,
+        pad_floor: Option<f32>,
+    ) -> Vec<i32> {
+        let mut ready: Vec<_> = self
+            .bomber_handler
             .units
             .iter()
-            .filter(|(id, a)| {
-                !busy.contains(id)
-                    && !springai::reserved::is_reserved(self.cb, **id)
-                    && a.kind == kind
-                    && !a.returning
-                    && a.unit.rules_param_float("noammo", 0.0) == 0.0
-                    && a.unit.health() >= a.unit.max_health() * 0.95
-                    && distance(a.unit.pos(), home) < 450.0
+            .filter(|(id, a)| a.kind == kind && !busy.contains(id) && !springai::reserved::is_reserved(self.cb, **id))
+            .filter_map(|(id, a)| {
+                let health = a.unit.health() / a.unit.max_health().max(1.0);
+                let noammo = a.unit.rules_param_float("noammo", 0.0);
+                let at_home = !a.returning && noammo == 0.0 && health >= 0.95 && distance(a.unit.pos(), home) < 450.0;
+                let on_pad = noammo == PAD_REPAIRING && pad_floor.is_some_and(|floor| health >= floor);
+                (at_home || on_pad).then_some((!at_home, -health, *id))
             })
-            .take(n)
-            .map(|(id, _)| *id)
-            .collect()
+            .collect();
+        ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+        ready.into_iter().take(n).map(|(_, _, id)| id).collect()
+    }
+
+    /// Metal in combat aircraft (Sparrows aside): what airpad caretakers
+    /// are for (`padnano`).
+    pub(crate) fn airstrike_fleet_metal(&self) -> f32 {
+        (self.bomber_handler.units.values())
+            .filter(|a| a.kind != Plane::Sparrow)
+            .filter_map(|a| a.unit.def())
+            .map(|d| d.cost(self.metal))
+            .sum()
     }
 
     /// Whether a package's implosion bombs and napalm spare our own and
@@ -771,7 +806,7 @@ impl Ai {
             let state = readiness(
                 springai::reserved::is_reserved(self.cb, id),
                 busy.contains(&id),
-                a.unit.rules_param_float("noammo", 0.0) > 0.0,
+                needs_ammo(a.unit.rules_param_float("noammo", 0.0)),
                 a.unit.health() >= a.unit.max_health() * 0.95,
                 distance(a.unit.pos(), home) < 450.0,
             );
@@ -916,7 +951,8 @@ impl Ai {
                 });
                 let Some(a) = self.bomber_handler.units.get_mut(&id) else { continue };
                 let u = a.unit;
-                let spent = u.rules_param_float("noammo", 0.0) > 0.0;
+                // A plane just lifted off a pad may still read 3 (repairing).
+                let spent = needs_ammo(u.rules_param_float("noammo", 0.0));
                 let forecast_safe = !risk.intercepted
                     && u.def()
                         .is_some_and(|d| sortie.job.flight_safe(a.kind, risk, u.health(), u.max_health(), d.speed()));
@@ -1131,11 +1167,14 @@ impl Ai {
             {
                 continue;
             }
+            // Primary work may take a rearmed aircraft off the pad before its
+            // slow repair ends (`padlaunch`); the rest waits for 95%.
+            let pad_floor = (job.kind.primary() && !self.dev_off("padlaunch")).then_some(PAD_LAUNCH_HEALTH);
             let mut selected = None;
             for package in &plan.packages {
                 let mut members = Vec::new();
                 for &(kind, n) in package {
-                    let candidates = self.airstrike_ready(kind, &busy, home, n);
+                    let candidates = self.airstrike_ready(kind, &busy, home, n, pad_floor);
                     if candidates.len() != n {
                         members.clear();
                         break;
@@ -1156,10 +1195,22 @@ impl Ai {
                 && !self.dev_off("raptorwear")
             {
                 let full = plan.packages.iter().flatten().filter(|(k, _)| *k == Plane::Raptor).map(|(_, n)| *n).max();
-                let ready = self.airstrike_ready(Plane::Raptor, &busy, home, full.unwrap_or(0));
+                let ready = self.airstrike_ready(Plane::Raptor, &busy, home, full.unwrap_or(0), pad_floor);
                 if !ready.is_empty() {
                     let n = ready.len();
-                    selected = Some((ready, vec![(Plane::Raptor, n)]));
+                    let mut members = ready;
+                    let mut package = vec![(Plane::Raptor, n)];
+                    // A ready Magpie rides along as in the full package (never
+                    // bought or waited for): its EMG slows the quarry, and a
+                    // slow quarry is what its gun is good at.
+                    if plan.packages.iter().flatten().any(|(k, _)| *k == Plane::Magpie) {
+                        let magpie = self.airstrike_ready(Plane::Magpie, &busy, home, 1, pad_floor);
+                        if !magpie.is_empty() {
+                            members.extend(magpie);
+                            package.insert(0, (Plane::Magpie, 1));
+                        }
+                    }
+                    selected = Some((members, package));
                 }
             }
             let Some((members, package)) = selected else { continue };
@@ -1254,6 +1305,10 @@ impl Ai {
             let field = self.airstrike_field(self.graph.get_ally_center(), &interceptors);
             lines.iter().map(|l| field.route(l.far)).collect()
         };
+        // Lifted off a pad before their repair ended (`padlaunch`).
+        let from_pad = (members.iter())
+            .filter(|id| self.bomber_handler.units[*id].unit.rules_param_float("noammo", 0.0) == PAD_REPAIRING)
+            .count();
         let mut members = members.to_vec();
         let mut package = package.to_vec();
         if job.optional_escort() {
@@ -1316,13 +1371,14 @@ impl Ai {
         }
 
         self.log(&format!(
-            "airstrikes: launch {:?} target={} package={} value={:.0} AA={:.2} exposure={:.2}",
+            "airstrikes: launch {:?} target={} package={} value={:.0} AA={:.2} exposure={:.2}{}",
             job.kind,
             job.target,
             members.len(),
             job.value,
             plan.risk.aa,
-            plan.risk.exposure
+            plan.risk.exposure,
+            if from_pad > 0 { format!(" from_pad={from_pad}") } else { String::new() }
         ));
         for l in &lines {
             let (n, metal) = self.carpet_exposure(*l);
@@ -1420,12 +1476,13 @@ impl Ai {
         status["speculation_enabled"] = json!(!self.dev_off("airspeculate"));
         status["scout_hunts"] = self.airstrike_scout_status();
         status["fleet"] = json!(self.bomber_handler.units.iter().map(|(&id, a)| {
-            let empty = a.unit.rules_param_float("noammo", 0.0) > 0.0;
+            let noammo = a.unit.rules_param_float("noammo", 0.0);
+            let empty = needs_ammo(noammo);
             let health = a.unit.health() / a.unit.max_health().max(1.0);
             let away = distance(a.unit.pos(), home);
             json!({"id": id, "unit": a.kind.name(), "name": format!("{:?}", a.kind),
                 "state": readiness(springai::reserved::is_reserved(self.cb, id), busy.contains(&id), empty, health >= 0.95, away < 450.0),
-                "health": health, "noammo": empty, "home_distance": away})
+                "health": health, "noammo": empty, "on_pad": noammo == PAD_REPAIRING, "home_distance": away})
         }).collect::<Vec<_>>());
         status
     }
@@ -1531,6 +1588,17 @@ mod operator_tests {
         assert_eq!(readiness(false, false, false, true, false), "returning");
         assert_eq!(readiness(false, true, false, true, false), "in_progress");
         assert_eq!(readiness(true, true, false, true, false), "operator");
+    }
+
+    #[test]
+    fn a_rearmed_plane_repairing_on_the_pad_is_loaded() {
+        // Zero-K: 1 flying to a pad, 2 rearming, 3 armed and repairing.
+        assert!(!needs_ammo(0.0));
+        assert!(needs_ammo(1.0));
+        assert!(needs_ammo(2.0));
+        assert!(!needs_ammo(PAD_REPAIRING));
+        // So a hurt one on the pad reads as repairing, not rearming.
+        assert_eq!(readiness(false, false, needs_ammo(PAD_REPAIRING), false, false), "repairing");
     }
 
     #[test]

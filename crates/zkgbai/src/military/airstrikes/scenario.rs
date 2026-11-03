@@ -34,7 +34,10 @@ impl Ai {
             self.airstrike_carpet_scenario(&test, frame);
             return;
         }
-        if matches!(test.as_str(), "airstrike-raptors" | "airstrike-raptors-likho" | "airstrike-revenants") {
+        if matches!(
+            test.as_str(),
+            "airstrike-raptors" | "airstrike-raptors-likho" | "airstrike-raptors-pad" | "airstrike-revenants"
+        ) {
             self.airstrike_gunship_scenario(&test, frame);
             return;
         }
@@ -172,10 +175,14 @@ impl Ai {
                 "airstrike-likhos"
                 | "airstrike-likho-fencer"
                 | "airstrike-likho-aa"
+                | "airstrike-padrepair"
                 | "airstrike-phoenixes"
                 | "airstrike-odins" => {
                     let (plane, n) = match test.as_str() {
                         "airstrike-likhos" => ("bomberheavy", 5),
+                        // Two Likhos through AA come home hurt to one pad,
+                        // with a constructor at hand for its caretaker.
+                        "airstrike-padrepair" => ("bomberheavy", 2),
                         "airstrike-phoenixes" => ("bomberriot", 4),
                         "airstrike-odins" => ("bomberassault", 2),
                         _ => ("bomberheavy", 1),
@@ -187,6 +194,9 @@ impl Ai {
                         ("staticrearm", get_directional_point(base, center, 400.0)),
                         ("energyfusion", get_directional_point(base, center, -300.0)),
                     ]);
+                    if test == "airstrike-padrepair" {
+                        spawn.push(("cloakcon", get_directional_point(base, center, 250.0)));
+                    }
                 }
                 "airstrike-singu" => spawn.push(("energysingu", site)),
                 "airstrike-factory" => spawn.push(("factoryshield", site)),
@@ -312,14 +322,40 @@ impl Ai {
                 "airstrike-likhos"
                     | "airstrike-likho-fencer"
                     | "airstrike-likho-aa"
+                    | "airstrike-padrepair"
                     | "airstrike-phoenixes"
                     | "airstrike-odins"
             )
             && let Some(d) = self.defs.get("staticradar")
         {
             self.cb.cheat_new_unit(d, Vec3::xz(site.x - 300.0, site.z));
-            if test == "airstrike-likho-aa" {
+            if matches!(test.as_str(), "airstrike-likho-aa" | "airstrike-padrepair") {
                 self.cb.cheat_new_unit(d, get_directional_point(site, self.graph.get_ally_center(), -600.0));
+            }
+        }
+        // Each Likho's health, ammo state (Zero-K `noammo`: 3 = repairing on
+        // the pad) and place, and the caretakers: what the pad time costs.
+        if test == "airstrike-padrepair" && frame % 150 == 0 {
+            let mut line = String::new();
+            for u in self.cb.team_units() {
+                let name = self.defs.name_of(u);
+                if name == "bomberheavy" || name == "staticcon" {
+                    let p = u.pos();
+                    line.push_str(&format!(
+                        " {name}:{}:{:.0}/{:.0}:n{:.0}@{:.0},{:.0}",
+                        u.id(),
+                        u.health(),
+                        u.max_health(),
+                        u.rules_param_float("noammo", 0.0),
+                        p.x,
+                        p.z
+                    ));
+                }
+            }
+            self.log(&format!("airstrike-test: pads{line}"));
+            if frame % 600 == 0 {
+                let jobs = self.eco_nano_debug();
+                self.log(&format!("airstrike-test: jobs{jobs}"));
             }
         }
         if frame % 300 == 0 {
