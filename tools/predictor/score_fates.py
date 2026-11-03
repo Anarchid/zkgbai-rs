@@ -2,7 +2,7 @@
 """Score the mechanics model's per-unit fates (simulate_mech(fates=...)) against what happened.
 
 usage: score_fates.py <fights.pkl> <out-dir> [workers] [horizons, default 150,300,900]
-FATE_VARIANT=focus|2d scores export_mech.VARIANTS[...] instead of the base opts (the Rust switches' recalibration).
+FATE_VARIANT=focus|2d|sr scores export_mech.VARIANTS[...] instead of the base opts (the Rust switches' recalibration).
 Fights of the test fold (split.split_of == "test") with an armed unit on each side at the start. The
 snapshot is the units present in the fight's first second (record "first" <= 30), as a planner would
 see them; each is scored on whether it died within the horizon (kill_f <= H). Model: the a-move fates
