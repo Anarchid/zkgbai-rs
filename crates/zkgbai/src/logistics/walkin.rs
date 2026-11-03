@@ -85,8 +85,8 @@ const IN_WAY: f32 = 300.0;
 /// A force starts hurting a place at its weapons' reach, at least this.
 const TOUCH_MIN: f32 = 200.0;
 
-/// A force's reach is the longest weapon range among members with at
-/// least this share of its power.
+/// A force's reach is the longest weapon range that at least this share
+/// of its power has.
 const REACH_SHARE: f32 = 0.2;
 
 /// A turret may reach this much less than the force and still count.
@@ -272,6 +272,21 @@ fn arrival_speed(members: &mut [(f32, f32)], need: f32) -> f32 {
     members.last().map_or(0.0, |m| m.0)
 }
 
+/// The longest weapon range that at least `share` of a force's power has:
+/// members as (range, power).
+fn reach_of(members: &mut [(f32, f32)], share: f32) -> f32 {
+    let total: f32 = members.iter().map(|m| m.1).sum();
+    members.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut sum = 0.0;
+    for &(range, power) in members.iter() {
+        sum += power;
+        if sum >= share * total {
+            return range;
+        }
+    }
+    0.0
+}
+
 /// Which turret, of candidates (power, cost, in time): in time, the
 /// cheapest that makes `ours` as strong as `enemy`, else the strongest.
 fn pick_turret(candidates: &[(f32, f32, bool)], ours: f32, enemy: f32) -> Option<usize> {
@@ -381,8 +396,8 @@ impl Ai {
                 .unwrap_or(middle);
             let mut speeds: Vec<(f32, f32)> = idx.iter().map(|&i| (ms[i].speed, ms[i].value)).collect();
             let speed = arrival_speed(&mut speeds, MIN_VALUE);
-            let reach =
-                (idx.iter()).filter(|&&i| ms[i].power >= REACH_SHARE * power).map(|&i| ms[i].reach).fold(0.0, f32::max);
+            let mut ranges: Vec<(f32, f32)> = idx.iter().map(|&i| (ms[i].reach, ms[i].power)).collect();
+            let reach = reach_of(&mut ranges, REACH_SHARE);
             let mut by_tier: BTreeMap<Tier, f32> = BTreeMap::new();
             for &i in idx {
                 *by_tier.entry(ms[i].tier).or_default() += ms[i].value;
@@ -822,6 +837,20 @@ mod tests {
         // Never enough: the slowest.
         let mut m = vec![(80.0, 100.0), (50.0, 100.0)];
         assert_eq!(arrival_speed(&mut m, 1500.0), 50.0);
+    }
+
+    #[test]
+    fn reach_is_what_a_fifth_of_the_power_has() {
+        // Ten Glaives (range 185) and two Fencers (700) with 9% each of
+        // the power: together less than a fifth; three are more.
+        let mut m: Vec<(f32, f32)> =
+            std::iter::repeat_n((185.0, 8.0), 10).chain([(700.0, 9.0), (700.0, 9.0)]).collect();
+        assert_eq!(reach_of(&mut m, 0.2), 185.0);
+        m.push((700.0, 9.0));
+        assert_eq!(reach_of(&mut m, 0.2), 700.0);
+        // A dozen equal raiders: their range (no member is a fifth alone).
+        let mut m = vec![(185.0, 10.0); 12];
+        assert_eq!(reach_of(&mut m, 0.2), 185.0);
     }
 
     #[test]
