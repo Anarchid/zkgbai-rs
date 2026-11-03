@@ -45,6 +45,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Economy",
         "conquest measures both sides' walks to an objective from the middle of their start boxes' metal",
     ),
+    (
+        "conquestlines",
+        "Economy",
+        "conquest also seeks lines of doors across the middle, counts spots as held only where mexes stand, and picks the front over the safe",
+    ),
     ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
     ("conquestseq", "Economy", "a held objective sends the commander on to the next"),
     ("artemis", "Economy", "an Artemis at the centroid of our front against over 4000 metal of enemy air"),
