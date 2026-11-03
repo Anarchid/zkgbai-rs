@@ -92,7 +92,8 @@ fn main() {
     let built = t0.elapsed();
     let maps: Vec<_> = tiers.iter().filter_map(|&t| terrain.tier(t)).collect();
     let walk = terrain.tier(Tier::Bot).expect("bot tier");
-    let mut p = Params { range, max_sites, lattice, per_tier, door_slack, lines, contest, detour_sat, ..Params::default() };
+    let mut p =
+        Params { range, max_sites, lattice, per_tier, door_slack, lines, contest, detour_sat, ..Params::default() };
     if list_chokes {
         for c in &walk.chokes {
             let ends = door_ends(c)

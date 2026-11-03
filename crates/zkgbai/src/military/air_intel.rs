@@ -416,7 +416,9 @@ mod tests {
 
     #[test]
     fn tube_weapons_land_fewer_shots_in_a_window() {
-        let p = |r: &str, b: &str| vec![("script_reload".to_owned(), r.to_owned()), ("script_burst".to_owned(), b.to_owned())];
+        let p = |r: &str, b: &str| {
+            vec![("script_reload".to_owned(), r.to_owned()), ("script_burst".to_owned(), b.to_owned())]
+        };
         // Hacksaw: 0.2 s reload, a 24-frame window, two tubes of 15 s.
         assert_eq!(fires_within(24, &p("15", "2")), 2);
         // Trident: 1.2 s, 144 frames, three tubes of 10 s.

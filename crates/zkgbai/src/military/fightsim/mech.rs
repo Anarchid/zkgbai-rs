@@ -2091,7 +2091,10 @@ mod tests {
     fn switches_off_are_the_frozen_fight() {
         let m = Model::load().unwrap();
         let t = MechTables::load().unwrap();
-        assert!(t.focus_cal.is_some() && t.twod_cal.is_some() && t.sr_cal.is_some(), "variant calibrations in the tables");
+        assert!(
+            t.focus_cal.is_some() && t.twod_cal.is_some() && t.sr_cal.is_some(),
+            "variant calibrations in the tables"
+        );
         assert!(t.splash.contains_key("tankraid_napalm_bomblet"));
         assert_eq!(t.calibration(SimFlags::default()).win, t.win);
         for (name, snap, _) in cases() {
