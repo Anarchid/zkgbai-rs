@@ -181,6 +181,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Likhos strike Revenants like other heavy aircraft (Nimbus, Krow, Odin): the bomb leads a straight-flying gunship (default on)",
     ),
     (
+        "padlaunch",
+        "Military",
+        "a rearmed aircraft sitting on an airpad for repair may leave at 70% health for primary missions whose survival check passes (default on)",
+    ),
+    (
+        "padnano",
+        "Economy",
+        "a caretaker beside each airpad, repairing what lands there at four times the pad's rate, once the air fleet is worth 1000 metal (default on)",
+    ),
+    (
         "airmenace",
         "Military",
         "gunships over our or allied ground units and buildings are intercepted wherever they are, not only in our territory or inbound (default on)",

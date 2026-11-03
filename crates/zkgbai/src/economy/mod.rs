@@ -52,6 +52,17 @@ use crate::util::distance;
 /// (build sites snap to the build grid), elmos.
 pub(super) const SITE_SLACK: f32 = 25.0;
 
+/// Airpads repair at 2.5 buildpower (`unit_refuel_pad_handler`: HP/s =
+/// 2.5 x max HP / (0.666 x cost), a Likho 4.4, an Odin 13). A caretaker
+/// repairs at its workertime / 0.666 = 15, about four times the pad, so
+/// once the air fleet is worth this much metal each airpad gets one
+/// (`padnano`), within `PAD_NANO_SITE` of it, repairing within
+/// `PAD_NANO_REACH` of the pad's center (caretaker build range 500).
+pub(super) const AIRPAD: &str = "staticrearm";
+pub(super) const PAD_NANO_FLEET_METAL: f32 = 1000.0;
+pub(super) const PAD_NANO_SITE: f32 = 200.0;
+pub(super) const PAD_NANO_REACH: f32 = 160.0;
+
 pub struct EconomyManager {
     cb: Callback,
     /// Scouting Sparrows, including radars currently morphing into them.
@@ -1341,8 +1352,22 @@ impl Ai {
                     Some(target) => {
                         let nt = Nanotower { unit, target };
                         self.eco.nanos.insert(unit.id(), nt);
-                        unit.set_repeat(true, 0);
-                        unit.guard(nt.target, 0);
+                        if self.defs.name_of(target) == AIRPAD {
+                            Self::eco_pad_nano_order(nt);
+                            let (p, q) = (unit.pos(), target.pos());
+                            self.log(&format!(
+                                "economy: airpad caretaker {} at ({:.0}, {:.0}) repairs over pad {} at ({:.0}, {:.0})",
+                                unit.id(),
+                                p.x,
+                                p.z,
+                                target.id(),
+                                q.x,
+                                q.z
+                            ));
+                        } else {
+                            unit.set_repeat(true, 0);
+                            unit.guard(nt.target, 0);
+                        }
                         self.eco_defend_nano(nt);
                     }
                     // port: a caretaker without a target would be self-destructed
@@ -1710,8 +1735,23 @@ impl Ai {
         for n in self.eco.nanos.values() {
             if n.target.health() <= 0.0 {
                 n.unit.self_destruct(0);
+            } else if n.unit.num_current_commands() == 0 && self.defs.name_of(n.target) == AIRPAD {
+                Self::eco_pad_nano_order(*n);
             }
         }
+    }
+
+    /// A caretaker by an airpad keeps a standing area repair over it: the
+    /// engine repairs whatever is damaged there, landed aircraft first (they
+    /// sit still). ALT keeps the order when nothing needs repair.
+    fn eco_pad_nano_order(n: Nanotower) {
+        let p = n.target.pos();
+        n.unit.execute_custom_command(
+            cmd::REPAIR,
+            &[p.x, p.y, p.z, PAD_NANO_REACH],
+            springai::opt::ALT_KEY,
+            NO_TIMEOUT,
+        );
     }
 
     fn eco_set_eco_priorities(&mut self) {

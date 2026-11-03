@@ -84,6 +84,17 @@ Primary missions:
   in the air; launch takes the cheapest package it can fill, so a Phoenix
   goes at a light raider only when no Magpie is ready. Raiders the
   firefighters are already on are left to them.
+- Airpads (`unit_refuel_pad_handler`): a landed aircraft rearms (Likho 25 s,
+  Odin 30 s), then sits until fully repaired at the pad's 2.5 buildpower, HP/s
+  = 2.5 x max HP / (0.666 x cost): a Likho 4.4 (30% takes ~160 s), an Odin 13
+  (one back at 43% sat 250 s on Agalta, 2026-11-03). Zero-K's `noammo` reads
+  3 for that repair phase; the aircraft is armed again and any order lifts it
+  off. A primary mission may take it at 70% health or more when its own
+  survival check at current health passes (`disable=padlaunch`); secondary
+  ones wait for 95%. The economy puts a caretaker (15 repair buildpower) beside
+  each airpad with a standing area repair over it once combat aircraft are
+  worth 1000 metal (`disable=padnano`), outside the one-per-10-income
+  caretaker budget.
 - Heavy aircraft in sight (Nimbus, Krow, Odin, Revenant): Likhos, as many as
   each adds 250 metal of damage value, when the target can be reached within
   25 seconds. ZK aims the bomb at the quarry's straight-line lead point, so

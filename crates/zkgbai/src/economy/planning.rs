@@ -482,8 +482,9 @@ impl Ai {
         // mexes, and sinks triggered by free spots or by the metal float
         // never fired in time; by 15:00 this rule plus the second factory
         // already spend what buildpower 1.6 brings in.
-        let built =
-            self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
+        // Airpad caretakers (`padnano`) come on top of this budget.
+        let built = self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() - self.eco_pad_nanos()
+            + self.eco.factory_tasks.len();
         let want = (self.eco.static_income / 10.0).floor();
         if !self.fac.factories.is_empty()
             && (built as f32) < want
@@ -515,6 +516,28 @@ impl Ai {
             && let Some(target) = self.eco_get_caretaker_target()
         {
             self.eco_create_air_pad_task(target);
+        }
+
+        // do we need caretakers at the airpads? (`padnano`)
+        if !self.dev_off("padnano")
+            && !self.eco.hard_estalled
+            && self.eco.static_income > 15.0
+            && self.airstrike_fleet_metal() >= super::PAD_NANO_FLEET_METAL
+            && let Some(pad) = self
+                .eco
+                .airpads
+                .iter()
+                .copied()
+                .find(|p| p.health() > 0.0 && !p.is_being_built() && self.eco_nanos_on(p.id()) == 0)
+        {
+            let fleet = self.airstrike_fleet_metal();
+            self.eco_create_nano_turret_task(wid, pad);
+            if self.eco_nanos_on(pad.id()) > 0 {
+                self.log(&format!(
+                    "economy: airpad caretaker planned for pad {} (air fleet {fleet:.0} metal)",
+                    pad.id()
+                ));
+            }
         }
 
         // do we need radar?
@@ -2812,6 +2835,8 @@ impl Ai {
         let def_name = self.defs.name_of(target);
         let (radius, mut build_dist) = if def_name == "striderhub" || def_name.contains("factory") {
             (400.0, 350.0)
+        } else if def_name == super::AIRPAD {
+            (super::PAD_NANO_SITE, super::PAD_NANO_SITE * 0.8)
         } else {
             (350.0, 300.0) // for superweapons
         };
@@ -2908,6 +2933,28 @@ impl Ai {
         if self.eco_add_simple(artemis, pos, List::Construction, None).is_some() {
             self.eco.screamer = true;
         }
+    }
+
+    /// Caretakers, built or queued, whose target is this unit.
+    fn eco_nanos_on(&self, id: i32) -> usize {
+        let eco = &self.eco;
+        let built = eco.nanos.values().filter(|n| n.target.health() > 0.0 && n.target.id() == id).count();
+        let queued = (eco.nano_tasks.iter())
+            .filter_map(|&c| eco.tasks.get(c).and_then(|t| t.as_construction()).and_then(|c| c.ct_target))
+            .filter(|t| t.health() > 0.0 && t.id() == id)
+            .count();
+        built + queued
+    }
+
+    /// Caretakers, built or queued, for airpads (`padnano`).
+    fn eco_pad_nanos(&self) -> usize {
+        let eco = &self.eco;
+        let pad = |t: &Unit| self.defs.name_of(*t) == super::AIRPAD;
+        eco.nanos.values().filter(|n| pad(&n.target)).count()
+            + (eco.nano_tasks.iter())
+                .filter_map(|&c| eco.tasks.get(c).and_then(|t| t.as_construction()).and_then(|c| c.ct_target))
+                .filter(|t| pad(t))
+                .count()
     }
 
     /// The factory (or factory under construction) with the fewest
