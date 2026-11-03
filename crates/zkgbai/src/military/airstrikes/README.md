@@ -78,8 +78,11 @@ Primary missions:
   in the air; launch takes the cheapest package it can fill, so a Phoenix
   goes at a light raider only when no Magpie is ready. Raiders the
   firefighters are already on are left to them.
-- Heavy aircraft in sight (Nimbus, Krow, Odin): Likhos, as many as each adds
-  250 metal of damage value, when the target can be reached within 25 seconds.
+- Heavy aircraft in sight (Nimbus, Krow, Odin, Revenant): Likhos, as many as
+  each adds 250 metal of damage value, when the target can be reached within
+  25 seconds. ZK aims the bomb at the quarry's straight-line lead point, so
+  speed alone does not save it (combat logs: 57/64 hits on aircraft, Revenant
+  4/4; `disable=likhorevenant` leaves Revenants to Raptors).
   The quarry and the heavy aircraft within 600 elmos of it (its flock: Nimbus
   fly in clumps and cover each other) are the target, not interceptors; other
   fighters and AA still gate the route (`disable=heavyflock` makes every flock

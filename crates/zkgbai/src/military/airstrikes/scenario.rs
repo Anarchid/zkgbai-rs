@@ -6,9 +6,11 @@
 //! `airstrike-likhos` / `airstrike-shieldball` sizes Likho packages for an
 //! Aspis; `airstrike-phoenixes` / `airstrike-outpost` burns a mex among its
 //! Solars with spare Phoenixes; `airstrike-odins` / `airstrike-turrets` burns
-//! a Gauss and a Stinger with spare Odins.
+//! a Gauss and a Stinger with spare Odins. `airstrike-raptors` /
+//! `airstrike-revenants`: a Raptor pair on Revenants over an outpost.
 mod carpet;
 mod flight;
+mod gunships;
 mod hunt;
 mod opportunity;
 mod targeting;
@@ -30,6 +32,10 @@ impl Ai {
         }
         if test.starts_with("airstrike-carpet") {
             self.airstrike_carpet_scenario(&test, frame);
+            return;
+        }
+        if matches!(test.as_str(), "airstrike-raptors" | "airstrike-raptors-likho" | "airstrike-revenants") {
+            self.airstrike_gunship_scenario(&test, frame);
             return;
         }
         if test.starts_with("airstrike-hunt") {

@@ -448,7 +448,7 @@ fn submerged_contacts_do_not_buy_interdictors_or_enter_surface_groups() {
 
 #[test]
 fn heavy_air_is_confirmed_likho_only_and_allows_partial_krow_strikes() {
-    for name in ["gunshipheavyskirm", "gunshipkrow", "bomberassault"] {
+    for name in ["gunshipheavyskirm", "gunshipkrow", "bomberassault", "gunshipassault"] {
         assert!(anti_air::heavy_air_target(name));
     }
     for name in ["planefighter", "planeheavyfighter", "gunshipraid", "bomberheavy"] {
@@ -850,4 +850,14 @@ fn only_defenseless_interceptions_in_light_aa_wear_down() {
     assert!(!wears_down(MissionKind::Intercept, true, Risk { intercepted: true, ..clear() }));
     assert!(!wears_down(MissionKind::Intercept, false, clear()));
     assert!(!wears_down(MissionKind::HeavyAir, true, clear()));
+}
+
+#[test]
+fn likhos_strike_a_revenant_in_partial_salvos() {
+    let rev = Contact { heavy_air: anti_air::heavy_air_target("gunshipassault"), ..revenant(1) };
+    let job =
+        missions(&[rev], Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::HeavyAir).expect("heavy air");
+    // Each Likho adds at least 250 metal of damage value: two for a whole
+    // Revenant (4000 of its 4200 HP), one when it is down to 2000.
+    assert_eq!(packages(&job, clear(), 800.0), vec![vec![(Plane::Likho, 2)], vec![(Plane::Likho, 1)]]);
 }

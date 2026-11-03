@@ -314,7 +314,9 @@ impl Ai {
                     known: e.identified,
                     live,
                     air,
-                    heavy_air: e.identified && anti_air::heavy_air_target(&e.def_name),
+                    heavy_air: e.identified
+                        && anti_air::heavy_air_target(&e.def_name)
+                        && !(e.def_name == anti_air::REVENANT && self.dev_off("likhorevenant")),
                     submerged: e.is_submerged(),
                     mex: e.is_mex,
                     static_: e.is_static,

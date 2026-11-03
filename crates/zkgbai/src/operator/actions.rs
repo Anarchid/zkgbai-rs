@@ -167,6 +167,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "ready Raptors go at an unescorted aircraft that cannot shoot back, such as a Revenant, without waiting for the full one-pass package (default on)",
     ),
     (
+        "likhorevenant",
+        "Military",
+        "Likhos strike Revenants like other heavy aircraft (Nimbus, Krow, Odin): the bomb leads a straight-flying gunship (default on)",
+    ),
+    (
         "airmenace",
         "Military",
         "gunships over our or allied ground units and buildings are intercepted wherever they are, not only in our territory or inbound (default on)",
@@ -190,7 +195,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "heavyflock",
         "Military",
-        "a Likho strike on a Nimbus/Krow/Odin counts the heavy aircraft flying with it as part of the target, not as AA (default on)",
+        "a Likho strike on a Nimbus/Krow/Odin/Revenant counts the heavy aircraft flying with it as part of the target, not as AA (default on)",
     ),
     (
         "odinfactories",
