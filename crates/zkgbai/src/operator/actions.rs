@@ -31,6 +31,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("pairs", "Economy", "Constables pair up on builds"),
     ("earlycons", "Economy", "an early second Constable in the opening"),
     ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
+    ("lightrepair", "Economy", "a combat unit's repair pulls workers by the metal its missing health is worth"),
     ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     (
@@ -48,6 +49,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "conquestsym",
         "Economy",
         "conquest measures both sides' walks to an objective from the middle of their start boxes' metal",
+    ),
+    (
+        "conquestlines",
+        "Economy",
+        "conquest also seeks lines of doors across the middle, counts spots as held only where mexes stand, and picks the front over the safe",
     ),
     ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
     ("conquestseq", "Economy", "a held objective sends the commander on to the next"),

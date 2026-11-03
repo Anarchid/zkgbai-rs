@@ -67,6 +67,24 @@ const APPROACH_TRAVEL: f32 = 128.0;
 const APPROACH_STALL: i32 = 20 * 30;
 const APPROACH_SHUN: i32 = 60 * 30;
 const APPROACH_SHUN_RADIUS: f32 = 64.0;
+/// A combat unit's repair pulls a worker by the metal its missing health is
+/// worth (`lightrepair`): in full from REPAIR_FULL_METAL up, less below. The
+/// flat pull (250 + health / 10) outbid a mex beside the worker (100 + up to
+/// 100 for free spots near) for a Dart at half health, 60 HP or 20 metal,
+/// which Zero-K heals for free once it idles (5 HP/s after 60 s; Glaives 20
+/// HP/s after 5 s). Off with `disable=lightrepair`.
+const REPAIR_FULL_METAL: f32 = 150.0;
+
+/// How much of a combat unit's repair pull it gets (0..=1): the metal worth
+/// of its missing health over REPAIR_FULL_METAL.
+fn repair_worth(cost: f32, health: f32, max_health: f32) -> f32 {
+    if max_health <= 0.0 {
+        return 1.0;
+    }
+    let missing = cost * ((max_health - health) / max_health).clamp(0.0, 1.0);
+    (missing / REPAIR_FULL_METAL).min(1.0)
+}
+
 /// Spring's repair and reclaim command ids (a build's is minus the def id).
 const CMD_REPAIR: i32 = 40;
 const CMD_RECLAIM: i32 = 90;
@@ -905,15 +923,21 @@ impl Ai {
                         return dist;
                     }
 
+                    let worth = if self.dev_off("lightrepair") {
+                        1.0
+                    } else {
+                        repair_worth(td.cost(self.metal), health, max_health)
+                    };
+
                     if rptask.is_shield_mob && worker.has_shields {
-                        return dist + (100.0 * (cost_mod - 1.0)) - 250.0 - max_health / (5.0 * cost_mod);
+                        return dist + (100.0 * (cost_mod - 1.0)) - worth * (250.0 + max_health / (5.0 * cost_mod));
                     }
 
                     if !self.graph.is_ally_territory(task_pos) {
                         return dist + 500.0;
                     }
 
-                    dist + (100.0 * (cost_mod - 1.0)) - 250.0 - (max_health + health) / (10.0 * cost_mod)
+                    dist + (100.0 * (cost_mod - 1.0)) - worth * (250.0 + (max_health + health) / (10.0 * cost_mod))
                 } else if !worker.is_greedy
                     && td.is_able_to_attack()
                     && !td.is_builder()
@@ -1157,6 +1181,31 @@ mod tests {
         let lone = cluster_bonus(spots[3], spots.iter().copied());
         assert_eq!(lone, 0.0);
         assert!((clustered - CLUSTER_BONUS * (2.0 / 3.0 + 0.5)).abs() < 1e-3);
+    }
+
+    /// A lone worker's repair cost for a mobile combat unit on our ground,
+    /// as `eco_cost_of_job_alone` prices it, against a lone mex there.
+    fn repair_cost(dist: f32, worth: f32, health: f32, max_health: f32) -> f32 {
+        dist - worth * (250.0 + (max_health + health) / 10.0)
+    }
+
+    #[test]
+    fn mex_beside_worker_beats_half_dead_dart() {
+        // Dart (vehscout): 40 metal, 120 HP, at half health, 50 elmos off;
+        // a lone mex 50 elmos off: (dist / 4) - 100.
+        let mex = 50.0 / 4.0 - 100.0;
+        let dart = repair_cost(50.0, repair_worth(40.0, 60.0, 120.0), 60.0, 120.0);
+        assert!(mex < dart, "mex {mex} vs dart {dart}");
+        // the flat pull it had picked the Dart
+        assert!(repair_cost(50.0, 1.0, 60.0, 120.0) < mex);
+    }
+
+    #[test]
+    fn heavy_repair_keeps_its_full_pull() {
+        // 600 metal at half health: 300 metal missing
+        assert_eq!(repair_worth(600.0, 1200.0, 2400.0), 1.0);
+        assert_eq!(repair_worth(40.0, 120.0, 120.0), 0.0);
+        assert_eq!(repair_worth(40.0, 60.0, 0.0), 1.0);
     }
 
     #[test]

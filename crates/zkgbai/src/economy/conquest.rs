@@ -100,6 +100,28 @@
 //! turrets of its own and helps the allied turrets rising within
 //! `SUPPORT_RADIUS` of the objective, for `SUPPORT_FOR` after it arrives.
 //!
+//! Conquest's turrets are placed on purpose and stand past the economy's
+//! Lotus crowding rule (it pools Lotuses whose reach overlaps); the guards
+//! count a Lotus as cover only when one stands within its reach of the site.
+//!
+//! Lines and the front (feature `conquestlines`, default on in wip; user
+//! 2026-11-03 on the offline comparison "Where conquest would stand": "this
+//! is much better; can you swap it in for wip"). The search also closes
+//! doors a turret reaches end to end (`DOOR_SLACK` past its reach) and looks
+//! for lines: the narrowest cut across the contested band, at most three
+//! turrets, kept when it is worth 1.5x its turrets apart (Mercurial's two
+//! middle gaps seal our half, ~32 metal/s against bots, for two Stingers).
+//! Its spots are ours or theirs only where a mex stands, the rest neutral,
+//! sides then read from the walks (the spot graph's shadows had already
+//! given Fairyland's centerward tuplets to one side or the other), and
+//! `PER_TIER` objectives per design tier reach the pick. The pick gives no
+//! bonus for safety (race factor at most 1) and favours ground the enemy
+//! reaches soon: x `1 + (URGENT_AT - enemy walk) / URGENT_SCALE`, 0.5 to 1.5
+//! (else the safe naturals and the remote corners won). A line is held from
+//! its door nearest home: the commander walks there first, forces and
+//! control are read there, attacks count near any of its doors, and each
+//! door has its turret (one at a time, within our means).
+//!
 //! Every decision goes to the journal (`conquest` records).
 
 use std::sync::mpsc;
@@ -107,7 +129,7 @@ use std::sync::mpsc;
 use serde_json::json;
 use springai::{UnitDef, Vec3};
 use zk_terrain::conquest::{Objective, Params, objectives};
-use zk_terrain::strategy::Asset;
+use zk_terrain::strategy::{Asset, Side};
 use zk_terrain::{Pos, Tier, TierMap};
 
 use super::{List, TaskId, WorkerTask};
@@ -148,10 +170,17 @@ const ENROUTE_DETOUR: f32 = 700.0;
 const ENROUTE_DETOUR_COST: f32 = 0.5;
 /// Turret sites an objective has (the search's `max_sites`).
 const SITES: usize = 1;
+/// Lines and the front pick (see the module notes).
+const DOOR_SLACK: f32 = 100.0;
+const PER_TIER: usize = 3;
+const URGENT_AT: f32 = 3500.0;
+const URGENT_SCALE: f32 = 2000.0;
 /// Allies' turrets (see the module notes).
 const ALLY_TURRET_REACH: f32 = 400.0;
 const SUPPORT_RADIUS: f32 = 800.0;
 const SUPPORT_FOR: i32 = 30 * 180;
+/// A line's guard stands among the spots this near its first door.
+const GUARD_SPOTS: f32 = 700.0;
 /// Undecided objectives are given up at this game time.
 const WATCH_UNTIL: i32 = 30 * 60 * 12;
 /// Seconds the denial counts for, and the share of income at stake that
@@ -577,9 +606,21 @@ impl Ai {
         }
         let maps: Vec<TierMap> = TIERS.iter().filter_map(|&t| terrain.tier(t).cloned()).collect();
         let Some(walk) = terrain.tier(Tier::Bot).cloned() else { return };
-        let assets = self.strategy_assets();
+        let lines = !self.dev_off("conquestlines");
+        let assets = if lines { self.conquest_assets() } else { self.strategy_assets() };
         let range = self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0);
-        let params = Params { range, max_sites: SITES, ..Params::default() };
+        let params = if lines {
+            Params {
+                range,
+                max_sites: SITES,
+                door_slack: DOOR_SLACK,
+                lines: true,
+                per_tier: PER_TIER,
+                ..Params::default()
+            }
+        } else {
+            Params { range, max_sites: SITES, ..Params::default() }
+        };
         let (tx, rx) = mpsc::channel();
         let (a, e, spots) = (pos(ally), pos(enemy), assets.clone());
         let spawned = std::thread::Builder::new().name("zkgbai-conquest".into()).spawn(move || {
@@ -611,7 +652,8 @@ impl Ai {
                 let tiers: Vec<String> =
                     o.denial.iter().map(|d| format!("{} {:.1} ({}/{})", d.tier.name(), d.worth, d.sealed, o.spots.len())).collect();
                 lines.push(format!(
-                    "conquest: objective {i} ({} design) sites {} spots {} income {:.1} walk {:.0} (enemy {:.0}); denial {}",
+                    "conquest: objective {i} ({}{} design) sites {} spots {} income {:.1} walk {:.0} (enemy {:.0}); denial {}",
+                    if o.line { "line, " } else { "" },
                     o.design.name(),
                     o.sites.iter().map(|s| format!("({:.0},{:.0})", s.x, s.z)).collect::<Vec<_>>().join(" "),
                     o.spots.len(),
@@ -621,7 +663,7 @@ impl Ai {
                     tiers.join(", ")
                 ));
                 json!({
-                    "design": o.design.name(), "income": o.income, "walk": o.walk.round(), "enemy_walk": o.enemy_walk.round(),
+                    "design": o.design.name(), "line": o.line, "income": o.income, "walk": o.walk.round(), "enemy_walk": o.enemy_walk.round(),
                     "sites": o.sites.iter().map(|s| [s.x.round(), s.z.round()]).collect::<Vec<_>>(),
                     "spots": o.spots.iter().filter_map(|&k| c.assets.get(k)).map(|a| [a.pos.x.round(), a.pos.z.round(), a.value]).collect::<Vec<_>>(),
                     "denial": o.denial.iter().map(|d| json!({"tier": d.tier.name(), "worth": d.worth, "own": d.own, "sealed": d.sealed})).collect::<Vec<_>>(),
@@ -711,7 +753,7 @@ impl Ai {
             return None;
         }
         let from = self.eco.workers.get(&wid)?.get_pos();
-        let to = self.conquest_v3(self.eco.conquest.objectives.get(op.idx)?.center());
+        let to = self.conquest_v3(self.conquest_anchor(self.eco.conquest.objectives.get(op.idx)?));
         let at = t.get_pos();
         let detour = distance(from, at) + distance(at, to) - distance(from, to);
         (detour <= ENROUTE_DETOUR).then(|| BONUS + MEX_FIRST - ENROUTE_DETOUR_COST * detour.max(0.0))
@@ -745,6 +787,45 @@ impl Ai {
 
     fn conquest_v3(&self, p: Pos) -> Vec3 {
         Vec3::new(p.x, self.cb.map().elevation_at(p.x, p.z), p.z)
+    }
+
+    /// The metal spots as conquest sees them: ours or theirs only where a
+    /// mex stands (owned, or an enemy's seen), the rest neutral (see the
+    /// module notes).
+    fn conquest_assets(&self) -> Vec<Asset> {
+        (self.graph.metal_spots.iter())
+            .map(|s| {
+                let side = if s.owned {
+                    Side::Ally
+                } else if s.hostile {
+                    Side::Enemy
+                } else {
+                    Side::Neutral
+                };
+                Asset { pos: pos(s.position), value: s.value, side }
+            })
+            .collect()
+    }
+
+    /// Where an objective is held from: its middle; a line's door nearest
+    /// home (see the module notes).
+    fn conquest_anchor(&self, o: &Objective) -> Pos {
+        if !o.line {
+            return o.center();
+        }
+        let home = pos(self.conquest_home());
+        (o.sites.iter().copied())
+            .min_by(|a, b| a.distance(home).total_cmp(&b.distance(home)))
+            .unwrap_or_else(|| o.center())
+    }
+
+    /// The objective's turret site nearest `p` (a line's door; else its one).
+    fn conquest_near_site(&self, o: &Objective, p: Vec3) -> Vec3 {
+        let q = pos(p);
+        let s = (o.sites.iter().copied())
+            .min_by(|a, b| a.distance(q).total_cmp(&b.distance(q)))
+            .unwrap_or_else(|| o.center());
+        self.conquest_v3(s)
     }
 
     fn conquest_start(&mut self, frame: i32) {
@@ -783,9 +864,15 @@ impl Ai {
             .map(|i| (i, self.conquest_expected(&c.objectives[i])))
             .filter(|(_, v)| *v > 0.0)
             .collect::<Vec<_>>();
+        let front = !self.dev_off("conquestlines");
         let race = |i: usize| {
             let o = &c.objectives[i];
-            (1.0 + (o.enemy_walk - o.walk) / RACE_SCALE).clamp(0.3, 1.5)
+            let r = 1.0 + (o.enemy_walk - o.walk) / RACE_SCALE;
+            if front {
+                r.clamp(0.3, 1.0) * (1.0 + (URGENT_AT - o.enemy_walk) / URGENT_SCALE).clamp(0.5, 1.5)
+            } else {
+                r.clamp(0.3, 1.5)
+            }
         };
         let mut ranked = best;
         ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
@@ -827,7 +914,7 @@ impl Ai {
         self.conquest_refresh_mexes();
         let o = &self.eco.conquest.objectives[idx];
         let (worth, cost, ratio) = self.conquest_value(o);
-        let center = o.center();
+        let center = self.conquest_anchor(o);
         self.eco.conquest.station = Some(Station { crew, center: self.conquest_v3(center), since: frame });
         self.log(&format!(
             "conquest: commander {crew} sets out for objective {idx} at ({:.0},{:.0}): {} spots, expected denial {expected:.1}/s, turrets now {ratio:.2} (worth {worth:.0} / cost {cost:.0})",
@@ -852,7 +939,7 @@ impl Ai {
     /// since we know where their commander is").
     fn conquest_team_pick(&self, crew: i32, eligible: &[(usize, f32)]) -> Option<(usize, f32, bool)> {
         let c = &self.eco.conquest;
-        let center = |i: usize| self.conquest_v3(c.objectives[i].center());
+        let center = |i: usize| self.conquest_v3(self.conquest_anchor(&c.objectives[i]));
         let mut before: Vec<(i32, Vec3)> = (self.cb.friendly_units().into_iter())
             .filter(|u| self.iq.peers.contains(&u.team()) && u.team() < self.team_id && u.health() > 0.0)
             .filter(|u| u.def().is_some_and(|d| self.defs.is_commander(d)))
@@ -930,6 +1017,18 @@ impl Ai {
             return Some(bonus);
         }
         let op = self.eco.conquest.op.as_ref()?;
+        // Before setting out the commander stays home on the home guard: the
+        // objective's jobs and those on the way wait for it (it had walked
+        // off to the objective's mexes while others built the Lotus).
+        if op.stage == Stage::Prepare {
+            let (t, _) = op.home_guard.filter(|(t, _)| t.task == Some(task))?;
+            if wid == op.crew {
+                return Some(BONUS + GUARD_BONUS);
+            }
+            let w = self.eco.workers.get(&wid)?;
+            return (self.eco.metal >= BANK_EMPTY && distance(w.get_pos(), t.site) <= HELP_RADIUS)
+                .then_some(HELP_BONUS);
+        }
         if op.mex_tasks.contains(&task) {
             return (wid == op.crew).then_some(BONUS + MEX_FIRST);
         }
@@ -942,8 +1041,15 @@ impl Ai {
         let banked = self.eco.metal >= BANK_EMPTY;
         let guard = [op.home_guard, op.guard].into_iter().flatten().find(|(t, _)| t.task == Some(task));
         if let Some((t, _)) = guard {
-            if wid == op.crew {
+            // Once out of `Prepare` the home guard is the other builders'
+            // (it had held the commander home two more minutes, fighting
+            // raiders by the site, while the enemy took the line's door).
+            let home = op.home_guard.is_some_and(|(h, _)| h.task == Some(task));
+            if wid == op.crew && !home {
                 return Some(BONUS + GUARD_BONUS);
+            }
+            if wid == op.crew {
+                return None;
             }
             let w = self.eco.workers.get(&wid)?;
             return (banked && distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS);
@@ -964,7 +1070,7 @@ impl Ai {
             return;
         }
         let o = self.eco.conquest.objectives[idx].clone();
-        let center = self.conquest_v3(o.center());
+        let center = self.conquest_v3(self.conquest_anchor(&o));
         let spots: Vec<Pos> = o.spots.iter().filter_map(|&k| self.eco.conquest.assets.get(k)).map(|a| a.pos).collect();
         if spots.iter().all(|&p| self.conquest_spot_hostile(p)) {
             self.conquest_end("the enemy took the spots", false);
@@ -1050,16 +1156,38 @@ impl Ai {
             }
         };
         let fresh = slot.is_none();
-        // A Lotus whose reach overlaps another's is refused (pooled into a
-        // stronger turret, see `lotus`): that ground has its Lotus.
-        let covered = !t.built && t.task.is_none() && self.eco_lotus_crowded(t.site);
-        let t = if covered { Turret { built: true, ..t } } else { self.conquest_turret_order(t, def) };
+        // Covered: a Lotus standing within its reach of the site. A queued
+        // one there (or its frame) becomes the guard, seen up before the
+        // commander leaves. Else our own, past the economy's crowding rule
+        // (user 2026-11-03, "the lotus-before-leaving base seems to be
+        // forgotten": any Lotus within twice the reach counted, a queued
+        // task included, so the commander left at 1:23 with none standing).
+        let reach = def.max_weapon_range();
+        let covered = !t.built
+            && t.task.is_none()
+            && self.eco.porcs.iter().any(|u| {
+                u.health() > 0.0
+                    && !u.is_being_built()
+                    && u.def().is_some_and(|d| d.id() == def.id())
+                    && distance(u.pos(), t.site) <= reach
+            });
+        let adopted =
+            if t.built || covered || t.task.is_some() { None } else { self.conquest_queued_lotus(t.site, reach) };
+        let t = if covered {
+            Turret { built: true, ..t }
+        } else if let Some((id, at)) = adopted {
+            Turret { task: Some(id), site: at, ..t }
+        } else {
+            self.conquest_turret_order(t, def)
+        };
         let done = t.built || frame - asked > GUARD_TIMEOUT || (t.task.is_none() && t.retries >= MAX_RETRIES);
         if fresh
             || (done && !slot.is_some_and(|(o, _)| o.built == t.built && o.retries == t.retries && o.task == t.task))
         {
             let what = if covered {
-                "covered by a Lotus near"
+                "covered by a Lotus standing near"
+            } else if adopted.is_some() {
+                "a queued Lotus near taken as the guard"
             } else if t.built {
                 "up"
             } else if done {
@@ -1091,6 +1219,17 @@ impl Ai {
         done
     }
 
+    /// A Lotus queued (or rising) within `reach` of `site`: its task and
+    /// place.
+    fn conquest_queued_lotus(&self, site: Vec3, reach: f32) -> Option<(TaskId, Vec3)> {
+        (self.eco.porc_tasks.iter()).find_map(|&id| {
+            let task = self.eco.tasks.get(id)?;
+            let c = task.as_construction()?;
+            (c.build_type.name() == GUARD_TURRET && distance(task.position, site) <= reach)
+                .then_some((id, task.position))
+        })
+    }
+
     /// Where the home guard goes: by our home mex nearest the enemy, out
     /// toward them; none if one of its kind stands there already.
     fn conquest_home_guard_site(&self) -> Option<Vec3> {
@@ -1112,9 +1251,14 @@ impl Ai {
     /// Where the objective's guard goes: among its spots (else its center).
     fn conquest_guard_site(&self, idx: usize) -> Option<Vec3> {
         let o = self.eco.conquest.objectives.get(idx)?;
-        let spots: Vec<Pos> = o.spots.iter().filter_map(|&k| self.eco.conquest.assets.get(k)).map(|a| a.pos).collect();
+        // A line's: the spots by its door nearest home.
+        let anchor = self.conquest_anchor(o);
+        let spots: Vec<Pos> = (o.spots.iter().filter_map(|&k| self.eco.conquest.assets.get(k)))
+            .map(|a| a.pos)
+            .filter(|p| !o.line || p.distance(anchor) <= GUARD_SPOTS)
+            .collect();
         let p = if spots.is_empty() {
-            o.center()
+            anchor
         } else {
             let n = spots.len() as f32;
             Pos::new(spots.iter().map(|p| p.x).sum::<f32>() / n, spots.iter().map(|p| p.z).sum::<f32>() / n)
@@ -1159,7 +1303,11 @@ impl Ai {
         let at = self.cb.map().find_closest_build_site(def, t.site, 250.0, 3, 0);
         let id = (at.x >= 0.0)
             .then(|| {
-                self.eco_add_construction(WorkerTask::construction(def, at, 0), Some(List::Porc), Some(List::Porc))
+                self.eco_add_construction_uncrowded(
+                    WorkerTask::construction(def, at, 0),
+                    Some(List::Porc),
+                    Some(List::Porc),
+                )
             })
             .flatten();
         if t.task.is_some() || id.is_none() {
@@ -1175,7 +1323,7 @@ impl Ai {
     /// Our force there and theirs, by power (the scale of `get_danger`).
     fn conquest_forces_at(&self, idx: usize) -> (f32, f32) {
         let Some(o) = self.eco.conquest.objectives.get(idx) else { return (0.0, 0.0) };
-        let c = self.conquest_v3(o.center());
+        let c = self.conquest_v3(self.conquest_anchor(o));
         (self.war.get_total_friendly_power(c), self.war.get_enemy_power(c))
     }
 
@@ -1195,7 +1343,7 @@ impl Ai {
         let mut changed = false;
         for i in 0..n {
             let o = &self.eco.conquest.objectives[i];
-            let center = self.conquest_v3(o.center());
+            let center = self.conquest_v3(self.conquest_anchor(o));
             let turrets = self.war.get_friendly_porc_threat(center) >= crate::terrain::HELD_POWER;
             let their_porc = o.sites.iter().any(|&s| self.war.get_porc_threat(self.conquest_v3(s)) > 0.0);
             let (ours, theirs) = self.conquest_forces_at(i);
@@ -1322,7 +1470,7 @@ impl Ai {
         let c = &self.eco.conquest;
         (c.objectives.iter().enumerate())
             .filter(|(i, _)| matches!(c.control.get(*i).map(|c| c.hold), Some(Hold::Ours(_))))
-            .map(|(_, o)| (self.conquest_forward(self.conquest_v3(o.center()), MINE_FORWARD), 2.0))
+            .map(|(_, o)| (self.conquest_forward(self.conquest_v3(self.conquest_anchor(o)), MINE_FORWARD), 2.0))
             .collect()
     }
 
@@ -1411,7 +1559,7 @@ impl Ai {
             return;
         }
         let p = unit.pos();
-        let op_center = c.op.as_ref().and_then(|op| c.objectives.get(op.idx)).map(|o| self.conquest_v3(o.center()));
+        let op_center = c.op.as_ref().and_then(|op| c.objectives.get(op.idx)).map(|o| self.conquest_near_site(o, p));
         let near = op_center.is_some_and(|q| distance(q, p) <= ATTACK_RADIUS)
             || c.held.iter().any(|h| distance(h.center, p) <= ATTACK_RADIUS);
         if near && self.eco.conquest.attacks.len() < 32 {
@@ -1436,8 +1584,11 @@ impl Ai {
             && op.added < MAX_ADDED
             && frame - op.last_attack >= ATTACK_GAP
         {
-            let center = self.conquest_v3(self.eco.conquest.objectives[op.idx].center());
-            if let Some(&(_, p)) = attacks.iter().rev().find(|(_, p)| distance(*p, center) <= ATTACK_RADIUS) {
+            let o = &self.eco.conquest.objectives[op.idx];
+            let hit =
+                (attacks.iter().rev()).find(|(_, p)| distance(*p, self.conquest_near_site(o, *p)) <= ATTACK_RADIUS);
+            if let Some(&(_, p)) = hit {
+                let center = self.conquest_near_site(o, p);
                 let watching = op.stage == Stage::Watch && !light;
                 // A Lotus while the Stingers still wait is ordered now (the
                 // op's list is ordered only once it fortifies).
@@ -1602,7 +1753,11 @@ impl Ai {
             let at = self.cb.map().find_closest_build_site(def, site, 250.0, 3, 0);
             let id = (at.x >= 0.0)
                 .then(|| {
-                    self.eco_add_construction(WorkerTask::construction(def, at, 0), Some(List::Porc), Some(List::Porc))
+                    self.eco_add_construction_uncrowded(
+                        WorkerTask::construction(def, at, 0),
+                        Some(List::Porc),
+                        Some(List::Porc),
+                    )
                 })
                 .flatten();
             if let Some(op) = &mut self.eco.conquest.op {
@@ -1652,7 +1807,7 @@ impl Ai {
         if success {
             self.eco.conquest.taken.push(op.idx);
             if let Some(o) = self.eco.conquest.objectives.get(op.idx) {
-                let center = self.conquest_v3(o.center());
+                let center = self.conquest_v3(self.conquest_anchor(o));
                 self.eco.conquest.held.push(Held { idx: op.idx, center, added: op.added, last_attack: op.last_attack });
             }
         }
