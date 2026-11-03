@@ -724,14 +724,14 @@ impl Ai {
         let mut snap = FightSnapshot { flags, ..Default::default() };
         for (u, def, hp) in ours {
             let (spec, q) = (self.fight_spec_of(u.id(), def), u.pos());
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: q.x, z: q.z });
+            snap.units.push(SnapUnit { side: 0, spec, hp, x: q.x, z: q.z, tubes: self.snap_tubes(u.id()) });
         }
         for (eid, def, hp, q) in theirs {
             let spec = self.fight_spec_of(eid, def);
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: q.x, z: q.z });
+            snap.units.push(SnapUnit { side: 1, spec, hp, x: q.x, z: q.z, tubes: self.snap_tubes(eid) });
         }
         let spec = self.fight_spec_of(bomb.id(), bomb_def);
-        snap.units.push(SnapUnit { side: 0, spec, hp: bomb_hp, x: p.x, z: p.z });
+        snap.units.push(SnapUnit { side: 0, spec, hp: bomb_hp, x: p.x, z: p.z, tubes: Vec::new() });
         let index = snap.units.len() - 1;
         Some((snap, index))
     }

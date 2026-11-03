@@ -259,7 +259,14 @@ impl Ai {
         Some(Observed {
             id: u.id(),
             paralysis: u.paralyze_damage() / u.max_health().max(1.0),
-            unit: SnapUnit { side: 0, spec: self.fight_spec_of(u.id(), def), hp: u.health(), x: p.x, z: p.z },
+            unit: SnapUnit {
+                side: 0,
+                spec: self.fight_spec_of(u.id(), def),
+                hp: u.health(),
+                x: p.x,
+                z: p.z,
+                tubes: self.snap_tubes(u.id()),
+            },
         })
     }
 
@@ -301,7 +308,14 @@ impl Ai {
                     enemies.push(Observed {
                         id,
                         paralysis: para,
-                        unit: SnapUnit { side: 1, hp: hp.max(1.0), x: pos.x, z: pos.z, spec },
+                        unit: SnapUnit {
+                            side: 1,
+                            hp: hp.max(1.0),
+                            x: pos.x,
+                            z: pos.z,
+                            spec,
+                            tubes: self.snap_tubes(id),
+                        },
                     });
                     focus.push(pressed_on);
                 }
@@ -462,7 +476,7 @@ mod regression {
         })
     }
     fn observed(id: i32, spec: Arc<UnitSpec>, side: u8, x: f32, z: f32) -> Observed {
-        Observed { id, paralysis: 0.0, unit: SnapUnit { hp: spec.health, spec, side, x, z } }
+        Observed { id, paralysis: 0.0, unit: SnapUnit { hp: spec.health, spec, side, x, z, tubes: Vec::new() } }
     }
     fn incident() -> Raid {
         let venom = spec("spideremp", 190.0, 740.0, 2.8, Some(("spideremp_spider", 240.0, 1.2, 65.0)));

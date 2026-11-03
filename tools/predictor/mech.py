@@ -453,7 +453,8 @@ def _pdead(hp0, hp, dead, death_f, var, horizon):
     return 0.5 * (1.0 + math.erf((taken - hp0) / math.sqrt(2.0 * v)))
 
 
-def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=None, fates=None, horizon=None, passing=None):
+def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=None, fates=None, horizon=None, passing=None,
+                  order=None):
     """trace: a dict to fill with per-unit fates in build_units order (A's records, then B's):
     pdead = probability the unit is dead when the fight stops, ehp = expected HP then (with a hazard;
     without one, the end state). withdraw: the "A withdraws now" query (predict.simulate's): every mobile
@@ -466,7 +467,14 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     runs to the horizon while one side has an armed unit and the other anything alive (unarmed eco
     included), with no quiet stop; use it without a hazard. passing: A's mobile units drive along the axis
     through B and out the far side at their speed instead of a-moving, on a line `passing` elmos from B's
-    statics (B's mobile units come to the line)."""
+    statics (B's mobile units come to the line).
+    order (fight2d order round, 2026-11-02): what A was told to do, in place of "every A unit closes on its
+    nearest enemy". {"kind": "amove"}: the coalesce Clean order, i.e. an engine Fight command to the armed B
+    unit nearest A's centroid, picked again when it dies (none armed left: back to the nearest-enemy rule).
+    A unit on a Fight command takes the B unit closest to its point on the command line within max range +
+    leash (engine MobileCAI::ExecuteFight, 100 elmos at moveState 1) and attacks it until it dies; with none,
+    it walks the line. {"kind": "attack", "target": i}: the Prize order, i = index in fight["B"]; A walks at
+    it whatever else is around (weapons still fire at whatever is in range)."""
     hits = predict.G["hits"]
     if opts.get("shield2"):  # mechanics round 4: shield pools starting from the logged charge
         opts = dict(opts, shield=1, shield_start=1)
@@ -482,6 +490,13 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     # Tubes start loaded. Per weapon: ready frame of each tube.
     sre = M.get("sreload", {}) if opts.get("sreload") else {}
     tubes = {id(w): [0] * sre[w.name][0] for u in us for w in u.weapons if w.name in sre}
+    # ammo (2026-11-03): a unit record's "tubes" are its first tube weapon's empty tubes, frames until each is
+    # loaded again (the AI's ledger of hits taken, military/ammo.rs; our own units' scriptLoaded).
+    for u, r in zip(us, list(fight["A"]) + list(fight["B"])):
+        tw = next((w for w in u.weapons if w.name in sre), None)
+        if tw is not None and r.get("tubes"):
+            n = sre[tw.name][0]
+            tubes[id(tw)] = [0] * max(n - len(r["tubes"]), 0) + [max(int(t), 0) for t in r["tubes"][:n]]
     # 2-D round (zkgbai-runs/predictor/twod): units keep their offset across the fight axis and move in
     # the plane; `sep` keeps them from overlapping, `aoe` lands splash on the units around a target.
     twod = bool(opts.get("twod") or opts.get("sep") or opts.get("aoe"))
@@ -493,6 +508,15 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
         pts, _ = plane(fight)
         for u, x, (along, lat) in zip(us, xs, pts):
             u.x, x.lat = along, lat
+
+    ordr = None
+    if order is not None:
+        A_units = [u for u in us if u.side == 0]
+        B_units = [u for u in us if u.side == 1]
+        ordr = {"kind": order["kind"], "leash": float(order.get("leash", 100.0)), "focus": None,
+                "start": {}, "att": {}}
+        if order["kind"] == "attack":
+            ordr["focus"] = B_units[order["target"]]
 
     def apart(a, b):
         dy = xof[id(a)].lat - xof[id(b)].lat
@@ -553,6 +577,15 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             for k, u in enumerate(side):
                 for w in u.weapons:
                     w.next = int(round(S * k / (len(side) - 1)))
+    # reload state (2026-11-03, user: "knowing when a Scalpel or Ripper has fired most recently can swing a
+    # prediction a lot"): a unit record's "ready" maps weapon names to frames until that weapon may fire again
+    # (the engine's reloadFrame, read off units in LOS); absent, every weapon starts loaded.
+    for u, r in zip(us, list(fight["A"]) + list(fight["B"])):
+        rd = r.get("ready")
+        if rd:
+            for w in u.weapons:
+                if w.name in rd:
+                    w.next = max(int(rd[w.name]), 0)
     death_on = bool(opts.get("death"))
     cost0 = [sum(u.cost for u in us if u.side == s and u.armed) for s in (0, 1)]
     killed = [0.0, 0.0]
@@ -652,6 +685,18 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     x.sh = min(x.shmax, x.sh + x.shregen * DT / 30.0)
             sides = [[u for u in alive if u.side == s] for s in (0, 1)]
         # movement: close until an enemy is within own range
+        if ordr is not None and (ordr["focus"] is None or not ordr["focus"].alive):
+            if ordr["kind"] == "amove" or ordr["focus"] is not None:
+                ours = sides[0]
+                armed_b = [e for e in sides[1] if is_armed(e)]
+                if ours and armed_b and ordr["kind"] == "amove":
+                    cx = sum(u.x for u in ours) / len(ours)
+                    cl = sum(xof[id(u)].lat for u in ours) / len(ours)
+                    ordr["focus"] = min(armed_b, key=lambda e: math.hypot(e.x - cx, xof[id(e)].lat - cl))
+                    # a new Fight command: each unit's line starts where it stands
+                    ordr["start"] = {}
+                else:
+                    ordr = None  # the gang ends (prize dead / nothing armed): back to the nearest-enemy rule
         prev_x = {id(u): (u.x, xof[id(u)].lat) for u in alive} if wat else None
         for u in alive:
             u.moving = False
@@ -696,6 +741,34 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 approached = True
                 continue
             if not u.armed:
+                continue
+            if ordr is not None and u.side == 0 and ordr["focus"] is not None:
+                # the order (see the docstring): walk at the focus, or attack what the Fight command picked
+                fo = ordr["focus"]
+                tgt = fo
+                if ordr["kind"] == "amove":
+                    att = ordr["att"].get(id(u))
+                    if att is None or not att.alive:
+                        sx, sl = ordr["start"].setdefault(id(u), (u.x, x.lat))
+                        ex, el = fo.x, xof[id(fo)].lat
+                        vx, vl = ex - sx, el - sl
+                        L2 = vx * vx + vl * vl
+                        t = 0.0 if L2 <= 1e-9 else max(0.0, min(1.0, ((u.x - sx) * vx + (x.lat - sl) * vl) / L2))
+                        px, pl = sx + t * vx, sl + t * vl
+                        reach = u.max_range + ordr["leash"]
+                        cand = [(math.hypot(e.x - px, xof[id(e)].lat - pl), e) for e in foes]
+                        cand = [c for c in cand if c[0] <= reach]
+                        att = min(cand, key=lambda c: c[0])[1] if cand else None
+                        ordr["att"][id(u)] = att
+                    if att is not None:
+                        tgt = att
+                d = apart(tgt, u)
+                if d > u.max_range * 0.95:
+                    step = min(speed * DT, d - u.max_range * 0.9)
+                    toward(u, tgt, step)
+                    u.moving = True
+                    moved = True
+                    approached = True
                 continue
             b = tac.get(u.def_)
             if b is not None:

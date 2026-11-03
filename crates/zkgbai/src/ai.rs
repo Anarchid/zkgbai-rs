@@ -13,6 +13,7 @@ use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
 use crate::logistics::Logistics;
 use crate::los::LosManager;
+use crate::military::ammo::Ammo;
 use crate::military::blasts::Blasts;
 use crate::military::coalesce::Coalesce;
 use crate::military::drops::Drops;
@@ -95,7 +96,11 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `eramp` (energy wanted ramps with the alliance's share of the metal
 /// spots and the clock, see economy/mod.rs ERAMP_*) is on in the wip line
 /// (user, 2026-11-03; disable=eramp to opt out) while its A/B runs.
-pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
+/// `ammo` (enemy tube-weapon shots counted from hits into the predictor's
+/// snapshots, military/ammo.rs) is off: its A/B (zkgbai-runs/ammo/ab,
+/// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
+/// ledger that is 99.5% right; the ledger still counts and journals.
+pub(crate) const OFF_BY_DEFAULT: [&str; 22] = [
     "pairs",
     "currency",
     "permanence",
@@ -117,6 +122,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
     "conquestleash",
     "conquestseq",
     "conquestroute",
+    "ammo",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -247,6 +253,8 @@ pub struct Ai {
     pub stakeouts: Stakeouts,
     /// Raider gangs judged by the fight predictor (`coalesce`).
     pub coalesce: Coalesce,
+    /// What the enemy's tube weapons have left (`ammo`).
+    pub ammo: Ammo,
     /// Retreats judged by the fight predictor (`stayveto`).
     pub stayveto: StayVeto,
     /// Which handler each unit belongs to (see `military::roles`).
@@ -376,6 +384,7 @@ impl SkirmishAi for Ai {
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
             coalesce: Coalesce::default(),
+            ammo: Ammo::default(),
             stayveto: StayVeto::default(),
             roles: Default::default(),
             air_intel: Default::default(),

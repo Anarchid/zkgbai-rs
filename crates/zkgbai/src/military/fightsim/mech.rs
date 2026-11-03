@@ -834,8 +834,13 @@ impl Model {
                     .filter(|(w, m)| !m.paralyzer && w.damage > 0.0)
                     .chain(ws.iter().filter(|(_, m)| m.paralyzer));
                 let (mut weapons, mut mech, mut splash) = (Vec::new(), Vec::new(), Vec::new());
+                // The unit's empty tubes are its first tube weapon's (as `sim_weapons`).
+                let first = (snap.flags.sreload)
+                    .then(|| su.spec.weapons.iter().find(|w| self.sreload.contains_key(&w.name)))
+                    .flatten();
                 for (w, m) in ordered {
-                    let mut sw = self.sim_weapon(w, snap.flags);
+                    let empty: &[i32] = if first.is_some_and(|f| std::ptr::eq(f, *w)) { &su.tubes } else { &[] };
+                    let mut sw = self.sim_weapon(w, snap.flags, empty);
                     if m.paralyzer {
                         sw.nominal = 0.0;
                     }
@@ -1557,7 +1562,8 @@ mod tests {
             .collect()
     }
 
-    /// A case's units, `side:def:hp:x:z` separated by `;`.
+    /// A case's units, `side:def:hp:x:z[:tubes]` separated by `;` (tubes:
+    /// frames until each empty tube is loaded, `,`-separated).
     fn snapshot(units: &str, specs: &HashMap<String, Arc<UnitSpec>>) -> FightSnapshot {
         let units = units
             .split(';')
@@ -1569,6 +1575,7 @@ mod tests {
                     hp: p[2].parse().unwrap(),
                     x: p[3].parse().unwrap(),
                     z: p[4].parse().unwrap(),
+                    tubes: p.get(5).map_or_else(Vec::new, |t| t.split(',').map(|f| f.parse().unwrap()).collect()),
                 }
             })
             .collect();
@@ -1596,8 +1603,8 @@ mod tests {
         let mut snap = FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0 },
-                SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 820.0, x: 100.0, z: 0.0 },
+                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0, tubes: Vec::new() },
+                SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 820.0, x: 100.0, z: 0.0, tubes: Vec::new() },
             ],
         };
         // Only the passenger has a weapon in the first comparison.
@@ -1622,8 +1629,8 @@ mod tests {
         let snap = FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0 },
-                SnapUnit { side: 1, spec: defs["cloakcon"].clone(), hp: 600.0, x: 1000.0, z: 0.0 },
+                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 1450.0, x: 0.0, z: 0.0, tubes: Vec::new() },
+                SnapUnit { side: 1, spec: defs["cloakcon"].clone(), hp: 600.0, x: 1000.0, z: 0.0, tubes: Vec::new() },
             ],
         };
         let mode = FateMode::Assassinate { target: 1 };
@@ -1684,10 +1691,17 @@ mod tests {
         let mut snap = FightSnapshot {
             flags: Default::default(),
             units: (0..4)
-                .map(|i| SnapUnit { side: 0, spec: buoy.clone(), hp: 1250.0, x: i as f32 * 30.0 - 45.0, z: 0.0 })
+                .map(|i| SnapUnit {
+                    side: 0,
+                    spec: buoy.clone(),
+                    hp: 1250.0,
+                    x: i as f32 * 30.0 - 45.0,
+                    z: 0.0,
+                    tubes: Vec::new(),
+                })
                 .collect(),
         };
-        snap.units.push(SnapUnit { side: 1, spec: lance, hp: 1000.0, x: 0.0, z: 1000.0 });
+        snap.units.push(SnapUnit { side: 1, spec: lance, hp: 1000.0, x: 0.0, z: 1000.0, tubes: Vec::new() });
         let mode = FateMode::Assassinate { target: 4 };
         let flight = Insertion { count: 4, dx: 0.0, dz: 570.4, wait: 45, flight: 155 };
         let healthy = model.fates_with_insertion(&snap, 1350, mode, &[], Some(flight));
@@ -1795,7 +1809,14 @@ mod tests {
     fn scalpels_kite_a_knight_to_death() {
         let m = Model::load().unwrap();
         let specs = specs_from(TACAI_UNITS);
-        let mut units = vec![SnapUnit { side: 0, spec: specs["cloakassault"].clone(), hp: 2500.0, x: 0.0, z: 0.0 }];
+        let mut units = vec![SnapUnit {
+            side: 0,
+            spec: specs["cloakassault"].clone(),
+            hp: 2500.0,
+            x: 0.0,
+            z: 0.0,
+            tubes: Vec::new(),
+        }];
         for i in 0..5 {
             units.push(SnapUnit {
                 side: 1,
@@ -1803,6 +1824,7 @@ mod tests {
                 hp: 660.0,
                 x: 600.0,
                 z: 25.0 * i as f32,
+                tubes: Vec::new(),
             });
         }
         let snap = FightSnapshot { flags: Default::default(), units };
@@ -1820,8 +1842,15 @@ mod tests {
         let snap = FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 30.0, x: 0.0, z: 0.0 },
-                SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 100000.0, x: 100.0, z: 0.0 },
+                SnapUnit { side: 0, spec: defs["hoverassault"].clone(), hp: 30.0, x: 0.0, z: 0.0, tubes: Vec::new() },
+                SnapUnit {
+                    side: 1,
+                    spec: defs["cloakriot"].clone(),
+                    hp: 100000.0,
+                    x: 100.0,
+                    z: 0.0,
+                    tubes: Vec::new(),
+                },
             ],
         };
         let mode = FateMode::Assassinate { target: 1 };
@@ -1848,9 +1877,9 @@ mod tests {
         let snap = FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { side: 0, spec: ours, hp: 1450.0, x: 0.0, z: 0.0 },
-                SnapUnit { side: 1, spec: decoy.clone(), hp: 1.0, x: 50.0, z: 0.0 },
-                SnapUnit { side: 1, spec: decoy, hp: 1.0, x: 150.0, z: 0.0 },
+                SnapUnit { side: 0, spec: ours, hp: 1450.0, x: 0.0, z: 0.0, tubes: Vec::new() },
+                SnapUnit { side: 1, spec: decoy.clone(), hp: 1.0, x: 50.0, z: 0.0, tubes: Vec::new() },
+                SnapUnit { side: 1, spec: decoy, hp: 1.0, x: 150.0, z: 0.0, tubes: Vec::new() },
             ],
         };
         let focused = model.fates(&snap, 300, FateMode::Assassinate { target: 2 });
@@ -2105,10 +2134,17 @@ mod tests {
         let mut units: Vec<SnapUnit> = (0..4)
             .map(|i| {
                 let a = std::f32::consts::FRAC_PI_2 * i as f32;
-                SnapUnit { side: 0, spec: g.clone(), hp: 230.0, x: 300.0 * a.cos(), z: 300.0 * a.sin() }
+                SnapUnit {
+                    side: 0,
+                    spec: g.clone(),
+                    hp: 230.0,
+                    x: 300.0 * a.cos(),
+                    z: 300.0 * a.sin(),
+                    tubes: Vec::new(),
+                }
             })
             .collect();
-        units.push(SnapUnit { side: 1, spec: k, hp: 660.0, x: 0.0, z: 0.0 });
+        units.push(SnapUnit { side: 1, spec: k, hp: 660.0, x: 0.0, z: 0.0, tubes: Vec::new() });
         let snap = FightSnapshot { flags: SimFlags::from_switches(true, false, false), units };
         let p = plane(&snap);
         for (x, z) in &p[..4] {
@@ -2139,7 +2175,8 @@ mod tests {
     #[test]
     fn engagement_reads_blockers_and_crowding() {
         let specs = specs();
-        let unit = |side, def: &str, x, z| SnapUnit { side, spec: specs[def].clone(), hp: 100.0, x, z };
+        let unit =
+            |side, def: &str, x, z| SnapUnit { side, spec: specs[def].clone(), hp: 100.0, x, z, tubes: Vec::new() };
         // A Rogue behind a file of Glaives, facing one Bandit 400 out.
         let mut snap = FightSnapshot {
             flags: Default::default(),
@@ -2206,10 +2243,18 @@ mod tests {
                     hp: 230.0,
                     x: -40.0 * row,
                     z: 30.0 * col,
+                    tubes: Vec::new(),
                 });
                 let def = if i % 3 == 0 { "tankraid" } else { "shieldraid" };
                 let hp = specs[def].health;
-                units.push(SnapUnit { side: 1, spec: specs[def].clone(), hp, x: 350.0 + 40.0 * row, z: 30.0 * col });
+                units.push(SnapUnit {
+                    side: 1,
+                    spec: specs[def].clone(),
+                    hp,
+                    x: 350.0 + 40.0 * row,
+                    z: 30.0 * col,
+                    tubes: Vec::new(),
+                });
             }
             let mut line = format!("{per_side:2} a side:");
             for (name, flags) in [

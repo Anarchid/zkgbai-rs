@@ -362,7 +362,11 @@ def make_vfight(ud, a, b, d0, layout):
 
 
 def _units(f):
-    return ";".join(f"{s}:{r['def']}:{r['hp']:.10g}:{r['x']:.10g}:{r['z']:.10g}" for s, side in ((0, f["A"]), (1, f["B"])) for r in side)
+    """side:def:hp:x:z, then :t1,t2,... for a unit with empty tubes (frames until each is loaded)."""
+    def tubes(r):
+        return ":" + ",".join(str(int(t)) for t in r["tubes"]) if r.get("tubes") else ""
+    return ";".join(f"{s}:{r['def']}:{r['hp']:.10g}:{r['x']:.10g}:{r['z']:.10g}{tubes(r)}"
+                    for s, side in ((0, f["A"]), (1, f["B"])) for r in side)
 
 
 def export_parity_variants(tdir):

@@ -155,7 +155,8 @@ mod tests {
     /// Lotus when `busy`.
     fn staged(bomb: &str, theirs: &[(&str, f32, f32)], twod: bool, busy: bool) -> (FightSnapshot, usize, Vec<bool>) {
         let s = specs();
-        let unit = |side, def: &str, x, z| SnapUnit { side, spec: s[def].clone(), hp: s[def].health, x, z };
+        let unit =
+            |side, def: &str, x, z| SnapUnit { side, spec: s[def].clone(), hp: s[def].health, x, z, tubes: Vec::new() };
         let mut units = vec![unit(0, "turretlaser", 0.0, 0.0)];
         units.extend(theirs.iter().map(|&(d, x, z)| unit(1, d, x, z)));
         units.push(unit(0, bomb, 0.0, 330.0));
@@ -257,7 +258,14 @@ mod tests {
                 let x = (i % 5) as f32 * 50.0 - 100.0;
                 snap.units.insert(
                     1,
-                    SnapUnit { side: 0, spec: s["cloakraid"].clone(), hp: 230.0, x, z: -80.0 - (i / 5) as f32 * 40.0 },
+                    SnapUnit {
+                        side: 0,
+                        spec: s["cloakraid"].clone(),
+                        hp: 230.0,
+                        x,
+                        z: -80.0 - (i / 5) as f32 * 40.0,
+                        tubes: Vec::new(),
+                    },
                 );
             }
             let b = b + k;

@@ -88,6 +88,7 @@ fn run(model: &Model, specs: &HashMap<String, Arc<UnitSpec>>, line: &str) -> Val
             hp: u[2].as_f64().unwrap_or(0.0) as f32,
             x: u[3].as_f64().unwrap_or(0.0) as f32,
             z: u[4].as_f64().unwrap_or(0.0) as f32,
+            tubes: Vec::new(),
         });
         arrivals.push(u[5].as_i64().unwrap_or(0) as i32);
         focus.push(u[6].as_u64().map(|i| i as usize));

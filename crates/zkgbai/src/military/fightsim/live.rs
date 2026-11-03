@@ -604,7 +604,8 @@ impl Ai {
             notes.members.push((id, spec.cost));
             notes.metal[0] += spec.cost;
             notes.n[0] += 1;
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(id);
+            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         let (mut air, mut statics) = (0.0, 0.0);
         for (eid, def, hp, p, flies, is_static) in theirs {
@@ -621,7 +622,8 @@ impl Ai {
             if is_static {
                 statics += spec.cost;
             }
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(eid);
+            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         if notes.metal[1] > 0.0 {
             notes.air_share = air / notes.metal[1];
@@ -788,11 +790,14 @@ impl Ai {
         for (side, id, d, hp, p) in raw {
             // A casualty, reinforcement, substantial damage, or movement
             // invalidates the old result even inside the freshness window.
+            // So does a tube weapon firing or loading.
+            let tubes = self.snap_tubes(id);
             (side, id, d.id(), (hp / d.health().max(1.0) * 5.0) as i32, (p.x / 256.0) as i32, (p.z / 256.0) as i32)
                 .hash(&mut hash);
+            tubes.len().hash(&mut hash);
             let spec = self.fight_spec_of(id, d);
             metal[side as usize] += spec.cost;
-            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z });
+            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z, tubes });
         }
         if snapshot.armed(0) == 0 || snapshot.armed(1) == 0 {
             return false;
@@ -933,7 +938,14 @@ mod veto_tests {
         for (side, n, name, x) in [(0, ours, "cloakassault", 0.0), (1, theirs, "hoverskirm", 600.0)] {
             let spec = fixture(name);
             for i in 0..n {
-                units.push(SnapUnit { side, hp: spec.health, spec: spec.clone(), x, z: i as f32 * 40.0 });
+                units.push(SnapUnit {
+                    side,
+                    hp: spec.health,
+                    spec: spec.clone(),
+                    x,
+                    z: i as f32 * 40.0,
+                    tubes: Vec::new(),
+                });
             }
         }
         FightSnapshot { flags: Default::default(), units }
