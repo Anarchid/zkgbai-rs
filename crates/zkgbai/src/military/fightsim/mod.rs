@@ -975,11 +975,28 @@ mod tests {
         assert_eq!(speed_band(9.0), 3);
     }
 
-    fn unit(side: u8, def: &str, cost: f32, health: f32, speed: f32, w: Option<(&str, &str, f32, f32, f32)>, x: f32) -> SnapUnit {
+    fn unit(
+        side: u8,
+        def: &str,
+        cost: f32,
+        health: f32,
+        speed: f32,
+        w: Option<(&str, &str, f32, f32, f32)>,
+        x: f32,
+    ) -> SnapUnit {
         let weapons = w.map_or_else(Vec::new, |(name, kind, range, reload, damage)| {
             vec![WeaponSpec { name: name.into(), weapon_type: kind.into(), range, reload, salvo: 1, damage }]
         });
-        let spec = UnitSpec { def: def.into(), cost, health, speed, mobile: speed > 0.0, weapons, radius: 12.0, ..UnitSpec::default() };
+        let spec = UnitSpec {
+            def: def.into(),
+            cost,
+            health,
+            speed,
+            mobile: speed > 0.0,
+            weapons,
+            radius: 12.0,
+            ..UnitSpec::default()
+        };
         SnapUnit { side, hp: health, x, z: 0.0, spec: Arc::new(spec), tubes: Vec::new() }
     }
 
@@ -988,7 +1005,17 @@ mod tests {
     #[test]
     fn a_puppy_is_spent_by_its_one_missile() {
         let m = Model::load().unwrap();
-        let puppy = || unit(0, "jumpscout", 45.0, 80.0, 3.5, Some(("jumpscout_missile", "MissileLauncher", 168.0, 1.5, 410.1)), 0.0);
+        let puppy = || {
+            unit(
+                0,
+                "jumpscout",
+                45.0,
+                80.0,
+                3.5,
+                Some(("jumpscout_missile", "MissileLauncher", 168.0, 1.5, 410.1)),
+                0.0,
+            )
+        };
         let wall = unit(1, "staticstorage", 100.0, 5000.0, 0.0, None, 400.0);
         let snap = FightSnapshot { units: vec![puppy(), wall], flags: SimFlags::from_switches(false, true, true) };
         let fates = m.fates(&snap, 30 * 20, FateMode::AMove);

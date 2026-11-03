@@ -667,7 +667,8 @@ impl Ai {
                 return None;
             }
             let spec = self.fight_spec_of(u.id(), def);
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(u.id());
+            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         let mut foes: Vec<(i32, UnitDef, f32, Vec3)> = Vec::new();
         for eid in theirs {
@@ -683,7 +684,8 @@ impl Ai {
         }
         for (eid, def, hp, p) in foes {
             let spec = self.fight_spec_of(eid, def);
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(eid);
+            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         if snap.units.len() > MAX_UNITS || snap.armed(0) == 0 || snap.armed(1) == 0 {
             return None;
