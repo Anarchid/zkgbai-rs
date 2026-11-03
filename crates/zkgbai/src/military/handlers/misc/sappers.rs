@@ -457,7 +457,7 @@ impl Ai {
                 continue;
             }
             let kept = sapper.site.filter(|s| {
-                self.sapper_front(s.position)
+                (self.sapper_front(s.position) || self.conquest_mine_ground(s.position))
                     && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
                     && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
                     && spaced(unit.id(), s.position, sapper.radius, &reservations)
@@ -468,7 +468,7 @@ impl Ai {
                 let sites: Vec<_> = candidate_sites(sapper.imp, sapper.radius, &fields, &finishers)
                     .into_iter()
                     .filter(|s| {
-                        self.sapper_front(s.position)
+                        (self.sapper_front(s.position) || self.conquest_mine_ground(s.position))
                             && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
                             && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
                             && self.war.get_porc_threat(s.position) <= 0.0

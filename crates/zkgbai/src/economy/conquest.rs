@@ -185,6 +185,8 @@ const GROUND_EVERY: i32 = 30 * 10;
 const MINE_FORWARD: f32 = 250.0;
 const MINES_PER_HELD: usize = 3;
 const MINES_MAX: usize = 6;
+/// A mine site this near a held objective's field middle belongs to it.
+const MINE_FIELD_REACH: f32 = 700.0;
 
 #[derive(Default)]
 pub struct Conquest {
@@ -1211,6 +1213,12 @@ impl Ai {
             .filter(|(i, _)| matches!(c.control.get(*i).map(|c| c.hold), Some(Hold::Ours(_))))
             .map(|(_, o)| (self.conquest_forward(self.conquest_v3(o.center()), MINE_FORWARD), 2.0))
             .collect()
+    }
+
+    /// Whether `p` lies in a held objective's minefield: a mine site there
+    /// counts as front for the sappers though it is past our front line.
+    pub(crate) fn conquest_mine_ground(&self, p: Vec3) -> bool {
+        self.conquest_mine_fields().iter().any(|(c, _)| distance(*c, p) <= MINE_FIELD_REACH)
     }
 
     /// Whether a factory that makes mines should make one now for the
