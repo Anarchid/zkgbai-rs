@@ -103,12 +103,14 @@ impl Local {
         [self.ours.iter().map(|o| o.cost).sum(), self.theirs.iter().map(|t| t.cost).sum()]
     }
 
-    /// The same fight without our units `ids`.
+    /// The same fight without our units `ids`, run the same way (it used
+    /// to drop the switches' flags, so stayveto weighed a fightfocus "stay"
+    /// against a frozen-fight "leave").
     pub fn without(&self, ids: &[i32]) -> Local {
         let keep: Vec<bool> = self.ours.iter().map(|o| !ids.contains(&o.id)).collect();
         let n = self.ours.len();
         let snap = FightSnapshot {
-            flags: Default::default(),
+            flags: self.snap.flags,
             units: (self.snap.units.iter().enumerate())
                 .filter(|(i, _)| *i >= n || keep[*i])
                 .map(|(_, u)| u.clone())
@@ -300,7 +302,7 @@ pub fn their_index(local: &Local, i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::military::fightsim::UnitSpec;
+    use crate::military::fightsim::{SimFlags, UnitSpec};
 
     fn fate(p: f32) -> UnitFate {
         UnitFate { p_dead: p, p_raw: p, ..Default::default() }
@@ -343,6 +345,13 @@ mod tests {
         assert_eq!(w.ours[0].id, 1);
         assert_eq!(w.snap.units.len(), 3);
         assert_eq!(their_index(&w, 0), 1);
+    }
+
+    #[test]
+    fn the_fight_without_some_of_ours_runs_the_same_way() {
+        let mut l = local(&[100.0, 50.0], &[(300.0, 450.0, true)]);
+        l.snap.flags = SimFlags::from_switches(false, true, true);
+        assert_eq!(l.without(&[0]).snap.flags, l.snap.flags);
     }
 
     #[test]
