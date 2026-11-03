@@ -214,6 +214,7 @@ impl Ai {
                 hp: f.unit.health(),
                 x: pos.x,
                 z: pos.z,
+                tubes: self.snap_tubes(*id),
             });
         }
         let def =
@@ -227,7 +228,8 @@ impl Ai {
             Arc::make_mut(&mut spec).health = e.unit.max_health().max(1.0);
         }
         let hp = seen.map_or(hp, |e| e.unit.health());
-        snapshot.units.push(SnapUnit { side: 1, spec, hp, x: job.pos.x, z: job.pos.z });
+        let tubes = job.id.map_or_else(Vec::new, |id| self.snap_tubes(id));
+        snapshot.units.push(SnapUnit { side: 1, spec, hp, x: job.pos.x, z: job.pos.z, tubes });
         // Inferred extra Phantoms also shoot; never treat a three-Phantom fix as
         // just one defender merely because the current focus is one of them.
         if job.phantom() {
@@ -238,6 +240,7 @@ impl Ai {
                     hp: def.health(),
                     x: job.pos.x + i as f32 * 80.0,
                     z: job.pos.z,
+                    tubes: Vec::new(),
                 });
             }
         }
@@ -272,6 +275,7 @@ impl Ai {
                 hp: e.get_health() * e.def_health(),
                 x: e.position.x,
                 z: e.position.z,
+                tubes: self.snap_tubes(e.unit_id),
             });
         }
         let paralysis = self.strike_stun(job).map(|(ratio, _)| ratio);

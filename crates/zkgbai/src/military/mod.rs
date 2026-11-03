@@ -3,6 +3,7 @@
 
 pub mod air_intel;
 pub mod airstrikes;
+pub mod ammo;
 pub mod arsenal;
 pub mod blasts;
 pub mod coalesce;
@@ -567,6 +568,7 @@ impl Ai {
         // Before the squads decide: their fight predictions arrive here.
         self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
+        self.guard("ammo.update", |ai| ai.ammo_update(frame));
         self.guard("coalesce.update", |ai| ai.coalesce_update(frame));
         self.guard("raider.update", |ai| ai.raider_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
@@ -1003,6 +1005,7 @@ impl Ai {
         paralyzer: bool,
     ) {
         self.raider_friendly_hit(unit, attacker, paralyzer);
+        self.ammo_hit(unit, attacker, dir, weapon);
         // Turrets for objectives under attack (see `economy::conquest`).
         if unit.team() == self.team_id {
             self.conquest_attacked(unit, attacker);
@@ -1303,6 +1306,7 @@ impl Ai {
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
         self.coalesce_enemy_destroyed(id);
+        self.ammo_enemy_destroyed(id);
         self.stayveto_enemy_destroyed(id);
         self.bomber_target_destroyed(enemy.id());
         self.counterbattery_destroyed(enemy.id());

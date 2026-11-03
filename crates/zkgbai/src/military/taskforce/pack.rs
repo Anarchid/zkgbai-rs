@@ -1101,11 +1101,18 @@ impl Ai {
             let (sx, sz) = (meet.x - c.x, meet.z - c.z);
             let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
             for (spec, hp, p, _) in &pack {
-                snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x + sx, z: p.z + sz });
+                snap.units.push(SnapUnit {
+                    side: 0,
+                    spec: spec.clone(),
+                    hp: *hp,
+                    x: p.x + sx,
+                    z: p.z + sz,
+                    tubes: Vec::new(),
+                });
             }
             for &i in &group {
                 let (spec, hp, p, _) = &armed[i];
-                snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+                snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z, tubes: Vec::new() });
             }
             let out = model.predict_with(&snap, true);
             let cost_a: f32 = pack.iter().map(|u| u.0.cost).sum();
@@ -1216,11 +1223,11 @@ impl Ai {
             };
             let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
             for (spec, hp, p, _) in &pack {
-                snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+                snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: *hp, x: p.x, z: p.z, tubes: Vec::new() });
             }
             for &i in &group {
                 let (_, spec, hp, p, _, _) = &near[i];
-                snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+                snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z, tubes: Vec::new() });
             }
             let fates = model.fates(&snap, horizon, FateMode::Pass { offset });
             let (ours_f, theirs_f) = fates.split_at(pack.len());

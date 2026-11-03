@@ -98,7 +98,7 @@ pub struct UnitSpec {
 }
 
 /// A unit in a fight.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SnapUnit {
     /// 0 = A (us), 1 = B.
     pub side: u8,
@@ -106,6 +106,10 @@ pub struct SnapUnit {
     pub hp: f32,
     pub x: f32,
     pub z: f32,
+    /// Its tube weapon's empty tubes (the first of its weapons with tubes,
+    /// [`SimFlags::sreload`]): frames from now until each is loaded again.
+    /// Empty: every tube loaded, or not known (see `military::ammo`).
+    pub tubes: Vec<i32>,
 }
 
 /// Which mechanics fight a consumer asks for (the AI's switches; both off
@@ -536,7 +540,18 @@ impl Model {
         out
     }
 
-    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags) -> SimWeapon {
+    /// The sim's weapons of unit `u`: its first tube weapon starts with the
+    /// unit's empty tubes ([`SnapUnit::tubes`]), every other tube loaded.
+    fn sim_weapons(&self, u: &SnapUnit, flags: SimFlags) -> Vec<SimWeapon> {
+        let first =
+            flags.sreload.then(|| u.spec.weapons.iter().position(|w| self.sreload.contains_key(&w.name))).flatten();
+        (u.spec.weapons.iter().enumerate())
+            .map(|(i, w)| self.sim_weapon(w, flags, if Some(i) == first { &u.tubes } else { &[] }))
+            .collect()
+    }
+
+    /// `empty`: frames until each empty tube is loaded (tube weapons only).
+    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags, empty: &[i32]) -> SimWeapon {
         let salvo = w.salvo.max(1);
         let hitscan = w.hitscan();
         let tubes = if flags.sreload { self.sreload.get(&w.name).copied() } else { None };
@@ -548,8 +563,12 @@ impl Model {
             salvo,
             nominal: if hitscan { w.damage as f64 * salvo as f64 } else { w.damage as f64 },
             next: 0,
-            // Tubes start loaded.
-            tubes: tubes.map_or_else(Vec::new, |(n, _)| vec![0; n]),
+            // Tubes start loaded, but for those known empty.
+            tubes: tubes.map_or_else(Vec::new, |(n, _)| {
+                let mut t = vec![0; n.saturating_sub(empty.len())];
+                t.extend(empty.iter().take(n).map(|&f| f.max(0)));
+                t
+            }),
             tube_reload: tubes.map_or(0, |(_, r)| r),
         }
     }
@@ -599,11 +618,7 @@ impl Model {
     /// The snapshot's units on the fight's line, with table keys resolved.
     fn sim_units(&self, snap: &FightSnapshot) -> Vec<SimUnit> {
         let xs = project(snap);
-        snap.units
-            .iter()
-            .zip(xs)
-            .map(|(u, x)| self.sim_unit(u, x, u.spec.weapons.iter().map(|w| self.sim_weapon(w, snap.flags)).collect()))
-            .collect()
+        snap.units.iter().zip(xs).map(|(u, x)| self.sim_unit(u, x, self.sim_weapons(u, snap.flags))).collect()
     }
 }
 
@@ -898,6 +913,7 @@ mod tests {
                             hp: p[2].parse().unwrap(),
                             x: p[3].parse().unwrap(),
                             z: p[4].parse().unwrap(),
+                            tubes: Vec::new(),
                         }
                     })
                     .collect();
@@ -997,7 +1013,14 @@ mod tests {
         let specs = specs();
         let snap = FightSnapshot {
             flags: Default::default(),
-            units: vec![SnapUnit { side: 0, spec: specs["cloakraid"].clone(), hp: 230.0, x: 0.0, z: 0.0 }],
+            units: vec![SnapUnit {
+                side: 0,
+                spec: specs["cloakraid"].clone(),
+                hp: 230.0,
+                x: 0.0,
+                z: 0.0,
+                tubes: Vec::new(),
+            }],
         };
         let out = m.predict(&snap);
         assert_eq!((out.killed_a, out.killed_b, out.armed_a, out.armed_b), (0.0, 0.0, 1, 0));
@@ -1029,6 +1052,7 @@ mod commit_tests {
                 }],
                 ..Default::default()
             }),
+            tubes: Vec::new(),
         }
     }
 

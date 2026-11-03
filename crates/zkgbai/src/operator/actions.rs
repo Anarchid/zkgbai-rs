@@ -276,6 +276,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
     ),
+    (
+        "ammo",
+        "Army",
+        "hits on our units count the enemy tube weapons' shots: the fight predictor sees their empty tubes, and a lone raider beside an emptied Picket takes it (off by default: lost its A/B)",
+    ),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),

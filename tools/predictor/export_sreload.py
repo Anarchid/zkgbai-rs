@@ -24,8 +24,38 @@ CASES = {
     "ogres_thugs": ([("shieldassault", 1.0)] * 3, [("tankriot", 1.0)] * 2, 360.4, "crowd"),
     "own_pickets": ([("turretmissile", 1.0)] * 2 + [("cloakraid", 1.0)], [("hoverraid", 1.0)] * 5, 380.9, "crowd"),
 }
+# Units with empty tubes (the AI's ammo ledger; our own units' scriptLoaded): (case, side, index) -> frames
+# until each empty tube is loaded. A Picket that just fired its three tubes (12.5 s each, 1.2 s apart) at a
+# wounded Kodachi; one with a tube left; an empty Picket beside a loaded one; Ogres caught between salvos.
+CASES.update({
+    "empty_picket_kodachi": ([("tankraid", 0.53)], [("turretmissile", 1.0)], 450.3, "crowd"),
+    "picket_one_left": ([("tankraid", 0.53)], [("turretmissile", 1.0)], 450.3, "crowd"),
+    "empty_picket_glaives": ([("cloakraid", 1.0)] * 2, [("turretmissile", 1.0), ("turretmissile", 1.0), ("staticmex", 1.0)], 520.7,
+                             "crowd"),
+    "empty_ogres": ([("hoverraid", 1.0)] * 6, [("tankriot", 1.0)] * 2, 330.1, "crowd"),
+    "own_empty_pickets": ([("turretmissile", 1.0)] * 2 + [("cloakraid", 1.0)], [("hoverraid", 1.0)] * 5, 380.9, "crowd"),
+})
+TUBES = {
+    ("empty_picket_kodachi", "B", 0): [288, 324, 360],
+    ("picket_one_left", "B", 0): [200, 236],
+    ("empty_picket_glaives", "B", 0): [250, 286, 322],
+    ("empty_ogres", "B", 0): [30, 39],
+    ("empty_ogres", "B", 1): [12],
+    ("own_empty_pickets", "A", 0): [100, 136, 172],
+    ("own_empty_pickets", "A", 1): [400],
+}
 # Fates horizons (frames) for some of them.
-FATES = {"picket_kodachis": 300, "picket_ring": 450, "ogre_daggers": 300, "ogres_thugs": 900, "own_pickets": 600}
+FATES = {"picket_kodachis": 300, "picket_ring": 450, "ogre_daggers": 300, "ogres_thugs": 900, "own_pickets": 600,
+         "empty_picket_kodachi": 450, "picket_one_left": 450, "empty_picket_glaives": 450, "own_empty_pickets": 600}
+
+
+def fight_of(ud, name):
+    a, b, d0, layout = CASES[name]
+    f = E.make_vfight(ud, a, b, d0, layout)
+    for (case, side, i), t in TUBES.items():
+        if case == name:
+            f[side][i]["tubes"] = list(t)
+    return f
 
 
 def main(rdir, crate):
@@ -47,11 +77,11 @@ def main(rdir, crate):
                      f"{d.radius:.10g}\t{'|'.join(ws)}\n")
     with open(os.path.join(tdir, "mech_sreload_cases.tsv"), "w") as fh:
         fh.write("# Python mech.simulate_mech per variant + sreload (tube weapons, the crate's fightsim_sreload.tsv), opts six +"
-                 " heatray + slow2d: units side:def:hp:x:z; dps = no hazard, stop = with the hazard, wd = A withdraws;"
+                 " heatray + slow2d: units side:def:hp:x:z[:empty tubes]; dps = no hazard, stop = with the hazard, wd = A withdraws;"
                  " off_dps = the same without sreload\n")
         fh.write("case\tvariant\tunits\tdps_A\tdps_B\tstop_A\tstop_B\twd_A\twd_B\toff_dps_A\toff_dps_B\n")
-        for name, (a, b, d0, layout) in CASES.items():
-            f = E.make_vfight(ud, a, b, d0, layout)
+        for name in CASES:
+            f = fight_of(ud, name)
             for v in E.VARIANTS:
                 o = dict(E.opts_of(v), sreload=1)
                 o_off = dict(E.opts_of(v), sreload=0)
@@ -68,8 +98,7 @@ def main(rdir, crate):
                  " unit dead:death frame (-1 alive):hp left:pdead\n")
         fh.write("case\tvariant\tunits\thorizon\tfates\n")
         for name, horizon in FATES.items():
-            a, b, d0, layout = CASES[name]
-            f = E.make_vfight(ud, a, b, d0, layout)
+            f = fight_of(ud, name)
             for v in E.VARIANTS:
                 fa = {}
                 mech.simulate_mech(f, dict(E.opts_of(v), sreload=1), None, fates=fa, horizon=horizon)

@@ -16,7 +16,8 @@
 //! the air or under water, no cloaked Scythes) are clustered by [`LINK`]
 //! (single linkage; a raider squad's members always share a cluster). A
 //! cluster of [`MIN_MEMBERS`] or more with an armed enemy in its local fight
-//! (`fightsim::local`) is judged two ways:
+//! (`fightsim::local`), or a lone raider beside an enemy whose tubes are
+//! all empty (`ammo`, [`LONE_OPEN`]), is judged two ways:
 //!
 //! - **clean**: all of it a-moving in. Every armed enemy likely dead (each
 //!   P(dead) >= [`CLEAN_MIN_P`], [`CLEAN_SHARE`] of their armed metal), at
@@ -52,7 +53,7 @@ use springai::{Unit, Vec3};
 
 use crate::Ai;
 use crate::military::SquadId;
-use crate::military::fightsim::local::{Budget, Local, Tally, kills, tally, their_index};
+use crate::military::fightsim::local::{Budget, CONTACT, Local, Tally, kills, tally, their_index};
 use crate::military::fightsim::{FateMode, UnitFate};
 use crate::military::wrappers::fighter::fight_clear;
 use crate::nav;
@@ -65,8 +66,12 @@ pub const SHADOW: &str = "coalesceshadow";
 const PERIOD: i32 = 15;
 /// Raiders this close are one cluster (single linkage).
 const LINK: f32 = 450.0;
-/// The smallest cluster judged: one raider alone is philosoraider's.
+/// The smallest cluster judged: one raider alone is philosoraider's...
 const MIN_MEMBERS: usize = 2;
+/// ...unless an enemy in its fight has fired every tube, for at least this
+/// many more frames (`ammo`): a Kodachi that has taken a Picket's three
+/// missiles, a Glaive whose pair-mate did.
+const LONE_OPEN: i32 = 60;
 /// Synchronous query time per scan (microseconds); clusters left over wait.
 const BUDGET_US: u128 = 4000;
 /// Prizes tried per cluster, most valuable first.
@@ -203,6 +208,10 @@ pub struct Coalesce {
     scans: u64,
     over_budget: u64,
     forms: u64,
+    /// Lone raiders judged beside an emptied tube weapon (`ammo`), and
+    /// the gangs of one formed (or would be).
+    lone_judged: u64,
+    lone_formed: u64,
     last_report: i32,
 }
 
@@ -519,7 +528,7 @@ impl Ai {
         self.coalesce.quiet.retain(|_, until| *until > frame);
         let free: Vec<(i32, Origin, Unit)> =
             self.coalesce_candidates().into_iter().filter(|c| !self.coalesce.owner.contains_key(&c.0)).collect();
-        if free.len() < MIN_MEMBERS {
+        if free.is_empty() {
             return;
         }
         let points: Vec<Vec3> = free.iter().map(|c| c.2.pos()).collect();
@@ -528,7 +537,7 @@ impl Ai {
             _ => false,
         })
         .into_iter()
-        .filter(|g| g.len() >= MIN_MEMBERS)
+        .filter(|g| g.len() >= MIN_MEMBERS || self.ammo_open_near(points[g[0]], CONTACT, LONE_OPEN))
         .filter(|g| !shadow || g.iter().all(|&i| !self.coalesce.quiet.contains_key(&free[i].0)))
         .collect();
         if groups.is_empty() {
@@ -545,7 +554,10 @@ impl Ai {
             let group = &groups[(start + k) % n];
             let members: Vec<(i32, Origin, Unit)> = group.iter().map(|&i| free[i]).collect();
             let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
+            let lone = members.len() == 1;
+            self.coalesce.lone_judged += u64::from(lone);
             let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) else { continue };
+            self.coalesce.lone_formed += u64::from(lone);
             self.coalesce_form(members, v, shadow);
         }
         self.coalesce.rotate = start + 1;
@@ -568,6 +580,7 @@ impl Ai {
         rec["gang"] = json!(gid);
         rec["t"] = json!(frame / 30);
         rec["members"] = json!(origins);
+        rec["lone"] = json!(members.len() == 1);
         rec["p_prize"] = json!(v.p_prize);
         if shadow {
             for m in &members {
@@ -697,7 +710,7 @@ impl Ai {
             "event": "cost", "t": frame / 30, "mode": mode,
             "scans_per_min": c.scans as f64 / minutes, "queries": c.queries,
             "mean_us": c.micros as f64 / c.scans as f64, "over_budget": c.over_budget, "forms": c.forms,
-            "gangs": c.gangs.len(),
+            "gangs": c.gangs.len(), "lone_judged": c.lone_judged, "lone_formed": c.lone_formed,
         });
         c.scans = 0;
         c.micros = 0;
@@ -715,10 +728,11 @@ fn coalesce_record(local: &Local, fates: &[UnitFate], plan: Plan, t: &Tally, p_p
         .map(|(o, f)| json!({"id": o.id, "cost": o.cost, "p": f.p_raw, "pc": f.p_dead}))
         .collect();
     let k = kills(local, fates);
-    let theirs: Vec<Value> = (local.theirs.iter().zip(&fates[n.min(fates.len())..]).zip(k))
-        .map(|((e, f), kv)| {
+    let theirs: Vec<Value> = (local.theirs.iter().zip(&fates[n.min(fates.len())..]).zip(k).enumerate())
+        .map(|(i, ((e, f), kv))| {
+            let tubes = local.snap.units.get(n + i).map_or(&[][..], |u| &u.tubes[..]);
             json!({"id": e.id, "def": e.def, "cost": e.cost, "value": e.value, "armed": e.armed,
-                   "prize": e.prize, "p": f.p_raw, "pc": f.p_dead, "kill": kv})
+                   "prize": e.prize, "p": f.p_raw, "pc": f.p_dead, "kill": kv, "tubes": tubes})
         })
         .collect();
     json!({

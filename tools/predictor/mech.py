@@ -474,6 +474,13 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     # Tubes start loaded. Per weapon: ready frame of each tube.
     sre = M.get("sreload", {}) if opts.get("sreload") else {}
     tubes = {id(w): [0] * sre[w.name][0] for u in us for w in u.weapons if w.name in sre}
+    # ammo (2026-11-03): a unit record's "tubes" are its first tube weapon's empty tubes, frames until each is
+    # loaded again (the AI's ledger of hits taken, military/ammo.rs; our own units' scriptLoaded).
+    for u, r in zip(us, list(fight["A"]) + list(fight["B"])):
+        tw = next((w for w in u.weapons if w.name in sre), None)
+        if tw is not None and r.get("tubes"):
+            n = sre[tw.name][0]
+            tubes[id(tw)] = [0] * max(n - len(r["tubes"]), 0) + [max(int(t), 0) for t in r["tubes"][:n]]
     # 2-D round (zkgbai-runs/predictor/twod): units keep their offset across the fight axis and move in
     # the plane; `sep` keeps them from overlapping, `aoe` lands splash on the units around a target.
     twod = bool(opts.get("twod") or opts.get("sep") or opts.get("aoe"))
@@ -554,6 +561,15 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             for k, u in enumerate(side):
                 for w in u.weapons:
                     w.next = int(round(S * k / (len(side) - 1)))
+    # reload state (2026-11-03, user: "knowing when a Scalpel or Ripper has fired most recently can swing a
+    # prediction a lot"): a unit record's "ready" maps weapon names to frames until that weapon may fire again
+    # (the engine's reloadFrame, read off units in LOS); absent, every weapon starts loaded.
+    for u, r in zip(us, list(fight["A"]) + list(fight["B"])):
+        rd = r.get("ready")
+        if rd:
+            for w in u.weapons:
+                if w.name in rd:
+                    w.next = max(int(rd[w.name]), 0)
     death_on = bool(opts.get("death"))
     cost0 = [sum(u.cost for u in us if u.side == s and u.armed) for s in (0, 1)]
     killed = [0.0, 0.0]
