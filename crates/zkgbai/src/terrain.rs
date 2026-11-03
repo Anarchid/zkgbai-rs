@@ -868,9 +868,15 @@ impl Ai {
                 blocked: false,
             })
             .collect();
+        // A chokepoint within reach of a conquest objective we hold counts
+        // too (see `economy::conquest`).
+        let conquered = self.conquest_held_sites();
+        let reach = self.conquest_reach();
         let held = |c: usize| {
             let p = map.chokes[c].pos;
-            self.war.get_friendly_porc_threat(Vec3::xz(p.x, p.z)) >= HELD_POWER
+            let at = Vec3::xz(p.x, p.z);
+            self.war.get_friendly_porc_threat(at) >= HELD_POWER
+                || conquered.iter().any(|s| crate::util::distance(Vec3::xz(s.x, s.z), at) <= reach)
         };
         // A region our defenses cover in strength holds like a chokepoint.
         let held_region = |r: usize| {

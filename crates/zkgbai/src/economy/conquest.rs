@@ -56,6 +56,22 @@
 //! commits the turrets at once and orders one more there, at most one per
 //! `ATTACK_GAP` and `MAX_ADDED` per objective.
 //!
+//! Conquered ground (user, 2026-11-03: "seizing critical junctions denies
+//! them to the enemy, and the ground behind them is ours to take; nothing
+//! capitalizes on it"). Every objective's control is read each second:
+//! ours while our turrets cover it, or while our force there outweighs the
+//! enemy's `FORCE_RATIO` times for `FORCE_FOR` seconds (lapsing
+//! `FORCE_LAPSE` after it last did), theirs when theirs does for
+//! `ENEMY_TICKS` or their turrets stand on a site. While one is ours, the
+//! spots it shields (each by how much longer the enemy's way to it gets,
+//! weighted by the belief) are conquered ground: a mex there is cheaper for
+//! our constructors by `GROUND_BONUS` times the shield, raid memory is
+//! waived there while no enemy stands near, colonists may go there though
+//! the spot graph presumes it the enemy's, and the chokepoints within the
+//! objective's reach count as held for the terrain's shelter. A commander
+//! hurt at an objective our force still holds leaves its turrets queued for
+//! the usual builders.
+//!
 //! Every decision goes to the journal (`conquest` records).
 
 use std::sync::mpsc;
@@ -151,6 +167,27 @@ const ATTACK_RADIUS: f32 = 900.0;
 const ATTACK_GAP: i32 = 30 * 20;
 const MAX_ADDED: u32 = 4;
 
+/// Conquered ground (see the module notes).
+const FORCE_RATIO: f32 = 1.5;
+const FORCE_MIN: f32 = crate::terrain::HELD_POWER;
+const FORCE_FOR: u32 = 30;
+const FORCE_LAPSE: i32 = 30 * 60;
+const ENEMY_TICKS: u32 = 3;
+pub(crate) const GROUND_BONUS: f32 = 1500.0;
+pub(crate) const GROUND_SAFE: f32 = 0.5;
+/// Conquered ground is reweighed this often (frames), and on any change.
+const GROUND_EVERY: i32 = 30 * 10;
+
+/// Mines at a held objective (user, 2026-11-03: "if we're a mine haver
+/// factory we should do the mines for these"): a field this far on its
+/// enemy side, mines wanted per held objective, and at most this many in
+/// all.
+const MINE_FORWARD: f32 = 250.0;
+const MINES_PER_HELD: usize = 3;
+const MINES_MAX: usize = 6;
+/// A mine site this near a held objective's field middle belongs to it.
+const MINE_FIELD_REACH: f32 = 700.0;
+
 #[derive(Default)]
 pub struct Conquest {
     job: Option<mpsc::Receiver<Vec<Objective>>>,
@@ -171,6 +208,44 @@ pub struct Conquest {
     pub held: Vec<Held>,
     /// Our units hit near an objective lately: (frame, where).
     pub attacks: Vec<(i32, Vec3)>,
+    /// Who holds each objective (see `conquest_control`).
+    pub control: Vec<Control>,
+    /// Per metal spot (graph index): how much the objectives we hold shield
+    /// it (see `conquest_ground`), and when that was weighed.
+    pub ground: Vec<f32>,
+    pub ground_at: i32,
+}
+
+/// Who holds an objective, as our AI reads it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Hold {
+    #[default]
+    Unknown,
+    /// Ours, by turrets or by force.
+    Ours(&'static str),
+    Contested,
+    Theirs,
+}
+
+impl Hold {
+    fn name(self) -> &'static str {
+        match self {
+            Hold::Unknown => "unknown",
+            Hold::Ours(by) => by,
+            Hold::Contested => "contested",
+            Hold::Theirs => "theirs",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Control {
+    pub hold: Hold,
+    /// Seconds in a row our force (their force) was the stronger there.
+    pub force: u32,
+    pub enemy: u32,
+    pub last_force: i32,
+    pub since: i32,
 }
 
 pub struct Held {
@@ -273,6 +348,7 @@ impl Ai {
         self.conquest_plan(frame);
         self.conquest_observe();
         self.conquest_attacks(frame);
+        self.conquest_control(frame);
         if self.eco.conquest.op.is_some() {
             self.conquest_step(frame);
         } else if !self.eco.conquest.done {
@@ -434,6 +510,7 @@ impl Ai {
         {
             self.eco.conquest.job = None;
             self.eco.conquest.objectives = found;
+            self.eco.conquest.control = vec![Control::default(); self.eco.conquest.objectives.len()];
             self.conquest_report_atlas();
         }
         if self.eco.conquest.asked || frame < 90 {
@@ -615,7 +692,7 @@ impl Ai {
         }) else {
             return;
         };
-        let best = (0..c.objectives.len())
+        let best: Vec<(usize, f32)> = (0..c.objectives.len())
             .filter(|&i| {
                 let o = &c.objectives[i];
                 !c.taken.contains(&i)
@@ -625,13 +702,15 @@ impl Ai {
             })
             .map(|i| (i, self.conquest_expected(&c.objectives[i])))
             .filter(|(_, v)| *v > 0.0)
-            .max_by(|a, b| {
-                let race = |i: usize| {
-                    let o = &c.objectives[i];
-                    (1.0 + (o.enemy_walk - o.walk) / RACE_SCALE).clamp(0.3, 1.5)
-                };
-                (a.1 * race(a.0)).total_cmp(&(b.1 * race(b.0)))
-            });
+            .collect::<Vec<_>>();
+        let race = |i: usize| {
+            let o = &c.objectives[i];
+            (1.0 + (o.enemy_walk - o.walk) / RACE_SCALE).clamp(0.3, 1.5)
+        };
+        let mut ranked = best;
+        ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
+        let best =
+            if self.iq.peers.is_empty() { ranked.first().copied() } else { self.conquest_team_pick(crew, &ranked) };
         let Some((idx, expected)) = best else {
             self.eco.conquest.done = true;
             self.log("conquest: no objective is open");
@@ -675,6 +754,45 @@ impl Ai {
                    "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len(),
                    "taken": self.eco.conquest.taken.len()}),
         );
+    }
+
+    /// With allied ZKGBAIs playing on their own (see `iq`): the eligible
+    /// objective nearest our commander that those of a lower team number
+    /// would not take, judging each of them, lowest first, to take the one
+    /// nearest its commander (user, 2026-11-03: "we typically spread around,
+    /// so the closest to us is the pick; we can probe what they would pick,
+    /// since we know where their commander is").
+    fn conquest_team_pick(&self, crew: i32, eligible: &[(usize, f32)]) -> Option<(usize, f32)> {
+        let c = &self.eco.conquest;
+        let center = |i: usize| self.conquest_v3(c.objectives[i].center());
+        let mut before: Vec<(i32, Vec3)> = (self.cb.friendly_units().into_iter())
+            .filter(|u| self.iq.peers.contains(&u.team()) && u.team() < self.team_id && u.health() > 0.0)
+            .filter(|u| u.def().is_some_and(|d| self.defs.is_commander(d)))
+            .map(|u| (u.team(), u.pos()))
+            .collect();
+        before.sort_by_key(|b| b.0);
+        before.dedup_by_key(|b| b.0);
+        let mut claimed: Vec<usize> = Vec::new();
+        for &(_, at) in &before {
+            if let Some(&(i, _)) = (eligible.iter())
+                .filter(|(i, _)| !claimed.contains(i))
+                .min_by(|a, b| distance(center(a.0), at).total_cmp(&distance(center(b.0), at)))
+            {
+                claimed.push(i);
+            }
+        }
+        let ours = self.eco.workers.get(&crew).map(|w| w.get_pos())?;
+        let nearest = |pool: &mut dyn Iterator<Item = &(usize, f32)>| {
+            pool.min_by(|a, b| distance(center(a.0), ours).total_cmp(&distance(center(b.0), ours))).copied()
+        };
+        let pick = nearest(&mut eligible.iter().filter(|(i, _)| !claimed.contains(i)))
+            .or_else(|| nearest(&mut eligible.iter()));
+        self.log(&format!(
+            "conquest: allied ZKGBAIs on teams {:?} before us would take objectives {claimed:?}; ours: {:?}",
+            before.iter().map(|b| b.0).collect::<Vec<_>>(),
+            pick.map(|p| p.0)
+        ));
+        pick
     }
 
     fn conquest_belief_json(&self) -> serde_json::Value {
@@ -943,6 +1061,178 @@ impl Ai {
         t
     }
 
+    /// Our force there and theirs, by power (the scale of `get_danger`).
+    fn conquest_forces_at(&self, idx: usize) -> (f32, f32) {
+        let Some(o) = self.eco.conquest.objectives.get(idx) else { return (0.0, 0.0) };
+        let c = self.conquest_v3(o.center());
+        (self.war.get_total_friendly_power(c), self.war.get_enemy_power(c))
+    }
+
+    /// Whether our force outweighs the enemy's at objective `idx` now.
+    fn conquest_force_holds(&self, idx: usize) -> bool {
+        let (ours, theirs) = self.conquest_forces_at(idx);
+        ours >= FORCE_MIN && ours >= FORCE_RATIO * theirs
+    }
+
+    /// Read who holds each objective; reweigh the conquered ground when
+    /// that changes (and every `GROUND_EVERY`).
+    fn conquest_control(&mut self, frame: i32) {
+        let n = self.eco.conquest.objectives.len();
+        if self.eco.conquest.control.len() != n {
+            self.eco.conquest.control = vec![Control::default(); n];
+        }
+        let mut changed = false;
+        for i in 0..n {
+            let o = &self.eco.conquest.objectives[i];
+            let center = self.conquest_v3(o.center());
+            let turrets = self.war.get_friendly_porc_threat(center) >= crate::terrain::HELD_POWER;
+            let their_porc = o.sites.iter().any(|&s| self.war.get_porc_threat(self.conquest_v3(s)) > 0.0);
+            let (ours, theirs) = self.conquest_forces_at(i);
+            let force = ours >= FORCE_MIN && ours >= FORCE_RATIO * theirs;
+            let enemy = their_porc || (theirs >= FORCE_MIN && theirs > FORCE_RATIO * ours);
+            let mut c = self.eco.conquest.control[i];
+            c.force = if force { c.force + 1 } else { 0 };
+            c.enemy = if enemy { c.enemy + 1 } else { 0 };
+            if force {
+                c.last_force = frame;
+            }
+            let hold = if turrets && !enemy {
+                Hold::Ours("turrets")
+            } else if c.enemy >= ENEMY_TICKS {
+                Hold::Theirs
+            } else if c.force >= FORCE_FOR || (c.hold == Hold::Ours("force") && frame - c.last_force < FORCE_LAPSE) {
+                Hold::Ours("force")
+            } else if matches!(c.hold, Hold::Ours(_)) {
+                Hold::Contested
+            } else {
+                c.hold
+            };
+            if hold != c.hold {
+                self.log(&format!(
+                    "conquest: objective {i} is {} (was {}; our power {ours:.0}, theirs {theirs:.0})",
+                    hold.name(),
+                    c.hold.name()
+                ));
+                self.op_emit(
+                    "conquest",
+                    json!({"event": "control", "t": frame / 30, "objective": i, "hold": hold.name(),
+                           "was": c.hold.name(), "ours": ours.round(), "theirs": theirs.round()}),
+                );
+                c.hold = hold;
+                c.since = frame;
+                changed = true;
+            }
+            self.eco.conquest.control[i] = c;
+        }
+        if changed || frame - self.eco.conquest.ground_at >= GROUND_EVERY {
+            self.conquest_ground_weigh(frame, changed);
+        }
+    }
+
+    /// The spots the objectives we hold shield, by how much (the most any
+    /// held objective gives; each objective's tiers weighted by the belief).
+    fn conquest_ground_weigh(&mut self, frame: i32, log: bool) {
+        let c = &self.eco.conquest;
+        let mut g = vec![0.0f32; c.assets.len()];
+        let belief = self.conquest_belief();
+        let teams = belief.len().max(1) as f32;
+        for (i, o) in c.objectives.iter().enumerate() {
+            if !matches!(c.control.get(i).map(|c| c.hold), Some(Hold::Ours(_))) {
+                continue;
+            }
+            let mut acc = vec![0.0f32; g.len()];
+            for (_, b) in &belief {
+                for &(t, p) in b {
+                    if let Some(d) = o.denial.iter().find(|d| d.tier == t && d.enemy == 0) {
+                        for &(k, w) in &d.shield {
+                            if let Some(a) = acc.get_mut(k) {
+                                *a += p * w / teams;
+                            }
+                        }
+                    }
+                }
+            }
+            for (gk, ak) in g.iter_mut().zip(acc) {
+                *gk = gk.max(ak);
+            }
+        }
+        if log {
+            let shielded = g.iter().filter(|&&w| w >= GROUND_SAFE).count();
+            let free = (g.iter().enumerate())
+                .filter(|&(k, &w)| {
+                    w >= GROUND_SAFE && self.graph.metal_spots.get(k).is_some_and(|s| !s.owned && !s.hostile)
+                })
+                .count();
+            self.log(&format!(
+                "conquest: conquered ground shields {shielded} spots ({free} free, shield >= {GROUND_SAFE})"
+            ));
+        }
+        self.eco.conquest.ground = g;
+        self.eco.conquest.ground_at = frame;
+    }
+
+    /// How much the objectives we hold shield the metal spot under `p`
+    /// (0: none, or not a spot).
+    pub(crate) fn conquest_ground(&self, p: Vec3) -> f32 {
+        let g = &self.eco.conquest.ground;
+        if g.is_empty() || self.dev_off("conquest") {
+            return 0.0;
+        }
+        self.graph.spot_under(p).and_then(|i| g.get(i)).copied().unwrap_or(0.0)
+    }
+
+    /// A mex job's bonus on conquered ground (see `eco_cost_of_job_alone`).
+    pub(crate) fn conquest_ground_bonus(&self, p: Vec3) -> f32 {
+        GROUND_BONUS * self.conquest_ground(p)
+    }
+
+    /// Whether `p` is conquered ground no enemy stands near now: raid
+    /// memory is waived there (see `assign`).
+    pub(crate) fn conquest_ground_safe(&self, p: Vec3) -> bool {
+        self.conquest_ground(p) >= GROUND_SAFE && self.war.get_enemy_power(p) <= 0.0
+    }
+
+    /// Sites of the objectives we hold: the chokepoints within their reach
+    /// count as held for the terrain's shelter.
+    pub(crate) fn conquest_held_sites(&self) -> Vec<Vec3> {
+        let c = &self.eco.conquest;
+        (c.objectives.iter().enumerate())
+            .filter(|(i, _)| matches!(c.control.get(*i).map(|c| c.hold), Some(Hold::Ours(_))))
+            .flat_map(|(_, o)| o.sites.iter().map(|&s| self.conquest_v3(s)))
+            .collect()
+    }
+
+    /// Minefields for the objectives we hold: (middle, value), on each
+    /// one's enemy side (see `sappers`).
+    pub(crate) fn conquest_mine_fields(&self) -> Vec<(Vec3, f32)> {
+        if self.dev_off("conquest") {
+            return Vec::new();
+        }
+        let c = &self.eco.conquest;
+        (c.objectives.iter().enumerate())
+            .filter(|(i, _)| matches!(c.control.get(*i).map(|c| c.hold), Some(Hold::Ours(_))))
+            .map(|(_, o)| (self.conquest_forward(self.conquest_v3(o.center()), MINE_FORWARD), 2.0))
+            .collect()
+    }
+
+    /// Whether `p` lies in a held objective's minefield: a mine site there
+    /// counts as front for the sappers though it is past our front line.
+    pub(crate) fn conquest_mine_ground(&self, p: Vec3) -> bool {
+        self.conquest_mine_fields().iter().any(|(c, _)| distance(*c, p) <= MINE_FIELD_REACH)
+    }
+
+    /// Whether a factory that makes mines should make one now for the
+    /// objectives we hold (`have`: our mines).
+    pub(crate) fn conquest_wants_mines(&self, have: usize) -> bool {
+        let held = self.conquest_mine_fields().len();
+        held > 0 && have < (MINES_PER_HELD * held).min(MINES_MAX)
+    }
+
+    /// The conquest turret's reach (Stinger 620 by default).
+    pub(crate) fn conquest_reach(&self) -> f32 {
+        self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0)
+    }
+
     /// Our unit was hit: if near an objective (ours now, or held), note it
     /// (see `conquest_attacks`).
     pub(crate) fn conquest_attacked(&mut self, unit: springai::Unit, attacker: Option<springai::Unit>) {
@@ -1177,8 +1467,9 @@ impl Ai {
         let guards = [op.home_guard, op.guard].into_iter().flatten().map(|(t, _)| t);
         // A held objective keeps what is still to come (turrets added for
         // attacks); a lost one drops what was not started.
-        let pending: Vec<Turret> =
-            if success { Vec::new() } else { op.turrets.iter().copied().chain(guards).collect() };
+        // So does one our force still holds when only the commander was hurt.
+        let keep = success || (why == "commander hurt" && self.conquest_force_holds(op.idx));
+        let pending: Vec<Turret> = if keep { Vec::new() } else { op.turrets.iter().copied().chain(guards).collect() };
         for t in pending.iter() {
             if let Some(id) = t.task
                 && self.eco.tasks.get(id).is_some_and(|task| task.as_construction().is_some_and(|c| c.target.is_none()))
@@ -1226,6 +1517,8 @@ impl Ai {
                 "added": op.added,
             })}),
             "held": c.held.iter().map(|h| json!({"objective": h.idx, "added": h.added})).collect::<Vec<_>>(),
+            "control": c.control.iter().map(|k| k.hold.name()).collect::<Vec<_>>(),
+            "ground": c.ground.iter().filter(|&&w| w >= GROUND_SAFE).count(),
         })
     }
 }
