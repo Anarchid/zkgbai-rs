@@ -29,6 +29,13 @@
 //! - What allies have counts by its effect where we can see it: an allied
 //!   anti-nuke near where ours would stand covers us, and superweapon sites
 //!   keep clear of allied superweapons as of ours.
+//! - One nuke is enough for the alliance: none of ours starts while a silo
+//!   stands or rises anywhere in it, anyone's, ours too (an allied frame we
+//!   would help aside, see [`Ai::eco_alliance_nuke`]). Helping an ally's
+//!   silo used to leave our own wish standing, so once it stood we started
+//!   the next (Agalta 3v3, 2026-11-03: three silos in a row, the second on
+//!   15 metal of income). Berthas, Zeniths and Disco Rave Parties may still
+//!   come after it.
 
 use std::collections::BTreeMap;
 
@@ -49,6 +56,8 @@ pub(super) const SUPERWEAPONS: [&str; 3] = ["staticnuke", "zenith", "raveparty"]
 /// Superweapon sites keep clear of these, anyone's.
 pub(super) const BIG_GUNS: [&str; 4] = ["staticheavyarty", "staticnuke", "zenith", "raveparty"];
 pub(super) const ANTI: &str = "staticantinuke";
+/// The alliance's one nuke (see the module notes).
+pub(super) const NUKE: &str = "staticnuke";
 /// The wait per step of the turn order from the owner of a turn, frames
 /// (1:00).
 pub(super) const LAPSE: i32 = 1800;
@@ -337,6 +346,21 @@ impl Ai {
             self.eco_help_frame(u, list);
         }
         true
+    }
+
+    /// The alliance's nuke silo, if it has one, standing or rising: ours,
+    /// or an ally's (as of the last census) other than the frame we would
+    /// help (see [`Self::eco_ally_frame`]), which our silo job goes to
+    /// instead. While there is one we start none: one is enough.
+    pub(super) fn eco_alliance_nuke(&self) -> Option<Unit> {
+        let ours = self.eco.super_weps.iter().copied().find(|&u| u.health() > 0.0 && self.defs.name_of(u) == NUKE);
+        ours.or_else(|| {
+            let helped = self.defs.get(NUKE).and_then(|d| self.eco_ally_frame(d));
+            (self.eco.allied.census.iter())
+                .filter(|&&(u, n)| n == NUKE && u.team() != self.team_id && u.health() > 0.0)
+                .map(|&(u, _)| u)
+                .find(|&u| !u.is_being_built() || Some(u) != helped)
+        })
     }
 
     /// An allied anti-nuke (standing or rising) near where ours would

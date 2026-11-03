@@ -238,7 +238,9 @@ version the lobby leaves the option unset on.
 Playing apart, they (and any ally, human or AI) share their projects instead of racing them. An ally's
 half-built building takes the job of ours that would go there, and an ally's superweapon, Bertha, reactor or
 anti-nuke rising near our base gets our help before we start our own. Allied instances start superweapons and
-anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. Opening
+anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. One nuke is
+enough for an alliance: none of ours starts while anyone's silo stands or rises (Berthas, Zeniths and Disco Rave
+Parties may follow). Opening
 factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Where much of
 a side's metal lies under water, one instance takes the start nearest it and an amphibious or hover opening; from
 3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on
