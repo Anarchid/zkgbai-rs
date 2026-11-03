@@ -20,6 +20,7 @@ mod phase;
 mod planning;
 mod plate;
 mod plop;
+mod rebuild;
 mod safespot;
 mod silo;
 mod sparrow;
@@ -191,6 +192,11 @@ pub struct EconomyManager {
     /// (see `planning::NEW_FAC_INCOME`).
     pub new_fac_at: Option<i32>,
     pub new_fac_due: bool,
+    /// Sites where a factory frame of ours died lately, until when (see
+    /// `rebuild`).
+    pub burned_fac_sites: Vec<(Vec3, i32)>,
+    /// When the last rebuild site search found nothing (see `rebuild`).
+    pub rebuild_tried_at: Option<i32>,
     /// Whether an air factory was taken for firefighters or for tempo (see
     /// `planning::is_air_requisition`): once a game.
     pub air_asked: bool,
@@ -414,6 +420,8 @@ impl EconomyManager {
             requisition_logged: None,
             new_fac_at: None,
             new_fac_due: false,
+            burned_fac_sites: Vec::new(),
+            rebuild_tried_at: None,
             air_asked: false,
             terraform_tags: 0,
             terraform_test: None,
@@ -1414,14 +1422,34 @@ impl Ai {
             eco.dporcs.remove(&uid);
             eco.nanos.remove(&uid);
 
+            let mut frame_of = None;
             for &id in &eco.construction_tasks {
                 if let Some(c) = eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut())
                     && c.target == Some(unit)
                 {
                     // if a building was killed while under construction, reset its target.
                     c.target = None;
+                    frame_of = Some(id);
                     break;
                 }
+            }
+            // The frame of the factory that would replace our last one: the
+            // job goes, its site is marked, and the next is sited anew (see
+            // `rebuild`), not where the frame just died.
+            if let Some(id) = frame_of
+                && self.eco_rebuilding()
+                && self.eco.factory_tasks.contains(&id)
+                && def.is_some_and(|d| self.eco.build_ids.fac_ids.contains(&d.id()))
+            {
+                let p = unit.pos();
+                self.log(&format!(
+                    "economy: rebuild: the {} frame at ({:.0}, {:.0}) died; its job goes",
+                    self.defs.name_of(unit),
+                    p.x,
+                    p.z
+                ));
+                self.eco_burn_factory_site(p, "frame killed");
+                self.eco.drop_construction_task(id);
             }
         }
         // A Sparrow still morphing is a static radar. Its death must also
