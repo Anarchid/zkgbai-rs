@@ -226,6 +226,11 @@ mod tests {
     }
 
     #[test]
+    fn bombcharge_is_on_by_default() {
+        assert!(!crate::ai::OFF_BY_DEFAULT.contains(&"bombcharge"));
+    }
+
+    #[test]
     fn a_bomb_nobody_shoots_at_gets_through() {
         let m = Model::load().unwrap();
         let (snap, b, busy) =

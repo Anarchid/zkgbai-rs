@@ -7,7 +7,7 @@
 //! what the blast stuns. A placed mine the enemy can see and shoot stays
 //! where it is.
 //!
-//! `bombcharge` (off by default): an Imp or Snitch with enemies near asks
+//! `bombcharge` (on by default): an Imp or Snitch with enemies near asks
 //! the fight predictor whether running at them beats sitting tight
 //! ([`crate::military::fightsim::Model::bomb_charge`]): busy, inaccurate
 //! skirmishers are worth a charge, a Mace driving by is not.

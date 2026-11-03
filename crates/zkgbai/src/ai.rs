@@ -87,7 +87,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
 /// sym) stay off.
-pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "pairs",
     "currency",
     "permanence",
@@ -108,7 +108,6 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
     "fight2d",
     "conquestleash",
     "conquestseq",
-    "bombcharge",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
