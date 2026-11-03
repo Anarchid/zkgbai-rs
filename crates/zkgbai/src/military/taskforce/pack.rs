@@ -1066,13 +1066,13 @@ impl Ai {
             .filter_map(|e| e.ud.map(|d| (e.unit_id, d, e.get_health() * e.def_health(), e.position, e.can_fly())))
             .collect();
         let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> =
-            ours.into_iter().map(|(id, d, hp, p)| (self.fight_spec(d), hp, p, id)).collect();
+            ours.into_iter().map(|(id, d, hp, p)| (self.fight_spec_of(id, d), hp, p, id)).collect();
         let mut j = Judgement { cores: pack.len(), ..Judgement::default() };
         let mut armed: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> = Vec::new();
         let mut along = Vec::new();
         let mut detail = Vec::new();
         for (eid, def, hp, p, flies) in seen {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(eid, def);
             if spec.weapons.is_empty() {
                 if !flies && distance(p, target) < TARGET_LEFT {
                     j.prize += spec.cost;
@@ -1169,14 +1169,14 @@ impl Ai {
             .filter_map(|e| e.ud.map(|d| (e.unit_id, d, e.get_health() * e.def_health(), e.position, e.can_fly())))
             .collect();
         let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> =
-            ours.into_iter().map(|(id, d, hp, p)| (self.fight_spec(d), hp, p, id)).collect();
+            ours.into_iter().map(|(id, d, hp, p)| (self.fight_spec_of(id, d), hp, p, id)).collect();
         let reach = pack.iter().flat_map(|u| u.0.weapons.iter().map(|w| w.range)).fold(0.0, f32::max);
         let pass_off = if ram { 0.0 } else { reach_share * reach };
         let mut j = Judgement { cores: pack.len(), ..Judgement::default() };
         // (id, spec, hp, where, along the way, off it)
         let mut near: Vec<(i32, Arc<UnitSpec>, f32, Vec3, f32, f32)> = Vec::new();
         for (eid, def, hp, p, flies) in seen {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(eid, def);
             let (along, off) = route_project(route, p);
             let within = if spec.weapons.is_empty() {
                 !flies && off <= reach

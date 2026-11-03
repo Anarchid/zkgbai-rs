@@ -7,6 +7,7 @@ mod artemis;
 mod assign;
 pub mod build_ids;
 mod colonize;
+pub mod comguard;
 mod commander;
 mod conquest;
 pub mod factory;
@@ -96,6 +97,8 @@ pub struct EconomyManager {
     pub commanders: Vec<i32>,
     /// Forward objectives the commander takes and fortifies (see `conquest`).
     pub conquest: conquest::Conquest,
+    /// Commanders out of fights the predictor says they lose (see `comguard`).
+    pub(super) guard: comguard::ComGuard,
     /// Workers waiting for a new assignment (worker ids).
     pub idlers: VecDeque<i32>,
     /// Workers with an assignment, re-evaluated round-robin (worker ids).
@@ -339,6 +342,7 @@ impl EconomyManager {
             tasks: TaskStore::default(),
             commanders: Vec::new(),
             conquest: conquest::Conquest::default(),
+            guard: comguard::ComGuard::default(),
             idlers: VecDeque::new(),
             assigned: VecDeque::new(),
             seeders: VecDeque::new(),
@@ -838,6 +842,7 @@ impl Ai {
         }
 
         self.eco_coordinate_plops();
+        self.eco_guard_commanders(frame);
         self.eco_assign_workers();
         self.iq_tick();
     }

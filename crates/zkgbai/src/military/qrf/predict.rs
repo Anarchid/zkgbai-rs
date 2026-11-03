@@ -259,7 +259,7 @@ impl Ai {
         Some(Observed {
             id: u.id(),
             paralysis: u.paralyze_damage() / u.max_health().max(1.0),
-            unit: SnapUnit { side: 0, spec: self.fight_spec(def), hp: u.health(), x: p.x, z: p.z },
+            unit: SnapUnit { side: 0, spec: self.fight_spec_of(u.id(), def), hp: u.health(), x: p.x, z: p.z },
         })
     }
 
@@ -297,7 +297,7 @@ impl Ai {
                     let Some(def) = t.kind() else { return Plan::Legacy };
                     let (pos, hp, pressed_on) = (t.pos, t.health, t.pressed_on);
                     let para = if t.in_los { t.unit.paralyze_damage() / def.health().max(1.0) } else { 0.0 };
-                    let spec = self.fight_spec(def);
+                    let spec = self.fight_spec_of(id, def);
                     enemies.push(Observed {
                         id,
                         paralysis: para,

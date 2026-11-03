@@ -174,11 +174,19 @@ impl Ai {
         let (is_chicken, chicken_frame, last_retreat_frame) = (w.is_chicken, w.chicken_frame, w.last_retreat_frame);
         if is_chicken {
             let view = self.war.view(unit.def());
-            if view.get_threat(pos) == 0.0
+            // A commander the predictor holds out of a fight stays out (see
+            // `comguard`), at its own haven.
+            let guarded = self.comguard_haven(wid);
+            if guarded.is_none()
+                && view.get_threat(pos) == 0.0
                 && ((view.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
                     || frame - chicken_frame > 150)
             {
                 self.eco_stop_chickening(wid);
+            } else if let Some(haven) = guarded {
+                if frame - last_retreat_frame > 15 && distance(pos, haven) > 25.0 {
+                    self.comguard_retreat(wid, haven);
+                }
             } else if frame - last_retreat_frame > 15 {
                 // Ahead of the enemy to where it gets last, if it pays.
                 let haven = self.incursion_refuge(unit).unwrap_or_else(|| self.graph_get_closest_haven(pos));
@@ -454,6 +462,7 @@ impl Ai {
                 && self.eco_prerequisites_ready(t)
                 && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
                 && !self.eco_worker_shuns(worker, t.get_pos())
+                && !(worker.is_com && self.comguard_avoids(worker.id, t.get_pos()))
         };
         // Metal only this type of constructor gets to goes first.
         let others = match def {
