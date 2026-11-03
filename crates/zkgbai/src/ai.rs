@@ -233,6 +233,8 @@ pub struct Ai {
     pub raid_test: crate::military::raid_test::RaidTest,
     pub stomp_test: crate::military::stomp_test::StompTest,
     pub jumps: Jumps,
+    /// Cyclopes driving into their cannon's reach.
+    pub cyclopes: crate::military::cyclops::Cyclopes,
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
@@ -363,6 +365,7 @@ impl SkirmishAi for Ai {
             raid_test: Default::default(),
             stomp_test: Default::default(),
             jumps: Jumps::default(),
+            cyclopes: Default::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
@@ -641,6 +644,7 @@ impl Ai {
                 "anti"
                     | "aafort"
                     | "fort"
+                    | "skirmfort"
                     | "radarfort"
                     | "shadowprobe"
                     | "heavies"
