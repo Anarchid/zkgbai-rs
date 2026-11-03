@@ -351,14 +351,18 @@ returning and operator-held aircraft; `utilization` accumulates aircraft-seconds
 per state, aircraft launches, observed spent payloads and abort reasons. Spent
 payloads indicate releases, not confirmed hits or kills. Home is the ally
 center (the middle of our metal spots), from which every plan's route, risk
-and length are reckoned. An idle aircraft counts as home within 450 elmos of
-it or, with `airhome` (`disable=airhome` restores the circle alone), anywhere
-over our territory: dispatch already checks each plane's own first leg, and the
-circle alone flapped idle planes between ready and returning (circling drifts
-them past it, and the center moves when a metal spot changes hands; a Likho on
-Agalta, 2026-11-03, flipped every 5-10 s). A plane back from a sortie stops
-returning once over our territory; idle ones outside the circle are moved back
-toward the center every 10 s without leaving the ready pool. A package takes
+and length are reckoned. Without `airhome` (`disable=airhome`) an aircraft is
+ready only within 450 elmos of it, which flapped idle planes between ready and
+returning: circling drifts them past the circle, and the center moves when a
+metal spot changes hands (a Likho on Agalta, 2026-11-03, flipped every 5-10 s;
+51 flips in 8 staged minutes). With `airhome` a plane back from a sortie, a pad
+or the factory is home once within the circle or over our territory, and stays
+home, ready, until it flies a sortie, needs a pad or is taken by the operator.
+Neither the circle nor the territory alone holds a circling plane: the center
+can lie outside our territory, between two holdings (staged, a second run still
+flipped 21 times on territory alone). Idle planes outside the circle are routed
+back toward the center every 10 s, and dispatch checks each plane's own way
+out from where it is. A package takes
 planes whose distances to its route's first waypoint differ by at most 900
 elmos, the old circle's diameter, so it still arrives together: of the sets
 that fill it, the one nearest that waypoint, idle planes before those on a

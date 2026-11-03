@@ -448,9 +448,21 @@ impl Ai {
         }
     }
 
-    /// Whether an aircraft at `pos` is home: see `HOME_RADIUS`.
+    /// Whether a plane at `pos`, back from a sortie, a pad or the factory,
+    /// is home again: see `HOME_RADIUS`.
     fn airstrike_home(&self, pos: Vec3, home: Vec3) -> bool {
         distance(pos, home) < HOME_RADIUS || (!self.dev_off("airhome") && self.graph.is_ally_territory(pos))
+    }
+
+    /// Whether `a` is home and resting there. With `airhome` it stays home
+    /// until it flies a sortie, needs a pad or is taken by the operator,
+    /// however far its circling takes it (an idle plane is moved back
+    /// toward the center, and dispatch checks its own way out): the
+    /// center can lie outside our territory, between two holdings, so
+    /// neither the circle nor the territory alone holds a circling plane.
+    /// Else only within the circle.
+    fn airstrike_at_rest(&self, a: &Aircraft, home: Vec3) -> bool {
+        !a.returning && (!self.dev_off("airhome") || distance(a.unit.pos(), home) < HOME_RADIUS)
     }
 
     /// Aircraft of these kinds free for a new sortie: idle at home, loaded
@@ -471,7 +483,7 @@ impl Ai {
             .filter_map(|(&id, a)| {
                 let health = a.unit.health() / a.unit.max_health().max(1.0);
                 let noammo = a.unit.rules_param_float("noammo", 0.0);
-                let idle = !a.returning && noammo == 0.0 && health >= 0.95 && self.airstrike_home(a.unit.pos(), home);
+                let idle = noammo == 0.0 && health >= 0.95 && self.airstrike_at_rest(a, home);
                 let on_pad = noammo == PAD_REPAIRING && pad_floor.is_some_and(|floor| health >= floor);
                 let reach = distance(a.unit.pos(), anchor);
                 (idle || on_pad).then_some(Candidate { id, kind: a.kind, reach, on_pad: !idle, health })
@@ -893,7 +905,7 @@ impl Ai {
                 busy.contains(&id),
                 needs_ammo(a.unit.rules_param_float("noammo", 0.0)),
                 a.unit.health() >= a.unit.max_health() * 0.95,
-                !a.returning && self.airstrike_home(a.unit.pos(), home),
+                self.airstrike_at_rest(a, home),
             );
             *self.bomber_handler.utilization.entry(a.kind).or_default().state_frames.entry(state).or_default() +=
                 PERIOD as u64;
@@ -1171,6 +1183,10 @@ impl Ai {
         let ids: Vec<_> = self.bomber_handler.units.keys().copied().filter(|id| !active.contains(id)).collect();
         for id in ids {
             if springai::reserved::is_reserved(self.cb, id) {
+                // Wherever the operator flies it, it comes home anew.
+                if !self.dev_off("airhome") {
+                    self.bomber_handler.units.get_mut(&id).unwrap().returning = true;
+                }
                 continue;
             }
             let a = &self.bomber_handler.units[&id];
@@ -1178,7 +1194,7 @@ impl Ai {
             let hurt = u.health() < u.max_health() * 0.95;
             let empty = u.rules_param_float("noammo", 0.0) > 0.0;
             let at_home = distance(u.pos(), home) < HOME_RADIUS;
-            if !hurt && !empty && self.airstrike_home(u.pos(), home) {
+            if !hurt && !empty && (self.airstrike_home(u.pos(), home) || self.airstrike_at_rest(a, home)) {
                 let a = self.bomber_handler.units.get_mut(&id).unwrap();
                 a.returning = false;
                 // Over our territory an idle plane is home (`airhome`), and
@@ -1353,7 +1369,7 @@ impl Ai {
                             && !busy.contains(id)
                             && !members.contains(id)
                             && a.unit.rules_param_float("noammo", 0.0) == 0.0
-                            && self.airstrike_home(a.unit.pos(), home)
+                            && self.airstrike_at_rest(a, home)
                     })
                     .count()
                     + self.firefighters_idle(Plane::Magpie.name());
@@ -1614,7 +1630,7 @@ impl Ai {
             let health = a.unit.health() / a.unit.max_health().max(1.0);
             let away = distance(a.unit.pos(), home);
             json!({"id": id, "unit": a.kind.name(), "name": format!("{:?}", a.kind),
-                "state": readiness(springai::reserved::is_reserved(self.cb, id), busy.contains(&id), empty, health >= 0.95, !a.returning && self.airstrike_home(a.unit.pos(), home)),
+                "state": readiness(springai::reserved::is_reserved(self.cb, id), busy.contains(&id), empty, health >= 0.95, self.airstrike_at_rest(a, home)),
                 "health": health, "noammo": empty, "on_pad": noammo == PAD_REPAIRING, "home_distance": away})
         }).collect::<Vec<_>>());
         status

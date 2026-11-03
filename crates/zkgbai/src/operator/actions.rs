@@ -198,7 +198,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "airhome",
         "Military",
-        "an idle, loaded, healthy aircraft anywhere over our territory is ready for a sortie, not only within 450 elmos of the ally center; idle ones drift back toward it, and a package takes the planes nearest its route whose starts differ by at most 900 elmos, so they arrive together (default on)",
+        "an aircraft back from a sortie is home once within 450 elmos of the ally center or over our territory, and stays ready there until its next sortie however its circling drifts, instead of flipping to returning each time it leaves the circle; idle ones are routed back toward the center, and a package takes the planes nearest its route whose starts differ by at most 900 elmos, so they arrive together (default on)",
     ),
     (
         "shieldworth",
