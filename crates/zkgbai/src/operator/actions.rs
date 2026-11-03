@@ -55,6 +55,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Economy",
         "conquest also seeks lines of doors across the middle, counts spots as held only where mexes stand, and picks the front over the safe",
     ),
+    (
+        "compush",
+        "Economy",
+        "no conquest trip: the commander expands toward the enemy, and objectives whose spots become ours get their turrets",
+    ),
+    (
+        "conquestroute",
+        "Economy",
+        "with the trip (compush off), one on one: the start and the commander's first mexes planned for the walk to its objective",
+    ),
     ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
     ("conquestseq", "Economy", "a held objective sends the commander on to the next"),
     ("artemis", "Economy", "an Artemis at the centroid of our front against over 4000 metal of enemy air"),

@@ -87,10 +87,15 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
 /// sym) stay off.
+/// `compush` (on in the wip line, 2026-11-03): no conquest trip; the
+/// commander's mex jobs lean toward the enemy, and objectives whose spots
+/// become ours by any hands get their turrets (disable=compush for the
+/// trip). `conquestroute` (the trip's start and opening mexes planned
+/// with it, one on one) is off (enable=conquestroute, with compush off).
 /// `eramp` (energy wanted ramps with the alliance's share of the metal
 /// spots and the clock, see economy/mod.rs ERAMP_*) is on in the wip line
 /// (user, 2026-11-03; disable=eramp to opt out) while its A/B runs.
-pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
     "pairs",
     "currency",
     "permanence",
@@ -111,6 +116,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "fight2d",
     "conquestleash",
     "conquestseq",
+    "conquestroute",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -1138,6 +1144,15 @@ impl Ai {
             best
         };
 
+        // One on one with `conquestroute`: the start for the conquest trip's
+        // walk (see economy/conquest/compush.rs).
+        if self.allies.is_empty()
+            && let Some(site) = self.conquest_route_start()
+        {
+            self.send_start_pos(site, map_center);
+            self.log("Solo Mode: Start Position for the conquest route!");
+            return;
+        }
         if self.allies.is_empty() || (self.allies.len() > 1 && priority_starts == 0) {
             // Starting solo (or first of a team): pick a spot near map center.
             let best = central_spot(&spots);
