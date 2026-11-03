@@ -292,6 +292,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
     ),
     (
+        "staygang",
+        "Army",
+        "a stayveto stand is a declared fight: the healthy units near the group join it, ordered at the same enemy, until the stand ends (default on)",
+    ),
+    (
         "ordered",
         "Army",
         "coalesce gangs are judged with their units firing for certain, not with the logs' odds that a unit fires at all (default on)",

@@ -46,17 +46,21 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
+use springai::reserved::{self, Owner};
 use springai::{Unit, Vec3};
 
 use crate::Ai;
 use crate::military::fightsim::FateMode;
 use crate::military::fightsim::local::{Budget, Local, Tally, kills, tally};
 use crate::military::wrappers::fighter::fight_clear;
+use crate::military::wrappers::squad::SquadKind;
 use crate::nav;
 use crate::util::distance;
 
 pub const FEATURE: &str = "stayveto";
 pub const SHADOW: &str = "stayshadow";
+/// A stand is a declared fight (`staygang`, see [`Ai::stayveto_declare`]).
+pub const GANG: &str = "staygang";
 
 /// Standing: extra gain over extra loss to start, then to go on.
 const RATIO: f32 = 3.0;
@@ -97,6 +101,29 @@ struct Stand {
     last: (f32, f32),
 }
 
+/// While a declared stand lasts its borrowed units take orders from the
+/// retreat handler's module (where stayveto runs) and the helpers every
+/// ground unit keeps; their own handlers' orders are dropped.
+const STAND_OWNER: Owner = Owner { module: "retreat", helpers: &["war.unitDamaged", "jumps", "teleport", "water"] };
+
+/// A healthy unit a declared stand borrowed, and the owner it goes back to.
+struct Borrowed {
+    id: i32,
+    unit: Unit,
+    origin: &'static str,
+    prev: Option<Owner>,
+}
+
+/// A declared stand: the standing group and the healthy units fighting it
+/// with them.
+struct StandGang {
+    group: Vec<i32>,
+    borrowed: Vec<Borrowed>,
+    since: i32,
+    focus: i32,
+    last_order: i32,
+}
+
 struct Window {
     frame: i32,
     kind: &'static str,
@@ -113,6 +140,12 @@ struct Window {
 #[derive(Default)]
 pub struct StayVeto {
     stands: BTreeMap<i32, Stand>,
+    gangs: BTreeMap<u32, StandGang>,
+    next_gang: u32,
+    /// Standing unit -> its declared stand.
+    gang_of: BTreeMap<i32, u32>,
+    /// Borrowed unit -> the declared stand that holds it.
+    lent: BTreeMap<i32, u32>,
     /// Retreating unit -> frame its retreat began.
     began: BTreeMap<i32, i32>,
     /// Retreats settled: judged once in the shadow, or a stand that ended
@@ -201,6 +234,7 @@ impl Ai {
         for &id in retreating {
             sv.began.entry(id).or_insert(frame);
         }
+        self.stayveto_gangs_tidy();
         if !self.stayveto_runs() {
             return Vec::new();
         }
@@ -285,6 +319,9 @@ impl Ai {
             if !holding {
                 self.stayveto.stood += 1;
                 self.stayveto_record("stand", group, &j);
+                if self.stayveto_gang_on() {
+                    self.stayveto_declare(group, j.focus);
+                }
             }
             for &(id, u) in group {
                 let s = self.stayveto.stands.entry(id).or_insert(Stand {
@@ -298,6 +335,7 @@ impl Ai {
                 s.last = (j.gain, j.loss);
                 self.stayveto_order(id, u, j.focus);
             }
+            self.stayveto_gangs_order(&ids, j.focus);
             return ids;
         }
         // The standing units hold on the looser rule, and through a few
@@ -317,6 +355,7 @@ impl Ai {
                 kept.push(id);
             }
         }
+        self.stayveto_gangs_order(&kept, j.focus);
         // A retreat that does not stand is judged again while fresh, in the
         // shadow as in play.
         if !holding && self.stayveto.judged.is_multiple_of(SAMPLE) {
@@ -341,7 +380,7 @@ impl Ai {
                 units.push(f.unit);
             }
         }
-        let local = self.local_fight(&units)?;
+        let mut local = self.local_fight(&units)?;
         if local.unknown || !local.armed_theirs() {
             return None;
         }
@@ -350,7 +389,14 @@ impl Ai {
         if cost <= 0.0 {
             return None;
         }
-        let leave_local = local.without(&ids);
+        let mut leave_local = local.without(&ids);
+        if self.stayveto_gang_on() {
+            // A declared stand: everyone in the stay fight fights under our
+            // order (SimFlags::ordered); leaving, the others go on as the
+            // logs say units do.
+            local.snap.flags.ordered = true;
+            leave_local.snap.flags.ordered = false;
+        }
         let stay = self.local_fates(&local, FateMode::AMove, budget)?;
         let leave = self.local_fates(&leave_local, FateMode::AMove, budget)?;
         let (ts, tl) = (tally(&local, &stay, true), tally(&leave_local, &leave, true));
@@ -369,6 +415,201 @@ impl Ai {
             leave_cal: tally(&leave_local, &leave, false),
             local,
         })
+    }
+
+    /// Declared stands (`staygang`): on with stayveto unless disabled.
+    pub fn stayveto_gang_on(&self) -> bool {
+        self.stayveto_on() && !self.dev_off(GANG)
+    }
+
+    /// Whether a declared stand holds unit `id` (coalesce leaves it alone).
+    pub fn stayveto_borrowed(&self, id: i32) -> bool {
+        self.stayveto.lent.contains_key(&id)
+    }
+
+    /// Healthy units near `group` that a declared stand may borrow: what a
+    /// raider gang could (raiders, armed pickets) and the members of
+    /// ordinary assault and hover squads; never taskforces, jaegers, AA or
+    /// artillery, nor anything on a strike, a QRF draft or an operator's
+    /// order, nor what another stand or a raider gang holds.
+    fn stayveto_borrowable(&self, group: &[(i32, Unit)]) -> Vec<(i32, Unit, &'static str)> {
+        let at: Vec<Vec3> = group.iter().map(|g| g.1.pos()).collect();
+        let near = |u: Unit| at.iter().any(|&p| distance(u.pos(), p) <= FRIENDS);
+        let free = |id: i32| {
+            !group.iter().any(|g| g.0 == id)
+                && !self.stayveto.lent.contains_key(&id)
+                && !self.stayveto.stands.contains_key(&id)
+                && !self.coalesce_owns(id)
+        };
+        let mut out: Vec<(i32, Unit, &'static str)> = (self.coalesce_candidates().into_iter())
+            .filter(|&(id, _, u)| free(id) && near(u))
+            .map(|(id, o, u)| (id, u, o.name()))
+            .collect();
+        for sid in self.squads.ids() {
+            let Some(s) = self.squads.get(sid) else { continue };
+            if !matches!(s.kind, SquadKind::Assault | SquadKind::Hover)
+                || self.qrf_drafted(sid)
+                || self.op_squad_target(sid).is_some()
+                || self.squad_strike_active(sid)
+            {
+                continue;
+            }
+            for &id in s.fighters.iter().chain(s.leader.iter()) {
+                let Some(f) = self.fighters.get(&id) else { continue };
+                let u = f.unit;
+                if f.is_dead() || !free(id) || out.iter().any(|o| o.0 == id) || !near(u) {
+                    continue;
+                }
+                let Some(def) = u.def() else { continue };
+                if u.team() != self.team_id
+                    || u.is_being_built()
+                    || def.is_able_to_fly()
+                    || def.max_weapon_range() <= 0.0
+                    || u.pos().y < -5.0
+                    || self.retreat_is_retreating(u)
+                    || self.fire_controls(id)
+                    || self.squad_strike_owns(id)
+                {
+                    continue;
+                }
+                out.push((id, u, "assault"));
+            }
+        }
+        out
+    }
+
+    /// The group stands: make it a declared fight (`staygang`, user
+    /// 2026-11-03: "a temporary stay in a fight, which actually is a fight
+    /// because we declare it to be a fight, re-evaluated continually"). In
+    /// the A/B games a stand lasted 2 s on median and the healthy units the
+    /// stay fate counted on mostly did not close in (32% did in 5 s, 42%
+    /// moved away): the fate priced a fight nobody ordered. Now the healthy
+    /// units near the group that a stand may borrow join it, owned by the
+    /// retreat module (their handlers' orders are dropped) and sent at the
+    /// focus with the group until its last stand ends. A group that grew
+    /// around a declared stand joins that one.
+    fn stayveto_declare(&mut self, group: &[(i32, Unit)], focus: i32) {
+        let frame = self.frame;
+        if let Some(gid) = group.iter().find_map(|g| self.stayveto.gang_of.get(&g.0).copied()) {
+            for &(id, _) in group {
+                self.stayveto.gang_of.insert(id, gid);
+                if let Some(g) = self.stayveto.gangs.get_mut(&gid)
+                    && !g.group.contains(&id)
+                {
+                    g.group.push(id);
+                }
+            }
+            return;
+        }
+        let gid = self.stayveto.next_gang;
+        self.stayveto.next_gang += 1;
+        let mut borrowed = Vec::new();
+        for (id, unit, origin) in self.stayveto_borrowable(group) {
+            let prev = reserved::owner(self.cb, id);
+            reserved::own(self.cb, id, STAND_OWNER);
+            self.stayveto.lent.insert(id, gid);
+            borrowed.push(Borrowed { id, unit, origin, prev });
+        }
+        for &(id, _) in group {
+            self.stayveto.gang_of.insert(id, gid);
+        }
+        let lent: Vec<Value> = (borrowed.iter())
+            .map(|b| json!([b.id, b.unit.def().map(|d| self.defs.name(d).to_owned()), b.origin]))
+            .collect();
+        let ids: Vec<i32> = group.iter().map(|g| g.0).collect();
+        self.op_emit(
+            "stayveto",
+            json!({"event": "gang", "t": frame / 30, "gang": gid, "group": ids, "focus": focus, "borrowed": lent}),
+        );
+        self.stayveto
+            .gangs
+            .insert(gid, StandGang { group: ids, borrowed, since: frame, focus: -1, last_order: -REORDER });
+    }
+
+    /// Send the borrowed units of the declared stands that `ids` stand in
+    /// at `focus` (with the group, see `stayveto_order`).
+    fn stayveto_gangs_order(&mut self, ids: &[i32], focus: i32) {
+        let frame = self.frame;
+        let mut gids: Vec<u32> = ids.iter().filter_map(|id| self.stayveto.gang_of.get(id).copied()).collect();
+        gids.sort_unstable();
+        gids.dedup();
+        let Some(epos) = self.war.targets.get(&focus).map(|e| e.position) else { return };
+        let team = self.team_id;
+        for gid in gids {
+            let Some(g) = self.stayveto.gangs.get(&gid) else { continue };
+            if g.focus == focus && frame - g.last_order < REORDER {
+                continue;
+            }
+            // A borrowed unit that its health sent home (and that does not
+            // stand in turn) is the retreat handler's.
+            let units: Vec<Unit> = (g.borrowed.iter())
+                .filter(|b| !self.retreat_handler.is_retreating(b.id) || self.stayveto.stands.contains_key(&b.id))
+                .map(|b| b.unit)
+                .filter(|u| u.health() > 0.0 && u.team() == team)
+                .collect();
+            let nav = nav!(self);
+            for u in units {
+                fight_clear(u, epos, 0, &nav);
+            }
+            if let Some(g) = self.stayveto.gangs.get_mut(&gid) {
+                g.focus = focus;
+                g.last_order = frame;
+            }
+        }
+    }
+
+    /// A declared stand is over: its borrowed units go back to their owners
+    /// (unless something else took them meanwhile) and handlers.
+    fn stayveto_gang_end(&mut self, gid: u32, reason: &str) {
+        let frame = self.frame;
+        let Some(g) = self.stayveto.gangs.remove(&gid) else { return };
+        for id in &g.group {
+            if self.stayveto.gang_of.get(id) == Some(&gid) {
+                self.stayveto.gang_of.remove(id);
+            }
+        }
+        let mut alive = 0;
+        for b in &g.borrowed {
+            self.stayveto.lent.remove(&b.id);
+            if reserved::owner(self.cb, b.id) == Some(STAND_OWNER) {
+                match b.prev {
+                    Some(o) => {
+                        reserved::own(self.cb, b.id, o);
+                    }
+                    None => {
+                        reserved::disown(self.cb, b.id);
+                    }
+                }
+            }
+            match b.origin {
+                "stakeout" => self.stakeouts_release(b.id),
+                "solo" | "kodachi" => {
+                    if let Some(f) = self.fighters.get_mut(&b.id) {
+                        f.last_task_frame = 0;
+                    }
+                }
+                _ => {}
+            }
+            alive += usize::from(b.unit.health() > 0.0 && b.unit.team() == self.team_id);
+        }
+        self.op_emit(
+            "stayveto",
+            json!({"event": "gang_end", "t": frame / 30, "gang": gid, "reason": reason,
+                   "life": (frame - g.since) / 30, "group": g.group.len(), "borrowed": g.borrowed.len(), "alive": alive}),
+        );
+    }
+
+    /// End the declared stands none of whose group stands any more (all of
+    /// them with the switch off).
+    fn stayveto_gangs_tidy(&mut self) {
+        let on = self.stayveto_gang_on();
+        let over: Vec<u32> = (self.stayveto.gangs.iter())
+            .filter(|(_, g)| !on || !g.group.iter().any(|id| self.stayveto.stands.contains_key(id)))
+            .map(|(&gid, _)| gid)
+            .collect();
+        for gid in over {
+            self.stayveto_gang_end(gid, if on { "over" } else { "off" });
+        }
     }
 
     fn stayveto_order(&mut self, id: i32, unit: Unit, focus: i32) {
@@ -391,6 +632,13 @@ impl Ai {
         let frame = self.frame;
         let Some(s) = self.stayveto.stands.remove(&id) else { return };
         self.stayveto.settled.insert(id, frame);
+        if let Some(gid) = self.stayveto.gang_of.remove(&id) {
+            let standing = (self.stayveto.gangs.get(&gid))
+                .is_some_and(|g| g.group.iter().any(|m| self.stayveto.stands.contains_key(m)));
+            if !standing {
+                self.stayveto_gang_end(gid, reason);
+            }
+        }
         self.retreat_handler.forget_retreat_order(id);
         let hp = self.retreat_handler.coward(id).map(|c| c.unit.health() / c.unit.max_health().max(1.0));
         self.op_emit(
@@ -506,6 +754,19 @@ mod tests {
         // Holding is looser.
         assert!(stands(200.0, 120.0, 150.0, true));
         assert!(!stands(200.0, 150.0, 150.0, true));
+    }
+
+    /// A declared stand's borrowed units take its orders (stayveto runs in
+    /// the retreat handler's module) and nobody else's but the helpers every
+    /// ground unit keeps.
+    #[test]
+    fn a_declared_stand_owns_what_it_borrows() {
+        assert!(STAND_OWNER.admits("retreat.update"));
+        assert!(STAND_OWNER.admits("war.unitDamaged"));
+        for other in ["squad.update", "raider.update", "stakeouts.update", "coalesce.update"] {
+            assert!(!STAND_OWNER.admits(other), "{other}");
+        }
+        assert!(!crate::ai::OFF_BY_DEFAULT.contains(&GANG));
     }
 
     #[test]
