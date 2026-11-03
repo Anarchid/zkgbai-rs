@@ -31,6 +31,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("pairs", "Economy", "Constables pair up on builds"),
     ("earlycons", "Economy", "an early second Constable in the opening"),
     ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
+    ("lightrepair", "Economy", "a combat unit's repair pulls workers by the metal its missing health is worth"),
     ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     ("colonize", "Economy", "colonists sent to far free metal"),
