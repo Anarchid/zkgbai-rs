@@ -634,6 +634,8 @@ impl Ai {
                 "saved": v.saved.round(),
                 "spent": (v.spent * 1000.0).round() / 1000.0,
                 "net": v.net.round(),
+                // The judged fight, for offline replay: def, side, hp, x, z, busy; the bomb last.
+                "snap": snap.units.iter().zip(&busy).map(|(u, b)| json!([u.spec.def, u.side, u.hp.round(), u.x.round(), u.z.round(), *b])).collect::<Vec<_>>(),
             });
             if !charge {
                 let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();

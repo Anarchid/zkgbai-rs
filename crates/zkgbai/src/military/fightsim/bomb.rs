@@ -47,7 +47,10 @@ impl Model {
     /// unit's fate over `horizon` frames with the bomb running at its
     /// nearest enemy, against the same fight without it. `busy[i]`: unit
     /// `i` is shooting at something else (its weapons are mid-reload).
-    /// Costs are the snapshot's; deaths are the calibrated chances.
+    /// Costs are the snapshot's; deaths are the sim's own chances
+    /// (`p_raw`, as the veto counts them): the calibrated ones are squeezed
+    /// towards the middle (a Glaive a Snitch surely blows up counted 0.6 of
+    /// its metal), while the bomb is spent for certain.
     pub fn bomb_charge(&self, snap: &FightSnapshot, bomb: usize, busy: &[bool], horizon: i32) -> BombVerdict {
         let mut snap = snap.clone();
         snap.flags.bombs = true;
@@ -68,9 +71,9 @@ impl Model {
                     continue;
                 }
                 if u.side == 1 {
-                    theirs += u.spec.cost * f.p_dead;
+                    theirs += u.spec.cost * f.p_raw;
                 } else {
-                    ours += u.spec.cost * f.p_dead;
+                    ours += u.spec.cost * f.p_raw;
                 }
             }
             (theirs, ours)
@@ -192,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snitch_charges_busy_skirmishers_but_not_ready_ones() {
+    fn a_snitch_charges_busy_skirmishers_and_ready_ones_are_worth_less() {
         let m = Model::load().unwrap();
         for twod in [false, true] {
             for theirs in [&ROGUES[..], &RONINS[..]] {
@@ -204,10 +207,12 @@ mod tests {
                 assert!(w.p_through < v.p_through, "ready {} 2d={twod}: {w:?} vs busy {v:?}", theirs[0].0);
             }
         }
-        // Ready Rogues: four missiles, each a one-hit kill, at the start.
+        // Ready Rogues: four missiles at the start, each a kill if it hits.
+        let (snap, b, busy) = staged("shieldbomb", &ROGUES, true, true);
+        let v = m.bomb_charge(&snap, b, &busy, 450);
         let (snap, b, idle) = staged("shieldbomb", &ROGUES, true, false);
         let w = m.bomb_charge(&snap, b, &idle, 450);
-        assert!(w.net < 0.0, "{w:?}");
+        assert!(w.net < v.net, "ready {w:?} vs busy {v:?}");
     }
 
     #[test]
