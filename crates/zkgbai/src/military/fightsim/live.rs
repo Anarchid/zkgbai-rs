@@ -41,7 +41,7 @@ use serde_json::json;
 use springai::{Unit, UnitDef, Vec3};
 
 use super::worker::{FightAnswer, FightRequest, FightWorker};
-use super::{FightSnapshot, Model, SnapUnit, UnitFate, UnitSpec, WeaponSpec};
+use super::{FightOutcome, FightSnapshot, Model, SnapUnit, UnitFate, UnitSpec, WeaponSpec};
 use crate::Ai;
 use crate::military::{SquadId, SquadKind};
 use crate::util::{NULLPOS, distance};
@@ -638,10 +638,24 @@ impl Ai {
     /// without an armed unit on each side, or with what the sim does not
     /// do (shields, submerged fights, too many units).
     pub(crate) fn fight_judge_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<[f32; 2]> {
+        let model = veto_model().ok()?;
+        let snap = self.fight_snapshot_units(ours, theirs)?;
+        Some(self.fightsim_judge(model, &snap).0)
+    }
+
+    /// The same fight run as the a-move fight the model was fitted on
+    /// (calibrated win probability and killed shares), for the record.
+    pub(crate) fn fight_predict_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<FightOutcome> {
+        let model = veto_model().ok()?;
+        let snap = self.fight_snapshot_units(ours, theirs)?;
+        Some(model.predict(&snap))
+    }
+
+    /// The snapshot behind [`Ai::fight_judge_units`].
+    fn fight_snapshot_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<FightSnapshot> {
         if !self.fightsim_runs() {
             return None;
         }
-        let model = veto_model().ok()?;
         let frame = self.frame;
         let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         for u in ours {
@@ -674,7 +688,7 @@ impl Ai {
         if snap.units.len() > MAX_UNITS || snap.armed(0) == 0 || snap.armed(1) == 0 {
             return None;
         }
-        Some(self.fightsim_judge(model, &snap).0)
+        Some(snap)
     }
 
     /// Judge `snap` on this thread, counting the cost.

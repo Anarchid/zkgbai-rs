@@ -274,6 +274,8 @@ const STRIKE_REVIEW: i32 = 60;
 const STRIKE_MAX: i32 = 30 * 60;
 /// The attack order is repeated this often (the target moves).
 const STRIKE_REISSUE: i32 = 45;
+/// One refused strike in this many is journaled (to tune the thresholds).
+const STRIKE_NO_SAMPLE: u32 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Duty {
@@ -395,6 +397,10 @@ struct Stats {
     strike_kills: u32,
     strike_losses: u32,
     strike_breaks: u32,
+    /// Predictor queries that could have started a strike, and pickets
+    /// that joined one under way.
+    strike_asks: u32,
+    strike_joins: u32,
 }
 
 /// A strike on a contact (`picketstrike`).
@@ -1277,20 +1283,50 @@ impl Ai {
             m.strike_asked = frame;
         }
         let Some((loss, party)) = self.stakeouts_strike_judge(eid, frame) else { return false };
+        let Some(e) = self.war.targets.get(&eid) else { return false };
+        let (eunit, ename, epos, ehp) = (e.unit, e.def_name.clone(), e.position, e.get_health());
+        let loss2 = [(loss[0] * 100.0).round() / 100.0, (loss[1] * 100.0).round() / 100.0];
+        self.stakeouts.stats.strike_asks += 1;
         if loss[1] < STRIKE_WIN || loss[0] > STRIKE_LOSS {
+            if self.stakeouts.stats.strike_asks.is_multiple_of(STRIKE_NO_SAMPLE) {
+                self.op_emit(
+                    "stakeout",
+                    json!({"event": "strike_no", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
+                           "party": party.len(), "loss": loss2, "hp": (ehp * 100.0).round() / 100.0}),
+                );
+            }
             return false;
         }
-        let Some(e) = self.war.targets.get(&eid) else { return false };
-        let (eunit, ename, epos) = (e.unit, e.def_name.clone(), e.position);
-        self.stakeouts.stats.strikes += 1;
+        // Joining a strike under way on this contact is not a new one.
+        let joins = party
+            .iter()
+            .any(|pid| self.stakeouts.members.get(pid).is_some_and(|m| m.strike.is_some_and(|s| s.target == eid)));
+        let units: Vec<Unit> =
+            party.iter().filter_map(|pid| self.stakeouts.members.get(pid)).map(|m| m.f.unit).collect();
+        let theirs: Vec<i32> = (self.war.targets.values())
+            .filter(|f| f.identified && armed(f) && frame - f.last_seen <= BOGEY_RECENT)
+            .filter(|f| distance(f.position, epos) <= STRIKE_GROUP)
+            .map(|f| f.unit_id)
+            .collect();
+        let amove = self.fight_predict_units(&units, &theirs);
+        if joins {
+            self.stakeouts.stats.strike_joins += 1;
+        } else {
+            self.stakeouts.stats.strikes += 1;
+        }
         self.op_emit(
             "stakeout",
             json!({"event": "strike", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
-                   "x": epos.x.round(), "z": epos.z.round(), "party": party.len(),
-                   "loss": [(loss[0] * 100.0).round() / 100.0, (loss[1] * 100.0).round() / 100.0]}),
+                   "x": epos.x.round(), "z": epos.z.round(), "party": party.len(), "foes": theirs.len(),
+                   "join": joins, "loss": loss2, "hp": (ehp * 100.0).round() / 100.0,
+                   "p_win": amove.map(|o| (o.p_a_wins * 100.0).round() / 100.0),
+                   "amove": amove.map(|o| [(o.mean_a * 100.0).round() / 100.0, (o.mean_b * 100.0).round() / 100.0])}),
         );
         for pid in party {
             let Some(m) = self.stakeouts.members.get_mut(&pid) else { continue };
+            if m.strike.is_some_and(|s| s.target == eid) {
+                continue;
+            }
             m.strike = Some(Strike { target: eid, since: frame, ordered: frame });
             m.strike_asked = frame;
             m.standing = false;
@@ -1621,7 +1657,7 @@ impl Ai {
         self.log(&format!(
             "stakeouts: t={} members={} (look {look}, post {post}, shadow {shadow}) posts={} manned={manned} wanted={} \
              claimed={} lost={} sightings={} flights={} follows={} sorties={} kills={} spooks={} \
-             strikes={} strike_kills={} strike_losses={} strike_breaks={}",
+             strikes={} strike_kills={} strike_losses={} strike_breaks={} strike_asks={} strike_joins={}",
             frame / 30,
             s.count(),
             s.posts.len(),
@@ -1637,7 +1673,9 @@ impl Ai {
             st.strikes,
             st.strike_kills,
             st.strike_losses,
-            st.strike_breaks
+            st.strike_breaks,
+            st.strike_asks,
+            st.strike_joins
         ));
         let posts: Vec<_> = (s.posts.iter())
             .map(|p| {
@@ -1664,7 +1702,7 @@ impl Ai {
                    "claimed": st.claimed, "lost": st.lost, "sightings": st.sightings, "flights": st.flights,
                    "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks,
                    "strikes": st.strikes, "strike_kills": st.strike_kills, "strike_losses": st.strike_losses,
-                   "strike_breaks": st.strike_breaks}),
+                   "strike_breaks": st.strike_breaks, "strike_asks": st.strike_asks, "strike_joins": st.strike_joins}),
         );
     }
 }
