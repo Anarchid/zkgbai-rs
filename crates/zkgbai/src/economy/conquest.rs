@@ -81,6 +81,14 @@
 //! hurt at an objective our force still holds leaves its turrets queued for
 //! the usual builders.
 //!
+//! On the way and lean (user, 2026-11-03: "move towards these while
+//! capturing mexes on site; and still fewer turrets"): walking out, the
+//! commander takes the free spots near its way first, nearest first, a spot
+//! off the straight line costing `ENROUTE_DETOUR_COST` per elmo it adds (up
+//! to `ENROUTE_DETOUR`), so it creeps toward the objective instead of
+//! walking past metal; an objective is one turret site (the search plans
+//! single sites), and attacks add Lotuses only.
+//!
 //! Every decision goes to the journal (`conquest` records).
 
 use std::sync::mpsc;
@@ -123,7 +131,12 @@ const HELP_RADIUS: f32 = 900.0;
 /// The turrets are decided when the commander is this near the objective,
 /// or this long after it set out.
 const ARRIVE: f32 = 900.0;
-const WALK_TIMEOUT: i32 = 30 * 150;
+const WALK_TIMEOUT: i32 = 30 * 300;
+/// Spots on the way (see the module notes).
+const ENROUTE_DETOUR: f32 = 700.0;
+const ENROUTE_DETOUR_COST: f32 = 0.5;
+/// Turret sites an objective has (the search's `max_sites`).
+const SITES: usize = 1;
 /// Undecided objectives are given up at this game time.
 const WATCH_UNTIL: i32 = 30 * 60 * 12;
 /// Seconds the denial counts for, and the share of income at stake that
@@ -547,7 +560,7 @@ impl Ai {
         let Some(walk) = terrain.tier(Tier::Bot).cloned() else { return };
         let assets = self.strategy_assets();
         let range = self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0);
-        let params = Params { range, ..Params::default() };
+        let params = Params { range, max_sites: SITES, ..Params::default() };
         let (tx, rx) = mpsc::channel();
         let (a, e, spots) = (pos(ally), pos(enemy), assets.clone());
         let spawned = std::thread::Builder::new().name("zkgbai-conquest".into()).spawn(move || {
@@ -668,13 +681,26 @@ impl Ai {
         def.cost(self.metal) <= AFFORD_SECS * self.eco.effective_income.max(0.0)
     }
 
-    /// The turret an attack adds: the conquest turret if within our means,
-    /// else a Lotus if that is (`Some(true)`: the Lotus), else none.
-    fn conquest_attack_turret(&self) -> Option<(UnitDef, bool)> {
-        let heavy = self.conquest_turret()?;
-        if self.conquest_affordable(heavy) {
-            return Some((heavy, false));
+    /// Walking out, a free spot near the commander's way: as dear as the
+    /// objective's own, less the detour it adds (see the module notes).
+    fn conquest_enroute_bonus(&self, op: &Op, wid: i32, task: TaskId) -> Option<f32> {
+        if wid != op.crew || op.stage != Stage::Walk {
+            return None;
         }
+        let t = self.eco.tasks.get(task)?;
+        if t.as_construction()?.build_type.id() != self.eco.build_ids.mex_id {
+            return None;
+        }
+        let from = self.eco.workers.get(&wid)?.get_pos();
+        let to = self.conquest_v3(self.eco.conquest.objectives.get(op.idx)?.center());
+        let at = t.get_pos();
+        let detour = distance(from, at) + distance(at, to) - distance(from, to);
+        (detour <= ENROUTE_DETOUR).then(|| BONUS + MEX_FIRST - ENROUTE_DETOUR_COST * detour.max(0.0))
+    }
+
+    /// The turret an attack adds: a Lotus, if within our means
+    /// (`Some((def, true))`), else none.
+    fn conquest_attack_turret(&self) -> Option<(UnitDef, bool)> {
         let light = self.defs.get(GUARD_TURRET)?;
         self.conquest_affordable(light).then_some((light, true))
     }
@@ -880,6 +906,9 @@ impl Ai {
         let op = self.eco.conquest.op.as_ref()?;
         if op.mex_tasks.contains(&task) {
             return (wid == op.crew).then_some(BONUS + MEX_FIRST);
+        }
+        if let Some(bonus) = self.conquest_enroute_bonus(op, wid, task) {
+            return Some(bonus);
         }
         let banked = self.eco.metal >= BANK_EMPTY;
         let guard = [op.home_guard, op.guard].into_iter().flatten().find(|(t, _)| t.task == Some(task));
