@@ -13,7 +13,9 @@
 //! The first client is defense against incursions the terrain model
 //! forecasts (`incursions`): at the first of our assets an enemy group can
 //! reach, a turret sized to the group, if one can stand in time and the
-//! value at risk pays for it. The others (feature `clients`) are capital
+//! value at risk pays for it. The walk-in guard (`walkin`, see [`walkin`])
+//! fortifies whatever we value that a force worth 1500 metal or more gets
+//! to with nothing of ours to meet it. The others (feature `clients`) are capital
 //! that waits: pylons while a building waits for its site to have power
 //! (`grid`), a factory a module requisitioned, an anti-nuke; each worth
 //! what it unlocks or saves, less a share of it for every second it is
@@ -35,6 +37,8 @@ use crate::defs::cmd;
 use crate::economy::{TaskId, Worker};
 use crate::military::wrappers::weapon_power;
 use crate::util::{distance, get_directional_point};
+
+pub mod walkin;
 
 /// Frames between assessments.
 const PERIOD: i32 = 30;
@@ -156,6 +160,8 @@ impl Worth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Defense,
+    /// A turret against a force nothing of ours would meet (`walkin`).
+    Walkin,
     /// A turret the posture ordered (see `posture`): crewed like a defense,
     /// but never urgent enough to hold back the rest (no pause).
     Posture,
@@ -170,6 +176,7 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Defense => "defense",
+            Kind::Walkin => "walkin",
             Kind::Posture => "posture",
             Kind::Grid => "grid",
             Kind::Factory => "factory",
@@ -268,6 +275,8 @@ pub struct Logistics {
     /// Construction and factories set to low priority for an urgent issue.
     paused: Vec<Unit>,
     frame: i32,
+    /// The walk-in guard.
+    pub walkin: walkin::State,
 }
 
 /// Defense power of a turret of type `def`, on the scale of the enemy
@@ -334,9 +343,24 @@ fn best_crew(
     worth: &Worth,
     now: f32,
 ) -> (usize, f32, f32) {
+    best_crew_stretched(hands, work, cost, metal, income, worth, now, PESSIMISM)
+}
+
+/// [`best_crew`] with forecast completion times stretched by `stretch`.
+#[allow(clippy::too_many_arguments)]
+fn best_crew_stretched(
+    hands: &[Hand],
+    work: f32,
+    cost: f32,
+    metal: f32,
+    income: f32,
+    worth: &Worth,
+    now: f32,
+    stretch: f32,
+) -> (usize, f32, f32) {
     let mut plans = Vec::with_capacity(MAX_CREW);
     for k in 1..=hands.len().min(MAX_CREW) {
-        let eta = finish_time(&hands[..k], work, cost, metal, income) * PESSIMISM;
+        let eta = finish_time(&hands[..k], work, cost, metal, income) * stretch;
         plans.push((k, eta, worth.at(now + eta)));
     }
     let Some(top) = plans.iter().map(|p| p.2).fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v)))) else {
@@ -361,6 +385,9 @@ impl Ai {
         let now = frame as f32 / 30.0;
         self.logistics_close_gone(now);
         self.logistics_defenses(now);
+        if !self.dev_off(walkin::FEATURE) && !self.dev_off("porc") {
+            self.logistics_walkins(now);
+        }
         self.logistics_grid(now);
         self.logistics_forecast(now);
         if !self.dev_off("pause") {
@@ -391,6 +418,24 @@ impl Ai {
             s.unpaid,
             s.nosite
         ));
+        if !self.dev_off(walkin::FEATURE) {
+            let w = self.logistics.walkin.stats;
+            self.log(&format!(
+                "walkin: {} force looks, {} with a place in reach, {} met everywhere, {} breaches: {} turrets opened, \
+                 {} already coming, {} capped, {} outranged, {} late, {} no site; {} stood down",
+                w.groups,
+                w.threats,
+                w.defended,
+                w.breaches,
+                w.opened,
+                w.pending,
+                w.capped,
+                w.outranged,
+                w.late,
+                w.nosite,
+                w.stood_down
+            ));
+        }
     }
 
     /// The bonus worker `wid` gets in the assignment loop for task `task`:
@@ -588,7 +633,8 @@ impl Ai {
             if p.seconds <= MARGIN {
                 continue;
             }
-            let same = |i: &Issue| i.kind == Kind::Defense && distance(i.pos, p.pos) < SAME_RADIUS;
+            let same =
+                |i: &Issue| matches!(i.kind, Kind::Defense | Kind::Walkin) && distance(i.pos, p.pos) < SAME_RADIUS;
             if self.logistics.issues.values().any(same) {
                 continue;
             }
@@ -736,15 +782,23 @@ impl Ai {
             let Some(issue) = self.logistics.issues.get(&task) else { continue };
             let work = issue.build_time * (1.0 - progress);
             let cost = issue.cost * (1.0 - progress);
-            let hands = self.logistics_hands(issue.pos, &issue.crew, Some(task));
-            let (k, eta, value) = best_crew(&hands, work, cost, metal, income, &issue.worth, now);
+            let walkin = issue.kind == Kind::Walkin;
+            let hands = if walkin {
+                self.walkin_hands(issue.pos, &issue.crew, Some(task), started)
+            } else {
+                self.logistics_hands(issue.pos, &issue.crew, Some(task))
+            };
+            let stretch = if walkin { walkin::STRETCH } else { PESSIMISM };
+            let (k, eta, value) = best_crew_stretched(&hands, work, cost, metal, income, &issue.worth, now, stretch);
+            // (Caretakers take no share: they go where they are told.)
+            let mobile = hands.iter().take(k).filter(|h| !self.walkin_is_caretaker(h.0)).count();
             let hopeless = value <= 0.0 && !started && issue.worth.deadline().is_some_and(|by| now > by + DECAY);
             let Some(issue) = self.logistics.issues.get_mut(&task) else { continue };
             issue.started = started;
             issue.eta = eta;
             issue.value = value;
             let crew: Vec<i32> = hands.iter().take(k).map(|h| h.0).collect();
-            let share = if k > 0 && value > 0.0 { (value / k as f32).min(BONUS_CAP) } else { 0.0 };
+            let share = if mobile > 0 && value > 0.0 { (value / mobile as f32).min(BONUS_CAP) } else { 0.0 };
             // Journaled when the crew changes or its bonus comes or goes.
             let changed = crew != issue.crew || (share > 0.0) != (issue.share > 0.0);
             issue.crew = crew;
@@ -770,7 +824,7 @@ impl Ai {
     /// other construction and the factories low, until it is done.
     fn logistics_pause(&mut self, now: f32) {
         let urgent: Vec<Unit> = (self.logistics.issues.values())
-            .filter(|i| i.kind == Kind::Defense && i.started && i.value >= MIN_NET)
+            .filter(|i| matches!(i.kind, Kind::Defense | Kind::Walkin) && i.started && i.value >= MIN_NET)
             .filter(|i| i.worth.deadline().is_none_or(|by| now <= by + DECAY))
             .filter_map(|i| self.eco.tasks.get(i.task)?.as_construction()?.target)
             .collect();
@@ -817,7 +871,8 @@ impl Ai {
     /// The open issues and the totals, for the operator.
     pub fn logistics_json(&self) -> Value {
         let issues: Vec<Value> = self.logistics.issues.values().map(Issue::json).collect();
-        json!({"issues": issues, "stats": self.logistics.stats.json(), "paused": self.logistics.paused.len()})
+        json!({"issues": issues, "stats": self.logistics.stats.json(), "paused": self.logistics.paused.len(),
+               "walkin": self.logistics.walkin.stats.json()})
     }
 }
 
