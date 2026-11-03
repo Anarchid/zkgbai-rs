@@ -1041,8 +1041,15 @@ impl Ai {
         let banked = self.eco.metal >= BANK_EMPTY;
         let guard = [op.home_guard, op.guard].into_iter().flatten().find(|(t, _)| t.task == Some(task));
         if let Some((t, _)) = guard {
-            if wid == op.crew {
+            // Once out of `Prepare` the home guard is the other builders'
+            // (it had held the commander home two more minutes, fighting
+            // raiders by the site, while the enemy took the line's door).
+            let home = op.home_guard.is_some_and(|(h, _)| h.task == Some(task));
+            if wid == op.crew && !home {
                 return Some(BONUS + GUARD_BONUS);
+            }
+            if wid == op.crew {
+                return None;
             }
             let w = self.eco.workers.get(&wid)?;
             return (banked && distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS);
