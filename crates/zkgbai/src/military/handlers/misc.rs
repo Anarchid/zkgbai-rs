@@ -99,6 +99,7 @@ impl Ai {
         }
         self.misc_clean_units();
         self.misc_update_supports();
+        self.misc_charge_sappers(frame);
         self.misc_update_sappers(frame);
         self.misc_update_swifts(frame);
 

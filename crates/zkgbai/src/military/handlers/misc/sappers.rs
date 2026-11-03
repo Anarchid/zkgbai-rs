@@ -6,13 +6,21 @@
 //! in, just out of the turret's footprint, where the turret still reaches
 //! what the blast stuns. A placed mine the enemy can see and shoot stays
 //! where it is.
+//!
+//! `bombcharge` (on by default): an Imp or Snitch with enemies near asks
+//! the fight predictor whether running at them beats sitting tight
+//! ([`crate::military::fightsim::Model::bomb_charge`]): busy, inaccurate
+//! skirmishers are worth a charge, a Mace driving by is not.
 
+use serde_json::json;
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 use zk_terrain::paths::Paths;
 
 use crate::Ai;
 use crate::defs::cmd;
 use crate::kgbutil::kgb_move_to_exact;
+use crate::military::fightsim::local::our_state;
+use crate::military::fightsim::{FightSnapshot, SimFlags, SnapUnit};
 use crate::terrain::{pos, tier_of};
 use crate::util::{distance, get_directional_point};
 
@@ -39,6 +47,31 @@ const SIGHT_MEMORY: i32 = 300;
 /// Sight assumed for a contact not yet identified.
 const UNKNOWN_SIGHT: f32 = 450.0;
 
+/// `bombcharge`: an Imp or Snitch judges a charge once an enemy on the
+/// ground comes this near (a run of 3-4 s)...
+const CHARGE_LOOK: f32 = 450.0;
+/// ...on the fight of ours and theirs within this of it...
+const CHARGE_REACH: f32 = 800.0;
+/// ...over this many frames.
+const CHARGE_HORIZON: i32 = 450;
+/// What a charge must be worth over sitting tight, net of the bomb (metal).
+const CHARGE_MARGIN: f32 = 25.0;
+/// A charging bomb is left to its order this long, then planned again.
+const CHARGE_HOLD: i32 = 30 * 8;
+/// A bomb's sit-tight verdicts are logged this often.
+const CHARGE_LOG: i32 = 150;
+/// Enemy mobiles stand where they were seen this recently.
+const CHARGE_SEEN: i32 = 45;
+/// Bigger fights are not judged: a judgement is nine plane fights, about
+/// 0.4 ms at 8 units, 1.4 at 18, 3 at 28, 6 at 40 (bomb_charge_cost).
+const CHARGE_MAX_UNITS: usize = 32;
+/// Judgements per 15-frame tick, over all bombs...
+const CHARGE_PER_TICK: usize = 2;
+/// ...and a bomb that sat tight is judged again after this many frames.
+const CHARGE_EVERY: i32 = 30;
+/// An armed unit with a foe this far inside its range is busy with it.
+const BUSY_SLACK: f32 = 50.0;
+
 #[derive(Clone, Copy)]
 struct Site {
     position: Vec3,
@@ -58,6 +91,12 @@ pub(super) struct Sapper {
     placed: bool,
     /// Kept still last pass, watched by the enemy.
     held: bool,
+    /// When it was sent charging (`bombcharge`).
+    charging: Option<i32>,
+    /// When its last sit-tight verdict was logged.
+    logged: i32,
+    /// When it may be judged again.
+    next_judge: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +325,9 @@ impl Ai {
                 site: None,
                 placed: false,
                 held: false,
+                charging: None,
+                logged: i32::MIN / 2,
+                next_judge: 0,
             },
         );
     }
@@ -433,6 +475,13 @@ impl Ai {
         for (i, sapper) in sappers.iter().enumerate() {
             let unit = sapper.unit;
             let from = reservations[i].position;
+            // A charge runs its course, then the bomb is planned afresh.
+            if let Some(f0) = sapper.charging {
+                if frame - f0 < CHARGE_HOLD {
+                    continue;
+                }
+                self.misc_handler.sappers.get_mut(&unit.id()).unwrap().charging = None;
+            }
             // Do not uncover an ambush just as the enemy walks into it, nor
             // walk a placed mine off under the eyes and guns of the enemy.
             // Fire-at-will handles contact; never give ATTACK or FIGHT here.
@@ -514,6 +563,177 @@ impl Ai {
                 _ => {}
             }
         }
+    }
+}
+
+/// Armed units of the judged fight busy with a foe other than the bomb
+/// (its weapons are mid-reload), by the snapshot.
+fn busy_units(snap: &FightSnapshot, bomb: usize) -> Vec<bool> {
+    (snap.units.iter())
+        .map(|u| {
+            let range = u.spec.weapons.iter().map(|w| w.range).fold(0.0f32, f32::max);
+            range > 0.0
+                && (snap.units.iter().enumerate())
+                    .any(|(j, v)| j != bomb && v.side != u.side && (v.x - u.x).hypot(v.z - u.z) <= range + BUSY_SLACK)
+        })
+        .collect()
+}
+
+impl Ai {
+    /// `bombcharge`: each Imp and Snitch with enemies near asks the fight
+    /// predictor whether charging them beats sitting tight, and charges the
+    /// nearest when it does by [`CHARGE_MARGIN`].
+    pub(super) fn misc_charge_sappers(&mut self, frame: i32) {
+        if self.dev_off("bombcharge") || self.misc_handler.sappers.is_empty() {
+            return;
+        }
+        let bombs: Vec<Sapper> = (self.misc_handler.sappers.values())
+            .filter(|s| (s.imp || s.snitch) && s.charging.is_none())
+            .copied()
+            .collect();
+        let mut judged = 0;
+        for s in bombs {
+            if judged >= CHARGE_PER_TICK {
+                break;
+            }
+            let unit = s.unit;
+            if unit.health() <= 0.0 || unit.is_being_built() || frame < s.next_judge {
+                continue;
+            }
+            let p = unit.pos();
+            // The sim's bomb runs at its nearest enemy: so does ours.
+            let nearest = (self.war.targets.values())
+                .filter(|e| !e.is_dead && e.identified && e.ud.is_some() && !e.can_fly())
+                .filter(|e| e.is_static || frame - e.last_seen <= CHARGE_SEEN)
+                .map(|e| (distance(e.position, p), e))
+                .filter(|(d, _)| *d <= CHARGE_LOOK)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(d, e)| (d, e.unit, e.position, e.visible, e.ud.map_or("?", |u| self.defs.name(u)).to_owned()));
+            let Some((dist, target, at, visible, target_name)) = nearest else { continue };
+            let Some(model) = self.local_model() else { return };
+            let Some((snap, bomb)) = self.bomb_fight(unit, p) else { continue };
+            judged += 1;
+            let busy = busy_units(&snap, bomb);
+            let theirs = snap.units.iter().filter(|u| u.side == 1).count();
+            let busy_theirs = snap.units.iter().zip(&busy).filter(|(u, b)| u.side == 1 && **b).count();
+            let v = model.bomb_charge(&snap, bomb, &busy, CHARGE_HORIZON);
+            let name = if s.imp { "Imp" } else { "Snitch" };
+            let charge = v.net > CHARGE_MARGIN;
+            let record = json!({
+                "event": if charge { "charge" } else { "sit" },
+                "t": frame / 30,
+                "unit": unit.id(),
+                "def": name,
+                "pos": [p.x.round(), p.z.round()],
+                "nearest": target_name,
+                "dist": dist.round(),
+                "theirs": theirs,
+                "busy": busy_theirs,
+                "through": (v.p_through * 1000.0).round() / 1000.0,
+                "gain": v.gain.round(),
+                "saved": v.saved.round(),
+                "spent": (v.spent * 1000.0).round() / 1000.0,
+                "net": v.net.round(),
+                // The judged fight, for offline replay: def, side, hp, x, z, busy; the bomb last.
+                "snap": snap.units.iter().zip(&busy).map(|(u, b)| json!([u.spec.def, u.side, u.hp.round(), u.x.round(), u.z.round(), *b])).collect::<Vec<_>>(),
+            });
+            if !charge {
+                let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
+                entry.next_judge = frame + CHARGE_EVERY;
+                if frame - s.logged >= CHARGE_LOG {
+                    entry.logged = frame;
+                    self.log(&format!(
+                        "sappers: {name} {} sits tight by {theirs} enemies ({busy_theirs} busy; nearest {target_name} {dist:.0} \
+                         away): through {:.2}, gain {:.0}, saved {:.0}, net {:+.0}",
+                        unit.id(),
+                        v.p_through,
+                        v.gain,
+                        v.saved,
+                        v.net
+                    ));
+                    self.op_emit("bombcharge", record);
+                }
+                continue;
+            }
+            if visible {
+                unit.attack(target, 0);
+            } else {
+                kgb_move_to_exact(unit, at, 4.0, 0, frame);
+            }
+            let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
+            (entry.charging, entry.site, entry.placed, entry.held) = (Some(frame), None, false, false);
+            self.log(&format!(
+                "sappers: {name} {} charges {target_name} {} away at ({:.0}, {:.0}), {theirs} enemies ({busy_theirs} busy): \
+                 through {:.2}, gain {:.0}, saved {:.0}, net {:+.0}",
+                unit.id(),
+                dist,
+                at.x,
+                at.z,
+                v.p_through,
+                v.gain,
+                v.saved,
+                v.net
+            ));
+            self.op_emit("bombcharge", record);
+        }
+    }
+
+    /// The fight round bomb `bomb` at `p`: our units (not other mines
+    /// but those charging) and identified enemies (mobiles as lately seen) within
+    /// [`CHARGE_REACH`], the bomb last; in the plane, whatever `fight2d`
+    /// says, since a blast's reach is geometry. `None` past
+    /// [`CHARGE_MAX_UNITS`] or with anything submerged.
+    fn bomb_fight(&mut self, bomb: Unit, p: Vec3) -> Option<(FightSnapshot, usize)> {
+        let frame = self.frame;
+        let mut ours: Vec<(Unit, UnitDef, f32)> = Vec::new();
+        for u in self.cb.friendly_units_in(p, CHARGE_REACH) {
+            // Other mines sit hidden, but one already charging is in the
+            // fight: this bomb is judged on what it adds to that one.
+            let mine = self.misc_handler.sappers.get(&u.id());
+            if u.id() == bomb.id() || mine.is_some_and(|m| m.charging.is_none()) || u.is_being_built() {
+                continue;
+            }
+            let Some((def, hp)) = our_state(u) else { continue };
+            if def.is_able_to_fly() {
+                continue;
+            }
+            if u.pos().y < -5.0 {
+                return None;
+            }
+            ours.push((u, def, hp));
+        }
+        let mut theirs: Vec<(i32, UnitDef, f32, Vec3)> = Vec::new();
+        for (&eid, e) in &self.war.targets {
+            if e.is_dead || !e.identified || e.can_fly() || distance(e.position, p) > CHARGE_REACH {
+                continue;
+            }
+            if !e.is_static && frame - e.last_seen > CHARGE_SEEN {
+                continue;
+            }
+            let Some(def) = e.ud else { continue };
+            if e.position.y < -5.0 {
+                return None;
+            }
+            theirs.push((eid, def, e.get_health() * e.def_health(), e.position));
+        }
+        if ours.len() + theirs.len() + 1 > CHARGE_MAX_UNITS {
+            return None;
+        }
+        let (bomb_def, bomb_hp) = our_state(bomb)?;
+        let flags = SimFlags { twod: true, ..self.sim_flags() };
+        let mut snap = FightSnapshot { flags, ..Default::default() };
+        for (u, def, hp) in ours {
+            let (spec, q) = (self.fight_spec_of(u.id(), def), u.pos());
+            snap.units.push(SnapUnit { side: 0, spec, hp, x: q.x, z: q.z });
+        }
+        for (eid, def, hp, q) in theirs {
+            let spec = self.fight_spec_of(eid, def);
+            snap.units.push(SnapUnit { side: 1, spec, hp, x: q.x, z: q.z });
+        }
+        let spec = self.fight_spec_of(bomb.id(), bomb_def);
+        snap.units.push(SnapUnit { side: 0, spec, hp: bomb_hp, x: p.x, z: p.z });
+        let index = snap.units.len() - 1;
+        Some((snap, index))
     }
 }
 
