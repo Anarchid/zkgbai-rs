@@ -52,7 +52,8 @@ Primary missions:
   fighter) with no AA or fighter within 1000 elmos of it, and little ground AA
   is on the way (risk <= 0.15), the Raptors that are ready go anyway, even
   one: they keep firing until it dies or flees, for up to 300 s instead of the
-  usual 150 (`disable=raptorwear`). Staged (`airstrike-raptors` vs
+  usual 150 (`disable=raptorwear`). A ready Magpie joins them as in the full
+  package: its EMG slows the quarry. Staged (`airstrike-raptors` vs
   `airstrike-revenants`, smoke runs in zkgbai-runs/gunships): two Raptors do
   ~28 damage/s to a hovering Revenant (strafing passes) and kill one in about
   three minutes. A Revenant is not harmless: its rocket salvos hit strafing

@@ -1195,7 +1195,19 @@ impl Ai {
                 let ready = self.airstrike_ready(Plane::Raptor, &busy, home, full.unwrap_or(0), pad_floor);
                 if !ready.is_empty() {
                     let n = ready.len();
-                    selected = Some((ready, vec![(Plane::Raptor, n)]));
+                    let mut members = ready;
+                    let mut package = vec![(Plane::Raptor, n)];
+                    // A ready Magpie rides along as in the full package (never
+                    // bought or waited for): its EMG slows the quarry, and a
+                    // slow quarry is what its gun is good at.
+                    if plan.packages.iter().flatten().any(|(k, _)| *k == Plane::Magpie) {
+                        let magpie = self.airstrike_ready(Plane::Magpie, &busy, home, 1, pad_floor);
+                        if !magpie.is_empty() {
+                            members.extend(magpie);
+                            package.insert(0, (Plane::Magpie, 1));
+                        }
+                    }
+                    selected = Some((members, package));
                 }
             }
             let Some((members, package)) = selected else { continue };
