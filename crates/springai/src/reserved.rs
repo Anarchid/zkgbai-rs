@@ -48,7 +48,7 @@ pub struct Owner {
 impl Owner {
     /// Whether orders from `module` may reach the unit. Orders issued
     /// outside any module are let through (no handler to blame).
-    fn admits(&self, module: &str) -> bool {
+    pub fn admits(&self, module: &str) -> bool {
         module.is_empty() || covers(self.module, module) || self.helpers.iter().any(|h| covers(h, module))
     }
 }

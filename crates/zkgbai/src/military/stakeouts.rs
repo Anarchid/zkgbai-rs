@@ -696,6 +696,10 @@ impl Ai {
     pub(crate) fn stakeouts_borrowable(&self, frame: i32) -> Vec<(i32, Unit)> {
         (self.stakeouts.members.iter())
             .filter(|(_, m)| m.armed && frame >= m.fleeing_until && !m.f.is_dead())
+            // A picket striking a contact (`picketstrike`) is busy: since
+            // gangs can order what they borrow (coalown), lending it would end
+            // its strike.
+            .filter(|(_, m)| m.strike.is_none())
             .filter(|(_, m)| !self.retreat_handler.is_retreating(m.f.id))
             .map(|(&id, m)| (id, m.f.unit))
             .collect()

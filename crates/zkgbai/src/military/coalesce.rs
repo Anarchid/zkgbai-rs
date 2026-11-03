@@ -120,7 +120,7 @@ pub enum Origin {
 }
 
 impl Origin {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Origin::Solo => "solo",
             Origin::Kodachi => "kodachi",
@@ -329,7 +329,7 @@ impl Ai {
     }
 
     /// The raiders free to join a gang, and where each comes from.
-    fn coalesce_candidates(&self) -> Vec<(i32, Origin, Unit)> {
+    pub(crate) fn coalesce_candidates(&self) -> Vec<(i32, Origin, Unit)> {
         let frame = self.frame;
         let h = &self.raider_handler;
         let mut out: Vec<(i32, Origin, Unit)> = Vec::new();
@@ -377,6 +377,7 @@ impl Ai {
                 && !self.squad_strike_owns(id)
                 && !self.fire_controls(id)
                 && !self.blasts_waiting(u.pos())
+                && !self.stayveto_borrowed(id)
         });
         out
     }
@@ -384,7 +385,10 @@ impl Ai {
     /// Judge `units` (with their origins) as one gang: the best plan that
     /// passes, holding `hold` (the plan to keep) with the looser thresholds.
     fn coalesce_judge(&mut self, units: &[Unit], hold: Option<Plan>, budget: &mut Budget) -> Judged {
-        let Some(local) = self.local_fight(units) else { return Judged::NoFight };
+        let Some(mut local) = self.local_fight(units) else { return Judged::NoFight };
+        // A gang is borrowed, committed and ordered: it fires for certain
+        // (`ordered`, SimFlags::ordered).
+        local.snap.flags.ordered = !self.dev_off(crate::military::fightsim::ORDERED);
         if !local.armed_theirs() {
             return Judged::NoFight;
         }

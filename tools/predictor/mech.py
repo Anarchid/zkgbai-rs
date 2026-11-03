@@ -485,6 +485,15 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
     slow2 = M.get("slow2", {}) if opts.get("slow2") else None
     us, xs = _setup(fight, opts)
     xof = {id(u): x for u, x in zip(us, xs)}
+    if opts.get("ordered"):
+        # `ordered` (fight lab, 2026-11-03, zkgbai-runs/lab): the engage prior is P(a unit fires at all in a fight),
+        # fitted on game logs where many units never commit; side A under our order (a coalesce gang: borrowed,
+        # committed, ordered) does commit, so its units fire for certain and B keeps its prior. Lab: 1-2 raiders
+        # ordered at a Picket, P(Picket dead in 10 s) Brier 0.296 -> 0.183; live coalesce forms: correlation with
+        # the 10-s member loss +0.016 [+0.011, +0.021], MAE -4.4.
+        for u, x in zip(us, xs):
+            if u.side == 0:
+                x.engage = 1.0
     # sreload (2026-11-02, user: Picket reload): ZK scriptReload.lua weapons fire from `burst` tubes, each
     # reloading `script_reload` s after it fires; the engine reloadtime is only the spacing between tubes.
     # Tubes start loaded. Per weapon: ready frame of each tube.
