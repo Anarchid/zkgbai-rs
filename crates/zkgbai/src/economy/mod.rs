@@ -641,8 +641,39 @@ const OD_PHASE_ENERGY: f32 = 100.0;
 const OD_FREE_SHARE: f32 = 0.15;
 const OD_FREE_INCOME: f32 = 20.0;
 
+/// `energyneed` (on; `disable=energyneed` restores the stall flag's
+/// prices): energy jobs pull workers by how far energy income falls short
+/// of what construction spends, not by the stall flag. The flag is on while
+/// energy income is under the wanted target (`eramp`: about 1.8x metal
+/// income at 1-5 min), which was 99% of the opening (battery b1, 36 games),
+/// and while on, every energy job got the full pull whatever the shortfall:
+/// the commander walked a median 237 elmos to energy against 520 to a mex
+/// and built energy 48% of its first five minutes; lowering the target
+/// (`eramp` A/B, 122 pairs) changed neither the energy built nor the
+/// commander's share. No pull at [`NEED_ENOUGH`] x metal income or more, the
+/// full [`NEED_PULL`] at [`NEED_SHORT`] x or less, linear between.
+const NEED_ENOUGH: f32 = 1.2;
+const NEED_SHORT: f32 = 0.6;
+pub(crate) const NEED_PULL: f32 = 300.0;
+
+/// How short energy income falls of construction's need, 0 (enough) to 1
+/// (see [`NEED_ENOUGH`]).
+pub(crate) fn energy_shortfall(energy_income: f32, metal_income: f32) -> f32 {
+    if metal_income <= 0.0 {
+        return 0.0;
+    }
+    let ratio = energy_income.max(0.0) / metal_income;
+    ((NEED_ENOUGH - ratio) / (NEED_ENOUGH - NEED_SHORT)).clamp(0.0, 1.0)
+}
+
 /// Cross-module economy logic and module events.
 impl Ai {
+    /// `energyneed`: the economy's energy shortfall now (see
+    /// [`energy_shortfall`]).
+    pub(crate) fn eco_energy_shortfall(&self) -> f32 {
+        energy_shortfall(self.eco.effective_income_energy, self.eco.static_income)
+    }
+
     /// `energycrew` (`disable=energycrew` stops it): metal floats for want of
     /// energy, so greedy constructors build energy too. Energy jobs are made only by
     /// non-greedy workers and greedy ones pay 10000 for them; early on
@@ -1708,6 +1739,23 @@ impl EconomyManager {
             let id = self.tasks.insert(t);
             self.combat_reclaim_tasks.push(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod energyneed_tests {
+    use super::energy_shortfall;
+
+    #[test]
+    fn the_shortfall_runs_from_enough_at_1_2x_to_full_at_0_6x_metal_income() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert_eq!(energy_shortfall(30.0, 20.0), 0.0, "1.5x: enough");
+        assert_eq!(energy_shortfall(24.0, 20.0), 0.0, "1.2x: enough");
+        assert!(close(energy_shortfall(20.0, 20.0), 1.0 / 3.0), "1:1: a third");
+        assert!(close(energy_shortfall(18.0, 20.0), 0.5), "0.9x: half");
+        assert_eq!(energy_shortfall(12.0, 20.0), 1.0, "0.6x: full");
+        assert_eq!(energy_shortfall(0.0, 20.0), 1.0);
+        assert_eq!(energy_shortfall(5.0, 0.0), 0.0, "no metal income: nothing to match");
     }
 }
 
