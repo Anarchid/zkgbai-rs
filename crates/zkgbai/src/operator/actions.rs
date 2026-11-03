@@ -33,6 +33,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
     ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
+    (
+        "facrebuild",
+        "Economy",
+        "the last factory's replacement goes where our build power gets soonest and we hold the ground now, away from frames killed lately",
+    ),
     ("colonize", "Economy", "colonists sent to far free metal"),
     (
         "conquest",

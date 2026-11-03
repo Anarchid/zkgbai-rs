@@ -813,8 +813,15 @@ impl Ai {
         if nfac == 0 && self.terrain_pending() && self.frame < 150 {
             return;
         }
+        // Our last factory is gone and the plop spent (see `rebuild`).
+        let rebuild = !is_plop && self.eco_rebuilding();
+        if rebuild && self.eco_rebuild_waits() {
+            return;
+        }
 
-        if self.eco.potential_fac_list.is_empty() && (nfac as i32) < 1 + merged {
+        // (A replacement is a first factory again: the list the opening
+        // had, not what was left for a second one, air and Striders.)
+        if (self.eco.potential_fac_list.is_empty() || rebuild) && (nfac as i32) < 1 + merged {
             self.eco.potential_fac_list = self.eco.initial_fac_list.clone();
             self.eco.added_facs = false;
         }
@@ -1017,7 +1024,18 @@ impl Ai {
 
         let closest_spot = |ai: &Ai, p: Vec3| ai.graph.get_closest_spot(p).map(|s| s.get_pos());
         let mut i = 0;
-        if self.fac.factories.is_empty() || is_plop {
+        // Sited by our build power and our hold now (else as a first
+        // factory from this worker, as before).
+        let mut picked = false;
+        if rebuild {
+            let site = self.eco_rebuild_factory_site(factory);
+            picked = site.is_some();
+            let Some(site) = site.or_else(|| self.eco_first_factory_site(factory, wpos)) else {
+                restore(self, &fac_name);
+                return;
+            };
+            (position, facing) = site;
+        } else if self.fac.factories.is_empty() || is_plop {
             // Where the pregame announced it to allies, if it still fits.
             let announced = (self.eco.opening_site.take())
                 .filter(|&(def, pos, face)| def.id() == factory.id() && self.eco_build_check(factory, pos, face))
@@ -1100,12 +1118,17 @@ impl Ai {
         }
 
         let mut ct = WorkerTask::construction_plop(factory, position, facing, is_plop);
-        // The free first factory always; another not while energy is what we lack.
+        // The free first factory always; another not while energy is what we
+        // lack. The replacement of our last one always: losing the base
+        // loses the solars too, and the metal then piles up unspent. (A
+        // site picked by build power has builders that get to it, if not
+        // this one.)
         if self.eco_build_check(factory, position, facing)
             && !self.eco.tasks.contains(&self.eco.factory_tasks, &ct)
-            && self.eco_can_reach(wid, position)
-            && (is_plop || !self.eco_energy_starved())
+            && (picked || self.eco_can_reach(wid, position))
+            && (is_plop || rebuild || !self.eco_energy_starved())
         {
+            self.eco.rebuild_tried_at = None;
             let exit_cost = (self.eco_exit_check(factory))
                 .map_or(0.0, |(classes, slopes)| self.eco_exit_cost(factory, position, facing, &classes, &slopes));
             self.log(&format!(
