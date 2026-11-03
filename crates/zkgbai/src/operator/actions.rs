@@ -103,7 +103,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Jugglenauts walk past enemy buildings instead of standing to stare at them, and stomp them by jumping on (default on)",
     ),
     (
-        "pounce",
+        "sumopounce",
         "Army",
         "Jugglenauts jump at faster enemies that outrange their gravity guns, landing with them in reach (default on)",
     ),

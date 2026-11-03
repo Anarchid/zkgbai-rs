@@ -23,7 +23,7 @@
 //! chasers off. Their guns cannot touch buildings, but their stomp can:
 //! they jump onto enemy buildings rather than stand and stare at them
 //! (`sumostatic`, see [`SUMO_LOCK`]), and onto what is faster than they
-//! and outranges their guns, landing with it in their pull (`pounce`, see
+//! and outranges their guns, landing with it in their pull (`sumopounce`, see
 //! [`POUNCE_WORTH`]).
 
 use std::collections::BTreeMap;
@@ -98,7 +98,7 @@ const SUMO_EDGE: f32 = 1.5;
 const STOMP_APPROACH: f32 = 0.6;
 const SUMO_AT_GOAL: f32 = 120.0;
 
-/// Pounces (`pounce`): a Jugglenaut walks 34.5 and its guns reach 440;
+/// Pounces (`sumopounce`): a Jugglenaut walks 34.5 and its guns reach 440;
 /// what is faster and reaches farther kites it for ever. A jump lands it
 /// with them in its pull, which holds them: onto them when they are in
 /// reach (stomping them too), else as near as it goes. Worth one for this
@@ -1464,7 +1464,7 @@ impl Ai {
             unit.fight(to, OPTION_SHIFT_KEY);
             return true;
         }
-        if !self.dev_off("pounce") && self.jumps_sumo_pounce(unit, jd) {
+        if !self.dev_off("sumopounce") && self.jumps_sumo_pounce(unit, jd) {
             return true;
         }
         !self.dev_off("sumostatic") && self.jumps_sumo_buildings(unit, jd)
