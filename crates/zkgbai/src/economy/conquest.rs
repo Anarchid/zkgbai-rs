@@ -122,7 +122,8 @@
 //! control are read there, attacks count near any of its doors, and each
 //! door has its turret (one at a time, within our means).
 //!
-//! Compush (feature `compush`, default on in wip; user 2026-11-03) drops
+//! Compush (feature `compush`, user 2026-11-03; off by default since that
+//! evening, enable=compush) drops
 //! the trip: the commander expands toward the enemy and the objectives whose
 //! spots become ours, by any hands, get their turrets; `conquestroute`
 //! plans the trip's start and opening mexes with it (see `compush`).
@@ -453,7 +454,7 @@ fn prior() -> Vec<(Tier, f32)> {
 }
 
 impl Ai {
-    /// `compush` (on by default), with or without `conquest`: no trip, the
+    /// `compush` (off by default), with or without `conquest`: no trip, the
     /// commander expands and the objectives whose spots become ours get
     /// their turrets (see `compush`).
     pub(crate) fn conquest_push(&self) -> bool {
@@ -2082,10 +2083,17 @@ mod tests {
         ai.set_feature_off("compush", true);
     }
 
+    /// `compush` on (off by default since 2026-11-03 evening).
+    fn push(ai: &mut Ai) {
+        ai.set_feature_off("compush", false);
+    }
+
     #[test]
     fn compush_alone_runs_conquest_and_the_trip_needs_both_switches() {
         let mut ai = energy_ai();
-        assert!(ai.dev_off("conquest") && ai.conquest_push() && ai.conquest_active(), "the default: compush");
+        assert!(ai.dev_off("conquest") && ai.dev_off("compush") && !ai.conquest_active(), "the default: nothing");
+        push(&mut ai);
+        assert!(ai.dev_off("conquest") && ai.conquest_push() && ai.conquest_active(), "compush alone");
         ai.set_feature_off("compush", true);
         assert!(!ai.conquest_active(), "both off: nothing");
         trip(&mut ai);
@@ -2097,6 +2105,7 @@ mod tests {
     #[test]
     fn with_compush_the_energy_worker_holds_from_the_start_to_the_overdrive_phase() {
         let mut ai = energy_ai();
+        push(&mut ai);
         COMMANDER_HOME.with(|h| h.set(true));
         ai.conquest_energy(600);
         let e = ai.eco.conquest.energy.as_ref().expect("an energy worker without a trip");
