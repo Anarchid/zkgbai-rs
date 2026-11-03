@@ -5,7 +5,7 @@ use springai::{UnitDef, Vec3};
 
 use super::planning::{exit_lane, keeps_exit};
 use super::worker::Approach;
-use super::{SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
+use super::{NEED_PULL, SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
 use crate::military::DefenseTarget;
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
@@ -746,6 +746,15 @@ impl Ai {
                     // With `compush` the commander leaves the energy behind
                     // it to the energy worker.
                     let back = self.compush_back_cost(worker, wpos, task_pos);
+                    // With `energyneed` the pull follows the shortfall
+                    // against construction, a walk costing as for a mex.
+                    if !self.dev_off("energyneed") {
+                        if greedy {
+                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
+                        }
+                        let crowd = (1000.0 * (cost_mod - if worker.is_com { 2.0 } else { 1.0 })).max(0.0);
+                        return (dist / 4.0) - NEED_PULL * self.eco_energy_shortfall() + crowd + back;
+                    }
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
                         if greedy {
