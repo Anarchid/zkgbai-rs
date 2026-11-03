@@ -748,7 +748,8 @@ impl Ai {
                     // and with `compush` the commander's toward the enemy.
                     let cluster = self.eco_mex_cluster_bonus(task_pos)
                         + self.conquest_ground_bonus(task_pos)
-                        + self.compush_face_bonus(worker, wpos, task_pos);
+                        + self.compush_face_bonus(worker, wpos, task_pos)
+                        + self.conquest_route_pull(worker.id, task.id, dist);
                     if worker.is_greedy {
                         return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 1.0)).max(0.0);
                     }
