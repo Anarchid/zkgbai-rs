@@ -435,7 +435,8 @@ impl Ai {
                 return self.logistics_risk(worker, p, near);
             }
             let mut cost = 500.0 * view.get_effective_threat(p).max(0.0);
-            if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) {
+            // Not on conquered ground with no enemy near now (see `conquest`).
+            if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) && !self.conquest_ground_safe(p) {
                 cost += RAID_COST + near;
             }
             // The operator's greed dial: far, dangerous jobs priced cheaper.
@@ -711,8 +712,8 @@ impl Ai {
                 }
 
                 if def_id == ids.mex_id {
-                    // for mexes
-                    let cluster = self.eco_mex_cluster_bonus(task_pos);
+                    // for mexes; conquered ground's first (see `conquest`)
+                    let cluster = self.eco_mex_cluster_bonus(task_pos) + self.conquest_ground_bonus(task_pos);
                     if worker.is_greedy {
                         return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 1.0)).max(0.0);
                     }

@@ -85,7 +85,15 @@ pub struct Denial {
     pub own: f32,
     /// The objective's spots the enemy cannot get at past the turrets.
     pub sealed: usize,
+    /// Every spot (index into the assets, whoever holds it) whose way from
+    /// this enemy gets longer by at least [`SHIELD_MIN`] with the turrets'
+    /// reach closed: `1 - before / after` (cut off: 1). What holding the
+    /// objective shelters, ours to take while it is held.
+    pub shield: Vec<(usize, f32)>,
 }
+
+/// A spot counts as shielded by an objective from this share on.
+pub const SHIELD_MIN: f32 = 0.05;
 
 /// A forward position: turret sites and the spots they take.
 #[derive(Clone, Debug)]
@@ -307,6 +315,44 @@ impl<'a> TierCase<'a> {
         }
         (all, mine, sealed)
     }
+
+    /// [`Self::denial`], and the shield over every asset (see
+    /// [`Denial::shield`]).
+    fn denial_and_shield(
+        &self,
+        k: usize,
+        sites: &[Pos],
+        assets: &[Asset],
+        counted: &[usize],
+        own: &[usize],
+        p: &Params,
+    ) -> Denial {
+        let blocked = self.grid.discs(sites, (p.range - p.disc_margin).max(0.0));
+        let after = self.grid.costs(self.enemies[k], Some(&blocked));
+        let (mut all, mut mine, mut sealed) = (0.0, 0.0, 0);
+        let mut shield = Vec::new();
+        for (i, asset) in assets.iter().enumerate() {
+            let b = reach_cost(&self.before[k], &self.cells[i]);
+            if b == UNREACHED || b == 0 {
+                continue;
+            }
+            let a = reach_cost(&after, &self.cells[i]);
+            let s = if a == UNREACHED { 1.0 } else { (1.0 - b as f32 / a as f32).max(0.0) };
+            if s >= SHIELD_MIN {
+                shield.push((i, s));
+            }
+            if !counted.contains(&i) {
+                continue;
+            }
+            let v = asset.value.max(0.0) * s;
+            all += v;
+            if own.contains(&i) {
+                mine += v;
+                sealed += usize::from(a == UNREACHED);
+            }
+        }
+        Denial { tier: self.map.tier, enemy: k, worth: all, own: mine, sealed, shield }
+    }
 }
 
 /// Neutral spots within `spot_cover` of a site.
@@ -525,8 +571,7 @@ pub fn objectives(
             let mut denials = Vec::new();
             for c in &cases {
                 for k in 0..enemies.len() {
-                    let (worth, own, sealed) = c.denial(k, &sites, assets, &all, &spots, p);
-                    denials.push(Denial { tier: c.map.tier, enemy: k, worth, own, sealed });
+                    denials.push(c.denial_and_shield(k, &sites, assets, &all, &spots, p));
                 }
             }
             let walk_to = sites.iter().map(|&s| band.ours_to(s)).fold(f32::INFINITY, f32::min);
@@ -587,8 +632,7 @@ pub fn evaluate(
     for &m in maps {
         let case = TierCase::new(m, enemies, assets, p);
         for k in 0..enemies.len() {
-            let (worth, own, sealed) = case.denial(k, sites, assets, &all, &spots, p);
-            denials.push(Denial { tier: m.tier, enemy: k, worth, own, sealed });
+            denials.push(case.denial_and_shield(k, sites, assets, &all, &spots, p));
         }
     }
     let income = spots.iter().map(|&i| assets[i].value.max(0.0)).sum();
@@ -640,6 +684,20 @@ mod tests {
         let o = evaluate(&[&map], &map, at(20.0, 1.0), &[at(2.0, 1.0)], &assets, &[door], &p);
         let d = o.denial_for(Tier::Vehicle, 0);
         assert!(d > 0.5 && d < 4.0, "denial {d}");
+    }
+
+    #[test]
+    fn the_shield_lists_the_spot_behind_the_only_door() {
+        let map = rooms();
+        let assets = [
+            Asset { pos: at(24.0, 1.0), value: 2.0, side: Side::Ally },
+            Asset { pos: at(2.0, 1.0), value: 2.0, side: Side::Enemy },
+        ];
+        let door = map.chokes[1].pos;
+        let o = evaluate(&[&map], &map, at(24.0, 1.0), &[at(2.0, 1.0)], &assets, &[door], &small());
+        let d = o.denial.iter().find(|d| d.tier == Tier::Vehicle).unwrap();
+        assert!(d.shield.iter().any(|&(i, s)| i == 0 && (s - 1.0).abs() < 1e-3), "{:?}", d.shield);
+        assert!(!d.shield.iter().any(|&(i, _)| i == 1), "{:?}", d.shield);
     }
 
     #[test]
