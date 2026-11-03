@@ -34,7 +34,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "remexfirst",
         "Economy",
-        "a worker builds a free mex within 1200 elmos before a new factory, strider hub or plate, so a raided base is remexed before the air factory; remexes at high build priority",
+        "a worker builds a free mex within 1200 elmos before a new factory, strider hub or plate, so a raided base is remexed before the air factory, and a mex in reach before the missile silo; remexes at high build priority",
     ),
     (
         "lightrepair",
