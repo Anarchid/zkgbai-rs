@@ -943,9 +943,13 @@ fn choose_silo_site(
     enemy: Vec3,
 ) -> Option<SiloSite> {
     // Score only work not already claimed by an ally, for both triggers.
+    // The coverage share stays a share of all the enemy's static value,
+    // claimed or not: of what allied silos leave, any site reaches most,
+    // so each ally after the first built one more (Red Comet 3v3,
+    // 2026-11-03: three silos, the third for "100%" of 470 metal).
+    let total: f32 = statics.iter().map(|t| t.1).sum();
     let targets: Vec<_> = targets.iter().filter(|t| !ally_covers(allies, t.0)).collect();
     let statics: Vec<_> = statics.iter().filter(|t| !ally_covers(allies, t.0)).collect();
-    let total: f32 = statics.iter().map(|t| t.1).sum();
     let scored: Vec<_> = sites
         .filter_map(|p| {
             let (payoff, n) =
@@ -1064,6 +1068,25 @@ mod site_tests {
         let targets = [(enemy, 2400.0), (uncovered, 600.0)];
         assert!(choose_silo_site(&[at], [uncovered].into_iter(), &targets, &[], DENSE, enemy).is_none());
         assert!(choose_silo_site(&[at], [uncovered].into_iter(), &[], &[(uncovered, 60000.0)], DENSE, enemy).is_some());
+    }
+
+    #[test]
+    fn what_allied_silos_leave_is_a_share_of_all_static_value() {
+        // An ally's silo reaches 75% of the enemy's statics; a site that
+        // reaches all the rest covers 25%, not 100%, and warrants no silo.
+        let ally = Vec3::xz(1000.0, 1000.0);
+        let enemy = Vec3::xz(3000.0, 1000.0);
+        let rest = Vec3::xz(9000.0, 1000.0);
+        let site = Vec3::xz(7000.0, 1000.0);
+        let statics = [(enemy, 6000.0), (rest, 2000.0)];
+        assert!(choose_silo_site(&[ally], [site].into_iter(), &[], &statics, DENSE, rest).is_none());
+        // Most of the value out of the ally's reach still warrants one.
+        let statics = [(enemy, 2000.0), (rest, 6000.0)];
+        let chosen = choose_silo_site(&[ally], [site].into_iter(), &[], &statics, DENSE, rest).unwrap();
+        assert_eq!((chosen.coverage.value, chosen.coverage.share), (6000.0, 0.75));
+        // Eos targets out of the ally's reach still pay for their own.
+        let targets = [(rest, 2400.0)];
+        assert!(choose_silo_site(&[ally], [site].into_iter(), &targets, &[], DENSE, rest).is_some());
     }
 
     #[test]
