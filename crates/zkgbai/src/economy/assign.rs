@@ -128,8 +128,14 @@ fn cluster_bonus(p: Vec3, free: impl Iterator<Item = Vec3>) -> f32 {
 /// factory (`airfire`) whose crew bonus comes on top: the constructors
 /// built the air factory in a base whose mexes had just died (user, 11-04).
 /// Zero-K has no construction decay, so a frame left for a mex waits.
+/// A worker's own mex is priced REMEX_KEEP lower: a commander joining it
+/// (+600 to the others' price) flipped a constructor between the mex and
+/// the factory 1360 elmos away every second while the commander's raid
+/// defense took it off and gave it back (Altair smoke, 11-04); raiders near
+/// it (RAID_COST) still send it off.
 const REMEX_RADIUS: f32 = 1200.0;
 const REMEX_CEILING: f32 = 300.0;
+const REMEX_KEEP: f32 = 700.0;
 
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
@@ -622,7 +628,10 @@ impl Ai {
             let best = (eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)))
                 .filter(|t| t.as_construction().is_some_and(|c| c.build_type.id() == mex))
                 .filter(|t| distance(wpos, t.get_pos()) <= REMEX_RADIUS && reaches(t))
-                .map(|t| (t, self.eco_cost_of_job(worker, wpos, t) - stranded(t) + threat_cost(t)))
+                .map(|t| {
+                    let keep = if worker.task == Some(t.id) { REMEX_KEEP } else { 0.0 };
+                    (t, self.eco_cost_of_job(worker, wpos, t) - stranded(t) + threat_cost(t) - keep)
+                })
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .filter(|&(_, c)| c < REMEX_CEILING);
             if let Some((m, c)) = best {
@@ -1341,6 +1350,10 @@ mod tests {
         // A third worker on it, or raiders near it (RAID_COST and up), not.
         assert!(mex(0.0, CLUSTER_CAP, 2.0) >= REMEX_CEILING);
         assert!(mex(0.0, CLUSTER_CAP, 0.0) + RAID_COST >= REMEX_CEILING);
+        // Its own mex: a commander joining it (counts 2) does not send the
+        // worker off; raiders near it do.
+        assert!(mex(REMEX_RADIUS, 0.0, 2.0) - REMEX_KEEP < REMEX_CEILING);
+        assert!(mex(0.0, CLUSTER_CAP, 0.0) + RAID_COST - REMEX_KEEP >= REMEX_CEILING);
     }
 
     #[test]
