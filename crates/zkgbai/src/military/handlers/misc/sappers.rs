@@ -678,8 +678,8 @@ impl Ai {
         }
     }
 
-    /// The fight round bomb `bomb` at `p`: our units (not other mines)
-    /// and identified enemies (mobiles as lately seen) within
+    /// The fight round bomb `bomb` at `p`: our units (not other mines
+    /// but those charging) and identified enemies (mobiles as lately seen) within
     /// [`CHARGE_REACH`], the bomb last; in the plane, whatever `fight2d`
     /// says, since a blast's reach is geometry. `None` past
     /// [`CHARGE_MAX_UNITS`] or with anything submerged.
@@ -687,7 +687,10 @@ impl Ai {
         let frame = self.frame;
         let mut ours: Vec<(Unit, UnitDef, f32)> = Vec::new();
         for u in self.cb.friendly_units_in(p, CHARGE_REACH) {
-            if u.id() == bomb.id() || self.misc_handler.sappers.contains_key(&u.id()) || u.is_being_built() {
+            // Other mines sit hidden, but one already charging is in the
+            // fight: this bomb is judged on what it adds to that one.
+            let mine = self.misc_handler.sappers.get(&u.id());
+            if u.id() == bomb.id() || mine.is_some_and(|m| m.charging.is_none()) || u.is_being_built() {
                 continue;
             }
             let Some((def, hp)) = our_state(u) else { continue };
