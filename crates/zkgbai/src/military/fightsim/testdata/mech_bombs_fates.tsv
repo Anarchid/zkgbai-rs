@@ -1,0 +1,20 @@
+# Python mech.simulate_mech fates per variant + bombs (no hazard), a-move: units side:def:hp:x:z; fates per unit dead:death frame (-1 alive):hp left:pdead
+case	variant	units	horizon	fates
+imp_glaives_rogues	focus	0:cloakbomb:50:0:0;0:cloakraid:230:-20:7;0:cloakraid:230:-40:14;0:cloakraid:230:0:46;1:shieldskirm:520:300.3:0;1:shieldskirm:520:320.3:7;1:shieldskirm:520:340.3:14	450	1:0:0:0.999999999;0:-1:153.8089761:0.1010116816;0:-1:230:0;1:420:0:0.552049147;0:-1:520:0;0:-1:520:0;0:-1:520:0
+imp_glaives_rogues	2d	0:cloakbomb:50:0:0;0:cloakraid:230:-20:7;0:cloakraid:230:-40:14;0:cloakraid:230:0:46;1:shieldskirm:520:300.3:0;1:shieldskirm:520:320.3:7;1:shieldskirm:520:340.3:14	450	1:0:0:1;1:210:0:0.9774944496;1:420:0:0.6503607173;0:-1:14.32393822:0.4467427582;0:-1:520:0;0:-1:520:0;0:-1:520:0
+snitch_ronins	focus	0:shieldbomb:60:0:0;0:cloakraid:230:-20:7;0:cloakraid:230:-40:14;1:cloakskirm:400:260.7:0;1:cloakskirm:400:280.7:7;1:cloakskirm:400:300.7:14;1:cloakskirm:400:260.7:46	450	1:0:0:1;1:0:0:1;1:0:0:1;0:-1:400:0;0:-1:400:0;0:-1:400:0;0:-1:400:0
+snitch_ronins	2d	0:shieldbomb:60:0:0;0:cloakraid:230:-20:7;0:cloakraid:230:-40:14;1:cloakskirm:400:260.7:0;1:cloakskirm:400:280.7:7;1:cloakskirm:400:300.7:14;1:cloakskirm:400:260.7:46	450	1:0:0:1;1:0:0:1;1:0:0:1;0:-1:400:0;0:-1:400:0;0:-1:400:0;0:-1:400:0
+imp_lotus_mace	focus	0:cloakbomb:50:0:0;0:turretlaser:785:-20:7;1:hoverriot:1400:250.2:0	300	1:3:0:1;1:81:0:1;0:-1:1196.541294:0
+imp_lotus_mace	2d	0:cloakbomb:50:0:0;0:turretlaser:785:-20:7;1:hoverriot:1400:250.2:0	300	1:3:0:1;1:81:0:1;0:-1:1196.541294:0
+skuttle_grizzly	focus	0:jumpbomb:380:0:0;1:amphassault:8700:250:0	450	1:147:0:0.4210890826;0:-1:1629.168276:0
+skuttle_grizzly	2d	0:jumpbomb:380:0:0;1:amphassault:8700:250:0	450	1:147:0:0.4210890826;0:-1:1629.168276:0
+limpet_daggers	focus	0:amphbomb:400:0:0;0:amphraid:360:-20:7;1:hoverraid:300:300.4:0;1:hoverraid:300:320.4:7;1:hoverraid:300:340.4:14;1:hoverraid:300:300.4:46	450	1:12:0:1;1:99:0:1;1:69:0:1;0:-1:206.564128:0;0:-1:210.0014374:0;0:-1:205.3386851:0
+limpet_daggers	2d	0:amphbomb:400:0:0;0:amphraid:360:-20:7;1:hoverraid:300:300.4:0;1:hoverraid:300:320.4:7;1:hoverraid:300:340.4:14;1:hoverraid:300:300.4:46	450	1:15:0:1;1:102:0:1;1:69:0:1;0:-1:214.0025943:0;0:-1:220.2459613:0;0:-1:213.5472234:0
+imp_glaive_cons	focus	0:cloakbomb:50:0:0;0:cloakraid:230:-20:7;1:cloakcon:600:250.6:0;1:cloakcon:600:270.6:7;1:cloakcon:600:290.6:14	300	1:42:0:1;0:-1:230:0;0:-1:517.6430157:0;0:-1:600:0;0:-1:600:0
+imp_glaive_cons	2d	0:cloakbomb:50:0:0;0:cloakraid:230:-20:7;1:cloakcon:600:250.6:0;1:cloakcon:600:270.6:7;1:cloakcon:600:290.6:14	300	1:42:0:1;0:-1:230:0;0:-1:517.6430157:0;0:-1:600:0;0:-1:600:0
+snitch_solars	focus	0:shieldbomb:60:0:0;1:energysolar:600:240.2:0;1:energysolar:600:260.2:7;1:energysolar:600:280.2:14	300	1:45:0:1;1:45:0:1;1:45:0:1;1:45:0:1
+snitch_solars	2d	0:shieldbomb:60:0:0;1:energysolar:600:240.2:0;1:energysolar:600:260.2:7;1:energysolar:600:280.2:14	300	1:45:0:1;1:45:0:1;1:45:0:1;1:45:0:1
+skuttle_cons	focus	0:jumpbomb:380:0:0;1:amphcon:1000:200.8:0;1:amphcon:1000:220.8:7	450	1:117:0:1;1:117:0:1;1:117:0:1
+skuttle_cons	2d	0:jumpbomb:380:0:0;1:amphcon:1000:200.8:0;1:amphcon:1000:220.8:7	450	1:117:0:1;1:117:0:1;1:117:0:1
+snitch_ring_cons	focus	0:shieldbomb:60:220:0;0:shieldbomb:60:-220:2.694222958e-14;1:shieldcon:780:0:0;1:shieldcon:780:20:0	300	1:36:0:1;1:36:0:1;1:36:0:1;1:36:0:1
+snitch_ring_cons	2d	0:shieldbomb:60:220:0;0:shieldbomb:60:-220:2.694222958e-14;1:shieldcon:780:0:0;1:shieldcon:780:20:0	300	1:36:0:1;1:36:0:1;1:36:0:1;1:36:0:1

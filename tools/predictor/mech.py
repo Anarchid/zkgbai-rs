@@ -3,7 +3,7 @@
 
 simulate_mech(fight, opts, hazard) -> expected killed cost fractions (A, B), deterministic.
 opts is a dict of switches: air, burn, death, pulse, emp, slow, engage, rate (blocking factor per
-own unit in the line), desync (seconds), kite. With opts empty it is predict.simulate's
+own unit in the line), desync (seconds), kite, bombs (each kamikaze's own kamikazeDistance). With opts empty it is predict.simulate's
 deterministic path exactly. Fitted parameters (fit_mech.py) live in M, loaded by load().
 """
 import math
@@ -17,6 +17,14 @@ from predict import DT, HORIZON, RBANDS, sband
 
 M = {}
 KAMIKAZE = {"cloakbomb", "shieldbomb", "jumpbomb", "amphbomb", "gunshipbomb", "subscout"}
+KAMIKAZE_REACH = 20.0      # every kamikaze blows up within this of its nearest enemy...
+# ...or, with opt `bombs` (2026-11-03), within its def's kamikazeDistance, centre to centre as the engine checks
+# (Unit.cpp SlowUpdateKamikaze; ZK has no AllowUnitKamikaze). At 20 a plane fight's overlap pass (sep) holds a
+# bomb off its target (an Imp's radius 8 plus a Rogue's 14 is already 22), so it never went off on contact.
+# The engine pushes units apart by their move footprints, smaller than the radii our plane fight keeps apart, so
+# with `bombs` touching its nearest enemy (radii plus 1) sets a bomb off too.
+KAMIKAZE_DIST = {"cloakbomb": 80.0, "shieldbomb": 80.0, "jumpbomb": 25.0, "amphbomb": 120.0, "gunshipbomb": 60.0,
+                 "subscout": 80.0}
 STUN_DECAY_S = 40.0        # unit_paralysis_damage.lua: 100% para decays to 0 in 40 s
 SLOW_MAX = 0.5             # timeslow_defs.lua
 SLOW_DECAY = 0.04          # of health per second, after 0.5 s without a slow hit
@@ -322,9 +330,15 @@ def _aoe_info(w):
 
 
 # ----------------------------------------------------------------------------- sim
+def goes_off(x, xn, dist):
+    """A kamikaze (mechanics state x) at dist from its nearest enemy (xn) blows up: within its reach, or with
+    `bombs` touching it."""
+    return dist <= x.kreach or (x.kcontact and dist <= x.rad + xn.rad + 1.0)
+
+
 class X:
     """Per-unit mechanics state riding on a SimUnit."""
-    __slots__ = ("maxhp", "air", "kamikaze", "death", "engage", "blockers", "para", "slowdmg", "slow_last", "ovs",
+    __slots__ = ("maxhp", "air", "kamikaze", "kreach", "kcontact", "death", "engage", "blockers", "para", "slowdmg", "slow_last", "ovs",
                  "burns", "range_", "speed_", "sh", "shmax", "shregen", "shr", "drain", "lat", "rad")
 
 
@@ -339,6 +353,8 @@ def _setup(fight, opts):
         x.maxhp = float(r["hpmax"]) if r["hpmax"] else max(u.hp, 1.0)
         x.air = bool(d is not None and d.canfly)
         x.kamikaze = r["def"] in KAMIKAZE
+        x.kreach = KAMIKAZE_DIST.get(r["def"], KAMIKAZE_REACH) if opts.get("bombs") else KAMIKAZE_REACH
+        x.kcontact = bool(opts.get("bombs"))
         x.death = M.get("death", {}).get(r["def"]) if opts.get("death") else None
         x.engage = 1.0
         x.lat = 0.0  # lateral coordinate (fates' pass mode; 2-D: offset across the fight axis)
@@ -651,7 +667,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             speed = u.speed * (1.0 - slowf(u)) if opts.get("slow") else u.speed
             x = xof[id(u)]
             if passing is not None and u.side == 0:
-                if death_on and x.kamikaze and dist <= 20.0:
+                if death_on and x.kamikaze and goes_off(x, xof[id(nearest)], dist):
                     kill(u)
                     continue
                 u.x += speed * DT
@@ -670,7 +686,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 moved = True
                 continue
             if death_on and x.kamikaze:
-                if dist <= 20.0:
+                if goes_off(x, xof[id(nearest)], dist):
                     kill(u)
                     continue
                 step = min(speed * DT, dist)

@@ -43,8 +43,28 @@ const TACAI_TSV: &str = include_str!("../../../data/fightsim_tacai.tsv");
 
 /// Unit defs that attack by dying next to the enemy.
 const KAMIKAZE: [&str; 6] = ["cloakbomb", "shieldbomb", "jumpbomb", "amphbomb", "gunshipbomb", "subscout"];
-/// A kamikaze within this of its nearest enemy blows up.
+/// A kamikaze within this of its nearest enemy blows up...
 const KAMIKAZE_REACH: f64 = 20.0;
+/// ...or with [`SimFlags::bombs`] within its def's `kamikazeDistance`,
+/// centre to centre (Unit.cpp SlowUpdateKamikaze; ZK has no
+/// AllowUnitKamikaze), as mech.py `KAMIKAZE_DIST`.
+const KAMIKAZE_DIST: [(&str, f64); 6] = [
+    ("cloakbomb", 80.0),
+    ("shieldbomb", 80.0),
+    ("jumpbomb", 25.0),
+    ("amphbomb", 120.0),
+    ("gunshipbomb", 60.0),
+    ("subscout", 80.0),
+];
+
+/// mech.py `goes_off`: kamikaze `k` at `dist` from its nearest enemy `n`.
+fn goes_off(k: &MechUnit, n: &MechUnit, dist: f64) -> bool {
+    dist <= k.kreach || (k.kcontact && dist <= k.rad + n.rad + 1.0)
+}
+
+fn kamikaze_reach(def: &str, bombs: bool) -> f64 {
+    (KAMIKAZE_DIST.iter().find(|(d, _)| bombs && *d == def)).map_or(KAMIKAZE_REACH, |&(_, r)| r)
+}
 /// Seconds for full paralysis to wear off (unit_paralysis_damage.lua).
 const STUN_DECAY_S: f64 = 40.0;
 
@@ -379,6 +399,12 @@ pub(super) struct MechUnit {
     maxhp: f64,
     air: bool,
     kamikaze: bool,
+    /// How near its nearest enemy a kamikaze goes off...
+    kreach: f64,
+    /// ...or, with [`SimFlags::bombs`], once touching it: the engine
+    /// pushes units apart by their move footprints, smaller than the radii
+    /// the plane fight keeps apart (mech.py `goes_off`).
+    kcontact: bool,
     death: Option<Death>,
     /// P(the unit fires at all in this fight).
     engage: f64,
@@ -491,6 +517,31 @@ struct Run<'a> {
     twod: bool,
     /// Shots go to the least-health target in range.
     least_health: bool,
+    /// A bomb's charge, for [`Model::bomb_charge`] (Rust only).
+    bomb: Option<BombRun>,
+    /// Log of the chance the bomb has survived the one-hit kills aimed at
+    /// it so far ([`BombMode::Charge`]).
+    bomb_ln_survive: f64,
+}
+
+/// One of side A's kamikazes in a [`Model::bomb_charge`] branch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct BombRun {
+    pub index: usize,
+    pub mode: BombMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BombMode {
+    /// It runs at the enemy. The expected-damage fight would kill a 50-hp
+    /// bomb with any shot whose hit chance times damage passes 50; here a
+    /// shot that kills with one hit misses it, and its chance of hitting
+    /// goes into [`Run::bomb_ln_survive`] (this branch is the bomb getting
+    /// through). Hits too weak to kill alone land as expected damage, so a
+    /// beam's stream still burns it down.
+    Charge,
+    /// It is shot down where it stands at the start, and blows up there.
+    Down,
 }
 
 /// mech.py's fates bookkeeping: the Bernoulli variance of the hits each
@@ -606,7 +657,44 @@ impl Model {
         defense: Option<&Defense>,
         kiting: bool,
     ) -> Vec<UnitFate> {
+        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None).0
+    }
+
+    /// An a-move's fates for [`Model::bomb_charge`]: each unit's weapons
+    /// first fire `phase[i]` of their reload in (busy elsewhere: they have
+    /// just fired), and the bomb runs or is shot down as `bomb` says. Also
+    /// the log of the bomb's chance to survive its run's one-hit kills.
+    pub(super) fn bomb_fates(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        phase: &[f64],
+        bomb: Option<BombRun>,
+    ) -> (Vec<UnitFate>, f64) {
+        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fates_run(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        mode: FateMode,
+        paralysis: &[(usize, f32)],
+        insertion: Option<Insertion>,
+        defense: Option<&Defense>,
+        kiting: bool,
+        phase: &[f64],
+        bomb: Option<BombRun>,
+    ) -> (Vec<UnitFate>, f64) {
         let mut units = self.mech_units(snap);
+        for (m, &ph) in units.iter_mut().zip(phase) {
+            if ph > 0.0 {
+                for w in &mut m.u.weapons {
+                    w.next = (ph * w.reload as f64).round() as i32;
+                }
+            }
+        }
         let kiting = kiting.then(|| self.kiting(snap, &units));
         if defense.is_some() {
             for (m, u) in units.iter_mut().zip(&snap.units) {
@@ -654,11 +742,8 @@ impl Model {
         };
         // Pass mode stays on its lines (mech.py has no plane pass); it keeps
         // the targeting.
-        let flags = if pass {
-            SimFlags { twod: false, focus: snap.flags.least_health(), sreload: snap.flags.sreload }
-        } else {
-            snap.flags
-        };
+        let flags =
+            if pass { SimFlags { twod: false, focus: snap.flags.least_health(), ..snap.flags } } else { snap.flags };
         let mut run = Run {
             defense,
             defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
@@ -672,13 +757,16 @@ impl Model {
             track: Some(track),
             twod: flags.twod,
             least_health: flags.least_health(),
+            bomb,
+            bomb_ln_survive: 0.0,
         };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
-        let Some(tr) = run.track else { return Vec::new() };
+        let ln_survive = run.bomb_ln_survive;
+        let Some(tr) = run.track else { return (Vec::new(), ln_survive) };
         let cal = self.mech.calibration(flags);
         let c = &cal.fate;
         let ln_h = (horizon.max(1) as f64 / 150.0).ln();
-        units
+        let fates = units
             .iter()
             .zip(&end)
             .enumerate()
@@ -693,7 +781,8 @@ impl Model {
                     p_raw: raw as f32,
                 }
             })
-            .collect()
+            .collect();
+        (fates, ln_survive)
     }
 
     /// The tactical AI of the snapshot's units, `units` being its
@@ -761,6 +850,8 @@ impl Model {
                     maxhp: if su.spec.health > 0.0 { su.spec.health as f64 } else { hp.max(1.0) },
                     air: su.spec.air,
                     kamikaze: KAMIKAZE.contains(&su.spec.def.as_str()),
+                    kreach: kamikaze_reach(&su.spec.def, snap.flags.bombs),
+                    kcontact: snap.flags.bombs,
                     death: t.death.get(&su.spec.def).copied(),
                     engage: 1.0,
                     para: 0.0,
@@ -929,6 +1020,8 @@ pub(super) fn simulate_mech_kiting(
         track: None,
         twod: flags.twod,
         least_health: flags.least_health(),
+        bomb: None,
+        bomb_ln_survive: 0.0,
     };
     run_mech(template, hits, stun_cap_s, &mut run).0
 }
@@ -1016,6 +1109,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut foes: Vec<usize> = Vec::with_capacity(n);
     let mut raid_focus = vec![None; n];
     let mut engagement_members = Vec::new();
+    if let Some(b) = run.bomb
+        && b.mode == BombMode::Down
+        && us.get(b.index).is_some_and(|u| u.u.alive)
+    {
+        kill(&mut us, &mut killed, b.index);
+    }
     while f < run.horizon {
         if let Some(hz) = hazard
             && f > 0
@@ -1166,7 +1265,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             let Some((dist, nx, nz, nj)) = nearest else { continue };
             let speed = us[i].u.speed * (1.0 - us[i].slowed());
             if run.pass && side == 0 {
-                if us[i].kamikaze && dist <= KAMIKAZE_REACH {
+                if us[i].kamikaze && goes_off(&us[i], &us[nj], dist) {
                     kill(&mut us, &mut killed, i);
                     continue;
                 }
@@ -1182,7 +1281,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 continue;
             }
             if run.defense.is_some() {
-                if us[i].kamikaze && dist <= KAMIKAZE_REACH {
+                if us[i].kamikaze && goes_off(&us[i], &us[nj], dist) {
                     kill(&mut us, &mut killed, i);
                     continue;
                 }
@@ -1197,7 +1296,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 continue;
             }
             if us[i].kamikaze {
-                if dist <= KAMIKAZE_REACH {
+                if goes_off(&us[i], &us[nj], dist) {
                     kill(&mut us, &mut killed, i);
                     continue;
                 }
@@ -1310,6 +1409,16 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 let splash = if run.twod { us[i].splash[wi] } else { None };
                 let frac_t = splash.map_or(frac, |sp| (frac - sp.geo / hit.p_any.max(0.05)).max(0.0));
                 let dmg = hit.p_tgt * frac_t * nominal * shots * eff;
+                if let Some(b) = run.bomb
+                    && b.mode == BombMode::Charge
+                    && j == b.index
+                    && frac_t * nominal >= us[j].u.hp
+                {
+                    // One hit kills it: in this branch it got through, by
+                    // the chance that all of this volley missed.
+                    run.bomb_ln_survive += shots * (1.0 - (hit.p_tgt * eff).clamp(0.0, 1.0)).max(1e-9).ln();
+                    continue;
+                }
                 let t = &mut us[j];
                 if m.burn > 0.0 && m.burn_frames > 0 {
                     t.burns.push((f + m.burn_frames, m.burn * hit.p_tgt * shots * eff / m.burn_frames as f64));
@@ -1393,6 +1502,9 @@ mod tests {
     const SRELOAD_UNITS: &str = include_str!("testdata/mech_sreload_units.tsv");
     const SRELOAD_CASES: &str = include_str!("testdata/mech_sreload_cases.tsv");
     const SRELOAD_FATES: &str = include_str!("testdata/mech_sreload_fates.tsv");
+    const BOMBS_UNITS: &str = include_str!("testdata/mech_bombs_units.tsv");
+    const BOMBS_CASES: &str = include_str!("testdata/mech_bombs_cases.tsv");
+    const BOMBS_FATES: &str = include_str!("testdata/mech_bombs_fates.tsv");
 
     /// export_mech.VARIANTS by name (both with `sreload` since 2026-11-03).
     fn variant(name: &str) -> SimFlags {
@@ -1901,6 +2013,70 @@ mod tests {
             n += 1;
         }
         assert!(n >= 10);
+    }
+
+    /// `bombs` (kamikazeDistance per def, or touching) against
+    /// mech.simulate_mech with each variant's opts + bombs
+    /// (testdata/mech_bombs_cases.tsv, export_bombs.py).
+    #[test]
+    fn bombs_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(BOMBS_UNITS);
+        let s = m.mech.stun_cap_s;
+        let (mut n, mut worst_all) = (0, 0.0f64);
+        for l in data_lines(BOMBS_CASES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let flags = SimFlags { bombs: true, ..variant(f[1]) };
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = flags;
+            let units = m.mech_units(&snap);
+            let want: Vec<f64> = f[3..11].iter().map(|v| v.parse().unwrap()).collect();
+            let dps = simulate_mech_flags(&units, &m.hits, s, None, false, flags);
+            let stop = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), false, flags);
+            let wd = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), true, flags);
+            let mut off = snap.clone();
+            off.flags.bombs = false;
+            let o = simulate_mech_flags(&m.mech_units(&off), &m.hits, s, None, false, off.flags);
+            let got = [dps.0, dps.1, stop.0, stop.1, wd.0, wd.1, o.0, o.1];
+            let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0, f64::max);
+            assert!(worst <= TOL, "{} {}: got {got:?}, python {want:?}", f[0], f[1]);
+            worst_all = worst_all.max(worst);
+            n += 1;
+        }
+        eprintln!("bombs parity: {n} cases, worst |rust - python| = {worst_all:.2e}");
+        assert!(n >= 18);
+    }
+
+    /// The `bombs` fates against mech.simulate_mech(fates=...), and the
+    /// flag moves when the bombs go off (in the plane, at all).
+    #[test]
+    fn bombs_fates_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(BOMBS_UNITS);
+        let (mut n, mut moved) = (0, 0);
+        for l in data_lines(BOMBS_FATES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = SimFlags { bombs: true, ..variant(f[1]) };
+            let horizon = f[3].parse().unwrap();
+            let got = m.fates(&snap, horizon, FateMode::AMove);
+            let want: Vec<Vec<&str>> = f[4].split(';').map(|u| u.split(':').collect()).collect();
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let death: i32 = w[1].parse().unwrap();
+                let (hp, pd): (f64, f64) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                assert_eq!(g.dead, w[0] == "1", "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert_eq!(g.death_frame, (death >= 0).then_some(death), "{} {} unit {i}", f[0], f[1]);
+                assert!((g.hp_left as f64 - hp).abs() <= 0.5 + 1e-3 * hp, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert!((g.p_raw as f64 - pd).abs() <= TOL, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+            }
+            snap.flags.bombs = false;
+            let off = m.fates(&snap, horizon, FateMode::AMove);
+            moved += usize::from(off.iter().zip(&got).any(|(a, b)| a.death_frame != b.death_frame));
+            n += 1;
+        }
+        eprintln!("bombs fates parity: {n} cases, {moved} moved by the flag");
+        assert!(n >= 18 && moved >= 6);
     }
 
     /// Off, both switches leave every answer as it was: the base parity

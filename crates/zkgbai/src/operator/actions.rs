@@ -246,6 +246,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("fight2d", "Army", "the fight predictor fights in the plane: positions kept, no overlaps, splash"),
     (
+        "bombcharge",
+        "Army",
+        "placed Imps and Snitches charge the enemies near them when the fight predictor says it beats sitting tight",
+    ),
+    (
         "sreload",
         "Army",
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
