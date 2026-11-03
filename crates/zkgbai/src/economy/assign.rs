@@ -145,7 +145,11 @@ impl Ai {
         // risk stays: see `logistics`.)
         // The operator's greed dial scales the threat a worker perceives.
         let greed = self.op_greed();
+        // The predictor speaks for a commander in a fight it judged (see
+        // `comguard`): no flinch from the threat paint.
+        let answered = w.is_com && self.comguard_answers(wid);
         if !w.is_chicken
+            && !answered
             && !self.logistics_holds(wid)
             && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() && w.raid_defense.is_none() || w.get_shields() < 0.5)
@@ -178,9 +182,10 @@ impl Ai {
             // `comguard`), at its own haven.
             let guarded = self.comguard_haven(wid);
             if guarded.is_none()
-                && view.get_threat(pos) == 0.0
-                && ((view.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
-                    || frame - chicken_frame > 150)
+                && (answered
+                    || (view.get_threat(pos) == 0.0
+                        && ((view.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
+                            || frame - chicken_frame > 150)))
             {
                 self.eco_stop_chickening(wid);
             } else if let Some(haven) = guarded {
