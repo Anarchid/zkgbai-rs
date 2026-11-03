@@ -100,6 +100,10 @@
 //! turrets of its own and helps the allied turrets rising within
 //! `SUPPORT_RADIUS` of the objective, for `SUPPORT_FOR` after it arrives.
 //!
+//! Conquest's turrets are placed on purpose and stand past the economy's
+//! Lotus crowding rule (it pools Lotuses whose reach overlaps); the guards
+//! count a Lotus as cover only when one stands within its reach of the site.
+//!
 //! Every decision goes to the journal (`conquest` records).
 
 use std::sync::mpsc;
@@ -930,6 +934,18 @@ impl Ai {
             return Some(bonus);
         }
         let op = self.eco.conquest.op.as_ref()?;
+        // Before setting out the commander stays home on the home guard: the
+        // objective's jobs and those on the way wait for it (it had walked
+        // off to the objective's mexes while others built the Lotus).
+        if op.stage == Stage::Prepare {
+            let (t, _) = op.home_guard.filter(|(t, _)| t.task == Some(task))?;
+            if wid == op.crew {
+                return Some(BONUS + GUARD_BONUS);
+            }
+            let w = self.eco.workers.get(&wid)?;
+            return (self.eco.metal >= BANK_EMPTY && distance(w.get_pos(), t.site) <= HELP_RADIUS)
+                .then_some(HELP_BONUS);
+        }
         if op.mex_tasks.contains(&task) {
             return (wid == op.crew).then_some(BONUS + MEX_FIRST);
         }
@@ -1050,16 +1066,38 @@ impl Ai {
             }
         };
         let fresh = slot.is_none();
-        // A Lotus whose reach overlaps another's is refused (pooled into a
-        // stronger turret, see `lotus`): that ground has its Lotus.
-        let covered = !t.built && t.task.is_none() && self.eco_lotus_crowded(t.site);
-        let t = if covered { Turret { built: true, ..t } } else { self.conquest_turret_order(t, def) };
+        // Covered: a Lotus standing within its reach of the site. A queued
+        // one there (or its frame) becomes the guard, seen up before the
+        // commander leaves. Else our own, past the economy's crowding rule
+        // (user 2026-11-03, "the lotus-before-leaving base seems to be
+        // forgotten": any Lotus within twice the reach counted, a queued
+        // task included, so the commander left at 1:23 with none standing).
+        let reach = def.max_weapon_range();
+        let covered = !t.built
+            && t.task.is_none()
+            && self.eco.porcs.iter().any(|u| {
+                u.health() > 0.0
+                    && !u.is_being_built()
+                    && u.def().is_some_and(|d| d.id() == def.id())
+                    && distance(u.pos(), t.site) <= reach
+            });
+        let adopted =
+            if t.built || covered || t.task.is_some() { None } else { self.conquest_queued_lotus(t.site, reach) };
+        let t = if covered {
+            Turret { built: true, ..t }
+        } else if let Some((id, at)) = adopted {
+            Turret { task: Some(id), site: at, ..t }
+        } else {
+            self.conquest_turret_order(t, def)
+        };
         let done = t.built || frame - asked > GUARD_TIMEOUT || (t.task.is_none() && t.retries >= MAX_RETRIES);
         if fresh
             || (done && !slot.is_some_and(|(o, _)| o.built == t.built && o.retries == t.retries && o.task == t.task))
         {
             let what = if covered {
-                "covered by a Lotus near"
+                "covered by a Lotus standing near"
+            } else if adopted.is_some() {
+                "a queued Lotus near taken as the guard"
             } else if t.built {
                 "up"
             } else if done {
@@ -1089,6 +1127,17 @@ impl Ai {
             }
         }
         done
+    }
+
+    /// A Lotus queued (or rising) within `reach` of `site`: its task and
+    /// place.
+    fn conquest_queued_lotus(&self, site: Vec3, reach: f32) -> Option<(TaskId, Vec3)> {
+        (self.eco.porc_tasks.iter()).find_map(|&id| {
+            let task = self.eco.tasks.get(id)?;
+            let c = task.as_construction()?;
+            (c.build_type.name() == GUARD_TURRET && distance(task.position, site) <= reach)
+                .then_some((id, task.position))
+        })
     }
 
     /// Where the home guard goes: by our home mex nearest the enemy, out
@@ -1159,7 +1208,11 @@ impl Ai {
         let at = self.cb.map().find_closest_build_site(def, t.site, 250.0, 3, 0);
         let id = (at.x >= 0.0)
             .then(|| {
-                self.eco_add_construction(WorkerTask::construction(def, at, 0), Some(List::Porc), Some(List::Porc))
+                self.eco_add_construction_uncrowded(
+                    WorkerTask::construction(def, at, 0),
+                    Some(List::Porc),
+                    Some(List::Porc),
+                )
             })
             .flatten();
         if t.task.is_some() || id.is_none() {
@@ -1602,7 +1655,11 @@ impl Ai {
             let at = self.cb.map().find_closest_build_site(def, site, 250.0, 3, 0);
             let id = (at.x >= 0.0)
                 .then(|| {
-                    self.eco_add_construction(WorkerTask::construction(def, at, 0), Some(List::Porc), Some(List::Porc))
+                    self.eco_add_construction_uncrowded(
+                        WorkerTask::construction(def, at, 0),
+                        Some(List::Porc),
+                        Some(List::Porc),
+                    )
                 })
                 .flatten();
             if let Some(op) = &mut self.eco.conquest.op {

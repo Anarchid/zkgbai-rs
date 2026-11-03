@@ -276,6 +276,28 @@ impl Ai {
         dedup: Option<List>,
         extra: Option<List>,
     ) -> Option<TaskId> {
+        self.eco_add_construction_with(task, dedup, extra, true)
+    }
+
+    /// [`Self::eco_add_construction`] past the Lotus crowding rule: a turret
+    /// placed on purpose (conquest's guards and attack turrets) stands even
+    /// where another Lotus's reach overlaps its own.
+    pub(super) fn eco_add_construction_uncrowded(
+        &mut self,
+        task: WorkerTask,
+        dedup: Option<List>,
+        extra: Option<List>,
+    ) -> Option<TaskId> {
+        self.eco_add_construction_with(task, dedup, extra, false)
+    }
+
+    fn eco_add_construction_with(
+        &mut self,
+        task: WorkerTask,
+        dedup: Option<List>,
+        extra: Option<List>,
+        crowding: bool,
+    ) -> Option<TaskId> {
         let c = task.as_construction()?;
         if !self.eco_build_check(c.build_type, task.position, c.facing) {
             return None;
@@ -283,7 +305,7 @@ impl Ai {
         if dedup.is_some_and(|l| self.eco.tasks.contains(self.eco.list(l), &task)) {
             return None;
         }
-        if c.build_type.name() == "turretlaser" && self.eco_lotus_crowded(task.position) {
+        if crowding && c.build_type.name() == "turretlaser" && self.eco_lotus_crowded(task.position) {
             // Point and gate planners register their own stable request
             // keys. Other sources contribute at most one request per area.
             if !c.fortification {
