@@ -18,9 +18,17 @@
 //!   moves at the speed at which [`MIN_VALUE`] of it arrives (its fastest
 //!   members first), on the movement tier of most of its value, never
 //!   through a chokepoint our turrets hold against it.
-//! - *Something we value*: places round our dearest buildings, one per
-//!   [`PLACE_LINK`]; a place counts when our buildings and constructors
-//!   within [`VAR_RADIUS`] are worth [`PLACE_VALUE`] or more. The places
+//! - *Something we value* (user, 2026-11-04: "a good value of dearth
+//!   would be the total amount of our economy that goes through that
+//!   place"): places round what our economy flows through, one per
+//!   [`PLACE_LINK`], the richest first. A mex streams its metal income, an
+//!   energy building its energy at what energy is worth now (one metal
+//!   while construction spends it, less the more of it goes to overdrive
+//!   or waste, [`energy_value`]), a factory our metal income, which it
+//!   turns into units (shared among factories by build power, its
+//!   caretakers' included). A place counts when the flow within
+//!   [`VAR_RADIUS`] is [`PLACE_FLOW`] metal a second or more, and is worth
+//!   that flow for [`OUTAGE`] seconds (a lone mex no longer is). The places
 //!   the group can get within its weapons' reach of within [`HORIZON`]
 //!   seconds, soonest first (factories and the base count, not only the
 //!   metal spots the Defense client watches).
@@ -58,7 +66,7 @@ use springai::{Unit, UnitDef, Vec3};
 use zk_terrain::Tier;
 use zk_terrain::paths::Paths;
 
-use super::{Hand, IN_TIME, Kind, MARGIN, UNIT_COST_CAP, Worth, best_crew_stretched, porc_power};
+use super::{Hand, IN_TIME, Kind, MARGIN, Worth, best_crew_stretched, porc_power};
 use crate::Ai;
 use crate::economy::TaskId;
 use crate::terrain::{pos, tier_of};
@@ -86,11 +94,16 @@ const MAX_PLACES: usize = 8;
 /// One place per this much ground round our dearest buildings, elmos.
 const PLACE_LINK: f32 = 350.0;
 
-/// What a place holds: our buildings and constructors this close, elmos.
+/// What a place holds: our flows this close, elmos.
 const VAR_RADIUS: f32 = 600.0;
 
-/// A place is something we value from this much metal on.
-const PLACE_VALUE: f32 = 600.0;
+/// A place is something we value from this much economy flowing through it
+/// on, metal a second (three mexes; a factory nearly always).
+const PLACE_FLOW: f32 = 6.0;
+
+/// A place that falls is taken to lose its flow for this long, seconds:
+/// its value at stake is flow x this.
+const OUTAGE: f32 = 120.0;
 
 /// Our units this close to a place fight there, elmos.
 const PRESENT: f32 = 500.0;
@@ -177,9 +190,11 @@ impl Group {
 /// Something of ours worth defending.
 #[derive(Clone, Copy, Debug)]
 struct Place {
-    /// Its dearest building.
+    /// Where its richest flow is.
     anchor: Vec3,
-    /// Our buildings and constructors within [`VAR_RADIUS`], metal.
+    /// Our economy through it (within [`VAR_RADIUS`]), metal a second.
+    flow: f32,
+    /// What it stands to lose, metal: `flow` x [`OUTAGE`].
     value: f32,
 }
 
@@ -313,6 +328,20 @@ fn worth_value(w: &Worth) -> f32 {
     match *w {
         Worth::Flat(value) | Worth::Deadline { value, .. } | Worth::Stream { value, .. } => value,
     }
+}
+
+/// Metal one energy of `income` is worth: the share construction spends
+/// is worth a metal each (ZK builds take metal and energy alike), the share
+/// overdrive spends (`overdrive`) what overdrive makes of it
+/// (`overdrive_metal` for all of it), the share wasted nothing.
+fn energy_value(income: f32, overdrive: f32, waste: f32, overdrive_metal: f32) -> f32 {
+    if income <= 0.0 {
+        return 1.0;
+    }
+    let od = (overdrive.max(0.0) / income).clamp(0.0, 1.0);
+    let wasted = (waste.max(0.0) / income).clamp(0.0, 1.0 - od);
+    let rate = if overdrive > 0.0 { (overdrive_metal.max(0.0) / overdrive).clamp(0.0, 1.0) } else { 0.0 };
+    1.0 - od - wasted + od * rate
 }
 
 /// Distance from `p` to the polyline `line` (on the ground plane).
@@ -493,48 +522,66 @@ impl Ai {
         groups
     }
 
-    /// Our places worth [`PLACE_VALUE`] or more.
+    /// Our places with [`PLACE_FLOW`] or more going through them.
     fn walkin_places(&self) -> Vec<Place> {
         let team = self.team_id;
-        let mut buildings: Vec<(Vec3, f32)> = Vec::new();
-        for u in self.cb.team_units() {
-            if u.team() != team || u.health() <= 0.0 {
+        let alive = |u: &Unit| u.health() > 0.0 && u.team() == team && !u.is_being_built();
+        // Factories: our metal income, by build power.
+        let mut factories: Vec<(i32, Vec3, f32)> = (self.fac.factories.values())
+            .filter(|f| alive(&f.unit))
+            .map(|f| (f.id, f.unit.pos(), f.unit.def().map_or(0.0, |d| d.build_speed())))
+            .collect();
+        for n in self.eco.nanos.values() {
+            if !alive(&n.unit) {
                 continue;
             }
-            let Some(d) = u.def() else { continue };
-            if d.speed() > 0.0 {
-                continue;
-            }
-            let cost = d.cost(self.metal);
-            // Terraform placeholders cost 100000 on paper.
-            if cost >= UNIT_COST_CAP {
-                continue;
-            }
-            let cost = if u.is_being_built() { cost * u.build_progress().clamp(0.0, 1.0) } else { cost };
-            if cost > 0.0 {
-                buildings.push((u.pos(), cost));
+            if let Some(f) = factories.iter_mut().find(|f| f.0 == n.target.id()) {
+                f.2 += n.unit.def().map_or(0.0, |d| d.build_speed());
             }
         }
-        let workers: Vec<(Vec3, f32)> = (self.eco.workers.values())
-            .filter(|w| w.unit.health() > 0.0 && w.unit.team() == team)
-            .filter_map(|w| Some((w.get_pos(), w.unit.def()?.cost(self.metal))))
-            .collect();
-        buildings.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let bp: f32 = factories.iter().map(|f| f.2).sum();
+        let income = self.eco.static_income.max(0.0);
+        let mut flows: Vec<(Vec3, f32)> =
+            (factories.iter()).filter(|_| bp > 0.0).map(|f| (f.1, income * f.2 / bp)).collect();
+        // Mexes and energy.
+        let energy = self.walkin_energy_value();
+        for u in self.cb.team_units() {
+            if !alive(&u) || u.def().is_none_or(|d| d.speed() > 0.0) || self.fac.factories.contains_key(&u.id()) {
+                continue;
+            }
+            let metal = u.rules_param_float("current_metalIncome", 0.0).max(0.0);
+            let e = u.rules_param_float("current_energyIncome", 0.0).max(0.0);
+            let flow = metal + e * energy;
+            if flow > 0.0 {
+                flows.push((u.pos(), flow));
+            }
+        }
+        flows.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut anchors: Vec<Vec3> = Vec::new();
-        for &(p, _) in &buildings {
+        for &(p, _) in &flows {
             if anchors.iter().all(|&a| distance(a, p) > PLACE_LINK) {
                 anchors.push(p);
             }
         }
         (anchors.into_iter())
             .filter_map(|anchor| {
-                let value: f32 = (buildings.iter().chain(&workers))
-                    .filter(|(p, _)| distance(*p, anchor) <= VAR_RADIUS)
-                    .map(|x| x.1)
-                    .sum();
-                (value >= PLACE_VALUE).then_some(Place { anchor, value })
+                let flow: f32 = flows.iter().filter(|(p, _)| distance(*p, anchor) <= VAR_RADIUS).map(|x| x.1).sum();
+                (flow >= PLACE_FLOW).then_some(Place { anchor, flow, value: flow * OUTAGE })
             })
             .collect()
+    }
+
+    /// Metal an energy is worth now (see [`energy_value`]), from the
+    /// overdrive gadget's team figures.
+    fn walkin_energy_value(&self) -> f32 {
+        let game = self.cb.game();
+        let param = |name: &str| game.team_rules_param_float(self.team_id, name, 0.0);
+        energy_value(
+            self.eco.effective_income_energy,
+            -param("OD_energyOverdrive"),
+            param("OD_team_energyWaste"),
+            param("OD_metalOverdrive"),
+        )
     }
 
     /// Our armed units, and whether each is free to answer a call.
@@ -816,7 +863,8 @@ impl Ai {
         self.logistics.walkin.notes.insert(key, frame);
         let mut note = json!({
             "event": event, "group": a.group.json(),
-            "place": {"pos": [a.place.anchor.x.round(), a.place.anchor.z.round()], "value": a.place.value.round()},
+            "place": {"pos": [a.place.anchor.x.round(), a.place.anchor.z.round()], "value": a.place.value.round(),
+                      "flow": (a.place.flow * 10.0).round() / 10.0},
             "seconds": (a.seconds * 10.0).round() / 10.0, "dwell": (a.dwell * 10.0).round() / 10.0,
             "ours": a.ours.json(), "met": a.ours.total().round(),
         });
@@ -825,9 +873,11 @@ impl Ai {
         }
         if event == "open" {
             self.log(&format!(
-                "walkin: fortify ({:.0}, {:.0}) worth {:.0} against {} units worth {:.0} {:.0}s out, met by {:.0} of {:.0}",
+                "walkin: fortify ({:.0}, {:.0}) ({:.1} metal/s, worth {:.0}) against {} units worth {:.0} {:.0}s out, \
+                 met by {:.0} of {:.0}",
                 a.place.anchor.x,
                 a.place.anchor.z,
+                a.place.flow,
                 a.place.value,
                 a.group.units,
                 a.group.value,
@@ -1004,6 +1054,18 @@ mod tests {
         assert_eq!(bump(&open, 900.0), Some(2));
         // Everything started: no slot.
         assert_eq!(bump(&[(1, 600.0, true)], 5000.0), None);
+    }
+
+    #[test]
+    fn energy_is_worth_less_the_more_of_it_overdrive_spends() {
+        // No overdrive: a metal each.
+        assert_eq!(energy_value(40.0, 0.0, 0.0, 0.0), 1.0);
+        // Half to overdrive at 0.2 metal per energy: 0.5 + 0.1.
+        assert!((energy_value(40.0, 20.0, 0.0, 4.0) - 0.6).abs() < 1e-5);
+        // A quarter wasted besides: 0.25 + 0.1.
+        assert!((energy_value(40.0, 20.0, 10.0, 4.0) - 0.35).abs() < 1e-5);
+        // Everything to overdrive.
+        assert!((energy_value(40.0, 40.0, 0.0, 8.0) - 0.2).abs() < 1e-5);
     }
 
     #[test]
