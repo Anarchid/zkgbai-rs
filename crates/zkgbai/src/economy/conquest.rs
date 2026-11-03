@@ -122,7 +122,14 @@
 //! control are read there, attacks count near any of its doors, and each
 //! door has its turret (one at a time, within our means).
 //!
+//! Compush (feature `compush`, default on in wip; user 2026-11-03) drops
+//! the trip: the commander expands toward the enemy and the objectives whose
+//! spots become ours, by any hands, get their turrets; `conquestroute`
+//! plans the trip's start and opening mexes with it (see `compush`).
+//!
 //! Every decision goes to the journal (`conquest` records).
+
+mod compush;
 
 use std::sync::mpsc;
 
@@ -286,6 +293,16 @@ pub struct Conquest {
     /// it (see `conquest_ground`), and when that was weighed.
     pub ground: Vec<f32>,
     pub ground_at: i32,
+    /// With `compush`: objectives whose spots became ours, their turrets
+    /// coming (see `compush`), and when a failed one may be seized again.
+    pub seized: Vec<compush::Seized>,
+    pub seize_cool: Vec<(usize, i32)>,
+    /// With `conquestroute`: the commander's opening mexes, in order, on
+    /// its way to the objective planned with the start (see `compush`).
+    pub route: Vec<Vec3>,
+    /// The atlas (and the route) went to the journal.
+    pub reported: bool,
+    pub route_note: Option<serde_json::Value>,
 }
 
 /// Who holds an objective, as our AI reads it.
@@ -400,6 +417,28 @@ pub struct Turret {
     pub built: bool,
 }
 
+/// The objectives' search, ready to run on any thread.
+pub(super) struct SearchInput {
+    maps: Vec<TierMap>,
+    walk: TierMap,
+    pub ally: Vec3,
+    pub enemy: Vec3,
+    pub assets: Vec<Asset>,
+    params: Params,
+    pub range: f32,
+}
+
+impl SearchInput {
+    pub(super) fn run(self) -> Vec<Objective> {
+        let refs: Vec<&TierMap> = self.maps.iter().collect();
+        objectives(&refs, &self.walk, pos(self.ally), &[pos(self.enemy)], &self.assets, &self.params)
+    }
+
+    pub(super) fn walk(&self) -> &TierMap {
+        &self.walk
+    }
+}
+
 /// Metal now against metal later: 2x until 3:00, 1x from 5:00 (see the
 /// module notes).
 fn metal_price(frame: i32) -> f32 {
@@ -428,7 +467,14 @@ impl Ai {
         self.conquest_observe();
         self.conquest_attacks(frame);
         self.conquest_control(frame);
-        if self.eco.conquest.op.is_some() {
+        if !self.dev_off("compush") {
+            // No trip: the commander expands toward the enemy, and the
+            // objectives whose spots become ours get their turrets.
+            if self.eco.conquest.op.is_some() {
+                self.conquest_end("compush", false);
+            }
+            self.conquest_seized_step(frame);
+        } else if self.eco.conquest.op.is_some() {
             self.conquest_step(frame);
         } else if !self.eco.conquest.done {
             self.conquest_start(frame);
@@ -592,40 +638,22 @@ impl Ai {
             self.eco.conquest.control = vec![Control::default(); self.eco.conquest.objectives.len()];
             self.conquest_report_atlas();
         }
+        // Found before the start (`conquestroute`): to the journal now.
+        if self.eco.conquest.asked && self.eco.conquest.job.is_none() && !self.eco.conquest.reported {
+            self.conquest_report_atlas();
+            if let Some(note) = self.eco.conquest.route_note.take() {
+                self.op_emit("conquest", note);
+            }
+        }
         if self.eco.conquest.asked || frame < 90 {
             return;
         }
-        let Some(terrain) = self.terrain.get() else { return };
-        let Some((mut ally, mut enemy)) = self.strategy_bases() else { return };
-        let box_ally = Some(self.graph.get_ally_base()).filter(|b| !b.is_zero());
-        if !self.dev_off("conquestsym")
-            && let (Some(a), Some(e)) = (box_ally, self.graph.get_enemy_base())
-        {
-            // Both walks from the same kind of place (see the module notes).
-            (ally, enemy) = (a, e);
-        }
-        let maps: Vec<TierMap> = TIERS.iter().filter_map(|&t| terrain.tier(t).cloned()).collect();
-        let Some(walk) = terrain.tier(Tier::Bot).cloned() else { return };
-        let lines = !self.dev_off("conquestlines");
-        let assets = if lines { self.conquest_assets() } else { self.strategy_assets() };
-        let range = self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0);
-        let params = if lines {
-            Params {
-                range,
-                max_sites: SITES,
-                door_slack: DOOR_SLACK,
-                lines: true,
-                per_tier: PER_TIER,
-                ..Params::default()
-            }
-        } else {
-            Params { range, max_sites: SITES, ..Params::default() }
-        };
+        let Some(input) = self.conquest_search_input() else { return };
         let (tx, rx) = mpsc::channel();
-        let (a, e, spots) = (pos(ally), pos(enemy), assets.clone());
+        let (ally, enemy, range) = (input.ally, input.enemy, input.range);
+        let assets = input.assets.clone();
         let spawned = std::thread::Builder::new().name("zkgbai-conquest".into()).spawn(move || {
-            let refs: Vec<&TierMap> = maps.iter().collect();
-            let _ = tx.send(objectives(&refs, &walk, a, &[e], &spots, &params));
+            let _ = tx.send(input.run());
         });
         self.eco.conquest.asked = true;
         match spawned {
@@ -641,7 +669,41 @@ impl Ai {
         }
     }
 
+    /// What the objectives' search needs: the terrain's tiers, both bases
+    /// and the spots as conquest sees them (see `conquest_plan`).
+    pub(super) fn conquest_search_input(&self) -> Option<SearchInput> {
+        let terrain = self.terrain.get()?;
+        // Both walks from the same kind of place (see the module notes):
+        // the start boxes' metal, known before the game starts.
+        let boxes = (!self.dev_off("conquestsym"))
+            .then(|| Some(self.graph.get_ally_base()).filter(|b| !b.is_zero()).zip(self.graph.get_enemy_base()))
+            .flatten();
+        let (ally, enemy) = match boxes {
+            Some(b) => b,
+            None => self.strategy_bases()?,
+        };
+        let maps: Vec<TierMap> = TIERS.iter().filter_map(|&t| terrain.tier(t).cloned()).collect();
+        let walk = terrain.tier(Tier::Bot).cloned()?;
+        let lines = !self.dev_off("conquestlines");
+        let assets = if lines { self.conquest_assets() } else { self.strategy_assets() };
+        let range = self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0);
+        let params = if lines {
+            Params {
+                range,
+                max_sites: SITES,
+                door_slack: DOOR_SLACK,
+                lines: true,
+                per_tier: PER_TIER,
+                ..Params::default()
+            }
+        } else {
+            Params { range, max_sites: SITES, ..Params::default() }
+        };
+        Some(SearchInput { maps, walk, ally, enemy, assets, params, range })
+    }
+
     fn conquest_report_atlas(&mut self) {
+        self.eco.conquest.reported = true;
         let c = &self.eco.conquest;
         let mut lines = Vec::new();
         let list: Vec<serde_json::Value> = c
@@ -853,6 +915,19 @@ impl Ai {
         }) else {
             return;
         };
+        let ranked = self.conquest_ranked();
+        let best = if self.iq.peers.is_empty() {
+            ranked.first().map(|&(i, e)| (i, e, false))
+        } else {
+            self.conquest_team_pick(crew, &ranked)
+        };
+        self.conquest_go(frame, crew, best);
+    }
+
+    /// The objectives open to a trip, best first: (index, expected denial),
+    /// by the denial expected times the race factor (see the module notes).
+    pub(super) fn conquest_ranked(&self) -> Vec<(usize, f32)> {
+        let c = &self.eco.conquest;
         let best: Vec<(usize, f32)> = (0..c.objectives.len())
             .filter(|&i| {
                 let o = &c.objectives[i];
@@ -876,11 +951,11 @@ impl Ai {
         };
         let mut ranked = best;
         ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
-        let best = if self.iq.peers.is_empty() {
-            ranked.first().map(|&(i, e)| (i, e, false))
-        } else {
-            self.conquest_team_pick(crew, &ranked)
-        };
+        ranked
+    }
+
+    /// Set out for the objective picked (none open: conquest is done).
+    fn conquest_go(&mut self, frame: i32, crew: i32, best: Option<(usize, f32, bool)>) {
         let Some((idx, expected, support)) = best else {
             self.eco.conquest.done = true;
             self.log("conquest: no objective is open");
@@ -1014,6 +1089,12 @@ impl Ai {
     /// its turrets for builders near them.
     pub(crate) fn conquest_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
         if let Some(bonus) = self.conquest_energy_bonus(wid, task) {
+            return Some(bonus);
+        }
+        if let Some(bonus) = self.conquest_seized_bonus(wid, task) {
+            return Some(bonus);
+        }
+        if let Some(bonus) = self.conquest_route_bonus(wid, task) {
             return Some(bonus);
         }
         let op = self.eco.conquest.op.as_ref()?;
@@ -1555,12 +1636,15 @@ impl Ai {
             return;
         }
         let c = &self.eco.conquest;
-        if c.op.is_none() && c.held.is_empty() {
+        if c.op.is_none() && c.held.is_empty() && c.seized.is_empty() {
             return;
         }
         let p = unit.pos();
         let op_center = c.op.as_ref().and_then(|op| c.objectives.get(op.idx)).map(|o| self.conquest_near_site(o, p));
+        let seized = (c.seized.iter().filter_map(|s| c.objectives.get(s.idx)))
+            .any(|o| distance(self.conquest_near_site(o, p), p) <= ATTACK_RADIUS);
         let near = op_center.is_some_and(|q| distance(q, p) <= ATTACK_RADIUS)
+            || seized
             || c.held.iter().any(|h| distance(h.center, p) <= ATTACK_RADIUS);
         if near && self.eco.conquest.attacks.len() < 32 {
             self.eco.conquest.attacks.push((self.frame, p));
@@ -1576,6 +1660,8 @@ impl Ai {
         if attacks.is_empty() {
             return;
         }
+        // Seized objectives still watching: their turrets go up now.
+        self.conquest_seized_attacked(frame, &attacks);
         // The turret an attack adds: none when even a Lotus is beyond us.
         let Some((def, light)) = self.conquest_attack_turret() else { return };
         let toward = |p: Vec3, c: Vec3| Vec3::new(p.x + (c.x - p.x) * 0.4, p.y, p.z + (c.z - p.z) * 0.4);
@@ -1867,6 +1953,9 @@ impl Ai {
                 "added": op.added,
             })}),
             "held": c.held.iter().map(|h| json!({"objective": h.idx, "added": h.added})).collect::<Vec<_>>(),
+            "seized": c.seized.iter().map(|s| json!({"objective": s.idx, "committed": s.committed,
+                "turrets": s.turrets.iter().filter(|t| t.built).count()})).collect::<Vec<_>>(),
+            "route": c.route.iter().map(|p| [p.x.round(), p.z.round()]).collect::<Vec<_>>(),
             "control": c.control.iter().map(|k| k.hold.name()).collect::<Vec<_>>(),
             "ground": c.ground.iter().filter(|&&w| w >= GROUND_SAFE).count(),
         })

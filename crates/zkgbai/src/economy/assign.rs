@@ -745,7 +745,10 @@ impl Ai {
 
                 if def_id == ids.mex_id {
                     // for mexes; conquered ground's first (see `conquest`)
-                    let cluster = self.eco_mex_cluster_bonus(task_pos) + self.conquest_ground_bonus(task_pos);
+                    // and with `compush` the commander's toward the enemy.
+                    let cluster = self.eco_mex_cluster_bonus(task_pos)
+                        + self.conquest_ground_bonus(task_pos)
+                        + self.compush_face_bonus(worker, wpos, task_pos);
                     if worker.is_greedy {
                         return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 1.0)).max(0.0);
                     }
