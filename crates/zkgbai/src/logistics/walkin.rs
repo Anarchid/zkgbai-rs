@@ -703,6 +703,9 @@ impl Ai {
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
             .count();
+        // The slot this place would take (see `bump`); given up only once
+        // this place's turret stands planned, else the cheaper place would
+        // reopen its own in the same pass.
         let bumped = if under_way >= MAX_OPEN && here < PLACE_CAP {
             let open: Vec<(TaskId, f32, bool)> = (self.logistics.issues.values())
                 .filter(|i| i.kind == Kind::Walkin)
@@ -712,13 +715,7 @@ impl Ai {
         } else {
             None
         };
-        if let Some(task) = bumped {
-            self.logistics.walkin.opened.retain(|o| o.2 != task);
-            self.logistics.walkin.called.remove(&task);
-            self.logistics.walkin.stats.bumped += 1;
-            self.logistics_close(task, "bumped");
-            self.eco.eco_logistics_drop(task);
-        } else if under_way >= MAX_OPEN || here >= PLACE_CAP {
+        if bumped.is_none() && (under_way >= MAX_OPEN || here >= PLACE_CAP) {
             self.logistics.walkin.stats.capped += 1;
             self.walkin_note("capped", a, json!({"under_way": under_way, "here": here}));
             return;
@@ -767,6 +764,13 @@ impl Ai {
             self.walkin_note("nosite", a, json!({"turret": self.defs.name(def)}));
             return;
         };
+        if let Some(old) = bumped {
+            self.logistics.walkin.opened.retain(|o| o.2 != old);
+            self.logistics.walkin.called.remove(&old);
+            self.logistics.walkin.stats.bumped += 1;
+            self.logistics_close(old, "bumped");
+            self.eco.eco_logistics_drop(old);
+        }
         // Unstamped: the economy drops stamped porc nobody took up within
         // 20 s; this one stays while a force calls for it (`STAND_DOWN`).
         if let Some(c) = self.eco.tasks.get_mut(task).and_then(|t| t.as_construction_mut()) {
