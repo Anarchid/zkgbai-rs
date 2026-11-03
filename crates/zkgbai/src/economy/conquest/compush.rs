@@ -11,8 +11,8 @@
 //! up, the objective is held: attacks there add turrets, and its shield
 //! counts as conquered ground. Toward the enemy: the commander's mex jobs
 //! cost `FACE_COST` less per elmo a spot is nearer the enemy's start-box
-//! metal than the commander stands, on our side of the middle only (to
-//! `FACE_SHARE` of the way). The sweep of 2026-11-03 had the trip cost a
+//! metal than the commander stands (half an elmo walked per elmo forward),
+//! on our side of the middle only (to `FACE_SHARE` of the way). The sweep of 2026-11-03 had the trip cost a
 //! fifth of the home energy in the first five minutes, the commander away
 //! 55% of the time against 26%.
 //!
@@ -39,8 +39,10 @@ use crate::terrain::pos;
 use crate::util::distance;
 
 /// Commander mex jobs: cost off per elmo nearer the enemy (jobs cost about
-/// a quarter per elmo walked: one elmo forward pays for one walked).
-const FACE_COST: f32 = 0.25;
+/// a quarter per elmo walked: one elmo forward pays for half an elmo
+/// walked; at one for one the first smoke walked 2500 elmos to the middle
+/// of Mercurial past every spot on the way, building nothing for 80 s).
+const FACE_COST: f32 = 0.125;
 /// Toward the enemy only on our side: spots at most this share of the way.
 const FACE_SHARE: f32 = 0.55;
 /// A failed seizure (lost spots, no turret up in time) waits this long.
@@ -48,6 +50,8 @@ const SEIZE_COOLDOWN: i32 = 30 * 120;
 /// The opening route: this many mexes, among the spots this near the start.
 const ROUTE_MEXES: usize = 3;
 const ROUTE_RADIUS: f32 = 1600.0;
+/// A mex job this near a route spot is its.
+const ROUTE_JOB: f32 = 100.0;
 /// How long the start position waits for the terrain.
 const TERRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -386,18 +390,63 @@ impl Ai {
         (self.eco.metal >= BANK_EMPTY).then_some(HELP_BONUS)
     }
 
-    /// With `conquestroute`, until the commander sets out: the next mex of
-    /// the planned route not yet ours is its job first.
+    /// With `conquestroute`: the route's next mex and its job, the
+    /// commander's first once its factory stands (it had walked the route
+    /// with the plop in hand: the factory went up at 2:02 on Wanderlust).
+    /// Spots taken are passed; so is one with no job (a factory's yard).
+    pub(super) fn conquest_route_step(&mut self) {
+        let c = &self.eco.conquest;
+        if c.route.is_empty() {
+            return;
+        }
+        let ready = !self.fac.factories.is_empty()
+            && (self.eco.commanders.iter().filter_map(|id| self.eco.workers.get(id))).any(|w| !w.has_plop());
+        let mex = self.eco.build_ids.mex_id;
+        let mut passed = Vec::new();
+        let mut next = None;
+        if c.op.is_none() && !c.done && ready {
+            for &p in &c.route {
+                if self.conquest_spot_owned(pos(p)) {
+                    continue;
+                }
+                if self.conquest_spot_hostile(pos(p)) {
+                    passed.push(format!("({:.0},{:.0}) hostile", p.x, p.z));
+                    continue;
+                }
+                let job = self.eco.construction_tasks.iter().copied().find(|&id| {
+                    self.eco.tasks.get(id).is_some_and(|t| {
+                        t.as_construction().is_some_and(|k| k.build_type.id() == mex)
+                            && distance(t.position, Vec3::new(p.x, t.position.y, p.z)) < ROUTE_JOB
+                    })
+                });
+                match job {
+                    Some(id) => {
+                        next = Some((p, id));
+                        break;
+                    }
+                    None => passed.push(format!("({:.0},{:.0}) has no job", p.x, p.z)),
+                }
+            }
+        }
+        let was = self.eco.conquest.route_next.map(|n| n.0);
+        if next.map(|n| n.0) != was {
+            let what = match next {
+                Some((p, _)) => format!("next mex ({:.0},{:.0})", p.x, p.z),
+                None if !ready => "waits for the factory".to_owned(),
+                None => "done".to_owned(),
+            };
+            let note = if passed.is_empty() { String::new() } else { format!(" (passed {})", passed.join(", ")) };
+            self.log(&format!("conquest route: {what}{note}"));
+        }
+        self.eco.conquest.route_next = next;
+    }
+
+    /// With `conquestroute`, until the commander sets out: the route's next
+    /// mex is a commander's job first (see `conquest_route_step`).
     pub(super) fn conquest_route_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
         let c = &self.eco.conquest;
-        if c.route.is_empty() || c.op.is_some() || c.done || !self.eco.commanders.contains(&wid) {
-            return None;
-        }
-        let next =
-            c.route.iter().find(|&&p| !self.conquest_spot_owned(pos(p)) && !self.conquest_spot_hostile(pos(p)))?;
-        let t = self.eco.tasks.get(task)?;
-        let mex = t.as_construction()?.build_type.id() == self.eco.build_ids.mex_id;
-        (mex && distance(t.position, Vec3::new(next.x, t.position.y, next.z)) < 50.0).then_some(BONUS + MEX_FIRST)
+        let (_, id) = c.route_next.filter(|_| c.op.is_none() && !c.done)?;
+        (id == task && self.eco.commanders.contains(&wid)).then_some(BONUS + MEX_FIRST)
     }
 
     /// With `conquestroute` in a one-on-one (see the module notes): the
@@ -480,8 +529,8 @@ mod tests {
     fn the_commander_leans_toward_the_enemy_on_our_side_only() {
         let v = |x: f32| Vec3::new(x, 0.0, 1000.0);
         let (home, enemy, at) = (v(1000.0), v(9000.0), v(2000.0));
-        // 800 elmos nearer the enemy than the commander: 200 off.
-        assert!((face(at, v(2800.0), home, enemy) - 200.0).abs() < 1e-3);
+        // 800 elmos nearer the enemy than the commander: 100 off.
+        assert!((face(at, v(2800.0), home, enemy) - 100.0).abs() < 1e-3);
         // Behind it: nothing; past the middle's share: nothing.
         assert_eq!(face(at, v(1500.0), home, enemy), 0.0);
         assert_eq!(face(at, v(6000.0), home, enemy), 0.0);

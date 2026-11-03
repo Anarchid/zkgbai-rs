@@ -300,6 +300,7 @@ pub struct Conquest {
     /// With `conquestroute`: the commander's opening mexes, in order, on
     /// its way to the objective planned with the start (see `compush`).
     pub route: Vec<Vec3>,
+    pub route_next: Option<(Vec3, TaskId)>,
     /// The atlas (and the route) went to the journal.
     pub reported: bool,
     pub route_note: Option<serde_json::Value>,
@@ -477,6 +478,7 @@ impl Ai {
         } else if self.eco.conquest.op.is_some() {
             self.conquest_step(frame);
         } else if !self.eco.conquest.done {
+            self.conquest_route_step();
             self.conquest_start(frame);
         }
         self.conquest_energy(frame);
