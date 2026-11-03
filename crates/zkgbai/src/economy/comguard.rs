@@ -30,7 +30,8 @@
 //! are left out.
 //!
 //! Hit by an enemy within [`HIT_WINDOW`], it leaves when the sim's own
-//! P(dead) reaches [`DEATH`]; not hit, it never leaves on the guard's
+//! P(dead) reaches [`DEATH`] or its expected health at the horizon is
+//! under [`NEAR_DEAD`] of its max; not hit, it never leaves on the guard's
 //! word. While a verdict is fresh ([`FRESH`]) and covers what last hit it
 //! (the shooter is in the judged fight, or it was not hit lately), the
 //! threat-paint retreat does not apply to it and a retreat that rule began
@@ -70,8 +71,12 @@ const FRIENDS: f32 = 800.0;
 const MAX_FRIENDS: usize = 40;
 /// Frames of fight judged (15 s).
 const GUARD_HORIZON: i32 = 450;
-/// The sim's own P(dead) at which a hit commander leaves.
+/// The sim's own P(dead) at which a hit commander leaves...
 const DEATH: f32 = 0.3;
+/// ...or the share of its health it is expected to end the fight under:
+/// P(dead) is the spread around the expected fight, and a commander
+/// expected out of it at 201 of 3250 had P(dead) 0.24 (smoke3 g2).
+const NEAR_DEAD: f32 = 0.1;
 /// A hit this recent (frames) lets a death verdict send it off.
 const HIT_WINDOW: i32 = 90;
 /// A verdict this recent (frames) speaks for the commander.
@@ -139,6 +144,12 @@ struct Verdict {
     unknown: bool,
     /// Their units (id, def, distance, cost).
     theirs: Vec<(i32, String, f32, f32)>,
+}
+
+/// Whether the fight proclaims the commander's death: the sim's own
+/// P(dead), or its expected health at the horizon out of `max`.
+fn dies(p_raw: f32, hp_left: f32, max: f32) -> bool {
+    p_raw >= DEATH || hp_left < NEAR_DEAD * max.max(1.0)
 }
 
 /// Whether a verdict judged on `theirs` covers the last hit: none lately,
@@ -341,7 +352,7 @@ impl Ai {
         let max = com.max_health();
         let theirs = local.theirs.iter().map(|t| (t.id, t.def.clone(), distance(t.pos, pos), t.cost)).collect();
         Some(Verdict {
-            dies: f.p_raw >= DEATH,
+            dies: dies(f.p_raw, f.hp_left, max),
             p_raw: f.p_raw,
             p_dead: f.p_dead,
             hp,
@@ -450,6 +461,17 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn death_is_p_dead_or_an_expected_end_near_zero() {
+        // smoke3 g2: 2 Thugs at 270 (P(dead) 1.0), a fight it ends at 6%.
+        assert!(dies(1.0, 0.0, 3250.0));
+        assert!(dies(0.24, 201.0, 3250.0));
+        // 4 Glaives on it beside 5 of ours: it ends at 85%.
+        assert!(!dies(0.0, 2773.0, 3250.0));
+        // A Warrior and Rockos took it to 44% expected: it fights on.
+        assert!(!dies(0.0, 1431.0, 3250.0));
+    }
 
     #[test]
     fn a_verdict_covers_a_hit_only_with_its_shooter_in_the_fight() {
