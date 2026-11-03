@@ -201,6 +201,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "gunships over our or allied ground units and buildings are intercepted wherever they are, not only in our territory or inbound (default on)",
     ),
     (
+        "airhome",
+        "Military",
+        "an aircraft back from a sortie is home once within 450 elmos of the ally center or over our territory, and stays ready there until its next sortie however its circling drifts, instead of flipping to returning each time it leaves the circle; idle ones are routed back toward the center, and a package takes the planes nearest its route whose starts differ by at most 900 elmos, so they arrive together (default on)",
+    ),
+    (
         "shieldworth",
         "Military",
         "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",

@@ -57,6 +57,56 @@ fn needs_ammo(noammo: f32) -> bool {
 /// a pad caretaker.
 pub(super) const PAD_LAUNCH_HEALTH: f32 = 0.7;
 
+/// Home is the ally center (the middle of the metal spots we own): every
+/// plan's route, risk and length are reckoned from it. Within this radius
+/// an aircraft always counts as home; with `airhome` so does anywhere over
+/// our territory, since a sortie checks each plane's own first leg anyway
+/// (`airstrike_dispatch`). The radius alone flapped idle planes between
+/// ready and returning: circling drifts them past it, and the center moves
+/// whenever a metal spot changes hands.
+const HOME_RADIUS: f32 = 450.0;
+/// The planes of one package start at most this much farther than each
+/// other from the route's first waypoint, so they still arrive together
+/// (`airhome`): the old home circle's diameter.
+const PACK_SPREAD: f32 = 2.0 * HOME_RADIUS;
+
+/// An aircraft free for a sortie (see `Ai::airstrike_candidates`).
+#[derive(Clone, Copy, Debug)]
+struct Candidate {
+    id: i32,
+    kind: Plane,
+    /// From where it is to the route's first waypoint.
+    reach: f32,
+    /// Rearmed on a pad and still repairing (`padlaunch`).
+    on_pad: bool,
+    health: f32,
+}
+
+/// Members for `package` whose reaches differ by at most `spread`, so they
+/// arrive together: of the windows of reach that fill it, the nearest (the
+/// earliest there), taking idle planes before those on a pad, then the
+/// nearest. A window is a stretch of distance to the route, not of ground:
+/// planes abreast of the route a base apart still arrive together.
+fn pick(package: &[(Plane, usize)], candidates: &[Candidate], spread: f32) -> Option<Vec<i32>> {
+    let mut starts: Vec<f32> = candidates.iter().map(|c| c.reach).collect();
+    starts.sort_by(f32::total_cmp);
+    starts.dedup();
+    starts.into_iter().find_map(|from| {
+        let mut members = Vec::new();
+        for &(kind, n) in package {
+            let mut fit: Vec<&Candidate> = (candidates.iter())
+                .filter(|c| c.kind == kind && c.reach >= from && c.reach <= from + spread && !members.contains(&c.id))
+                .collect();
+            if fit.len() < n {
+                return None;
+            }
+            fit.sort_by(|a, b| a.on_pad.cmp(&b.on_pad).then(a.reach.total_cmp(&b.reach)).then(a.id.cmp(&b.id)));
+            members.extend(fit[..n].iter().map(|c| c.id));
+        }
+        (!members.is_empty()).then_some(members)
+    })
+}
+
 fn readiness(reserved: bool, active: bool, empty: bool, healthy: bool, at_home: bool) -> &'static str {
     if reserved {
         "operator"
@@ -163,6 +213,12 @@ pub struct BomberHandler {
     def_shields: std::cell::RefCell<BTreeMap<i32, DefShield>>,
     /// Launches and retargets held back for what they would do to our own.
     collateral_holds: std::cell::Cell<usize>,
+    /// Packages not launched because their planes started too far apart
+    /// (`PACK_SPREAD`).
+    spread_holds: usize,
+    /// Each aircraft's last readiness, for the transition log of the
+    /// `airstrike-` fixtures.
+    test_states: BTreeMap<i32, &'static str>,
     defenses: Vec<FireSource>,
     utilization: BTreeMap<Plane, Utilization>,
     speculation: speculation::State,
@@ -392,33 +448,74 @@ impl Ai {
         }
     }
 
-    /// Aircraft of this kind free for a new sortie, at most `n` of them: idle
-    /// at home, loaded and healthy, and with `pad_floor` also those rearmed
-    /// on a pad and repaired to at least that share of their health (the
-    /// healthiest first, after the ones at home).
+    /// Whether a plane at `pos`, back from a sortie, a pad or the factory,
+    /// is home again: see `HOME_RADIUS`.
+    fn airstrike_home(&self, pos: Vec3, home: Vec3) -> bool {
+        distance(pos, home) < HOME_RADIUS || (!self.dev_off("airhome") && self.graph.is_ally_territory(pos))
+    }
+
+    /// Whether `a` is home and resting there. With `airhome` it stays home
+    /// until it flies a sortie, needs a pad or is taken by the operator,
+    /// however far its circling takes it (an idle plane is moved back
+    /// toward the center, and dispatch checks its own way out): the
+    /// center can lie outside our territory, between two holdings, so
+    /// neither the circle nor the territory alone holds a circling plane.
+    /// Else only within the circle.
+    fn airstrike_at_rest(&self, a: &Aircraft, home: Vec3) -> bool {
+        !a.returning && (!self.dev_off("airhome") || distance(a.unit.pos(), home) < HOME_RADIUS)
+    }
+
+    /// Aircraft of these kinds free for a new sortie: idle at home, loaded
+    /// and healthy, and with `pad_floor` also those rearmed on a pad and
+    /// repaired to at least that share of their health.
+    fn airstrike_candidates(
+        &self,
+        kinds: &[Plane],
+        busy: &BTreeSet<i32>,
+        home: Vec3,
+        anchor: Vec3,
+        pad_floor: Option<f32>,
+    ) -> Vec<Candidate> {
+        (self.bomber_handler.units.iter())
+            .filter(|(id, a)| {
+                kinds.contains(&a.kind) && !busy.contains(id) && !springai::reserved::is_reserved(self.cb, **id)
+            })
+            .filter_map(|(&id, a)| {
+                let health = a.unit.health() / a.unit.max_health().max(1.0);
+                let noammo = a.unit.rules_param_float("noammo", 0.0);
+                let idle = noammo == 0.0 && health >= 0.95 && self.airstrike_at_rest(a, home);
+                let on_pad = noammo == PAD_REPAIRING && pad_floor.is_some_and(|floor| health >= floor);
+                let reach = distance(a.unit.pos(), anchor);
+                (idle || on_pad).then_some(Candidate { id, kind: a.kind, reach, on_pad: !idle, health })
+            })
+            .collect()
+    }
+
+    /// Up to `n` of the candidates of this kind: those idle first, nearest to
+    /// `anchor` (the route's first waypoint) with `airhome`, else the
+    /// healthiest; then those on a pad, the healthiest first.
     fn airstrike_ready(
         &self,
         kind: Plane,
         busy: &BTreeSet<i32>,
         home: Vec3,
+        anchor: Vec3,
         n: usize,
         pad_floor: Option<f32>,
     ) -> Vec<i32> {
-        let mut ready: Vec<_> = self
-            .bomber_handler
-            .units
-            .iter()
-            .filter(|(id, a)| a.kind == kind && !busy.contains(id) && !springai::reserved::is_reserved(self.cb, **id))
-            .filter_map(|(id, a)| {
-                let health = a.unit.health() / a.unit.max_health().max(1.0);
-                let noammo = a.unit.rules_param_float("noammo", 0.0);
-                let at_home = !a.returning && noammo == 0.0 && health >= 0.95 && distance(a.unit.pos(), home) < 450.0;
-                let on_pad = noammo == PAD_REPAIRING && pad_floor.is_some_and(|floor| health >= floor);
-                (at_home || on_pad).then_some((!at_home, -health, *id))
-            })
-            .collect();
-        ready.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
-        ready.into_iter().take(n).map(|(_, _, id)| id).collect()
+        let nearest = !self.dev_off("airhome");
+        let mut ready = self.airstrike_candidates(&[kind], busy, home, anchor, pad_floor);
+        let order = |c: &Candidate| if nearest && !c.on_pad { c.reach } else { -c.health };
+        ready.sort_by(|a, b| a.on_pad.cmp(&b.on_pad).then(order(a).total_cmp(&order(b))).then(a.id.cmp(&b.id)));
+        ready.into_iter().take(n).map(|c| c.id).collect()
+    }
+
+    /// A threat-aware way home for `u` from where it flies now.
+    fn airstrike_home_route(&self, u: Unit, kind: Plane, home: Vec3, interceptors: &[(Vec3, f32, f32)]) -> Vec<Vec3> {
+        let v = u.vel();
+        let len = (v.x * v.x + v.z * v.z).sqrt();
+        let heading = (len > 1e-3).then(|| (v.x / len, v.z / len));
+        self.airstrike_field(u.pos(), interceptors).route_for(home, self.airstrike_turn_radius(kind), heading)
     }
 
     /// Metal in combat aircraft (Sparrows aside): what airpad caretakers
@@ -808,22 +905,36 @@ impl Ai {
                 busy.contains(&id),
                 needs_ammo(a.unit.rules_param_float("noammo", 0.0)),
                 a.unit.health() >= a.unit.max_health() * 0.95,
-                distance(a.unit.pos(), home) < 450.0,
+                self.airstrike_at_rest(a, home),
             );
             *self.bomber_handler.utilization.entry(a.kind).or_default().state_frames.entry(state).or_default() +=
                 PERIOD as u64;
+            if self.test.as_deref().is_some_and(|t| t.starts_with("airstrike-"))
+                && self.bomber_handler.test_states.insert(id, state) != Some(state)
+            {
+                let p = a.unit.pos();
+                self.log(&format!(
+                    "airstrike-test: state {id} {:?} {state} at {:.0},{:.0} home_d={:.0} territory={}",
+                    a.kind,
+                    p.x,
+                    p.z,
+                    distance(p, home),
+                    self.graph.is_ally_territory(p)
+                ));
+            }
         }
         if frame - self.bomber_handler.last_report >= 30 * 30 {
             self.bomber_handler.last_report = frame;
             self.log(&format!(
-                "airstrikes: {} jobs, {} recent primary, {} planes, {} sorties; grounded={} next={:?}; launched={}",
+                "airstrikes: {} jobs, {} recent primary, {} planes, {} sorties; grounded={} next={:?}; launched={} spread_holds={}",
                 self.bomber_handler.plans.len(),
                 self.bomber_handler.recent.len(),
                 self.bomber_handler.units.len(),
                 self.bomber_handler.sorties.len(),
                 self.bomber_handler.grounded,
                 self.airstrike_production(),
-                self.bomber_handler.launched
+                self.bomber_handler.launched,
+                self.bomber_handler.spread_holds
             ));
         }
     }
@@ -1072,15 +1183,33 @@ impl Ai {
         let ids: Vec<_> = self.bomber_handler.units.keys().copied().filter(|id| !active.contains(id)).collect();
         for id in ids {
             if springai::reserved::is_reserved(self.cb, id) {
+                // Wherever the operator flies it, it comes home anew.
+                if !self.dev_off("airhome") {
+                    self.bomber_handler.units.get_mut(&id).unwrap().returning = true;
+                }
                 continue;
             }
             let a = &self.bomber_handler.units[&id];
             let u = a.unit;
             let hurt = u.health() < u.max_health() * 0.95;
             let empty = u.rules_param_float("noammo", 0.0) > 0.0;
-            let at_home = distance(u.pos(), home) < 450.0;
-            if at_home && !hurt && !empty {
-                self.bomber_handler.units.get_mut(&id).unwrap().returning = false;
+            let at_home = distance(u.pos(), home) < HOME_RADIUS;
+            if !hurt && !empty && (self.airstrike_home(u.pos(), home) || self.airstrike_at_rest(a, home)) {
+                let a = self.bomber_handler.units.get_mut(&id).unwrap();
+                a.returning = false;
+                // Over our territory an idle plane is home (`airhome`), and
+                // drifts back toward the center without leaving the ready
+                // pool, so the planes of a package start together.
+                if !at_home && frame - a.last_order >= 30 * 10 {
+                    a.last_order = frame;
+                    let kind = a.kind;
+                    let route = self.airstrike_home_route(u, kind, home, interceptors);
+                    if route.is_empty() {
+                        u.move_to(home, 0);
+                    } else {
+                        Self::airstrike_route(u, &route, false, turns);
+                    }
+                }
                 continue;
             }
             if frame - a.last_order < 30 * 10 {
@@ -1089,7 +1218,7 @@ impl Ai {
             if a.kind == Plane::Sparrow
                 && !hurt
                 && let Some(leader) = a.escort.and_then(|id| self.bomber_handler.units.get(&id)).map(|a| a.unit)
-                && distance(leader.pos(), home) > 450.0
+                && distance(leader.pos(), home) > HOME_RADIUS
             {
                 u.guard(leader, 0);
                 self.bomber_handler.units.get_mut(&id).unwrap().last_order = frame;
@@ -1097,10 +1226,7 @@ impl Ai {
             }
             let needs_pad = hurt || empty;
             let route = if !(at_home || needs_pad && self.graph.is_ally_territory(u.pos())) {
-                let v = u.vel();
-                let len = (v.x * v.x + v.z * v.z).sqrt();
-                let heading = (len > 1e-3).then(|| (v.x / len, v.z / len));
-                self.airstrike_field(u.pos(), interceptors).route_for(home, self.airstrike_turn_radius(a.kind), heading)
+                self.airstrike_home_route(u, a.kind, home, interceptors)
             } else {
                 vec![]
             };
@@ -1170,21 +1296,38 @@ impl Ai {
             // Primary work may take a rearmed aircraft off the pad before its
             // slow repair ends (`padlaunch`); the rest waits for 95%.
             let pad_floor = (job.kind.primary() && !self.dev_off("padlaunch")).then_some(PAD_LAUNCH_HEALTH);
+            // Members start wherever they are home, so the package is drawn
+            // nearest to where its route begins, and close enough together
+            // to arrive together (`airhome`).
+            let anchor = plan.route.first().copied().unwrap_or(job.pos);
             let mut selected = None;
+            let mut spread_held = false;
             for package in &plan.packages {
-                let mut members = Vec::new();
-                for &(kind, n) in package {
-                    let candidates = self.airstrike_ready(kind, &busy, home, n, pad_floor);
-                    if candidates.len() != n {
-                        members.clear();
-                        break;
+                let members = if self.dev_off("airhome") {
+                    let mut members = Vec::new();
+                    for &(kind, n) in package {
+                        let candidates = self.airstrike_ready(kind, &busy, home, anchor, n, pad_floor);
+                        if candidates.len() != n {
+                            members.clear();
+                            break;
+                        }
+                        members.extend(candidates);
                     }
-                    members.extend(candidates);
-                }
-                if !members.is_empty() {
+                    (!members.is_empty()).then_some(members)
+                } else {
+                    let kinds: Vec<Plane> = package.iter().map(|(k, _)| *k).collect();
+                    let candidates = self.airstrike_candidates(&kinds, &busy, home, anchor, pad_floor);
+                    let members = pick(package, &candidates, PACK_SPREAD);
+                    spread_held |= members.is_none() && pick(package, &candidates, f32::INFINITY).is_some();
+                    members
+                };
+                if let Some(members) = members {
                     selected = Some((members, package.clone()));
                     break;
                 }
+            }
+            if selected.is_none() && spread_held {
+                self.bomber_handler.spread_holds += 1;
             }
             // A quarry without counted anti-air (see `Mission::wearable`), unescorted, is
             // worn down by the Raptors that are ready: they keep firing until
@@ -1195,7 +1338,7 @@ impl Ai {
                 && !self.dev_off("raptorwear")
             {
                 let full = plan.packages.iter().flatten().filter(|(k, _)| *k == Plane::Raptor).map(|(_, n)| *n).max();
-                let ready = self.airstrike_ready(Plane::Raptor, &busy, home, full.unwrap_or(0), pad_floor);
+                let ready = self.airstrike_ready(Plane::Raptor, &busy, home, anchor, full.unwrap_or(0), pad_floor);
                 if !ready.is_empty() {
                     let n = ready.len();
                     let mut members = ready;
@@ -1204,7 +1347,7 @@ impl Ai {
                     // bought or waited for): its EMG slows the quarry, and a
                     // slow quarry is what its gun is good at.
                     if plan.packages.iter().flatten().any(|(k, _)| *k == Plane::Magpie) {
-                        let magpie = self.airstrike_ready(Plane::Magpie, &busy, home, 1, pad_floor);
+                        let magpie = self.airstrike_ready(Plane::Magpie, &busy, home, anchor, 1, pad_floor);
                         if !magpie.is_empty() {
                             members.extend(magpie);
                             package.insert(0, (Plane::Magpie, 1));
@@ -1226,7 +1369,7 @@ impl Ai {
                             && !busy.contains(id)
                             && !members.contains(id)
                             && a.unit.rules_param_float("noammo", 0.0) == 0.0
-                            && distance(a.unit.pos(), home) < 450.0
+                            && self.airstrike_at_rest(a, home)
                     })
                     .count()
                     + self.firefighters_idle(Plane::Magpie.name());
@@ -1244,8 +1387,14 @@ impl Ai {
                     .fold(f32::INFINITY, f32::min);
                 let velocity = self.war.targets.get(&job.target).map_or(Vec3::ZERO, |e| e.unit.vel() * 30.0);
                 let window = if job.kind == MissionKind::HeavyAir { 25.0 } else { 12.0 };
-                if plan.length / speed.max(1.0) > window
-                    || intercept_time(home, job.pos, velocity, speed).is_none_or(|t| t > window)
+                // From where each member actually starts: onto the route at
+                // its first waypoint, rather than from home.
+                let starts: Vec<Vec3> = members.iter().map(|id| self.bomber_handler.units[id].unit.pos()).collect();
+                let length = (starts.iter())
+                    .map(|p| plan.length + distance(*p, anchor) - distance(home, anchor))
+                    .fold(0.0, f32::max);
+                if length / speed.max(1.0) > window
+                    || starts.iter().any(|p| intercept_time(*p, job.pos, velocity, speed).is_none_or(|t| t > window))
                 {
                     continue;
                 }
@@ -1481,7 +1630,7 @@ impl Ai {
             let health = a.unit.health() / a.unit.max_health().max(1.0);
             let away = distance(a.unit.pos(), home);
             json!({"id": id, "unit": a.kind.name(), "name": format!("{:?}", a.kind),
-                "state": readiness(springai::reserved::is_reserved(self.cb, id), busy.contains(&id), empty, health >= 0.95, away < 450.0),
+                "state": readiness(springai::reserved::is_reserved(self.cb, id), busy.contains(&id), empty, health >= 0.95, self.airstrike_at_rest(a, home)),
                 "health": health, "noammo": empty, "on_pad": noammo == PAD_REPAIRING, "home_distance": away})
         }).collect::<Vec<_>>());
         status
@@ -1553,6 +1702,7 @@ impl BomberHandler {
             "available": missions.len() - self.sorties.len(), "in_progress": self.sorties.len(),
             "missions": missions,
             "collateral_holds": self.collateral_holds.get(),
+            "spread_holds": self.spread_holds,
             "combined_strikes": {"checks": self.wave_checks, "last_check": self.last_wave_check,
                 "launched": self.waves_launched, "last_launch": self.last_wave_launch},
             "utilization": self.utilization.iter().map(|(k, u)| json!({"unit": k.name(), "name": format!("{k:?}"),
@@ -1599,6 +1749,39 @@ mod operator_tests {
         assert!(!needs_ammo(PAD_REPAIRING));
         // So a hurt one on the pad reads as repairing, not rearming.
         assert_eq!(readiness(false, false, needs_ammo(PAD_REPAIRING), false, false), "repairing");
+    }
+
+    #[test]
+    fn a_package_is_drawn_from_planes_that_arrive_together() {
+        let c = |id, kind, reach, on_pad| Candidate { id, kind, reach, on_pad, health: 1.0 };
+        let likhos = [(Plane::Likho, 2)];
+        // One at the edge of our territory near the route, two at home: the
+        // nearest pair would arrive 1500 elmos apart, the home pair together.
+        let edge =
+            [c(1, Plane::Likho, 500.0, false), c(2, Plane::Likho, 2000.0, false), c(3, Plane::Likho, 2100.0, false)];
+        assert_eq!(pick(&likhos, &edge, PACK_SPREAD), Some(vec![2, 3]));
+        // With a third Likho near the edge one, those two go first.
+        let near = [edge[0], edge[1], edge[2], c(4, Plane::Likho, 900.0, false)];
+        assert_eq!(pick(&likhos, &near, PACK_SPREAD), Some(vec![1, 4]));
+        // Too far apart: held, though the circle-free rule would fill it.
+        let apart = [edge[0], edge[1]];
+        assert_eq!(pick(&likhos, &apart, PACK_SPREAD), None);
+        assert_eq!(pick(&likhos, &apart, f32::INFINITY), Some(vec![1, 2]));
+        // In a window, idle planes before those on a pad, then the nearest.
+        let pad = [c(5, Plane::Likho, 100.0, true), c(6, Plane::Likho, 300.0, false), c(7, Plane::Likho, 400.0, false)];
+        assert_eq!(pick(&likhos, &pad, PACK_SPREAD), Some(vec![6, 7]));
+        // Every kind from the same window, no plane twice.
+        let mixed = [(Plane::Magpie, 1), (Plane::Raptor, 2)];
+        let fleet = [
+            c(8, Plane::Raptor, 200.0, false),
+            c(9, Plane::Raptor, 300.0, false),
+            c(10, Plane::Magpie, 2500.0, false),
+            c(11, Plane::Raptor, 2600.0, false),
+            c(12, Plane::Raptor, 2700.0, false),
+        ];
+        assert_eq!(pick(&mixed, &fleet, PACK_SPREAD), Some(vec![10, 11, 12]));
+        assert_eq!(pick(&[(Plane::Raptor, 3)], &fleet, f32::INFINITY), Some(vec![8, 9, 11]));
+        assert_eq!(pick(&likhos, &[], PACK_SPREAD), None);
     }
 
     #[test]
