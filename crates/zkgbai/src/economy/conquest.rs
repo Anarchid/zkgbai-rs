@@ -707,21 +707,8 @@ impl Ai {
         };
         let mut ranked = best;
         ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
-        // Allied ZKGBAIs playing on their own (see `iq`) take the picks in
-        // turn, by team number, so their commanders spread over the
-        // objectives instead of walking to the same one (user, 2026-11-03).
-        let rank = self.iq.peers.iter().filter(|&&t| t < self.team_id).count();
-        let k = if ranked.is_empty() { 0 } else { rank % ranked.len() };
-        if rank > 0 && !ranked.is_empty() {
-            self.log(&format!(
-                "conquest: allied ZKGBAI number {} of {}: the pick {} of {}",
-                rank + 1,
-                self.iq.peers.len() + 1,
-                k + 1,
-                ranked.len()
-            ));
-        }
-        let best = ranked.get(k).copied();
+        let best =
+            if self.iq.peers.is_empty() { ranked.first().copied() } else { self.conquest_team_pick(crew, &ranked) };
         let Some((idx, expected)) = best else {
             self.eco.conquest.done = true;
             self.log("conquest: no objective is open");
@@ -765,6 +752,45 @@ impl Ai {
                    "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len(),
                    "taken": self.eco.conquest.taken.len()}),
         );
+    }
+
+    /// With allied ZKGBAIs playing on their own (see `iq`): the eligible
+    /// objective nearest our commander that those of a lower team number
+    /// would not take, judging each of them, lowest first, to take the one
+    /// nearest its commander (user, 2026-11-03: "we typically spread around,
+    /// so the closest to us is the pick; we can probe what they would pick,
+    /// since we know where their commander is").
+    fn conquest_team_pick(&self, crew: i32, eligible: &[(usize, f32)]) -> Option<(usize, f32)> {
+        let c = &self.eco.conquest;
+        let center = |i: usize| self.conquest_v3(c.objectives[i].center());
+        let mut before: Vec<(i32, Vec3)> = (self.cb.friendly_units().into_iter())
+            .filter(|u| self.iq.peers.contains(&u.team()) && u.team() < self.team_id && u.health() > 0.0)
+            .filter(|u| u.def().is_some_and(|d| self.defs.is_commander(d)))
+            .map(|u| (u.team(), u.pos()))
+            .collect();
+        before.sort_by_key(|b| b.0);
+        before.dedup_by_key(|b| b.0);
+        let mut claimed: Vec<usize> = Vec::new();
+        for &(_, at) in &before {
+            if let Some(&(i, _)) = (eligible.iter())
+                .filter(|(i, _)| !claimed.contains(i))
+                .min_by(|a, b| distance(center(a.0), at).total_cmp(&distance(center(b.0), at)))
+            {
+                claimed.push(i);
+            }
+        }
+        let ours = self.eco.workers.get(&crew).map(|w| w.get_pos())?;
+        let nearest = |pool: &mut dyn Iterator<Item = &(usize, f32)>| {
+            pool.min_by(|a, b| distance(center(a.0), ours).total_cmp(&distance(center(b.0), ours))).copied()
+        };
+        let pick = nearest(&mut eligible.iter().filter(|(i, _)| !claimed.contains(i)))
+            .or_else(|| nearest(&mut eligible.iter()));
+        self.log(&format!(
+            "conquest: allied ZKGBAIs on teams {:?} before us would take objectives {claimed:?}; ours: {:?}",
+            before.iter().map(|b| b.0).collect::<Vec<_>>(),
+            pick.map(|p| p.0)
+        ));
+        pick
     }
 
     fn conquest_belief_json(&self) -> serde_json::Value {
