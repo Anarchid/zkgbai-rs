@@ -393,7 +393,8 @@ impl Ai {
     /// With `conquestroute`: the route's next mex and its job, the
     /// commander's first once its factory stands (it had walked the route
     /// with the plop in hand: the factory went up at 2:02 on Wanderlust).
-    /// Spots taken are passed; so is one with no job (a factory's yard).
+    /// Spots with our mex standing are passed; so is one hostile or with
+    /// no job (a factory's yard).
     pub(super) fn conquest_route_step(&mut self) {
         let c = &self.eco.conquest;
         if c.route.is_empty() {
@@ -406,7 +407,13 @@ impl Ai {
         let mut next = None;
         if c.op.is_none() && !c.done && ready {
             for &p in &c.route {
-                if self.conquest_spot_owned(pos(p)) {
+                // Done when a mex of ours stands finished there: a frame
+                // started counts the spot ours, and the route had moved on,
+                // leaving the start's mex half built until 1:38 on Agalta.
+                let standing = self.eco.mexes.iter().any(|m| {
+                    !m.is_being_built() && m.health() > 0.0 && distance(m.pos(), Vec3::new(p.x, m.pos().y, p.z)) < 50.0
+                });
+                if standing {
                     continue;
                 }
                 if self.conquest_spot_hostile(pos(p)) {
