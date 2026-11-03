@@ -241,6 +241,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
     ),
+    ("venomphase", "Army", "spiders raid with Venoms until the enemy fields a line or the map fills up"),
     ("jumps", "Army", "jumpjets jump"),
     (
         "lobsters",
