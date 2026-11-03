@@ -1,0 +1,92 @@
+//! `airstrike-raptors` versus `airstrike-revenants`: two Raptors at home, an
+//! outpost (a mex and three Solars) at the map center, outside our territory,
+//! and a pair of Revenants the defender flies over it (held by the fixture,
+//! firing at will). The Raptors should go at them as a pair (`raptorwear`)
+//! although the full package is six, because they are over our buildings
+//! (`airmenace`). Compare `?disable=raptorwear,airmenace`.
+//! `airstrike-raptors-likho` adds a Likho (`likhorevenant`).
+use crate::{Ai, util::get_directional_point};
+use springai::Vec3;
+
+impl Ai {
+    pub(super) fn airstrike_gunship_scenario(&mut self, test: &str, frame: i32) {
+        let map = self.cb.map();
+        let center = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0);
+        let site = Vec3::xz(center.x, center.z + 400.0);
+        let gunships = test == "airstrike-revenants";
+        let watched: &[&str] = if gunships {
+            &["gunshipassault"]
+        } else {
+            &["planeheavyfighter", "bomberheavy", "staticmex", "energysolar"]
+        };
+        if frame == 60 {
+            self.cb.cheats_set_enabled(true);
+            let base = self.graph.get_ally_center();
+            let mut spawn = Vec::new();
+            if gunships {
+                // They come in from our side, so they are seen arriving.
+                let start = get_directional_point(site, base, 1500.0);
+                for i in 0..2 {
+                    spawn.push(("gunshipassault", Vec3::xz(start.x + 60.0 * i as f32, start.z)));
+                }
+            } else {
+                for i in 0..2 {
+                    spawn.push(("planeheavyfighter", Vec3::xz(base.x + 40.0 * i as f32, base.z + 100.0)));
+                }
+                if test == "airstrike-raptors-likho" {
+                    spawn.push(("bomberheavy", Vec3::xz(base.x + 80.0, base.z + 100.0)));
+                }
+                spawn.push(("staticrearm", get_directional_point(base, center, 400.0)));
+                spawn.push(("energyfusion", get_directional_point(base, center, -300.0)));
+                spawn.push(("staticmex", site));
+                for (dx, dz) in [(90.0, 0.0), (-90.0, 0.0), (0.0, 90.0)] {
+                    spawn.push(("energysolar", Vec3::xz(site.x + dx, site.z + dz)));
+                }
+            }
+            for (name, pos) in spawn {
+                let Some(d) = self.defs.get(name) else { continue };
+                let p = map.find_closest_build_site(d, pos, 250.0, 1, 0);
+                let Some(u) = self.cb.cheat_new_unit(d, if p.x >= 0.0 { p } else { pos }) else { continue };
+                if gunships {
+                    springai::reserved::reserve(self.cb, u.id());
+                }
+                self.log(&format!("airstrike-test: spawned {name} {} at {:.0},{:.0}", u.id(), u.pos().x, u.pos().z));
+            }
+        }
+        // The fixture alone flies the Revenants: over the outpost, shooting.
+        if gunships && frame >= 120 && frame % 90 == 0 {
+            for u in self.cb.team_units() {
+                if springai::reserved::is_reserved(self.cb, u.id()) {
+                    springai::reserved::as_owner(|| {
+                        u.set_fire_state(2, 0);
+                        u.set_move_state(2, 0);
+                        u.fight(site, 0);
+                    });
+                }
+            }
+        }
+        if frame % 300 == 0 {
+            for r in [self.metal, self.energy] {
+                self.cb.cheat_resource(r, 20000.0);
+            }
+        }
+        if frame >= 150 && frame % 150 == 0 {
+            let mut line = String::new();
+            for u in self.cb.team_units() {
+                let name = self.defs.name_of(u);
+                if watched.contains(&name) {
+                    let p = u.pos();
+                    line.push_str(&format!(
+                        " {name}:{}:{:.0}/{:.0}@{:.0},{:.0}",
+                        u.id(),
+                        u.health(),
+                        u.max_health(),
+                        p.x,
+                        p.z
+                    ));
+                }
+            }
+            self.log(&format!("airstrike-test: standing{line}"));
+        }
+    }
+}

@@ -42,7 +42,24 @@ Primary missions:
 - Aircraft on LOS/radar inbound to our territory: at least two Raptors, with a
   Magpie to assist (its EMG slows the quarry) when one is ready; it is never
   bought or waited for. Unidentified radar contacts can count when clearly
-  above terrain.
+  above terrain. An identified armed aircraft whose weapon reaches our or
+  allied ground units or buildings (its range plus 200 elmos) is intercepted
+  wherever it is, at the front or over an expansion (`disable=airmenace`:
+  only in our territory or inbound to home).
+  The package is a one-pass kill, one Raptor per 700 HP (six for a
+  Revenant), and procurement buys toward it. When it cannot be filled and the
+  quarry carries no anti-air we count (no AA or flex-AA weapon, not a
+  fighter) with no AA or fighter within 1000 elmos of it, and little ground AA
+  is on the way (risk <= 0.15), the Raptors that are ready go anyway, even
+  one: they keep firing until it dies or flees, for up to 300 s instead of the
+  usual 150 (`disable=raptorwear`). Staged (`airstrike-raptors` vs
+  `airstrike-revenants`, smoke runs in zkgbai-runs/gunships): two Raptors do
+  ~28 damage/s to a hovering Revenant (strafing passes) and kill one in about
+  three minutes. A Revenant is not harmless: its rocket salvos hit strafing
+  Raptors 10 times in 142 shots (210 each) and killed one hurt Raptor, against
+  ~19.8k damage dealt to Revenants. Before this, the 2-3 ready
+  Raptors never went at a Revenant pair working over our ground for four
+  minutes (Agalta, 2026-11-03: six asked for), and flew at Gnats instead.
 - Statics worth at least 1000 metal, and every identified factory or strider
   hub: Odin thermite. Singularities get a bonus; a factory counts three times
   its cost (it is where the army comes from, and the rebuild costs time), four
@@ -67,8 +84,11 @@ Primary missions:
   in the air; launch takes the cheapest package it can fill, so a Phoenix
   goes at a light raider only when no Magpie is ready. Raiders the
   firefighters are already on are left to them.
-- Heavy aircraft in sight (Nimbus, Krow, Odin): Likhos, as many as each adds
-  250 metal of damage value, when the target can be reached within 25 seconds.
+- Heavy aircraft in sight (Nimbus, Krow, Odin, Revenant): Likhos, as many as
+  each adds 250 metal of damage value, when the target can be reached within
+  25 seconds. ZK aims the bomb at the quarry's straight-line lead point, so
+  speed alone does not save it (combat logs: 57/64 hits on aircraft, Revenant
+  4/4; `disable=likhorevenant` leaves Revenants to Raptors).
   The quarry and the heavy aircraft within 600 elmos of it (its flock: Nimbus
   fly in clumps and cover each other) are the target, not interceptors; other
   fighters and AA still gate the route (`disable=heavyflock` makes every flock

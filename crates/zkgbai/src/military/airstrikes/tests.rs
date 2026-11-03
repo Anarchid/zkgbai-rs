@@ -29,6 +29,7 @@ pub(super) fn enemy(id: i32) -> Contact {
         armed: false,
         speed: 50.0,
         aa: false,
+        menacing: false,
     }
 }
 fn clear() -> Risk {
@@ -54,6 +55,7 @@ pub(super) fn job(kind: MissionKind, hp: f32) -> Mission {
         deep: false,
         shields: Vec::new(),
         fast: false,
+        wearable: false,
     }
 }
 #[test]
@@ -446,7 +448,7 @@ fn submerged_contacts_do_not_buy_interdictors_or_enter_surface_groups() {
 
 #[test]
 fn heavy_air_is_confirmed_likho_only_and_allows_partial_krow_strikes() {
-    for name in ["gunshipheavyskirm", "gunshipkrow", "bomberassault"] {
+    for name in ["gunshipheavyskirm", "gunshipkrow", "bomberassault", "gunshipassault"] {
         assert!(anti_air::heavy_air_target(name));
     }
     for name in ["planefighter", "planeheavyfighter", "gunshipraid", "bomberheavy"] {
@@ -786,4 +788,76 @@ fn spare_magpies_strafe_what_cannot_shoot_back() {
     // Anything that shoots at aircraft, or needs more than four, is not.
     assert!(strafe(Contact { aa: true, ..con.clone() }).is_none());
     assert!(strafe(Contact { hp: 3000.0, max_hp: 3000.0, ..con }).is_none());
+}
+
+/// A Revenant at 4200 HP, hovering over our mexes far from home.
+fn revenant(id: i32) -> Contact {
+    Contact {
+        air: true,
+        value: 850.0,
+        hp: 4200.0,
+        max_hp: 4200.0,
+        speed: 130.5,
+        armed: true,
+        pos: Vec3::xz(5000.0, 5000.0),
+        ..enemy(id)
+    }
+}
+
+fn intercept(contacts: &[Contact], id: i32) -> Option<Mission> {
+    missions(contacts, Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::Intercept && j.target == id)
+}
+
+#[test]
+fn gunships_over_our_ground_are_intercepted_anywhere() {
+    // Hovering (no velocity) outside our territory: not inbound.
+    assert!(intercept(&[revenant(1)], 1).is_none());
+    let job = intercept(&[Contact { menacing: true, ..revenant(1) }], 1).expect("intercept");
+    // The full one-pass package still drives procurement: six Raptors.
+    assert_eq!(
+        packages(&job, clear(), 800.0),
+        vec![vec![(Plane::Magpie, 1), (Plane::Raptor, 6)], vec![(Plane::Raptor, 6)]]
+    );
+    // A stale contact is not chased.
+    assert!(intercept(&[Contact { menacing: true, seen: 300 - FRESH - 1, ..revenant(1) }], 1).is_none());
+}
+
+#[test]
+fn wearable_quarry_has_no_counted_aa_and_flies_unescorted() {
+    let menacing = |c: Contact| Contact { menacing: true, ..c };
+    let solo = intercept(&[menacing(revenant(1))], 1).unwrap();
+    assert!(solo.wearable);
+    // Its own pair is no escort: a Revenant carries no counted anti-air.
+    let pair = [menacing(revenant(1)), menacing(revenant(2))];
+    assert!(intercept(&pair, 1).unwrap().wearable);
+    // A Trident (or a Raptor) flying with it is.
+    let trident = Contact { air: true, aa: true, pos: Vec3::xz(5600.0, 5400.0), ..enemy(3) };
+    assert!(!intercept(&[menacing(revenant(1)), trident.clone()], 1).unwrap().wearable);
+    let far = Contact { pos: Vec3::xz(6200.0, 5000.0), ..trident.clone() };
+    assert!(intercept(&[menacing(revenant(1)), far], 1).unwrap().wearable);
+    let stale = Contact { seen: 300 - FRESH - 1, ..trident };
+    assert!(intercept(&[menacing(revenant(1)), stale], 1).unwrap().wearable);
+    // A Nimbus shoots back; an unidentified dot might.
+    assert!(!intercept(&[menacing(Contact { aa: true, ..revenant(1) })], 1).unwrap().wearable);
+    assert!(!intercept(&[menacing(Contact { known: false, ..revenant(1) })], 1).unwrap().wearable);
+}
+
+#[test]
+fn only_wearable_interceptions_in_light_aa_wear_down() {
+    assert!(wears_down(MissionKind::Intercept, true, clear()));
+    assert!(wears_down(MissionKind::Intercept, true, Risk { aa: WEAR_MAX_AA, ..clear() }));
+    assert!(!wears_down(MissionKind::Intercept, true, Risk { aa: 0.3, ..clear() }));
+    assert!(!wears_down(MissionKind::Intercept, true, Risk { intercepted: true, ..clear() }));
+    assert!(!wears_down(MissionKind::Intercept, false, clear()));
+    assert!(!wears_down(MissionKind::HeavyAir, true, clear()));
+}
+
+#[test]
+fn likhos_strike_a_revenant_in_partial_salvos() {
+    let rev = Contact { heavy_air: anti_air::heavy_air_target("gunshipassault"), ..revenant(1) };
+    let job =
+        missions(&[rev], Vec3::ZERO, 300).into_iter().find(|j| j.kind == MissionKind::HeavyAir).expect("heavy air");
+    // Each Likho adds at least 250 metal of damage value: two for a whole
+    // Revenant (4000 of its 4200 HP), one when it is down to 2000.
+    assert_eq!(packages(&job, clear(), 800.0), vec![vec![(Plane::Likho, 2)], vec![(Plane::Likho, 1)]]);
 }

@@ -23,6 +23,14 @@ const MAX_SECONDARY_SORTIES: usize = 4;
 /// Our own losses a drop may cost, as a share of what it removes.
 const COLLATERAL_SHARE: f32 = 0.5;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
+/// Raptors wearing down an aircraft without counted anti-air stay on it longer:
+/// strafing passes keep each firing about 14% of the time (two did 28 damage
+/// a second to a hovering Revenant in the staged fixture, and the 150-second
+/// limit called them home with it at 639 of 4200 HP, to regenerate).
+const WEAR_TIMEOUT: i32 = 30 * 300;
+fn sortie_timeout(job: &Mission) -> i32 {
+    if job.kind == MissionKind::Intercept && job.wearable { WEAR_TIMEOUT } else { SORTIE_TIMEOUT }
+}
 const COOLDOWN: i32 = 30 * 15;
 
 #[derive(Default)]
@@ -314,7 +322,9 @@ impl Ai {
                     known: e.identified,
                     live,
                     air,
-                    heavy_air: e.identified && anti_air::heavy_air_target(&e.def_name),
+                    heavy_air: e.identified
+                        && anti_air::heavy_air_target(&e.def_name)
+                        && !(e.def_name == anti_air::REVENANT && self.dev_off("likhorevenant")),
                     submerged: e.is_submerged(),
                     mex: e.is_mex,
                     static_: e.is_static,
@@ -339,9 +349,50 @@ impl Ai {
                     armor,
                     armed: e.can_attack(),
                     speed: e.def_speed(),
-                    aa: e.is_aa || e.is_flex_aa,
+                    aa: e.is_aa || e.is_flex_aa || FIGHTERS.contains(&e.def_name.as_str()),
+                    // Marked once a planning pass (`airstrike_mark_menacing`).
+                    menacing: false,
                 }
             })
+            .collect()
+    }
+
+    /// Armed enemy aircraft in sight or on radar whose weapons reach our or
+    /// allied ground units or buildings (its range and 200 elmos more, in a
+    /// vertical cylinder: it flies above them) are `menacing`.
+    /// `disable=airmenace` leaves the old rule: an interception only in our
+    /// territory or inbound to home.
+    fn airstrike_mark_menacing(&self, contacts: &mut [Contact]) {
+        if self.dev_off("airmenace") {
+            return;
+        }
+        for c in contacts.iter_mut().filter(|c| c.air && c.live && c.known && c.armed) {
+            let Some(e) = self.war.targets.get(&c.id) else { continue };
+            c.menacing = self
+                .cb
+                .friendly_units_in_cylinder(c.pos, e.threat_radius.max(250.0) + 200.0)
+                .iter()
+                .any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()));
+        }
+    }
+
+    /// Aircraft of this kind free for a new sortie: idle at home, loaded and
+    /// healthy, at most `n` of them.
+    fn airstrike_ready(&self, kind: Plane, busy: &BTreeSet<i32>, home: Vec3, n: usize) -> Vec<i32> {
+        self.bomber_handler
+            .units
+            .iter()
+            .filter(|(id, a)| {
+                !busy.contains(id)
+                    && !springai::reserved::is_reserved(self.cb, **id)
+                    && a.kind == kind
+                    && !a.returning
+                    && a.unit.rules_param_float("noammo", 0.0) == 0.0
+                    && a.unit.health() >= a.unit.max_health() * 0.95
+                    && distance(a.unit.pos(), home) < 450.0
+            })
+            .take(n)
+            .map(|(id, _)| *id)
             .collect()
     }
 
@@ -443,9 +494,7 @@ impl Ai {
                     && Some(e.unit_id) != quarry
                     && !flock.is_some_and(|at| e.identified && super::anti_air::flock_mate(at, e.position, &e.def_name))
                     && e.can_fly()
-                    && (e.is_aa
-                        || e.is_flex_aa
-                        || matches!(e.def_name.as_str(), "planefighter" | "planeheavyfighter" | "planesupport"))
+                    && (e.is_aa || e.is_flex_aa || FIGHTERS.contains(&e.def_name.as_str()))
                     && self.frame - e.last_seen < 30 * 20
             })
             .map(|e| (e.position, e.threat_radius.max(600.0) + e.def_speed() * 5.0, e.get_danger().max(250.0) / 500.0))
@@ -598,7 +647,8 @@ impl Ai {
         // still gates the mission and its route.
         let air = self.airstrike_field(home, &interceptors);
         let defense_air = self.airstrike_field(home, &[]);
-        let contacts = self.airstrike_contacts();
+        let mut contacts = self.airstrike_contacts();
+        self.airstrike_mark_menacing(&mut contacts);
         self.bomber_handler.refresh_priority_memory(&contacts, frame);
         let arms = self.airstrike_arms();
         let mut jobs = missions(&contacts, home, frame);
@@ -849,8 +899,12 @@ impl Ai {
                 distance(w.target, pos) <= wave::MAX_PURSUIT
                     && wave::route_allowed(from, &approach_route, |p| self.graph.is_ally_territory(p))
             });
-            let done =
-                disabled || !valid || !wave_safe || troops_gone || hatched || frame - sortie.launched > SORTIE_TIMEOUT;
+            let done = disabled
+                || !valid
+                || !wave_safe
+                || troops_gone
+                || hatched
+                || frame - sortie.launched > sortie_timeout(&sortie.job);
             let mut keep = Vec::new();
             let mut friendly_release = Vec::new();
             for (index, id) in sortie.members.into_iter().enumerate() {
@@ -900,7 +954,7 @@ impl Ai {
                             "submerged_target"
                         } else if !safe {
                             if u.health() < u.max_health() * 0.5 { "damage" } else { "unsafe_route" }
-                        } else if frame - sortie.launched > SORTIE_TIMEOUT {
+                        } else if frame - sortie.launched > sortie_timeout(&sortie.job) {
                             "timeout"
                         } else if troops_gone {
                             "no_troops"
@@ -1081,22 +1135,7 @@ impl Ai {
             for package in &plan.packages {
                 let mut members = Vec::new();
                 for &(kind, n) in package {
-                    let candidates: Vec<_> = self
-                        .bomber_handler
-                        .units
-                        .iter()
-                        .filter(|(id, a)| {
-                            !busy.contains(id)
-                                && !springai::reserved::is_reserved(self.cb, **id)
-                                && a.kind == kind
-                                && !a.returning
-                                && a.unit.rules_param_float("noammo", 0.0) == 0.0
-                                && a.unit.health() >= a.unit.max_health() * 0.95
-                                && distance(a.unit.pos(), home) < 450.0
-                        })
-                        .take(n)
-                        .map(|(id, _)| *id)
-                        .collect();
+                    let candidates = self.airstrike_ready(kind, &busy, home, n);
                     if candidates.len() != n {
                         members.clear();
                         break;
@@ -1106,6 +1145,21 @@ impl Ai {
                 if !members.is_empty() {
                     selected = Some((members, package.clone()));
                     break;
+                }
+            }
+            // A quarry without counted anti-air (see `Mission::wearable`), unescorted, is
+            // worn down by the Raptors that are ready: they keep firing until
+            // it dies or flees, so the one-pass package (six for a Revenant)
+            // need not be filled. Procurement still buys toward the full one.
+            if selected.is_none()
+                && wears_down(plan.job.kind, plan.job.wearable, plan.risk)
+                && !self.dev_off("raptorwear")
+            {
+                let full = plan.packages.iter().flatten().filter(|(k, _)| *k == Plane::Raptor).map(|(_, n)| *n).max();
+                let ready = self.airstrike_ready(Plane::Raptor, &busy, home, full.unwrap_or(0));
+                if !ready.is_empty() {
+                    let n = ready.len();
+                    selected = Some((ready, vec![(Plane::Raptor, n)]));
                 }
             }
             let Some((members, package)) = selected else { continue };
@@ -1495,6 +1549,7 @@ mod operator_tests {
             deep: true,
             shields: Vec::new(),
             fast: false,
+            wearable: false,
         };
         let route = vec![Vec3::xz(500.0, 200.0), job.pos];
         let package = vec![(Plane::Odin, 1), (Plane::Sparrow, 1)];

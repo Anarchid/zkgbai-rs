@@ -1,9 +1,18 @@
-//! Likho's guided implosion bomb can catch these large, slow aircraft.
+//! Likho's implosion bomb catches these heavy aircraft. ZK retargets it at
+//! release onto a fixed point: the aircraft's position plus its velocity
+//! times the flight time (`weapon_projectile_retarget`), so a quarry flying
+//! straight is hit at any speed; only turning in the ~0.8 s of flight dodges.
+//! In 12k combat logs (2026-11-03, AI-flown targets): 57 of 64 clean shots at
+//! aircraft hit (Nimbus 37/41, Krow 11/11, Odin 5/6), 27 of 28 at gunships
+//! doing 90 elmos/s or more, Revenant 4/4 (two at 130 elmos/s).
 use super::*;
 
 pub(super) fn heavy_air_target(name: &str) -> bool {
-    matches!(name, "gunshipheavyskirm" | "gunshipkrow" | "bomberassault")
+    matches!(name, "gunshipheavyskirm" | "gunshipkrow" | "bomberassault" | REVENANT)
 }
+
+/// Heavy air since 2026-11-03 (`disable=likhorevenant` takes it out).
+pub(super) const REVENANT: &str = "gunshipassault";
 
 /// Heavy aircraft this close to a HeavyAir quarry fly with it (a Nimbus
 /// covers 600 elmos): part of the target, not an escort that vetoes it.
