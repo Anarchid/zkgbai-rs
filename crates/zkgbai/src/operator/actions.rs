@@ -162,6 +162,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "spare Magpies strafe anything that cannot shoot back, away from AA, while three stay home for raids (default on)",
     ),
     (
+        "raptorwear",
+        "Military",
+        "ready Raptors go at an unescorted aircraft that cannot shoot back, such as a Revenant, without waiting for the full one-pass package (default on)",
+    ),
+    (
+        "airmenace",
+        "Military",
+        "gunships over our or allied ground units and buildings are intercepted wherever they are, not only in our territory or inbound (default on)",
+    ),
+    (
         "shieldworth",
         "Military",
         "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",

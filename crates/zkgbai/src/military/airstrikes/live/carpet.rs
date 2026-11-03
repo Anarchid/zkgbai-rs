@@ -146,6 +146,7 @@ impl Ai {
                     deep: false,
                     shields: Vec::new(),
                     fast: false,
+                    defenseless: false,
                     inference: Some(fix),
                 })
             })

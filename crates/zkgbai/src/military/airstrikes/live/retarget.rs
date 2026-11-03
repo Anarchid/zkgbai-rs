@@ -126,6 +126,7 @@ pub(super) fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec
             shields: shields::over(&carriers, &[e.pos]),
             // Any raider is one of these; a Raven's bomb cannot catch it.
             fast: e.speed >= RAVEN_MAX_TARGET_SPEED,
+            defenseless: false,
         });
     }
     jobs

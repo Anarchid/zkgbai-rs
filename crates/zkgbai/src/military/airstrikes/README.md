@@ -42,7 +42,18 @@ Primary missions:
 - Aircraft on LOS/radar inbound to our territory: at least two Raptors, with a
   Magpie to assist (its EMG slows the quarry) when one is ready; it is never
   bought or waited for. Unidentified radar contacts can count when clearly
-  above terrain.
+  above terrain. An identified armed aircraft whose weapon reaches our or
+  allied ground units or buildings (its range plus 200 elmos) is intercepted
+  wherever it is, at the front or over an expansion (`disable=airmenace`:
+  only in our territory or inbound to home).
+  The package is a one-pass kill, one Raptor per 700 HP (six for a
+  Revenant), and procurement buys toward it. When it cannot be filled and the
+  quarry cannot shoot at aircraft (no AA weapon, not a fighter) with no AA or
+  fighter within 1000 elmos of it, and little ground AA is on the way (risk
+  <= 0.15), the Raptors that are ready go anyway, even one: they keep firing
+  until it dies or flees (`disable=raptorwear`). Before this, the 2-3 ready
+  Raptors never went at a Revenant pair working over our ground for four
+  minutes (Agalta, 2026-11-03: six asked for), and flew at Gnats instead.
 - Statics worth at least 1000 metal, and every identified factory or strider
   hub: Odin thermite. Singularities get a bonus; a factory counts three times
   its cost (it is where the army comes from, and the rebuild costs time), four
