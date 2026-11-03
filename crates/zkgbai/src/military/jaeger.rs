@@ -11,6 +11,14 @@
 //! only stun, the army does the killing: they are kept to a share of the
 //! rest of our army's metal.
 //!
+//! Widows do not scale: against heavies that cover one another, a stun
+//! leaves the rest shooting the Widows and whoever comes to finish, and a
+//! Paladin or a Detriment takes more stuns than a squad has, with nothing of
+//! ours to finish it. From [`ULTI_CLUMP`] metal of heavies together, or one
+//! such giant, Ultimatums are called for (switch `ultimata`): no more Widows
+//! are hunters, Ultimatums have a budget of their own, and a strider hub is
+//! requisitioned if we have none.
+//!
 //! Jaegers walk cloaked and hold their fire, in squads of a kind, which
 //! form until they can take the heavies seen. A squad strikes a heavy
 //! together once it can take it: Widows when their stuns together pass its
@@ -81,6 +89,28 @@ const MAX_JAEGERS: usize = 8;
 /// Widows' metal, ordered ones too, is at most this share of the rest of
 /// our army's (a fifth of the whole).
 const WIDOW_ARMY_SHARE: f32 = 0.25;
+
+/// The Ultimatum (`striderantiheavy`), from a strider hub.
+pub(crate) const ULTIMATUM: &str = "striderantiheavy";
+
+/// Ultimatums are called for, in place of more Widows, by heavies of at
+/// least this much metal that cover one another (each within this of
+/// another at their last sightings: a Grizzly's reach, 600), where stunning
+/// one leaves the rest shooting; or by one heavy of at least this much
+/// health (a Paladin's 32000, a Detriment's 76000: no squad of Widows holds
+/// them long, and nothing of ours finishes them).
+const ULTI_CLUMP: f32 = 5000.0;
+const ULTI_CLUMP_RADIUS: f32 = 600.0;
+const GIANT_HEALTH: f32 = 20000.0;
+
+/// While called for, Ultimatums get up to this share of the heavies' metal
+/// (one at least), and are at most this many.
+const ULTI_SHARE: f32 = 0.5;
+const MAX_ULTIS: usize = 4;
+
+/// A call for Ultimatums holds this many frames after it was last met (heavies
+/// walking in and out of one another's reach flicker the clump).
+const ULTI_HOLD: i32 = 30 * 120;
 
 /// A pounce holds its Skuttle out of its squad, its blast counted on the
 /// heavy, this many frames (a jump flies about 2.5 s).
@@ -195,7 +225,7 @@ const KINDS: [Kind; 3] = [
         ambush: 260.0,
     },
     Kind {
-        name: "striderantiheavy",
+        name: ULTIMATUM,
         alpha: None,
         stuns: false,
         suicide: false,
@@ -246,6 +276,45 @@ struct Seen {
     /// Max health, if it is a heavy.
     heavy: Option<f32>,
     last_seen: i32,
+    /// Where it was last seen, and its def.
+    pos: Vec3,
+    ud: Option<springai::UnitDef>,
+}
+
+/// Why Ultimatums are called for: what they answer, in metal, and in words.
+#[derive(Clone)]
+pub(crate) struct UltiCall {
+    pub value: f32,
+    pub why: String,
+}
+
+/// Metal and number of the heavies seen that cover one another most: those
+/// linked by sightings within [`ULTI_CLUMP_RADIUS`] of one another.
+fn biggest_clump(heavies: &[(Vec3, f32)]) -> (f32, usize) {
+    fn root(group: &mut [usize], mut i: usize) -> usize {
+        while group[i] != i {
+            group[i] = group[group[i]];
+            i = group[i];
+        }
+        i
+    }
+    let n = heavies.len();
+    let mut group: Vec<usize> = (0..n).collect();
+    for i in 0..n {
+        for j in i + 1..n {
+            if distance(heavies[i].0, heavies[j].0) <= ULTI_CLUMP_RADIUS {
+                let (a, b) = (root(&mut group, i), root(&mut group, j));
+                group[a] = b;
+            }
+        }
+    }
+    let mut clumps: BTreeMap<usize, (f32, usize)> = BTreeMap::new();
+    for (i, &(_, value)) in heavies.iter().enumerate() {
+        let c = clumps.entry(root(&mut group, i)).or_default();
+        c.0 += value;
+        c.1 += 1;
+    }
+    clumps.into_values().max_by(|a, b| a.0.total_cmp(&b.0)).unwrap_or_default()
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -307,6 +376,9 @@ pub struct Jaegers {
     /// Jaegers out of squads on their own (a Skuttle that jumped when
     /// shown), until a frame.
     held: BTreeMap<i32, i32>,
+    /// The call for Ultimatums, if any, and when it was last met (see
+    /// [`ULTI_HOLD`]).
+    ulti: Option<(UltiCall, i32)>,
 }
 
 impl Jaegers {
@@ -370,10 +442,75 @@ impl Ai {
             .max()
     }
 
-    /// Whether a factory that can build `name` should build it now.
+    /// Whether Ultimatums are called for (see [`ULTI_CLUMP`]), and why.
+    pub(crate) fn jaeger_ulti_call(&self) -> Option<UltiCall> {
+        if self.dev_off("jaeger") || self.dev_off("ultimata") {
+            return None;
+        }
+        self.jaegers.ulti.as_ref().map(|(c, _)| c.clone())
+    }
+
+    /// Whether Ultimatums are called for by the heavies seen now.
+    fn jaeger_ulti_met(&self) -> Option<UltiCall> {
+        if self.dev_off("jaeger") || self.dev_off("ultimata") {
+            return None;
+        }
+        let heavies = self.jaegers.seen.values().filter(|s| s.heavy.is_some());
+        let giant = (heavies.clone())
+            .filter(|s| s.heavy.is_some_and(|h| h >= GIANT_HEALTH))
+            .max_by(|a, b| a.value.total_cmp(&b.value));
+        if let Some(g) = giant {
+            let name = g.ud.map_or_else(|| "giant".to_owned(), |d| d.human_name());
+            return Some(UltiCall { value: g.value, why: format!("a {name} seen ({:.0} metal)", g.value) });
+        }
+        let at: Vec<(Vec3, f32)> = heavies.filter(|s| s.pos != NULLPOS).map(|s| (s.pos, s.value)).collect();
+        let (metal, n) = biggest_clump(&at);
+        (metal >= ULTI_CLUMP)
+            .then(|| UltiCall { value: metal, why: format!("{n} heavies of {metal:.0} metal cover one another") })
+    }
+
+    /// Our Ultimatums, those ordered counted.
+    fn jaeger_ultis(&self) -> usize {
+        let frame = self.frame;
+        let ordered = self.jaegers.ordered.iter().filter(|o| o.0 == ULTIMATUM && frame - o.1 <= ORDER_TIMEOUT);
+        let have = (self.jaegers.members.iter().filter_map(|id| self.fighters.get(id)))
+            .filter(|f| self.defs.name_of(f.unit) == ULTIMATUM);
+        ordered.count() + have.count()
+    }
+
+    /// Whether one more Ultimatum fits while they are called for: the first
+    /// always, more within [`ULTI_SHARE`] of the heavies' metal.
+    fn jaeger_ulti_fits(&self) -> bool {
+        let one = self.defs.get(ULTIMATUM).map_or(0.0, |d| d.cost(self.metal));
+        let n = self.jaeger_ultis();
+        let (heavy, _) = self.jaeger_heavy_value();
+        n < MAX_ULTIS && (n == 0 || (n + 1) as f32 * one <= ULTI_SHARE * heavy)
+    }
+
+    /// Whether our energy income keeps one more Ultimatum cloaked (24 a
+    /// second on the move): twice our jaegers' upkeep with it.
+    pub fn jaeger_ulti_energy(&self) -> bool {
+        let one = self.defs.get(ULTIMATUM).map_or(0.0, |d| d.cloak_cost_moving());
+        self.eco.effective_income_energy >= 2.0 * (self.jaeger_upkeep() + one)
+    }
+
+    /// Whether a factory that can build `name` should build it now. While
+    /// Ultimatums are called for, they have a budget of their own, and no
+    /// more Widows are hunters.
     pub fn jaeger_wants(&self, name: &str) -> bool {
         let Some(kind) = kind_of(name) else { return false };
-        if self.dev_off("jaeger") || self.jaeger_needed(kind).is_none() {
+        if self.dev_off("jaeger") {
+            return false;
+        }
+        if self.jaeger_ulti_call().is_some() {
+            if kind.name == ULTIMATUM {
+                return self.jaeger_ulti_fits();
+            }
+            if kind.stuns {
+                return false;
+            }
+        }
+        if self.jaeger_needed(kind).is_none() {
             return false;
         }
         let (heavy, army) = self.jaeger_heavy_value();
@@ -535,10 +672,23 @@ impl Ai {
             return;
         }
         self.jaeger_remember(frame);
+        let was = self.jaegers.ulti.is_some();
+        match self.jaeger_ulti_met() {
+            Some(c) => self.jaegers.ulti = Some((c, frame)),
+            None => self.jaegers.ulti = self.jaegers.ulti.take().filter(|&(_, met)| frame - met <= ULTI_HOLD),
+        }
+        let call = self.jaeger_ulti_call();
+        if self.jaegers.ulti.is_some() != was {
+            self.log(&match &call {
+                Some(c) => format!("jaeger: Ultimatums called for, no more Widows: {}", c.why),
+                None => "jaeger: Ultimatums no longer called for".to_owned(),
+            });
+        }
         if frame % 1800 < PERIOD {
             let (heavy, army) = self.jaeger_heavy_value();
             if heavy > 0.0 || !self.jaegers.members.is_empty() {
                 let (widows, rest) = self.jaeger_widow_metal();
+                let ultis = self.jaeger_ultis();
                 let j = &self.jaegers;
                 // Cloak is paid from storage (15 energy a second moving, 5
                 // still): an empty one shows them.
@@ -546,7 +696,7 @@ impl Ai {
                     (j.members.iter().filter_map(|id| self.fighters.get(id))).filter(|f| f.unit.is_cloaked()).count();
                 let e = self.cb.economy();
                 self.log(&format!(
-                    "jaeger: {heavy:.0} of {army:.0} enemy army metal seen lately is heavy; {} jaegers ({cloaked} cloaked; energy {:.0} of {:.0}), {} squads, {} ordered; Widows {widows:.0} to {rest:.0} of the rest of our army; {} ambushes laid, {} threatened, {} dodges, {} dodge jumps",
+                    "jaeger: {heavy:.0} of {army:.0} enemy army metal seen lately is heavy; {} jaegers ({cloaked} cloaked; energy {:.0} of {:.0}), {} squads, {} ordered; Widows {widows:.0} to {rest:.0} of the rest of our army; {} ambushes laid, {} threatened, {} dodges, {} dodge jumps; {ultis} Ultimatums{}",
                     j.members.len(),
                     e.current(self.energy),
                     e.storage(self.energy),
@@ -555,7 +705,8 @@ impl Ai {
                     j.ambushes,
                     j.threatened,
                     j.dodges,
-                    j.dodge_jumps
+                    j.dodge_jumps,
+                    call.as_ref().map_or(String::new(), |c| format!(", called for: {}", c.why))
                 ));
             }
             let j = &mut self.jaegers;
@@ -580,7 +731,9 @@ impl Ai {
         for (&id, e) in &self.war.targets {
             if !e.is_dead && is_army(e) {
                 let heavy = is_heavy(e, self.metal).then(|| e.def_health());
-                self.jaegers.seen.insert(id, Seen { value: cost(e, self.metal), heavy, last_seen: e.last_seen });
+                let seen =
+                    Seen { value: cost(e, self.metal), heavy, last_seen: e.last_seen, pos: e.position, ud: e.ud };
+                self.jaegers.seen.insert(id, seen);
             }
         }
         self.jaegers.seen.retain(|_, s| frame - s.last_seen <= RECENT);
@@ -1304,6 +1457,25 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heavies_in_a_chain_of_sightings_are_one_clump() {
+        // Three Grizzlies walking in a file, a Cyclops far off.
+        let grizzly = 1900.0;
+        let heavies = [
+            (Vec3::xz(1000.0, 1000.0), grizzly),
+            (Vec3::xz(1500.0, 1000.0), grizzly),
+            (Vec3::xz(2000.0, 1100.0), grizzly),
+            (Vec3::xz(4000.0, 4000.0), 2200.0),
+        ];
+        let (metal, n) = biggest_clump(&heavies);
+        assert_eq!(n, 3);
+        assert!(metal >= ULTI_CLUMP && (metal - 3.0 * grizzly).abs() < 1e-3);
+        // Spread out, no clump calls for Ultimatums.
+        let spread: Vec<(Vec3, f32)> = (0..3).map(|i| (Vec3::xz(1000.0 * i as f32, 0.0), grizzly)).collect();
+        assert_eq!(biggest_clump(&spread), (grizzly, 1));
+        assert_eq!(biggest_clump(&[]), (0.0, 0));
+    }
 
     #[test]
     fn recruited_hunter_cannot_leave_an_order_for_the_next_scout() {

@@ -4,6 +4,11 @@
 # file goes in under a temporary name and is renamed over the old one, so a
 # running game keeps its mapped library (a plain cp segfaults it).
 #
+# The lobby wip is the branch `wip` and nothing else. Work meant for the wip
+# is merged (or cherry-picked) into `wip`, never stacked on a new wip-* branch,
+# and `wip` is installed from a clean checkout of its tip whose release build
+# carries that commit's stamp. Other versions install from anything.
+#
 # usage: install-wip.sh [version=wip] [data-dir=~/.spring]
 set -e
 version=${1:-wip}
@@ -14,6 +19,18 @@ src="$here/crates/zkgbai/data"
 dst="$data/AI/Skirmish/ZKGBAI/$version"
 [ -f "$lib" ] || { echo "no $lib: cargo build --release first" >&2; exit 1; }
 if pgrep -x cargo > /dev/null; then echo "cargo is running; wait for it" >&2; exit 1; fi
+# build.rs stamps the library with `git describe --always --dirty --abbrev=8`.
+stamp=$(git -C "$here" describe --always --dirty --abbrev=8 2> /dev/null || echo unknown)
+if [ "$version" = wip ]; then
+    refuse() { echo "not installing as wip: $1. The lobby wip installs only from branch wip: merge your work into wip, build its tip, install from there." >&2; exit 1; }
+    branch=$(git -C "$here" symbolic-ref -q --short HEAD || true)
+    [ "$branch" = wip ] || refuse "$here is on '${branch:-detached HEAD}', not wip"
+    [ -z "$(git -C "$here" status --porcelain --untracked-files=no)" ] || refuse "$here has uncommitted changes"
+    case "$stamp" in *-dirty|unknown) refuse "no clean stamp for $here ($stamp)";; esac
+    if ! grep -qaF -- "$stamp" "$lib" || grep -qaF -- "$stamp-dirty" "$lib"; then
+        refuse "$lib was not built from $stamp (rebuild it)"
+    fi
+fi
 mkdir -p "$dst"
 put() { cp "$1" "$dst/.$2.tmp" && mv -f "$dst/.$2.tmp" "$dst/$2"; }
 sed "s/@VERSION@/$version/" "$src/AIInfo.lua" > "$dst/.AIInfo.lua.tmp"
@@ -47,5 +64,10 @@ put "$lib" libSkirmishAI.so
 put "$src/banter.toml" banter.example.toml
 mv -f "$dst/.AIInfo.lua.tmp" "$dst/AIInfo.lua"
 mv -f "$dst/.AIOptions.lua.tmp" "$dst/AIOptions.lua"
-echo "installed $(git -C "$here" rev-parse --short HEAD 2>/dev/null) as ZKGBAI $version in $dst (operator and journal on)"
+# What went in, for whoever asks later which code the lobby plays.
+printf 'stamp %s\nbranch %s\ncommit %s\nfrom %s\nsha256 %s\ninstalled %s\n' "$stamp" \
+    "$(git -C "$here" symbolic-ref -q --short HEAD || echo detached)" "$(git -C "$here" rev-parse HEAD 2> /dev/null)" \
+    "$here" "$(sha256sum "$lib" | cut -d' ' -f1)" "$(date -Is)" > "$dst/.INSTALLED.tmp"
+mv -f "$dst/.INSTALLED.tmp" "$dst/INSTALLED"
+echo "installed $stamp as ZKGBAI $version in $dst (operator and journal on)"
 grep -n -A4 "key    = 'operator'\|key    = 'journal'" "$dst/AIOptions.lua" | grep "def"

@@ -10,17 +10,21 @@ Idle plants reconsider every two seconds, so they resume without an idle event.
 
 Primary missions:
 
-- Groups of at least three medium ground units: Phoenix or existing Likhos in
+- Groups of at least two ground units of 150-2500 metal each, worth 600
+  together (heavies such as Grizzly, Goliath and Crab included, striders left to
+  single-target strikes; a pair of Grizzlies is one target that five Likhos burn
+  both of, where each alone needs six for a sure kill): Phoenix or existing Likhos in
   clear air, Likhos where their own survival budget permits. Passes are valued by `metal * min(predicted
   damage / current HP, 1)` per victim rather than requiring the whole clump to
   die. Likho uses the installed weapon's blast radius and falloff, a 20% damage
   reserve, and the best member to aim at; center-distance sampling conservatively
   ignores collision-volume extent. Phoenix retains a heuristic 1800 total HP
   damage budget spread across the group. Every additional Likho/Phoenix must
-  add at least 250/150 metal of damage value. Smaller worthwhile packages remain
+  add at least 250/150 metal of damage value, on average over the aircraft added
+  since the last worthwhile package (see Shields). Smaller worthwhile packages remain
   eligible, so one ready Likho need not wait for a lethal fleet. These are damage
-  estimates, not predictions of kills; shields, movement, and napalm placement
-  can change realized damage. Candidate ranking and combined-wave allocation
+  estimates, not predictions of kills; movement and napalm placement can change
+  realized damage. Candidate ranking and combined-wave allocation
   use damage value for groups; operator snapshots expose `package_damage_values`
   alongside the unchanged full target `value`.
 - Priority strikes target mobile units costing at least 600 metal with at most
@@ -35,8 +39,10 @@ Primary missions:
   cheaper to buy.
 - At least five nearby wind generators: Phoenix, with an approach clear of
   known interceptors.
-- Aircraft on LOS/radar inbound to our territory: one Magpie and at least two
-  Raptors. Unidentified radar contacts can count when clearly above terrain.
+- Aircraft on LOS/radar inbound to our territory: at least two Raptors, with a
+  Magpie to assist (its EMG slows the quarry) when one is ready; it is never
+  bought or waited for. Unidentified radar contacts can count when clearly
+  above terrain.
 - Statics worth at least 1000 metal, and every identified factory or strider
   hub: Odin thermite. Singularities get a bonus; a factory counts three times
   its cost (it is where the army comes from, and the rebuild costs time), four
@@ -87,20 +93,96 @@ Primary missions:
   `friendly_fire`). Carpets never join combined waves or local retargeting.
   `disable=carpet` switches it off.
 
+Shields (`shields.rs`, `disable=airshields` plans as if no enemy had one).
+Every Zero-K shield stops every bomb our planes drop. Under the default
+`shield_merge` mode a bubble takes a bomb only while its charge exceeds the
+bomb's shield damage (it then loses that much); a weaker one lets it through
+untouched. So an Aspis (3600) takes one Likho bomb (2000), four Raven bombs
+(800), 90 napalm bombs (40, so a Phoenix pass drains 720) and in practice all
+Odin thermite (2), while a Thug's bubble (1200) takes no Likho bomb at all. A
+stopped bomb bursts on the bubble, so only bubbles at least as wide as the blast
+protect the units beneath (napalm 160, implosion 96, Raven 16, thermite 20).
+Charge is read for bubbles in sight and assumed full otherwise; shield links and
+regeneration within a pass are ignored. Group values spend each package's bombs
+on the bubbles over the aim first; the package rule takes the planes that only
+feed a bubble together with the ones whose bombs then land, so a lone Likho is no
+longer sent at an Aspis ball (two are: the first spends the Aspis), and a Phoenix
+package must outlast the dome (six or more against one Aspis). The aim is the
+member giving the best value per Likho flown once the bubbles over it are spent,
+and groups rank by their best value per aircraft over all package sizes. A clump's metal is worth more under bubbles
+(`disable=shieldworth` counts plain metal): ground fire is small shots every
+bubble takes, while an implosion bomb goes through any bubble short of an Aspis,
+so a bomb kill spares our army the shields as well as the hit points. Each
+victim counts `(HP + its share of the bubbles over it) / HP` times its metal, at
+most three: a Thug among Thugs 2.25. Ranked by plain metal, a Felon ball lost to
+the Felon's own Raven priority strike, whose sortie then covered the Felon and
+kept the Likhos off the clump; with this the clump strike ranks first. Single
+target strikes add the bombs the bubbles over the target take: a Felon (its own
+bubble takes two Raven bombs) under an Aspis (four more) needs ten Ravens or two
+Likhos instead of four or one. Thermite and turret burns are not flown at targets
+under a charged bubble.
+
+Friendly fire (`disable=collateral` restores the old rule: no Likho or Phoenix
+drop with any of our or allied ground units or buildings within 220 elmos of the
+aim). A drop's implosion bombs and napalm are priced on our own and allied ground
+units and buildings within reach (about 355 elmos, half a napalm line plus its
+blast) like enemy victims, with no reserve: units by the damaged share of their
+metal, buildings whole when destroyed and a quarter of the damaged share
+otherwise, mexes four times their metal, Solars behind their armor. The napalm
+line runs along the final route leg. Launch, combined-wave assignment and local
+retargets require our losses to stay under half of what the strike removes (its
+damage value for groups, the target's value otherwise). Holds are counted in
+`collateral_holds`.
+
+Ravens never take targets with a top speed of 90 elmos/s or more: their guided
+bomb flies 135 elmos/s and homes weakly. Over 37k Raven bombs in our arena combat
+logs it hit 86-88% of targets moving under 80 elmos/s at release, 73% at 80-100
+and about 25% faster (Scorcher 32%, Kodachi 30%, Dagger 10%, Glaive 50%, Pyro 56%;
+Rocko 94%, Ravager 91%, Fencer 88%). Such targets are Magpie and Likho work; this
+covers retargets onto the nearest mobile enemy too. A Likho flies at a single
+target (priority, opportunistic, static or retarget) only for at least 250 metal
+per Likho, the worth a group strike asks of each: a 125-metal Quill is Raven work.
+
 Secondary missions use existing assets and cannot cause purchases: damaged
 heavies reachable within 12 seconds by Ravens, ordinary statics for Ravens,
 cheap artillery such as Fencers and still-tough targets such as healthy Cyclops for a sufficient
-existing Raven/Likho fleet, and an Odin shield cluster over friendly ground troops in an ongoing fight. The
+existing Raven/Likho fleet, outposts and heavy defenses (below), and an Odin shield cluster over friendly
+ground troops in an ongoing fight. The
 drop point follows those troops (our mobile ground fighter nearest the enemy,
 within 600 elmos) and the sortie is called off (`no_troops`) once none are left.
+
+- Outpost burns (`outposts`, `disable=outposts`): clumps of at least three cheap
+  buildings (each at most 300 metal: mexes, Solars, turbines, pylons, Lotuses;
+  not factories, shields or anything submerged) within 260 elmos of a seed, mexes
+  seeding first so an expansion is taken about its mex. Phoenixes only, in clear
+  air, at most six. Each salvo is modelled as 18 bombs along the final approach
+  (taken as the line from home), 390 elmos long and centred on the aim, plus
+  the fire (about 150 damage per victim, once), at 80% and behind each
+  building's armor (a Solar closes to a third, conservatively for the whole
+  pass). A building is worth its strike value (a mex four times its metal) if
+  destroyed and a quarter of its damaged share if not; the aim is a member or
+  the centroid. Against a mex among four Solars one salvo leaves the mex at
+  about 430 of 560 and two burn it down; Solars on the line need six, so in
+  practice outposts cost the enemy mexes, turbines and light porc. Priority 1.5,
+  between Raven statics and shield drops.
+- Turret burns (`odinturrets`, `disable=odinturrets`): a spare Odin's thermite
+  on an armed building of at least 400 metal that is not already a thermite
+  target (Gauss 400, Stinger 450, Thresher 450, Sunlance 700), counted against
+  its hit points behind its armor (a closed Gauss takes a third: one Odin still
+  burns it), priority 2 like shield drops. Like thermite these take optional
+  Sparrow escorts on deep routes, burn submerged targets, and are not flown at
+  a target under a charged bubble.
+
 Ordinary dispatch takes launchable primary missions before secondary ones.
 Within each tier, mission score is discounted by actual route length
 (`score / (1 + length / 1200)`); defensive interception keeps its urgency.
 Procurement uses the same distance discount. Unfillable primary
 packages do not reserve every aircraft of a type; spare aircraft may take
 secondary opportunities while the remaining package is built. Overlapping jobs
-cannot launch duplicate sorties against the same group. There are at most four
-ordinary simultaneous sorties and 24 aircraft in a package; oversized jobs are rejected,
+cannot launch duplicate sorties against the same group. There are at most ten
+ordinary simultaneous sorties, at most four of them secondary (so single-plane
+static and opportunity sorties cannot crowd out a primary strike), and 24
+aircraft in a package; oversized jobs are rejected,
 not silently reduced. Mobile fixes must be live and at most five seconds old.
 
 Every 30 seconds, before ordinary dispatch, a combined-strike fallback checks
@@ -134,14 +216,36 @@ Active sorties recheck ingress and return corridors against current threats.
 An armed sortie may switch once to a known local opportunity even while its
 original mission remains healthy. The available payload must fit the new job,
 its estimated damage value must improve by more than 10%, and every loaded
-member must arrive at least one second sooner, within six seconds. Arrival
+member must arrive within six seconds, either at least one second sooner or
+later but worth the wait: its value per second over the rest of the sortie
+(the drop plus 30 s of flight home and rearm) at least 1.5 times the current
+one's (a Lance a second past a mex qualifies). Arrival
 estimates include route detours and target motion; candidates must lie within
 800 elmos of every loaded member and retain the survival, friendly-fire and
 target-reservation checks. The original target need not be nearby. The new
 attack is ordered immediately and gets the existing eight-second terminal
 commitment, preventing repeated shopping instead of releasing. Existing local
 fallbacks for lost, destroyed or unsafe targets remain available. Retarget logs
-distinguish `better_earlier_drop` from `fallback`.
+distinguish `better_drop` from `fallback`.
+
+Pooling (`live/pool.rs`, `disable=airpool`): a sortie retargets only its own
+bombers, so lone Ravens sent at mexes past a Lance could never take it (one 800
+bomb for 1000 HP). Once an update, the nearest free sorties (not yet switched,
+not in a wave, of strike kinds, every member a loaded, healthy Raven or Likho
+within 800 elmos of the target) whose bombers together fit a strike job give
+them up to one pooled sortie, when the pooled drop's value is at least 1.25
+times the drops they give up, the route survives and friendly fire is within
+bounds. The first donor becomes the pooled sortie (switched, so it does not
+switch again); the others dissolve and their targets are free. Logs read
+`airstrikes: pool N sorties (M bombers) -> Kind:target`.
+
+Magpie strafes (`disable=magpiestrafe`, secondary, priority 2): any identified
+ground unit or building in sight that cannot shoot at aircraft, along a route
+clear of AA. A Magpie's load (twelve EMG salvos of 48) answers 460 HP of a slow
+target and 200 of a raider (90 elmos/s or faster); targets needing more than
+four are left alone. A strafe takes Magpies only while at least three stay idle
+at home, the firefighters' included, for the next raid; Interdict on raiders in
+our territory remains a primary mission.
 Corridor selection retains the shared strategic threat map. Survival uses a
 separate estimate: known ground AA weapon damage against plane armor, projectile
 and salvo counts, and reload time. Enemy HP and splash weighting do not count
@@ -159,6 +263,21 @@ and candidate snapshots also expose `incoming_dps` and `ready_volley_damage`. Sp
 New AA invalidates procurement
 memory and causes active sorties to abort or update their approaches. Spent or
 damaged aircraft return via threat-aware routes and rearm.
+
+Wide-turning airframes (`disable=odinroutes`; a real turn of 300 elmos or more,
+in practice the Odin at about 400) get their own routes (`AirField::route_for`).
+The cheapest way runs over 64-elmo cells in eight directions, so a slanting
+flight staircases in 45-degree steps a cell or two apart, turns an Odin needs
+`400 * tan(22.5)`, about 166 elmos of straight flight on each side, to make.
+Its route is pulled straight instead: from each waypoint the next is the
+farthest point of the cheapest way whose straight leg costs at most 5% (plus
+two open cells) more than the way it replaces, so it cuts across open air but
+not into anti-air the cheapest way went round, among legs whose turn fits in
+half of each leg it joins; when none does, the safe leg overrunning least. A
+sortie flying an Odin uses it for the plan, its in-flight re-routes (from the
+lead's heading) and the egress; an Odin flying home alone, from its own
+heading. On a test wall of anti-air with a gap, 11 cell waypoints became 3 with
+39-degree turns.
 
 Every route an aircraft is given skips the waypoints it cannot turn onto from
 its current flight (`turns.rs`, `disable=airturns` restores the old routes).
@@ -234,6 +353,13 @@ tools/arena/match.sh -t 180 -f 14400 -s 20 \
   "ZKGBAI:airstrike@$PWD/target/debug/libzkgbai.so?test=airstrike-odin" \
   "ZKGBAI:airstrike@$PWD/target/debug/libzkgbai.so?test=airstrike-singu"
 ```
+
+`airstrike-likhos` (five Likhos) versus `airstrike-shieldball` (an Aspis and four
+Thugs, held) checks Likho package sizing against a dome. `airstrike-phoenixes`
+(four Phoenixes) versus `airstrike-outpost` (a mex, four Solars 90 out and two
+turbines) and `airstrike-odins` (two Odins) versus `airstrike-turrets` (a Gauss
+and a Stinger, held fire) exercise the outpost and turret burns; the defender
+logs `airstrike-test: standing name:hp/max ...` every ten seconds.
 
 `airstrike-odin` versus `airstrike-factory` adds a Shieldbot factory at the
 same site: the thermite target, with `airstrike-track:` flight lines for the

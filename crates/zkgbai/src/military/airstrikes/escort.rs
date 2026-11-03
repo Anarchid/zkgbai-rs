@@ -1,10 +1,11 @@
-//! Optional jammers accompany deep thermite strikes without gating launch.
+//! Optional jammers accompany deep thermite strikes (factories, superweapons,
+//! heavy defenses) without gating launch.
 use super::*;
 use std::collections::BTreeMap;
 
 impl Mission {
     pub(super) fn optional_escort(&self) -> bool {
-        self.kind == MissionKind::Thermite && self.deep
+        matches!(self.kind, MissionKind::Thermite | MissionKind::Turret) && self.deep
     }
     pub(super) fn flight_safe(&self, plane: Plane, risk: Risk, hp: f32, max_hp: f32, speed: f32) -> bool {
         (self.optional_escort() && plane == Plane::Sparrow) || (plane.survives(risk, hp, speed) && hp >= max_hp * 0.5)

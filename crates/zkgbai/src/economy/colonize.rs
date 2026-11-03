@@ -166,13 +166,16 @@ impl Ai {
         let scale_at = |center| policy.utility_scale(distance_at(center), self.regime.density);
         let workers: Vec<Vec3> = self.eco.workers.values().map(|w| w.get_pos()).collect();
         let near = |p: Vec3| workers.iter().map(|&w| distance(w, p)).fold(f32::INFINITY, f32::min);
+        // Conquered ground counts as free though the spot graph presumes it
+        // the enemy's (see `conquest`).
+        let conquered = |p: Vec3| self.conquest_ground(p) >= super::conquest::GROUND_SAFE;
         let free: Vec<(Vec3, f32)> = (self.graph.get_neutral_spots().iter())
-            .filter(|s| !s.enemy_shadowed)
+            .filter(|s| !s.enemy_shadowed || conquered(s.get_pos()))
             .map(|s| (s.get_pos(), s.value))
             .filter(|&(p, _)| {
                 self.war.get_porc_threat(p) == 0.0
                     && self.war.get_effective_threat(p) <= 0.0
-                    && !self.graph.is_enemy_territory(p)
+                    && (!self.graph.is_enemy_territory(p) || conquered(p))
                     && near(p) >= FAR
             })
             .collect();

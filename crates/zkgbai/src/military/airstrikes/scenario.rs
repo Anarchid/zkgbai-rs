@@ -3,6 +3,10 @@
 //! exercise deep thermite procurement and optional Sparrow support;
 //! `airstrike-odin` / `airstrike-factory` burns a factory and tracks the
 //! Odin's flight home. `airstrike-turns` measures real turning circles.
+//! `airstrike-likhos` / `airstrike-shieldball` sizes Likho packages for an
+//! Aspis; `airstrike-phoenixes` / `airstrike-outpost` burns a mex among its
+//! Solars with spare Phoenixes; `airstrike-odins` / `airstrike-turrets` burns
+//! a Gauss and a Stinger with spare Odins.
 mod carpet;
 mod flight;
 mod hunt;
@@ -146,9 +150,32 @@ impl Ai {
                         ));
                     }
                 }
-                "airstrike-likhos" | "airstrike-likho-fencer" | "airstrike-likho-aa" => {
-                    for i in 0..if test == "airstrike-likhos" { 5 } else { 1 } {
-                        spawn.push(("bomberheavy", Vec3::xz(base.x + 40.0 * i as f32, base.z + 100.0)));
+                "airstrike-outpost" => {
+                    spawn.push(("staticmex", site));
+                    for (dx, dz) in [(90.0, 0.0), (-90.0, 0.0), (0.0, 90.0), (0.0, -90.0)] {
+                        spawn.push(("energysolar", Vec3::xz(site.x + dx, site.z + dz)));
+                    }
+                    for dx in [-170.0, 170.0] {
+                        spawn.push(("energywind", Vec3::xz(site.x + dx, site.z + 90.0)));
+                    }
+                }
+                "airstrike-turrets" => {
+                    spawn.push(("turretgauss", site));
+                    spawn.push(("turretheavylaser", Vec3::xz(site.x + 400.0, site.z)));
+                }
+                "airstrike-likhos"
+                | "airstrike-likho-fencer"
+                | "airstrike-likho-aa"
+                | "airstrike-phoenixes"
+                | "airstrike-odins" => {
+                    let (plane, n) = match test.as_str() {
+                        "airstrike-likhos" => ("bomberheavy", 5),
+                        "airstrike-phoenixes" => ("bomberriot", 4),
+                        "airstrike-odins" => ("bomberassault", 2),
+                        _ => ("bomberheavy", 1),
+                    };
+                    for i in 0..n {
+                        spawn.push((plane, Vec3::xz(base.x + 40.0 * i as f32, base.z + 100.0)));
                     }
                     spawn.extend([
                         ("staticrearm", get_directional_point(base, center, 400.0)),
@@ -194,6 +221,7 @@ impl Ai {
                                 | "airstrike-tough-target"
                                 | "airstrike-fencer"
                                 | "airstrike-shieldball"
+                                | "airstrike-turrets"
                                 | "airstrike-ravagers"
                                 | "airstrike-ravagers-aa"
                         ) && name != "turretaalaser"
@@ -242,6 +270,7 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "airstrike-turrets"
                     | "airstrike-ravagers"
                     | "airstrike-ravagers-aa"
             )
@@ -272,7 +301,14 @@ impl Ai {
             }
         }
         if frame == 150
-            && matches!(test.as_str(), "airstrike-likhos" | "airstrike-likho-fencer" | "airstrike-likho-aa")
+            && matches!(
+                test.as_str(),
+                "airstrike-likhos"
+                    | "airstrike-likho-fencer"
+                    | "airstrike-likho-aa"
+                    | "airstrike-phoenixes"
+                    | "airstrike-odins"
+            )
             && let Some(d) = self.defs.get("staticradar")
         {
             self.cb.cheat_new_unit(d, Vec3::xz(site.x - 300.0, site.z));
@@ -294,9 +330,23 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "airstrike-outpost"
+                    | "airstrike-turrets"
                     | "airstrike-ravagers"
                     | "airstrike-ravagers-aa"
             ) {
+                if matches!(test.as_str(), "airstrike-outpost" | "airstrike-turrets" | "airstrike-shieldball") {
+                    // Which buildings stand, and how hurt: the value model's
+                    // kills and partial damage, per pass.
+                    let mut line = String::new();
+                    for u in self.cb.team_units() {
+                        let name = self.defs.name_of(u);
+                        if Plane::of(name).is_none() && !name.starts_with("dyn") && !name.starts_with("factory") {
+                            line.push_str(&format!(" {name}:{:.0}/{:.0}", u.health(), u.max_health()));
+                        }
+                    }
+                    self.log(&format!("airstrike-test: standing{line}"));
+                }
                 let alive = self
                     .cb
                     .team_units()
@@ -314,6 +364,10 @@ impl Ai {
                                 | "shieldshield"
                                 | "shieldassault"
                                 | "vehassault"
+                                | "staticmex"
+                                | "energysolar"
+                                | "turretgauss"
+                                | "turretheavylaser"
                         )
                     })
                     .count();

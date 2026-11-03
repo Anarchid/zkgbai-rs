@@ -1,4 +1,6 @@
-//! One local target change: salvage a failed attack, or take a better, earlier drop.
+//! One local target change: salvage a failed attack, or take a better drop:
+//! an earlier one, or a later one worth the wait (Lances just beyond the mex
+//! a lone Raven was sent at).
 use super::*;
 
 const VICINITY: f32 = 800.0;
@@ -9,6 +11,11 @@ const MAX_LEG: f32 = 1200.0;
 const MAX_OPPORTUNITY_ETA: f32 = 6.0;
 const TIME_GAIN: f32 = 1.0;
 const VALUE_GAIN: f32 = 1.1;
+/// What a sortie has left after its drop: the flight home and the rearm.
+/// A later drop pays when its value per second over the whole remaining
+/// sortie beats the current one's by `LATER_RATE_GAIN`.
+const CYCLE: f32 = 30.0;
+const LATER_RATE_GAIN: f32 = 1.5;
 
 fn better_drop(old_value: f32, new_value: f32, old_eta: f32, new_eta: f32) -> bool {
     old_value.is_finite()
@@ -17,7 +24,8 @@ fn better_drop(old_value: f32, new_value: f32, old_eta: f32, new_eta: f32) -> bo
         && old_eta.is_finite()
         && new_eta.is_finite()
         && new_eta <= MAX_OPPORTUNITY_ETA
-        && new_eta + TIME_GAIN <= old_eta
+        && (new_eta + TIME_GAIN <= old_eta
+            || new_value / (new_eta + CYCLE) >= old_value / (old_eta.max(0.0) + CYCLE) * LATER_RATE_GAIN)
 }
 
 fn arrival_time(from: Vec3, route: &[Vec3], velocity: Vec3, speed: f32) -> f32 {
@@ -60,7 +68,7 @@ fn static_raven_limit(job: &Mission, have: &BTreeMap<Plane, usize>, damage: f32)
         .then(|| job.ravens(damage).min(have[&Plane::Raven]))
 }
 
-fn fits(package: &[(Plane, usize)], have: &BTreeMap<Plane, usize>) -> bool {
+pub(super) fn fits(package: &[(Plane, usize)], have: &BTreeMap<Plane, usize>) -> bool {
     // Do not give an incompatible payload the new job, or count spent aircraft
     // toward a reliable strike. Mixed Raven/Likho waves retain mixed packages.
     package.iter().all(|(kind, n)| have.get(kind).copied().unwrap_or(0) >= *n)
@@ -69,7 +77,7 @@ fn fits(package: &[(Plane, usize)], have: &BTreeMap<Plane, usize>) -> bool {
 
 // A leftover Raven does not need another spare Raven to finish a nearby
 // target. Keep the damage margin, but use the ammunition already on station.
-fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, raven_damage: f32) -> bool {
+pub(super) fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, raven_damage: f32) -> bool {
     !risk.intercepted
         && matches!(
             job.kind,
@@ -80,10 +88,13 @@ fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, rave
                 | MissionKind::Thermite
         )
         && !have.is_empty()
-        && have
-            .keys()
-            .all(|k| matches!(k, Plane::Raven | Plane::Likho) && can_hit_submerged(*k, job.kind, job.submerged))
+        && have.keys().all(|k| {
+            matches!(k, Plane::Raven | Plane::Likho)
+                && can_hit_submerged(*k, job.kind, job.submerged)
+                && !(job.fast && *k == Plane::Raven)
+        })
         && (!have.contains_key(&Plane::Raven) || risk.aa <= 0.15)
+        && job.value >= LIKHO_MIN_VALUE * have.get(&Plane::Likho).copied().unwrap_or(0) as f32
         && have
             .iter()
             .map(|(k, n)| *n as f64 * if *k == Plane::Raven { f64::from(raven_damage) } else { 2000.0 })
@@ -91,8 +102,9 @@ fn precision_fits(job: &Mission, risk: Risk, have: &BTreeMap<Plane, usize>, rave
             >= f64::from(job.hp) * 1.2
 }
 
-fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
+pub(super) fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
     let mut jobs = missions(contacts, home, frame);
+    let carriers = shields::carriers(contacts);
     for e in contacts.iter().filter(|e| e.known && e.live && !e.air && !e.static_ && frame - e.seen <= FRESH) {
         // A terminal opportunity need not meet the primary 600-metal filter,
         // or belong to an artillery/raider class. Keep it secondary.
@@ -111,6 +123,9 @@ fn opportunities(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             targets: vec![e.id],
             seen: frame,
             deep: false,
+            shields: shields::over(&carriers, &[e.pos]),
+            // Any raider is one of these; a Raven's bomb cannot catch it.
+            fast: e.speed >= RAVEN_MAX_TARGET_SPEED,
         });
     }
     jobs
@@ -194,7 +209,7 @@ impl Ai {
             *have.entry(a.kind).or_default() += 1;
         }
         let mut actual: Vec<_> = have.iter().map(|(&k, &n)| (k, n)).collect();
-        let blast = self.airstrike_blast();
+        let arms = self.airstrike_arms();
         let mut old_job = sortie.job.clone();
         old_job.pos = anchor;
         if let Some(e) = contacts.iter().find(|e| e.id == old_job.target && e.live) {
@@ -203,14 +218,21 @@ impl Ai {
         }
         if old_job.group.is_some() {
             let victims: Vec<_> = contacts.iter().filter(|e| e.live && old_job.targets.contains(&e.id)).collect();
-            old_job.group = Some(GroupStrike::new(&victims));
-            old_job.aim_group(blast);
+            let points: Vec<_> = victims.iter().map(|e| e.pos).collect();
+            old_job.shields = shields::over(&shields::carriers(&contacts), &points);
+            old_job.group = Some(if old_job.kind == MissionKind::Outpost {
+                GroupStrike::outpost(&victims, old_job.shields.clone(), home)
+            } else {
+                GroupStrike::new(&victims, old_job.shields.clone())
+            });
+            old_job.aim_group(arms);
         }
         let old_value = old_job.damage_value(&actual);
         let old_velocity = contacts.iter().find(|e| e.id == sortie.job.target && e.live).map_or(Vec3::ZERO, |e| e.vel);
         let mut best: Option<(f32, Plan)> = None;
         for mut job in opportunities(&contacts, home, self.frame) {
             if matches!(job.kind, MissionKind::Intercept | MissionKind::HeavyAir | MissionKind::Shield)
+                || self.airstrike_kind_off(job.kind)
                 || job.target == sortie.job.target
                 || job.targets.iter().any(|id| occupied.contains(id) && !sortie.job.targets.contains(id))
                 || !self
@@ -221,7 +243,7 @@ impl Ai {
             {
                 continue;
             }
-            job.aim_group(blast);
+            job.aim_group(arms);
             let length = field.length(job.pos).unwrap_or(f32::INFINITY);
             if !(if fallback {
                 local(anchor, from, job.pos, length)
@@ -272,13 +294,7 @@ impl Ai {
             {
                 continue;
             }
-            if have.keys().any(|k| matches!(k, Plane::Phoenix | Plane::Likho))
-                && self
-                    .cb
-                    .friendly_units_in(job.pos, 220.0)
-                    .iter()
-                    .any(|u| u.def().is_some_and(|d| !d.is_able_to_fly()))
-            {
+            if !self.airstrike_spares_friends(&job, &actual, &route) {
                 continue;
             }
             let choices = packages(&job, risk, self.bomber_handler.raven_damage.unwrap_or(800.0));
@@ -304,7 +320,7 @@ impl Ai {
             plan.job.target,
             plan.job.value,
             plan.length,
-            if fallback { "fallback" } else { "better_earlier_drop" }
+            if fallback { "fallback" } else { "better_drop" }
         ));
         if let Some(n) = static_raven_limit(&plan.job, &have, self.bomber_handler.raven_damage.unwrap_or(800.0)) {
             // A fallback to a mex must not send the entire old priority wing.
@@ -364,11 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn a_later_drop_must_pay_for_its_wait() {
+        // A Lance (1100) a second past the mex (340) a Raven was sent at.
+        assert!(better_drop(340.0, 1100.0, 2.0, 3.0));
+        // A little more for five more seconds: no.
+        assert!(!better_drop(340.0, 400.0, 1.0, 6.0));
+        // Still within the terminal window only.
+        assert!(!better_drop(340.0, 1100.0, 2.0, 7.0));
+    }
+
+    #[test]
     fn an_upgrade_must_pay_more_and_finish_sooner_within_the_terminal_window() {
         assert!(better_drop(600.0, 3500.0, 5.0, 2.0));
-        assert!(!better_drop(600.0, 3500.0, 2.0, 5.0));
+        // Later, but six times the value: worth the wait.
+        assert!(better_drop(600.0, 3500.0, 2.0, 5.0));
+        assert!(!better_drop(600.0, 800.0, 2.0, 5.0));
         assert!(!better_drop(600.0, 650.0, 5.0, 2.0));
-        assert!(!better_drop(600.0, 3500.0, 5.0, 4.5));
+        // Barely sooner, but far more: the rate rule takes it.
+        assert!(better_drop(600.0, 3500.0, 5.0, 4.5));
         assert!(!better_drop(600.0, 3500.0, 15.0, 7.0));
         assert!(!better_drop(600.0, 3500.0, f32::INFINITY, 2.0));
         assert!(!better_drop(600.0, 3500.0, 5.0, f32::NAN));
@@ -378,10 +407,13 @@ mod tests {
     fn a_short_straight_line_does_not_hide_a_detour_or_an_escaping_target() {
         let from = Vec3::ZERO;
         let old = arrival_time(from, &[Vec3::xz(1000.0, 0.0)], Vec3::ZERO, 270.0);
+        // A modest upgrade qualifies only by arriving sooner, which neither
+        // the detour nor the escaping target does once they are counted.
         let detour = arrival_time(from, &[Vec3::xz(0.0, 600.0), Vec3::xz(400.0, 0.0)], Vec3::ZERO, 270.0);
-        assert!(!better_drop(600.0, 3500.0, old, detour));
+        assert!(detour > old);
+        assert!(!better_drop(600.0, 700.0, old, detour));
         let escaping = arrival_time(from, &[Vec3::xz(400.0, 0.0)], Vec3::xz(200.0, 0.0), 270.0);
-        assert!(!better_drop(600.0, 3500.0, old, escaping));
+        assert!(!better_drop(600.0, 700.0, old, escaping));
         assert!(!arrival_time(from, &[], Vec3::ZERO, 270.0).is_finite());
     }
 

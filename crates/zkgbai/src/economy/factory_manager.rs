@@ -10,8 +10,8 @@ use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
 use crate::military::UnitClasses;
 use crate::military::roles::Role;
-use crate::military::scouts;
 use crate::military::stakeouts::{opens_with_scouts, stakeout_unit};
+use crate::military::{jaeger, scouts};
 use crate::util::kgb_rand;
 
 /// Firewalker and Jugglenaut metal, and from how much enemy light
@@ -912,6 +912,11 @@ impl Ai {
             return "cloakcon";
         }
 
+        // Mines for the conquest objectives we hold (see `conquest`).
+        if self.conquest_wants_mines(self.sapper_count()) {
+            return "cloakbomb";
+        }
+
         if let Some(support) = self.army_support_factory(fac) {
             return support;
         }
@@ -924,7 +929,8 @@ impl Ai {
             return scouts::SCYTHE;
         }
 
-        if fac.raider_spam < 0.0 || fm.scout_budget > 0 {
+        let dropped = fm.scout_budget == 0 && self.fac_front_cancel(&mut fac.raider_spam);
+        if (fac.raider_spam < 0.0 && !dropped) || fm.scout_budget > 0 {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
@@ -933,7 +939,8 @@ impl Ai {
             return "cloakraid";
         }
 
-        if fac.expensive_raider_spam < 0.0 {
+        let dropped = self.fac_front_cancel(&mut fac.expensive_raider_spam);
+        if fac.expensive_raider_spam < 0.0 && !dropped {
             fac.expensive_raider_spam += 1.0;
             return "cloakheavyraid";
         }
@@ -1071,6 +1078,11 @@ impl Ai {
             return "shieldcon";
         }
 
+        // Mines for the conquest objectives we hold (see `conquest`).
+        if self.conquest_wants_mines(self.sapper_count()) {
+            return "shieldbomb";
+        }
+
         if let Some(support) = self.army_support_factory(fac) {
             return support;
         }
@@ -1080,7 +1092,8 @@ impl Ai {
             return "shieldassault";
         }
 
-        if fac.raider_spam < 0.0 || fm.scout_budget > 0 {
+        let dropped = fm.scout_budget == 0 && self.fac_front_cancel(&mut fac.raider_spam);
+        if (fac.raider_spam < 0.0 && !dropped) || fm.scout_budget > 0 {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
@@ -1173,7 +1186,8 @@ impl Ai {
             return "amphfloater";
         }
 
-        if fac.raider_spam < 0.0 || fm.scout_budget > 0 {
+        let dropped = fm.scout_budget == 0 && self.fac_front_cancel(&mut fac.raider_spam);
+        if (fac.raider_spam < 0.0 && !dropped) || fm.scout_budget > 0 {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
@@ -1191,6 +1205,11 @@ impl Ai {
         if !self.dev_off("lobsters") && !self.dev_off("jumps") && fm.num_lobsters < lobster_target(fm.amph_combat_value)
         {
             return "amphlaunch";
+        }
+
+        if let Some(heavy) = self.fac_front_heavy("amphassault") {
+            fac.add_scout_allowance(3);
+            return heavy;
         }
 
         if income > 30.0
@@ -1256,7 +1275,8 @@ impl Ai {
             return "vehscout";
         }
 
-        if fac.raider_spam < 0.0 {
+        let dropped = self.fac_front_cancel(&mut fac.raider_spam);
+        if fac.raider_spam < 0.0 && !dropped {
             fac.raider_spam += 1.0;
             return "vehraid";
         }
@@ -1331,7 +1351,8 @@ impl Ai {
             return "hoverassault";
         }
 
-        if fac.raider_spam < 0.0 || fm.scout_budget > 0 {
+        let dropped = fm.scout_budget == 0 && self.fac_front_cancel(&mut fac.raider_spam);
+        if (fac.raider_spam < 0.0 && !dropped) || fm.scout_budget > 0 {
             if fm.scout_budget == 0 {
                 fac.raider_spam += 1.0;
             } else {
@@ -1413,7 +1434,8 @@ impl Ai {
             fac.expensive_raider_spam = -5.0;
         }
 
-        if fac.expensive_raider_spam < 0.0 {
+        let dropped = self.fac_front_cancel(&mut fac.expensive_raider_spam);
+        if fac.expensive_raider_spam < 0.0 && !dropped {
             fac.expensive_raider_spam += 1.0;
             return "tankheavyraid";
         }
@@ -1422,6 +1444,11 @@ impl Ai {
 
         if self.fac_aa_roll() {
             return "tankaa";
+        }
+
+        if let Some(heavy) = self.fac_front_heavy("tankheavyassault") {
+            fac.add_scout_allowance(1);
+            return heavy;
         }
 
         if income > 25.0
@@ -1486,13 +1513,20 @@ impl Ai {
         }
 
         // Raiders: Fleas in the opening, Venoms after it; the Fleas then are
-        // the stakeouts' alone (the scout detachment).
-        if fac.raider_spam < 0.0 {
+        // the stakeouts' alone (the scout detachment). Raiders owed in dense
+        // fights are dropped (`frontgate`).
+        let dropped = self.fac_front_cancel(&mut fac.raider_spam);
+        if fac.raider_spam < 0.0 && !dropped {
             return self.fac_spider_raider(fac);
         }
 
         if self.fac_aa_roll() {
             return "spideraa";
+        }
+
+        if let Some(heavy) = self.fac_front_heavy("spidercrabe") {
+            fac.add_scout_allowance(6);
+            return heavy;
         }
 
         if self.phase_income() > 30.0
@@ -1593,7 +1627,8 @@ impl Ai {
             return "jumpraid";
         }
 
-        if fac.raider_spam < 0.0 {
+        let dropped = self.fac_front_cancel(&mut fac.raider_spam);
+        if fac.raider_spam < 0.0 && !dropped {
             fac.raider_spam += 1.0;
             return "jumpraid";
         }
@@ -1601,6 +1636,11 @@ impl Ai {
         // Moderators shoot aircraft too.
         if self.fac_aa_roll() {
             return if kgb_rand() > 0.5 { "jumpaa" } else { "jumpskirm" };
+        }
+
+        if let Some(heavy) = self.fac_front_heavy("jumpsumo") {
+            fac.add_scout_allowance(1);
+            return heavy;
         }
 
         // An early Jack: a commander killer that jumps out again.
@@ -1805,8 +1845,11 @@ impl Ai {
         let eco = &self.eco;
         let war = &self.war;
 
-        if fm.has_fusion && self.jaeger_wants("striderantiheavy") {
-            return "striderantiheavy";
+        // From a Fusion; called for (see `jaeger`), as soon as our energy
+        // income keeps it cloaked.
+        let ulti_energy = fm.has_fusion || (self.jaeger_ulti_call().is_some() && self.jaeger_ulti_energy());
+        if ulti_energy && self.jaeger_wants(jaeger::ULTIMATUM) {
+            return jaeger::ULTIMATUM;
         }
 
         if eco.bots_viable

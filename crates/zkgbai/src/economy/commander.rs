@@ -59,7 +59,8 @@ impl Ai {
             && !reserved::is_reserved(self.cb, id)
             && !self.qrf_claims(id)
             && !super::terraform::is_terraforming(unit)
-            && !self.eco_in_transit(id);
+            && !self.eco_in_transit(id)
+            && !self.comguard_holds(id);
         let def = unit.def();
         let view = self.war.view(def);
         // The same scale as the commander's paint in war_update_threats,
@@ -163,7 +164,7 @@ impl Ai {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use springai::{Callback, SkirmishAi, Unit, UnitDef, ffi};
     use std::cell::{Cell, RefCell};
@@ -325,7 +326,8 @@ mod tests {
         ai
     }
 
-    fn test_ai_with(customize: impl FnOnce(&mut ffi::SSkirmishAICallback)) -> Ai {
+    /// A bare `Ai` over a stub callback (`customize` overrides entries).
+    pub(crate) fn test_ai_with(customize: impl FnOnce(&mut ffi::SSkirmishAICallback)) -> Ai {
         use std::ffi::{CStr, c_char, c_void};
         unsafe extern "C" fn size(_: i32) -> i32 {
             32

@@ -25,9 +25,32 @@ use crate::util::NULLPOS;
 /// set).
 pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
+    ("lightrepair", "Economy", "a combat unit's repair pulls workers by the metal its missing health is worth"),
     ("requisition", "Economy", "modules ask for the factories they need"),
+    (
+        "facrebuild",
+        "Economy",
+        "the last factory's replacement goes where our build power gets soonest and we hold the ground now, away from frames killed lately",
+    ),
     ("colonize", "Economy", "colonists sent to far free metal"),
-    ("artemis", "Economy", "an Artemis against over 4000 metal of enemy air when one reaches our whole front"),
+    (
+        "conquest",
+        "Economy",
+        "the commander walks to forward ground a few turrets can hold, takes its metal and fortifies it when the denial pays",
+    ),
+    (
+        "conquestsym",
+        "Economy",
+        "conquest measures both sides' walks to an objective from the middle of their start boxes' metal",
+    ),
+    (
+        "conquestlines",
+        "Economy",
+        "conquest also seeks lines of doors across the middle, counts spots as held only where mexes stand, and picks the front over the safe",
+    ),
+    ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
+    ("conquestseq", "Economy", "a held objective sends the commander on to the next"),
+    ("artemis", "Economy", "an Artemis at the centroid of our front against over 4000 metal of enemy air"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
     ("densgate", "Economy", "phase gates on the map's density clock, not time and income"),
@@ -59,6 +82,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Defense",
         "pickets that can arrive and kill an economic attacker before its victim dies join QRF (default on)",
     ),
+    (
+        "picketloan",
+        "Defense",
+        "dear pickets (120+ metal: Kodachi) lent to the QRF stay on the stakeout budget until back or dead, and displaced ones relocate instead of raiding (default on)",
+    ),
     ("airstrikes", "Military", "mission-driven aircraft production, strikes and interception"),
     (
         "airspeculate",
@@ -66,6 +94,42 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "scout inferred artillery and hunt it with available Likhos under weak AA (default on)",
     ),
     ("carpet", "Military", "napalm unseen Phantoms along their shots' bearings with available Phoenixes (default on)"),
+    (
+        "airshields",
+        "Military",
+        "bomb counts include the bombs enemy shields would take, and Odins skip shielded targets (default on)",
+    ),
+    (
+        "collateral",
+        "Military",
+        "Likho and Phoenix drops weigh what they would do to our own and allied units and buildings (off: none within 220 elmos; default on)",
+    ),
+    (
+        "odinroutes",
+        "Military",
+        "wide-turning airframes (Odin) fly fewer, straighter legs on turns they can make, still clear of anti-air (default on)",
+    ),
+    (
+        "airpool",
+        "Military",
+        "loaded bombers of separate sorties pool onto a target none can take alone, such as two lone Ravens on a Lance (default on)",
+    ),
+    (
+        "magpiestrafe",
+        "Military",
+        "spare Magpies strafe anything that cannot shoot back, away from AA, while three stay home for raids (default on)",
+    ),
+    (
+        "shieldworth",
+        "Military",
+        "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",
+    ),
+    (
+        "outposts",
+        "Military",
+        "spare Phoenixes burn clumps of cheap buildings, such as a mex among its Solars (default on)",
+    ),
+    ("odinturrets", "Military", "spare Odins burn heavy defenses such as Gauss and Stinger (default on)"),
     (
         "carpetspare",
         "Military",
@@ -122,6 +186,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("minotaur", "Army", "Minotaur packs, from two Minotaurs, an Ogre screen behind"),
     ("jaeger", "Army", "anti-heavy hunters once enemy heavies show"),
+    (
+        "ultimata",
+        "Army",
+        "Ultimatums in place of more Widows once enemy heavies clump past 5000 metal or a Paladin or Detriment shows; a strider hub requisitioned for them; default on",
+    ),
     ("strikes", "Army", "assassination strikes on Phantoms and Lances"),
     (
         "strikefragile",
@@ -138,18 +207,26 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "stayveto",
         "Army",
-        "a unit stays in its fight instead of retreating when the predictor says staying wins far more than it risks (default off)",
+        "a unit stays in its fight instead of retreating when the predictor says staying wins far more than it risks (default on in the wip line)",
     ),
     ("stayshadow", "Army", "with stayveto off, journal the retreats it would stop"),
     ("firesquads", "Army", "skirmisher-heavy assault squads keep formation and range, evade or commit together"),
-    ("fightsim", "Army", "veto crushing defeats for ordinary ground squads (default on)"),
-    ("fightmech", "Army", "use the mechanics model for the crushing-defeat veto"),
+    (
+        "fightsim",
+        "Army",
+        "veto hopeless attacks by ordinary ground squads, kiting judged, and hold the retreat (default on)",
+    ),
     (
         "fightfocus",
         "Army",
         "the fight predictor sends every shot to the target in range with the least health left (default on)",
     ),
     ("fight2d", "Army", "the fight predictor fights in the plane: positions kept, no overlaps, splash"),
+    (
+        "bombcharge",
+        "Army",
+        "placed Imps and Snitches charge the enemies near them when the fight predictor says it beats sitting tight",
+    ),
     (
         "sreload",
         "Army",

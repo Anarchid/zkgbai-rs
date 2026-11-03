@@ -22,10 +22,14 @@
 //! [`mech`] runs the same fight with the fitted mechanics (air, burn,
 //! death, EMP, slow, engagement, heatray) beside it when asked.
 
+mod bomb;
 pub mod live;
 pub mod local;
 pub mod mech;
+pub mod scenario;
 pub mod worker;
+
+pub use bomb::BombVerdict;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -122,12 +126,19 @@ pub struct SimFlags {
     /// Tube weapons fire from their tubes, each reloading on its own clock
     /// (mech.py `sreload`); off, they fire at the engine reload forever.
     pub sreload: bool,
+    /// Each kamikaze goes off within its def's `kamikazeDistance` of its
+    /// nearest enemy, centre to centre as the engine checks (mech.py
+    /// `bombs`): Imp and Snitch 80, Skuttle 25, Limpet 120. Off, every one
+    /// waits for 20, which the plane fight's overlap pass never allows (an
+    /// Imp's radius and a Rogue's add up to 22), so there no bomb went off
+    /// on contact. Set by the bomb-charge judgement ([`Model::bomb_charge`]).
+    pub bombs: bool,
 }
 
 impl SimFlags {
     /// The flags as the AI's switches set them.
     pub fn from_switches(fight2d: bool, focus: bool, sreload: bool) -> SimFlags {
-        SimFlags { twod: fight2d, focus: focus || fight2d, sreload }
+        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false }
     }
 
     /// Whether shots go to the least-health target (always in the plane).

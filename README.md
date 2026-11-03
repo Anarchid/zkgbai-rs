@@ -69,6 +69,12 @@ and `maps/`), or copy a local build's `dist-rs/AI/Skirmish/ZKGBAI/<version>` to
 `<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.5.2`.
 Lobbies listing local AIs will then offer it.
 
+The lobby's `ZKGBAI wip` is the branch `wip`. Work meant for it is merged or cherry-picked into
+`wip`; it does not get a branch of its own. `tools/install-wip.sh` installs the release build with the
+operator and journal on. For the `wip` version it refuses anything but a clean checkout of `wip`
+whose library carries that commit's build stamp. It writes `INSTALLED` (stamp, commit, sha256)
+next to the library.
+
 Testing against other AIs
 -------------------------
 
@@ -91,8 +97,8 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
-`artemis` (an Artemis against over 4000 metal of enemy air when one reaches our whole front),
-`mexporc` (the turret by every mex and link, the "porc tax"). `regionsplit` (off by default, `enable=regionsplit`)
+`artemis` (an Artemis at the centroid of our front against over 4000 metal of enemy air),
+`mexporc` (the turret by every mex and link, the "porc tax"). `regionsplit` (on by default, `disable=regionsplit`)
 has the terrain model cut regions holding many metal spots into pieces around clusters of them.
 `ZKGBAI_MUTE` (or the AI option `mute`) silences modules: `eco`, `fac`, `raider`, `squad`, `scouts`, ... (the
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do

@@ -93,6 +93,8 @@ impl Ai {
                 targets: vec![f.id],
                 seen: f.last,
                 deep: false,
+                shields: Vec::new(),
+                fast: false,
                 inference: Some(f),
             })
             .collect()

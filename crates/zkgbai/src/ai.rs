@@ -50,18 +50,17 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// are on (disable=ravager,minotaur to opt out). `coalesce` (raider gangs
 /// judged by the fight predictor) is on (2026-10-31, disable=coalesce to
 /// opt out). `stayveto` (retreats the predictor says throw a won fight
-/// away) is off since the 2026-11-01 batteries
-/// (zkgbai-runs/coalesce/RESULTS.md): it lost its mirror 3-15 and changed
-/// nothing against Circuit or Wires, and its standing units died more
-/// without killing more (enable=stayveto to opt in). The shadow switches
-/// (journal only) stay off.
+/// away) lost its 2026-11-01 batteries (zkgbai-runs/coalesce/RESULTS.md:
+/// its mirror 3-15, nothing changed against Circuit or Wires) but is on
+/// again since 2026-11-02, judged with the kiting fight and the latched
+/// veto (disable=stayveto). The shadow switches (journal only) stay off.
 /// `carpetspare`: Phoenix carpets burn friendlies under the line unless
 /// named (Phantoms are worth the friendly fire).
 /// `densgate` (phase gates on the map's density clock) waits for its A/B
 /// (enable=densgate to opt in).
 /// `regionsplit` (terrain regions holding many metal spots cut into pieces
-/// around clusters of them, 2026-11-02) waits for its A/B
-/// (enable=regionsplit to opt in).
+/// around clusters of them, 2026-11-02) is on for eyeballing until its A/B
+/// (disable=regionsplit).
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
@@ -71,17 +70,31 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `permanence`, `airtempo`, `airfire`, `posture`, `ecoladder`, the
 /// `scorcher`, `dagger` and `blitz` packs); their results are in the
 /// history of this comment.
+/// `conquest` (the commander walks to forward ground a few turrets hold,
+/// takes its metal, and fortifies it when the denial pays) and `conquestsym`
+/// (both sides' walks to an objective measured alike) are on for
+/// observation (2026-11-02; batteries in zkgbai-runs/conquest: on - off
+/// +0.03, sym - on +0.07; disable=conquest to opt out). `conquestleash`
+/// (the commander keeps near the ground it took, b3 -0.11) and
+/// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
+/// sym) stay off.
+/// `eramp` (energy wanted ramps with the alliance's share of the metal
+/// spots and the clock, see economy/mod.rs ERAMP_*) is on (user,
+/// 2026-11-03; disable=eramp to opt out) while its A/B runs.
+/// `bombcharge` (placed Imps and Snitches charge when the fight predictor
+/// says it beats sitting tight) is on for eyeballing (user, 2026-11-03;
+/// disable=bombcharge).
 pub(crate) const OFF_BY_DEFAULT: [&str; 10] = [
     "mexporc",
     "firesquads",
     "coalesceshadow",
     "stayshadow",
     "carpetspare",
-    "stayveto",
     "chatcommands",
     "densgate",
-    "regionsplit",
     "fight2d",
+    "conquestleash",
+    "conquestseq",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -619,7 +632,10 @@ impl Ai {
                     | "radarfort"
                     | "shadowprobe"
                     | "heavies"
+                    | "veto-scalpels"
+                    | "veto-scalpels10"
                     | "heavypush"
+                    | "paladin"
                     | "farm"
                     | "snipers"
                     | "lances"
@@ -642,6 +658,8 @@ impl Ai {
                     | "airstrike-tough-target"
                     | "airstrike-fencer"
                     | "airstrike-shieldball"
+                    | "airstrike-outpost"
+                    | "airstrike-turrets"
                     | "airstrike-ravagers"
                     | "airstrike-ravagers-aa"
                     | "assassin-raider-lance"

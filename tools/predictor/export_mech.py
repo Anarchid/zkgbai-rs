@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export the mechanics model (round-1 six + heatray + round-6 slow2d) for the Rust port.
 
-usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity]
+usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity|variants|variant-parity|tacai]
   <refit2-dir>  zkgbai-runs/predictor/refit2: mech.pkl (fitted mechanics), empcap/hitcells.pkl
                 (heatray damage by range band), fights.pkl (calibration fights)
   <crate-dir>   crates/zkgbai: writes data/fightsim_mech.tsv and the parity cases
@@ -11,6 +11,8 @@ usage: export_mech.py <refit2-dir> <crate-dir> [workers] [parity]
                 recalibration (score_fates.py with FATE_VARIANT=<v> -> predictor/fates-<v>/cal.tsv, run first),
                 and the variant parity cases (mech_variants_*.tsv); every other line of fightsim_mech.tsv stays
   variant-parity  only the variant parity cases
+  tacai         only write ZK's tactical unit AI (mech2/tacai.json, from tacai_dump.py) as
+                data/fightsim_tacai.tsv and its parity cases testdata/mech_tacai_{units,cases}.tsv
 The sim runs on the crate's own base tables (refit-1 hit cells and hazard, the ones in
 data/fightsim_hits.tsv and fightsim_coef.tsv): predict._init on ~/.../refit1/empcap with
 PRED_HAZARD=refit1/hazard.pkl, so the calibration and the parity numbers match what Rust runs.
@@ -37,6 +39,7 @@ BASE = os.path.join(ROOT, "refit1", "empcap")           # the crate's hit tables
 HAZARD = os.path.join(ROOT, "refit1", "hazard.pkl")     # the crate's hazard
 SHIELD = os.path.join(ROOT, "mech2", "shield.json")      # _dyn_weapons for heatray
 FATES_CAL = os.path.join(ROOT, "fates", "cal.tsv")       # score_fates.py: the p_dead recalibration
+TACAI = os.path.join(ROOT, "mech2", "tacai.json")        # tacai_dump.py: ZK's tactical unit AI, resolved
 SLOW = os.path.join(ROOT, "mech6", "slowhits.pkl")       # slow_hits.py: the slow2 table (fixed dump)
 OPTS = {"air": 1, "burn": 1, "death": 1, "emp": 1, "slow": 1, "engage": 1, "heatray": 1, "slow2d": 1}
 # The Rust switches (2026-11-02, zkgbai-runs/predictor/twod/rerun-plane): `fightfocus` = least health in range
@@ -58,6 +61,7 @@ def init(rdir):
     mech.load_shield(SHIELD, os.path.join(rdir, "empcap", "hitcells.pkl"))
     mech.load_slow(SLOW)  # the slow2 table; its inferred slow-only hit cells are not used (slow2d)
     mech.load_aoe(AOE)  # used only by opts with `aoe`
+    mech.load_tacai(TACAI)
     load_sreload_tsv(SRELOAD)  # used only by opts with `sreload`
     G["hz"] = predict.G["hazard"]
 
@@ -249,6 +253,24 @@ FATE_CASES = {
 }
 
 
+# Tactical AI cases (mech.py opts + tacai): (A, B, centroid distance, fates horizon in frames).
+TACAI_CASES = {
+    "knight_scalpels_1v2": ([("cloakassault", 1.0)], [("hoverskirm", 1.0)] * 2, 600.3, 450),
+    "knight_scalpels_1v3": ([("cloakassault", 1.0)], [("hoverskirm", 1.0)] * 3, 600.3, 450),
+    "knight_scalpels_1v5": ([("cloakassault", 1.0)], [("hoverskirm", 1.0)] * 5, 600.3, 450),
+    "knight_scalpels_2v5": ([("cloakassault", 1.0)] * 2, [("hoverskirm", 1.0)] * 5, 600.3, 900),
+    "knight_scalpels_3v3": ([("cloakassault", 1.0)] * 3, [("hoverskirm", 1.0)] * 3, 600.3, 450),
+    "scalpels_knights_3v10": ([("hoverskirm", 1.0)] * 10, [("cloakassault", 1.0)] * 3, 600.3, 450),
+    "ronins_bandits": ([("cloakskirm", 1.0)] * 3, [("shieldraid", 1.0)] * 3, 500.7, 450),
+    "fleas_flee_knight": ([("spiderscout", 1.0)] * 3, [("cloakassault", 0.6)], 250.9, 300),
+    "darts_flee_reaver": ([("vehscout", 1.0)] * 2, [("cloakriot", 1.0), ("cloakraid", 1.0)], 300.1, 300),
+    # big_mixed's A against its B without the Bandits: a Bandit's skirm leeway is 0, so it holds at exactly its
+    # range, where Rust's f32 speeds and Python's f64 split the range check (232.00000000000003 vs 232.0).
+    "mixed": (CASES["big_mixed"][0], [("shieldassault", 1.0)] * 2 + [("shieldriot", 1.0), ("shieldskirm", 0.7), ("shieldskirm", 1.0),
+                                       ("turretlaser", 1.0)], 550, 450),
+}
+
+
 def make_fight(ud, a, b, d0, layout):
     def recs(side, x0, dx):
         out = []
@@ -392,8 +414,69 @@ def export_parity_variants(tdir):
                 print(f"{name:18} {v:6} " + " ".join(f"{'X' if d else '.'}{p:.2f}" for d, p in zip(fa["dead"], fa["pdead"])))
 
 
+def unit_rows(names):
+    ud, wtab = predict.G["ud"], predict.G["wtab"]
+    rows = []
+    for name in names:
+        d = ud.get(name)
+        ws = []
+        for w in d.weapons:
+            if w.name in wtab.index and float(wtab.loc[w.name, "range"]) > 0 and wtab.loc[w.name, "type"] != "Shield":
+                r = wtab.loc[w.name]
+                ws.append(f"{w.name}:{r['type']}:{float(r['range']):.10g}:{float(r['reload']):.10g}:{int(r['salvo'])}:{float(r['damage']):.10g}")
+        rows.append(f"{name}\t{d.cost:.10g}\t{d.health:.10g}\t{d.speed:.10g}\t{int(d.canmove)}\t{int(d.canfly)}\t{int(d.builder)}\t0\t"
+                    f"{d.radius:.10g}\t{'|'.join(ws)}\n")
+    return rows
+
+
+def export_tacai(crate):
+    """ZK's tactical unit AI with mech.py's defaults resolved (no skirm range = never skirms, skirm and
+    reload leeways 0, flee leeway 100), and parity cases with it on."""
+    tac = mech.M["tacai"]
+    with open(os.path.join(crate, "data", "fightsim_tacai.tsv"), "w") as fh:
+        fh.write(f"# fightsim tactical AI: written {datetime.date.today()} by tools/predictor/export_mech.py from "
+                 f"mech2/tacai.json (tacai_dump.py, LuaRules/Configs/tactical_ai_defs.lua); skirm range 0 = never skirms\n")
+        fh.write("def\tskirm_range\tskirm_leeway\treload_skirm_leeway\tflee_leeway\tskirm_everything\tflee_everything\tskirms\tflees\n")
+        for n in sorted(tac):
+            b = tac[n]
+            fh.write(f"{n}\t{(b['skirmRange'] or 0.0):.10g}\t{(b['skirmLeeway'] or 0.0):.10g}\t{(b['reloadSkirmLeeway'] or 0.0):.10g}\t"
+                     f"{(b['fleeLeeway'] or 100.0):.10g}\t{int(bool(b['skirmEverything']))}\t{int(bool(b['fleeEverything']))}\t"
+                     f"{','.join(sorted(b['skirms']))}\t{','.join(sorted(b['flees']))}\n")
+    print(f"{len(tac)} tactical AI rows")
+    ud = predict.G["ud"]
+    tdir = os.path.join(crate, "src", "military", "fightsim", "testdata")
+    opts = dict(OPTS, tacai=1)
+    defs = sorted({n for a, b, *_ in TACAI_CASES.values() for n, _ in a + b})
+    with open(os.path.join(tdir, "mech_tacai_units.tsv"), "w") as fh:
+        fh.write("# unit specs for the tactical AI parity cases, as mech_parity_units.tsv\n")
+        fh.write("def\tcost\thealth\tspeed\tmobile\tair\tbuilder\tcom\tradius\tweapons\n")
+        fh.writelines(unit_rows(defs))
+    with open(os.path.join(tdir, "mech_tacai_cases.tsv"), "w") as fh:
+        fh.write("# Python mech.simulate_mech, opts six + heatray + tacai: units side:def:hp:x:z; dps = no hazard, stop = with the"
+                 " hazard, wd = A withdraws, with the hazard; fates (no hazard) at the horizon per unit dead:death frame (-1 alive):hp left:pdead\n")
+        fh.write("case\tunits\tdps_A\tdps_B\tstop_A\tstop_B\twd_A\twd_B\thorizon\tfates\n")
+        for name, (a, b, d0, horizon) in TACAI_CASES.items():
+            f = make_fight(ud, a, b, d0, "crowd")
+            dps = mech.simulate_mech(f, opts, None)
+            stop = mech.simulate_mech(f, opts, G["hz"])
+            wd = mech.simulate_mech(f, opts, G["hz"], withdraw=True)
+            fa = {}
+            mech.simulate_mech(f, opts, None, fates=fa, horizon=horizon)
+            us = ";".join(f"{s}:{r['def']}:{r['hp']:.10g}:{r['x']:.10g}:{r['z']:.10g}" for s, side in ((0, f["A"]), (1, f["B"])) for r in side)
+            fs = ";".join(f"{int(d)}:{-1 if t is None else t}:{h:.10g}:{p:.10g}"
+                          for d, t, h, p in zip(fa["dead"], fa["death_f"], fa["hp"], fa["pdead"]))
+            fh.write(f"{name}\t{us}\t{dps[0]:.10g}\t{dps[1]:.10g}\t{stop[0]:.10g}\t{stop[1]:.10g}\t{wd[0]:.10g}\t{wd[1]:.10g}\t{horizon}\t{fs}\n")
+            off = mech.simulate_mech(f, OPTS, G["hz"])
+            print(f"{name:22} dps {dps[0]:.3f} {dps[1]:.3f}  stop {stop[0]:.3f} {stop[1]:.3f} (no tacai {off[0]:.3f} {off[1]:.3f})"
+                  f"  wd {wd[0]:.3f} {wd[1]:.3f}  fates " + " ".join(f"{'X' if d else '.'}{p:.2f}" for d, p in zip(fa["dead"], fa["pdead"])))
+
+
 def main(rdir, crate, workers=2, what="all"):
     workers = int(workers)
+    if what == "tacai":
+        init(rdir)
+        export_tacai(crate)
+        return
     if what in ("variants", "variant-parity"):
         # the `fightfocus` / `fight2d` rows and parity cases only; the base tables and cases are untouched
         if what == "variants":

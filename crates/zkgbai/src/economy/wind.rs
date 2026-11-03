@@ -454,7 +454,8 @@ impl Ai {
         let (geos, adv): (Vec<Unit>, Vec<Unit>) = eco.geos.iter().partition(|u| self.defs.name_of(**u) == "energygeo");
         self.log(&format!(
             "energy: solars {} ({:.1}), turbines {} ({:.1}, floor {floor:.1}; {} queued on hills in {} batches), geos {} \
-             ({:.1}), advanced {} ({:.1}), fusions {} ({:.1}); metal income {:.1}",
+             ({:.1}), advanced {} ({:.1}), fusions {} ({:.1}); metal income {:.1}; energy wanted {:.1}, made {:.1} \
+             (spots held {:.0}%)",
             eco.solars.len(),
             make(&eco.solars),
             eco.windgens.len(),
@@ -468,6 +469,9 @@ impl Ai {
             eco.fusions.len(),
             make(&eco.fusions),
             eco.effective_income_metal,
+            eco.energy_target,
+            eco.effective_income_energy,
+            100.0 * self.graph.territory_fraction,
         ));
     }
 }

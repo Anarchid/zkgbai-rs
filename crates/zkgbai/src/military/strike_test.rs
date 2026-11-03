@@ -49,6 +49,9 @@
 //! minute 7, fight their way to the enemy's base with Glaives and Reavers
 //! guarding them (what the jaegers lie in wait for and dodge), and a few
 //! turrets hold its base against the attacker's assaults meanwhile. With
+//! `test=paladin`, a passive defender gets a Paladin standing halfway, which
+//! calls for Ultimatums (see `jaeger`; the attacker plays as usual), and the
+//! same fortified factory. With
 //! `test=farm`, a passive
 //! defender gets twelve wind generators, four caretakers and three more
 //! caretakers apart by its base: light things together, for the Infernos of a `test=eos` attacker,
@@ -190,6 +193,24 @@ const HUNT_ROUND: i32 = 30 * 120;
 const DROP_FRAME: i32 = 30 * 60;
 const DROP_ROUND: i32 = 30 * 180;
 
+/// A factory behind `base` (away from `enemy`), which keeps the AI team
+/// alive (ZK ends an AI team with no constructor or factory), and a fort
+/// that holds it.
+fn fortified_factory(base: Vec3, enemy: Vec3) -> Vec<(&'static str, Vec3)> {
+    let back = get_directional_point(base, enemy, -300.0);
+    let (dx, dz) = ((enemy.x - base.x) / distance(base, enemy), (enemy.z - base.z) / distance(base, enemy));
+    let mut units = vec![("factorycloak", back)];
+    for (gun, ahead, aside) in [
+        ("turretheavylaser", 150.0, -160.0),
+        ("turretheavylaser", 150.0, 160.0),
+        ("turretriot", 60.0, 0.0),
+        ("turretriot", -150.0, 250.0),
+    ] {
+        units.push((gun, Vec3::xz(back.x + dx * ahead - dz * aside, back.z + dz * ahead + dx * aside)));
+    }
+    units
+}
+
 impl Ai {
     /// Whether this side's cheated units stand where they are posted (the
     /// sniper teams), out of the handlers' hands.
@@ -200,6 +221,7 @@ impl Ai {
     pub fn strike_test_update(&mut self, frame: i32) {
         self.airstrike_scenario(frame);
         self.strikes_scenario(frame);
+        self.veto_scenario(frame);
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_update(frame);
         }
@@ -382,6 +404,22 @@ impl Ai {
                 }
                 units
             }
+            // The veto's case (see `fightsim::scenario`): five Scalpels in a
+            // row across the way, halfway; a factory keeps the team alive.
+            ("veto-scalpels" | "veto-scalpels10", 60) => {
+                let half = distance(base, enemy) / 2.0;
+                let count = if test == "veto-scalpels10" { 10 } else { 5 };
+                let mut units: Vec<(&str, Vec3)> = (0..count)
+                    .map(|k| {
+                        // Rows of five, 40 apart across the way, the second 60 behind.
+                        let mid = get_directional_point(base, enemy, half - 60.0 * (k / 5) as f32);
+                        let s = ((k % 5) as f32 - 2.0) * 40.0;
+                        (crate::military::fightsim::scenario::SCALPEL, Vec3::xz(mid.x - dz / n * s, mid.z + dx / n * s))
+                    })
+                    .collect();
+                units.push(("factorycloak", get_directional_point(base, enemy, -300.0)));
+                units
+            }
             ("heavies", 60) => {
                 // Halfway to the enemy; a factory keeps the AI team alive
                 // (ZK ends an AI team with no constructor or factory).
@@ -404,20 +442,16 @@ impl Ai {
                         .map(|(k, &n)| (n, get_directional_point(base, enemy, half - 120.0 - 70.0 * k as f32))),
                 );
                 if f == 60 {
-                    let back = get_directional_point(base, enemy, -300.0);
-                    units.push(("factorycloak", back));
-                    // A fort that holds the base meanwhile.
-                    let (dx, dz) =
-                        ((enemy.x - base.x) / distance(base, enemy), (enemy.z - base.z) / distance(base, enemy));
-                    for (gun, ahead, aside) in [
-                        ("turretheavylaser", 150.0, -160.0),
-                        ("turretheavylaser", 150.0, 160.0),
-                        ("turretriot", 60.0, 0.0),
-                        ("turretriot", -150.0, 250.0),
-                    ] {
-                        units.push((gun, Vec3::xz(back.x + dx * ahead - dz * aside, back.z + dz * ahead + dx * aside)));
-                    }
+                    units.extend(fortified_factory(base, enemy));
                 }
+                units
+            }
+            ("paladin", 60) => {
+                // A Paladin halfway (it calls for Ultimatums: see `jaeger`),
+                // and the fortified factory behind it.
+                let mut units =
+                    vec![("striderbantha", get_directional_point(base, enemy, distance(base, enemy) / 2.0))];
+                units.extend(fortified_factory(base, enemy));
                 units
             }
             ("farm", 60) => {
@@ -574,14 +608,24 @@ impl Ai {
         // (it would shoot the probes; losing it ends the game).
         if matches!(
             test.as_str(),
-            "fort" | "radarfort" | "skirmfort" | "heavies" | "heavypush" | "farm" | "snipers" | "lances"
+            "fort"
+                | "radarfort"
+                | "skirmfort"
+                | "heavies"
+                | "heavypush"
+                | "paladin"
+                | "farm"
+                | "snipers"
+                | "lances"
+                | "veto-scalpels"
+                | "veto-scalpels10"
         ) && frame == 300
         {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
                 c.set_move_state(0, 0);
                 // Out of the way of the heavies' fight.
-                if test == "heavies" || test == "heavypush" {
+                if matches!(test.as_str(), "heavies" | "heavypush" | "paladin" | "veto-scalpels" | "veto-scalpels10") {
                     c.move_to(get_directional_point(base, enemy, -600.0), 0);
                 }
             }

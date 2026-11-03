@@ -470,6 +470,11 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
     }))
 }
 
+/// Conquest objectives and the one under way (see `economy::conquest`).
+pub fn conquest(ai: &mut Ai, _: &Args) -> Out {
+    Ok(ai.conquest_json())
+}
+
 /// The map's regime: structural openness per movement tier (lanes), the
 /// deciding tier and density (see `crate::regime`).
 pub fn regime(ai: &mut Ai, _: &Args) -> Out {
@@ -1237,6 +1242,14 @@ pub fn snapshot(ai: &mut Ai, _: &Args) -> Out {
 pub fn tick_value(ai: &Ai) -> Value {
     let e = ai.cb.economy();
     let res = |r: Resource| json!([r1(e.current(r)), r1(e.income(r)), r1(e.usage(r)), r1(e.storage(r))]);
+    let f = &ai.war.front;
+    let front = json!([
+        f.ema.map(|e| e.round() as i64),
+        f.ratchet.round() as i64,
+        r2(f.escalation()),
+        f.contact.0.round() as i64,
+        f.contact.1.round() as i64
+    ]);
     json!({
         "m": res(ai.metal),
         "e": res(ai.energy),
@@ -1254,6 +1267,9 @@ pub fn tick_value(ai: &Ai) -> Value {
         "density": ai.regime.density.round() as i64,
         "laneness": r2(ai.regime.laneness()),
         "forecast": ai.projected_metal_density().round() as i64,
+        // Fight density (see `military::front`; measured with `frontgate` on or
+        // off): smoothed, ratchet, escalation, our metal in contact, all ours.
+        "front": front,
         // `densgate`: phase minute, income scale, phase income, map diagonal.
         "phase": if ai.phase_on() {
             json!([r1(ai.phase_minutes()), r2(ai.phase_scale()), r1(ai.phase_income()), ai.phase_map_diag().round() as i64])

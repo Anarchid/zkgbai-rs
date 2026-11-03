@@ -293,7 +293,7 @@ impl Ai {
     }
 
     /// Our job building `u`, if one does.
-    fn eco_task_on(&self, u: Unit) -> Option<TaskId> {
+    pub(super) fn eco_task_on(&self, u: Unit) -> Option<TaskId> {
         (self.eco.construction_tasks.iter().copied())
             .find(|&id| self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.target == Some(u)))
     }
@@ -308,7 +308,7 @@ impl Ai {
     }
 
     /// A job helping to build the allied frame `u`.
-    fn eco_help_frame(&mut self, u: Unit, list: List) -> Option<TaskId> {
+    pub(super) fn eco_help_frame(&mut self, u: Unit, list: List) -> Option<TaskId> {
         let def = u.def()?;
         let mut ct = WorkerTask::construction(def, u.pos(), u.building_facing());
         if let Some(c) = ct.as_construction_mut() {

@@ -61,6 +61,24 @@ const APPROACH_TRAVEL: f32 = 128.0;
 const APPROACH_STALL: i32 = 20 * 30;
 const APPROACH_SHUN: i32 = 60 * 30;
 const APPROACH_SHUN_RADIUS: f32 = 64.0;
+/// A combat unit's repair pulls a worker by the metal its missing health is
+/// worth (`lightrepair`): in full from REPAIR_FULL_METAL up, less below. The
+/// flat pull (250 + health / 10) outbid a mex beside the worker (100 + up to
+/// 100 for free spots near) for a Dart at half health, 60 HP or 20 metal,
+/// which Zero-K heals for free once it idles (5 HP/s after 60 s; Glaives 20
+/// HP/s after 5 s). Off with `disable=lightrepair`.
+const REPAIR_FULL_METAL: f32 = 150.0;
+
+/// How much of a combat unit's repair pull it gets (0..=1): the metal worth
+/// of its missing health over REPAIR_FULL_METAL.
+fn repair_worth(cost: f32, health: f32, max_health: f32) -> f32 {
+    if max_health <= 0.0 {
+        return 1.0;
+    }
+    let missing = cost * ((max_health - health) / max_health).clamp(0.0, 1.0);
+    (missing / REPAIR_FULL_METAL).min(1.0)
+}
+
 /// Spring's repair and reclaim command ids (a build's is minus the def id).
 const CMD_REPAIR: i32 = 40;
 const CMD_RECLAIM: i32 = 90;
@@ -137,7 +155,11 @@ impl Ai {
         let view = self.war.view(unit.def());
         // The operator's greed dial scales the threat a worker perceives.
         let greed = self.op_greed();
+        // The predictor speaks for a commander in a fight it judged (see
+        // `comguard`): no flinch from the threat paint.
+        let answered = w.is_com && self.comguard_answers(wid);
         if !w.is_chicken
+            && !answered
             && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
                 || ((unit.health() < unit.max_health() && w.raid_defense.is_none() || w.get_shields() < 0.5)
                     && view.get_threat(pos) / greed > 0.0
@@ -165,11 +187,20 @@ impl Ai {
         let (is_chicken, chicken_frame, last_retreat_frame) = (w.is_chicken, w.chicken_frame, w.last_retreat_frame);
         if is_chicken {
             let view = self.war.view(unit.def());
-            if view.get_threat(pos) == 0.0
-                && ((view.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
-                    || frame - chicken_frame > 150)
+            // A commander the predictor holds out of a fight stays out (see
+            // `comguard`), at its own haven.
+            let guarded = self.comguard_haven(wid);
+            if guarded.is_none()
+                && (answered
+                    || (view.get_threat(pos) == 0.0
+                        && ((view.get_total_friendly_threat(pos) > 0.0 && frame - chicken_frame > 90)
+                            || frame - chicken_frame > 150)))
             {
                 self.eco_stop_chickening(wid);
+            } else if let Some(haven) = guarded {
+                if frame - last_retreat_frame > 15 && distance(pos, haven) > 25.0 {
+                    self.comguard_retreat(wid, haven);
+                }
             } else if frame - last_retreat_frame > 15 {
                 // Ahead of the enemy to where it gets last, if it pays.
                 let haven = self.incursion_refuge(unit).unwrap_or_else(|| self.graph_get_closest_haven(pos));
@@ -419,7 +450,8 @@ impl Ai {
             let p = t.get_pos();
             let near: f32 = raiders.iter().filter(|r| distance(r.0, p) <= RAID_RADIUS).map(|r| r.1).sum();
             let mut cost = 500.0 * view.get_effective_threat(p).max(0.0);
-            if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) {
+            // Not on conquered ground with no enemy near now (see `conquest`).
+            if near > 0.0 && near > RAID_HOLD * self.war.get_total_friendly_power(p) && !self.conquest_ground_safe(p) {
                 cost += RAID_COST + near;
             }
             // The operator's greed dial: far, dangerous jobs priced cheaper.
@@ -438,6 +470,7 @@ impl Ai {
                 && self.eco_prerequisites_ready(t)
                 && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
                 && !self.eco_worker_shuns(worker, t.get_pos())
+                && !(worker.is_com && self.comguard_avoids(worker.id, t.get_pos()))
         };
         // Metal only this type of constructor gets to goes first.
         let others = match def {
@@ -569,6 +602,16 @@ impl Ai {
             .collect()
     }
 
+    /// What worker `worker` at `wpos` doing `task` costs (lower is better),
+    /// with a commander holding conquered ground kept near it
+    /// (`conquestleash`).
+    fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+        let cost = self.eco_cost_of_job_alone(worker, wpos, task);
+        if cost >= NEVER {
+            return cost;
+        }
+        cost + self.conquest_leash(worker.id, task.get_pos())
+    }
     /// What worker `w`'s present job costs it on the ladder (lower is
     /// better; `NEVER` without one), as `eco_assign_worker` weighs keeping
     /// it: for jobs handed out otherwise (a ditch, see `terraform`).
@@ -583,8 +626,9 @@ impl Ai {
         cost
     }
 
-    /// What worker `worker` at `wpos` doing `task` costs (lower is better).
-    fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+    /// What worker `worker` at `wpos` doing `task` costs on its own (lower
+    /// is better).
+    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
         let task_pos = task.get_pos();
@@ -616,6 +660,14 @@ impl Ai {
                 // over workers like other jobs.
                 if self.op_priority(task.id) {
                     return (dist / 4.0) - 3000.0 + (400.0 * (cost_mod - 1.0)).max(0.0);
+                }
+
+                // A conquest objective's job: its commander's first, and
+                // its turrets' for builders near them; energy at home for
+                // the energy worker while the commander is away (see
+                // `conquest`).
+                if let Some(bonus) = self.conquest_bonus(worker.id, task.id) {
+                    return (dist / 4.0) - bonus + (400.0 * (cost_mod - 1.0)).max(0.0);
                 }
 
                 // On the crew of a tracked issue: its share of the value
@@ -654,8 +706,8 @@ impl Ai {
                 }
 
                 if def_id == ids.mex_id {
-                    // for mexes
-                    let cluster = self.eco_mex_cluster_bonus(task_pos);
+                    // for mexes; conquered ground's first (see `conquest`)
+                    let cluster = self.eco_mex_cluster_bonus(task_pos) + self.conquest_ground_bonus(task_pos);
                     if worker.is_greedy {
                         return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 1.0)).max(0.0);
                     }
@@ -824,15 +876,21 @@ impl Ai {
                         return dist;
                     }
 
+                    let worth = if self.dev_off("lightrepair") {
+                        1.0
+                    } else {
+                        repair_worth(td.cost(self.metal), health, max_health)
+                    };
+
                     if rptask.is_shield_mob && worker.has_shields {
-                        return dist + (100.0 * (cost_mod - 1.0)) - 250.0 - max_health / (5.0 * cost_mod);
+                        return dist + (100.0 * (cost_mod - 1.0)) - worth * (250.0 + max_health / (5.0 * cost_mod));
                     }
 
                     if !self.graph.is_ally_territory(task_pos) {
                         return dist + 500.0;
                     }
 
-                    dist + (100.0 * (cost_mod - 1.0)) - 250.0 - (max_health + health) / (10.0 * cost_mod)
+                    dist + (100.0 * (cost_mod - 1.0)) - worth * (250.0 + (max_health + health) / (10.0 * cost_mod))
                 } else if !worker.is_greedy
                     && td.is_able_to_attack()
                     && !td.is_builder()
@@ -1076,6 +1134,31 @@ mod tests {
         let lone = cluster_bonus(spots[3], spots.iter().copied());
         assert_eq!(lone, 0.0);
         assert!((clustered - CLUSTER_BONUS * (2.0 / 3.0 + 0.5)).abs() < 1e-3);
+    }
+
+    /// A lone worker's repair cost for a mobile combat unit on our ground,
+    /// as `eco_cost_of_job_alone` prices it, against a lone mex there.
+    fn repair_cost(dist: f32, worth: f32, health: f32, max_health: f32) -> f32 {
+        dist - worth * (250.0 + (max_health + health) / 10.0)
+    }
+
+    #[test]
+    fn mex_beside_worker_beats_half_dead_dart() {
+        // Dart (vehscout): 40 metal, 120 HP, at half health, 50 elmos off;
+        // a lone mex 50 elmos off: (dist / 4) - 100.
+        let mex = 50.0 / 4.0 - 100.0;
+        let dart = repair_cost(50.0, repair_worth(40.0, 60.0, 120.0), 60.0, 120.0);
+        assert!(mex < dart, "mex {mex} vs dart {dart}");
+        // the flat pull it had picked the Dart
+        assert!(repair_cost(50.0, 1.0, 60.0, 120.0) < mex);
+    }
+
+    #[test]
+    fn heavy_repair_keeps_its_full_pull() {
+        // 600 metal at half health: 300 metal missing
+        assert_eq!(repair_worth(600.0, 1200.0, 2400.0), 1.0);
+        assert_eq!(repair_worth(40.0, 120.0, 120.0), 0.0);
+        assert_eq!(repair_worth(40.0, 60.0, 0.0), 1.0);
     }
 
     #[test]

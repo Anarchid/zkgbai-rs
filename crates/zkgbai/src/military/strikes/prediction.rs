@@ -2,6 +2,7 @@
 //! resolved into plain snapshots before submission; stale answers never launch.
 use super::{COOLDOWN, DIVE_TIMEOUT, Job, Phase, Wave, launchable};
 use crate::Ai;
+use crate::military::fightsim::live::{COMSPEC, commander_weapons, read_loadout};
 use crate::military::fightsim::{FateMode, FightSnapshot, Model, SnapUnit, UnitSpec, WeaponSpec};
 use crate::util::distance;
 use springai::UnitDef;
@@ -76,7 +77,9 @@ impl Predictor {
 }
 
 impl Ai {
-    fn strike_spec(&self, def: UnitDef, target: Option<UnitDef>) -> Arc<UnitSpec> {
+    /// `def`'s weapons that hit `target`; unit `id`'s, if it is a commander
+    /// (see [`Ai::fight_spec_of`]).
+    fn strike_spec(&self, def: UnitDef, target: Option<UnitDef>, id: Option<i32>) -> Arc<UnitSpec> {
         let mut weapons: Vec<WeaponSpec> = Vec::new();
         for mount in def.weapon_mounts() {
             let Some(wd) = mount.weapon_def() else { continue };
@@ -99,10 +102,17 @@ impl Ai {
                 name,
                 range: wd.range(),
                 reload: wd.reload(),
-                salvo: wd.salvo_size(),
+                // Shots per reload as the hit tables count them: projectiles per
+                // shot times the burst (a Scalpel fires two missiles a volley; the
+                // engine's salvo size alone, its burst, is one).
+                salvo: wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1),
                 damage,
                 weapon_type: wd.weapon_type(),
             });
+        }
+        if self.defs.is_commander(def) && !self.dev_off(COMSPEC) {
+            let fired = id.and_then(|id| self.commander_fired(id, read_loadout(springai::Unit::from_id(self.cb, id))));
+            weapons = commander_weapons(&weapons, def, fired.as_deref());
         }
         Arc::new(UnitSpec {
             def: self.defs.name(def).into(),
@@ -200,7 +210,7 @@ impl Ai {
             let pos = f.get_pos();
             snapshot.units.push(SnapUnit {
                 side: 0,
-                spec: self.strike_spec(def, None),
+                spec: self.strike_spec(def, None, Some(*id)),
                 hp: f.unit.health(),
                 x: pos.x,
                 z: pos.z,
@@ -212,7 +222,7 @@ impl Ai {
             job.id.and_then(|id| self.war.targets.get(&id)).map_or(def.health(), |e| e.get_health() * e.def_health());
         let target = snapshot.units.len();
         let seen = job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible);
-        let mut spec = self.strike_spec(def, ground_target);
+        let mut spec = self.strike_spec(def, ground_target, job.id);
         if let Some(e) = seen {
             Arc::make_mut(&mut spec).health = e.unit.max_health().max(1.0);
         }
@@ -224,7 +234,7 @@ impl Ai {
             for i in 1..job.count {
                 snapshot.units.push(SnapUnit {
                     side: 1,
-                    spec: self.strike_spec(def, ground_target),
+                    spec: self.strike_spec(def, ground_target, None),
                     hp: def.health(),
                     x: job.pos.x + i as f32 * 80.0,
                     z: job.pos.z,
@@ -258,7 +268,7 @@ impl Ai {
             } // Fail closed for unbounded fronts.
             snapshot.units.push(SnapUnit {
                 side: 1,
-                spec: self.strike_spec(def, ground_target),
+                spec: self.strike_spec(def, ground_target, Some(e.unit_id)),
                 hp: e.get_health() * e.def_health(),
                 x: e.position.x,
                 z: e.position.z,

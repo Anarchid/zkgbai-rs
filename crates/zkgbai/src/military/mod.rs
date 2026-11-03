@@ -12,6 +12,7 @@ pub mod enemy;
 pub mod fightsim;
 pub mod fire_squad;
 pub mod firefighters;
+pub mod front;
 pub mod handlers;
 pub mod impalers;
 pub mod incursions;
@@ -203,6 +204,8 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    /// The density of our fights (see [`front`]).
+    pub front: front::Front,
     /// The Jugglenaut's def while they walk past enemy buildings rather
     /// than attack-move (`sumostatic`, see `jumps::SUMO_LOCK`).
     pub sumo_walks: Option<i32>,
@@ -272,6 +275,7 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            front: front::Front::default(),
             sumo_walks: None,
         }
     }
@@ -591,6 +595,7 @@ impl Ai {
         self.guard("raid_test.update", |ai| ai.raid_test_update(frame));
         self.guard("stomp_test.update", |ai| ai.stomp_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
+        self.guard("front.update", |ai| ai.front_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -690,7 +695,7 @@ impl Ai {
             return;
         }
         // Scouts picket the lanes to our economy (see `stakeouts`).
-        if self.stakeouts_claims(name) {
+        if self.stakeouts_claims(unit.id(), name) {
             self.assign_role(unit, Role::Stakeout);
             return;
         }
@@ -998,6 +1003,10 @@ impl Ai {
         paralyzer: bool,
     ) {
         self.raider_friendly_hit(unit, attacker, paralyzer);
+        // Turrets for objectives under attack (see `economy::conquest`).
+        if unit.team() == self.team_id {
+            self.conquest_attacked(unit, attacker);
+        }
         if self.test.as_deref() == Some("shadowprobe") {
             self.shadow_probe_damaged(unit, weapon);
         }
