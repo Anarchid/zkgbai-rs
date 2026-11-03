@@ -25,6 +25,8 @@
 use std::collections::BTreeMap;
 
 use crate::Ai;
+use crate::military::Enemy;
+use crate::military::qrf::live::ANTI_RAIDERS;
 
 /// Frames between estimates.
 const PERIOD: i32 = 30;
@@ -53,6 +55,8 @@ const LOG_PERIOD: i32 = 1800;
 pub struct Intel {
     /// Enemy units and buildings identified and not known dead: cost.
     known: BTreeMap<i32, f32>,
+    /// Of those, the enemy's line (see [`is_line`]): cost.
+    line: BTreeMap<i32, f32>,
     /// Cost of the enemy units we have seen die.
     pub killed: f32,
     /// The enemy's estimated production so far, and its rate (metal/s).
@@ -86,6 +90,26 @@ impl Intel {
     pub fn estimated_value(&self) -> f32 {
         (self.produced - self.killed).max(self.known.values().sum::<f32>())
     }
+
+    /// Metal of the enemy's line seen alive and not seen to die.
+    pub fn line_value(&self) -> f32 {
+        self.line.values().sum()
+    }
+}
+
+/// The enemy's line: ground fighters other than raiders and the riots
+/// that run with them (the QRF's anti-raiders: Venoms, Bolas, Archers),
+/// commanders and constructors. What the raider phase gives way to.
+fn is_line(e: &Enemy) -> bool {
+    !e.is_static
+        && !e.is_raider
+        && !e.is_com
+        && !e.is_worker
+        && !e.can_fly()
+        && e.def_speed() > 0.0
+        && e.def_max_weapon_range() > 0.0
+        && e.def_builds_nothing()
+        && !ANTI_RAIDERS.contains(&e.def_name.as_str())
 }
 
 impl Ai {
@@ -97,7 +121,10 @@ impl Ai {
         // Everything identified, but commanders (they come free).
         for (&id, e) in &self.war.targets {
             if let Some(ud) = e.ud.filter(|_| e.identified && !e.is_com) {
-                self.intel.known.entry(id).or_insert_with(|| ud.cost(metal));
+                let cost = *self.intel.known.entry(id).or_insert_with(|| ud.cost(metal));
+                if is_line(e) {
+                    self.intel.line.insert(id, cost);
+                }
             }
         }
 
@@ -127,12 +154,13 @@ impl Ai {
         if frame / LOG_PERIOD != (frame - PERIOD) / LOG_PERIOD {
             let i = &self.intel;
             self.log(&format!(
-                "intel: enemy made ~{:.0} metal (~{:.1}/s); seen alive {:.0}, destroyed {:.0}, unaccounted {:.0}, \
-                 of which suspicious {:.0} (we keep {:.0}% in buildings); spots ours {:.1}, theirs seen {:.1}, \
-                 inferred {:.1}; our income {:.1}",
+                "intel: enemy made ~{:.0} metal (~{:.1}/s); seen alive {:.0} (line {:.0}), destroyed {:.0}, \
+                 unaccounted {:.0}, of which suspicious {:.0} (we keep {:.0}% in buildings); spots ours {:.1}, \
+                 theirs seen {:.1}, inferred {:.1}; our income {:.1}",
                 i.produced,
                 i.income,
                 i.known.values().sum::<f32>(),
+                i.line_value(),
                 i.killed,
                 i.unaccounted(),
                 i.suspicious(),
@@ -147,6 +175,7 @@ impl Ai {
 
     /// An enemy unit died.
     pub fn intel_enemy_destroyed(&mut self, id: i32, cost: Option<f32>) {
+        self.intel.line.remove(&id);
         match self.intel.known.remove(&id) {
             Some(c) => self.intel.killed += c,
             None => self.intel.killed += cost.unwrap_or(0.0),

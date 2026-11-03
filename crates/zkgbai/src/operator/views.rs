@@ -430,6 +430,7 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
             "known": w.targets.len(),
             "defenses": w.enemy_porcs.len(),
             "outranging_share": r2(w.outranging_share),
+            "line_value": r1(i.line_value()),
         },
         "ours": {
             "army_value": r1(ai.fac.army_value),
