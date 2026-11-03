@@ -690,7 +690,7 @@ impl Ai {
         }) else {
             return;
         };
-        let best = (0..c.objectives.len())
+        let best: Vec<(usize, f32)> = (0..c.objectives.len())
             .filter(|&i| {
                 let o = &c.objectives[i];
                 !c.taken.contains(&i)
@@ -700,13 +700,28 @@ impl Ai {
             })
             .map(|i| (i, self.conquest_expected(&c.objectives[i])))
             .filter(|(_, v)| *v > 0.0)
-            .max_by(|a, b| {
-                let race = |i: usize| {
-                    let o = &c.objectives[i];
-                    (1.0 + (o.enemy_walk - o.walk) / RACE_SCALE).clamp(0.3, 1.5)
-                };
-                (a.1 * race(a.0)).total_cmp(&(b.1 * race(b.0)))
-            });
+            .collect::<Vec<_>>();
+        let race = |i: usize| {
+            let o = &c.objectives[i];
+            (1.0 + (o.enemy_walk - o.walk) / RACE_SCALE).clamp(0.3, 1.5)
+        };
+        let mut ranked = best;
+        ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
+        // Allied ZKGBAIs playing on their own (see `iq`) take the picks in
+        // turn, by team number, so their commanders spread over the
+        // objectives instead of walking to the same one (user, 2026-11-03).
+        let rank = self.iq.peers.iter().filter(|&&t| t < self.team_id).count();
+        let k = if ranked.is_empty() { 0 } else { rank % ranked.len() };
+        if rank > 0 && !ranked.is_empty() {
+            self.log(&format!(
+                "conquest: allied ZKGBAI number {} of {}: the pick {} of {}",
+                rank + 1,
+                self.iq.peers.len() + 1,
+                k + 1,
+                ranked.len()
+            ));
+        }
+        let best = ranked.get(k).copied();
         let Some((idx, expected)) = best else {
             self.eco.conquest.done = true;
             self.log("conquest: no objective is open");
