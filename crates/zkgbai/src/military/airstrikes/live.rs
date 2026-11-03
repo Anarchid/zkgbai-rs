@@ -23,13 +23,13 @@ const MAX_SECONDARY_SORTIES: usize = 4;
 /// Our own losses a drop may cost, as a share of what it removes.
 const COLLATERAL_SHARE: f32 = 0.5;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
-/// Raptors wearing down an aircraft that cannot shoot back stay on it longer:
+/// Raptors wearing down an aircraft without counted anti-air stay on it longer:
 /// strafing passes keep each firing about 14% of the time (two did 28 damage
 /// a second to a hovering Revenant in the staged fixture, and the 150-second
 /// limit called them home with it at 639 of 4200 HP, to regenerate).
 const WEAR_TIMEOUT: i32 = 30 * 300;
 fn sortie_timeout(job: &Mission) -> i32 {
-    if job.kind == MissionKind::Intercept && job.defenseless { WEAR_TIMEOUT } else { SORTIE_TIMEOUT }
+    if job.kind == MissionKind::Intercept && job.wearable { WEAR_TIMEOUT } else { SORTIE_TIMEOUT }
 }
 const COOLDOWN: i32 = 30 * 15;
 
@@ -1147,12 +1147,12 @@ impl Ai {
                     break;
                 }
             }
-            // A quarry that cannot shoot at aircraft and flies unescorted is
+            // A quarry without counted anti-air (see `Mission::wearable`), unescorted, is
             // worn down by the Raptors that are ready: they keep firing until
             // it dies or flees, so the one-pass package (six for a Revenant)
             // need not be filled. Procurement still buys toward the full one.
             if selected.is_none()
-                && wears_down(plan.job.kind, plan.job.defenseless, plan.risk)
+                && wears_down(plan.job.kind, plan.job.wearable, plan.risk)
                 && !self.dev_off("raptorwear")
             {
                 let full = plan.packages.iter().flatten().filter(|(k, _)| *k == Plane::Raptor).map(|(_, n)| *n).max();
@@ -1549,7 +1549,7 @@ mod operator_tests {
             deep: true,
             shields: Vec::new(),
             fast: false,
-            defenseless: false,
+            wearable: false,
         };
         let route = vec![Vec3::xz(500.0, 200.0), job.pos];
         let package = vec![(Plane::Odin, 1), (Plane::Sparrow, 1)];

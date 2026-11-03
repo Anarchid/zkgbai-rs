@@ -56,17 +56,18 @@ fn strafe_magpies(hp: f32, fast: bool) -> usize {
 /// Anti-air flying this close to an aircraft covers it (a Trident reaches 750,
 /// a Raptor 800): fighters going at it would meet that escort.
 const ESCORT_REACH: f32 = 1000.0;
-/// A Raptor's laser does 100 damage per second to aircraft. Against a quarry
-/// that cannot shoot back and flies without escort, whatever Raptors are ready
-/// go (see `Mission::defenseless`) where this little anti-air is on the way.
+/// A Raptor's laser does 100 damage per second to aircraft (about 14 in
+/// practice against a hovering gunship: strafing passes). Against a quarry
+/// without counted anti-air or escort, whatever Raptors are ready go (see
+/// `Mission::wearable`) where this little ground anti-air is on the way.
 pub(super) const WEAR_MAX_AA: f32 = 0.15;
 /// Aircraft that hunt ours: anti-air whatever their tooltip says.
 pub(super) const FIGHTERS: [&str; 3] = ["planefighter", "planeheavyfighter", "planesupport"];
 
 /// Whether a plan whose full package cannot be filled may go with the
-/// Raptors that are ready (see `Mission::defenseless`).
-fn wears_down(kind: MissionKind, defenseless: bool, risk: Risk) -> bool {
-    kind == MissionKind::Intercept && defenseless && risk.aa <= WEAR_MAX_AA && !risk.intercepted
+/// Raptors that are ready (see `Mission::wearable`).
+fn wears_down(kind: MissionKind, wearable: bool, risk: Risk) -> bool {
+    kind == MissionKind::Intercept && wearable && risk.aa <= WEAR_MAX_AA && !risk.intercepted
 }
 
 const GROUP_MIN_UNIT_METAL: f32 = 150.0;
@@ -323,11 +324,15 @@ struct Mission {
     shields: Vec<Shield>,
     /// Too fast for a Raven's guided bomb (`RAVEN_MAX_TARGET_SPEED`).
     fast: bool,
-    /// An identified aircraft that cannot shoot at ours, with no anti-air
-    /// flying within `ESCORT_REACH` of it (a Revenant, a Gnat): Raptors keep
-    /// firing at it until it dies or flees, so they need not kill it in one
-    /// pass, and fewer than the full package may go (`raptorwear`).
-    defenseless: bool,
+    /// An identified aircraft carrying no anti-air we count (no AA or flex-AA
+    /// weapon, not a fighter), with none flying within `ESCORT_REACH` of it (a
+    /// Revenant, a Gnat): Raptors keep firing at it until it dies or flees,
+    /// so they need not kill it in one pass, and fewer than the full package
+    /// may go (`raptorwear`). Not harmless: a Revenant's rocket salvo (210 a
+    /// rocket) hit strafing Raptors with 10 of 142 shots in the staged runs
+    /// and killed one already hurt Raptor, while Raptors did ~19.8k damage
+    /// to Revenants; the 50%-health abort sends hurt ones home.
+    wearable: bool,
 }
 impl Mission {
     fn key(&self) -> (MissionKind, i32) {
@@ -365,9 +370,9 @@ impl Mission {
     }
 }
 
-/// See `Mission::defenseless`. Unidentified contacts never are: what they
+/// See `Mission::wearable`. Unidentified contacts never are: what they
 /// carry is unknown.
-fn defenseless(e: &Contact, contacts: &[Contact], frame: i32) -> bool {
+fn wearable(e: &Contact, contacts: &[Contact], frame: i32) -> bool {
     e.air
         && e.known
         && !e.aa
@@ -423,7 +428,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             continue;
         }
         let here = shields::over(&carriers, &[e.pos]);
-        let defenseless = defenseless(e, contacts, frame);
+        let wearable = wearable(e, contacts, frame);
         let mut add = |kind, targets: Vec<i32>, hp, value| {
             jobs.push(Mission {
                 kind,
@@ -439,7 +444,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                 deep: e.singu || distance(e.pos, home) >= 3000.0,
                 shields: here.clone(),
                 fast: !e.static_ && e.speed >= RAVEN_MAX_TARGET_SPEED,
-                defenseless,
+                wearable,
             })
         };
         if e.air {
@@ -574,7 +579,7 @@ fn outposts(contacts: &[Contact], carriers: &[Shield], home: Vec3, frame: i32) -
             deep: distance(seed.pos, home) >= 3000.0,
             shields,
             fast: false,
-            defenseless: false,
+            wearable: false,
         };
         job.aim_group(Arms::default());
         jobs.push(job);

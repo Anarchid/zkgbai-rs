@@ -164,7 +164,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "raptorwear",
         "Military",
-        "ready Raptors go at an unescorted aircraft that cannot shoot back, such as a Revenant, without waiting for the full one-pass package (default on)",
+        "ready Raptors go at an unescorted aircraft without counted anti-air, such as a Revenant, without waiting for the full one-pass package, and stay on it up to 300 s (default on)",
     ),
     (
         "likhorevenant",

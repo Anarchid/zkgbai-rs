@@ -55,7 +55,7 @@ pub(super) fn job(kind: MissionKind, hp: f32) -> Mission {
         deep: false,
         shields: Vec::new(),
         fast: false,
-        defenseless: false,
+        wearable: false,
     }
 }
 #[test]
@@ -823,27 +823,27 @@ fn gunships_over_our_ground_are_intercepted_anywhere() {
 }
 
 #[test]
-fn defenseless_quarry_cannot_shoot_air_and_flies_unescorted() {
+fn wearable_quarry_has_no_counted_aa_and_flies_unescorted() {
     let menacing = |c: Contact| Contact { menacing: true, ..c };
     let solo = intercept(&[menacing(revenant(1))], 1).unwrap();
-    assert!(solo.defenseless);
-    // Its own pair is no escort: Revenants cannot shoot at aircraft.
+    assert!(solo.wearable);
+    // Its own pair is no escort: a Revenant carries no counted anti-air.
     let pair = [menacing(revenant(1)), menacing(revenant(2))];
-    assert!(intercept(&pair, 1).unwrap().defenseless);
+    assert!(intercept(&pair, 1).unwrap().wearable);
     // A Trident (or a Raptor) flying with it is.
     let trident = Contact { air: true, aa: true, pos: Vec3::xz(5600.0, 5400.0), ..enemy(3) };
-    assert!(!intercept(&[menacing(revenant(1)), trident.clone()], 1).unwrap().defenseless);
+    assert!(!intercept(&[menacing(revenant(1)), trident.clone()], 1).unwrap().wearable);
     let far = Contact { pos: Vec3::xz(6200.0, 5000.0), ..trident.clone() };
-    assert!(intercept(&[menacing(revenant(1)), far], 1).unwrap().defenseless);
+    assert!(intercept(&[menacing(revenant(1)), far], 1).unwrap().wearable);
     let stale = Contact { seen: 300 - FRESH - 1, ..trident };
-    assert!(intercept(&[menacing(revenant(1)), stale], 1).unwrap().defenseless);
+    assert!(intercept(&[menacing(revenant(1)), stale], 1).unwrap().wearable);
     // A Nimbus shoots back; an unidentified dot might.
-    assert!(!intercept(&[menacing(Contact { aa: true, ..revenant(1) })], 1).unwrap().defenseless);
-    assert!(!intercept(&[menacing(Contact { known: false, ..revenant(1) })], 1).unwrap().defenseless);
+    assert!(!intercept(&[menacing(Contact { aa: true, ..revenant(1) })], 1).unwrap().wearable);
+    assert!(!intercept(&[menacing(Contact { known: false, ..revenant(1) })], 1).unwrap().wearable);
 }
 
 #[test]
-fn only_defenseless_interceptions_in_light_aa_wear_down() {
+fn only_wearable_interceptions_in_light_aa_wear_down() {
     assert!(wears_down(MissionKind::Intercept, true, clear()));
     assert!(wears_down(MissionKind::Intercept, true, Risk { aa: WEAR_MAX_AA, ..clear() }));
     assert!(!wears_down(MissionKind::Intercept, true, Risk { aa: 0.3, ..clear() }));

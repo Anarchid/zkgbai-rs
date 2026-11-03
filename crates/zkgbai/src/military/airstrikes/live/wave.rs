@@ -269,7 +269,7 @@ mod tests {
             deep: false,
             shields: Vec::new(),
             fast: false,
-            defenseless: false,
+            wearable: false,
         };
         let risk = Risk { aa: 0.0, exposure: 0.0, intercepted: false, burst: 0.0 };
         Plan {

@@ -95,7 +95,7 @@ impl Ai {
                 deep: false,
                 shields: Vec::new(),
                 fast: false,
-                defenseless: false,
+                wearable: false,
                 inference: Some(f),
             })
             .collect()

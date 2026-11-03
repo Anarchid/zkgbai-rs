@@ -48,10 +48,16 @@ Primary missions:
   only in our territory or inbound to home).
   The package is a one-pass kill, one Raptor per 700 HP (six for a
   Revenant), and procurement buys toward it. When it cannot be filled and the
-  quarry cannot shoot at aircraft (no AA weapon, not a fighter) with no AA or
-  fighter within 1000 elmos of it, and little ground AA is on the way (risk
-  <= 0.15), the Raptors that are ready go anyway, even one: they keep firing
-  until it dies or flees (`disable=raptorwear`). Before this, the 2-3 ready
+  quarry carries no anti-air we count (no AA or flex-AA weapon, not a
+  fighter) with no AA or fighter within 1000 elmos of it, and little ground AA
+  is on the way (risk <= 0.15), the Raptors that are ready go anyway, even
+  one: they keep firing until it dies or flees, for up to 300 s instead of the
+  usual 150 (`disable=raptorwear`). Staged (`airstrike-raptors` vs
+  `airstrike-revenants`, smoke runs in zkgbai-runs/gunships): two Raptors do
+  ~28 damage/s to a hovering Revenant (strafing passes) and kill one in about
+  three minutes. A Revenant is not harmless: its rocket salvos hit strafing
+  Raptors 10 times in 142 shots (210 each) and killed one hurt Raptor, against
+  ~19.8k damage dealt to Revenants. Before this, the 2-3 ready
   Raptors never went at a Revenant pair working over our ground for four
   minutes (Agalta, 2026-11-03: six asked for), and flew at Gnats instead.
 - Statics worth at least 1000 metal, and every identified factory or strider
