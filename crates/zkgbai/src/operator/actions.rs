@@ -37,6 +37,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("earlycons", "Economy", "an early second Constable in the opening"),
     ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
     (
+        "remexfirst",
+        "Economy",
+        "a worker builds a free mex within 1200 elmos before a new factory, strider hub or plate, so a raided base is remexed before the air factory; remexes at high build priority",
+    ),
+    (
         "lightrepair",
         "Economy",
         "a combat unit's repair pulls workers by the metal its missing health is worth; one whose repair loses to a mex does not wait at home for it",

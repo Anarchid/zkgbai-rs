@@ -117,6 +117,26 @@ fn cluster_bonus(p: Vec3, free: impl Iterator<Item = Vec3>) -> f32 {
     (CLUSTER_BONUS * free.map(near).sum::<f32>()).min(CLUSTER_CAP)
 }
 
+/// Mexes before a new factory (`remexfirst`, default on): a worker whose
+/// cheapest job is a factory, strider hub or plate (not a commander's plop,
+/// nor a factory while we have none) builds a free metal spot within
+/// REMEX_RADIUS of it first, if that mex, its crowd and danger counted,
+/// costs under REMEX_CEILING (an unshared, unraided mex out to the radius
+/// does; a third worker on one, or raiders still near it, do not). A
+/// factory pulls by its metal cost (~750 against a mex's 100, plus up to
+/// 100 for free spots near), and raids that cost us mexes ask for an air
+/// factory (`airfire`) whose crew bonus comes on top: the constructors
+/// built the air factory in a base whose mexes had just died (user, 11-04).
+/// Zero-K has no construction decay, so a frame left for a mex waits.
+/// A worker's own mex is priced REMEX_KEEP lower: a commander joining it
+/// (+600 to the others' price) flipped a constructor between the mex and
+/// the factory 1360 elmos away every second while the commander's raid
+/// defense took it off and gave it back (Altair smoke, 11-04); raiders near
+/// it (RAID_COST) still send it off.
+const REMEX_RADIUS: f32 = 1200.0;
+const REMEX_CEILING: f32 = 300.0;
+const REMEX_KEEP: f32 = 700.0;
+
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
     Build(UnitDef, Vec3, i32),
@@ -600,7 +620,46 @@ impl Ai {
         let own = |t: &WorkerTask| matches!(&t.kind, TaskKind::Repair(r) if r.target.id() == wid);
         consider(&eco.repair_tasks, true, &own);
 
+        // A free mex near the worker before a new factory (`remexfirst`).
+        if let Some(fac) = task.and_then(|id| eco.tasks.get(id)).filter(|t| self.eco_new_factory_job(t))
+            && !self.dev_off("remexfirst")
+        {
+            let mex = eco.build_ids.mex_id;
+            let best = (eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)))
+                .filter(|t| t.as_construction().is_some_and(|c| c.build_type.id() == mex))
+                .filter(|t| distance(wpos, t.get_pos()) <= REMEX_RADIUS && reaches(t))
+                .map(|t| {
+                    let keep = if worker.task == Some(t.id) { REMEX_KEEP } else { 0.0 };
+                    (t, self.eco_cost_of_job(worker, wpos, t) - stranded(t) + threat_cost(t) - keep)
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .filter(|&(_, c)| c < REMEX_CEILING);
+            if let Some((m, c)) = best {
+                if worker.task != Some(m.id) {
+                    let (p, f) = (m.get_pos(), fac.get_pos());
+                    let name = fac.as_construction().map_or("", |c| self.defs.name(c.build_type));
+                    self.log(&format!(
+                        "economy: remexfirst: worker {wid} takes the mex at ({:.0}, {:.0}) (cost {c:.0}) before the {name} at ({:.0}, {:.0})",
+                        p.x, p.z, f.x, f.z
+                    ));
+                }
+                return Some(m.id);
+            }
+        }
+
         task
+    }
+
+    /// Whether `t` is the job of a new factory, strider hub or plate: not a
+    /// commander's plop, nor a factory while we have none (see
+    /// [`REMEX_RADIUS`]), nor one the operator asked for.
+    fn eco_new_factory_job(&self, t: &WorkerTask) -> bool {
+        let Some(c) = t.as_construction() else { return false };
+        let id = c.build_type.id();
+        !c.fac_plop
+            && !self.fac.factories.is_empty()
+            && (self.eco.build_ids.fac_ids.contains(&id) || self.defs.name(c.build_type).starts_with("plate"))
+            && !self.op_priority(t.id)
     }
 
     /// The types of our constructors other than `def` (commanders aside:
@@ -1277,6 +1336,24 @@ mod tests {
         for (cost, hp) in [(130.0, 480.0), (125.0, 520.0), (145.0, 1550.0)] {
             assert!(!repair_loses_to_mex(cost, hp / 2.0, hp), "{cost} m, {hp} HP");
         }
+    }
+
+    #[test]
+    fn remex_ceiling_takes_free_mexes_not_crowded_or_raided_ones() {
+        // A non-greedy worker's mex price (see `eco_cost_of_job_alone`):
+        // (dist / 4) - 100 - cluster + 600 (cost_mod - 2), cost_mod being 1
+        // plus the workers already on it nearer than this one.
+        let mex = |dist: f32, cluster: f32, on_it: f32| dist / 4.0 - 100.0 - cluster + (600.0 * (on_it - 1.0)).max(0.0);
+        // A lone mex at the edge of the radius, and one shared with one other.
+        assert!(mex(REMEX_RADIUS, 0.0, 0.0) < REMEX_CEILING);
+        assert!(mex(REMEX_RADIUS, 0.0, 1.0) < REMEX_CEILING);
+        // A third worker on it, or raiders near it (RAID_COST and up), not.
+        assert!(mex(0.0, CLUSTER_CAP, 2.0) >= REMEX_CEILING);
+        assert!(mex(0.0, CLUSTER_CAP, 0.0) + RAID_COST >= REMEX_CEILING);
+        // Its own mex: a commander joining it (counts 2) does not send the
+        // worker off; raiders near it do.
+        assert!(mex(REMEX_RADIUS, 0.0, 2.0) - REMEX_KEEP < REMEX_CEILING);
+        assert!(mex(0.0, CLUSTER_CAP, 0.0) + RAID_COST - REMEX_KEEP >= REMEX_CEILING);
     }
 
     #[test]
