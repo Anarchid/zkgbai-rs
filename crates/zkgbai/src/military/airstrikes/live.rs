@@ -23,6 +23,14 @@ const MAX_SECONDARY_SORTIES: usize = 4;
 /// Our own losses a drop may cost, as a share of what it removes.
 const COLLATERAL_SHARE: f32 = 0.5;
 const SORTIE_TIMEOUT: i32 = 30 * 150;
+/// Raptors wearing down an aircraft that cannot shoot back stay on it longer:
+/// strafing passes keep each firing about 14% of the time (two did 28 damage
+/// a second to a hovering Revenant in the staged fixture, and the 150-second
+/// limit called them home with it at 639 of 4200 HP, to regenerate).
+const WEAR_TIMEOUT: i32 = 30 * 300;
+fn sortie_timeout(job: &Mission) -> i32 {
+    if job.kind == MissionKind::Intercept && job.defenseless { WEAR_TIMEOUT } else { SORTIE_TIMEOUT }
+}
 const COOLDOWN: i32 = 30 * 15;
 
 #[derive(Default)]
@@ -891,8 +899,12 @@ impl Ai {
                 distance(w.target, pos) <= wave::MAX_PURSUIT
                     && wave::route_allowed(from, &approach_route, |p| self.graph.is_ally_territory(p))
             });
-            let done =
-                disabled || !valid || !wave_safe || troops_gone || hatched || frame - sortie.launched > SORTIE_TIMEOUT;
+            let done = disabled
+                || !valid
+                || !wave_safe
+                || troops_gone
+                || hatched
+                || frame - sortie.launched > sortie_timeout(&sortie.job);
             let mut keep = Vec::new();
             let mut friendly_release = Vec::new();
             for (index, id) in sortie.members.into_iter().enumerate() {
@@ -942,7 +954,7 @@ impl Ai {
                             "submerged_target"
                         } else if !safe {
                             if u.health() < u.max_health() * 0.5 { "damage" } else { "unsafe_route" }
-                        } else if frame - sortie.launched > SORTIE_TIMEOUT {
+                        } else if frame - sortie.launched > sortie_timeout(&sortie.job) {
                             "timeout"
                         } else if troops_gone {
                             "no_troops"
