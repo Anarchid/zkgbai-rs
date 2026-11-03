@@ -27,7 +27,11 @@
 //!   the group's side of it: the cheapest that makes the place as strong
 //!   as the group, else the strongest; one that reaches as far as the
 //!   group's main weapons and that the nearest crew (with the caretakers
-//!   in reach) can have standing before the group arrives. It is a
+//!   in reach) can have standing before the group arrives, or before as
+//!   long again as it has already stood within reach of the place (a force
+//!   that stands is not walking in; [`DWELL_GAP`]). The turret goes at
+//!   the place itself when the enemy already covers the side toward the
+//!   group. It is a
 //!   logistics issue (kind `walkin`): the crew gets a share of the place's
 //!   value, other construction waits for it (`pause`), and it is dropped if
 //!   no group calls for it for [`STAND_DOWN`] before it is started.
@@ -102,6 +106,13 @@ const OFFSET: f32 = 160.0;
 
 /// The force's approach to a place is read this far back along its route.
 const LOOKBACK: f32 = 400.0;
+
+/// A place a force has stood within reach of for some seconds gets as long
+/// again for its turret (counted up to [`HORIZON`]). Its clock starts over
+/// once no force has had it within reach for this many frames; places
+/// within [`DWELL_LINK`] elmos share a clock.
+const DWELL_GAP: i32 = 450;
+const DWELL_LINK: f32 = 300.0;
 
 /// Walk-in turrets under way at once, at most.
 const MAX_OPEN: usize = 2;
@@ -197,6 +208,9 @@ struct Assessment {
     /// Where it comes from into the place (its route's last waypoint).
     approach: Vec3,
     breach: bool,
+    /// Seconds a force has stood within reach of the place (see
+    /// [`DWELL_GAP`]).
+    dwell: f32,
 }
 
 /// Running totals, logged with the logistics summary.
@@ -243,6 +257,25 @@ pub struct State {
     helping: BTreeMap<i32, Unit>,
     /// Last journal note per place (on a 256-elmo grid) and event.
     notes: BTreeMap<(i32, i32, &'static str), i32>,
+    /// Places a force has within reach: anchor, first and last frame.
+    standing: Vec<(Vec3, i32, i32)>,
+}
+
+/// Seconds a force has had the place at `anchor` within reach, this pass
+/// included: its clock in `standing` (stale clocks pruned by the caller,
+/// see [`DWELL_GAP`]), started if it has none.
+fn stand(standing: &mut Vec<(Vec3, i32, i32)>, anchor: Vec3, frame: i32) -> f32 {
+    match standing.iter_mut().find(|s| distance(s.0, anchor) <= DWELL_LINK) {
+        Some(s) => {
+            s.0 = anchor;
+            s.2 = frame;
+            ((frame - s.1) as f32 / 30.0).min(HORIZON)
+        }
+        None => {
+            standing.push((anchor, frame, frame));
+            0.0
+        }
+    }
 }
 
 /// Distance from `p` to the polyline `line` (on the ground plane).
@@ -314,7 +347,13 @@ impl Ai {
             return;
         }
         let ours = self.walkin_ours();
-        for a in self.walkin_assess(&groups, &places, &ours) {
+        let standing = &mut self.logistics.walkin.standing;
+        standing.retain(|&(_, _, last)| frame - last <= DWELL_GAP);
+        let mut assessed = self.walkin_assess(&groups, &places, &ours);
+        for a in &mut assessed {
+            a.dwell = stand(&mut self.logistics.walkin.standing, a.place.anchor, frame);
+        }
+        for a in assessed {
             if a.breach {
                 self.logistics.walkin.stats.breaches += 1;
                 self.walkin_fortify(&a, now);
@@ -570,7 +609,7 @@ impl Ai {
                 }
                 let approach = paths.approach(pos(pl.anchor), LOOKBACK).map_or(g.pos, |p| Vec3::xz(p.x, p.z));
                 let breach = i.total() < g.power;
-                let a = Assessment { group: g.clone(), place: *pl, seconds: t, ours: i, approach, breach };
+                let a = Assessment { group: g.clone(), place: *pl, seconds: t, ours: i, approach, breach, dwell: 0.0 };
                 if breach {
                     first = Some(a);
                     break;
@@ -591,7 +630,7 @@ impl Ai {
     /// stands in time (see the module notes).
     fn walkin_fortify(&mut self, a: &Assessment, now: f32) {
         let frame = self.frame;
-        let by = now + a.seconds - MARGIN;
+        let by = now + a.seconds.max(a.dwell) - MARGIN;
         let worth = Worth::Deadline { value: a.place.value, by };
         // A turret for this place under way (anywhere it covers: a base has
         // several places): keep it called for, its deadline current.
@@ -623,11 +662,13 @@ impl Ai {
             self.walkin_note("capped", a, json!({"under_way": under_way, "here": here}));
             return;
         }
-        let site = if distance(a.place.anchor, a.approach) > 1.0 {
-            get_directional_point(a.place.anchor, a.approach, OFFSET)
-        } else {
-            a.place.anchor
-        };
+        // Toward the force; else (the enemy covers that side already, or it
+        // is blocked) at the place itself.
+        let mut sites = vec![a.place.anchor];
+        if distance(a.place.anchor, a.approach) > 1.0 {
+            sites.insert(0, get_directional_point(a.place.anchor, a.approach, OFFSET));
+        }
+        let site = sites[0];
         let hands = self.walkin_hands(site, &[], None, false);
         let (metal, income) = (self.eco.metal, self.eco.effective_income);
         let ours = a.ours.total();
@@ -659,7 +700,8 @@ impl Ai {
             return;
         };
         let (def, eta) = defs[k];
-        let Some((task, _)) = self.eco_logistics_porc(def, site, 0.0) else {
+        let Some((task, site)) = sites.iter().find_map(|&s| self.eco_logistics_porc(def, s, 0.0).map(|(t, _)| (t, s)))
+        else {
             self.logistics.walkin.stats.nosite += 1;
             self.walkin_note("nosite", a, json!({"turret": self.defs.name(def)}));
             return;
@@ -671,7 +713,7 @@ impl Ai {
         }
         let what = self.defs.name(def).to_owned();
         let why = format!(
-            "walk-in: {} units worth {:.0} (power {:.0}, reach {:.0}) {:.0}s from {:.0} of ours; met by {:.0} \
+            "walk-in: {} units worth {:.0} (power {:.0}, reach {:.0}) {:.0}s from {:.0} of ours (standing {:.0}s); met by {:.0} \
              (porc {:.0}, present {:.0}, in the way {:.0}, coming {:.0}); {what} +{:.0}, eta {eta:.0}s, {} hands",
             a.group.units,
             a.group.value,
@@ -679,6 +721,7 @@ impl Ai {
             a.group.reach,
             a.seconds,
             a.place.value,
+            a.dwell,
             ours,
             a.ours.porc,
             a.ours.present,
@@ -709,7 +752,8 @@ impl Ai {
         let mut note = json!({
             "event": event, "group": a.group.json(),
             "place": {"pos": [a.place.anchor.x.round(), a.place.anchor.z.round()], "value": a.place.value.round()},
-            "seconds": (a.seconds * 10.0).round() / 10.0, "ours": a.ours.json(), "met": a.ours.total().round(),
+            "seconds": (a.seconds * 10.0).round() / 10.0, "dwell": (a.dwell * 10.0).round() / 10.0,
+            "ours": a.ours.json(), "met": a.ours.total().round(),
         });
         if let (Some(n), Value::Object(e)) = (note.as_object_mut(), extra) {
             n.extend(e);
@@ -865,6 +909,23 @@ mod tests {
         assert_eq!(pick_turret(&c, 0.0, 2000.0), Some(1));
         // Nothing in time.
         assert_eq!(pick_turret(&[(1.0, 1.0, false)], 0.0, 10.0), None);
+    }
+
+    #[test]
+    fn a_force_that_stands_gets_as_long_again() {
+        let mut standing = Vec::new();
+        let base = Vec3::xz(1000.0, 1000.0);
+        assert_eq!(stand(&mut standing, base, 0), 0.0);
+        assert_eq!(stand(&mut standing, Vec3::xz(1200.0, 1000.0), 300), 10.0);
+        assert_eq!(stand(&mut standing, base, 600), 20.0);
+        // Elsewhere: its own clock.
+        assert_eq!(stand(&mut standing, Vec3::xz(2000.0, 1000.0), 600), 0.0);
+        // Capped at the horizon.
+        assert_eq!(stand(&mut standing, base, 600 + 30 * 100), HORIZON);
+        // Left alone past the gap: starts over.
+        let frame = 600 + 30 * 100 + DWELL_GAP + 1;
+        standing.retain(|&(_, _, last)| frame - last <= DWELL_GAP);
+        assert_eq!(stand(&mut standing, base, frame), 0.0);
     }
 
     #[test]
