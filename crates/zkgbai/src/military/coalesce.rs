@@ -37,6 +37,18 @@
 //! go back to whoever drove them, and a new gang may form at once (the
 //! Lotus is dead: the mexes behind it are the next fight).
 //!
+//! `coalsize` (default on): a gang is sized to its fight, as the QRF's
+//! mark sizes a team. The cluster's blocks (a raider squad is one block:
+//! its handler skips the whole squad while any member is borrowed) are
+//! taken nearest the focus first until they are worth [`JUST_ENOUGH`]
+//! times the fight's armed enemy metal, and that prefix is judged; only
+//! if it fails is the whole cluster judged as before (the lobby, 11-04:
+//! six raiders chasing one Dagger, seven one Ravager, whole clusters on a
+//! lone Dart). A clean gang whose focus outruns it (faster than its
+//! slowest member and the gap growing [`CHASE_TICKS`] rechecks running)
+//! breaks off (`chase`), and that enemy is left alone for [`SHY`] frames,
+//! so the same Dart does not form a new gang every few seconds.
+//!
 //! `coalesceshadow` (with `coalesce` off) judges the same clusters and
 //! journals what would have formed, with the same windows, for the off arm
 //! of an A/B.
@@ -53,7 +65,7 @@ use springai::{Unit, Vec3};
 
 use crate::Ai;
 use crate::military::SquadId;
-use crate::military::fightsim::local::{Budget, CONTACT, Local, Tally, kills, tally, their_index};
+use crate::military::fightsim::local::{Budget, CONTACT, Local, Tally, Theirs, kills, tally, their_index};
 use crate::military::fightsim::{FateMode, UnitFate};
 use crate::military::wrappers::fighter::fight_clear;
 use crate::nav;
@@ -61,6 +73,7 @@ use crate::util::distance;
 
 pub const FEATURE: &str = "coalesce";
 pub const SHADOW: &str = "coalesceshadow";
+pub const SIZE: &str = "coalsize";
 
 /// Frames between scans (2 Hz).
 const PERIOD: i32 = 15;
@@ -100,6 +113,14 @@ const FAILS: u8 = 3;
 const MAX_LIFE: i32 = 30 * 45;
 /// Orders are repeated at most this often, unless the focus changes.
 const REORDER: i32 = 60;
+/// A sized gang is worth this many times the fight's armed enemy metal.
+const JUST_ENOUGH: f32 = 2.0;
+/// A clean gang is chasing when its gap to the focus grows this much
+/// (elmos) per recheck, this many rechecks running.
+const CHASE_GAIN: f32 = 30.0;
+const CHASE_TICKS: u8 = 3;
+/// An enemy that outran a gang is left alone this long (frames).
+const SHY: i32 = 30 * 15;
 /// Frames after a form (or would) over which the outcome is read.
 const WINDOW: i32 = 30 * 30;
 /// A unit in a `would` record is not recorded again for this long, so the
@@ -156,6 +177,10 @@ struct Gang {
     /// Failed judgements in a row, and the last judgement's sums.
     fails: u8,
     last: Option<(Tally, f32)>,
+    /// The focus and our gap to it at the last recheck, and how many
+    /// rechecks running the gap has grown (`coalsize`).
+    gap: Option<(i32, f32)>,
+    chasing: u8,
 }
 
 /// A gang's judgement.
@@ -212,7 +237,31 @@ pub struct Coalesce {
     /// the gangs of one formed (or would be).
     lone_judged: u64,
     lone_formed: u64,
+    /// Gangs formed as a sized prefix of their cluster, and clean gangs
+    /// broken off a chase (`coalsize`).
+    sized: u64,
+    chases: u64,
+    /// Enemies that outran a gang: unit id -> frame until which no gang
+    /// forms on them.
+    shy: BTreeMap<i32, i32>,
     last_report: i32,
+}
+
+/// Blocks (a raider squad is one block) `(distance to the focus, metal,
+/// member indices)`, nearest first, until they are worth `need`: the
+/// indices taken. At least `min_units` units when the blocks have them.
+fn take_blocks(blocks: &mut [(f32, f32, Vec<usize>)], need: f32, min_units: usize) -> Vec<usize> {
+    blocks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut taken = Vec::new();
+    let mut have = 0.0;
+    for (_, cost, idx) in blocks.iter() {
+        if have >= need && taken.len() >= min_units {
+            break;
+        }
+        taken.extend(idx.iter().copied());
+        have += cost;
+    }
+    taken
 }
 
 fn passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool) -> bool {
@@ -395,12 +444,18 @@ impl Ai {
         if local.unknown {
             return Judged::Unknown;
         }
+        // An enemy that outran a gang is left alone a while (`coalsize`).
+        let sized = !self.dev_off(SIZE);
+        let shy = |id: i32| sized && self.coalesce.shy.contains_key(&id);
+        if local.theirs.iter().filter(|t| t.armed).all(|t| shy(t.id)) {
+            return Judged::NoFight;
+        }
         let mid = {
             let n = units.len().max(1) as f32;
             Vec3::xz(units.iter().map(|u| u.pos().x).sum::<f32>() / n, units.iter().map(|u| u.pos().z).sum::<f32>() / n)
         };
         let focus = (local.theirs.iter())
-            .filter(|t| t.armed)
+            .filter(|t| t.armed && !shy(t.id))
             .min_by(|a, b| distance(a.pos, mid).total_cmp(&distance(b.pos, mid)))
             .map(|t| t.id);
         let mut plans: Vec<Plan> = match hold {
@@ -517,6 +572,12 @@ impl Ai {
                         g.last = Some((v.tally, v.p_prize));
                     }
                     self.coalesce_order(gid, v.focus);
+                    if plan == Plan::Clean
+                        && !self.dev_off(SIZE)
+                        && let Some(fid) = v.focus
+                    {
+                        self.coalesce_chase(gid, fid, &units);
+                    }
                 }
                 Judged::NoFight => self.coalesce_end(gid, "clear"),
                 Judged::Unknown => fail(self, "unknown", None),
@@ -530,6 +591,7 @@ impl Ai {
         let frame = self.frame;
         let shadow = !self.coalesce_on();
         self.coalesce.quiet.retain(|_, until| *until > frame);
+        self.coalesce.shy.retain(|_, until| *until > frame);
         let free: Vec<(i32, Origin, Unit)> =
             self.coalesce_candidates().into_iter().filter(|c| !self.coalesce.owner.contains_key(&c.0)).collect();
         if free.is_empty() {
@@ -557,17 +619,112 @@ impl Ai {
             }
             let group = &groups[(start + k) % n];
             let members: Vec<(i32, Origin, Unit)> = group.iter().map(|&i| free[i]).collect();
+            let cluster = members.len();
+            // Just enough of the cluster first (`coalsize`).
+            if !self.dev_off(SIZE)
+                && let Some(prefix) = self.coalesce_prefix(&members)
+            {
+                let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
+                if let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) {
+                    self.coalesce.sized += 1;
+                    self.coalesce_form(prefix, v, shadow, cluster);
+                    continue;
+                }
+                if budget.spent() {
+                    continue;
+                }
+            }
             let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
             let lone = members.len() == 1;
             self.coalesce.lone_judged += u64::from(lone);
             let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) else { continue };
             self.coalesce.lone_formed += u64::from(lone);
-            self.coalesce_form(members, v, shadow);
+            self.coalesce_form(members, v, shadow, cluster);
         }
         self.coalesce.rotate = start + 1;
     }
 
-    fn coalesce_form(&mut self, members: Vec<(i32, Origin, Unit)>, v: Verdict, shadow: bool) {
+    /// The cluster's blocks nearest the fight's focus until they are worth
+    /// [`JUST_ENOUGH`] times its armed enemy metal (`coalsize`); `None`
+    /// when that is the whole cluster, or there is no fight to size to.
+    fn coalesce_prefix(&mut self, members: &[(i32, Origin, Unit)]) -> Option<Vec<(i32, Origin, Unit)>> {
+        if members.len() <= MIN_MEMBERS {
+            return None;
+        }
+        let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
+        let local = self.local_fight(&units)?;
+        let armed: Vec<&Theirs> =
+            (local.theirs.iter()).filter(|t| t.armed && !self.coalesce.shy.contains_key(&t.id)).collect();
+        if armed.is_empty() {
+            return None;
+        }
+        let n = units.len() as f32;
+        let mid = Vec3::xz(
+            units.iter().map(|u| u.pos().x).sum::<f32>() / n,
+            units.iter().map(|u| u.pos().z).sum::<f32>() / n,
+        );
+        let focus = (armed.iter()).min_by(|a, b| distance(a.pos, mid).total_cmp(&distance(b.pos, mid)))?.pos;
+        let need = JUST_ENOUGH * armed.iter().map(|t| t.cost).sum::<f32>();
+        let metal = self.metal;
+        let mut blocks: Vec<(f32, f32, Vec<usize>)> = Vec::new();
+        let mut squads: BTreeMap<SquadId, usize> = BTreeMap::new();
+        for (i, m) in members.iter().enumerate() {
+            let d = distance(m.2.pos(), focus);
+            let cost = m.2.def().map_or(0.0, |def| def.cost(metal));
+            let slot = match m.1 {
+                Origin::Squad(sid) => match squads.get(&sid) {
+                    Some(&b) => b,
+                    None => {
+                        blocks.push((d, 0.0, Vec::new()));
+                        squads.insert(sid, blocks.len() - 1);
+                        blocks.len() - 1
+                    }
+                },
+                _ => {
+                    blocks.push((d, 0.0, Vec::new()));
+                    blocks.len() - 1
+                }
+            };
+            let b = &mut blocks[slot];
+            b.0 = b.0.min(d);
+            b.1 += cost;
+            b.2.push(i);
+        }
+        let taken = take_blocks(&mut blocks, need, MIN_MEMBERS);
+        if taken.len() >= members.len() {
+            return None;
+        }
+        Some(taken.iter().map(|&i| members[i]).collect())
+    }
+
+    /// A clean gang whose focus outruns it breaks off, and that enemy is
+    /// left alone a while (`coalsize`).
+    fn coalesce_chase(&mut self, gid: u32, fid: i32, units: &[Unit]) {
+        let frame = self.frame;
+        let Some(e) = self.war.targets.get(&fid) else { return };
+        let Some(ed) = e.ud else { return };
+        if e.is_static || e.is_dead {
+            return;
+        }
+        let slowest = units.iter().filter_map(|u| u.def()).map(|d| d.speed()).fold(f32::INFINITY, f32::min);
+        let n = units.len().max(1) as f32;
+        let mid = Vec3::xz(
+            units.iter().map(|u| u.pos().x).sum::<f32>() / n,
+            units.iter().map(|u| u.pos().z).sum::<f32>() / n,
+        );
+        let gap = distance(mid, e.position);
+        let Some(g) = self.coalesce.gangs.iter_mut().find(|g| g.id == gid) else { return };
+        let grew = g.gap.is_some_and(|(f, last)| f == fid && gap > last + CHASE_GAIN);
+        g.gap = Some((fid, gap));
+        g.chasing = if grew && ed.speed() > slowest * 1.05 { g.chasing + 1 } else { 0 };
+        if g.chasing >= CHASE_TICKS {
+            self.coalesce.shy.insert(fid, frame + SHY);
+            self.coalesce.chases += 1;
+            self.coalesce_end(gid, "chase");
+        }
+    }
+
+    fn coalesce_form(&mut self, members: Vec<(i32, Origin, Unit)>, v: Verdict, shadow: bool, cluster: usize) {
         let frame = self.frame;
         let c = &mut self.coalesce;
         let gid = c.next_id;
@@ -585,6 +742,8 @@ impl Ai {
         rec["t"] = json!(frame / 30);
         rec["members"] = json!(origins);
         rec["lone"] = json!(members.len() == 1);
+        rec["cluster"] = json!(cluster);
+        rec["spare"] = json!(cluster.saturating_sub(members.len()));
         rec["p_prize"] = json!(v.p_prize);
         if shadow {
             for m in &members {
@@ -606,6 +765,8 @@ impl Ai {
             focus: None,
             fails: 0,
             last: Some((v.tally, v.p_prize)),
+            gap: None,
+            chasing: 0,
         });
         // Solo raiders leave their scout task (they had stopped for it).
         for m in &members {
@@ -715,6 +876,7 @@ impl Ai {
             "scans_per_min": c.scans as f64 / minutes, "queries": c.queries,
             "mean_us": c.micros as f64 / c.scans as f64, "over_budget": c.over_budget, "forms": c.forms,
             "gangs": c.gangs.len(), "lone_judged": c.lone_judged, "lone_formed": c.lone_formed,
+            "sized": c.sized, "chases": c.chases,
         });
         c.scans = 0;
         c.micros = 0;
@@ -749,6 +911,23 @@ fn coalesce_record(local: &Local, fates: &[UnitFate], plan: Plan, t: &Tally, p_p
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gang_takes_the_nearest_blocks_until_just_enough() {
+        // Four solos at 100/200/300/400 elmos worth 70 each vs need 150: the two nearest.
+        let mut b =
+            vec![(300.0, 70.0, vec![2]), (100.0, 70.0, vec![0]), (400.0, 70.0, vec![3]), (200.0, 70.0, vec![1])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![0, 1, 2]);
+        assert_eq!(take_blocks(&mut b, 100.0, 2), vec![0, 1]);
+        // A squad is one block: taken whole, and enough on its own.
+        let mut b = vec![(250.0, 210.0, vec![1, 2, 3]), (100.0, 70.0, vec![0])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![0, 1, 2, 3]);
+        let mut b = vec![(50.0, 210.0, vec![1, 2, 3]), (100.0, 70.0, vec![0])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![1, 2, 3]);
+        // Never fewer than the minimum when the cluster has them.
+        let mut b = vec![(50.0, 500.0, vec![0]), (100.0, 70.0, vec![1])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![0, 1]);
+    }
 
     fn t(own_cost: f32, own_loss: f32, kill_value: f32, armed_share: f32, min_armed_p: f32) -> Tally {
         Tally { own_cost, own_loss, kill_value, armed_cost: 100.0, armed_share, min_armed_p }

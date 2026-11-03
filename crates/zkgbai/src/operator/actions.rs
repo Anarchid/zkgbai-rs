@@ -352,6 +352,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
     ),
     (
+        "coalsize",
+        "Army",
+        "a gang is sized to its fight: the raiders nearest its target until twice their armed metal (a raider squad whole); a clean gang whose target outruns it breaks off and leaves it be a while (default on)",
+    ),
+    (
         "staygang",
         "Army",
         "a stayveto stand is a declared fight: the healthy units near the group join it, ordered at the same enemy, until the stand ends (default on)",
