@@ -43,7 +43,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "conquest",
         "Economy",
-        "the commander walks to forward ground a few turrets can hold, takes its metal and fortifies it when the denial pays",
+        "the early trip (with compush off): the commander walks to forward ground a few turrets can hold, takes its metal and fortifies it when the denial pays",
     ),
     (
         "conquestsym",
@@ -58,7 +58,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "compush",
         "Economy",
-        "no conquest trip: the commander expands toward the enemy, and objectives whose spots become ours get their turrets",
+        "no conquest trip: the commander expands toward the enemy, a constructor builds the home energy, and objectives whose spots become ours get their turrets",
     ),
     (
         "conquestroute",

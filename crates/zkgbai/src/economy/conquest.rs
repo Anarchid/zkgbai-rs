@@ -453,11 +453,24 @@ fn prior() -> Vec<(Tier, f32)> {
 }
 
 impl Ai {
+    /// `compush` (on by default), with or without `conquest`: no trip, the
+    /// commander expands and the objectives whose spots become ours get
+    /// their turrets (see `compush`).
+    pub(crate) fn conquest_push(&self) -> bool {
+        !self.dev_off("compush")
+    }
+
+    /// Whether conquest runs at all: `compush`, or `conquest` (off by
+    /// default) for the trip with `compush` off.
+    pub(crate) fn conquest_active(&self) -> bool {
+        self.conquest_push() || !self.dev_off("conquest")
+    }
+
     pub(super) fn eco_conquest_update(&mut self, frame: i32) {
         if frame % PERIOD != (self.offset + 7) % PERIOD {
             return;
         }
-        if self.dev_off("conquest") {
+        if !self.conquest_active() {
             if self.eco.conquest.op.is_some() {
                 self.conquest_end("switched off", false);
             }
@@ -468,7 +481,7 @@ impl Ai {
         self.conquest_observe();
         self.conquest_attacks(frame);
         self.conquest_control(frame);
-        if !self.dev_off("compush") {
+        if self.conquest_push() {
             // No trip: the commander expands toward the enemy, and the
             // objectives whose spots become ours get their turrets.
             if self.eco.conquest.op.is_some() {
@@ -536,13 +549,26 @@ impl Ai {
     /// While the commander is away, the constructor nearest home becomes
     /// non-greedy (greedy ones never build energy) and puts energy first;
     /// once a commander is home again it goes back to what it was. If the
-    /// commanders are all gone, it stays on (non-greedy).
+    /// commanders are all gone, it stays on (non-greedy). With `compush` the
+    /// commander is out expanding from the start: the role holds from the
+    /// first constructor until the overdrive phase (home energy is then
+    /// fusions). Without it the commander built the home energy, 38% of its
+    /// first five minutes against 41% on mexes, and the constructors 1%
+    /// (battery b1, 2026-11-03).
     fn conquest_energy(&mut self, frame: i32) {
         if self.eco.conquest.energy.as_ref().is_some_and(|e| !self.eco.workers.contains_key(&e.id)) {
             let id = self.eco.conquest.energy.take().map_or(0, |e| e.id);
             self.op_emit("conquest", json!({"event": "energy", "t": frame / 30, "what": "lost", "worker": id}));
         }
         let home = self.conquest_home();
+        if self.conquest_push() {
+            if self.eco_overdrive_phase() {
+                self.conquest_energy_release("overdrive phase", true);
+            } else if self.eco.conquest.energy.is_none() {
+                self.conquest_energy_pick(frame, home);
+            }
+            return;
+        }
         if self.eco.conquest.op.is_some() {
             if self.eco.conquest.energy.is_none() {
                 self.conquest_energy_pick(frame, home);
@@ -1514,7 +1540,7 @@ impl Ai {
     /// (0: none, or not a spot).
     pub(crate) fn conquest_ground(&self, p: Vec3) -> f32 {
         let g = &self.eco.conquest.ground;
-        if g.is_empty() || self.dev_off("conquest") {
+        if g.is_empty() || !self.conquest_active() {
             return 0.0;
         }
         self.graph.spot_under(p).and_then(|i| g.get(i)).copied().unwrap_or(0.0)
@@ -1544,7 +1570,7 @@ impl Ai {
     /// Minefields for the objectives we hold: (middle, value), on each
     /// one's enemy side (see `sappers`).
     pub(crate) fn conquest_mine_fields(&self) -> Vec<(Vec3, f32)> {
-        if self.dev_off("conquest") {
+        if !self.conquest_active() {
             return Vec::new();
         }
         let c = &self.eco.conquest;
@@ -2050,9 +2076,46 @@ mod tests {
         ai.eco.workers.get(&id).unwrap().is_greedy
     }
 
+    /// The trip: `conquest` on, `compush` off.
+    fn trip(ai: &mut Ai) {
+        ai.set_feature_off("conquest", false);
+        ai.set_feature_off("compush", true);
+    }
+
+    #[test]
+    fn compush_alone_runs_conquest_and_the_trip_needs_both_switches() {
+        let mut ai = energy_ai();
+        assert!(ai.dev_off("conquest") && ai.conquest_push() && ai.conquest_active(), "the default: compush");
+        ai.set_feature_off("compush", true);
+        assert!(!ai.conquest_active(), "both off: nothing");
+        trip(&mut ai);
+        assert!(ai.conquest_active() && !ai.conquest_push(), "the trip");
+        ai.set_feature_off("compush", false);
+        assert!(ai.conquest_push(), "both on: compush");
+    }
+
+    #[test]
+    fn with_compush_the_energy_worker_holds_from_the_start_to_the_overdrive_phase() {
+        let mut ai = energy_ai();
+        COMMANDER_HOME.with(|h| h.set(true));
+        ai.conquest_energy(600);
+        let e = ai.eco.conquest.energy.as_ref().expect("an energy worker without a trip");
+        assert_eq!((e.id, e.was_greedy), (12, true));
+        assert!(!greedy(&ai, 12));
+        ai.conquest_energy(900);
+        assert!(ai.eco.conquest.energy.is_some(), "the commander home does not end it");
+        ai.eco.od_phase = Some(900);
+        ai.conquest_energy(1200);
+        assert!(ai.eco.conquest.energy.is_none());
+        assert!(greedy(&ai, 12));
+        ai.conquest_energy(1500);
+        assert!(ai.eco.conquest.energy.is_none(), "not picked again");
+    }
+
     #[test]
     fn the_constructor_nearest_home_builds_energy_until_the_commander_is_back() {
         let mut ai = energy_ai();
+        trip(&mut ai);
         ai.eco.conquest.op = Some(walking());
         ai.conquest_energy(600);
         let e = ai.eco.conquest.energy.as_ref().expect("an energy worker");
@@ -2074,6 +2137,7 @@ mod tests {
     #[test]
     fn without_a_commander_the_energy_worker_stays_non_greedy() {
         let mut ai = energy_ai();
+        trip(&mut ai);
         ai.eco.conquest.op = Some(walking());
         ai.conquest_energy(600);
         ai.eco.conquest.op = None;
