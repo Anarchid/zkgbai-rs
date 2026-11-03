@@ -228,4 +228,37 @@ mod tests {
         let v = m.bomb_charge(&snap, b, &busy, 450);
         assert!((v.p_through - 1.0).abs() < 1e-6 && v.went_off.is_some() && v.gain > 0.0, "{v:?}");
     }
+
+    /// What one judgement costs (all branches and phases, plane fight), by
+    /// size: `cargo test --release bomb_charge_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bomb_charge_cost() {
+        let m = Model::load().unwrap();
+        let s = specs();
+        for k in [3usize, 8, 13, 19] {
+            let mut theirs = Vec::new();
+            for i in 0..k {
+                let def = ["shieldskirm", "cloakskirm", "hoverriot", "cloakraid"][i % 4];
+                theirs.push((def, (i % 5) as f32 * 50.0 - 100.0, 480.0 + (i / 5) as f32 * 50.0));
+            }
+            let (mut snap, b, busy) = staged("shieldbomb", &theirs, true, true);
+            for i in 0..k {
+                let x = (i % 5) as f32 * 50.0 - 100.0;
+                snap.units.insert(
+                    1,
+                    SnapUnit { side: 0, spec: s["cloakraid"].clone(), hp: 230.0, x, z: -80.0 - (i / 5) as f32 * 40.0 },
+                );
+            }
+            let b = b + k;
+            let busy: Vec<bool> = std::iter::repeat_n(false, k).chain(busy).collect();
+            let n = 20;
+            let start = std::time::Instant::now();
+            for _ in 0..n {
+                let _ = m.bomb_charge(&snap, b, &busy, 450);
+            }
+            let us = start.elapsed().as_secs_f64() * 1e6 / n as f64;
+            eprintln!("bomb_charge: {} units, {us:.0} us per judgement", snap.units.len());
+        }
+    }
 }

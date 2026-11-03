@@ -62,10 +62,13 @@ const CHARGE_HOLD: i32 = 30 * 8;
 const CHARGE_LOG: i32 = 150;
 /// Enemy mobiles stand where they were seen this recently.
 const CHARGE_SEEN: i32 = 45;
-/// Bigger fights are not judged (2-D fates cost grows fast).
-const CHARGE_MAX_UNITS: usize = 40;
-/// Judgements per 15-frame tick, over all bombs.
-const CHARGE_PER_TICK: usize = 3;
+/// Bigger fights are not judged: a judgement is nine plane fights, about
+/// 0.4 ms at 8 units, 1.4 at 18, 3 at 28, 6 at 40 (bomb_charge_cost).
+const CHARGE_MAX_UNITS: usize = 32;
+/// Judgements per 15-frame tick, over all bombs...
+const CHARGE_PER_TICK: usize = 2;
+/// ...and a bomb that sat tight is judged again after this many frames.
+const CHARGE_EVERY: i32 = 30;
 /// An armed unit with a foe this far inside its range is busy with it.
 const BUSY_SLACK: f32 = 50.0;
 
@@ -92,6 +95,8 @@ pub(super) struct Sapper {
     charging: Option<i32>,
     /// When its last sit-tight verdict was logged.
     logged: i32,
+    /// When it may be judged again.
+    next_judge: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -322,6 +327,7 @@ impl Ai {
                 held: false,
                 charging: None,
                 logged: i32::MIN / 2,
+                next_judge: 0,
             },
         );
     }
@@ -591,7 +597,7 @@ impl Ai {
                 break;
             }
             let unit = s.unit;
-            if unit.health() <= 0.0 || unit.is_being_built() {
+            if unit.health() <= 0.0 || unit.is_being_built() || frame < s.next_judge {
                 continue;
             }
             let p = unit.pos();
@@ -630,8 +636,10 @@ impl Ai {
                 "net": v.net.round(),
             });
             if !charge {
+                let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
+                entry.next_judge = frame + CHARGE_EVERY;
                 if frame - s.logged >= CHARGE_LOG {
-                    self.misc_handler.sappers.get_mut(&unit.id()).unwrap().logged = frame;
+                    entry.logged = frame;
                     self.log(&format!(
                         "sappers: {name} {} sits tight by {theirs} enemies ({busy_theirs} busy; nearest {target_name} {dist:.0} \
                          away): through {:.2}, gain {:.0}, saved {:.0}, net {:+.0}",
