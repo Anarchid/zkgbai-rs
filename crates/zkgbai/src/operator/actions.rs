@@ -53,6 +53,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Economy",
         "the last factory's replacement goes where our build power gets soonest and we hold the ground now, away from frames killed lately",
     ),
+    (
+        "facpit",
+        "Economy",
+        "factories and plates are not sited where their units come out on ground cut off from most of the metal (a walled trench beside the start)",
+    ),
     ("colonize", "Economy", "colonists sent to far free metal"),
     (
         "conquest",

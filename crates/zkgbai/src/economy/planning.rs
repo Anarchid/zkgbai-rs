@@ -1,7 +1,7 @@
 //! Task generation: factories, energy and grid, caretakers, storage, radar,
 //! static defenses, superweapons, reclaim, morphs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
@@ -31,6 +31,14 @@ pub(super) const EXIT_LANE: f32 = 192.0;
 /// steep cells units drive round, nothing across the way.
 const EXIT_CLEAR: f32 = 0.1;
 
+/// What a factory's exit costs more when its units start on ground cut
+/// off from the metal: its yard (the flat ground under it) connected to
+/// less than `REACH_RIVAL` of what the best connected ground of their tier
+/// holds. More than any blocked lane, so a pit is the last resort.
+/// Terrain7 (2026-11-04): an Amphibious Complex went into a 130-deep walled
+/// trench beside the start; its lane, down the flat floor, cost 0.
+const TRAPPED: f32 = 10.0;
+
 /// The engine slope map's cell, elmos.
 const SLOPE_CELL: f32 = 16.0;
 
@@ -54,6 +62,41 @@ pub(super) fn exit_lane(def: UnitDef, pos: Vec3, facing: i32) -> [f32; 4] {
         1 => [pos.x + hx, pos.z - hz, pos.x + hx + EXIT_LANE, pos.z + hz],
         2 => [pos.x - hx, pos.z - hz - EXIT_LANE, pos.x + hx, pos.z - hz],
         _ => [pos.x - hx - EXIT_LANE, pos.z - hz, pos.x - hx, pos.z + hz],
+    }
+}
+
+/// What a factory's exit must be clear for: see `Ai::eco_exit_check`.
+pub(super) struct ExitCheck {
+    /// The movement classes of its ground units.
+    classes: Vec<MoveClass>,
+    /// The engine's slope map.
+    slopes: Vec<f32>,
+    /// The metal its units' tier gets to from each piece of ground; `None`
+    /// without a terrain model (or metal).
+    reach: Option<ExitReach>,
+}
+
+/// Metal by connected ground, for one movement tier.
+struct ExitReach {
+    tier: Tier,
+    /// Metal spot value by the terrain model's static component (a spot
+    /// counts for the ground within `FACTORY_REACH` of it).
+    metal: HashMap<u32, f32>,
+    /// All metal on the map.
+    total: f32,
+    /// The most metal one component holds.
+    best: f32,
+}
+
+impl ExitReach {
+    /// Share of the map's metal held by component `c` (`None`: no ground).
+    fn share(&self, c: Option<u32>) -> f32 {
+        c.and_then(|c| self.metal.get(&c)).map_or(0.0, |m| m / self.total)
+    }
+
+    /// Whether ground holding `share` of the metal is a pit.
+    fn trapped(&self, share: f32) -> bool {
+        share < REACH_RIVAL * self.best / self.total
     }
 }
 
@@ -685,10 +728,10 @@ impl Ai {
     }
 
     /// What a factory's exit must be clear for: the movement classes of its
-    /// units with the engine's slope map, `None` for the aircraft plants.
-    /// Spiders climb any slope, so only buildings wall the spider factory's
-    /// exit.
-    pub(super) fn eco_exit_check(&self, factory: UnitDef) -> Option<(Vec<MoveClass>, Vec<f32>)> {
+    /// units with the engine's slope map, and the metal their tier gets to
+    /// by connected ground; `None` for the aircraft plants. Spiders climb
+    /// any slope, so only buildings wall the spider factory's exit.
+    pub(super) fn eco_exit_check(&self, factory: UnitDef) -> Option<ExitCheck> {
         if !keeps_exit(self.defs.name(factory)) {
             return None;
         }
@@ -696,15 +739,43 @@ impl Ai {
             .filter(|d| d.speed() > 0.0 && !d.is_able_to_fly())
             .filter_map(move_class)
             .collect();
-        Some((classes, self.cb.map().slope_map()))
+        let reach = factory_tier(&self.fac_tech(factory)).filter(|_| !self.dev_off("facpit")).and_then(|tier| {
+            let map = self.reach_terrain()?.tier(tier)?;
+            let (mut metal, mut total) = (HashMap::new(), 0.0);
+            for s in &self.graph.metal_spots {
+                total += s.value;
+                if let Some(c) = map.component_near(terrain_pos(s.position), FACTORY_REACH) {
+                    *metal.entry(c).or_insert(0.0) += s.value;
+                }
+            }
+            let best = metal.values().copied().fold(0.0, f32::max);
+            (best > 0.0).then_some(ExitReach { tier, metal, total, best })
+        });
+        Some(ExitCheck { classes, slopes: self.cb.map().slope_map(), reach })
+    }
+
+    /// The share of the map's metal the units of a factory of type `def` at
+    /// `pos` get to from its yard, and whether that makes it a pit (see
+    /// `TRAPPED`); `None` when not known. The yard, not the door: a door
+    /// against a trench wall would find the ground on top of it. (The yard
+    /// is flat, buildable ground; the look for passable ground stays on
+    /// it.)
+    fn eco_exit_reach(&self, def: UnitDef, pos: Vec3, check: &ExitCheck) -> Option<(f32, bool)> {
+        let r = check.reach.as_ref()?;
+        let map = self.reach_terrain()?.tier(r.tier)?;
+        let yard = def.x_size().min(def.z_size()) as f32 * 4.0;
+        let share = r.share(map.component_near(terrain_pos(pos), yard));
+        Some((share, r.trapped(share)))
     }
 
     /// How blocked the exit of a factory of type `def` at `pos` facing
-    /// `facing` is, 0 when clear: the share of its lane one of `classes`
-    /// cannot drive over (off the map counts), plus one for each row across
-    /// the lane mostly blocked, and one for each building, queued job and
-    /// metal spot in it.
-    fn eco_exit_cost(&self, def: UnitDef, pos: Vec3, facing: i32, classes: &[MoveClass], slopes: &[f32]) -> f32 {
+    /// `facing` is, 0 when clear: the share of its lane one of the
+    /// `check`'s classes cannot drive over (off the map counts), plus one
+    /// for each row across the lane mostly blocked, and one for each
+    /// building, queued job and metal spot in it; `TRAPPED` more when it
+    /// stands in a pit.
+    fn eco_exit_cost(&self, def: UnitDef, pos: Vec3, facing: i32, check: &ExitCheck) -> f32 {
+        let (classes, slopes) = (&check.classes, &check.slopes);
         let lane = exit_lane(def, pos, facing);
         let inside = |p: Vec3, pad: f32| {
             p.x + pad > lane[0] && p.x - pad < lane[2] && p.z + pad > lane[1] && p.z - pad < lane[3]
@@ -765,6 +836,9 @@ impl Ai {
         if self.graph.get_closest_spot(centre).is_some_and(|s| inside(s.get_pos(), 24.0)) {
             cost += 1.0;
         }
+        if self.eco_exit_reach(def, pos, check).is_some_and(|(_, trapped)| trapped) {
+            cost += TRAPPED;
+        }
         cost
     }
 
@@ -777,7 +851,7 @@ impl Ai {
         def: UnitDef,
         pos: Vec3,
         order: [i32; 4],
-        exit: Option<&(Vec<MoveClass>, Vec<f32>)>,
+        exit: Option<&ExitCheck>,
     ) -> Option<(Vec3, i32, f32)> {
         let mut best: Option<(Vec3, i32, f32)> = None;
         for f in order {
@@ -786,7 +860,7 @@ impl Ai {
             if site.x < 0.0 || !self.eco_build_check(def, site, f) {
                 continue;
             }
-            let cost = exit.map_or(0.0, |(classes, slopes)| self.eco_exit_cost(def, site, f, classes, slopes));
+            let cost = exit.map_or(0.0, |check| self.eco_exit_cost(def, site, f, check));
             if cost < EXIT_CLEAR {
                 return Some((site, f, cost));
             }
@@ -1174,10 +1248,19 @@ impl Ai {
             && (is_plop || rebuild || !self.eco_energy_starved())
         {
             self.eco.rebuild_tried_at = None;
-            let exit_cost = (self.eco_exit_check(factory))
-                .map_or(0.0, |(classes, slopes)| self.eco_exit_cost(factory, position, facing, &classes, &slopes));
+            let check = self.eco_exit_check(factory);
+            let exit_cost = check.as_ref().map_or(0.0, |c| self.eco_exit_cost(factory, position, facing, c));
+            let reach = (check.as_ref().and_then(|c| self.eco_exit_reach(factory, position, c)))
+                .map(|(share, trapped)| {
+                    format!(
+                        ", its units get to {:.0}% of the metal{}",
+                        share * 100.0,
+                        if trapped { " (a pit)" } else { "" }
+                    )
+                })
+                .unwrap_or_default();
             self.log(&format!(
-                "economy: {} at ({:.0}, {:.0}) facing {facing} (map middle: {}), exit cost {exit_cost:.2}",
+                "economy: {} at ({:.0}, {:.0}) facing {facing} (map middle: {}), exit cost {exit_cost:.2}{reach}",
                 self.defs.name(factory),
                 position.x,
                 position.z,
@@ -3081,6 +3164,28 @@ mod tests {
 
     fn list(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_yard_on_ground_cut_off_from_the_metal_is_a_pit() {
+        // Terrain7: the plain beside the start holds most of the metal, a
+        // walled trench none; a far island a little.
+        let reach = ExitReach {
+            tier: Tier::Amphib,
+            metal: HashMap::from([(0, 90.0), (1, 0.0), (2, 10.0)]),
+            total: 100.0,
+            best: 90.0,
+        };
+        assert!(!reach.trapped(reach.share(Some(0))));
+        assert!(reach.trapped(reach.share(Some(1))));
+        assert!(reach.trapped(reach.share(Some(2))));
+        // No ground under the yard, or ground with no spot near it.
+        assert!(reach.trapped(reach.share(None)));
+        assert!(reach.trapped(reach.share(Some(7))));
+        // Two halves of a map: neither is a pit.
+        let halves =
+            ExitReach { tier: Tier::Bot, metal: HashMap::from([(0, 50.0), (1, 50.0)]), total: 100.0, best: 50.0 };
+        assert!(!halves.trapped(halves.share(Some(0))) && !halves.trapped(halves.share(Some(1))));
     }
 
     #[test]

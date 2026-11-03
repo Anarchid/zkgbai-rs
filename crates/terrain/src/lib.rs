@@ -234,6 +234,12 @@ impl TierMap {
         (c != NONE).then_some(c)
     }
 
+    /// Static connectivity class of `p`, or of the nearest passable cell
+    /// within `radius` elmos; `None` with no passable ground that near.
+    pub fn component_near(&self, p: Pos, radius: f32) -> Option<u32> {
+        self.nearest_passable(p, radius).map(|c| self.component[c])
+    }
+
     /// Whether units of this tier can travel between `a` and `b` at all,
     /// snapping each to passable ground within `snap` elmos.
     pub fn connected(&self, a: Pos, b: Pos, snap: f32) -> bool {
