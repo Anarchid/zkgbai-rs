@@ -152,10 +152,16 @@ impl Ai {
                 let fits = !w.job.prey.needs_stun(w.tactic)
                     || stun_window_fits(self.strike_stun(&w.job).map_or(0, |(_, frames)| frames), a.kill_frames);
                 if launchable(a.probability) && fits {
+                    let chained = if w.phase == Phase::Chaining {
+                        format!(", chain link {}", w.chain.links + 1)
+                    } else {
+                        String::new()
+                    };
                     w.phase = Phase::Diving;
                     w.since = self.frame;
+                    w.chain.dive_hp = w.job.id.and_then(|id| self.war.targets.get(&id)).map(|e| e.get_health());
                     self.log(&format!(
-                        "strikes: {} {} dive {} (target death {:.0}%)",
+                        "strikes: {} {} dive {} (target death {:.0}%{chained})",
                         w.members.len(),
                         w.tactic.name(),
                         w.job.name,
@@ -177,11 +183,14 @@ impl Ai {
         }
         self.strikes.serial += 1;
         let key = self.strikes.serial;
+        // A chain is judged from where the wave stands, not its muster.
+        let from =
+            if w.phase == Phase::Chaining { self.strike_wave_center(&w.members).unwrap_or(w.home) } else { w.home };
         let Some(request) = self.strike_prediction_request(
             key,
             &w.job,
             &w.members,
-            w.home,
+            from,
             self.defs.get(w.tactic.name()),
             w.job.prey.needs_stun(w.tactic),
         ) else {

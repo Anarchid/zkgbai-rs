@@ -172,6 +172,35 @@ pathing detours cannot be ruled out in advance.
 
 The Phantom fixture stays at its seeded firing source, cloaked and firing normally.
 
+## Chained dives (`strikechain`)
+
+A dive that ends for any reason (its target killed, the 45-second clock, the
+target out of reach, a stun window closed) first looks within 1000 elmos of the
+wave for another fresh job it may take as it stands: reachable by every member,
+allowed for its tactic now (a light swarm needs the stun on the heavy already),
+not cooling down and not taken by a squad strike. The target the dive was on
+may be taken up again only if the dive took a fifth of its health or more, so a
+Lance left at 4% when the clock ran out is finished, while a chase that never
+caught its target still ends. Candidates rank by metal per hit point left, then
+distance. Up to three are put in turn to the predictor, from the members'
+places, with up to four seconds for each answer; members keep their last
+orders meanwhile. A launchable answer starts a new dive with its own clock
+(logged `chain link N`); a wave chains at most six dives. When none is taken
+the wave goes home as before, and every place it struck along the chain cools
+down then (clustered Lances sit inside one another's 500-elmo cooldown).
+Phantom-sweep continuation and the soft-formation sweep keep their own rules.
+
+A waiting wave given up for anything but a kill (its target left the job
+list, e.g. a wounded target out of sight; a member off the target's ground; a
+wave it cannot fill) puts that job on a 20-second cooldown: before, the next
+pass formed it again and the one after released it, stopping its members each
+time. Every release logs its reason.
+
+`test=assassin-dirtbag-lance` versus `test=assassin-lances` (three Lances 220
+apart) exercises chains after kills; versus `test=assassin-lance-runner` (a Lance
+that drives off once under 70%) the same-target rule; `disable=strikechain` is
+the control.
+
 ## Existing Halberd assault squads
 
 Ready, exclusively Halberd squads (the ordinary `Hover` kind, or pure `Assault`

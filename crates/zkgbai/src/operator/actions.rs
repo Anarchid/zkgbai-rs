@@ -295,6 +295,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "strike non-riots worth at least 600 metal at half a healthy Lance HP/metal or less; default on",
     ),
+    (
+        "strikechain",
+        "Army",
+        "a strike whose dive ends looks round its wave first: another target near it, or its own hurt by a fifth of its health or more, put to the predictor with the wave as it stands (default on)",
+    ),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     (
         "coalesce",

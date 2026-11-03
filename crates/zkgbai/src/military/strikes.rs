@@ -12,6 +12,7 @@ use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod chain;
 mod evasion;
 mod fragile;
 mod lobsters;
@@ -29,6 +30,21 @@ const HALBERD_REQUISITION_PERIOD: i32 = 30 * 30;
 const DIVE_TIMEOUT: i32 = 30 * 45;
 const MAX_WAVE: usize = 128;
 const SPREAD: f32 = 105.0;
+/// `strikechain`: a dive that ends, for whatever reason, first looks this
+/// far round the wave for another target it can take on as it stands...
+const CHAIN_REACH: f32 = 1000.0;
+/// ... and takes up the target it was on again only if the dive took this
+/// share of its health (a lost chase ends; a Lance left at 4% does not).
+const CHAIN_PROGRESS: f32 = 0.2;
+/// Candidates put to the predictor before the wave goes home, and how long
+/// (frames) each may wait for its answer.
+const CHAIN_ASKS: usize = 3;
+const CHAIN_WAIT: i32 = 30 * 4;
+/// Dives one wave may chain.
+const MAX_LINKS: u32 = 6;
+/// A waiting wave given up for any reason but a kill keeps its job off the
+/// list this long (frames), so it is not formed and released every pass.
+const REFORM_COOLDOWN: i32 = 30 * 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tactic {
@@ -134,8 +150,27 @@ enum Phase {
     Screening,
     Forming,
     Diving,
+    /// A dive ended; the predictor is asked about a chain target.
+    Chaining,
     Returning,
 }
+
+/// `strikechain` state of a wave.
+#[derive(Clone, Debug, Default)]
+struct Chain {
+    /// Target health share when the current dive began.
+    dive_hp: Option<f32>,
+    /// Chained dives so far.
+    links: u32,
+    /// Candidates not yet asked about.
+    asks: Vec<Job>,
+    /// The job whose dive just ended: its cooldown waits on the chain.
+    ended: Option<Job>,
+    /// Places this wave struck along its chain: they cool down when it goes
+    /// home, not before (clustered Lances sit inside one another's 500).
+    struck: Vec<Vec3>,
+}
+
 struct Wave {
     tactic: Tactic,
     job: Job,
@@ -145,6 +180,7 @@ struct Wave {
     since: i32,
     home: Vec3,
     query: Option<(u64, i32)>,
+    chain: Chain,
 }
 
 #[derive(Default)]
@@ -218,6 +254,7 @@ impl Ai {
                     distance(f.get_pos(), w.home) < staging::muster_radius(w.tactic, w.members.len()))).count(),
                 "prediction_pending": w.query.is_some(),
                 "evading": w.members.iter().filter(|id| self.strike_evasion_goal(**id).is_some()).count(),
+                "chain_links": w.chain.links, "chain_asks": w.chain.asks.len(),
             })
         });
         serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "squad_missions": self.squad_strikes_status(), "raider_missions": self.squad_strikes_status(), "lobster_missions": self.lobster_strikes_status(), "counterbattery": self.counterbattery_status() })
@@ -494,10 +531,23 @@ impl Ai {
         self.strikes.evasion.remove(&unit.id());
     }
 
-    fn strikes_release(&mut self, w: Wave) {
+    fn strikes_release(&mut self, w: Wave, why: &str) {
         self.strikes.killed.clear();
-        self.log(&format!("strikes: {} survivors of {} return to normal handlers", w.members.len(), w.tactic.name()));
+        self.log(&format!(
+            "strikes: {} survivors of {} return to normal handlers ({why})",
+            w.members.len(),
+            w.tactic.name()
+        ));
         self.strikes_release_members(w.members);
+    }
+
+    /// Give up a waiting wave and keep its job off the list a while: the
+    /// reasons behind this flicker (a wounded target blinking out of sight,
+    /// a member stuck off the target's ground), and every pass that formed
+    /// and released the wave again stopped its members in their tracks.
+    fn strikes_drop(&mut self, w: Wave, why: &str) {
+        self.strikes.cooldowns.push((w.job.pos, self.frame - COOLDOWN + REFORM_COOLDOWN));
+        self.strikes_release(w, why);
     }
 
     fn strikes_release_members(&mut self, members: Vec<i32>) {
@@ -649,7 +699,7 @@ impl Ai {
         self.strikes.cooldowns.retain(|(_, f)| frame - *f < COOLDOWN);
         if self.dev_off("strikes") {
             if let Some(w) = self.strikes.wave.take() {
-                self.strikes_release(w);
+                self.strikes_release(w, "strikes switched off");
             }
             return;
         }
@@ -727,6 +777,7 @@ impl Ai {
                         since: frame,
                         home,
                         query: None,
+                        chain: Chain::default(),
                     });
                     break 'jobs;
                 }
@@ -737,7 +788,7 @@ impl Ai {
         if let Some(mut w) = self.strikes.wave.take() {
             if matches!(w.phase, Phase::Forming | Phase::Screening) {
                 if w.job.id.is_some_and(|id| self.strikes.killed.contains(&id)) {
-                    self.strikes_release(w);
+                    self.strikes_release(w, "target killed meanwhile");
                     return;
                 }
                 // Surviving estimates are refreshed below from the kill-adjusted
@@ -760,7 +811,7 @@ impl Ai {
                     w.query = None;
                 }
             }
-            if w.tactic.light_swarm() && w.phase != Phase::Diving {
+            if w.tactic.light_swarm() && !matches!(w.phase, Phase::Diving | Phase::Chaining) {
                 let positions: Vec<_> = w
                     .members
                     .iter()
@@ -787,10 +838,11 @@ impl Ai {
                     w.phase = Phase::Forming;
                     w.since = frame;
                     w.query = None;
+                    w.chain = Chain::default();
                 }
             }
             if matches!(w.phase, Phase::Forming | Phase::Screening) && !self.strike_preparable(w.tactic, &w.job) {
-                self.strikes_release(w);
+                self.strikes_drop(w, "target no longer eligible");
                 return;
             }
             self.strikes.wave = Some(w);
@@ -822,20 +874,21 @@ impl Ai {
             if let Some(j) = fresh {
                 w.job = j;
             } else {
-                self.strikes_release(w);
+                self.strikes_drop(w, "target left the job list");
                 return;
             }
-            if w.job.id.is_some_and(|id| self.strikes.killed.remove(&id))
-                || frame - w.job.last >= JOB_MEMORY
-                || frame - w.since > JOB_MEMORY * 2
-            {
-                self.strikes_release(w);
+            if w.job.id.is_some_and(|id| self.strikes.killed.remove(&id)) {
+                self.strikes_release(w, "target killed meanwhile");
+                return;
+            }
+            if frame - w.job.last >= JOB_MEMORY || frame - w.since > JOB_MEMORY * 2 {
+                self.strikes_drop(w, "job too old");
                 return;
             }
             if !self.strike_tactic_reaches(w.tactic, w.home, w.job.pos)
                 || (!w.members.is_empty() && !self.strike_members_reach(&w.members, w.job.pos))
             {
-                self.strikes_release(w);
+                self.strikes_drop(w, "target out of reach");
                 return;
             }
             let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
@@ -848,7 +901,7 @@ impl Ai {
                     && (!w.job.production_pays(w.tactic, cost)
                         || !self.fac.factories.values().any(|f| f.kind() == w.tactic.factory())))
             {
-                self.strikes_release(w);
+                self.strikes_drop(w, "wave cannot be filled");
                 return;
             }
             // Follow the front while waiting, and gather before a likely call.
@@ -860,8 +913,7 @@ impl Ai {
                 w.query = None;
             }
             if w.job.prey == Prey::Defenseless && !self.strike_opportunity_clear(w.home, w.job.pos) {
-                self.log("strikes: release opportunistic wave; approach is defended");
-                self.strikes_release(w);
+                self.strikes_drop(w, "opportunity approach defended");
                 return;
             }
             let expected = w.job.id.is_some_and(|id| self.jaeger_stun_expected(id));
@@ -919,6 +971,7 @@ impl Ai {
                 ));
                 w.job = next;
                 w.since = frame;
+                w.chain.dive_hp = w.job.id.and_then(|id| self.war.targets.get(&id)).map(|e| e.get_health());
             } else if dead && w.job.phantom() && w.job.count > 0 {
                 w.job.id = None; // Sweep for the next Phantom with the surviving wave.
             } else if dead
@@ -928,8 +981,9 @@ impl Ai {
                 || frame - w.since > DIVE_TIMEOUT
                 || w.members.is_empty()
             {
+                let hp = w.job.id.and_then(|id| self.war.targets.get(&id)).map(|e| e.get_health());
                 self.log(&format!(
-                    "strikes: {} ended ({})",
+                    "strikes: {} ended ({}){}",
                     w.tactic.name(),
                     if dead {
                         "target killed"
@@ -941,13 +995,16 @@ impl Ai {
                         "fragile target no longer eligible"
                     } else if !self.strike_target_allowed(w.tactic, &w.job) {
                         "stun window closed"
+                    } else if w.members.is_empty() {
+                        "wave lost"
                     } else {
-                        "search expired or wave lost"
-                    }
+                        "dive timed out"
+                    },
+                    hp.filter(|_| !dead).map_or(String::new(), |h| format!(", target at {:.0}%", 100.0 * h))
                 ));
-                w.phase = Phase::Returning;
-                w.since = frame;
-                self.strikes.cooldowns.push((w.job.pos, frame));
+                if !self.strike_chain_start(&mut w, dead, frame) {
+                    self.strike_chain_home(&mut w, frame);
+                }
             } else if let Some(e) = target.filter(|e| e.visible || e.is_radar_visible) {
                 w.job.pos = e.position;
                 w.job.last = frame;
@@ -963,6 +1020,9 @@ impl Ai {
                 w.job.pos = e.position;
                 w.job.last = frame;
             }
+        }
+        if w.phase == Phase::Chaining {
+            self.strike_chain_step(&mut w, frame);
         }
         if w.phase == Phase::Returning
             && (w.members.iter().all(|id| self.fighters.get(id).is_none_or(|f| distance(f.get_pos(), w.home) < 450.0))
@@ -981,16 +1041,19 @@ impl Ai {
                     w.phase = Phase::Forming;
                     w.since = frame;
                     w.query = None;
+                    w.chain = Chain::default();
                 } else {
-                    self.strikes_release(w);
+                    self.strikes_release(w, "next job too big");
                     return;
                 }
             } else {
-                self.strikes_release(w);
+                self.strikes_release(w, "back home, no next job");
                 return;
             }
         }
-        self.strike_command(&w);
+        if w.phase != Phase::Chaining {
+            self.strike_command(&w);
+        }
         self.strikes.wave = Some(w);
     }
 
