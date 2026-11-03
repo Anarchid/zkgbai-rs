@@ -188,7 +188,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "padnano",
         "Economy",
-        "a caretaker beside each airpad, repairing what lands there at four times the pad's rate, once the air fleet is worth 1000 metal (default on)",
+        "a caretaker beside each airpad, repairing what lands there at three times the pad's rate, once the air fleet is worth 1000 metal (default on)",
     ),
     (
         "airmenace",

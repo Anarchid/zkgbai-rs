@@ -5,6 +5,10 @@
 //! although the full package is six, because they are over our buildings
 //! (`airmenace`). Compare `?disable=raptorwear,airmenace`.
 //! `airstrike-raptors-likho` adds a Likho (`likhorevenant`).
+//! `airstrike-raptors-pad`: a bigger outpost (the Revenants stay in sight
+//! longer) and, unless `padnano` is off, a caretaker beside the airpad
+//! adopted as the economy adopts a built one: hurt Raptors come home to it,
+//! and with `padlaunch` leave the pad at 70% while a job is open.
 use crate::{Ai, util::get_directional_point};
 use springai::Vec3;
 
@@ -17,7 +21,7 @@ impl Ai {
         let watched: &[&str] = if gunships {
             &["gunshipassault"]
         } else {
-            &["planeheavyfighter", "bomberheavy", "staticmex", "energysolar"]
+            &["planeheavyfighter", "bomberheavy", "staticmex", "energysolar", "staticcon"]
         };
         if frame == 60 {
             self.cb.cheats_set_enabled(true);
@@ -42,6 +46,11 @@ impl Ai {
                 for (dx, dz) in [(90.0, 0.0), (-90.0, 0.0), (0.0, 90.0)] {
                     spawn.push(("energysolar", Vec3::xz(site.x + dx, site.z + dz)));
                 }
+                if test == "airstrike-raptors-pad" {
+                    for (dx, dz) in [(180.0, 0.0), (-180.0, 0.0), (0.0, 180.0), (90.0, 180.0), (-90.0, 180.0)] {
+                        spawn.push(("energysolar", Vec3::xz(site.x + dx, site.z + dz)));
+                    }
+                }
             }
             for (name, pos) in spawn {
                 let Some(d) = self.defs.get(name) else { continue };
@@ -51,6 +60,18 @@ impl Ai {
                     springai::reserved::reserve(self.cb, u.id());
                 }
                 self.log(&format!("airstrike-test: spawned {name} {} at {:.0},{:.0}", u.id(), u.pos().x, u.pos().z));
+            }
+        }
+        if test == "airstrike-raptors-pad"
+            && frame == 90
+            && !self.dev_off("padnano")
+            && let Some(pad) = self.cb.team_units().into_iter().find(|u| self.defs.name_of(*u) == "staticrearm")
+            && let Some(d) = self.defs.get("staticcon")
+        {
+            let near = get_directional_point(pad.pos(), center, -130.0);
+            let p = map.find_closest_build_site(d, near, 120.0, 1, 0);
+            if let Some(u) = self.cb.cheat_new_unit(d, if p.x >= 0.0 { p } else { near }) {
+                self.eco_adopt_pad_nano(u, pad);
             }
         }
         // The fixture alone flies the Revenants: over the outpost, shooting.
@@ -77,10 +98,11 @@ impl Ai {
                 if watched.contains(&name) {
                     let p = u.pos();
                     line.push_str(&format!(
-                        " {name}:{}:{:.0}/{:.0}@{:.0},{:.0}",
+                        " {name}:{}:{:.0}/{:.0}:n{:.0}@{:.0},{:.0}",
                         u.id(),
                         u.health(),
                         u.max_health(),
+                        u.rules_param_float("noammo", 0.0),
                         p.x,
                         p.z
                     ));

@@ -53,8 +53,10 @@ use crate::util::distance;
 pub(super) const SITE_SLACK: f32 = 25.0;
 
 /// Airpads repair at 2.5 buildpower (`unit_refuel_pad_handler`: HP/s =
-/// 2.5 x max HP / (0.666 x cost), a Likho 4.4, an Odin 13). A caretaker
-/// repairs at its workertime / 0.666 = 15, about four times the pad, so
+/// 2.5 x max HP / (0.5 x cost), a Likho 5.9, an Odin 17, a Raptor 18; the
+/// staged fixture measured 18.8 for a Raptor). A caretaker repairs at 15
+/// buildpower (HP/s = 15 x max HP / cost: a Raptor 55, measured 55), three
+/// times the pad, one aircraft at a time, so
 /// once the air fleet is worth this much metal each airpad gets one
 /// (`padnano`), within `PAD_NANO_SITE` of it, repairing within
 /// `PAD_NANO_REACH` of the pad's center (caretaker build range 500).
@@ -1353,17 +1355,7 @@ impl Ai {
                         let nt = Nanotower { unit, target };
                         self.eco.nanos.insert(unit.id(), nt);
                         if self.defs.name_of(target) == AIRPAD {
-                            Self::eco_pad_nano_order(nt);
-                            let (p, q) = (unit.pos(), target.pos());
-                            self.log(&format!(
-                                "economy: airpad caretaker {} at ({:.0}, {:.0}) repairs over pad {} at ({:.0}, {:.0})",
-                                unit.id(),
-                                p.x,
-                                p.z,
-                                target.id(),
-                                q.x,
-                                q.z
-                            ));
+                            self.eco_adopt_pad_nano(unit, target);
                         } else {
                             unit.set_repeat(true, 0);
                             unit.guard(nt.target, 0);
@@ -1739,6 +1731,24 @@ impl Ai {
                 Self::eco_pad_nano_order(*n);
             }
         }
+    }
+
+    /// Adopt a finished caretaker as this airpad's (`padnano`), as the
+    /// economy does when it builds one; the staged fixtures spawn theirs.
+    pub(crate) fn eco_adopt_pad_nano(&mut self, unit: Unit, pad: Unit) {
+        let nt = Nanotower { unit, target: pad };
+        self.eco.nanos.insert(unit.id(), nt);
+        Self::eco_pad_nano_order(nt);
+        let (p, q) = (unit.pos(), pad.pos());
+        self.log(&format!(
+            "economy: airpad caretaker {} at ({:.0}, {:.0}) repairs over pad {} at ({:.0}, {:.0})",
+            unit.id(),
+            p.x,
+            p.z,
+            pad.id(),
+            q.x,
+            q.z
+        ));
     }
 
     /// A caretaker by an airpad keeps a standing area repair over it: the

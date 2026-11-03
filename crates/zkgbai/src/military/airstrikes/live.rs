@@ -51,7 +51,10 @@ fn needs_ammo(noammo: f32) -> bool {
 /// A rearmed aircraft still on the pad may leave for a primary mission at
 /// this much health (`padlaunch`), when the mission's own survival check at
 /// its current health passes too. An airpad repairs at 2.5 buildpower: a
-/// Likho takes ~160 s to mend 30%, an Odin back from 43% sat 250 s.
+/// Likho takes ~120 s to mend 30%, an Odin back from 43% sat 250 s (with its
+/// flight home and 30 s rearm). Staged (zkgbai-runs/padrepair/smoke5):
+/// Raptors wounded to 35% sat 40 s on the pad alone, 4-11 s with this and
+/// a pad caretaker.
 pub(super) const PAD_LAUNCH_HEALTH: f32 = 0.7;
 
 fn readiness(reserved: bool, active: bool, empty: bool, healthy: bool, at_home: bool) -> &'static str {

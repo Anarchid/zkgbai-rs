@@ -518,10 +518,10 @@ impl Ai {
             self.eco_create_air_pad_task(target);
         }
 
-        // do we need caretakers at the airpads? (`padnano`)
+        // do we need caretakers at the airpads? (`padnano`; airpads come
+        // only past 15 static income already)
         if !self.dev_off("padnano")
             && !self.eco.hard_estalled
-            && self.eco.static_income > 15.0
             && self.airstrike_fleet_metal() >= super::PAD_NANO_FLEET_METAL
             && let Some(pad) = self
                 .eco
@@ -2944,6 +2944,35 @@ impl Ai {
             .filter(|t| t.health() > 0.0 && t.id() == id)
             .count();
         built + queued
+    }
+
+    /// Fixture diagnostics: the caretaker jobs queued (target, place, worker
+    /// count) and what each worker is building.
+    pub(crate) fn eco_nano_debug(&self) -> String {
+        let eco = &self.eco;
+        let mut out = String::new();
+        for &id in &eco.nano_tasks {
+            let Some(t) = eco.tasks.get(id) else { continue };
+            if let Some(c) = t.as_construction() {
+                let p = t.get_pos();
+                out.push_str(&format!(
+                    " nano-task(target {:?}, at {:.0},{:.0}, started {})",
+                    c.ct_target.map(|u| u.id()),
+                    p.x,
+                    p.z,
+                    c.target.is_some()
+                ));
+            }
+        }
+        for w in eco.workers.values() {
+            let job = w
+                .task
+                .and_then(|id| eco.tasks.get(id))
+                .and_then(|t| t.as_construction())
+                .map(|c| self.defs.name(c.build_type).to_owned());
+            out.push_str(&format!(" worker {}:{}:{:?}", w.id, self.defs.name_of(w.unit), job));
+        }
+        out
     }
 
     /// Caretakers, built or queued, for airpads (`padnano`).
