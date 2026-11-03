@@ -196,6 +196,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "gunships over our or allied ground units and buildings are intercepted wherever they are, not only in our territory or inbound (default on)",
     ),
     (
+        "airhome",
+        "Military",
+        "an idle, loaded, healthy aircraft anywhere over our territory is ready for a sortie, not only within 450 elmos of the ally center; idle ones drift back toward it, and a package takes the planes nearest its route whose starts differ by at most 900 elmos, so they arrive together (default on)",
+    ),
+    (
         "shieldworth",
         "Military",
         "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",

@@ -349,8 +349,24 @@ requirements; `optional_escort` identifies optional Sparrow support for deep
 thermite candidates. Active packages list only escorts actually assigned. `fleet` distinguishes ready, in-progress, rearming, repairing,
 returning and operator-held aircraft; `utilization` accumulates aircraft-seconds
 per state, aircraft launches, observed spent payloads and abort reasons. Spent
-payloads indicate releases, not confirmed hits or kills. Aircraft still gather
-within 450 elmos of home and require 95% health before launch. The operator HUD and map board expose the same distinction. `disable=airstrikes` disables the policy.
+payloads indicate releases, not confirmed hits or kills. Home is the ally
+center (the middle of our metal spots), from which every plan's route, risk
+and length are reckoned. An idle aircraft counts as home within 450 elmos of
+it or, with `airhome` (`disable=airhome` restores the circle alone), anywhere
+over our territory: dispatch already checks each plane's own first leg, and the
+circle alone flapped idle planes between ready and returning (circling drifts
+them past it, and the center moves when a metal spot changes hands; a Likho on
+Agalta, 2026-11-03, flipped every 5-10 s). A plane back from a sortie stops
+returning once over our territory; idle ones outside the circle are moved back
+toward the center every 10 s without leaving the ready pool. A package takes
+planes whose distances to its route's first waypoint differ by at most 900
+elmos, the old circle's diameter, so it still arrives together: of the sets
+that fill it, the one nearest that waypoint, idle planes before those on a
+pad. When only a more spread-out set would fill it the launch is held and
+counted in `spread_holds`. A Raptor wear-down sortie takes whoever is ready,
+nearest first. The Assassinate and HeavyAir arrival windows are timed from each
+member's own position. Launch requires 95% health except off a pad
+(`padlaunch`). The operator HUD and map board expose the same distinction. `disable=airstrikes` disables the policy.
 
 ## Verification
 
