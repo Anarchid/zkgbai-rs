@@ -1292,6 +1292,7 @@ impl Ai {
         paralyzer: bool,
     ) {
         let _ = (damage, dir, paralyzer);
+        self.comguard_hit(unit, attacker);
         let h = unit;
         let Some(hdef) = h.def() else {
             return;

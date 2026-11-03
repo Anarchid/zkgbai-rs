@@ -1,51 +1,52 @@
-//! `comguard` (on; `disable=comguard`): a commander leaves a fight the
-//! fight predictor says it loses, before the first shots land, and keeps
-//! out of it while it lasts.
+//! `comguard` (on; `disable=comguard`): the commander is a combat pusher.
+//! Shot at, it fights on unless the fight predictor, counting everything
+//! about, says it dies; then it leaves and keeps out of that fight.
 //!
-//! The worker retreat (`assign`) asks the threat paint: a commander flees
-//! when the enemy paint is twice ours (its own paint included, and a
-//! commander paints a lot) or when hurt in enemy paint, unless building a
-//! turret; it comes back once its spot has had no enemy paint for 3 s.
-//! In the lobby games of Nov 2 the commander died in 10 of 40, each time
-//! to an army seen closing for 20-30 s (5 Reapers, 4 Ravagers and a Mace,
-//! Halberds, 3 Buoys outranging it) while it built, repaired or stood at
-//! full health; it turned only when hurt, and once went back to a mex job
-//! inside the Buoys' range (user, 2026-11-03: "steps back when fired at,
-//! then goes and builds something while ignoring continued incoming
-//! fire").
+//! The worker retreat (`assign`) reads the threat paint: a commander fled
+//! when the enemy paint was twice ours (its own paint included) or when
+//! hurt in enemy paint, unless building a turret, and came back once its
+//! spot had no enemy paint for 3 s. In the lobby games of Nov 2 the
+//! commander died in 10 of 40, each time to an army seen closing for
+//! 20-30 s (5 Reapers, 4 Ravagers and a Mace, Halberds, 3 Buoys outranging
+//! it); it stepped back at the first hits and went back to work under fire
+//! (user, 2026-11-03: "steps back when fired at, then goes and builds
+//! something while ignoring continued incoming fire").
 //!
-//! Every [`PERIOD`] frames, each commander with an armed enemy within
+//! User, 2026-11-03, after a first version fled ahead of contact from any
+//! fight costing it a fifth of its health (and so from 4 Scorchers beside
+//! its own garrison, QRF and Lotus, which it did not count): "We want the
+//! commander to be able to be a combat pusher, so generally maybe a
+//! trigger can be actually taking damage first, and then retreating if the
+//! local situation *in its entirety* proclaims commander death."
+//!
+//! Every [`PERIOD`] frames, a commander with an armed enemy within
 //! [`SUPPORT`] asks the predictor about its local fight
-//! (`fightsim::local`: every identified enemy about, the commander and our
-//! armed units and turrets within [`FRIENDS`]), ZK's tactical AI moving
-//! the units it governs (`kiting_fates`: Buoys keep their range), over
-//! [`HORIZON`] (10 s).
+//! (`fightsim::local`: every identified enemy about; on our side every
+//! armed friendly unit, ours or an ally's, turrets included, within
+//! [`FRIENDS`], the nearest [`MAX_FRIENDS`]), ZK's tactical AI moving the
+//! units it governs (`kiting_fates`: Buoys keep their range), over
+//! [`GUARD_HORIZON`] (15 s, the squad veto's). Enemy turrets it is out of
+//! range of stay out (the a-move would walk it in); unidentified contacts
+//! are left out.
 //!
-//! The commander does not take a costly fight even when it wins it: its
-//! death is permanent. Besides its metal and build power, every new
-//! commander carries the Vanguard Economy Pack (4 metal and 6 energy
-//! income) for the rest of the game (user, 2026-11-03: "A commander's loss
-//! is not just lasting damage, it's permanent: -4 income forever"). It is
-//! in danger when the sim's own P(dead) reaches [`DEATH`], when it loses
-//! [`LOSS`] of its health within the horizon whatever it kills, or when it
-//! comes out under [`LOW`] of its health having lost [`LOW_LOSS`]. Most
-//! fights are still closing at the horizon (the sim's P(dead) was 0 in
-//! every judgement of the first smoke), so the loss carries the rule: one
-//! Redback at 600 costs a base recon trainer 41% while it kills it, 3
-//! Buoys at 420 cost it 57% and none of them is hurt; a few Fleas or a
-//! lone Glaive cost it 0-5%. Enemy turrets it is out of range of stay out of the
-//! fight (the a-move would walk it in); unidentified contacts are left out
-//! (the threat rules still see them).
+//! Hit by an enemy within [`HIT_WINDOW`], it leaves when the sim's own
+//! P(dead) reaches [`DEATH`]; not hit, it never leaves on the guard's
+//! word. While a verdict is fresh ([`FRESH`]) and covers what last hit it
+//! (the shooter is in the judged fight, or it was not hit lately), the
+//! threat-paint retreat does not apply to it and a retreat that rule began
+//! ends: the predictor speaks for the commander. A hit from outside the
+//! judged fight (unseen or unidentified) leaves it to the threat paint.
 //!
-//! In danger it drops local defense, flees (the worker retreat, jumps
+//! Leaving, it drops local defense, flees (the worker retreat, jumps
 //! included) to the first of the incursion refuge, the closest haven and
-//! the allies' centre that the enemies in the fight do not reach, and asks
-//! for defense. The danger holds [`HOLD`] past its last verdict: the
-//! retreat does not end nor local defense take it meanwhile. For
-//! [`AVOID`] after, it takes no job the enemies of that fight reach.
+//! the allies' centre that the enemies in the fight do not reach (re-picked
+//! when they come on), and asks for defense. It is held [`HOLD`] past the
+//! last death verdict; for [`AVOID`] after, it takes no job those enemies
+//! reach.
 //!
 //! Journal (`k=comguard`): `flee` (the fight and its fate), `release`,
-//! one `safe` judgement in [`SAMPLE`], and `cost` every minute.
+//! `hit` (a hit commander judged to live, at most every [`HIT_EMIT`]),
+//! `cost` every minute.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -56,25 +57,29 @@ use springai::{Unit, Vec3, reserved};
 use super::erase_one_dq;
 use crate::Ai;
 use crate::military::DefenseTarget;
-use crate::military::fightsim::local::{HORIZON, SUPPORT};
+use crate::military::fightsim::local::SUPPORT;
 use crate::util::distance;
 
 pub const FEATURE: &str = "comguard";
 
 /// Frames between judgements.
 const PERIOD: i32 = 10;
-/// Our armed units and turrets this close to the commander fight beside it.
-const FRIENDS: f32 = 600.0;
-/// The sim's own P(dead) at which the commander leaves...
-const DEATH: f32 = 0.25;
-/// ...or the share of its health it must not lose within the horizon...
-const LOSS: f32 = 0.2;
-/// ...or the share it must not end below, having lost this share.
-const LOW: f32 = 0.5;
-const LOW_LOSS: f32 = 0.1;
-/// The danger holds this long past its last verdict (frames).
+/// Armed friendly units (ours and allies') this close fight beside it...
+const FRIENDS: f32 = 800.0;
+/// ...the nearest this many (the local fight is judged up to 64 units).
+const MAX_FRIENDS: usize = 40;
+/// Frames of fight judged (15 s).
+const GUARD_HORIZON: i32 = 450;
+/// The sim's own P(dead) at which a hit commander leaves.
+const DEATH: f32 = 0.3;
+/// A hit this recent (frames) lets a death verdict send it off.
+const HIT_WINDOW: i32 = 90;
+/// A verdict this recent (frames) speaks for the commander.
+const FRESH: i32 = 30;
+/// It is held this long past the last death verdict (frames).
 const HOLD: i32 = 150;
-/// Jobs the danger's enemies reach are off this long after (frames)...
+/// Jobs the enemies of a death verdict reach are off this long after
+/// (frames)...
 const AVOID: i32 = 900;
 /// ...within their range and this margin.
 const AVOID_MARGIN: f32 = 350.0;
@@ -84,11 +89,11 @@ const AVOID_SEEN: i32 = 600;
 const STATIC_MARGIN: f32 = 100.0;
 /// A haven within an enemy's range and this margin is no haven.
 const HAVEN_MARGIN: f32 = 400.0;
-/// One safe judgement in this many is journaled.
-const SAMPLE: u64 = 20;
+/// A hit commander judged to live is journaled at most this often (frames).
+const HIT_EMIT: i32 = 90;
 const REPORT_PERIOD: i32 = 1800;
 
-/// A commander in danger, or lately.
+/// A commander held out of a fight, or lately.
 struct Danger {
     since: i32,
     last: i32,
@@ -99,11 +104,22 @@ struct Danger {
     released: bool,
 }
 
+/// What a commander's guard knows between judgements.
+#[derive(Clone, Copy, Default)]
+struct Watch {
+    /// The last enemy hit: frame and shooter (`None`: unseen).
+    hit: Option<(i32, Option<i32>)>,
+    /// The last verdict's frame and whether it covered the last hit.
+    verdict: Option<(i32, bool)>,
+    last_emit: i32,
+}
+
 #[derive(Default)]
 pub struct ComGuard {
     dangers: BTreeMap<i32, Danger>,
+    watch: BTreeMap<i32, Watch>,
     judged: u64,
-    safe: u64,
+    hit_judged: u64,
     flees: u64,
     micros: u64,
     max_micros: u64,
@@ -112,7 +128,7 @@ pub struct ComGuard {
 
 /// One judgement of a commander's fight.
 struct Verdict {
-    danger: bool,
+    dies: bool,
     p_raw: f32,
     p_dead: f32,
     hp: f32,
@@ -125,11 +141,13 @@ struct Verdict {
     theirs: Vec<(i32, String, f32, f32)>,
 }
 
-/// Whether a commander with `hp` of `max` health and this fate is in
-/// danger.
-fn in_danger(p_raw: f32, hp: f32, hp_left: f32, max: f32) -> bool {
-    let (max, lost) = (max.max(1.0), hp - hp_left);
-    p_raw >= DEATH || lost >= LOSS * max || (hp_left < LOW * max && lost >= LOW_LOSS * max)
+/// Whether a verdict judged on `theirs` covers the last hit: none lately,
+/// or its shooter is in the fight.
+fn covers(hit: Option<(i32, Option<i32>)>, frame: i32, theirs: &[i32]) -> bool {
+    match hit {
+        Some((at, shooter)) if frame - at <= HIT_WINDOW => shooter.is_some_and(|s| theirs.contains(&s)),
+        _ => true,
+    }
 }
 
 impl Ai {
@@ -140,10 +158,12 @@ impl Ai {
         self.comguard_report(frame);
         if self.dev_off(FEATURE) {
             self.eco.guard.dangers.clear();
+            self.eco.guard.watch.clear();
             return;
         }
         let commanders = self.eco.commanders.clone();
         self.eco.guard.dangers.retain(|id, d| commanders.contains(id) && frame - d.last <= HOLD + AVOID);
+        self.eco.guard.watch.retain(|id, _| commanders.contains(id));
         for id in commanders {
             self.comguard_check(id, frame);
         }
@@ -173,6 +193,25 @@ impl Ai {
         })
     }
 
+    /// Commander `unit` was damaged by `attacker` (`None`: unseen).
+    pub(super) fn comguard_hit(&mut self, unit: Unit, attacker: Option<Unit>) {
+        let id = unit.id();
+        if !self.eco.commanders.contains(&id) || attacker.is_some_and(|a| a.ally_team() == self.ally_team_id) {
+            return;
+        }
+        let shooter = attacker.filter(|a| a.def().is_some()).map(|a| a.id());
+        self.eco.guard.watch.entry(id).or_default().hit = Some((self.frame, shooter));
+    }
+
+    /// Whether the predictor speaks for commander `id` now (see the module
+    /// notes): the threat-paint retreat does not apply to it.
+    pub(super) fn comguard_answers(&self, id: i32) -> bool {
+        !self.dev_off(FEATURE)
+            && (self.eco.guard.watch.get(&id))
+                .and_then(|w| w.verdict)
+                .is_some_and(|(at, covered)| covered && self.frame - at <= FRESH)
+    }
+
     fn comguard_check(&mut self, id: i32, frame: i32) {
         let Some(unit) = self.eco.workers.get(&id).map(|w| w.unit) else { return };
         if unit.health() <= 0.0 || unit.team() != self.team_id || unit.is_being_built() {
@@ -183,9 +222,16 @@ impl Ai {
             return;
         }
         let verdict = self.comguard_judge(unit);
+        let watch = self.eco.guard.watch.get(&id).copied().unwrap_or_default();
+        let hit = watch.hit.is_some_and(|(at, _)| frame - at <= HIT_WINDOW);
+        if let Some(v) = &verdict {
+            let theirs: Vec<i32> = v.theirs.iter().map(|t| t.0).collect();
+            let covered = covers(watch.hit, frame, &theirs);
+            self.eco.guard.watch.entry(id).or_default().verdict = Some((frame, covered));
+        }
         let held = self.comguard_holds(id);
         match verdict {
-            Some(v) if v.danger => {
+            Some(v) if v.dies && (held || hit) => {
                 let enemies: Vec<i32> = v.theirs.iter().map(|t| t.0).collect();
                 if held {
                     let d = self.eco.guard.dangers.get_mut(&id).unwrap();
@@ -207,11 +253,11 @@ impl Ai {
                 self.comguard_flee(unit, frame, enemies, &v);
             }
             v => {
-                if v.as_ref().is_some_and(|v| !v.danger) {
-                    self.eco.guard.safe += 1;
-                    if self.eco.guard.safe.is_multiple_of(SAMPLE) {
-                        let v = v.as_ref().unwrap();
-                        self.comguard_emit("safe", unit, v, None);
+                if hit && let Some(v) = &v {
+                    self.eco.guard.hit_judged += 1;
+                    if frame - watch.last_emit >= HIT_EMIT {
+                        self.eco.guard.watch.entry(id).or_default().last_emit = frame;
+                        self.comguard_emit("hit", unit, v, None);
                     }
                 }
                 let ended = self.eco.guard.dangers.get(&id).is_some_and(|d| !d.released && frame - d.last > HOLD);
@@ -222,7 +268,7 @@ impl Ai {
                     self.op_emit(
                         "comguard",
                         json!({"event": "release", "t": frame / 30, "id": id, "held_s": held_s,
-                        "hp": unit.health().round(), "why": if v.is_none() { "no fight" } else { "safe" }}),
+                        "hp": unit.health().round(), "why": if v.is_none() { "no fight" } else { "lives" }}),
                     );
                 }
             }
@@ -244,28 +290,21 @@ impl Ai {
         if !armed_near {
             return None;
         }
-        let mut units = vec![com];
-        units.extend(
-            (self.fighters.values())
-                .filter(|f| {
-                    f.unit.health() > 0.0
-                        && !self.retreat_handler.is_retreating(f.unit.id())
-                        && distance(f.get_pos(), pos) <= FRIENDS
-                })
-                .map(|f| f.unit),
-        );
-        units.extend(
-            (self.eco.porcs.iter())
-                .filter(|p| !p.is_being_built() && p.health() > 0.0 && distance(p.pos(), pos) <= FRIENDS)
-                .copied(),
-        );
-        units.extend(
-            (self.eco.commanders.iter())
-                .filter(|&&c| c != com.id())
-                .filter_map(|c| self.eco.workers.get(c))
-                .filter(|w| w.unit.health() > 0.0 && distance(w.get_pos(), pos) <= FRIENDS)
-                .map(|w| w.unit),
-        );
+        // Every armed friendly unit about, whoever drives it (squads, QRF,
+        // garrisons, raiders, turrets, allies), the nearest first.
+        let mut friends: Vec<(f32, Unit)> = (self.cb.friendly_units_in(pos, FRIENDS).into_iter())
+            .filter(|u| {
+                u.id() != com.id()
+                    && u.health() > 0.0
+                    && !u.is_being_built()
+                    && !self.retreat_handler.is_retreating(u.id())
+                    && u.def().is_some_and(|d| d.is_able_to_attack() && !d.weapon_mounts().is_empty())
+            })
+            .map(|u| (distance(u.pos(), pos), u))
+            .collect();
+        friends.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let units: Vec<Unit> =
+            std::iter::once(com).chain(friends.into_iter().take(MAX_FRIENDS).map(|(_, u)| u)).collect();
         let mut local = self.local_fight(&units)?;
         // Turrets it is not in range of: the a-move would walk it in, the
         // commander building beside them does not.
@@ -290,7 +329,7 @@ impl Ai {
         }
         let model = self.local_model()?;
         let t0 = Instant::now();
-        let fates = model.kiting_fates(&local.snap, HORIZON);
+        let fates = model.kiting_fates(&local.snap, GUARD_HORIZON);
         let us = t0.elapsed().as_micros() as u64;
         let g = &mut self.eco.guard;
         g.judged += 1;
@@ -302,7 +341,7 @@ impl Ai {
         let max = com.max_health();
         let theirs = local.theirs.iter().map(|t| (t.id, t.def.clone(), distance(t.pos, pos), t.cost)).collect();
         Some(Verdict {
-            danger: in_danger(f.p_raw, hp, f.hp_left, max),
+            dies: f.p_raw >= DEATH,
             p_raw: f.p_raw,
             p_dead: f.p_dead,
             hp,
@@ -391,16 +430,18 @@ impl Ai {
         if frame - g.last_report < REPORT_PERIOD {
             return;
         }
-        let (judged, safe, flees, micros, max) = (g.judged, g.safe, g.flees, g.micros, g.max_micros);
+        let (judged, hit, flees, micros, max) = (g.judged, g.hit_judged, g.flees, g.micros, g.max_micros);
         self.eco.guard.last_report = frame;
         if judged == 0 {
             return;
         }
         let mean = micros / judged.max(1);
-        self.log(&format!("comguard: {judged} judged ({mean} us mean, {max} max), {flees} flees, {safe} safe"));
+        self.log(&format!(
+            "comguard: {judged} judged ({mean} us mean, {max} max), {hit} hit and living, {flees} flees"
+        ));
         self.op_emit(
             "comguard",
-            json!({"event": "cost", "t": frame / 30, "judged": judged, "safe": safe, "flees": flees,
+            json!({"event": "cost", "t": frame / 30, "judged": judged, "hit_living": hit, "flees": flees,
                    "us_mean": mean, "us_max": max}),
         );
     }
@@ -411,20 +452,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn danger_is_death_or_a_costly_fight_even_a_won_one() {
-        // Dies, or might.
-        assert!(in_danger(0.6, 3800.0, 0.0, 3800.0));
-        assert!(in_danger(0.3, 3800.0, 2000.0, 3800.0));
-        // 3 Buoys at 420: 57% of its health gone, none of them hurt.
-        assert!(in_danger(0.0, 3800.0, 1623.0, 3800.0));
-        // One Redback at 600 (smoke1 g1): it kills it, but loses 41%.
-        assert!(in_danger(0.0, 3229.0, 1882.0, 3250.0));
-        // A few Fleas or a lone Glaive: a scratch.
-        assert!(!in_danger(0.0, 3250.0, 3178.0, 3250.0));
-        assert!(!in_danger(0.0, 3800.0, 3650.0, 3800.0));
-        // Already hurt, a lone raider scratches it: no reason to leave.
-        assert!(!in_danger(0.0, 1500.0, 1400.0, 3800.0));
-        // Already hurt and losing a tenth more: leave.
-        assert!(in_danger(0.0, 1500.0, 1100.0, 3800.0));
+    fn a_verdict_covers_a_hit_only_with_its_shooter_in_the_fight() {
+        // Not hit lately: the verdict speaks.
+        assert!(covers(None, 1000, &[]));
+        assert!(covers(Some((800, Some(7))), 1000, &[]));
+        // Hit by a unit in the judged fight.
+        assert!(covers(Some((950, Some(7))), 1000, &[3, 7]));
+        // Hit by one outside it, or unseen: the threat paint decides.
+        assert!(!covers(Some((950, Some(9))), 1000, &[3, 7]));
+        assert!(!covers(Some((950, None)), 1000, &[3, 7]));
     }
 }
