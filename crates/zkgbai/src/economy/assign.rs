@@ -136,6 +136,11 @@ fn cluster_bonus(p: Vec3, free: impl Iterator<Item = Vec3>) -> f32 {
 const REMEX_RADIUS: f32 = 1200.0;
 const REMEX_CEILING: f32 = 300.0;
 const REMEX_KEEP: f32 = 700.0;
+/// The missile silo is rushed (SQUAD_PULL), and half the time it is for
+/// offense, so only a mex the worker stands at, within its build range or
+/// REMEX_STEP past it, goes before it (user, 11-04: "if the constructor is
+/// literally sitting on the mex, it just is worth it to build").
+const REMEX_STEP: f32 = 64.0;
 
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
@@ -620,14 +625,16 @@ impl Ai {
         let own = |t: &WorkerTask| matches!(&t.kind, TaskKind::Repair(r) if r.target.id() == wid);
         consider(&eco.repair_tasks, true, &own);
 
-        // A free mex near the worker before a new factory (`remexfirst`).
-        if let Some(fac) = task.and_then(|id| eco.tasks.get(id)).filter(|t| self.eco_new_factory_job(t))
+        // A free mex near the worker before a new factory, or one it stands
+        // at before the missile silo (`remexfirst`).
+        if let Some((fac, radius)) =
+            task.and_then(|id| eco.tasks.get(id)).and_then(|t| Some((t, self.eco_remex_radius(t, range)?)))
             && !self.dev_off("remexfirst")
         {
             let mex = eco.build_ids.mex_id;
             let best = (eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)))
                 .filter(|t| t.as_construction().is_some_and(|c| c.build_type.id() == mex))
-                .filter(|t| distance(wpos, t.get_pos()) <= REMEX_RADIUS && reaches(t))
+                .filter(|t| distance(wpos, t.get_pos()) <= radius && reaches(t))
                 .map(|t| {
                     let keep = if worker.task == Some(t.id) { REMEX_KEEP } else { 0.0 };
                     (t, self.eco_cost_of_job(worker, wpos, t) - stranded(t) + threat_cost(t) - keep)
@@ -650,16 +657,23 @@ impl Ai {
         task
     }
 
-    /// Whether `t` is the job of a new factory, strider hub or plate: not a
-    /// commander's plop, nor a factory while we have none (see
-    /// [`REMEX_RADIUS`]), nor one the operator asked for.
-    fn eco_new_factory_job(&self, t: &WorkerTask) -> bool {
-        let Some(c) = t.as_construction() else { return false };
+    /// How far a free mex may be from a worker whose cheapest job is `t`
+    /// to go first (`remexfirst`), the worker's reach being `range`:
+    /// [`REMEX_RADIUS`] for a new factory, strider hub or plate (not a
+    /// commander's plop, nor a factory while we have none); a step past its
+    /// reach for the missile silo (see [`REMEX_STEP`]); none for anything
+    /// else, or a job the operator asked for.
+    fn eco_remex_radius(&self, t: &WorkerTask, range: f32) -> Option<f32> {
+        let c = t.as_construction()?;
+        if self.op_priority(t.id) {
+            return None;
+        }
         let id = c.build_type.id();
-        !c.fac_plop
-            && !self.fac.factories.is_empty()
-            && (self.eco.build_ids.fac_ids.contains(&id) || self.defs.name(c.build_type).starts_with("plate"))
-            && !self.op_priority(t.id)
+        if id == self.eco.build_ids.missile_silo_id {
+            return Some(range + REMEX_STEP);
+        }
+        let factory = self.eco.build_ids.fac_ids.contains(&id) || self.defs.name(c.build_type).starts_with("plate");
+        (factory && !c.fac_plop && !self.fac.factories.is_empty()).then_some(REMEX_RADIUS)
     }
 
     /// The types of our constructors other than `def` (commanders aside:
