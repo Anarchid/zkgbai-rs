@@ -31,10 +31,13 @@
 //!   long again as it has already stood within reach of the place (a force
 //!   that stands is not walking in; [`DWELL_GAP`]). The turret goes at
 //!   the place itself when the enemy already covers the side toward the
-//!   group. It is a
-//!   logistics issue (kind `walkin`): the crew gets a share of the place's
-//!   value, other construction waits for it (`pause`), and it is dropped if
-//!   no group calls for it for [`STAND_DOWN`] before it is started.
+//!   group. It is a logistics issue (kind `walkin`): the crew gets a
+//!   share of the place's value, other construction waits for it
+//!   (`pause`), and it is dropped if no force has had its place within
+//!   reach (met or not: a force's strength flickers with what we see of
+//!   it) for [`STAND_DOWN`] before it is started. At most [`MAX_OPEN`]
+//!   under way, [`PLACE_CAP`] per place per [`CAP_WINDOW`] (dropped ones
+//!   not counted).
 //!
 //! Journal: `k=walkin` per decision (`event`: open, defended, pending,
 //! capped, outranged, late, nosite, stood_down), at most one per place and
@@ -123,8 +126,9 @@ const CAP_RADIUS: f32 = 500.0;
 const CAP_WINDOW: i32 = 9000;
 
 /// An unstarted walk-in turret no force has called for in this many
-/// frames is dropped.
-const STAND_DOWN: i32 = 300;
+/// frames is dropped (as long as a place's dwell clock keeps,
+/// [`DWELL_GAP`]).
+const STAND_DOWN: i32 = DWELL_GAP;
 
 /// Frames between journal notes for the same place and event.
 const NOTE_FRAMES: i32 = 300;
@@ -248,9 +252,12 @@ impl Stats {
 #[derive(Default)]
 pub struct State {
     pub stats: Stats,
-    /// Walk-in turrets opened: the place, the frame.
-    opened: Vec<(Vec3, i32)>,
-    /// Frame each open walk-in issue was last called for.
+    /// Walk-in turrets opened (stood down ones forgotten): the place, the
+    /// frame, the task.
+    opened: Vec<(Vec3, i32, TaskId)>,
+    /// Frame each open walk-in issue was last called for: a force had its
+    /// place within reach (breach or met: a force's strength flickers with
+    /// what of it we see).
     called: BTreeMap<TaskId, i32>,
     /// Caretakers off their factory to help build: the nanoframe each
     /// repairs.
@@ -352,6 +359,12 @@ impl Ai {
         let mut assessed = self.walkin_assess(&groups, &places, &ours);
         for a in &mut assessed {
             a.dwell = stand(&mut self.logistics.walkin.standing, a.place.anchor, frame);
+            let anchor = a.place.anchor;
+            for i in self.logistics.issues.values() {
+                if i.kind == Kind::Walkin && distance(i.pos, anchor) <= VAR_RADIUS {
+                    self.logistics.walkin.called.insert(i.task, frame);
+                }
+            }
         }
         for a in assessed {
             if a.breach {
@@ -654,9 +667,10 @@ impl Ai {
             return;
         }
         let under_way = self.logistics.issues.values().filter(|i| i.kind == Kind::Walkin).count();
-        self.logistics.walkin.opened.retain(|&(_, f)| frame - f < CAP_WINDOW);
-        let here =
-            (self.logistics.walkin.opened.iter()).filter(|(p, _)| distance(*p, a.place.anchor) <= CAP_RADIUS).count();
+        self.logistics.walkin.opened.retain(|&(_, f, _)| frame - f < CAP_WINDOW);
+        let here = (self.logistics.walkin.opened.iter())
+            .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
+            .count();
         if under_way >= MAX_OPEN || here >= PLACE_CAP {
             self.logistics.walkin.stats.capped += 1;
             self.walkin_note("capped", a, json!({"under_way": under_way, "here": here}));
@@ -731,7 +745,7 @@ impl Ai {
             hands.len(),
         );
         if let Some(id) = self.logistics_open(task, Kind::Walkin, worth, &why, a.group.power) {
-            self.logistics.walkin.opened.push((a.place.anchor, frame));
+            self.logistics.walkin.opened.push((a.place.anchor, frame, task));
             self.logistics.walkin.called.insert(task, frame);
             self.logistics.walkin.stats.opened += 1;
             let extra = json!({"issue": id, "turret": what, "turret_power": candidates[k].0.round(),
@@ -784,6 +798,7 @@ impl Ai {
             .map(|i| i.task)
             .collect();
         for task in stale {
+            self.logistics.walkin.opened.retain(|o| o.2 != task);
             self.logistics.walkin.stats.stood_down += 1;
             self.logistics_close(task, "stood down");
             self.eco.eco_logistics_drop(task);
