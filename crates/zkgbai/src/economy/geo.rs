@@ -38,6 +38,10 @@ const ADVANCED: &str = "energyheavygeo";
 /// 500 metal is then half a minute of it).
 const GEO_SHORTFALL: f32 = 0.5;
 const GEO_MIN_INCOME: f32 = 15.0;
+/// With `energyneed`, the income rule gives way to this shortfall against
+/// construction (see `eco_energy_shortfall`): 0.5 is energy income at 0.9x
+/// metal income.
+const GEO_NEED: f32 = 0.5;
 
 /// A plant's site is this close to its vent, elmos.
 const VENT_SNAP: f32 = 48.0;
@@ -168,7 +172,16 @@ impl Ai {
         let vents = self.eco_geo_vents();
         let Some(plant) = self.defs.get(PLANT).filter(|_| !vents.is_empty()) else { return false };
         let short = self.eco.energy_target - self.eco.effective_income_energy;
-        if short < GEO_SHORTFALL * super::wind::energy_make(plant) && self.eco.static_income < GEO_MIN_INCOME {
+        let wanted = short >= GEO_SHORTFALL * super::wind::energy_make(plant);
+        // With `energyneed`: when energy lags construction, not at an income
+        // (it opened at 1:40 on Agalta, a walk of 1300 elmos while mexes
+        // waited, energy then 1.07x the metal income).
+        let open = if self.dev_off("energyneed") {
+            wanted || self.eco.static_income >= GEO_MIN_INCOME
+        } else {
+            wanted || self.eco_energy_shortfall() >= GEO_NEED
+        };
+        if !open {
             return false;
         }
         let planned = self.eco.construction_tasks.iter().any(|&t| {

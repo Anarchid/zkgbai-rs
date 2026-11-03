@@ -253,6 +253,29 @@ impl Ai {
         self.eco.assigned.push_back(wid);
     }
 
+    /// Journal worker `wid` leaving the job `old` (a tracked issue's) for
+    /// `new`: each job's price as the ladder has it, the crew bonus, the
+    /// threat paint at each.
+    fn eco_journal_leave(&self, wid: i32, old: TaskId, new: TaskId) {
+        let Some(w) = self.eco.workers.get(&wid) else { return };
+        let wpos = w.get_pos();
+        let view = self.war.view(w.unit.def());
+        let one = |id: TaskId| {
+            let Some(t) = self.eco.tasks.get(id) else { return serde_json::Value::Null };
+            let what = t.as_construction().map_or("other", |c| self.defs.name(c.build_type));
+            serde_json::json!({"what": what, "dist": distance(wpos, t.get_pos()).round(),
+                               "cost": self.eco_cost_of_job(w, wpos, t).round(),
+                               "bonus": self.logistics_bonus(wid, id).map(f32::round),
+                               "threat": (view.get_effective_threat(t.get_pos()) * 100.0).round() / 100.0,
+                               "raiders": self.eco_raiders_near(t.get_pos()).round()})
+        };
+        self.op_emit(
+            "leave",
+            serde_json::json!({"worker": wid, "def": self.defs.name_of(w.unit), "greedy": w.is_greedy,
+                               "chicken": w.is_chicken, "from": one(old), "to": one(new)}),
+        );
+    }
+
     fn eco_stop_chickening(&mut self, wid: i32) {
         if let Some(w) = self.eco.workers.get_mut(&wid) {
             w.is_chicken = false;
@@ -308,6 +331,11 @@ impl Ai {
             return;
         }
 
+        // A worker leaving a tracked issue's job: journaled with both
+        // prices, to see what pulls workers off a geothermal plant.
+        if let Some(old) = wtask.filter(|&t| t != task_id && self.logistics_tracks(t)) {
+            self.eco_journal_leave(wid, old, task_id);
+        }
         // remove it from its old assignment if it had one
         if wtask != Some(task_id)
             && let Some(w) = self.eco.workers.get_mut(&wid)
