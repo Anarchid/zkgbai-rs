@@ -87,6 +87,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
 /// sym) stay off.
+/// `eramp` (energy wanted ramps with the alliance's share of the metal
+/// spots and the clock, see economy/mod.rs ERAMP_*) is on in the wip line
+/// (user, 2026-11-03; disable=eramp to opt out) while its A/B runs.
 pub(crate) const OFF_BY_DEFAULT: [&str; 20] = [
     "pairs",
     "currency",
