@@ -433,8 +433,13 @@ impl Ai {
             self.eco_choose_super_weapon();
         }
 
-        // A nuke, when one strike would pay for it.
-        if !self.eco.has_super_wep && self.eco.super_wep_tasks.is_empty() && self.eco.s_wep != 1 && self.nukes_wanted()
+        // A nuke, when one strike would pay for it and the alliance has
+        // none (one is enough, see `allied`).
+        if !self.eco.has_super_wep
+            && self.eco.super_wep_tasks.is_empty()
+            && self.eco.s_wep != 1
+            && self.eco_alliance_nuke().is_none()
+            && self.nukes_wanted()
         {
             if let Some((p, v)) = self.nukes_build_target() {
                 self.log(&format!(
@@ -1033,7 +1038,8 @@ impl Ai {
             self.eco.s_wep = 0;
         } else {
             let rnd = kgb_rand();
-            if !self.war.enemy_has_anti_nuke && rnd > 0.66 {
+            let nuke = !self.war.enemy_has_anti_nuke && self.eco_alliance_nuke().is_none();
+            if nuke && rnd > 0.66 {
                 self.eco.s_wep = 1;
             } else if rnd > 0.33 {
                 self.eco.s_wep = 2;
@@ -1051,7 +1057,7 @@ impl Ai {
             return;
         }
         if needs > energy {
-            let fallback = if self.war.enemy_has_anti_nuke { 0 } else { 1 };
+            let fallback = if self.war.enemy_has_anti_nuke || self.eco_alliance_nuke().is_some() { 0 } else { 1 };
             self.log(&format!(
                 "economy: {name} needs {needs:.0} energy and we make {energy:.0}; building {} instead",
                 ["staticheavyarty", "staticnuke"][fallback as usize]
@@ -1163,7 +1169,25 @@ impl Ai {
             return;
         };
         // An ally's frame of it first; else in our turn (see `allied`).
-        if self.eco_assist_ally(death) || !self.eco_ally_turn("superweapon", &super::allied::SUPERWEAPONS) {
+        if self.eco_assist_ally(death) {
+            return;
+        }
+        // The alliance's one nuke stands or rises (the ally's we helped,
+        // say): our wish is answered, Berthas next.
+        if self.eco.s_wep == 1
+            && let Some(silo) = self.eco_alliance_nuke()
+        {
+            let p = silo.pos();
+            self.log(&format!(
+                "economy: the alliance has its nuke (team {}'s at ({:.0}, {:.0})); one is enough, none of ours",
+                silo.team(),
+                p.x,
+                p.z
+            ));
+            self.eco.s_wep = 0;
+            return;
+        }
+        if !self.eco_ally_turn("superweapon", &super::allied::SUPERWEAPONS) {
             return;
         }
 
