@@ -45,7 +45,10 @@ OPTS = {"air": 1, "burn": 1, "death": 1, "emp": 1, "slow": 1, "engage": 1, "heat
 AOE = os.path.join(ROOT, "twod", "fit", "aoe_all.pkl")   # aoe_fit.py: splash kappa by weapon class
 # Both run with `sreload` (2026-11-03): tube weapons fire from tubes that each reload on their own clock, the
 # crate's data/fightsim_sreload.tsv; their calibrations were refitted with it (fates-<variant>-sr).
-VARIANTS = {"focus": dict(OPTS, focus=1, sreload=1), "2d": dict(OPTS, twod=1, sep=1, aoe=1, focus=1, sreload=1)}
+# `sr` (2026-11-03): the plain fight with tube weapons, what `disable=fightfocus` runs; the base rows stay the
+# frozen fight's (every switch off, tubes too).
+VARIANTS = {"focus": dict(OPTS, focus=1, sreload=1), "2d": dict(OPTS, twod=1, sep=1, aoe=1, focus=1, sreload=1),
+            "sr": dict(OPTS, sreload=1)}
 VARIANT_FATES_CAL = {v: os.path.join(ROOT, f"fates-{v}-sr", "cal.tsv") for v in VARIANTS}
 SRELOAD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "crates", "zkgbai", "data", "fightsim_sreload.tsv")
 G = {}

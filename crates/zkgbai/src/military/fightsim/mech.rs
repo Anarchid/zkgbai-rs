@@ -177,6 +177,8 @@ pub struct MechTables {
     /// `cal focus.*` and `cal 2d.*`).
     pub focus_cal: Option<Calibration>,
     pub twod_cal: Option<Calibration>,
+    /// The plain fight with tube weapons (`sreload` without `fightfocus`).
+    pub sr_cal: Option<Calibration>,
     /// The data file's fitting header.
     pub fitted: String,
 }
@@ -195,6 +197,8 @@ impl MechTables {
             self.twod_cal.as_ref()
         } else if flags.focus {
             self.focus_cal.as_ref()
+        } else if flags.sreload {
+            self.sr_cal.as_ref()
         } else {
             None
         };
@@ -283,6 +287,7 @@ impl MechTables {
             fate: base.fate,
             focus_cal: variant("focus")?,
             twod_cal: variant("2d")?,
+            sr_cal: variant("sr")?,
             fitted: tsv.lines().next().unwrap_or_default().trim_start_matches('#').trim().to_owned(),
         })
     }
@@ -1246,6 +1251,7 @@ mod tests {
         match name {
             "focus" => SimFlags::from_switches(false, true, true),
             "2d" => SimFlags::from_switches(true, false, true),
+            "sr" => SimFlags::from_switches(false, false, true),
             v => panic!("variant {v:?}"),
         }
     }
@@ -1693,7 +1699,7 @@ mod tests {
     fn switches_off_are_the_frozen_fight() {
         let m = Model::load().unwrap();
         let t = MechTables::load().unwrap();
-        assert!(t.focus_cal.is_some() && t.twod_cal.is_some(), "variant calibrations in the tables");
+        assert!(t.focus_cal.is_some() && t.twod_cal.is_some() && t.sr_cal.is_some(), "variant calibrations in the tables");
         assert!(t.splash.contains_key("tankraid_napalm_bomblet"));
         assert_eq!(t.calibration(SimFlags::default()).win, t.win);
         for (name, snap, _) in cases() {
