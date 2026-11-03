@@ -498,6 +498,14 @@ impl Ai {
         ready.into_iter().take(n).map(|c| c.id).collect()
     }
 
+    /// A threat-aware way home for `u` from where it flies now.
+    fn airstrike_home_route(&self, u: Unit, kind: Plane, home: Vec3, interceptors: &[(Vec3, f32, f32)]) -> Vec<Vec3> {
+        let v = u.vel();
+        let len = (v.x * v.x + v.z * v.z).sqrt();
+        let heading = (len > 1e-3).then(|| (v.x / len, v.z / len));
+        self.airstrike_field(u.pos(), interceptors).route_for(home, self.airstrike_turn_radius(kind), heading)
+    }
+
     /// Metal in combat aircraft (Sparrows aside): what airpad caretakers
     /// are for (`padnano`).
     pub(crate) fn airstrike_fleet_metal(&self) -> f32 {
@@ -1177,8 +1185,14 @@ impl Ai {
                 // drifts back toward the center without leaving the ready
                 // pool, so the planes of a package start together.
                 if !at_home && frame - a.last_order >= 30 * 10 {
-                    u.move_to(home, 0);
                     a.last_order = frame;
+                    let kind = a.kind;
+                    let route = self.airstrike_home_route(u, kind, home, interceptors);
+                    if route.is_empty() {
+                        u.move_to(home, 0);
+                    } else {
+                        Self::airstrike_route(u, &route, false, turns);
+                    }
                 }
                 continue;
             }
@@ -1196,10 +1210,7 @@ impl Ai {
             }
             let needs_pad = hurt || empty;
             let route = if !(at_home || needs_pad && self.graph.is_ally_territory(u.pos())) {
-                let v = u.vel();
-                let len = (v.x * v.x + v.z * v.z).sqrt();
-                let heading = (len > 1e-3).then(|| (v.x / len, v.z / len));
-                self.airstrike_field(u.pos(), interceptors).route_for(home, self.airstrike_turn_radius(a.kind), heading)
+                self.airstrike_home_route(u, a.kind, home, interceptors)
             } else {
                 vec![]
             };
