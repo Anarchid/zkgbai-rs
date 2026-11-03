@@ -178,6 +178,14 @@ pub(crate) const GROUND_SAFE: f32 = 0.5;
 /// Conquered ground is reweighed this often (frames), and on any change.
 const GROUND_EVERY: i32 = 30 * 10;
 
+/// Mines at a held objective (user, 2026-11-03: "if we're a mine haver
+/// factory we should do the mines for these"): a field this far on its
+/// enemy side, mines wanted per held objective, and at most this many in
+/// all.
+const MINE_FORWARD: f32 = 250.0;
+const MINES_PER_HELD: usize = 3;
+const MINES_MAX: usize = 6;
+
 #[derive(Default)]
 pub struct Conquest {
     job: Option<mpsc::Receiver<Vec<Objective>>>,
@@ -1149,6 +1157,26 @@ impl Ai {
             .filter(|(i, _)| matches!(c.control.get(*i).map(|c| c.hold), Some(Hold::Ours(_))))
             .flat_map(|(_, o)| o.sites.iter().map(|&s| self.conquest_v3(s)))
             .collect()
+    }
+
+    /// Minefields for the objectives we hold: (middle, value), on each
+    /// one's enemy side (see `sappers`).
+    pub(crate) fn conquest_mine_fields(&self) -> Vec<(Vec3, f32)> {
+        if self.dev_off("conquest") {
+            return Vec::new();
+        }
+        let c = &self.eco.conquest;
+        (c.objectives.iter().enumerate())
+            .filter(|(i, _)| matches!(c.control.get(*i).map(|c| c.hold), Some(Hold::Ours(_))))
+            .map(|(_, o)| (self.conquest_forward(self.conquest_v3(o.center()), MINE_FORWARD), 2.0))
+            .collect()
+    }
+
+    /// Whether a factory that makes mines should make one now for the
+    /// objectives we hold (`have`: our mines).
+    pub(crate) fn conquest_wants_mines(&self, have: usize) -> bool {
+        let held = self.conquest_mine_fields().len();
+        held > 0 && have < (MINES_PER_HELD * held).min(MINES_MAX)
     }
 
     /// The conquest turret's reach (Stinger 620 by default).

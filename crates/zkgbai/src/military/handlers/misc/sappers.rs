@@ -264,6 +264,11 @@ fn rows(center: Vec3, forward: Vec3, width: f32, spacing: f32) -> Vec<(Vec3, usi
 }
 
 impl Ai {
+    /// Our mines in play.
+    pub(crate) fn sapper_count(&self) -> usize {
+        self.misc_handler.sappers.len()
+    }
+
     pub fn misc_prepare_sapper(&self, unit: Unit) {
         configure(unit);
     }
@@ -353,6 +358,12 @@ impl Ai {
                 let value = 1.0 / (1.0 + rank as f32);
                 fields.push(Field { center, toward, width: gate.width, gate: crossing, value });
             }
+        }
+        // The conquest objectives we hold: a field on each one's enemy side,
+        // across their way in, before the gates (see `economy::conquest`).
+        for (center, value) in self.conquest_mine_fields() {
+            let Some(toward) = approach.toward(center, GATE_LOOKBACK) else { continue };
+            fields.push(Field { center, toward, width: 600.0, gate: center, value });
         }
         // Open maps and the period before terrain analysis still get a
         // distributed minefield, using owned front spots as sectors.

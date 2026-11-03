@@ -912,6 +912,11 @@ impl Ai {
             return "cloakcon";
         }
 
+        // Mines for the conquest objectives we hold (see `conquest`).
+        if self.conquest_wants_mines(self.sapper_count()) {
+            return "cloakbomb";
+        }
+
         if let Some(support) = self.army_support_factory(fac) {
             return support;
         }
@@ -1071,6 +1076,11 @@ impl Ai {
 
         if self.fac_need_workers(fac) {
             return "shieldcon";
+        }
+
+        // Mines for the conquest objectives we hold (see `conquest`).
+        if self.conquest_wants_mines(self.sapper_count()) {
+            return "shieldbomb";
         }
 
         if let Some(support) = self.army_support_factory(fac) {
