@@ -153,6 +153,8 @@ pub struct EconomyManager {
     potential_fac_list: BTreeSet<String>,
     new_workers: BTreeSet<i32>,
     new_mexes: Vec<Unit>,
+    /// Where our finished mexes died, and when (see [`REMEX_MEMORY`]).
+    lost_mexes: Vec<(Vec3, i32)>,
     new_energy: Vec<Unit>,
     reclaim_record: VecDeque<f32>,
 
@@ -397,6 +399,7 @@ impl EconomyManager {
             potential_fac_list: BTreeSet::new(),
             new_workers: BTreeSet::new(),
             new_mexes: Vec::new(),
+            lost_mexes: Vec::new(),
             new_energy: Vec::new(),
             reclaim_record: VecDeque::new(),
             effective_income_energy: 0.0,
@@ -669,6 +672,15 @@ const OD_FREE_INCOME: f32 = 20.0;
 const NEED_ENOUGH: f32 = 1.2;
 const NEED_SHORT: f32 = 0.6;
 pub(crate) const NEED_PULL: f32 = 300.0;
+
+/// Remexes at high build priority (`remexfirst`): a mex frame within
+/// REMEX_SPOT of where a finished mex of ours died in the last REMEX_MEMORY
+/// frames, unless energy hard-stalls. In the staged smoke (11-04) a base
+/// raid took 56 -> 22 metal income and emptied storage in 18 s; at normal
+/// priority the remex frames then shared that with factory production
+/// and turrets at the front, sitting unbuilt for 40 s.
+const REMEX_MEMORY: i32 = 30 * 300;
+const REMEX_SPOT: f32 = 64.0;
 
 /// How short energy income falls of construction's need, 0 (enough) to 1
 /// (see [`NEED_ENOUGH`]).
@@ -1448,7 +1460,14 @@ impl Ai {
             self.eco_silo_lost(unit);
         }
         if def.is_some_and(|d| d.speed() == 0.0) {
+            let frame = self.frame;
             let eco = &mut self.eco;
+            // A finished mex of ours lost: its replacement is a remex
+            // (see `eco_set_eco_priorities`).
+            if eco.mexes.contains(&unit) {
+                eco.lost_mexes.retain(|&(_, f)| frame - f <= REMEX_MEMORY);
+                eco.lost_mexes.push((unit.pos(), frame));
+            }
             for list in [
                 &mut eco.radars,
                 &mut eco.porcs,
@@ -1771,7 +1790,15 @@ impl Ai {
 
         let prio =
             if !eco.hard_estalled && !self.graph.eminent_territory && eco.adjusted_income < 20.0 { 2.0 } else { 1.0 };
+        // A remex goes first too (`remexfirst`): its metal was income a
+        // moment ago, and the raid that took it left storage empty, so at
+        // normal priority it waited behind factory production and turrets.
+        let remex = !eco.hard_estalled && !self.dev_off("remexfirst");
+        let frame = self.frame;
+        let lost =
+            |p: Vec3| eco.lost_mexes.iter().any(|&(q, f)| frame - f <= REMEX_MEMORY && distance(p, q) < REMEX_SPOT);
         for u in eco.new_mexes.iter().filter(|u| building(u)) {
+            let prio = if remex && lost(u.pos()) { 2.0 } else { prio };
             u.execute_custom_command(cmd::PRIORITY, &[prio], 0, NO_TIMEOUT);
         }
 
