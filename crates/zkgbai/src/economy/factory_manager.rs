@@ -889,6 +889,11 @@ impl Ai {
                 && eco.max_storage > 0.5
                 && worker_deficit > -1)
             || (self.fac_early_worker() && fm.num_workers < 2 * (1 + merged))
+            // With `compush` the first constructor builds the home energy
+            // while the commander expands (see `conquest_energy`): it comes
+            // first, as on big maps (Cloakbots and Hovercraft otherwise
+            // opened with ten raiders, the constructor at 1:50).
+            || (self.conquest_push() && fm.num_workers < 2 * (1 + merged))
         {
             return true;
         }

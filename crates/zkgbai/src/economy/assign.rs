@@ -720,6 +720,9 @@ impl Ai {
                     // (Greedy workers build it while metal floats for want
                     // of it: `energycrew`.)
                     let greedy = worker.is_greedy && !self.eco_floating_on_energy();
+                    // With `compush` the commander leaves the energy behind
+                    // it to the energy worker.
+                    let back = self.compush_back_cost(worker, wpos, task_pos);
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
                         if greedy {
@@ -727,9 +730,9 @@ impl Ai {
                         }
                         if worker.is_com {
                             if eco.hard_estalled {
-                                return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                                return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                             }
-                            return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                            return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                         }
                         return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     } else {
@@ -737,7 +740,7 @@ impl Ai {
                             return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
                         }
                         if worker.is_com {
-                            return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                            return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                         }
                         return (dist / 4.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     }
