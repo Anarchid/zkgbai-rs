@@ -97,6 +97,21 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "optional Lobster squad throws and one launcher per 2500 metal of non-raider armed amphs; default on",
     ),
     ("stomp", "Army", "Jugglenauts escape and jump cliffs only where their landing spares our and allied units"),
+    (
+        "sumostatic",
+        "Army",
+        "Jugglenauts walk past enemy buildings instead of standing to stare at them, and stomp them by jumping on (default on)",
+    ),
+    (
+        "pounce",
+        "Army",
+        "Jugglenauts jump at faster enemies that outrange their gravity guns, landing with them in reach (default on)",
+    ),
+    (
+        "cyclops",
+        "Army",
+        "Cyclopes drive into cannon reach of what their slow beam reaches and their cannon does not (default on)",
+    ),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
     ("lance", "Army", "Lances in taskforces with a Mace guarding each (the lance doctrine)"),

@@ -6,6 +6,7 @@ pub mod airstrikes;
 pub mod arsenal;
 pub mod blasts;
 pub mod coalesce;
+pub mod cyclops;
 pub mod drops;
 pub mod enemy;
 pub mod fightsim;
@@ -202,6 +203,9 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    /// The Jugglenaut's def while they walk past enemy buildings rather
+    /// than attack-move (`sumostatic`, see `jumps::SUMO_LOCK`).
+    pub sumo_walks: Option<i32>,
 }
 
 impl MilitaryManager {
@@ -268,6 +272,7 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            sumo_walks: None,
         }
     }
 
@@ -562,6 +567,7 @@ impl Ai {
         self.guard("raider.update", |ai| ai.raider_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
+        self.guard("cyclops.update", |ai| ai.cyclops_update(frame));
         self.guard("bomber.update", |ai| ai.bomber_update(frame));
         self.guard("teleport.update", |ai| ai.teleport_update(frame));
         self.guard("drops.update", |ai| ai.drops_update(frame));
@@ -1098,6 +1104,7 @@ impl Ai {
         self.misc_remove_unit(unit);
         self.jaeger_remove_unit(unit);
         self.jumps_remove_unit(unit);
+        self.cyclops_remove_unit(unit.id());
         self.puppies_remove_unit(unit);
         self.stakeouts_remove_unit(unit, attacker);
         self.roles_unit_destroyed(id);

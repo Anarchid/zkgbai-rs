@@ -92,6 +92,14 @@
 //! `test=crabprogress` instead gives one Crab at minute 1, three Weavers
 //! at minute 2 and two more at minute 3: departure must precede the escorts,
 //! which join progressively without taking economy jobs away from the Crab.
+//! With `test=heavyfort` (against `test=fort`, or `test=skirmfort`: the
+//! fort with Rogues, a Slasher and a Recluse posted halfway to the enemy
+//! every two minutes from minute 1, to one side then the other), the attacker gets a
+//! radar covering the fort and two Sparrows at once, and two Cyclopes, two
+//! Jugglenauts and two Moderators at home every four minutes from minute 1:
+//! the Cyclopes should drive into their cannon's reach (`cyclops:` lines),
+//! the Jugglenauts stomp the fort and pounce on the skirmishers rather than
+//! stand staring at buildings (`jumps:` lines).
 
 use springai::{Unit, Vec3};
 
@@ -165,6 +173,15 @@ const IMPALER_WAR: [i32; 3] = [30 * 480, 30 * 720, 30 * 960];
 /// How often a sniper team is posted (`snipers`, `lances`), where, and
 /// how often the hunters come (`hunt`).
 const SNIPER_ROUND: i32 = 30 * 150;
+/// `test=heavyfort`: Cyclopes, Jugglenauts and Moderators at home from
+/// this frame, a round every this many.
+const HEAVY_FRAME: i32 = 30 * 60;
+const HEAVY_ROUND: i32 = 30 * 240;
+/// `test=skirmfort`: skirmishers posted halfway to the enemy, this far to
+/// one side then the other, from this frame, a group every this many.
+const SKIRM_FRAME: i32 = 30 * 60;
+const SKIRM_ROUND: i32 = 30 * 120;
+const SKIRM_ASIDE: f32 = 250.0;
 const SNIPER_OUT: f32 = 1400.0;
 const SNIPER_ASIDE: f32 = 500.0;
 const HUNT_ROUND: i32 = 30 * 120;
@@ -177,7 +194,7 @@ impl Ai {
     /// Whether this side's cheated units stand where they are posted (the
     /// sniper teams), out of the handlers' hands.
     pub fn strike_test_posted(&self) -> bool {
-        matches!(self.test.as_deref(), Some("snipers" | "lances"))
+        matches!(self.test.as_deref(), Some("snipers" | "lances" | "skirmfort"))
     }
 
     pub fn strike_test_update(&mut self, frame: i32) {
@@ -258,7 +275,7 @@ impl Ai {
                     ("vehaa", aside(150.0, -1250.0)),
                 ]
             }
-            ("fort", 60) => {
+            ("fort" | "skirmfort", 60) => {
                 let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
                 spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
                 let mut units = vec![("planescout", ahead(-100.0)), ("planescout", ahead(-200.0))];
@@ -279,6 +296,37 @@ impl Ai {
                 }
                 units
             }
+            // Skirmishers that outrange a Jugglenaut and outrun it, posted
+            // before the fort (see `jumps`'s pounces).
+            ("skirmfort", f) if f >= SKIRM_FRAME && (f - SKIRM_FRAME) % SKIRM_ROUND == 0 => {
+                let s = if ((f - SKIRM_FRAME) / SKIRM_ROUND) % 2 == 0 { 1.0 } else { -1.0 };
+                let half = distance(base, toward) / 2.0;
+                let at = |d: f32, across: f32| {
+                    let p = ahead(half + d);
+                    Vec3::xz(p.x - dz / n * (s * SKIRM_ASIDE + across), p.z + dx / n * (s * SKIRM_ASIDE + across))
+                };
+                vec![
+                    ("shieldskirm", at(0.0, -60.0)),
+                    ("shieldskirm", at(0.0, 60.0)),
+                    ("vehsupport", at(80.0, 0.0)),
+                    ("spiderskirm", at(-100.0, 0.0)),
+                ]
+            }
+            // Heavies against a fort (see `cyclops` and `jumps`): what the
+            // Cyclopes' cannons reach, the Jugglenauts' stomps.
+            ("heavyfort", 60) => vec![
+                ("staticradar", get_directional_point(enemy, base, 2200.0)),
+                ("planelightscout", ahead(-200.0)),
+                ("planelightscout", ahead(-260.0)),
+            ],
+            ("heavyfort", f) if f >= HEAVY_FRAME && (f - HEAVY_FRAME) % HEAVY_ROUND == 0 => vec![
+                ("tankheavyassault", ahead(-100.0)),
+                ("tankheavyassault", ahead(-220.0)),
+                ("jumpsumo", ahead(-340.0)),
+                ("jumpsumo", ahead(-460.0)),
+                ("jumpskirm", ahead(-560.0)),
+                ("jumpskirm", ahead(-620.0)),
+            ],
             ("precision", f) if f >= PRECISION_FRAME && (f - PRECISION_FRAME) % PRECISION_ROUND == 0 => {
                 let mut units: Vec<(&str, Vec3)> = Vec::new();
                 for name in ["cloakraid", "cloakheavyraid", "vehraid", "tankraid"] {
@@ -524,8 +572,10 @@ impl Ai {
         }
         // Owls keep watch over the fort, and the commander holds its fire
         // (it would shoot the probes; losing it ends the game).
-        if matches!(test.as_str(), "fort" | "radarfort" | "heavies" | "heavypush" | "farm" | "snipers" | "lances")
-            && frame == 300
+        if matches!(
+            test.as_str(),
+            "fort" | "radarfort" | "skirmfort" | "heavies" | "heavypush" | "farm" | "snipers" | "lances"
+        ) && frame == 300
         {
             for c in self.cb.team_units().into_iter().filter(|u| self.defs.name_of(*u).starts_with("dyn")) {
                 c.set_fire_state(0, 0);
@@ -552,7 +602,7 @@ impl Ai {
                 }
             }
         }
-        if (test == "fort" || test == "radarfort") && frame == 60 {
+        if matches!(test.as_str(), "fort" | "radarfort" | "skirmfort") && frame == 60 {
             let mut spots: Vec<Vec3> = self.graph.metal_spots.iter().map(|m| m.position).collect();
             spots.sort_by(|a, b| distance(*a, base).total_cmp(&distance(*b, base)));
             spots.truncate(FORT_SPOTS);

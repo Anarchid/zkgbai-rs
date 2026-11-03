@@ -61,12 +61,16 @@ pub(crate) fn next_waypoint(path: &mut VecDeque<Vec3>, skip: usize) -> Option<Ve
 
 /// An attack-move of `unit` to `pos`, or a plain move while either is in a
 /// no-go circle (a blast of ours coming; see `military::blasts`): out of one, as
-/// attacking it would stop there to shoot; into one, as far as its rim.
+/// attacking it would stop there to shoot; into one, as far as its rim. A
+/// Jugglenaut walks where an enemy building is about (it would stop to
+/// stare at it; see `jumps::SUMO_LOCK`).
 pub(crate) fn fight_clear(unit: Unit, pos: Vec3, opts: i16, nav: &Nav) {
     let at = unit.pos();
     if nav.pathfinder.no_go_at(at).is_some() || nav.pathfinder.no_go_at(pos).is_some() {
         let to = nav.pathfinder.no_go_exit(pos, at).unwrap_or(pos);
         kgb_move_to(unit, to, opts, nav.frame);
+    } else if crate::military::jumps::sumo_walks(unit, at, pos, nav.war) {
+        kgb_move_to(unit, pos, opts, nav.frame);
     } else {
         unit.fight(pos, opts);
     }

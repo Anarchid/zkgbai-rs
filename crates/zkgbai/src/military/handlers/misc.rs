@@ -403,7 +403,8 @@ impl Ai {
         let ids: Vec<i32> = self.misc_handler.loners.iter().copied().collect();
         for id in ids {
             let Some(u) = self.fighters.get(&id).map(|f| f.unit) else { continue };
-            if self.retreat_handler.is_retreating(id) {
+            // (A Cyclops driving into its cannon's reach: see `cyclops`.)
+            if self.retreat_handler.is_retreating(id) || self.cyclopes.holds(id, self.frame) {
                 continue;
             }
             let pos = u.pos();
