@@ -30,6 +30,7 @@ mod watchtower;
 mod wind;
 pub mod worker;
 
+pub(crate) use assign::repair_loses_to_mex;
 pub use build_ids::BuildIds;
 pub use factory::Factory;
 pub use factory_manager::FactoryManager;

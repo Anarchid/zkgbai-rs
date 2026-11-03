@@ -85,6 +85,16 @@ fn repair_worth(cost: f32, health: f32, max_health: f32) -> f32 {
     (missing / REPAIR_FULL_METAL).min(1.0)
 }
 
+/// A lone mex's pull on a worker beside it, no free spots near.
+const LONE_MEX_PULL: f32 = 100.0;
+
+/// Whether a lone worker beside a mobile combat unit would rather build a
+/// lone mex there than repair it (`lightrepair`). A retreated unit like that
+/// does not wait at home for a repair (see `retreat`).
+pub(crate) fn repair_loses_to_mex(cost: f32, health: f32, max_health: f32) -> bool {
+    repair_worth(cost, health, max_health) * (250.0 + (max_health + health) / 10.0) < LONE_MEX_PULL
+}
+
 /// Spring's repair and reclaim command ids (a build's is minus the def id).
 const CMD_REPAIR: i32 = 40;
 const CMD_RECLAIM: i32 = 90;
@@ -445,6 +455,19 @@ impl Ai {
     fn eco_worker_shuns(&self, w: &Worker, p: Vec3) -> bool {
         let frame = self.frame;
         w.shunned.iter().any(|&(s, until)| until > frame && distance(s, p) < APPROACH_SHUN_RADIUS)
+    }
+
+    /// Whether a worker on the job of repairing `unit` is about at it (in
+    /// build range, give or take a step).
+    pub(crate) fn eco_repair_crew_near(&self, unit: springai::Unit) -> bool {
+        let eco = &self.eco;
+        let p = unit.pos();
+        eco.repair_tasks
+            .iter()
+            .filter_map(|&id| eco.tasks.get(id))
+            .filter(|t| matches!(&t.kind, TaskKind::Repair(r) if r.target == unit))
+            .flat_map(|t| t.assigned_workers.iter().filter_map(|id| eco.workers.get(id)))
+            .any(|w| distance(w.get_pos(), p) <= w.unit.def().map_or(0.0, |d| d.build_distance()) + 100.0)
     }
 
     fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
@@ -1205,6 +1228,18 @@ mod tests {
         assert!(mex < dart, "mex {mex} vs dart {dart}");
         // the flat pull it had picked the Dart
         assert!(repair_cost(50.0, 1.0, 60.0, 120.0) < mex);
+    }
+
+    #[test]
+    fn scouts_and_small_raiders_do_not_wait_for_repair() {
+        // at half health: Dart, Flea, Glaive, Bandit, Dagger lose to a mex
+        for (cost, hp) in [(40.0, 120.0), (25.0, 40.0), (65.0, 230.0), (75.0, 350.0), (80.0, 300.0)] {
+            assert!(repair_loses_to_mex(cost, hp / 2.0, hp), "{cost} m, {hp} HP");
+        }
+        // Scorcher, Rogue, Hermit do not
+        for (cost, hp) in [(130.0, 480.0), (125.0, 520.0), (145.0, 1550.0)] {
+            assert!(!repair_loses_to_mex(cost, hp / 2.0, hp), "{cost} m, {hp} HP");
+        }
     }
 
     #[test]

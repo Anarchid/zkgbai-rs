@@ -2,11 +2,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde_json::json;
 use springai::{Unit, Vec3};
 
 use crate::Ai;
 use crate::military::Coward;
 use crate::nav;
+use crate::util::distance;
+
+/// A retreating unit this near its haven is home (see `retreat_waits_in_vain`).
+const HAVEN_HOME: f32 = 300.0;
 
 #[derive(Default)]
 pub struct RetreatHandler {
@@ -269,8 +274,8 @@ impl Ai {
                 continue;
             }
 
-            let (unit, pos, is_scythe, is_plane, is_flyer, cloaked) =
-                (c.unit, c.get_pos(), c.is_scythe, c.is_plane, c.is_flyer, c.is_cloaked());
+            let (unit, pos, is_scythe, is_plane, is_flyer, cloaked, only_hurt) =
+                (c.unit, c.get_pos(), c.is_scythe, c.is_plane, c.is_flyer, c.is_cloaked(), c.only_hurt());
 
             // Don't retreat scythes unless they're cloaked.
             if is_scythe && !cloaked && self.war.get_effective_threat(pos) <= 0.0 {
@@ -279,6 +284,19 @@ impl Ai {
 
             // (Under water, only what hits under water counts; see `water`.)
             let threatened = self.war.view(unit.def()).get_threat(pos) > 0.0;
+            // Home and out of danger, it goes back to work.
+            if !is_plane && !is_flyer && only_hurt && !threatened && self.retreat_waits_in_vain(unit, pos) {
+                let h = &mut self.retreat_handler;
+                h.retreated_units.remove(&id);
+                h.retreating_units.remove(&id);
+                if let Some(c) = h.cowards.get_mut(&id) {
+                    c.release();
+                }
+                let (t, def) = (self.frame / 30, self.defs.name_of(unit).to_owned());
+                let health = (unit.health() / unit.max_health().max(1.0) * 100.0).round();
+                self.op_emit("retreat", json!({"event": "released", "t": t, "unit": id, "def": def, "health": health}));
+                continue;
+            }
             if !self.retreat_handler.retreated_units.contains(&id) || threatened {
                 if !is_plane {
                     let haven = if is_flyer {
@@ -313,6 +331,22 @@ impl Ai {
         if !retreated {
             self.retreat_handler.retreated_units.clear();
         }
+    }
+
+    /// Whether `unit`, home at `pos`, would wait in vain for a repair
+    /// (`lightrepair`): a worker would rather build a mex beside it than
+    /// repair it, and none is at it already. Zero-K heals it on the move
+    /// (the idle-regen clock restarts only on damage).
+    fn retreat_waits_in_vain(&self, unit: Unit, pos: Vec3) -> bool {
+        if self.dev_off("lightrepair") {
+            return false;
+        }
+        let Some(def) = unit.def() else {
+            return false;
+        };
+        distance(pos, self.graph_get_closest_haven(pos)) <= HAVEN_HOME
+            && crate::economy::repair_loses_to_mex(def.cost(self.metal), unit.health(), unit.max_health())
+            && !self.eco_repair_crew_near(unit)
     }
 
     fn retreat_check_shields(&mut self) {
