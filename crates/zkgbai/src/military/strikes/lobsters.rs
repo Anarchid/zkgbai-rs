@@ -299,6 +299,7 @@ impl Ai {
                             || a.members != m.members
                             || q.members != m.members
                             || distance(q.pos, m.job.pos) > 80.0
+                            || !self.strike_reload_current(&a)
                             || !launchable(a.probability)
                             || !self.lobster_strike_launch(sid, q.plan)
                         {

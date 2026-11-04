@@ -605,7 +605,8 @@ impl Ai {
             notes.metal[0] += spec.cost;
             notes.n[0] += 1;
             let tubes = self.snap_tubes(id);
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, tubes });
+            let reloads = self.snap_reloads(id);
+            snap.units.push(SnapUnit { reloads, side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         let (mut air, mut statics) = (0.0, 0.0);
         for (eid, def, hp, p, flies, is_static) in theirs {
@@ -623,7 +624,8 @@ impl Ai {
                 statics += spec.cost;
             }
             let tubes = self.snap_tubes(eid);
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, tubes });
+            let reloads = self.snap_reloads(eid);
+            snap.units.push(SnapUnit { reloads, side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         if notes.metal[1] > 0.0 {
             notes.air_share = air / notes.metal[1];
@@ -668,7 +670,8 @@ impl Ai {
             }
             let spec = self.fight_spec_of(u.id(), def);
             let tubes = self.snap_tubes(u.id());
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, tubes });
+            let reloads = self.snap_reloads(u.id());
+            snap.units.push(SnapUnit { reloads, side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         let mut foes: Vec<(i32, UnitDef, f32, Vec3)> = Vec::new();
         for eid in theirs {
@@ -685,7 +688,8 @@ impl Ai {
         for (eid, def, hp, p) in foes {
             let spec = self.fight_spec_of(eid, def);
             let tubes = self.snap_tubes(eid);
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, tubes });
+            let reloads = self.snap_reloads(eid);
+            snap.units.push(SnapUnit { reloads, side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         if snap.units.len() > MAX_UNITS || snap.armed(0) == 0 || snap.armed(1) == 0 {
             return None;
@@ -856,12 +860,15 @@ impl Ai {
             // invalidates the old result even inside the freshness window.
             // So does a tube weapon firing or loading.
             let tubes = self.snap_tubes(id);
+            let reloads = self.snap_reloads(id);
             (side, id, d.id(), (hp / d.health().max(1.0) * 5.0) as i32, (p.x / 256.0) as i32, (p.z / 256.0) as i32)
                 .hash(&mut hash);
             tubes.len().hash(&mut hash);
             let spec = self.fight_spec_of(id, d);
             metal[side as usize] += spec.cost;
-            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z, tubes });
+            let unit = SnapUnit { reloads, side, spec, hp, x: p.x, z: p.z, tubes };
+            unit.hash_reloads(self.frame, &mut hash);
+            snapshot.units.push(unit);
         }
         if snapshot.armed(0) == 0 || snapshot.armed(1) == 0 {
             return false;
@@ -1003,6 +1010,7 @@ mod veto_tests {
             let spec = fixture(name);
             for i in 0..n {
                 units.push(SnapUnit {
+                    reloads: Vec::new(),
                     side,
                     hp: spec.health,
                     spec: spec.clone(),

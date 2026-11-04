@@ -271,6 +271,16 @@ labels active formations `fireteam` and exposes their tactic, cores, range and f
 records. The dashboard, map labels, HUD and in-game operator widget show the fireteam label
 and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
 
+Live fight snapshots read each allied or currently visible enemy weapon's engine reload
+clock (`reloads`, default on; `disable=reloads` restores the previous estimates).
+Known cooldowns override the bomb-charge predictor's busy-enemy reload guesses,
+so Snitches can evaluate an actual Ripper reload window. Active bursts and beams
+remain immediate threats; losing LOS returns to unknown cooldowns. Cached
+QRF and strike answers are invalidated when the observed reload window changes.
+This is independent of `ammo`, the default-off hit-based ledger for scripted
+tube magazines. Cooldowns do not identify a shot's target or represent missiles
+already in flight. Hypothetical future encounters still start ready.
+
 Ordinary ground assault and raider squads use `fightsim` as a default-on veto.
 Only predicted crushing defeats add a refusal: at least 75% of our armed metal
 lost, at most 5% of theirs, and enemy metal losses no greater than one tenth of

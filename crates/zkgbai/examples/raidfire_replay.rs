@@ -83,6 +83,7 @@ fn run(model: &Model, specs: &HashMap<String, Arc<UnitSpec>>, line: &str) -> Val
         let def = u[0].as_str().unwrap_or("");
         let Some(spec) = specs.get(def) else { return json!({"id": id, "error": format!("unknown def {def}")}) };
         units.push(SnapUnit {
+            reloads: Vec::new(),
             side: u[1].as_u64().unwrap_or(0) as u8,
             spec: spec.clone(),
             hp: u[2].as_f64().unwrap_or(0.0) as f32,

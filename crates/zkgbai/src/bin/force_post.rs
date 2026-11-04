@@ -97,6 +97,7 @@ fn main() {
                     };
                     let share = u[3].as_f64().unwrap_or(1.0).clamp(0.01, 1.0) as f32;
                     Some(SnapUnit {
+                        reloads: Vec::new(),
                         side: s,
                         spec: row.spec.clone(),
                         hp: row.spec.health * share,

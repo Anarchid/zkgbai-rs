@@ -138,10 +138,18 @@ pub fn staged_fight(
     for (i, &k) in pick.iter().enumerate() {
         let s = options[k].clone();
         let z = mid + SPACING * (i as f32 - (pick.len() as f32 - 1.0) / 2.0);
-        units.push(SnapUnit { side: 0, hp: s.health, x: x0, z, spec: s, tubes: Vec::new() });
+        units.push(SnapUnit { reloads: Vec::new(), side: 0, hp: s.health, x: x0, z, spec: s, tubes: Vec::new() });
     }
     for (s, x, z) in against {
-        units.push(SnapUnit { side: 1, hp: s.health, x: *x, z: *z, spec: s.clone(), tubes: Vec::new() });
+        units.push(SnapUnit {
+            reloads: Vec::new(),
+            side: 1,
+            hp: s.health,
+            x: *x,
+            z: *z,
+            spec: s.clone(),
+            tubes: Vec::new(),
+        });
     }
     FightSnapshot { units, flags }
 }

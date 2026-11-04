@@ -27,6 +27,7 @@ pub mod live;
 pub mod local;
 pub mod mech;
 pub mod plan;
+mod reloads;
 pub mod scenario;
 pub mod worker;
 
@@ -114,6 +115,9 @@ pub struct SnapUnit {
     /// [`SimFlags::sreload`]): frames from now until each is loaded again.
     /// Empty: every tube loaded, or not known (see `military::ammo`).
     pub tubes: Vec<i32>,
+    /// Observed engine cooldowns by weapon name, in frames from this snapshot.
+    /// Missing = unknown; zero = observed ready (or still firing a burst).
+    pub reloads: Vec<(String, i32)>,
 }
 
 /// Switch: coalesce gangs are judged with their units firing for certain
@@ -611,12 +615,12 @@ impl Model {
         let first =
             flags.sreload.then(|| u.spec.weapons.iter().position(|w| self.sreload.contains_key(&w.name))).flatten();
         (u.spec.weapons.iter().enumerate())
-            .map(|(i, w)| self.sim_weapon(w, flags, if Some(i) == first { &u.tubes } else { &[] }))
+            .map(|(i, w)| self.sim_weapon(w, flags, if Some(i) == first { &u.tubes } else { &[] }, u.reload(&w.name)))
             .collect()
     }
 
     /// `empty`: frames until each empty tube is loaded (tube weapons only).
-    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags, empty: &[i32]) -> SimWeapon {
+    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags, empty: &[i32], observed: Option<i32>) -> SimWeapon {
         let salvo = w.salvo.max(1);
         let hitscan = w.hitscan();
         let tubes = if flags.sreload { self.sreload.get(&w.name).copied() } else { None };
@@ -627,7 +631,8 @@ impl Model {
             hitscan,
             salvo,
             nominal: if hitscan { w.damage as f64 * salvo as f64 } else { w.damage as f64 },
-            next: 0,
+            next: observed.unwrap_or(0).max(0),
+            observed_reload: observed.is_some(),
             // Tubes start loaded, but for those known empty.
             tubes: tubes.map_or_else(Vec::new, |(n, _)| {
                 let mut t = vec![0; n.saturating_sub(empty.len())];
@@ -702,6 +707,7 @@ struct SimWeapon {
     /// otherwise.
     nominal: f64,
     next: i32,
+    observed_reload: bool,
     /// Tube weapons (`SimFlags::sreload`): the frame each tube is loaded
     /// again; empty for every other weapon.
     tubes: Vec<i32>,
@@ -989,6 +995,7 @@ mod tests {
                     .map(|u| {
                         let p: Vec<&str> = u.split(':').collect();
                         SnapUnit {
+                            reloads: Vec::new(),
                             side: p[0].parse().unwrap(),
                             spec: specs[p[1]].clone(),
                             hp: p[2].parse().unwrap(),
@@ -1052,7 +1059,7 @@ mod tests {
             radius: 12.0,
             ..UnitSpec::default()
         };
-        SnapUnit { side, hp: health, x, z: 0.0, spec: Arc::new(spec), tubes: Vec::new() }
+        SnapUnit { reloads: Vec::new(), side, hp: health, x, z: 0.0, spec: Arc::new(spec), tubes: Vec::new() }
     }
 
     /// A unit whose ground route is longer than the straight line stands
@@ -1060,6 +1067,7 @@ mod tests {
     #[test]
     fn unfold_puts_units_at_their_route_distance() {
         let mk = |side: u8, x: f32, z: f32, speed: f32| SnapUnit {
+            reloads: Vec::new(),
             side,
             hp: 100.0,
             x,
@@ -1181,6 +1189,7 @@ mod tests {
         let snap = FightSnapshot {
             flags: Default::default(),
             units: vec![SnapUnit {
+                reloads: Vec::new(),
                 side: 0,
                 spec: specs["cloakraid"].clone(),
                 hp: 230.0,
@@ -1200,6 +1209,7 @@ mod commit_tests {
 
     fn gun(side: u8, damage: f32, x: f32) -> SnapUnit {
         SnapUnit {
+            reloads: Vec::new(),
             side,
             hp: 1000.0,
             x,
@@ -1221,6 +1231,39 @@ mod commit_tests {
             }),
             tubes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn ordinary_enemy_reload_delays_damage_in_the_live_models() {
+        let model = Model::load().unwrap();
+        let mut enemy = gun(1, 250.0, 400.0);
+        enemy.reloads = vec![("fire_test_gun".into(), 60)];
+        let mut snap = FightSnapshot { flags: Default::default(), units: vec![gun(0, 0.0, 0.0), enemy] };
+        // The frozen model also receives the observed first-fire time.
+        assert_eq!(model.sim_units(&snap)[1].weapons[0].next, 60);
+        let delayed = model.fates(&snap, 15, FateMode::AMove);
+        assert_eq!(delayed[0].hp_left, 1000.0);
+        snap.units[1].reloads[0].1 = 0;
+        let ready = model.fates(&snap, 15, FateMode::AMove);
+        assert!(ready[0].hp_left < delayed[0].hp_left);
+        // Unknown observations retain the previous ready-at-start behavior.
+        snap.units[1].reloads.clear();
+        assert_eq!(model.fates(&snap, 15, FateMode::AMove)[0].hp_left, ready[0].hp_left);
+    }
+
+    #[test]
+    fn tube_inventory_and_engine_spacing_both_apply() {
+        let model = Model::load().unwrap();
+        let (name, &(n, _)) = model.sreload.iter().find(|(_, (n, _))| *n > 1).unwrap();
+        let mut unit = gun(1, 250.0, 400.0);
+        Arc::make_mut(&mut unit.spec).weapons[0].name = name.clone();
+        unit.reloads = vec![(name.clone(), 12)];
+        unit.tubes = vec![90; n];
+        let mut weapons = model.sim_weapons(&unit, SimFlags { sreload: true, ..Default::default() });
+        let weapon = &mut weapons[0];
+        assert_eq!(weapon.next, 12);
+        assert!(!weapon.take_tube(12, 0.0));
+        assert_eq!(weapon.next, 90);
     }
 
     #[test]

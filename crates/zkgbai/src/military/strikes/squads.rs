@@ -290,7 +290,10 @@ impl Ai {
             }
             if !m.diving {
                 if let Some(a) = m.answer.take() {
-                    if !answer_current(&a, &m, self.frame) || !launchable(a.probability) {
+                    if !answer_current(&a, &m, self.frame)
+                        || !self.strike_reload_current(&a)
+                        || !launchable(a.probability)
+                    {
                         self.squad_strike_release(sid, m);
                         return None;
                     }
@@ -525,7 +528,15 @@ mod tests {
             halberds: false,
             home: Vec3::xz(0.0, 0.0),
         };
-        let a = Answer { key: 7, kill_frames: Some(100), probability: 1.0, pos: m.job.pos, members: vec![2, 3] };
+        let a = Answer {
+            reload_units: Vec::new(),
+            reload_stamp: 0,
+            key: 7,
+            kill_frames: Some(100),
+            probability: 1.0,
+            pos: m.job.pos,
+            members: vec![2, 3],
+        };
         assert!(answer_current(&a, &m, 101));
         assert!(!answer_current(&a, &m, 190));
         m.members.pop();
