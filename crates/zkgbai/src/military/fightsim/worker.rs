@@ -186,6 +186,7 @@ mod tests {
             flags: Default::default(),
             units: (0..6)
                 .map(|i| SnapUnit {
+                    reloads: Vec::new(),
                     side: (i % 2) as u8,
                     spec: raider(),
                     hp: 230.0,

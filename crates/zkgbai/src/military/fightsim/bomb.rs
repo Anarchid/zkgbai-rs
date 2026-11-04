@@ -176,7 +176,14 @@ mod tests {
     /// Lotus when `busy`.
     fn staged(bomb: &str, theirs: &[(&str, f32, f32)], twod: bool, busy: bool) -> (FightSnapshot, usize, Vec<bool>) {
         let s = specs();
-        let unit = |side, def: &str, x, z| SnapUnit { side, spec: s[def].clone(), hp: s[def].health, x, z };
+        let unit = |side, def: &str, x, z| SnapUnit {
+            reloads: Vec::new(),
+            side,
+            spec: s[def].clone(),
+            hp: s[def].health,
+            x,
+            z,
+        };
         let mut units = vec![unit(0, "turretlaser", 0.0, 0.0)];
         units.extend(theirs.iter().map(|&(d, x, z)| unit(1, d, x, z)));
         units.push(unit(0, bomb, 0.0, 330.0));
@@ -210,6 +217,7 @@ mod tests {
             }),
         );
         let unit = |side, name: &str, x, z| SnapUnit {
+            reloads: Vec::new(),
             side,
             spec: specs[name].clone(),
             hp: specs[name].health,
@@ -294,6 +302,64 @@ mod tests {
     }
 
     #[test]
+    fn snitch_can_exploit_a_rippers_observed_reload() {
+        let m = Model::load().unwrap();
+        let (mut snap, b, busy) = staged("shieldbomb", &[("shieldskirm", 0.0, 510.0)], true, true);
+        snap.units[0].spec = specs()["energysolar"].clone();
+        snap.units[0].hp = snap.units[0].spec.health;
+        snap.units[1].spec = Arc::new(UnitSpec {
+            def: "vehriot".into(),
+            cost: 240.0,
+            health: 1020.0,
+            speed: 2.1,
+            mobile: true,
+            radius: 12.0,
+            weapons: vec![WeaponSpec {
+                name: "vehriot_vehriot_weapon".into(),
+                weapon_type: "Cannon".into(),
+                range: 285.0,
+                reload: 1.77,
+                salvo: 1,
+                damage: 250.2,
+            }],
+            ..Default::default()
+        });
+        snap.units[1].hp = 1020.0;
+        snap.units[1].reloads = vec![("vehriot_vehriot_weapon".into(), 0)];
+        let ready = m.bomb_charge(&snap, b, &busy, 150);
+        snap.units[1].reloads[0].1 = 53;
+        let fired = m.bomb_charge(&snap, b, &busy, 150);
+        assert!(fired.p_through > ready.p_through, "{fired:?} vs {ready:?}");
+        assert!(fired.net > ready.net, "{fired:?} vs {ready:?}");
+    }
+
+    #[test]
+    fn observed_reload_overrides_busy_phase_in_snitch_charge() {
+        let m = Model::load().unwrap();
+        let (mut snap, b, busy) = staged("shieldbomb", &ROGUES, true, true);
+        let idle = vec![false; snap.units.len()];
+        for u in snap.units.iter_mut().filter(|u| u.side == 1) {
+            u.reloads = u.spec.weapons.iter().map(|w| (w.name.clone(), 0)).collect();
+        }
+        let ready = m.bomb_charge(&snap, b, &busy, 450);
+        let ready_idle = m.bomb_charge(&snap, b, &idle, 450);
+        assert!((ready.net - ready_idle.net).abs() < 0.01, "known ready cannot gain a fictitious window");
+        for u in snap.units.iter_mut().filter(|u| u.side == 1) {
+            for (_, left) in &mut u.reloads {
+                *left = 150;
+            }
+        }
+        let reloading = m.bomb_charge(&snap, b, &busy, 450);
+        let reloading_idle = m.bomb_charge(&snap, b, &idle, 450);
+        assert!(
+            (reloading.net - reloading_idle.net).abs() < 0.01,
+            "known cooldown cannot be replaced by phase guesses"
+        );
+        assert!(reloading.p_through > ready.p_through, "{reloading:?} vs {ready:?}");
+        assert!(reloading.net > ready.net, "{reloading:?} vs {ready:?}");
+    }
+
+    #[test]
     fn an_imp_stun_is_worth_nothing_with_no_one_to_finish() {
         // The Lotus (460) cannot reach Rogues at 520+: the stun kills
         // nothing, and the Imp is gone.
@@ -335,7 +401,14 @@ mod tests {
                 let x = (i % 5) as f32 * 50.0 - 100.0;
                 snap.units.insert(
                     1,
-                    SnapUnit { side: 0, spec: s["cloakraid"].clone(), hp: 230.0, x, z: -80.0 - (i / 5) as f32 * 40.0 },
+                    SnapUnit {
+                        reloads: Vec::new(),
+                        side: 0,
+                        spec: s["cloakraid"].clone(),
+                        hp: 230.0,
+                        x,
+                        z: -80.0 - (i / 5) as f32 * 40.0,
+                    },
                 );
             }
             let b = b + k;

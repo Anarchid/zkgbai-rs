@@ -604,7 +604,7 @@ impl Ai {
             notes.members.push((id, spec.cost));
             notes.metal[0] += spec.cost;
             notes.n[0] += 1;
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
+            snap.units.push(SnapUnit { reloads: self.snap_reloads(id), side: 0, spec, hp, x: p.x, z: p.z });
         }
         let (mut air, mut statics) = (0.0, 0.0);
         for (eid, def, hp, p, flies, is_static) in theirs {
@@ -621,7 +621,7 @@ impl Ai {
             if is_static {
                 statics += spec.cost;
             }
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z });
+            snap.units.push(SnapUnit { reloads: self.snap_reloads(eid), side: 1, spec, hp, x: p.x, z: p.z });
         }
         if notes.metal[1] > 0.0 {
             notes.air_share = air / notes.metal[1];
@@ -795,7 +795,9 @@ impl Ai {
                 .hash(&mut hash);
             let spec = self.fight_spec_of(id, d);
             metal[side as usize] += spec.cost;
-            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z });
+            let unit = SnapUnit { reloads: self.snap_reloads(id), side, spec, hp, x: p.x, z: p.z };
+            unit.hash_reloads(self.frame, &mut hash);
+            snapshot.units.push(unit);
         }
         if snapshot.armed(0) == 0 || snapshot.armed(1) == 0 {
             return false;
@@ -936,7 +938,14 @@ mod veto_tests {
         for (side, n, name, x) in [(0, ours, "cloakassault", 0.0), (1, theirs, "hoverskirm", 600.0)] {
             let spec = fixture(name);
             for i in 0..n {
-                units.push(SnapUnit { side, hp: spec.health, spec: spec.clone(), x, z: i as f32 * 40.0 });
+                units.push(SnapUnit {
+                    reloads: Vec::new(),
+                    side,
+                    hp: spec.health,
+                    spec: spec.clone(),
+                    x,
+                    z: i as f32 * 40.0,
+                });
             }
         }
         FightSnapshot { flags: Default::default(), units }

@@ -26,6 +26,7 @@ mod bomb;
 pub mod live;
 pub mod local;
 pub mod mech;
+mod reloads;
 pub mod scenario;
 pub mod worker;
 
@@ -101,7 +102,7 @@ pub struct UnitSpec {
 }
 
 /// A unit in a fight.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SnapUnit {
     /// 0 = A (us), 1 = B.
     pub side: u8,
@@ -109,6 +110,9 @@ pub struct SnapUnit {
     pub hp: f32,
     pub x: f32,
     pub z: f32,
+    /// Observed engine cooldowns by weapon name, in frames from this snapshot.
+    /// Missing = unknown; zero = observed ready (or still firing a burst).
+    pub reloads: Vec<(String, i32)>,
 }
 
 /// Which mechanics fight a consumer asks for (the AI's switches; both off
@@ -546,7 +550,7 @@ impl Model {
         out
     }
 
-    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags) -> SimWeapon {
+    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags, observed: Option<i32>) -> SimWeapon {
         let salvo = w.salvo.max(1);
         let hitscan = w.hitscan();
         let tubes = if flags.sreload { self.sreload.get(&w.name).copied() } else { None };
@@ -557,7 +561,8 @@ impl Model {
             hitscan,
             salvo,
             nominal: if hitscan { w.damage as f64 * salvo as f64 } else { w.damage as f64 },
-            next: 0,
+            next: observed.unwrap_or(0).max(0),
+            observed_reload: observed.is_some(),
             // Tubes start loaded.
             tubes: tubes.map_or_else(Vec::new, |(n, _)| vec![0; n]),
             tube_reload: tubes.map_or(0, |(_, r)| r),
@@ -612,7 +617,13 @@ impl Model {
         snap.units
             .iter()
             .zip(xs)
-            .map(|(u, x)| self.sim_unit(u, x, u.spec.weapons.iter().map(|w| self.sim_weapon(w, snap.flags)).collect()))
+            .map(|(u, x)| {
+                self.sim_unit(
+                    u,
+                    x,
+                    u.spec.weapons.iter().map(|w| self.sim_weapon(w, snap.flags, u.reload(&w.name))).collect(),
+                )
+            })
             .collect()
     }
 }
@@ -631,6 +642,7 @@ struct SimWeapon {
     /// otherwise.
     nominal: f64,
     next: i32,
+    observed_reload: bool,
     /// Tube weapons (`SimFlags::sreload`): the frame each tube is loaded
     /// again; empty for every other weapon.
     tubes: Vec<i32>,
@@ -903,6 +915,7 @@ mod tests {
                     .map(|u| {
                         let p: Vec<&str> = u.split(':').collect();
                         SnapUnit {
+                            reloads: Vec::new(),
                             side: p[0].parse().unwrap(),
                             spec: specs[p[1]].clone(),
                             hp: p[2].parse().unwrap(),
@@ -1007,7 +1020,14 @@ mod tests {
         let specs = specs();
         let snap = FightSnapshot {
             flags: Default::default(),
-            units: vec![SnapUnit { side: 0, spec: specs["cloakraid"].clone(), hp: 230.0, x: 0.0, z: 0.0 }],
+            units: vec![SnapUnit {
+                reloads: Vec::new(),
+                side: 0,
+                spec: specs["cloakraid"].clone(),
+                hp: 230.0,
+                x: 0.0,
+                z: 0.0,
+            }],
         };
         let out = m.predict(&snap);
         assert_eq!((out.killed_a, out.killed_b, out.armed_a, out.armed_b), (0.0, 0.0, 1, 0));
@@ -1020,6 +1040,7 @@ mod commit_tests {
 
     fn gun(side: u8, damage: f32, x: f32) -> SnapUnit {
         SnapUnit {
+            reloads: Vec::new(),
             side,
             hp: 1000.0,
             x,
@@ -1040,6 +1061,24 @@ mod commit_tests {
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn ordinary_enemy_reload_delays_damage_in_the_live_models() {
+        let model = Model::load().unwrap();
+        let mut enemy = gun(1, 250.0, 400.0);
+        enemy.reloads = vec![("fire_test_gun".into(), 60)];
+        let mut snap = FightSnapshot { flags: Default::default(), units: vec![gun(0, 0.0, 0.0), enemy] };
+        // The frozen model also receives the observed first-fire time.
+        assert_eq!(model.sim_units(&snap)[1].weapons[0].next, 60);
+        let delayed = model.fates(&snap, 15, FateMode::AMove);
+        assert_eq!(delayed[0].hp_left, 1000.0);
+        snap.units[1].reloads[0].1 = 0;
+        let ready = model.fates(&snap, 15, FateMode::AMove);
+        assert!(ready[0].hp_left < delayed[0].hp_left);
+        // Unknown observations retain the previous ready-at-start behavior.
+        snap.units[1].reloads.clear();
+        assert_eq!(model.fates(&snap, 15, FateMode::AMove)[0].hp_left, ready[0].hp_left);
     }
 
     #[test]

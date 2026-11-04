@@ -634,6 +634,7 @@ impl Ai {
                 "saved": v.saved.round(),
                 "spent": (v.spent * 1000.0).round() / 1000.0,
                 "net": v.net.round(),
+                "reloads": snap.units.iter().map(|u| &u.reloads).collect::<Vec<_>>(),
                 // The judged fight, for offline replay: def, side, hp, x, z, busy; the bomb last.
                 "snap": snap.units.iter().zip(&busy).map(|(u, b)| json!([u.spec.def, u.side, u.hp.round(), u.x.round(), u.z.round(), *b])).collect::<Vec<_>>(),
             });
@@ -724,14 +725,14 @@ impl Ai {
         let mut snap = FightSnapshot { flags, ..Default::default() };
         for (u, def, hp) in ours {
             let (spec, q) = (self.fight_spec_of(u.id(), def), u.pos());
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: q.x, z: q.z });
+            snap.units.push(SnapUnit { reloads: self.snap_reloads(u.id()), side: 0, spec, hp, x: q.x, z: q.z });
         }
         for (eid, def, hp, q) in theirs {
             let spec = self.fight_spec_of(eid, def);
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: q.x, z: q.z });
+            snap.units.push(SnapUnit { reloads: self.snap_reloads(eid), side: 1, spec, hp, x: q.x, z: q.z });
         }
         let spec = self.fight_spec_of(bomb.id(), bomb_def);
-        snap.units.push(SnapUnit { side: 0, spec, hp: bomb_hp, x: p.x, z: p.z });
+        snap.units.push(SnapUnit { reloads: Vec::new(), side: 0, spec, hp: bomb_hp, x: p.x, z: p.z });
         let index = snap.units.len() - 1;
         Some((snap, index))
     }

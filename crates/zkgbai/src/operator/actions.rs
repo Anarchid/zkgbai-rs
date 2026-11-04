@@ -238,6 +238,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
     ),
+    (
+        "reloads",
+        "Army",
+        "fight predictions use observed weapon cooldowns for allies and enemies in LOS, including bomb charge timing (default on)",
+    ),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("recovery", "Army", "factory jams and trapped units: clear owned blockers, Lobster, Djinn and airlift rescue"),

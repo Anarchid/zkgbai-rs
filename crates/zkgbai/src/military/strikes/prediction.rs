@@ -13,6 +13,8 @@ use std::sync::{
 
 pub(super) struct Request {
     pub(super) key: u64,
+    pub(super) reload_units: Vec<i32>,
+    pub(super) reload_stamp: u64,
     snapshot: FightSnapshot,
     target: usize,
     pub(super) pos: springai::Vec3,
@@ -30,6 +32,8 @@ impl Request {
 }
 pub(super) struct Answer {
     pub(super) key: u64,
+    pub(super) reload_units: Vec<i32>,
+    pub(super) reload_stamp: u64,
     pub(super) kill_frames: Option<i32>,
     pub(super) probability: f32,
     pub(super) pos: springai::Vec3,
@@ -64,7 +68,15 @@ impl Predictor {
                     let kill_frames = fate.and_then(|f| f.death_frame);
                     let probability = fate.filter(|f| !r.stun_required || f.dead).map_or(0.0, |f| f.p_dead);
                     if answers
-                        .send(Answer { key: r.key, kill_frames, probability, pos: r.pos, members: r.members })
+                        .send(Answer {
+                            key: r.key,
+                            reload_units: r.reload_units,
+                            reload_stamp: r.reload_stamp,
+                            kill_frames,
+                            probability,
+                            pos: r.pos,
+                            members: r.members,
+                        })
                         .is_err()
                     {
                         break;
@@ -77,6 +89,10 @@ impl Predictor {
 }
 
 impl Ai {
+    pub(super) fn strike_reload_current(&self, answer: &Answer) -> bool {
+        self.reload_stamp(&answer.reload_units) == answer.reload_stamp
+    }
+
     /// `def`'s weapons that hit `target`; unit `id`'s, if it is a commander
     /// (see [`Ai::fight_spec_of`]).
     fn strike_spec(&self, def: UnitDef, target: Option<UnitDef>, id: Option<i32>) -> Arc<UnitSpec> {
@@ -144,7 +160,8 @@ impl Ai {
         }
         let p = self.strikes.predictor.as_ref().unwrap();
         while let Ok(a) = p.rx.try_recv() {
-            if w.query.is_some_and(|(key, at)| key == a.key && self.frame - at < 90)
+            if self.strike_reload_current(&a)
+                && w.query.is_some_and(|(key, at)| key == a.key && self.frame - at < 90)
                 && a.members == w.members
                 && distance(a.pos, w.job.pos) < 150.0
             {
@@ -203,12 +220,15 @@ impl Ai {
         ground_target: Option<UnitDef>,
         stun_required: bool,
     ) -> Option<Request> {
+        let mut reload_units = members.to_vec();
+        reload_units.extend(job.id);
         let mut snapshot = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         for id in members {
             let f = self.fighters.get(id)?;
             let def = f.unit.def()?;
             let pos = f.get_pos();
             snapshot.units.push(SnapUnit {
+                reloads: self.snap_reloads(*id),
                 side: 0,
                 spec: self.strike_spec(def, None, Some(*id)),
                 hp: f.unit.health(),
@@ -227,12 +247,20 @@ impl Ai {
             Arc::make_mut(&mut spec).health = e.unit.max_health().max(1.0);
         }
         let hp = seen.map_or(hp, |e| e.unit.health());
-        snapshot.units.push(SnapUnit { side: 1, spec, hp, x: job.pos.x, z: job.pos.z });
+        snapshot.units.push(SnapUnit {
+            reloads: job.id.map_or_else(Vec::new, |id| self.snap_reloads(id)),
+            side: 1,
+            spec,
+            hp,
+            x: job.pos.x,
+            z: job.pos.z,
+        });
         // Inferred extra Phantoms also shoot; never treat a three-Phantom fix as
         // just one defender merely because the current focus is one of them.
         if job.phantom() {
             for i in 1..job.count {
                 snapshot.units.push(SnapUnit {
+                    reloads: Vec::new(),
                     side: 1,
                     spec: self.strike_spec(def, ground_target, None),
                     hp: def.health(),
@@ -266,7 +294,9 @@ impl Ai {
             if snapshot.units.len() >= 192 {
                 return None;
             } // Fail closed for unbounded fronts.
+            reload_units.push(e.unit_id);
             snapshot.units.push(SnapUnit {
+                reloads: self.snap_reloads(e.unit_id),
                 side: 1,
                 spec: self.strike_spec(def, ground_target, Some(e.unit_id)),
                 hp: e.get_health() * e.def_health(),
@@ -279,6 +309,8 @@ impl Ai {
             return None;
         }
         Some(Request {
+            reload_stamp: self.reload_stamp(&reload_units),
+            reload_units,
             key,
             snapshot,
             target,

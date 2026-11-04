@@ -65,13 +65,14 @@ struct Request {
 
 impl Request {
     fn reusable(&self, now: &Self) -> bool {
-        fn same(a: &Observed, b: &Observed) -> bool {
-            a.id == b.id
+        let same = |a: &Observed, b: &Observed| {
+            a.unit.same_reload_window(&b.unit, self.frame, now.frame)
+                && a.id == b.id
                 && a.unit.spec.def == b.unit.spec.def
                 && (a.unit.hp - b.unit.hp).abs() <= (a.unit.spec.health * 0.15).max(10.0)
                 && (a.paralysis - b.paralysis).abs() <= 0.1
                 && (a.unit.x - b.unit.x).hypot(a.unit.z - b.unit.z) <= 64.0 + a.unit.spec.speed * 30.0
-        }
+        };
         (0..=STALE).contains(&(now.frame - self.frame))
             && self.raid_aim == now.raid_aim
             && self.teams == now.teams
@@ -259,7 +260,14 @@ impl Ai {
         Some(Observed {
             id: u.id(),
             paralysis: u.paralyze_damage() / u.max_health().max(1.0),
-            unit: SnapUnit { side: 0, spec: self.fight_spec_of(u.id(), def), hp: u.health(), x: p.x, z: p.z },
+            unit: SnapUnit {
+                reloads: self.snap_reloads(u.id()),
+                side: 0,
+                spec: self.fight_spec_of(u.id(), def),
+                hp: u.health(),
+                x: p.x,
+                z: p.z,
+            },
         })
     }
 
@@ -301,7 +309,14 @@ impl Ai {
                     enemies.push(Observed {
                         id,
                         paralysis: para,
-                        unit: SnapUnit { side: 1, hp: hp.max(1.0), x: pos.x, z: pos.z, spec },
+                        unit: SnapUnit {
+                            reloads: self.snap_reloads(id),
+                            side: 1,
+                            hp: hp.max(1.0),
+                            x: pos.x,
+                            z: pos.z,
+                            spec,
+                        },
                     });
                     focus.push(pressed_on);
                 }
@@ -462,7 +477,7 @@ mod regression {
         })
     }
     fn observed(id: i32, spec: Arc<UnitSpec>, side: u8, x: f32, z: f32) -> Observed {
-        Observed { id, paralysis: 0.0, unit: SnapUnit { hp: spec.health, spec, side, x, z } }
+        Observed { id, paralysis: 0.0, unit: SnapUnit { reloads: Vec::new(), hp: spec.health, spec, side, x, z } }
     }
     fn incident() -> Raid {
         let venom = spec("spideremp", 190.0, 740.0, 2.8, Some(("spideremp_spider", 240.0, 1.2, 65.0)));

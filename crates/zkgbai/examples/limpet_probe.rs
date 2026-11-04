@@ -50,6 +50,7 @@ fn main() {
             .unwrap()
             .iter()
             .map(|u| SnapUnit {
+                reloads: Vec::new(),
                 side: u["side"].as_u64().unwrap() as u8,
                 spec: specs[u["def"].as_str().unwrap()].clone(),
                 hp: num(u, "hp"),
