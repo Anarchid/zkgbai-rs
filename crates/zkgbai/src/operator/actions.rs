@@ -276,6 +276,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("squadhyst", "Army", "raider squads keep their rally point a while"),
     ("qrfpredict", "Army", "predict small QRF assignments including asset losses and arrival times"),
     ("justenough", "Army", "one raider claim per target; QRF teams sized to the raid"),
+    (
+        "standoff",
+        "Army",
+        "a QRF team never marks a raid from inside its guns: against a raid that outranges it, the fight judge says strike or stand beyond its reach (default on)",
+    ),
     ("venomraid", "Army", "Venoms raid after the opening, Fleas left to the stakeouts"),
     (
         "venomstand",
