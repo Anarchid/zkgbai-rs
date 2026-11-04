@@ -119,6 +119,8 @@ pub struct FacFrames {
     to_fighter: u32,
     from_factory: u32,
     killed: u32,
+    /// Turns whose order was refused.
+    refused: u32,
 }
 
 impl Ai {
@@ -170,16 +172,18 @@ impl Ai {
             let f = &self.facframes;
             self.log(&format!(
                 "facframe: in the last minute {} engine attacks on factory frames, turned {} to the factory and {} \
-                 to an armed enemy, {} more from the factory to an armed enemy; {} turned-to factories died{}",
+                 to an armed enemy, {} more from the factory to an armed enemy; {} turned-to factories died; {} \
+                 turns refused{}",
                 f.seen,
                 f.to_factory,
                 f.to_fighter,
                 f.from_factory,
                 f.killed,
+                f.refused,
                 if self.dev_off("facframe") { " (facframe off)" } else { "" }
             ));
             let f = &mut self.facframes;
-            (f.seen, f.to_factory, f.to_fighter, f.from_factory, f.killed) = (0, 0, 0, 0, 0);
+            (f.seen, f.to_factory, f.to_fighter, f.from_factory, f.killed, f.refused) = (0, 0, 0, 0, 0, 0);
             f.counted.clear();
         }
         if frame % PERIOD != (self.offset + 4) % PERIOD {
@@ -306,13 +310,21 @@ impl Ai {
                 }
                 drop.push(c.tag() as f32);
             }
-            if !off {
-                unit.execute_custom_command(
+            // Refused: the unit is another module's alone (see
+            // `roles`, which names this module a helper of each role), or
+            // held by the operator.
+            if !off
+                && !unit.execute_custom_command(
                     CMD_INSERT,
                     &[0.0, CMD_ATTACK as f32, 0.0, to as f32],
                     opt::ALT_KEY,
                     springai::NO_TIMEOUT,
-                );
+                )
+            {
+                self.facframes.refused += u32::from(new);
+                continue;
+            }
+            if !off {
                 unit.execute_custom_command(CMD_REMOVE, &drop, 0, springai::NO_TIMEOUT);
             }
             let fac = on_frame.map(|f| f.factory).or(turned).unwrap_or(-1);

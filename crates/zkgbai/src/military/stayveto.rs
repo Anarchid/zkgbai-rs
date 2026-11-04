@@ -103,8 +103,10 @@ struct Stand {
 
 /// While a declared stand lasts its borrowed units take orders from the
 /// retreat handler's module (where stayveto runs) and the helpers every
-/// ground unit keeps; their own handlers' orders are dropped.
-const STAND_OWNER: Owner = Owner { module: "retreat", helpers: &["war.unitDamaged", "jumps", "teleport", "water"] };
+/// ground unit keeps (`facframe` turns an engine attack on a factory's frame
+/// to the factory); their own handlers' orders are dropped.
+const STAND_OWNER: Owner =
+    Owner { module: "retreat", helpers: &["war.unitDamaged", "jumps", "teleport", "water", "facframe"] };
 
 /// A healthy unit a declared stand borrowed, and the owner it goes back to.
 struct Borrowed {
