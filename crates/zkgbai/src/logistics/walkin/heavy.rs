@@ -10,7 +10,9 @@
 //!
 //! - *More than 3 Stingers*: the walk-in turrets the place has had in the
 //!   last [`CAP_WINDOW`] and the Stingers it would take to make up what the
-//!   force has over all that meets it, together more than [`PLACE_CAP`].
+//!   force has over all that meets it, together more than [`PLACE_CAP`];
+//!   or any shortfall at a place that has [`super::MID_CAP`] mid-heavy
+//!   turrets standing already (`midcap`: past those, a heavy or units).
 //! - *Energy and grid*: Lucifer and Desolator fire only on a grid making 50
 //!   energy (`neededlink`). A site has it if the grids it would join make
 //!   that much, or if [`MAX_PYLONS`] pylons link it to grids that do (they
@@ -60,7 +62,10 @@ use std::collections::BTreeMap;
 use serde_json::{Value, json};
 use springai::{Unit, UnitDef, Vec3};
 
-use super::{Assessment, CAP_RADIUS, CAP_WINDOW, OFFSET, PLACE_CAP, RANGE_SLACK, STRETCH, TOUCH_MIN, VAR_RADIUS};
+use super::{
+    Assessment, CAP_RADIUS, CAP_WINDOW, OFFSET, PLACE_CAP, PORCMIX, RANGE_SLACK, STRETCH, TOUCH_MIN, VAR_RADIUS,
+    blast_room,
+};
 use crate::Ai;
 use crate::economy::TaskId;
 use crate::economy::grid::GridAccess;
@@ -310,7 +315,7 @@ impl Ai {
     /// (`here` walk-in turrets it had lately): a Lucifer, a Desolator or
     /// both in their stead, where the grid powers them. Whether one was
     /// planned (else the usual turret goes).
-    pub(super) fn walkin_heavy(&mut self, a: &Assessment, now: f32, here: usize) -> bool {
+    pub(super) fn walkin_heavy(&mut self, a: &Assessment, now: f32, here: usize, mid_full: bool) -> bool {
         if self.dev_off(FEATURE) {
             return false;
         }
@@ -318,7 +323,7 @@ impl Ai {
         let s = porc_power(stinger);
         let shortfall = a.group.power - a.ours.total();
         let wanted = stingers_wanted(here, shortfall, s);
-        if wanted <= PLACE_CAP {
+        if wanted <= PLACE_CAP && !mid_full {
             return false;
         }
         let (frame, anchor) = (self.frame, a.place.anchor);
@@ -329,7 +334,10 @@ impl Ai {
         }
         st.opened.retain(|o| frame - o.1 < CAP_WINDOW);
         let open = st.tasks.len() + usize::from(st.raise.is_some());
-        let at_place = st.opened.iter().filter(|o| distance(o.0, anchor) <= CAP_RADIUS).count();
+        let lately = st.opened.iter().filter(|o| distance(o.0, anchor) <= CAP_RADIUS).count();
+        // At most PER_PLACE opened lately, and as many standing (a rolling
+        // window alone lets them pile up: see `MIDCAP`).
+        let at_place = lately.max(self.walkin_standing(anchor, &HEAVIES));
         self.logistics.walkin.stats.heavy.wanted += 1;
         if open >= MAX_OPEN || at_place >= PER_PLACE {
             self.logistics.walkin.stats.heavy.capped += 1;
@@ -346,6 +354,12 @@ impl Ai {
                 break;
             }
             let Some(def) = self.defs.get(name) else { continue };
+            // One of a kind a place (`porcmix`: a Desolator's death blast
+            // is 1270 across 520 elmos).
+            if !self.dev_off(PORCMIX) && self.walkin_standing(anchor, &[name]) >= 1 {
+                refused.push(json!([name, "have"]));
+                continue;
+            }
             match self.walkin_heavy_try(def, a, now, wanted, prey) {
                 Ok(()) => {
                     slots -= 1;
@@ -386,10 +400,18 @@ impl Ai {
         let name = self.defs.name(def).to_owned();
         let (anchor, approach, frame) = (a.place.anchor, a.approach, self.frame);
         let perch = if name == LUCIFER { Some(self.walkin_heavy_perch(def, a).ok_or("nosite")?) } else { None };
-        let site = match &perch {
-            Some(p) => p.site,
-            None if distance(anchor, approach) > 1.0 => get_directional_point(anchor, approach, OFFSET),
-            None => anchor,
+        // The Desolator out of our turrets' death blasts and theirs of it,
+        // beside the others across the approach (`porcmix`).
+        let spaced = if perch.is_none() && !self.dev_off(PORCMIX) {
+            self.walkin_spaced_sites(def, anchor, approach, OFFSET)
+        } else {
+            Vec::new()
+        };
+        let site = match (&perch, spaced.first()) {
+            (Some(p), _) => p.site,
+            (None, Some(&s)) => s,
+            (None, None) if distance(anchor, approach) > 1.0 => get_directional_point(anchor, approach, OFFSET),
+            (None, None) => anchor,
         };
         let gd = &self.eco.grid_defs;
         let (range, needs) = (gd.range(def.id()).unwrap_or(0.0), gd.needs(def.id()));
@@ -496,7 +518,8 @@ impl Ai {
             let task = if perch.is_some() {
                 self.eco_logistics_porc_at(def, site, SITE_SLACK)
             } else {
-                [site, anchor].into_iter().find_map(|s| self.eco_logistics_porc(def, s, 0.0).map(|(t, _)| t))
+                (spaced.iter().copied().chain([site, anchor]))
+                    .find_map(|s| self.eco_logistics_porc(def, s, 0.0).map(|(t, _)| t))
             };
             let task = task.ok_or("nosite")?;
             self.walkin_heavy_open(def, task, anchor, a.place.value, by, a.group.power, &why).ok_or("refused")?;
@@ -529,6 +552,14 @@ impl Ai {
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
         let front = distance(anchor, approach) - FRONT_SLACK;
         let war = &self.war;
+        // Out of our turrets' death blasts, and they of its (`porcmix`).
+        let blast = |d: UnitDef| d.death_explosion().map_or(0.0, |w| w.area_of_effect());
+        let mine = blast(def);
+        let others: Vec<(Vec3, f32)> = if self.dev_off(PORCMIX) {
+            Vec::new()
+        } else {
+            (self.walkin_turrets_near(anchor, cover + 300.0).into_iter()).map(|(p, d)| (p, blast(d))).collect()
+        };
         let mut spots: Vec<(f32, f32, Vec3)> = Vec::new();
         for i in -n..=n {
             for j in -n..=n {
@@ -538,6 +569,9 @@ impl Ai {
                     continue;
                 }
                 if distance(p, approach) < front || (d > STEP && !self.graph.is_ally_territory(p)) {
+                    continue;
+                }
+                if others.iter().any(|&(o, b)| blast_room(distance(o, p), mine, b) < 1.0) {
                     continue;
                 }
                 let raise = (PLATFORM - (ground(p) - base)).max(0.0);

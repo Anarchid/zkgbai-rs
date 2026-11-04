@@ -657,7 +657,13 @@ impl Ai {
                 continue;
             }
             let mut best: Option<(UnitDef, f32, f32, f32, f32)> = None;
+            // No third mid-heavy at a place (see `walkin::MIDCAP`).
+            let mid_full =
+                !self.dev_off(walkin::MIDCAP) && self.walkin_standing(p.pos, &walkin::MID_HEAVY) >= walkin::MID_CAP;
             for name in TURRETS {
+                if mid_full && walkin::MID_HEAVY.contains(&name) {
+                    continue;
+                }
                 let Some(def) = self.defs.get(name) else { continue };
                 let cost = def.cost(self.metal);
                 let after = loss_chance(p.power, ours + porc_power(def));

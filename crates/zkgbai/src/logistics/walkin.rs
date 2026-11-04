@@ -58,8 +58,11 @@
 //!   under way, [`PLACE_CAP`] per place per [`CAP_WINDOW`] (dropped ones
 //!   not counted).
 //!
+//! A place keeps at most [`MID_CAP`] mid-heavy turrets (Gauss, Stinger);
+//! past that only a heavy (`heavy`) or none (`midcap`, see [`MIDCAP`]).
+//!
 //! Journal: `k=walkin` per decision (`event`: open, defended, pending,
-//! capped, outranged, late, nosite, stood_down), at most one per place and
+//! capped, full, outranged, late, nosite, stood_down), at most one per place and
 //! event every [`NOTE_FRAMES`].
 
 use std::collections::BTreeMap;
@@ -168,6 +171,53 @@ const STAND_DOWN: i32 = DWELL_GAP;
 
 /// Frames between journal notes for the same place and event.
 const NOTE_FRAMES: i32 = 300;
+
+/// The mid-heavy turrets (Gauss, Stinger), of which a place keeps at most
+/// [`MID_CAP`] standing or planned within [`CAP_RADIUS`], whoever built
+/// them (`midcap`, on by default; `disable=midcap`). User, 2026-11-04,
+/// after a Mecharavaged lobby game where one place got four Gausses and two
+/// Stardusts in seven minutes (the [`PLACE_CAP`] window rolled over):
+/// "Probably should limit to no more than 2 mid-heavy turrets per place; if
+/// we want more porc after that, it's get desolator or maek units". So a
+/// place with as many gets no ordinary walk-in turret: a heavy if the grid
+/// powers one (see `heavy`), else nothing, and the metal stays with the
+/// factories.
+pub const MIDCAP: &str = "midcap";
+pub(super) const MID_HEAVY: [&str; 2] = ["turretgauss", "turretheavylaser"];
+pub(super) const MID_CAP: usize = 2;
+
+/// Turret kinds mixed and spaced (`porcmix`, on by default;
+/// `disable=porcmix`). User, 2026-11-04: "Another thing to avoid in
+/// general: multiple turrets of the same type, and placed together;
+/// Stardusts for example not only block each other's line of fire, but
+/// also explode violently; a 3 stardust forfification would much better be
+/// a stardust+faraday+2 lotus or stardust + stinger". A place keeps at most
+/// [`kind_cap`] of a kind standing or planned within [`CAP_RADIUS`] (two
+/// Lotuses, one of the rest, one heavy of each kind), and a new turret
+/// stands out of the death blast of every turret of ours, theirs and its
+/// own the larger (Stardust 170, Faraday and Stinger 130, Lotus and Gauss
+/// 90, Desolator and Lucifer 260): sites side by side across the force's
+/// approach, [`SPREAD`] apart, so their lines of fire run alongside. With
+/// every kind there, more porc is a heavy or none, as with [`MIDCAP`].
+pub const PORCMIX: &str = "porcmix";
+
+/// Sites are tried this far apart across the approach, this many to either
+/// side, elmos.
+const SPREAD: f32 = 96.0;
+const SPREAD_STEPS: i32 = 3;
+
+/// How many of a kind a place keeps (see [`PORCMIX`]).
+pub(super) fn kind_cap(name: &str) -> usize {
+    if name == "turretlaser" { 2 } else { 1 }
+}
+
+/// How far apart two turrets with death blasts of radius `a` and `b` stand
+/// (`d`) against how far they should: under 1 one's blast reaches the
+/// other.
+fn blast_room(d: f32, a: f32, b: f32) -> f32 {
+    let need = a.max(b);
+    if need <= 0.0 { f32::INFINITY } else { d / need }
+}
 
 /// Candidate turrets: Stardust, Faraday, Gauss, Stinger, Lotus.
 const TURRETS: [&str; 5] = ["turretriot", "turretemp", "turretgauss", "turretheavylaser", "turretlaser"];
@@ -278,6 +328,8 @@ pub struct Stats {
     pub nosite: u32,
     pub stood_down: u32,
     pub bumped: u32,
+    /// The place has [`MID_CAP`] mid-heavies and no heavy was to be had.
+    pub full: u32,
     /// Lucifers and Desolators (`heavyporc`).
     pub heavy: heavy::Stats,
 }
@@ -288,7 +340,7 @@ impl Stats {
             "heavy": self.heavy.json(),
             "groups": self.groups, "threats": self.threats, "defended": self.defended, "breaches": self.breaches,
             "opened": self.opened, "pending": self.pending, "capped": self.capped, "outranged": self.outranged,
-            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped,
+            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped, "full": self.full,
         })
     }
 }
@@ -791,9 +843,23 @@ impl Ai {
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
             .count();
-        // More than PLACE_CAP Stingers' worth wanted here: a Lucifer or a
-        // Desolator instead, where the grid powers one.
-        if self.walkin_heavy(a, now, here) {
+        // More than PLACE_CAP Stingers' worth wanted here, or more than
+        // MID_CAP mid-heavies: a Lucifer or a Desolator instead, where the
+        // grid powers one.
+        // Or every kind the place may have is there (`porcmix`).
+        let midcap = !self.dev_off(MIDCAP);
+        let mix = !self.dev_off(PORCMIX);
+        let kinds = self.walkin_kinds(a.place.anchor);
+        let have = |name: &str| kinds.get(name).copied().unwrap_or(0);
+        let mid: usize = if midcap { MID_HEAVY.iter().map(|n| have(n)).sum() } else { 0 };
+        let mixed = mix && TURRETS.iter().all(|n| have(n) >= kind_cap(n));
+        let full = (midcap && mid >= MID_CAP) || mixed;
+        if self.walkin_heavy(a, now, here, full) {
+            return;
+        }
+        if full {
+            self.logistics.walkin.stats.full += 1;
+            self.walkin_note("full", a, json!({"mid": mid, "kinds": kinds}));
             return;
         }
         // The slot this place would take (see `bump`); given up only once
@@ -828,6 +894,9 @@ impl Ai {
         let mut outranged = 0;
         for name in TURRETS {
             let Some(def) = self.defs.get(name) else { continue };
+            if mix && have(name) >= kind_cap(name) {
+                continue;
+            }
             if def.max_weapon_range() + RANGE_SLACK < a.group.reach {
                 outranged += 1;
                 continue;
@@ -851,6 +920,9 @@ impl Ai {
             return;
         };
         let (def, eta) = defs[k];
+        if mix {
+            sites = self.walkin_spaced_sites(def, a.place.anchor, a.approach, OFFSET);
+        }
         let Some((task, site)) = sites.iter().find_map(|&s| self.eco_logistics_porc(def, s, 0.0).map(|(t, _)| (t, s)))
         else {
             self.logistics.walkin.stats.nosite += 1;
@@ -897,6 +969,78 @@ impl Ai {
                                "hands": hands.len()});
             self.walkin_note("open", a, extra);
         }
+    }
+
+    /// Our turrets named `names` standing (built or not) or planned within
+    /// [`CAP_RADIUS`] of `anchor`.
+    pub(super) fn walkin_standing(&self, anchor: Vec3, names: &[&str]) -> usize {
+        let kinds = self.walkin_kinds(anchor);
+        names.iter().map(|n| kinds.get(*n).copied().unwrap_or(0)).sum()
+    }
+
+    /// Our turrets standing (built or not) or planned within [`CAP_RADIUS`]
+    /// of `anchor`, by kind.
+    pub(super) fn walkin_kinds(&self, anchor: Vec3) -> BTreeMap<String, usize> {
+        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, def) in self.walkin_turrets_near(anchor, CAP_RADIUS) {
+            *kinds.entry(self.defs.name(def).to_owned()).or_default() += 1;
+        }
+        kinds
+    }
+
+    /// Our armed buildings (built or not) and planned porc within `radius`
+    /// of `p`: where, what.
+    fn walkin_turrets_near(&self, p: Vec3, radius: f32) -> Vec<(Vec3, UnitDef)> {
+        let team = self.team_id;
+        let armed = |d: &UnitDef| d.speed() <= 0.0 && !d.weapon_mounts().is_empty();
+        let mut out: Vec<(Vec3, UnitDef)> = (self.cb.friendly_units_in(p, radius).into_iter())
+            .filter(|u| u.team() == team && u.health() > 0.0)
+            .filter_map(|u| u.def().filter(armed).map(|d| (u.pos(), d)))
+            .collect();
+        out.extend((self.eco.porc_tasks.iter()).filter_map(|&id| {
+            let t = self.eco.tasks.get(id)?;
+            let c = t.as_construction()?;
+            let pos = t.get_pos();
+            (c.target.is_none() && distance(pos, p) <= radius).then_some((pos, c.build_type))
+        }));
+        out
+    }
+
+    /// Sites for `def` guarding `anchor` against a force coming from
+    /// `approach`: side by side across the approach, `offset` toward it,
+    /// then at the place. Those out of every death blast (see [`PORCMIX`])
+    /// first, nearest the middle first; then the rest, the roomiest first.
+    pub(super) fn walkin_spaced_sites(&self, def: UnitDef, anchor: Vec3, approach: Vec3, offset: f32) -> Vec<Vec3> {
+        let blast = |d: UnitDef| d.death_explosion().map_or(0.0, |w| w.area_of_effect());
+        let mine = blast(def);
+        let reach = offset + SPREAD * SPREAD_STEPS as f32 + 300.0;
+        let others: Vec<(Vec3, f32)> =
+            self.walkin_turrets_near(anchor, reach).into_iter().map(|(p, d)| (p, blast(d))).collect();
+        let d = distance(anchor, approach);
+        let (dx, dz) = if d > 1.0 { ((approach.x - anchor.x) / d, (approach.z - anchor.z) / d) } else { (0.0, 1.0) };
+        let (px, pz) = (-dz, dx);
+        let map = self.cb.map();
+        let mut tried: Vec<(bool, usize, f32, Vec3)> = Vec::new();
+        for off in [if d > 1.0 { offset } else { 0.0 }, 0.0] {
+            for step in 0..=2 * SPREAD_STEPS {
+                // 0, 1, -1, 2, -2, ...
+                let k = if step % 2 == 1 { (step + 1) / 2 } else { -(step / 2) } as f32;
+                let p = Vec3::xz(anchor.x + dx * off + px * k * SPREAD, anchor.z + dz * off + pz * k * SPREAD);
+                let site = map.find_closest_build_site(def, p, 48.0, 3, 0);
+                if site.x < 0.0 || tried.iter().any(|t| distance(t.3, site) < 16.0) {
+                    continue;
+                }
+                let room =
+                    (others.iter()).map(|&(o, b)| blast_room(distance(o, site), mine, b)).fold(f32::INFINITY, f32::min);
+                tried.push((room >= 1.0, tried.len(), room, site));
+            }
+        }
+        tried.sort_by(|a, b| b.0.cmp(&a.0).then(if a.0 { a.1.cmp(&b.1) } else { b.2.total_cmp(&a.2) }));
+        let mut sites: Vec<Vec3> = tried.into_iter().map(|t| t.3).collect();
+        if sites.is_empty() {
+            sites.push(anchor);
+        }
+        sites
     }
 
     /// Journal decision `event` on assessment `a` (rate limited per place).
@@ -1129,6 +1273,18 @@ mod tests {
         assert_eq!(place_bar(40.0), PLACE_FLOW);
         assert!((place_bar(60.0) - 9.0).abs() < 1e-4);
         assert!((place_bar(100.0) - 15.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn turrets_keep_out_of_each_other_s_blast() {
+        // A Stardust (170) 120 from a Lotus (90): inside its blast.
+        assert!(blast_room(120.0, 90.0, 170.0) < 1.0);
+        // A Stinger (130) 140 from a Faraday (130): clear.
+        assert!(blast_room(140.0, 130.0, 130.0) >= 1.0);
+        assert_eq!(blast_room(10.0, 0.0, 0.0), f32::INFINITY);
+        // Two Lotuses a place, one of the rest.
+        assert_eq!(kind_cap("turretlaser"), 2);
+        assert_eq!(kind_cap("turretriot"), 1);
     }
 
     #[test]
