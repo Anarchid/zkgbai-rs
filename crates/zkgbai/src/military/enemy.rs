@@ -51,6 +51,8 @@ pub struct Enemy {
     pub def_name: String,
     speed: f32,
     last_health: Cell<f32>,
+    /// Last observed capture ownership; hidden units do not expose this rule.
+    capture_controller: Cell<Option<i32>>,
     is_flamer: bool,
     // Immutable unit-def properties cached at identification (hot paths).
     can_fly: bool,
@@ -108,6 +110,7 @@ impl Enemy {
             def_name: String::new(),
             speed: 0.0,
             last_health: Cell::new(0.0),
+            capture_controller: Cell::new(None),
             is_flamer: false,
             can_fly: false,
             can_attack: false,
@@ -385,6 +388,18 @@ impl Enemy {
         } else {
             self.def_health
         }
+    }
+
+    /// Current capture owner in LOS, otherwise the last observed owner.
+    /// Zero is a valid unit id; absent/released ownership is reported as -1.
+    pub fn capture_controller(&self) -> Option<i32> {
+        if self.visible {
+            let controller = self.unit.rules_param_float("capture_controller", -1.0);
+            self.capture_controller.set(
+                (controller.is_finite() && controller >= 0.0 && controller.fract() == 0.0).then_some(controller as i32),
+            );
+        }
+        self.capture_controller.get()
     }
 
     /// Speed in elmos per frame (from the def or the radar guess).
