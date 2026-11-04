@@ -113,13 +113,14 @@ impl GridDefs {
 }
 
 /// What power a site has (see [`Ai::eco_grid_access`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GridAccess {
     /// The grids it would join make this much, enough.
     Powered(f32),
-    /// Not enough, but `pylons` pylons from the member at `from` (of pylon
-    /// range `range`) link it to grids making `energy` together.
-    Link { from: Vec3, range: f32, pylons: f32, energy: f32 },
+    /// Not enough, but `pylons` pylons in all, chains from the members at
+    /// `links` (where, pylon range), link it to grids making `energy`
+    /// together.
+    Link { links: Vec<(Vec3, f32)>, pylons: f32, energy: f32 },
     /// Not enough and no grid that makes up the rest: what it would have.
     Unpowered(f32),
 }
@@ -473,18 +474,25 @@ impl Ai {
         if pr <= 0.0 {
             return GridAccess::Unpowered(has);
         }
-        // The fewest pylons to a grid that makes up the rest (the stronger
-        // of equals).
-        let link = (0..n)
-            .filter(|&i| !joined.contains(&grid[i]) && has + capacity[grid[i]] >= needs)
-            .map(|i| (link_pylons(distance(members[i].0, pos), members[i].1, range, pr), i))
-            .min_by(|a, b| a.0.total_cmp(&b.0).then(capacity[grid[b.1]].total_cmp(&capacity[grid[a.1]])));
-        match link {
-            Some((pylons, i)) => {
-                GridAccess::Link { from: members[i].0, range: members[i].1, pylons, energy: has + capacity[grid[i]] }
+        // Each other grid making energy by the fewest pylons to it, then
+        // the cheapest in pylons per energy first until the rest is made up
+        // (several small grids may: a base of turbines is that, 2026-11-04
+        // Thornford: 100-120 energy in all, no single grid of 50 near).
+        let mut nearest: Vec<(usize, f32, usize)> = Vec::new();
+        for i in (0..n).filter(|&i| !joined.contains(&grid[i]) && capacity[grid[i]] > 0.0) {
+            let pylons = link_pylons(distance(members[i].0, pos), members[i].1, range, pr);
+            match nearest.iter_mut().find(|e| e.0 == grid[i]) {
+                Some(e) if pylons < e.1 => (e.1, e.2) = (pylons, i),
+                Some(_) => {}
+                None => nearest.push((grid[i], pylons, i)),
             }
-            None => GridAccess::Unpowered(has),
         }
+        let (links, pylons, energy) = gather_links(&nearest, &capacity, has, needs);
+        if energy < needs {
+            return GridAccess::Unpowered(has);
+        }
+        let links = links.into_iter().map(|i| (members[i].0, members[i].1)).collect();
+        GridAccess::Link { links, pylons, energy }
     }
 
     /// Whether a pylon stands (or is queued) where one is planned.
@@ -572,6 +580,24 @@ fn shortest_link(members: &[Member], a: &[usize], b: &[usize], pr: f32) -> (f32,
     (1.0 + (best.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil(), ends)
 }
 
+/// Which of the grids `nearest` (grid, pylons to it, member nearest) to link
+/// to make `needs` from `has`: the cheapest in pylons per energy first.
+/// Their members, the pylons in all, the energy then.
+fn gather_links(nearest: &[(usize, f32, usize)], capacity: &[f32], has: f32, needs: f32) -> (Vec<usize>, f32, f32) {
+    let mut order: Vec<&(usize, f32, usize)> = nearest.iter().collect();
+    order.sort_by(|a, b| (a.1 / capacity[a.0]).total_cmp(&(b.1 / capacity[b.0])));
+    let (mut links, mut pylons, mut energy) = (Vec::new(), 0.0, has);
+    for &&(g, p, i) in &order {
+        if energy >= needs {
+            break;
+        }
+        links.push(i);
+        pylons += p;
+        energy += capacity[g];
+    }
+    (links, pylons, energy)
+}
+
 /// Pylons (of range `pr`) a link between buildings `d` apart, of pylon
 /// ranges `ra` and `rb`, takes (as [`shortest_link`] counts them).
 fn link_pylons(d: f32, ra: f32, rb: f32, pr: f32) -> f32 {
@@ -616,6 +642,18 @@ mod tests {
         assert_eq!(points.len(), 4);
         // Close by, one does.
         assert_eq!(chain(a, ra, Vec3::xz(800.0, 0.0), rb, pr).len(), 1);
+    }
+
+    #[test]
+    fn small_grids_add_up_cheapest_first() {
+        // Grids 0..3 making 20, 30, 60, 10; pylons to them 1, 1, 3, 1.
+        let capacity = [20.0, 30.0, 60.0, 10.0];
+        let nearest = [(0, 1.0, 10), (1, 1.0, 11), (2, 3.0, 12), (3, 1.0, 13)];
+        // 50 from nothing: the 30 and the 20 (2 pylons) beat the 60 (3).
+        let (links, pylons, energy) = gather_links(&nearest, &capacity, 0.0, 50.0);
+        assert_eq!((links, pylons, energy), (vec![11, 10], 2.0, 50.0));
+        // Never enough: all of it.
+        assert_eq!(gather_links(&nearest, &capacity, 0.0, 500.0).2, 120.0);
     }
 
     #[test]

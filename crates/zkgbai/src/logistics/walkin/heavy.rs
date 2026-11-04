@@ -15,8 +15,9 @@
 //!   turrets standing already (`midcap`: past those, a heavy or units).
 //! - *Energy and grid*: Lucifer and Desolator fire only on a grid making 50
 //!   energy (`neededlink`). A site has it if the grids it would join make
-//!   that much, or if [`MAX_PYLONS`] pylons link it to grids that do (they
-//!   are queued with the turret).
+//!   that much, or if [`MAX_PYLONS`] pylons link it to grids that do
+//!   together (several small ones may; they are queued with the turret, and
+//!   their metal counts in the worth guard).
 //! - *Which*: the Lucifer (2200 metal, 1200 range, 4000 a shot every 10 s)
 //!   against heavy forces and forces that outrange a Desolator; the
 //!   Desolator (1500, 10000 health, heat ray and plasma to 650) against
@@ -95,7 +96,9 @@ const LUCIFER_PREY: f32 = 0.5;
 const WORTH_SHARE: f32 = 1.0;
 
 /// Pylons a heavy's site may need to its power, at most.
-const MAX_PYLONS: f32 = 2.0;
+/// (2 refused 24 of the 45 dear places in the 11-04 Thornford lobby game,
+/// 3 about 13: replayed on its snapshots.)
+const MAX_PYLONS: f32 = 3.0;
 
 /// A heavy must be able to stand within this long, seconds (forecast,
 /// stretched like walk-in turrets').
@@ -415,13 +418,16 @@ impl Ai {
         };
         let gd = &self.eco.grid_defs;
         let (range, needs) = (gd.range(def.id()).unwrap_or(0.0), gd.needs(def.id()));
-        let (link, grid) = match self.eco_grid_access(site, range, needs) {
-            GridAccess::Powered(e) => (None, e),
-            GridAccess::Link { from, range: r, pylons, energy } if pylons <= MAX_PYLONS => {
-                (Some((from, r, pylons)), energy)
-            }
+        let (links, pylons, grid) = match self.eco_grid_access(site, range, needs) {
+            GridAccess::Powered(e) => (Vec::new(), 0.0, e),
+            GridAccess::Link { links, pylons, energy } if pylons <= MAX_PYLONS => (links, pylons, energy),
             _ => return Err("nogrid"),
         };
+        // The pylons are part of its price.
+        let pylon_cost = self.defs.get("energypylon").map_or(200.0, |d| d.cost(self.metal));
+        if def.cost(self.metal) + pylons * pylon_cost > WORTH_SHARE * a.place.value {
+            return Err("dear");
+        }
         let hands = self.walkin_hands(site, &[], None, false);
         if hands.is_empty() {
             return Err("nohands");
@@ -469,7 +475,7 @@ impl Ai {
         let extra = json!({
             "turret": name, "site": [site.x.round(), site.z.round()], "eta": (eta * 10.0).round() / 10.0,
             "wanted": wanted, "prey": (prey * 100.0).round() / 100.0, "grid": grid.round(),
-            "pylons": link.map_or(0.0, |l| l.2), "raise": raise.round(), "raise_s": raise_s.round(),
+            "pylons": pylons, "raise": raise.round(), "raise_s": raise_s.round(),
             "raising": raising, "hands": hands.len(),
         });
         if raising {
@@ -531,7 +537,7 @@ impl Ai {
             self.walkin_note("heavy", a, extra);
         }
         self.logistics.walkin.heavy.opened.push((anchor, frame));
-        if let Some((from, r, _)) = link {
+        for (from, r) in links {
             self.eco_lay_pylons(from, r, site, range, &format!("a {name} guarding ({:.0}, {:.0})", anchor.x, anchor.z));
         }
         Ok(())
