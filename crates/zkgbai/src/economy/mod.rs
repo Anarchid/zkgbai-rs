@@ -48,6 +48,7 @@ use crate::Ai;
 use crate::defs::cmd;
 use crate::kgbutil::HeightMap;
 use crate::military::Porc;
+use crate::military::air_demand::is_drone;
 use crate::util::distance;
 
 /// A building within this of a construction job's site is that job's
@@ -1667,7 +1668,7 @@ impl Ai {
         }
 
         // check for enemy air
-        if def.is_able_to_fly() && !matches!(self.defs.name(def), "dronelight" | "droneheavyslow" | "dronecarry") {
+        if def.is_able_to_fly() && !is_drone(self.defs.name(def)) {
             self.eco.enemy_has_air = true;
         }
     }

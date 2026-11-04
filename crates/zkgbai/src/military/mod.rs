@@ -1,6 +1,7 @@
 //! Military: enemy tracking, threat/value maps, targeting, and the unit
 //! handlers (raiders, squads, retreat, misc, bombers).
 
+pub(crate) mod air_demand;
 pub mod air_intel;
 pub mod airstrikes;
 pub mod ammo;
@@ -1743,8 +1744,7 @@ impl Ai {
         }
 
         let metal = self.metal;
-        // Commander drones should not prompt early AA, even across a large enemy team.
-        let count_commander_drones = self.projected_metal_density() >= 500.0;
+        let enemy_players = self.get_enemy_team_ids().len();
         // Whose to answer (see `Faced`): the nearest allied factory or mex.
         let anchors = self.ally_anchors().to_vec();
         let us = self.team_id;
@@ -1771,6 +1771,7 @@ impl Ai {
         let mut enemy_air_value = 0.0f32;
         let mut enemy_air_armed = 0.0f32;
         let mut faced_air = 0.0f32;
+        let mut drones = air_demand::DroneSightings::default();
         war.faced = Faced { max_air: war.faced.max_air, ..Faced::default() };
         war.enemy_heavy_value = 0.0;
         war.enemy_fighter_value = 0.0;
@@ -1826,12 +1827,8 @@ impl Ai {
                 }
                 _ if t.can_fly() && !t.is_nano_spam => {
                     let armed = t.can_attack() && !t.is_worker;
-                    if matches!(name, "dronelight" | "droneheavyslow" | "dronecarry") {
-                        if count_commander_drones || name == "dronecarry" {
-                            enemy_air_value += 25.0;
-                            enemy_air_armed += if armed { 25.0 } else { 0.0 };
-                            faced_air += if mine { 25.0 } else { 0.0 };
-                        }
+                    if air_demand::is_drone(name) {
+                        drones.observe(!t.is_dead && (t.visible || t.is_radar_visible), armed, mine);
                     } else {
                         enemy_air_value += cost;
                         enemy_air_armed += if armed { cost } else { 0.0 };
@@ -1890,6 +1887,10 @@ impl Ai {
         }
         war.outranging_share = if mobile_value > 0.0 { outranging_value / mobile_value } else { 0.0 };
 
+        let (drone_air, drone_armed, drone_faced) = drones.values(enemy_players);
+        enemy_air_value += drone_air;
+        enemy_air_armed += drone_armed;
+        faced_air += drone_faced;
         war.max_enemy_air_value = enemy_air_value.max(war.max_enemy_air_value);
         war.enemy_air_armed = enemy_air_armed;
         war.faced.max_air = faced_air.max(war.faced.max_air);

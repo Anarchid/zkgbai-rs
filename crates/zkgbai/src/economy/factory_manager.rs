@@ -9,6 +9,7 @@ use crate::economy::Factory;
 use crate::economy::factory::FacKind;
 use crate::kgbutil::kgb_move_to;
 use crate::military::UnitClasses;
+use crate::military::air_demand::is_drone;
 use crate::military::roles::Role;
 use crate::military::stakeouts::{opens_with_scouts, stakeout_unit};
 use crate::military::{jaeger, scouts};
@@ -592,7 +593,7 @@ impl Ai {
     pub fn fac_enemy_enter_los(&mut self, enemy: Unit) {
         let Some(def) = enemy.def() else { return };
         let name = self.defs.name(def);
-        let is_drone = matches!(name, "dronelight" | "droneheavyslow" | "dronecarry");
+        let is_drone = is_drone(name);
         if def.is_able_to_fly() && !is_drone {
             // TODO (from the C++ port): also ignore sparrows (and athenas?).
             self.fac.enemy_has_air = true;
