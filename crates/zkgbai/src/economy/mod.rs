@@ -17,7 +17,7 @@ mod geo;
 pub mod grid;
 mod lotus;
 mod phase;
-mod planning;
+pub(crate) mod planning;
 mod plate;
 mod plop;
 pub mod porcmix;

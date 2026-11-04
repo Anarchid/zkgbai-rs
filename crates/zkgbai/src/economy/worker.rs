@@ -5,7 +5,7 @@ use springai::{Unit, Vec3, Weapon};
 use crate::economy::TaskId;
 use crate::economy::tasks::{TaskKind, TaskStore};
 use crate::kgbutil::{Nav, PathCost, kgb_move_to};
-use crate::util::{OPTION_SHIFT_KEY, distance, get_angular_point, get_directional_point, get_speed};
+use crate::util::{OPTION_SHIFT_KEY, distance, get_directional_point};
 
 /// A worker's way to its own task out of build range (see `approach` in
 /// `assign`): the order sent, the nearest it has got, and when it last got
@@ -40,8 +40,6 @@ pub struct Worker {
     /// Sites this worker could not get to, shunned until a frame.
     pub shunned: Vec<(Vec3, i32)>,
     shield: Option<Weapon>,
-    last_task_frame: i32,
-    last_stuck_frame: i32,
     team: i32,
 }
 
@@ -113,8 +111,6 @@ impl Worker {
             approach: None,
             shunned: Vec::new(),
             shield,
-            last_task_frame: 0,
-            last_stuck_frame: -32768,
             team,
         }
     }
@@ -128,12 +124,11 @@ impl Worker {
     }
 
     /// Assign this worker to task `id` (and the task to this worker).
-    pub fn set_task(&mut self, tasks: &mut TaskStore, id: TaskId, frame: i32) {
+    pub fn set_task(&mut self, tasks: &mut TaskStore, id: TaskId, _frame: i32) {
         self.task = Some(id);
         if let Some(t) = tasks.get_mut(id) {
             t.add_worker(self.id);
         }
-        self.last_task_frame = frame;
     }
 
     /// Leave the current task and stop.
@@ -152,36 +147,6 @@ impl Worker {
         if self.unit.health() > 0.0 {
             self.unit.stop(0);
         }
-    }
-
-    /// If the worker seems stuck on its task, back off and drop the task.
-    /// Returns whether the worker is (recently) unstuck and should be left alone.
-    pub fn unstick(&mut self, frame: i32, tasks: &mut TaskStore) -> bool {
-        let mut unstuck = false;
-        if frame - self.last_stuck_frame < 60 {
-            return true;
-        }
-        let Some(task_pos) = self.task.and_then(|id| tasks.get(id)).map(|t| t.get_pos()) else {
-            return false;
-        };
-        if frame - self.last_task_frame < 120 {
-            return false;
-        }
-
-        let pos = self.unit.pos();
-        let jobdist = distance(pos, task_pos);
-        let (speed, build_dist) = self.unit.def().map_or((0.0, 0.0), |d| (d.speed(), d.build_distance()));
-
-        if (get_speed(self.unit) < speed / 10.0 && jobdist > build_dist * 1.1) || self.unit.num_current_commands() == 0
-        {
-            let unstick_point = get_angular_point(task_pos, pos, distance(task_pos, pos) + 150.0);
-            kgb_move_to(self.unit, unstick_point, 0, frame);
-            self.clear_task(tasks);
-            unstuck = true;
-            self.last_stuck_frame = frame;
-        }
-        self.last_task_frame = frame;
-        unstuck
     }
 
     /// Path to build range of `pos`, avoiding enemies.

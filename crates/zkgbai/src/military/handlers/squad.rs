@@ -176,7 +176,7 @@ fn engaged_for(ran: Option<(f32, f32)>) -> String {
 impl Ai {
     pub fn squad_update(&mut self, frame: i32) {
         if frame % 30 == (self.offset + 7) % 30 {
-            self.squad_check_fighters(frame);
+            self.squad_check_fighters();
         }
         if frame % 7 == self.offset % 7 {
             self.squad_assign_squads();
@@ -214,8 +214,8 @@ impl Ai {
         }
     }
 
-    /// Drop dead and stuck fighters, and (re)assign squadless ones.
-    fn squad_check_fighters(&mut self, frame: i32) {
+    /// Drop dead fighters and (re)assign squadless ones. Recovery owns stalls.
+    fn squad_check_fighters(&mut self) {
         let ids: Vec<i32> = self.squad_handler.fighters.iter().copied().collect();
         for id in ids {
             let Some(f) = self.fighters.get(&id) else {
@@ -229,23 +229,7 @@ impl Ai {
                 continue;
             }
             let retreating = self.retreat_handler.is_retreating(id);
-            let flies = unit.def().is_some_and(|d| d.is_able_to_fly());
-            // A squad the operator holds somewhere stands still on purpose:
-            // not stuck, not for the reclaimers; so does one waiting out
-            // a blast of ours (see `blasts`).
-            let held = self.limpet_controls(id)
-                || f.squad
-                    .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some())
-                || self.blasts_waiting(unit.pos())
-                || self.fire_controls(id)
-                || self.squad_strike_owns(id);
-            if !retreating && !flies && !held && self.fighters.get_mut(&id).is_some_and(|f| f.is_stuck(frame)) {
-                self.squad_leave_squad(id);
-                self.eco_add_combat_reclaim_task(unit);
-                self.retreat_remove_unit(unit);
-                self.squad_delete_fighter(id);
-                continue;
-            }
+            // Movement recovery preserves the fighter and its role.
             // A squad id that no longer exists counts as no squad.
             let Some(f) = self.fighters.get_mut(&id) else { continue };
             if f.squad.is_some_and(|s| !self.squads.contains(s)) {

@@ -3,7 +3,7 @@
 
 use springai::{UnitDef, Vec3};
 
-use super::planning::{exit_lane, keeps_exit};
+use super::planning::{FACTORY_CLEARANCE, exit_lane, keeps_exit};
 use super::worker::Approach;
 use super::{NEED_PULL, SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
@@ -158,6 +158,19 @@ enum Order {
 }
 
 impl Ai {
+    pub(crate) fn eco_worker_held(&self, id: i32) -> bool {
+        self.eco.workers.get(&id).is_some_and(|w| {
+            w.raid_defense.is_some()
+                || self.crab_escort(id)
+                || self.rush_push_escort(id)
+                || self.rush_holds(id)
+                || self.logistics_holds(id)
+                || self.eco_in_transit(id)
+                || self.eco.terraform_hold.get(&id).is_some_and(|until| self.frame < *until)
+                || super::terraform::is_terraforming(w.unit)
+        })
+    }
+
     pub(super) fn eco_assign_workers(&mut self) {
         let frame = self.frame;
         if frame < 8 {
@@ -168,9 +181,9 @@ impl Ai {
         // Also refresh retreat paths for chickening units and process them when they're done chickening.
         if frame % 2 == 0 {
             if let Some(wid) = self.eco.idlers.pop_front() {
-                self.eco_service_worker(wid, false);
+                self.eco_service_worker(wid);
             } else if let Some(wid) = self.eco.assigned.pop_front() {
-                self.eco_service_worker(wid, true);
+                self.eco_service_worker(wid);
             }
         } else if let Some(wid) = self.eco.seeders.pop_front() {
             let Some(unit) = self.eco.workers.get(&wid).map(|w| w.unit) else {
@@ -187,7 +200,7 @@ impl Ai {
 
     /// One step of the idlers/assigned round robin: drop dead workers,
     /// handle chickening (retreating from danger), otherwise (re)assign.
-    fn eco_service_worker(&mut self, wid: i32, check_stuck: bool) {
+    fn eco_service_worker(&mut self, wid: i32) {
         let frame = self.frame;
         let Some(w) = self.eco.workers.get(&wid) else {
             return;
@@ -198,6 +211,10 @@ impl Ai {
             return;
         }
 
+        if self.recovery_owns(wid) {
+            self.eco.assigned.push_back(wid);
+            return;
+        }
         let pos = unit.pos();
         // The threat maps as the worker sees them, under water too (see `water`).
         let view = self.war.view(unit.def());
@@ -273,18 +290,15 @@ impl Ai {
                     self.eco_stop_chickening(wid);
                 }
             }
-        } else if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some()) || self.jump_in_progress(unit) {
+        } else if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some())
+            || self.jump_in_progress(unit)
+            || self.recovery_owns(wid)
+        {
             // Local defense and jumps own the orders until they finish.
-        } else if !check_stuck {
-            self.eco_assign_worker(wid);
         } else {
-            let unstuck = match self.eco.workers.get_mut(&wid) {
-                Some(w) => w.unstick(frame, &mut self.eco.tasks),
-                None => true,
-            };
-            if !unstuck {
-                self.eco_assign_worker(wid);
-            }
+            // The approach rule handles reassignment; shared recovery owns
+            // persistent movement failures instead of resetting them every 4 s.
+            self.eco_assign_worker(wid);
         }
         self.eco.assigned.push_back(wid);
     }
@@ -322,7 +336,7 @@ impl Ai {
 
     pub(super) fn eco_assign_worker(&mut self, wid: i32) {
         let frame = self.frame;
-        if springai::reserved::is_reserved(self.cb, wid) {
+        if springai::reserved::is_reserved(self.cb, wid) || self.recovery_owns(wid) {
             return;
         }
         // Idle, completion, move-failed and retreat-finished callbacks also
@@ -1240,7 +1254,12 @@ impl Ai {
         //check for overlap with existing queued jobs
         for t in self.eco.construction_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)) {
             if let Some(c) = t.as_construction() {
-                let (cxsize, czsize) = extents(c.build_type, c.facing, 0.0);
+                let pad = if keeps_exit(self.defs.name(c.build_type)) || keeps_exit(self.defs.name(def)) {
+                    FACTORY_CLEARANCE / 4.0
+                } else {
+                    0.0
+                };
+                let (cxsize, czsize) = extents(c.build_type, c.facing, pad);
                 if overlaps(t.position, cxsize, czsize) {
                     return false;
                 }
@@ -1253,9 +1272,22 @@ impl Ai {
             let Some(fdef) = fac.def() else {
                 continue;
             };
-            let (cxsize, czsize) = extents(fdef, fac.building_facing(), 1.0);
+            let (cxsize, czsize) = extents(fdef, fac.building_facing(), FACTORY_CLEARANCE / 4.0);
             if overlaps(fac.pos(), cxsize, czsize) {
                 return false;
+            }
+        }
+
+        // New factories need the same clearance from existing static units.
+        if keeps_exit(self.defs.name(def)) {
+            let reach = xsize.max(zsize) + FACTORY_CLEARANCE + 400.0;
+            for u in self.cb.friendly_units_in_cylinder(pos, reach) {
+                if let Some(d) = u.def().filter(|d| d.speed() <= 0.0) {
+                    let (hx, hz) = extents(d, u.building_facing(), FACTORY_CLEARANCE / 4.0);
+                    if overlaps(u.pos(), hx, hz) {
+                        return false;
+                    }
+                }
             }
         }
 

@@ -11,9 +11,7 @@ use springai::{Unit, Vec3};
 use crate::kgbutil::{Nav, PathCost, kgb_move_to};
 use crate::military::wrappers::weapon_power;
 use crate::military::{ScoutTaskId, ScoutTasks, SquadId};
-use crate::util::{
-    NULLPOS, OPTION_SHIFT_KEY, distance, get_angular_point, get_directional_point, get_radial_point, get_speed,
-};
+use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance, get_directional_point, get_radial_point};
 
 /// All fighters by unit id.
 pub type FighterStore = BTreeMap<i32, Fighter>;
@@ -45,7 +43,6 @@ pub struct Fighter {
     pub last_task_frame: i32,
     /// Raiders.
     pub last_rotation_frame: i32,
-    stuck: i32,
     team: i32,
 }
 
@@ -106,7 +103,6 @@ impl Fighter {
             task: None,
             last_task_frame: 0,
             last_rotation_frame: 0,
-            stuck: 0,
             team,
         }
     }
@@ -138,12 +134,6 @@ impl Fighter {
     /// Frame at which the last of the unit's weapons is reloaded.
     fn last_weapon_frame(&self) -> i32 {
         self.unit.weapons().iter().map(|w| w.reload_frame()).fold(0, i32::max)
-    }
-
-    /// Not shooting and barely moving although it should be.
-    fn seems_stuck(&self, frame: i32) -> bool {
-        let max_speed = self.unit.def().map_or(0.0, |d| d.speed());
-        self.last_weapon_frame() < frame - 30 && get_speed(self.unit) < max_speed / 10.0 && !self.unit.is_paralyzed()
     }
 
     pub fn get_fight_path(&self, pos: Vec3, nav: &mut Nav) -> VecDeque<Vec3> {
@@ -180,26 +170,6 @@ impl Fighter {
         if let Some(wp) = next_waypoint(&mut path, skip) {
             kgb_move_to(self.unit, wp, OPTION_SHIFT_KEY, nav.frame);
         }
-    }
-
-    pub fn is_stuck(&mut self, frame: i32) -> bool {
-        if self.unit.health() <= 0.0 || self.target == NULLPOS {
-            return false;
-        }
-        if self.seems_stuck(frame) {
-            self.stuck += 1;
-            if self.stuck >= 10 {
-                let pos = self.unit.pos();
-                let away = get_angular_point(self.target, pos, distance(self.target, pos) + 100.0);
-                kgb_move_to(self.unit, away, 0, frame);
-            }
-            if self.stuck == 15 {
-                return true;
-            }
-        } else {
-            self.stuck = (self.stuck - 2).max(0);
-        }
-        false
     }
 
     pub fn is_dead(&self) -> bool {
@@ -266,24 +236,6 @@ impl Fighter {
 
     pub fn is_reloading(&self, frame: i32) -> bool {
         self.last_weapon_frame() > frame
-    }
-
-    /// Returns `true` once the raider has been stuck for good.
-    pub fn unstick(&mut self, frame: i32, tasks: &mut ScoutTasks) -> bool {
-        if self.unit.health() <= 0.0 {
-            return false;
-        }
-        if self.seems_stuck(frame) {
-            self.stuck += 1;
-            if self.stuck == 15 {
-                return true;
-            }
-            self.clear_task(tasks);
-            kgb_move_to(self.unit, get_radial_point(self.unit.pos(), 100.0), 0, frame);
-        } else {
-            self.stuck = (self.stuck - 2).max(0);
-        }
-        false
     }
 
     // ── Strider / Krow ──────────────────────────────────────────────────

@@ -358,15 +358,6 @@ impl Ai {
         }
     }
 
-    pub(crate) fn eco_worker_held(&self, id: i32) -> bool {
-        self.crab_escort(id)
-            || self.rush_push_escort(id)
-            || self.rush_holds(id)
-            || self.eco.terraform_hold.get(&id).is_some_and(|&until| until > self.frame)
-            || self.eco_in_transit(id)
-            || self.logistics_holds(id)
-    }
-
     pub(crate) fn eco_release_terraform(&mut self, builders: &[Unit]) {
         for b in builders {
             self.eco.terraform_hold.remove(&b.id());

@@ -436,6 +436,7 @@ impl Ai {
             u.health() > 0.0
                 && u.team() == self.team_id
                 && !reserved::is_reserved(self.cb, id)
+                && !self.recovery_owns(id)
                 && !u.is_being_built()
                 && !def.is_able_to_fly()
                 && def.max_weapon_range() > 0.0
@@ -539,6 +540,7 @@ impl Ai {
                         && u.team() == self.team_id
                         && !reserved::is_reserved(self.cb, id)
                         && self.coalesce.leases.get(&id).is_some_and(|l| l.active())
+                        && !self.recovery_owns(id)
                         && !self.retreat_handler.is_retreating(id)
                         && !self.squad_strike_owns(id)
                         && !self.fire_controls(id)

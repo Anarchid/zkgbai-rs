@@ -45,6 +45,7 @@ getters!(FeatureDef.def_id {
     str fn description() = FeatureDef_getDescription;
     res fn contained_resource() = FeatureDef_getContainedResource;
     fn max_health() -> f32 = FeatureDef_getMaxHealth;
+    fn is_blocking() -> bool = FeatureDef_isBlocking;
     fn is_reclaimable() -> bool = FeatureDef_isReclaimable;
     /// A geothermal vent: geothermal plants are built over it.
     fn is_geo_thermal() -> bool = FeatureDef_isGeoThermal;
