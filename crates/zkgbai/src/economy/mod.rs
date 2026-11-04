@@ -270,7 +270,7 @@ pub struct EconomyManager {
     wolv_mine_id: i32,
 
     build_ids: BuildIds,
-    height_map: HeightMap,
+    pub(crate) height_map: HeightMap,
 }
 
 /// The task category lists, for list-generic helpers.

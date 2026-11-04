@@ -72,6 +72,8 @@ use crate::economy::TaskId;
 use crate::terrain::{pos, tier_of};
 use crate::util::{distance, get_directional_point};
 
+pub mod heavy;
+
 /// The switch.
 pub const FEATURE: &str = "walkin";
 
@@ -175,6 +177,8 @@ struct Group {
     /// How far its main weapons reach, elmos.
     reach: f32,
     tier: Tier,
+    /// Its members' health and value.
+    members: Vec<(f32, f32)>,
 }
 
 impl Group {
@@ -266,11 +270,14 @@ pub struct Stats {
     pub nosite: u32,
     pub stood_down: u32,
     pub bumped: u32,
+    /// Lucifers and Desolators (`heavyporc`).
+    pub heavy: heavy::Stats,
 }
 
 impl Stats {
     pub fn json(&self) -> Value {
         json!({
+            "heavy": self.heavy.json(),
             "groups": self.groups, "threats": self.threats, "defended": self.defended, "breaches": self.breaches,
             "opened": self.opened, "pending": self.pending, "capped": self.capped, "outranged": self.outranged,
             "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped,
@@ -295,6 +302,8 @@ pub struct State {
     notes: BTreeMap<(i32, i32, &'static str), i32>,
     /// Places a force has within reach: anchor, first and last frame.
     standing: Vec<(Vec3, i32, i32)>,
+    /// Lucifers and Desolators in place of a fourth Stinger (`heavyporc`).
+    pub heavy: heavy::State,
 }
 
 /// Seconds a force has had the place at `anchor` within reach, this pass
@@ -402,6 +411,7 @@ impl Ai {
     pub(super) fn logistics_walkins(&mut self, now: f32) {
         let frame = self.frame;
         self.walkin_stand_down(frame);
+        self.walkin_heavy_update(now);
         self.walkin_caretakers();
         let groups = self.walkin_groups(frame);
         self.logistics.walkin.stats.groups += groups.len() as u32;
@@ -424,6 +434,7 @@ impl Ai {
                     self.logistics.walkin.called.insert(i.task, frame);
                 }
             }
+            self.walkin_heavy_call(anchor, frame);
         }
         // The dearest places first: they get the turrets under the caps.
         assessed.sort_by(|a, b| b.place.value.total_cmp(&a.place.value));
@@ -447,6 +458,7 @@ impl Ai {
             speed: f32,
             reach: f32,
             tier: Tier,
+            health: f32,
         }
         let mut ms: Vec<M> = Vec::new();
         for e in self.war.targets.values() {
@@ -465,7 +477,8 @@ impl Ai {
                 continue;
             }
             let reach = e.def_max_weapon_range();
-            ms.push(M { pos: e.position, value: e.value, power, speed: e.def_speed(), reach, tier });
+            let health = e.ud.map_or(0.0, |d| d.health());
+            ms.push(M { pos: e.position, value: e.value, power, speed: e.def_speed(), reach, tier, health });
         }
         // Single linkage.
         let n = ms.len();
@@ -516,7 +529,8 @@ impl Ai {
                 *by_tier.entry(ms[i].tier).or_default() += ms[i].value;
             }
             let Some(tier) = by_tier.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|t| t.0) else { continue };
-            groups.push(Group { value, power, units: idx.len(), pos: at, speed, reach, tier });
+            let members = idx.iter().map(|&i| (ms[i].health, ms[i].value)).collect();
+            groups.push(Group { value, power, units: idx.len(), pos: at, speed, reach, tier, members });
         }
         groups.sort_by(|a, b| b.value.total_cmp(&a.value));
         groups
@@ -726,18 +740,28 @@ impl Ai {
         let worth = Worth::Deadline { value: a.place.value, by };
         // A turret for this place under way (anywhere it covers: a base has
         // several places): keep it called for, its deadline current.
+        let heavy = &self.logistics.walkin.heavy;
         let open: Vec<(TaskId, Kind)> = (self.logistics.issues.values())
-            .filter(|i| matches!(i.kind, Kind::Walkin | Kind::Defense) && distance(i.pos, a.place.anchor) <= VAR_RADIUS)
+            .filter(|i| matches!(i.kind, Kind::Walkin | Kind::Defense))
+            .filter(|i| distance(i.pos, a.place.anchor) <= VAR_RADIUS || heavy.guards(i.task, a.place.anchor))
             .map(|i| (i.task, i.kind))
             .collect();
-        if !open.is_empty() {
+        if !open.is_empty() || heavy.raising(a.place.anchor) {
             for (task, kind) in open {
                 if kind != Kind::Walkin {
                     continue;
                 }
                 self.logistics.walkin.called.insert(task, frame);
+                let heavy = self.logistics.walkin.heavy.tasks.contains_key(&task);
                 if let Some(i) = self.logistics.issues.get_mut(&task) {
-                    i.worth = worth;
+                    // A heavy turret's deadline is when it can stand (see
+                    // `heavy`): a nearer force does not make it late.
+                    i.worth = match (heavy, i.worth, worth) {
+                        (true, Worth::Deadline { by: old, .. }, Worth::Deadline { value, by }) => {
+                            Worth::Deadline { value, by: by.max(old) }
+                        }
+                        _ => worth,
+                    };
                     i.against = a.group.power;
                 }
             }
@@ -750,6 +774,11 @@ impl Ai {
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
             .count();
+        // More than PLACE_CAP Stingers' worth wanted here: a Lucifer or a
+        // Desolator instead, where the grid powers one.
+        if self.walkin_heavy(a, now, here) {
+            return;
+        }
         // The slot this place would take (see `bump`); given up only once
         // this place's turret stands planned, else the cheaper place would
         // reopen its own in the same pass.
@@ -895,7 +924,14 @@ impl Ai {
         self.logistics.walkin.called.retain(|t, _| issues.contains_key(t));
         let stale: Vec<TaskId> = (self.logistics.issues.values())
             .filter(|i| i.kind == Kind::Walkin && !i.started)
-            .filter(|i| self.logistics.walkin.called.get(&i.task).is_none_or(|&f| frame - f > STAND_DOWN))
+            .filter(|i| {
+                let patience = if self.logistics.walkin.heavy.tasks.contains_key(&i.task) {
+                    heavy::STAND_DOWN
+                } else {
+                    STAND_DOWN
+                };
+                self.logistics.walkin.called.get(&i.task).is_none_or(|&f| frame - f > patience)
+            })
             .map(|i| i.task)
             .collect();
         for task in stale {

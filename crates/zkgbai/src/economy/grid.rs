@@ -112,6 +112,18 @@ impl GridDefs {
     }
 }
 
+/// What power a site has (see [`Ai::eco_grid_access`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GridAccess {
+    /// The grids it would join make this much, enough.
+    Powered(f32),
+    /// Not enough, but `pylons` pylons from the member at `from` (of pylon
+    /// range `range`) link it to grids making `energy` together.
+    Link { from: Vec3, range: f32, pylons: f32, energy: f32 },
+    /// Not enough and no grid that makes up the rest: what it would have.
+    Unpowered(f32),
+}
+
 /// One of our grid members (or a building's site waiting for power).
 struct Member {
     what: String,
@@ -421,6 +433,60 @@ impl Ai {
         ))
     }
 
+    /// What a building of pylon range `range` at `pos` that needs `needs`
+    /// energy would have: the energy of the grids it would join standing
+    /// there, or else the fewest pylons that link it to a grid making the
+    /// rest (see [`GridAccess`]).
+    pub(crate) fn eco_grid_access(&self, pos: Vec3, range: f32, needs: f32) -> GridAccess {
+        let gd = &self.eco.grid_defs;
+        let pr = gd.pylon_range;
+        let members: Vec<(Vec3, f32, f32)> = (self.cb.team_units().into_iter())
+            .filter(|u| u.health() > 0.0 && !u.is_being_built())
+            .filter_map(|u| {
+                let range = gd.range(u.def()?.id())?;
+                Some((u.pos(), range, u.rules_param_float("current_energyIncome", 0.0).max(0.0)))
+            })
+            .collect();
+        let n = members.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        for i in 0..n {
+            for j in i + 1..n {
+                if distance(members[i].0, members[j].0) < members[i].1 + members[j].1 {
+                    let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let grid: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
+        let mut capacity = vec![0.0f32; n];
+        for (i, m) in members.iter().enumerate() {
+            capacity[grid[i]] += m.2;
+        }
+        let mut joined: Vec<usize> =
+            (0..n).filter(|&i| distance(members[i].0, pos) < members[i].1 + range).map(|i| grid[i]).collect();
+        joined.sort_unstable();
+        joined.dedup();
+        let has: f32 = joined.iter().map(|&g| capacity[g]).sum();
+        if has >= needs {
+            return GridAccess::Powered(has);
+        }
+        if pr <= 0.0 {
+            return GridAccess::Unpowered(has);
+        }
+        // The fewest pylons to a grid that makes up the rest (the stronger
+        // of equals).
+        let link = (0..n)
+            .filter(|&i| !joined.contains(&grid[i]) && has + capacity[grid[i]] >= needs)
+            .map(|i| (link_pylons(distance(members[i].0, pos), members[i].1, range, pr), i))
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(capacity[grid[b.1]].total_cmp(&capacity[grid[a.1]])));
+        match link {
+            Some((pylons, i)) => {
+                GridAccess::Link { from: members[i].0, range: members[i].1, pylons, energy: has + capacity[grid[i]] }
+            }
+            None => GridAccess::Unpowered(has),
+        }
+    }
+
     /// Whether a pylon stands (or is queued) where one is planned.
     fn eco_pylon_near(&self, p: Vec3) -> bool {
         self.eco.pylons.iter().any(|u| distance(u.pos(), p) < PYLON_SAME)
@@ -469,7 +535,7 @@ impl Ai {
 
     /// Queue the pylons of a chain from `a` (range `ra`) to `b` that are not
     /// there yet.
-    pub(super) fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
+    pub(crate) fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
         let Some(pylon) = self.defs.get("energypylon") else { return };
         let mut queued = 0;
         for p in chain(a, ra, b, rb, self.eco.grid_defs.pylon_range) {
@@ -504,6 +570,13 @@ fn shortest_link(members: &[Member], a: &[usize], b: &[usize], pr: f32) -> (f32,
         }
     }
     (1.0 + (best.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil(), ends)
+}
+
+/// Pylons (of range `pr`) a link between buildings `d` apart, of pylon
+/// ranges `ra` and `rb`, takes (as [`shortest_link`] counts them).
+fn link_pylons(d: f32, ra: f32, rb: f32, pr: f32) -> f32 {
+    let gap = d - CHAIN_SLACK * (ra + rb + 2.0 * pr);
+    1.0 + (gap.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil()
 }
 
 /// Where the pylons (of range `pr`) of a chain from `a` (range `ra`) to `b`
@@ -543,5 +616,17 @@ mod tests {
         assert_eq!(points.len(), 4);
         // Close by, one does.
         assert_eq!(chain(a, ra, Vec3::xz(800.0, 0.0), rb, pr).len(), 1);
+    }
+
+    #[test]
+    fn link_pylons_count_as_the_chain_lays_them() {
+        // A Lucifer (range 50) 900 from a solar (100), pylons 500: one
+        // pylon spans 0.85 x 1150 = 977.
+        assert_eq!(link_pylons(900.0, 100.0, 50.0, 500.0), 1.0);
+        assert_eq!(link_pylons(1500.0, 100.0, 50.0, 500.0), 2.0);
+        for d in [900.0, 1500.0, 2400.0] {
+            let n = chain(Vec3::xz(0.0, 0.0), 100.0, Vec3::xz(d, 0.0), 50.0, 500.0).len() as f32;
+            assert!(n <= link_pylons(d, 100.0, 50.0, 500.0), "{d}: chain {n}");
+        }
     }
 }

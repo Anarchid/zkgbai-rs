@@ -822,10 +822,19 @@ impl Ai {
     }
 
     /// Zero-K build priority: an urgent defense under way gets high, the
-    /// other construction and the factories low, until it is done.
+    /// other construction and the factories low, until it is done. A heavy
+    /// walk-in turret (a Lucifer, a Desolator: see [`walkin::heavy`]) gets
+    /// high priority but holds nothing back: it is no emergency build.
     fn logistics_pause(&mut self, now: f32) {
+        let heavy = |i: &Issue| walkin::heavy::HEAVIES.contains(&i.what.as_str());
+        for i in self.logistics.issues.values().filter(|i| i.kind == Kind::Walkin && i.started && heavy(i)) {
+            if let Some(u) = self.eco.tasks.get(i.task).and_then(|t| t.as_construction()?.target) {
+                u.execute_custom_command(cmd::PRIORITY, &[2.0], 0, NO_TIMEOUT);
+            }
+        }
         let urgent: Vec<Unit> = (self.logistics.issues.values())
             .filter(|i| matches!(i.kind, Kind::Defense | Kind::Walkin) && i.started && i.value >= MIN_NET)
+            .filter(|i| !heavy(i))
             .filter(|i| i.worth.deadline().is_none_or(|by| now <= by + DECAY))
             .filter_map(|i| self.eco.tasks.get(i.task)?.as_construction()?.target)
             .collect();

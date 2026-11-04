@@ -32,6 +32,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Defense",
         "a turret at whatever we value that a known enemy force worth 800+ metal gets to with nothing of ours to meet it there, on its way or in time (default on)",
     ),
+    (
+        "heavyporc",
+        "Defense",
+        "where the walk-in guard would want more than 3 Stingers at a place and a 50-energy grid reaches it: a Lucifer on a spire or a raised platform (against heavies and long reach) or a Desolator (against light forces), or both (default on)",
+    ),
     ("currency", "Economy", "a job's raid danger priced in metal against its crew's bonus"),
     ("pairs", "Economy", "Constables pair up on builds"),
     ("earlycons", "Economy", "an early second Constable in the opening"),
