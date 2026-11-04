@@ -769,7 +769,10 @@ impl Ai {
             self.walkin_note("pending", a, json!({}));
             return;
         }
-        let under_way = self.logistics.issues.values().filter(|i| i.kind == Kind::Walkin).count();
+        // Heavies (see `heavy`) have slots of their own and are not bumped.
+        let heavies: Vec<TaskId> = self.logistics.walkin.heavy.tasks.keys().copied().collect();
+        let ordinary = move |i: &&super::Issue| i.kind == Kind::Walkin && !heavies.contains(&i.task);
+        let under_way = self.logistics.issues.values().filter(&ordinary).count();
         self.logistics.walkin.opened.retain(|&(_, f, _)| frame - f < CAP_WINDOW);
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
@@ -784,7 +787,7 @@ impl Ai {
         // reopen its own in the same pass.
         let bumped = if under_way >= MAX_OPEN && here < PLACE_CAP {
             let open: Vec<(TaskId, f32, bool)> = (self.logistics.issues.values())
-                .filter(|i| i.kind == Kind::Walkin)
+                .filter(&ordinary)
                 .map(|i| (i.task, worth_value(&i.worth), i.started))
                 .collect();
             bump(&open, a.place.value)

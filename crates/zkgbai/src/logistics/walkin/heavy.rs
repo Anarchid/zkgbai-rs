@@ -190,8 +190,9 @@ pub struct Stats {
     pub wanted: u32,
     pub lucifers: u32,
     pub desolators: u32,
-    /// Lucifers on a spire as it stood.
+    /// Lucifers on a spire as it stood; on the ground, a platform too slow.
     pub spires: u32,
+    pub flat: u32,
     /// Platforms ordered; up; given up short.
     pub platforms: u32,
     pub raised: u32,
@@ -205,7 +206,7 @@ pub struct Stats {
 impl Stats {
     pub fn json(&self) -> Value {
         json!({
-            "wanted": self.wanted, "lucifers": self.lucifers, "desolators": self.desolators, "spires": self.spires,
+            "wanted": self.wanted, "lucifers": self.lucifers, "desolators": self.desolators, "spires": self.spires, "flat": self.flat,
             "platforms": self.platforms, "raised": self.raised, "short": self.short, "none": self.none,
             "capped": self.capped, "stood_down": self.stood_down,
         })
@@ -378,15 +379,20 @@ impl Ai {
         let k = hands.len().min(MAX_CREW);
         let (metal, income) = (self.eco.metal, self.eco.effective_income);
         let raise = perch.as_ref().map_or(0.0, |p| p.raise);
-        let raising = raise > UP_SLACK;
         let side = def.x_size().max(def.z_size()) as f32 * 8.0 + 2.0 * RING;
-        let raise_s = if raising {
+        let raise_s = if raise > UP_SLACK {
             let m = platform_metal(side, raise);
-            finish_time(&hands[..k.min(RAISERS)], m, m, metal, income)
+            finish_time(&hands[..k.min(RAISERS)], m, m, metal, income) * STRETCH
         } else {
             0.0
         };
-        let eta = (raise_s + finish_time(&hands[..k], def.build_time(), def.cost(self.metal), metal, income)) * STRETCH;
+        // A platform only if it is up before the force arrives: with an
+        // enemy beside it the raise goes 20 times slower (the gadget's
+        // enemy penalty; smoke1/g3 got 0 of 80 in 61 s), and a Lucifer on
+        // the ground fires sooner than none.
+        let raising = raise > UP_SLACK && raise_s <= a.seconds.max(a.dwell) - MARGIN;
+        let eta = if raising { raise_s } else { 0.0 }
+            + finish_time(&hands[..k], def.build_time(), def.cost(self.metal), metal, income) * STRETCH;
         if eta > ETA {
             return Err("late");
         }
@@ -404,6 +410,7 @@ impl Ai {
             porc_power(def),
             match &perch {
                 Some(p) if raising => format!(", on a platform raised {:.0}", p.raise),
+                Some(p) if p.raise > UP_SLACK => format!(" on the ground (raising {:.0} takes {raise_s:.0}s)", p.raise),
                 Some(_) => " on a spire".to_owned(),
                 None => String::new(),
             }
@@ -411,7 +418,8 @@ impl Ai {
         let extra = json!({
             "turret": name, "site": [site.x.round(), site.z.round()], "eta": (eta * 10.0).round() / 10.0,
             "wanted": wanted, "prey": (prey * 100.0).round() / 100.0, "grid": grid.round(),
-            "pylons": link.map_or(0.0, |l| l.2), "raise": raise.round(), "hands": hands.len(),
+            "pylons": link.map_or(0.0, |l| l.2), "raise": raise.round(), "raise_s": raise_s.round(),
+            "raising": raising, "hands": hands.len(),
         });
         if raising {
             let Some(p) = perch else { return Err("nosite") };
@@ -462,8 +470,10 @@ impl Ai {
             };
             let task = task.ok_or("nosite")?;
             self.walkin_heavy_open(def, task, anchor, a.place.value, by, a.group.power, &why).ok_or("refused")?;
-            if perch.is_some() {
-                self.logistics.walkin.stats.heavy.spires += 1;
+            match perch {
+                Some(_) if raise > UP_SLACK => self.logistics.walkin.stats.heavy.flat += 1,
+                Some(_) => self.logistics.walkin.stats.heavy.spires += 1,
+                None => {}
             }
             self.walkin_note("heavy", a, extra);
         }
@@ -664,11 +674,30 @@ impl Ai {
             self.logistics.walkin.stats.heavy.short += 1;
         }
         let task = self.eco_logistics_porc_at(r.def, site, SITE_SLACK);
+        // Who raised it, and whether an enemy stood by (the 20x penalty).
+        let raisers: Vec<String> = (r.workers.iter())
+            .map(|&u| {
+                let state = if u.health() <= 0.0 {
+                    "dead"
+                } else if is_terraforming(u) {
+                    "raising"
+                } else {
+                    "off"
+                };
+                format!("{}@{:.0} {state}", u.id(), distance(u.pos(), site))
+            })
+            .collect();
+        let enemy = (self.war.targets.values())
+            .filter(|e| !e.is_dead && frame - e.last_seen <= 90)
+            .map(|e| distance(e.position, site))
+            .fold(f32::INFINITY, f32::min);
         self.log(&format!(
-            "walkin: heavy: platform at ({:.0}, {:.0}) {up:.0} of {asked:.0} up after {:.0}s; {}",
+            "walkin: heavy: platform at ({:.0}, {:.0}) {up:.0} of {asked:.0} up after {:.0}s (raisers {}; nearest \
+             enemy seen {enemy:.0} off); {}",
             site.x,
             site.z,
             (frame - since) as f32 / 30.0,
+            raisers.join(", "),
             if task.is_some() { "the Lucifer goes on top" } else { "no site for the Lucifer on it" }
         ));
         let Some(task) = task else { return };
