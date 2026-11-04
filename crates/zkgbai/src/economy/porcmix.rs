@@ -59,10 +59,11 @@ pub fn kind_cap(name: &str) -> usize {
 }
 
 /// Blasts are kept this much further apart than their radius, elmos: a
-/// built turret stands up to a build square off its planned site
-/// (wirestank2: a Lucifer and a Faraday planned clear stood 253 apart, the
-/// Lucifer's blast 260).
-const BLAST_MARGIN: f32 = 16.0;
+/// built turret stands a little off its planned site (wirestank2: a
+/// Lucifer and a Faraday planned clear stood 253 apart, the Lucifer's blast
+/// 260). Half a build square: the silo guards' Lotuses stand 140 from their
+/// Stinger (130) on purpose.
+pub const BLAST_MARGIN: f32 = 8.0;
 
 /// The mid-heavy turrets, of which at most [`MID_CAP`] together stand
 /// within [`MIX_RADIUS`] (`midcap`; user, 2026-11-04: "no more than 2
@@ -157,10 +158,10 @@ mod tests {
     fn turrets_keep_out_of_each_other_s_blast() {
         // A Stardust (170) 120 from a Lotus (90): inside its blast.
         assert!(blast_room(120.0, 90.0, 170.0) < 1.0);
-        // A Stinger (130) 150 from a Faraday (130): clear; 140 is within
-        // the margin a build square shifts a turret by.
-        assert!(blast_room(150.0, 130.0, 130.0) >= 1.0);
-        assert!(blast_room(140.0, 130.0, 130.0) < 1.0);
+        // A Stinger (130) 140 from a Faraday (130): clear; 135 is within
+        // the margin a turret shifts by.
+        assert!(blast_room(140.0, 130.0, 130.0) >= 1.0);
+        assert!(blast_room(135.0, 130.0, 130.0) < 1.0);
         assert_eq!(blast_room(10.0, 0.0, 0.0), f32::INFINITY);
     }
 
