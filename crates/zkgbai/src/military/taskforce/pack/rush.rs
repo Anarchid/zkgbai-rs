@@ -303,7 +303,7 @@ impl Ai {
                 && e.visible
                 && e.is_static
                 && self.war.can_hit(hits, e)
-                && distance(heavy.pos(), e.position) <= 0.94 * reach
+                && distance(heavy.pos(), e.position) <= 0.92 * reach
                 && !st.blocked.is_some_and(|(id, until)| id == e.unit_id && frame < until)
         };
         let target = st
