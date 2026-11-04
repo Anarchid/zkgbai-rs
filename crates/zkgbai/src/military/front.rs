@@ -24,6 +24,20 @@
 //! E x min(1, `front_heavy` / cost) once our income pays for it in
 //! [`HEAVY_PAYBACK_S`] seconds ([`Ai::fac_front_heavy`]). The measurement
 //! runs and goes in the journal's `front` tick field either way.
+//!
+//! `frontallies` (on; `disable=frontallies`): allied armed ground units
+//! count among a unit's neighbours as ours do (not as units sampled), so a
+//! team fight reads as dense as it is. Without it a 3v3 on an 8x8 map read
+//! 497 at 14 minutes for an AI whose allies did the fighting (2026-11-04).
+//!
+//! `frontretire` (on; `disable=frontretire`): once the ratchet reaches
+//! `front_sparse` (default `front_hi`), the sparse-map ground-control
+//! measures stand down for good: no stakeout pickets or lookers (those
+//! there go to the raider squads), no garrison posts (the guards go back),
+//! and no scouts built for the scout budget. Fights that dense have radar
+//! over everything and fire everywhere; a picket sees nothing radar does
+//! not, and its refills skipped `frontgate` (96 Puppies in 16 minutes in
+//! that 3v3). The QRF's own teams stay.
 
 use crate::Ai;
 use crate::util::kgb_rand;
@@ -57,18 +71,26 @@ pub struct Front {
     pub raw: Option<f32>,
     /// Our armed ground metal in contact, and all of it, at the last sample.
     pub contact: (f32, f32),
-    settings: Option<(f32, f32, f32)>,
+    /// When the ratchet first reached `front_sparse` (frame).
+    pub sparse_since: Option<i32>,
+    /// lo, hi, heavy metal per pick, sparse.
+    settings: Option<(f32, f32, f32, f32)>,
 }
 
 impl Front {
-    fn settings(&self) -> (f32, f32, f32) {
-        self.settings.unwrap_or((LO, HI, HEAVY_METAL_PER_PICK))
+    fn settings(&self) -> (f32, f32, f32, f32) {
+        self.settings.unwrap_or((LO, HI, HEAVY_METAL_PER_PICK, HI))
     }
 
     /// E from the ratchet (whether or not the switch is on).
     pub fn escalation(&self) -> f32 {
-        let (lo, hi, _) = self.settings();
+        let (lo, hi, _, _) = self.settings();
         escalation(self.ratchet, lo, hi)
+    }
+
+    /// Whether the ratchet has reached `front_sparse`.
+    pub fn past_sparse(&self) -> bool {
+        self.ratchet >= self.settings().3
     }
 
     /// Fold in a sample taken `seconds` after the previous one.
@@ -89,10 +111,16 @@ pub(crate) fn escalation(ratchet: f32, lo: f32, hi: f32) -> f32 {
 }
 
 /// Over `ours` (x, z, metal) with enemy metal within `radius`, the
-/// metal-weighted mean of the metal within `radius` (the others of ours and
-/// `foes`) per km-elmo²; `None` if none of ours is in contact. Also the
-/// metal of ours in contact.
-pub(crate) fn fight_density(ours: &[(f32, f32, f32)], foes: &[(f32, f32, f32)], radius: f32) -> (Option<f32>, f32) {
+/// metal-weighted mean of the metal within `radius` (the others of ours,
+/// `friends` and `foes`) per km-elmo²; `None` if none of ours is in
+/// contact. Also the metal of ours in contact. `friends` (allied units)
+/// are neighbours only: the density is the one our units stand in.
+pub(crate) fn fight_density(
+    ours: &[(f32, f32, f32)],
+    friends: &[(f32, f32, f32)],
+    foes: &[(f32, f32, f32)],
+    radius: f32,
+) -> (Option<f32>, f32) {
     let r2 = radius * radius;
     let area = std::f32::consts::PI * r2 / 1.0e6;
     let near = |a: &(f32, f32, f32), b: &(f32, f32, f32)| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) <= r2;
@@ -102,7 +130,8 @@ pub(crate) fn fight_density(ours: &[(f32, f32, f32)], foes: &[(f32, f32, f32)], 
         if enemy <= 0.0 {
             continue;
         }
-        let own: f32 = (ours.iter().enumerate()).filter(|&(j, o)| j != i && near(u, o)).map(|(_, o)| o.2).sum();
+        let own: f32 = (ours.iter().enumerate()).filter(|&(j, o)| j != i && near(u, o)).map(|(_, o)| o.2).sum::<f32>()
+            + friends.iter().filter(|o| near(u, o)).map(|o| o.2).sum::<f32>();
         weighted += f64::from(u.2) * f64::from((own + enemy) / area);
         metal += f64::from(u.2);
     }
@@ -124,6 +153,12 @@ impl Ai {
         self.war.front.escalation()
     }
 
+    /// `frontretire`: the fights have been dense enough that pickets,
+    /// garrisons and scouts stand down (for good: the ratchet only rises).
+    pub(crate) fn front_retired(&self) -> bool {
+        !self.dev_off("frontretire") && self.war.front.past_sparse()
+    }
+
     /// Sample the density of our fights (switch on or off).
     pub(crate) fn front_update(&mut self, frame: i32) {
         if frame % PERIOD != (self.offset + 11) % PERIOD {
@@ -131,8 +166,9 @@ impl Ai {
         }
         if self.war.front.settings.is_none() {
             let opt = |k: &str, d: f32| self.cb.option(k).and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(d);
+            let hi = opt("front_hi", HI);
             self.war.front.settings =
-                Some((opt("front_lo", LO), opt("front_hi", HI), opt("front_heavy", HEAVY_METAL_PER_PICK)));
+                Some((opt("front_lo", LO), hi, opt("front_heavy", HEAVY_METAL_PER_PICK), opt("front_sparse", hi)));
         }
         let ours: Vec<(f32, f32, f32)> = (self.fighters.values())
             .filter(|f| f.metal_value > 0.0 && f.unit.def().is_some_and(|d| !d.is_able_to_fly()))
@@ -154,10 +190,42 @@ impl Ai {
             })
             .filter_map(|e| Some((e.position.x, e.position.z, e.ud?.cost(metal))))
             .collect();
-        let (raw, in_contact) = fight_density(&ours, &foes, RADIUS);
+        // Allied armed ground units, constructors and commanders aside
+        // (as on the enemy's side).
+        let friends: Vec<(f32, f32, f32)> = if self.dev_off("frontallies") || self.allies.is_empty() {
+            Vec::new()
+        } else {
+            let team = self.team_id;
+            (self.cb.friendly_units().into_iter())
+                .filter(|u| u.team() != team && u.health() > 0.0 && !u.is_being_built())
+                .filter_map(|u| {
+                    let d = u.def()?;
+                    let armed = d.is_able_to_attack() && d.speed() > 0.0 && !d.is_able_to_fly();
+                    (armed && !d.is_builder() && !self.defs.is_commander(d)).then(|| {
+                        let p = u.pos();
+                        (p.x, p.z, d.cost(metal))
+                    })
+                })
+                .collect()
+        };
+        let (raw, in_contact) = fight_density(&ours, &friends, &foes, RADIUS);
         let front = &mut self.war.front;
         front.contact = (in_contact, ours.iter().map(|u| u.2).sum());
         front.sample(raw, PERIOD as f32 / 30.0);
+        if front.sparse_since.is_none() && front.past_sparse() {
+            front.sparse_since = Some(frame);
+            let (ratchet, sparse) = (front.ratchet, front.settings().3);
+            if self.front_retired() {
+                self.log(&format!(
+                    "front: fight density {ratchet:.0} reached {sparse:.0}: pickets, garrisons and scouts stand down"
+                ));
+            }
+            self.op_emit(
+                "front",
+                serde_json::json!({"event": "sparse", "t": frame / 30, "ratchet": ratchet.round(), "sparse": sparse.round(),
+                                   "retire": self.front_retired()}),
+            );
+        }
     }
 
     /// `frontgate`: with chance E, drop one owed raider (`debt` < 0) instead
@@ -186,7 +254,7 @@ impl Ai {
         if cost <= 0.0 || self.phase_income() * HEAVY_PAYBACK_S < cost {
             return None;
         }
-        let (_, _, per_pick) = self.war.front.settings();
+        let (_, _, per_pick, _) = self.war.front.settings();
         (kgb_rand() < f64::from(e * (per_pick / cost).min(1.0))).then_some(name)
     }
 }
@@ -201,12 +269,38 @@ mod tests {
         // Two of ours together, one far off; an enemy next to the pair.
         let ours = [(0.0, 0.0, 100.0), (100.0, 0.0, 300.0), (5000.0, 0.0, 1000.0)];
         let foes = [(200.0, 0.0, 400.0)];
-        let (raw, contact) = fight_density(&ours, &foes, RADIUS);
+        let (raw, contact) = fight_density(&ours, &[], &foes, RADIUS);
         assert_eq!(contact, 400.0);
         // Unit 0 sees 300 + 400, unit 1 sees 100 + 400.
         let want = (100.0 * 700.0 + 300.0 * 500.0) / 400.0 / area;
         assert!((raw.unwrap() - want).abs() < 1e-3, "{raw:?} {want}");
-        assert_eq!(fight_density(&ours[2..], &foes, RADIUS), (None, 0.0));
+        assert_eq!(fight_density(&ours[2..], &[], &foes, RADIUS), (None, 0.0));
+    }
+
+    #[test]
+    fn allies_are_neighbours_not_samples() {
+        let area = std::f32::consts::PI * RADIUS * RADIUS / 1.0e6;
+        let ours = [(0.0, 0.0, 100.0)];
+        let foes = [(200.0, 0.0, 400.0)];
+        // An ally beside our unit, and one far off in a fight of its own.
+        let friends = [(50.0, 0.0, 600.0), (9000.0, 0.0, 5000.0)];
+        let (raw, contact) = fight_density(&ours, &friends, &foes, RADIUS);
+        assert_eq!(contact, 100.0);
+        assert!((raw.unwrap() - 1000.0 / area).abs() < 1e-3, "{raw:?}");
+        // Allies alone in contact make no sample.
+        assert_eq!(fight_density(&[], &friends, &foes, RADIUS), (None, 0.0));
+    }
+
+    #[test]
+    fn sparse_defaults_to_hi_and_holds() {
+        let mut f = Front::default();
+        assert!(!f.past_sparse());
+        f.sample(Some(HI - 1.0), 2.0);
+        assert!(!f.past_sparse());
+        f.sample(Some(HI * 3.0), 2.0);
+        f.sample(None, 2.0);
+        f.sample(Some(0.0), 2.0);
+        assert!(f.past_sparse());
     }
 
     #[test]
