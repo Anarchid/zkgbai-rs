@@ -22,11 +22,12 @@
 //!   30 s or, where none is seen, what killed our units there in the last
 //!   5 minutes (each killer once): the raiders that keep the ground;
 //! - open: free spots and nobody about.
+//!
 //! For each:
 //! - stake: what its enemy-held spots pay the enemy, metal/s; gain: that
 //!   and all its spots' income, ours once taken;
 //! - defenders: the known armed enemy buildings covering its spots (reach
-//!   + 50) or standing in it, and the armed units seen there (10 s on held
+//!   plus 50) or standing in it, and the armed units seen there (10 s on held
 //!   ground, 30 s on empty) or the killers above; their armed metal `D`;
 //! - the build after the clear: a mex on every spot (85 metal each) and,
 //!   unless open, a Lotus (90), at a constructor's 5 metal/s, by our nearest
@@ -57,6 +58,7 @@
 //! - net = P x hold x (gain x max(0, 480 - income start) + reclaim) - lost
 //!   share x metal - metal x force time / 600 (the force's time, worth its
 //!   metal over ten minutes) - the build's metal.
+//!
 //! The pieces come out ranked by their best source's net.
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -67,8 +69,8 @@ use serde_json::{Value, json};
 use zk_terrain::paths::Paths;
 use zk_terrain::{Pos, SpringMapData, Terrain, Tier, TierMap};
 use zkgbai::military::fightsim::plan::{
-    Caps, FACTORY_BUILD_POWER, Logistics, Moves, SpecRow, cheapest_force, judge_seizure, load_specs, plan_timing, priced_seizure,
-    staged_fight,
+    Caps, FACTORY_BUILD_POWER, Logistics, Moves, SpecRow, cheapest_force, judge_seizure, load_specs, plan_timing,
+    priced_seizure, staged_fight,
 };
 use zkgbai::military::fightsim::{Model, SimFlags, UnitSpec};
 
@@ -221,7 +223,12 @@ fn main() {
         let unit = |v: &Value| -> Option<Unit> {
             let def = v[0].as_str()?.to_owned();
             let spec = db.get(&def)?.spec.clone();
-            Some(Unit { def, pos: Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32), spec, hp: v[3].as_f64().unwrap_or(1.0) as f32 })
+            Some(Unit {
+                def,
+                pos: Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32),
+                spec,
+                hp: v[3].as_f64().unwrap_or(1.0) as f32,
+            })
         };
         let ours: Vec<Unit> = (s["ours"].as_array().into_iter().flatten()).filter_map(unit).collect();
         let enemy: Vec<(Unit, f64)> = (s["enemy"].as_array().into_iter().flatten())
@@ -232,9 +239,13 @@ fn main() {
             .collect();
         let income = s["income"].as_f64().unwrap_or(10.0) as f32;
         let cons: Vec<(Pos, f32)> = (s["cons"].as_array().into_iter().flatten())
-            .filter_map(|v| Some((Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32), db.get(v[0].as_str()?)?.spec.speed)))
+            .filter_map(|v| {
+                Some((Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32), db.get(v[0].as_str()?)?.spec.speed))
+            })
             .collect();
-        let enemy_base = s["enemy_base"].as_array().map(|v| Pos::new(v[0].as_f64().unwrap_or(0.0) as f32, v[1].as_f64().unwrap_or(0.0) as f32));
+        let enemy_base = s["enemy_base"]
+            .as_array()
+            .map(|v| Pos::new(v[0].as_f64().unwrap_or(0.0) as f32, v[1].as_f64().unwrap_or(0.0) as f32));
         // Who holds each spot: ours, the enemy's (a known mex within 60), or free.
         let enemy_mexes: Vec<Pos> = enemy.iter().filter(|(u, _)| u.def == "staticmex").map(|(u, _)| u.pos).collect();
         let held = |p: Pos, by: &[Pos]| by.iter().any(|m| m.distance(p) <= 60.0);
@@ -244,29 +255,44 @@ fn main() {
                 pieces.entry(r).or_default().push(k);
             }
         }
-        let our_regions: std::collections::HashSet<usize> = (our_mexes.iter().chain(ours.iter().map(|u| &u.pos)))
-            .filter_map(|p| map.region_near(*p, SNAP))
-            .collect();
+        let our_regions: std::collections::HashSet<usize> =
+            (our_mexes.iter().chain(ours.iter().map(|u| &u.pos))).filter_map(|p| map.region_near(*p, SNAP)).collect();
         // Sources: our standing groups, and our factories' priced plans.
-        let armed_ours: Vec<&Unit> = ours.iter().filter(|u| !u.spec.weapons.is_empty() && u.spec.mobile && !u.spec.builder).collect();
-        let owned: Vec<Unit> = armed_ours.iter().map(|u| Unit { def: u.def.clone(), pos: u.pos, spec: u.spec.clone(), hp: u.hp }).collect();
-        let our_groups: Vec<Vec<&Unit>> = groups(&owned, GROUP_LINK).into_iter().map(|g| g.into_iter().map(|i| &owned[i]).collect()).collect();
+        let armed_ours: Vec<&Unit> =
+            ours.iter().filter(|u| !u.spec.weapons.is_empty() && u.spec.mobile && !u.spec.builder).collect();
+        let owned: Vec<Unit> = armed_ours
+            .iter()
+            .map(|u| Unit { def: u.def.clone(), pos: u.pos, spec: u.spec.clone(), hp: u.hp })
+            .collect();
+        let our_groups: Vec<Vec<&Unit>> =
+            groups(&owned, GROUP_LINK).into_iter().map(|g| g.into_iter().map(|i| &owned[i]).collect()).collect();
         let factories: Vec<(String, Pos, Vec<String>)> = (s["factories"].as_array().into_iter().flatten())
             .filter_map(|v| {
                 let def = v[0].as_str()?.to_owned();
-                let builds: Vec<String> = db.get(&def)?.builds.iter()
-                    .filter(|b| db.get(*b).is_some_and(|r| r.spec.mobile && !r.spec.air && !r.spec.builder && !r.spec.weapons.is_empty()))
-                    .cloned().collect();
+                let builds: Vec<String> = db
+                    .get(&def)?
+                    .builds
+                    .iter()
+                    .filter(|b| {
+                        db.get(*b).is_some_and(|r| {
+                            r.spec.mobile && !r.spec.air && !r.spec.builder && !r.spec.weapons.is_empty()
+                        })
+                    })
+                    .cloned()
+                    .collect();
                 let at = Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32);
                 (!builds.is_empty()).then_some((def, at, builds))
             })
             .collect();
         // The enemy's armies seen lately, for its time to come back.
         let movers: Vec<Unit> = (enemy.iter())
-            .filter(|(u, age)| *age <= ARMY_SEEN && u.spec.mobile && !u.spec.weapons.is_empty() && !u.spec.air && !u.spec.builder)
+            .filter(|(u, age)| {
+                *age <= ARMY_SEEN && u.spec.mobile && !u.spec.weapons.is_empty() && !u.spec.air && !u.spec.builder
+            })
             .map(|(u, _)| Unit { def: u.def.clone(), pos: u.pos, spec: u.spec.clone(), hp: u.hp })
             .collect();
-        let armies: Vec<(Pos, f32, f32)> = groups(&movers, GROUP_LINK).into_iter()
+        let armies: Vec<(Pos, f32, f32)> = groups(&movers, GROUP_LINK)
+            .into_iter()
             .map(|g| {
                 let us: Vec<&Unit> = g.iter().map(|&i| &movers[i]).collect();
                 let metal: f32 = us.iter().map(|u| u.spec.cost).sum();
@@ -278,7 +304,11 @@ fn main() {
         let mut ranked = Vec::new();
         for (&r, ks) in &pieces {
             let theirs: Vec<usize> = ks.iter().copied().filter(|&k| held(spots[k].0, &enemy_mexes)).collect();
-            let free: Vec<usize> = ks.iter().copied().filter(|&k| !held(spots[k].0, &enemy_mexes) && !held(spots[k].0, &our_mexes)).collect();
+            let free: Vec<usize> = ks
+                .iter()
+                .copied()
+                .filter(|&k| !held(spots[k].0, &enemy_mexes) && !held(spots[k].0, &our_mexes))
+                .collect();
             if theirs.is_empty() && free.is_empty() {
                 continue;
             }
@@ -289,13 +319,20 @@ fn main() {
             let gain = stake + ours_after;
             let in_piece = |p: Pos| map.region_near(p, SNAP) == Some(r);
             let near = |p: Pos| in_piece(p) || targets.iter().any(|&k| p.distance(spots[k].0) <= 600.0);
-            let covers = |u: &Unit| targets.iter().any(|&k| u.pos.distance(spots[k].0) <= u.spec.weapons.iter().map(|w| w.range).fold(0.0, f32::max) + 50.0);
+            let covers = |u: &Unit| {
+                targets.iter().any(|&k| {
+                    u.pos.distance(spots[k].0) <= u.spec.weapons.iter().map(|w| w.range).fold(0.0, f32::max) + 50.0
+                })
+            };
             // Held ground counts units seen there in the last 10 s; empty
             // ground the enemy only patrols, the last 30 s.
             let seen = if theirs.is_empty() { PRESENCE_SEEN } else { SEEN };
             let mut defenders: Vec<&Unit> = (enemy.iter())
                 .filter(|(u, age)| {
-                    !u.spec.weapons.is_empty() && !u.spec.air && !u.spec.builder && !anti_air(&u.def)
+                    !u.spec.weapons.is_empty()
+                        && !u.spec.air
+                        && !u.spec.builder
+                        && !anti_air(&u.def)
                         && if u.spec.mobile { *age <= seen && near(u.pos) } else { covers(u) || in_piece(u.pos) }
                 })
                 .map(|(u, _)| u)
@@ -311,22 +348,34 @@ fn main() {
                     let p = Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32);
                     let by = v[5].as_str()?;
                     let spec = db.get(by)?.spec.clone();
-                    (near(p) && spec.mobile && !spec.weapons.is_empty() && !anti_air(by) && killer_ids.insert(v[6].as_i64().unwrap_or(-1)))
-                        .then(|| Unit { def: by.to_owned(), pos: p, spec, hp: 1.0 })
+                    (near(p)
+                        && spec.mobile
+                        && !spec.weapons.is_empty()
+                        && !anti_air(by)
+                        && killer_ids.insert(v[6].as_i64().unwrap_or(-1)))
+                    .then(|| Unit { def: by.to_owned(), pos: p, spec, hp: 1.0 })
                 })
                 .collect();
             if defenders.iter().all(|u| !u.spec.mobile) {
                 defenders.extend(killers.iter());
             }
-            let kind = if !theirs.is_empty() { "held" } else if !defenders.is_empty() { "contested" } else { "open" };
+            let kind = if !theirs.is_empty() {
+                "held"
+            } else if !defenders.is_empty() {
+                "contested"
+            } else {
+                "open"
+            };
             let d_metal: f32 = defenders.iter().map(|u| u.spec.cost).sum();
-            let wrecks: f32 = WRECK * (s["deaths"].as_array().into_iter().flatten())
-                .filter_map(|v| {
-                    let p = Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32);
-                    near(p).then(|| db.get(v[0].as_str()?).map(|r| r.spec.cost))?
-                })
-                .sum::<f32>();
-            let against: Vec<(Arc<UnitSpec>, f32, f32)> = defenders.iter().map(|u| (u.spec.clone(), u.pos.x, u.pos.z)).collect();
+            let wrecks: f32 = WRECK
+                * (s["deaths"].as_array().into_iter().flatten())
+                    .filter_map(|v| {
+                        let p = Pos::new(v[1].as_f64()? as f32, v[2].as_f64()? as f32);
+                        near(p).then(|| db.get(v[0].as_str()?).map(|r| r.spec.cost))?
+                    })
+                    .sum::<f32>();
+            let against: Vec<(Arc<UnitSpec>, f32, f32)> =
+                defenders.iter().map(|u| (u.spec.clone(), u.pos.x, u.pos.z)).collect();
             let only_mobiles = !against.is_empty() && against.iter().all(|a| a.0.mobile);
             let center = map.regions[r].center;
             // The build once it is clear: a mex on every target spot, and a
@@ -340,9 +389,14 @@ fn main() {
                 .fold(f32::INFINITY, f32::min);
             let con_from_factory = (factories.iter())
                 .filter_map(|(fdef, fpos, _)| {
-                    let con = db.get(fdef)?.builds.iter().find(|b| db.get(*b).is_some_and(|r| r.spec.builder && r.spec.mobile))?;
+                    let con = db
+                        .get(fdef)?
+                        .builds
+                        .iter()
+                        .find(|b| db.get(*b).is_some_and(|r| r.spec.builder && r.spec.mobile))?;
                     let spec = &db.get(con)?.spec;
-                    walk(map, *fpos, r).map(|d| spec.cost / income.clamp(0.5, FACTORY_BUILD_POWER) + d / (spec.speed.max(0.1) * 30.0))
+                    walk(map, *fpos, r)
+                        .map(|d| spec.cost / income.clamp(0.5, FACTORY_BUILD_POWER) + d / (spec.speed.max(0.1) * 30.0))
                 })
                 .fold(f32::INFINITY, f32::min);
             let t_con = con_from_field.min(con_from_factory);
@@ -387,7 +441,15 @@ fn main() {
             };
             let mut sources: Vec<Source> = Vec::new();
             if against.is_empty() {
-                sources.push(Source { label: "constructor".into(), metal: 0.0, pick: vec![], produce: 0.0, walk: 0.0, fight: 0.0, judged_clear: true });
+                sources.push(Source {
+                    label: "constructor".into(),
+                    metal: 0.0,
+                    pick: vec![],
+                    produce: 0.0,
+                    walk: 0.0,
+                    fight: 0.0,
+                    judged_clear: true,
+                });
             }
             for (gi, g) in our_groups.iter().enumerate() {
                 let metal_g: f32 = g.iter().map(|u| u.spec.cost * u.hp.clamp(0.05, 1.0)).sum();
@@ -407,7 +469,11 @@ fn main() {
                 };
                 // The whole group, or a detachment sized to the job (an
                 // escort, where nobody holds the ground).
-                let mut sizes: Vec<f32> = [2.0f32, 3.0, 5.0, 8.0].iter().map(|k| k * d_metal).filter(|m| *m >= 100.0 && *m < metal_g).collect();
+                let mut sizes: Vec<f32> = [2.0f32, 3.0, 5.0, 8.0]
+                    .iter()
+                    .map(|k| k * d_metal)
+                    .filter(|m| *m >= 100.0 && *m < metal_g)
+                    .collect();
                 if d_metal <= 0.0 {
                     sizes.push(metal_g.min(300.0));
                 }
@@ -426,8 +492,15 @@ fn main() {
                     *count.entry(u.def.clone()).or_default() += 1;
                 }
                 let label = if m < metal_g { format!("group {gi} (part)") } else { format!("group {gi}") };
-                sources.push(Source { label, metal: m, pick: count.into_iter().collect(), produce: 0.0, walk: w / (speed * 30.0), fight,
-                                      judged_clear: clear });
+                sources.push(Source {
+                    label,
+                    metal: m,
+                    pick: count.into_iter().collect(),
+                    produce: 0.0,
+                    walk: w / (speed * 30.0),
+                    fight,
+                    judged_clear: clear,
+                });
             }
             for (fdef, fpos, builds) in &factories {
                 if against.is_empty() {
@@ -439,7 +512,13 @@ fn main() {
                 // Only units there: the fight test (a riot for raiders);
                 // buildings too: the seizure test.
                 let base = if only_mobiles {
-                    cheapest_force(&model, &against, &options, flags, &Caps { metal: 1500.0, units: 12, ..Caps::default() })
+                    cheapest_force(
+                        &model,
+                        &against,
+                        &options,
+                        flags,
+                        &Caps { metal: 1500.0, units: 12, ..Caps::default() },
+                    )
                 } else {
                     priced_seizure(&model, &against, &options, flags, &caps, horizon, Moves::AMove, &lg)
                 };
@@ -451,7 +530,8 @@ fn main() {
                     let speed = base.pick.iter().map(|&k| options[k].speed).fold(f32::INFINITY, f32::min);
                     (base.pick.clone(), base.cost, speed, if only_mobiles { 15.0 } else { t.fight }, base.cost)
                 } else {
-                    let k = (0..options.len()).min_by(|&a, &b| options[a].cost.total_cmp(&options[b].cost)).unwrap_or(0);
+                    let k =
+                        (0..options.len()).min_by(|&a, &b| options[a].cost.total_cmp(&options[b].cost)).unwrap_or(0);
                     (vec![k], options[k].cost, options[k].speed, 5.0, options[k].cost)
                 };
                 let mut best: Option<(f32, Source)> = None;
@@ -469,8 +549,18 @@ fn main() {
                         for &k in &mix {
                             *count.entry(builds[k].clone()).or_default() += scale.round() as usize;
                         }
-                        best = Some((net, Source { label: format!("factory {fdef}"), metal, pick: count.into_iter().collect(),
-                                                   produce: t_produce, walk: t_walk, fight: t_fight, judged_clear: base.met }));
+                        best = Some((
+                            net,
+                            Source {
+                                label: format!("factory {fdef}"),
+                                metal,
+                                pick: count.into_iter().collect(),
+                                produce: t_produce,
+                                walk: t_walk,
+                                fight: t_fight,
+                                judged_clear: base.met,
+                            },
+                        ));
                     }
                 }
                 if let Some((_, src)) = best {
@@ -488,7 +578,9 @@ fn main() {
                                     "fight": r2(src.fight), "total": r2(t_force.max(t_con) + build_secs), "income_from": r2(income_from),
                                     "lost": r2(lost), "hold": r2(hold), "benefit": r2(benefit), "net": r2(net)}));
             }
-            options.sort_by(|a, b| b["net"].as_f64().unwrap_or(f64::MIN).total_cmp(&a["net"].as_f64().unwrap_or(f64::MIN)));
+            options.sort_by(|a, b| {
+                b["net"].as_f64().unwrap_or(f64::MIN).total_cmp(&a["net"].as_f64().unwrap_or(f64::MIN))
+            });
             let best_net = options.first().and_then(|o| o["net"].as_f64()).unwrap_or(f64::MIN);
             ranked.push((best_net, json!({
                 "region": r, "kind": kind, "center": [center.x.round(), center.z.round()], "spots": ks.len(), "theirs": theirs.len(), "free": free.len(),
@@ -504,6 +596,7 @@ fn main() {
         }
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
         let pieces: Vec<Value> = ranked.into_iter().map(|(_, v)| v).collect();
-        writeln!(out, "{}", json!({"id": id, "pieces": pieces, "groups": our_groups.len(), "armies": armies.len()})).ok();
+        writeln!(out, "{}", json!({"id": id, "pieces": pieces, "groups": our_groups.len(), "armies": armies.len()}))
+            .ok();
     }
 }

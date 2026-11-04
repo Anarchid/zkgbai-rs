@@ -244,6 +244,8 @@ pub struct Ai {
     pub missiles: Missiles,
     pub sweeps: Sweeps,
     pub strikes: Strikes,
+    /// Invasion targets (`invade`).
+    pub invade: crate::military::invade::Invade,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
@@ -381,6 +383,7 @@ impl SkirmishAi for Ai {
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
             strikes: Strikes::default(),
+            invade: Default::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),

@@ -161,7 +161,12 @@ struct Judged {
 /// adds most margin per metal) and every single-kind force, grown until it
 /// meets the caps; the cheapest that meets them, else the one closest to
 /// the criterion.
-fn search(options: &[Arc<UnitSpec>], caps: &Caps, judge: &dyn Fn(&[usize]) -> Judged, price: Option<&dyn Fn(&Plan) -> f32>) -> Plan {
+fn search(
+    options: &[Arc<UnitSpec>],
+    caps: &Caps,
+    judge: &dyn Fn(&[usize]) -> Judged,
+    price: Option<&dyn Fn(&Plan) -> f32>,
+) -> Plan {
     let usable: Vec<usize> =
         (0..options.len()).filter(|&k| options[k].cost > 0.0 && !options[k].weapons.is_empty()).collect();
     let grow = |kinds: &[usize]| -> Plan {
@@ -223,7 +228,13 @@ pub fn cheapest_force(
         caps,
         &|pick: &[usize]| {
             let out = model.predict(&staged_fight(against, options, pick, flags));
-            Judged { margin: out.mean_b - out.mean_a, crit: out.p_a_wins, loss: out.mean_a, killed: out.mean_b, secs: 0.0 }
+            Judged {
+                margin: out.mean_b - out.mean_a,
+                crit: out.p_a_wins,
+                loss: out.mean_a,
+                killed: out.mean_b,
+                secs: 0.0,
+            }
         },
         None,
     )
@@ -274,7 +285,16 @@ pub fn priced_seizure(
     lg: &Logistics,
 ) -> Plan {
     let h = horizon as f32 / 30.0;
-    seizure_search(model, against, options, flags, caps, horizon, moves, Some(&|p: &Plan| plan_timing(p, options, h, lg).price))
+    seizure_search(
+        model,
+        against,
+        options,
+        flags,
+        caps,
+        horizon,
+        moves,
+        Some(&|p: &Plan| plan_timing(p, options, h, lg).price),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -326,7 +346,8 @@ pub fn judge_seizure(model: &Model, snap: &FightSnapshot, horizon: i32, moves: M
         Moves::AMove => model.fates(snap, horizon, FateMode::AMove),
     };
     let (mut ours, mut lost, mut hurt_ours) = (0.0f32, 0.0f32, 0.0f32);
-    let (mut theirs, mut armed, mut killed, mut killed_armed, mut hurt_theirs) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut theirs, mut armed, mut killed, mut killed_armed, mut hurt_theirs) =
+        (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
     let (mut last, mut all) = (0i32, true);
     for (u, f) in snap.units.iter().zip(&fates) {
         // Damage is counted from the health the unit came in with.
@@ -505,13 +526,34 @@ mod tests {
         let caps = Caps { win: 1.0, metal: 1500.0, units: 12, ..Caps::default() };
         let (h, flags) = (30 * 90, SimFlags::default());
         let cheap = cheapest_seizure(&m, &triplet, &options, flags, &caps, h, Moves::AMove);
-        let poor = priced_seizure(&m, &triplet, &options, flags, &caps, h, Moves::AMove, &Logistics::factory(10.0, 3000.0, 0.0));
+        let poor = priced_seizure(
+            &m,
+            &triplet,
+            &options,
+            flags,
+            &caps,
+            h,
+            Moves::AMove,
+            &Logistics::factory(10.0, 3000.0, 0.0),
+        );
         assert_eq!(poor.pick, cheap.pick, "nothing at stake: the cheapest force");
         let t = plan_timing(&cheap, &options, 90.0, &Logistics::factory(10.0, 3000.0, 6.0));
         assert!(t.produce > 0.0 && t.walk > 0.0 && t.total > t.fight, "{t:?}");
-        let rich = priced_seizure(&m, &triplet, &options, flags, &caps, h, Moves::AMove, &Logistics::factory(10.0, 3000.0, 50.0));
+        let rich = priced_seizure(
+            &m,
+            &triplet,
+            &options,
+            flags,
+            &caps,
+            h,
+            Moves::AMove,
+            &Logistics::factory(10.0, 3000.0, 50.0),
+        );
         let tr = plan_timing(&rich, &options, 90.0, &Logistics::factory(10.0, 3000.0, 50.0));
-        assert!(tr.price <= plan_timing(&cheap, &options, 90.0, &Logistics::factory(10.0, 3000.0, 50.0)).price, "{rich:?} {tr:?}");
+        assert!(
+            tr.price <= plan_timing(&cheap, &options, 90.0, &Logistics::factory(10.0, 3000.0, 50.0)).price,
+            "{rich:?} {tr:?}"
+        );
     }
 
     fn puppy() -> Arc<UnitSpec> {
@@ -520,7 +562,13 @@ mod tests {
 
     /// A tough unarmed building: only what a shot does to it counts.
     fn block() -> Arc<UnitSpec> {
-        Arc::new(UnitSpec { def: "staticstorage".into(), cost: 100.0, health: 5000.0, radius: 20.0, ..UnitSpec::default() })
+        Arc::new(UnitSpec {
+            def: "staticstorage".into(),
+            cost: 100.0,
+            health: 5000.0,
+            radius: 20.0,
+            ..UnitSpec::default()
+        })
     }
 
     #[test]

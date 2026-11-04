@@ -24,12 +24,18 @@
 //! gets its time to clear and price (`plan::Logistics`), `priced` is the
 //! best plan by price, and `standing` prices our recorded force as it
 //! stands (nothing to build or walk; its fight at the recorded places).
+//! With "zktamap" (a terrain dump), "tier" (our units' ground tier, default
+//! bot) and "place" ([x, z]), `seize_path` is `seize` with our units moved
+//! out to their ground-route distance from the place
+//! (`FightSnapshot::unfold`): the fight walks straight, the ground may not.
 //! Defs the specs lack are listed in `missing` and left out of the fight.
 use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use zk_terrain::paths::Paths;
+use zk_terrain::{Pos, SpringMapData, Terrain, Tier};
 use zkgbai::military::fightsim::plan::{
     Caps, Logistics, Moves, Plan, Seizure, Timing, cheapest_force, cheapest_seizure, judge_seizure, load_specs,
     plan_timing, priced_seizure, staged_fight, timing,
@@ -70,6 +76,7 @@ fn main() {
     let flags = SimFlags::from_switches(false, true, true);
     let caps_seize = Caps { win: 1.0, loss: 0.5, metal: 1500.0, units: 12 };
     let caps_fight = Caps { metal: 1500.0, units: 12, ..Caps::default() };
+    let mut terrains: BTreeMap<(String, String), Option<Terrain>> = BTreeMap::new();
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -110,8 +117,32 @@ fn main() {
                                   "killed_a": r3(f.killed_a), "killed_b": r3(f.killed_b)});
             let at_places = judge_seizure(&model, &snap, horizon, Moves::AMove);
             res["seize"] = seizure(&at_places);
+            if let (Some(zk), Some(place)) = (ep["zktamap"].as_str(), ep["place"].as_array()) {
+                let tier_name = ep["tier"].as_str().unwrap_or("bot").to_owned();
+                let tier = [Tier::Spider, Tier::Bot, Tier::Vehicle, Tier::Hover, Tier::Ship, Tier::Amphib]
+                    .into_iter()
+                    .find(|t| t.name() == tier_name);
+                let terrain = terrains.entry((zk.to_owned(), tier_name)).or_insert_with(|| {
+                    let data = SpringMapData::load(std::path::Path::new(zk)).ok()?;
+                    tier.map(|t| Terrain::build_with(&data, &[(t, t.zero_k_class())]))
+                });
+                let at = (place[0].as_f64().unwrap_or(0.0) as f32, place[1].as_f64().unwrap_or(0.0) as f32);
+                if let Some(map) = terrain.as_ref().zip(tier).and_then(|(t, tier)| t.tier(tier)) {
+                    let paths = Paths::new(map, Pos::new(at.0, at.1), |_| false);
+                    let reach = theirs.iter().flat_map(|u| u.spec.weapons.iter().map(|w| w.range)).fold(0.0, f32::max);
+                    let mut walked = snap.clone();
+                    let moved = walked.unfold(0, at, reach.min(200.0), |x, z| paths.distance_to(Pos::new(x, z)));
+                    let j = judge_seizure(&model, &walked, horizon, Moves::AMove);
+                    res["seize_path"] = seizure(&j);
+                    res["seize_path"]["moved"] = json!(moved);
+                }
+            }
             let lg = ep["stake"].as_f64().map(|st| {
-                Logistics::factory(ep["income"].as_f64().unwrap_or(15.0) as f32, ep["walk"].as_f64().unwrap_or(3000.0) as f32, st as f32)
+                Logistics::factory(
+                    ep["income"].as_f64().unwrap_or(15.0) as f32,
+                    ep["walk"].as_f64().unwrap_or(3000.0) as f32,
+                    st as f32,
+                )
             });
             let h = horizon as f32 / 30.0;
             if let Some(lg) = &lg {
@@ -131,7 +162,10 @@ fn main() {
             res["staged"] = seizure(&judge_seizure(&model, &staged, horizon, Moves::AMove));
             let names: Vec<String> = (ep["options"].as_array().into_iter().flatten())
                 .filter_map(|o| o.as_str())
-                .filter(|n| db.get(*n).is_some_and(|r| r.spec.mobile && !r.spec.air && !r.spec.builder && !r.spec.weapons.is_empty()))
+                .filter(|n| {
+                    db.get(*n)
+                        .is_some_and(|r| r.spec.mobile && !r.spec.air && !r.spec.builder && !r.spec.weapons.is_empty())
+                })
                 .map(String::from)
                 .collect();
             if !names.is_empty() {

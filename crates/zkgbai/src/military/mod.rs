@@ -18,6 +18,7 @@ pub mod handlers;
 pub mod impalers;
 pub mod incursions;
 pub mod intel;
+pub mod invade;
 pub mod jaeger;
 pub mod jumps;
 pub mod missiles;
@@ -571,6 +572,7 @@ impl Ai {
         self.guard("ammo.update", |ai| ai.ammo_update(frame));
         self.guard("coalesce.update", |ai| ai.coalesce_update(frame));
         self.guard("raider.update", |ai| ai.raider_update(frame));
+        self.guard("invade.update", |ai| ai.invade_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
         self.guard("cyclops.update", |ai| ai.cyclops_update(frame));
