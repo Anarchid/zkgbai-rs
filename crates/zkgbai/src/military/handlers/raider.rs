@@ -400,51 +400,7 @@ impl Ai {
             self.raider_assign_solo_raiders();
         }
 
-        // Unstick raiders that are caught on buildings or wrecks (not those
-        // waiting out a blast of ours).
-        if frame % 30 == (offset + 1) % 30 {
-            let mut small: Vec<i32> = self.raider_handler.small_raiders.iter().copied().collect();
-            small.retain(|id| !self.squad_strike_owns(*id) && !self.coalesce_owns(*id));
-            small.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
-            for id in small {
-                if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
-                    f.unstick(frame, &mut self.raider_handler.scout_tasks);
-                }
-            }
-        }
-
-        if frame % 30 == (offset + 5) % 30 {
-            let mut medium: Vec<i32> = self.raider_handler.medium_raiders.iter().copied().collect();
-            medium.retain(|id| !self.squad_strike_owns(*id) && !self.coalesce_owns(*id));
-            medium.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
-            for id in medium {
-                let Some(f) = self.fighters.get_mut(&id) else {
-                    continue;
-                };
-                let attacking = f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.status == 'a');
-                if !f.is_dead() && attacking && f.unstick(frame, &mut self.raider_handler.scout_tasks) {
-                    // Too bad, so sad!
-                    let unit = f.unit;
-                    self.raider_handler.medium_raiders.remove(&id);
-                    self.raider_discard(id);
-                    self.eco_add_combat_reclaim_task(unit);
-                    self.retreat_remove_unit(unit);
-                }
-            }
-        }
-
-        if frame % 30 == (offset + 8) % 30 {
-            let mut ids: Vec<i32> = self.raider_handler.solo_raiders.iter().copied().collect();
-            ids.extend(self.raider_handler.kodachis.iter().copied());
-            // Raiders parked at a precision spot stand still on purpose.
-            ids.retain(|id| !self.precision.missions.contains_key(id) && !self.coalesce_owns(*id));
-            ids.retain(|id| !self.fighters.get(id).is_some_and(|f| self.blasts_waiting(f.get_pos())));
-            for id in ids {
-                if let Some(f) = self.fighters.get_mut(&id).filter(|f| !f.is_dead()) {
-                    f.unstick(frame, &mut self.raider_handler.scout_tasks);
-                }
-            }
-        }
+        // Persistent stalls are handled centrally by recovery.
     }
 
     /// Count a stun hit by one of our Venoms on our own `unit`.

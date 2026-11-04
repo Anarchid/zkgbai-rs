@@ -145,6 +145,11 @@ fn strike_landing(from: Vec3, target: Vec3, throw_range: f32, gun_range: f32) ->
 }
 
 impl Ai {
+    pub(crate) fn lobster_busy(&self, id: i32) -> bool {
+        self.jumps.lobsters.throws.contains_key(&id)
+            || self.jumps.lobsters.throws.values().any(|t| t.members.contains(&id))
+    }
+
     pub(crate) fn lobster_strike_begin(&mut self, sid: SquadId, target: Vec3) -> bool {
         if self.jumps.lobsters.throws.values().any(|t| t.squad == sid) {
             return false;
@@ -263,8 +268,9 @@ impl Ai {
             .collect()
     }
 
-    fn lobster_ready(&self, u: Unit) -> Option<(JumpDef, f32)> {
-        if self.dev_off("lobsters")
+    pub(crate) fn lobster_ready(&self, u: Unit) -> Option<(JumpDef, f32)> {
+        if (self.recovery_owns(u.id()) && springai::reserved::current_module() != "recovery.update")
+            || self.dev_off("lobsters")
             || self.dev_off("jumps")
             || u.health() <= 0.0
             || u.team() != self.team_id
@@ -308,7 +314,7 @@ impl Ai {
         ))
     }
 
-    fn lobster_clear(&self, jd: JumpDef, lobster: Unit, passengers: &[Unit], to: Vec3) -> bool {
+    pub(crate) fn lobster_clear(&self, jd: JumpDef, lobster: Unit, passengers: &[Unit], to: Vec3) -> bool {
         let from = lobster.pos();
         if !throw_in_range(from, to, jd.reach()) {
             return false;
@@ -376,6 +382,9 @@ impl Ai {
     /// Iris-style attachment, with one Lobster per amphib squad. It stays
     /// outside the member list, squad value, leader choice and rally checks.
     pub(crate) fn lobster_support(&mut self, id: i32) -> bool {
+        if self.recovery_owns(id) {
+            return true;
+        }
         let Some(f) = self.fighters.get(&id) else { return false };
         if self.defs.name_of(f.unit) != LOBSTER {
             return false;

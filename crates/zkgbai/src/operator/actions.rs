@@ -240,6 +240,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
+    ("recovery", "Army", "factory jams and trapped units: clear owned blockers, Lobster, Djinn and airlift rescue"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),
     (
         "resignvalue",

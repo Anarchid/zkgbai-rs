@@ -199,6 +199,7 @@ pub struct Ai {
     pub teleports: Teleports,
     /// Our air transports and the drop under way.
     pub drops: Drops,
+    pub recovery: crate::recovery::Recovery,
     /// What we know, and can guess, of the enemy's metal.
     pub intel: Intel,
     /// Our nuclear strikes, and where they were intercepted.
@@ -336,6 +337,7 @@ impl SkirmishAi for Ai {
             regime: Regime::default(),
             teleports: Teleports::default(),
             drops: Drops::default(),
+            recovery: crate::recovery::Recovery::default(),
             intel: Intel::default(),
             nukes: Nukes::default(),
             blasts: Blasts::default(),
@@ -857,6 +859,7 @@ impl Ai {
         if !self.active() {
             return;
         }
+        self.recovery_created(unit, builder);
         self.guard("graph.unitCreated", |ai| ai.graph_unit_created(unit, builder));
         self.guard("eco.unitCreated", |ai| ai.eco_unit_created(unit, builder));
         self.guard("fac.unitCreated", |ai| ai.fac_unit_created(unit, builder));
@@ -881,6 +884,7 @@ impl Ai {
         if !self.active() {
             return;
         }
+        self.guard("recovery.unitGiven", |ai| ai.recovery_transferred(unit, new_team));
         self.guard("eco.unitGiven", |ai| ai.eco_unit_given(unit, old_team, new_team));
         self.guard("war.unitGiven", |ai| ai.war_unit_given(unit, old_team, new_team));
         self.guard("fac.unitGiven", |ai| ai.fac_unit_given(unit, old_team, new_team));
@@ -896,6 +900,8 @@ impl Ai {
                 self.guard("war.unitFinished", |ai| ai.war_unit_finished(unit));
                 self.guard("fac.unitFinished", |ai| ai.fac_unit_finished(unit));
             }
+            Event::UnitMoveFailed { unit } => self.recovery_move_failed(unit),
+            Event::UnitIdle { unit } if self.recovery_owns(unit.id()) => {}
             Event::UnitIdle { unit } => {
                 self.guard("eco.unitIdle", |ai| ai.eco_unit_idle(unit));
                 self.guard("war.unitIdle", |ai| ai.war_unit_idle(unit));
@@ -917,6 +923,7 @@ impl Ai {
                 self.guard("banter.unitDestroyed", |ai| ai.banter_unit_destroyed(unit));
             }
             Event::UnitCaptured { unit, old_team, new_team } => {
+                self.guard("recovery.unitCaptured", |ai| ai.recovery_transferred(unit, new_team));
                 self.guard("eco.unitCaptured", |ai| ai.eco_unit_captured(unit, old_team, new_team));
                 self.guard("war.unitCaptured", |ai| ai.war_unit_captured(unit, old_team, new_team));
                 self.guard("fac.unitCaptured", |ai| ai.fac_unit_captured(unit, old_team, new_team));

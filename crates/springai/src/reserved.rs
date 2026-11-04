@@ -61,6 +61,42 @@ thread_local! {
     static MUTED: RefCell<BTreeSet<(i32, String)>> = const { RefCell::new(BTreeSet::new()) };
     static ORDERS: RefCell<BTreeMap<(i32, &'static str), OrderStats>> = const { RefCell::new(BTreeMap::new()) };
     static OWNED: RefCell<BTreeMap<(i32, i32), Owner>> = const { RefCell::new(BTreeMap::new()) };
+    static LEASED: RefCell<BTreeMap<(i32, i32), (u64, Owner)>> = const { RefCell::new(BTreeMap::new()) };
+    static NEXT_LEASE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Temporary command authority. Returning an old lease cannot undo a newer
+/// loan or role change. Operator reservations and module mutes still apply.
+#[derive(Debug)]
+pub struct CommandLease {
+    ai: i32,
+    unit: i32,
+    token: u64,
+}
+
+impl CommandLease {
+    pub fn active(&self) -> bool {
+        LEASED.with_borrow(|l| l.get(&(self.ai, self.unit)).is_some_and(|(t, _)| *t == self.token))
+    }
+
+    pub fn release(self) {
+        if self.active() {
+            LEASED.with_borrow_mut(|l| l.remove(&(self.ai, self.unit)));
+        }
+    }
+}
+
+/// Lend a unit to a temporary controller, preserving its underlying role.
+/// A later `own` or `disown` cancels the loan rather than resurrecting an old role.
+pub fn lend(cb: Callback, unit_id: i32, owner: Owner) -> CommandLease {
+    lend_unit(cb.ai_id(), unit_id, owner)
+}
+
+fn lend_unit(ai: i32, unit: i32, owner: Owner) -> CommandLease {
+    let token = NEXT_LEASE.get() + 1;
+    NEXT_LEASE.set(token);
+    LEASED.with_borrow_mut(|l| l.insert((ai, unit), (token, owner)));
+    CommandLease { ai, unit, token }
 }
 
 /// Reserve unit `unit_id` of AI `cb`; `false` if it already was.
@@ -86,22 +122,37 @@ pub fn reserved(cb: Callback) -> Vec<i32> {
 /// Make unit `unit_id` of AI `cb` module `owner`'s alone; the previous
 /// owner, if any.
 pub fn own(cb: Callback, unit_id: i32, owner: Owner) -> Option<Owner> {
-    OWNED.with_borrow_mut(|o| o.insert((cb.ai_id(), unit_id), owner))
+    set_owner(cb.ai_id(), unit_id, Some(owner))
 }
 
 /// Let any module order unit `unit_id` again; its owner, if it had one.
 pub fn disown(cb: Callback, unit_id: i32) -> Option<Owner> {
-    OWNED.with_borrow_mut(|o| o.remove(&(cb.ai_id(), unit_id)))
+    set_owner(cb.ai_id(), unit_id, None)
+}
+
+fn set_owner(ai: i32, unit: i32, owner: Option<Owner>) -> Option<Owner> {
+    LEASED.with_borrow_mut(|l| l.remove(&(ai, unit)));
+    OWNED.with_borrow_mut(|o| match owner {
+        Some(owner) => o.insert((ai, unit), owner),
+        None => o.remove(&(ai, unit)),
+    })
 }
 
 pub fn owner(cb: Callback, unit_id: i32) -> Option<Owner> {
-    OWNED.with_borrow(|o| o.get(&(cb.ai_id(), unit_id)).copied())
+    effective_owner(cb.ai_id(), unit_id)
+}
+
+fn effective_owner(ai: i32, unit: i32) -> Option<Owner> {
+    LEASED
+        .with_borrow(|l| l.get(&(ai, unit)).map(|(_, o)| *o))
+        .or_else(|| OWNED.with_borrow(|o| o.get(&(ai, unit)).copied()))
 }
 
 /// Release every unit of AI `cb`, unmute its modules and forget their order
 /// counts (on release of the AI).
 pub fn clear(cb: Callback) {
     let ai = cb.ai_id();
+    LEASED.with_borrow_mut(|l| l.retain(|&(a, _), _| a != ai));
     OWNED.with_borrow_mut(|o| o.retain(|&(a, _), _| a != ai));
     RESERVED.with_borrow_mut(|r| r.retain(|&(a, _)| a != ai));
     MUTED.with_borrow_mut(|m| m.retain(|(a, _)| *a != ai));
@@ -189,8 +240,7 @@ fn gate(ai: i32, unit_id: i32, module: &'static str) -> bool {
     let reserved = RESERVED.with_borrow(|r| !r.is_empty() && r.contains(&(ai, unit_id)));
     let muted =
         !reserved && MUTED.with_borrow(|m| !m.is_empty() && m.iter().any(|(a, p)| *a == ai && covers(p, module)));
-    let foreign =
-        !reserved && !muted && OWNED.with_borrow(|o| o.get(&(ai, unit_id)).is_some_and(|owner| !owner.admits(module)));
+    let foreign = !reserved && !muted && effective_owner(ai, unit_id).is_some_and(|owner| !owner.admits(module));
     let dropped = reserved || muted || foreign;
     ORDERS.with_borrow_mut(|o| {
         let s = o.entry((ai, module)).or_default();
@@ -204,6 +254,44 @@ fn gate(ai: i32, unit_id: i32, module: &'static str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loan_transfers_commands_and_returns_to_the_role_without_bypassing_the_operator() {
+        const AI: i32 = 7_003;
+        OWNED.with_borrow_mut(|o| o.insert((AI, 5), Owner { module: "raider", helpers: &["retreat"] }));
+        let gang = Owner { module: "coalesce", helpers: &["water"] };
+        let lease = lend_unit(AI, 5, gang);
+        assert!(gate(AI, 5, "coalesce.update"));
+        assert!(!gate(AI, 5, "raider.update"));
+        assert!(!gate(AI, 5, "retreat.update"));
+        RESERVED.with_borrow_mut(|r| r.insert((AI, 5)));
+        assert!(!gate(AI, 5, "coalesce.update"));
+        RESERVED.with_borrow_mut(|r| r.remove(&(AI, 5)));
+        MUTED.with_borrow_mut(|m| m.insert((AI, "coalesce".to_owned())));
+        assert!(!gate(AI, 5, "coalesce.update"));
+        MUTED.with_borrow_mut(|m| m.remove(&(AI, "coalesce".to_owned())));
+        let newer = lend_unit(AI, 5, gang);
+        lease.release();
+        assert!(newer.active());
+        newer.release();
+        assert!(gate(AI, 5, "raider.update"));
+        assert!(!gate(AI, 5, "coalesce.update"));
+        OWNED.with_borrow_mut(|o| o.remove(&(AI, 5)));
+    }
+
+    #[test]
+    fn a_role_change_or_death_invalidates_the_old_loan() {
+        const AI: i32 = 7_004;
+        let gang = Owner { module: "coalesce", helpers: &[] };
+        for replacement in [Some(Owner { module: "stakeouts", helpers: &[] }), None] {
+            set_owner(AI, 5, Some(Owner { module: "raider", helpers: &[] }));
+            let lease = lend_unit(AI, 5, gang);
+            set_owner(AI, 5, replacement);
+            assert!(!lease.active());
+            lease.release();
+            assert_eq!(effective_owner(AI, 5).map(|o| o.module), replacement.map(|o| o.module));
+        }
+    }
 
     #[test]
     fn prefixes_cover_at_dots() {

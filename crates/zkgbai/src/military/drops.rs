@@ -284,6 +284,16 @@ struct Landing {
 }
 
 impl Ai {
+    /// Cargo and aircraft committed to an existing sortie or colony ferry.
+    pub(crate) fn drops_busy(&self, id: i32) -> bool {
+        self.drops
+            .sortie
+            .iter()
+            .flat_map(|s| &s.loads)
+            .chain(self.drops.ferry.iter().map(|f| &f.load))
+            .any(|l| l.charon.id() == id || l.cargo.id() == id)
+    }
+
     /// Whether a gunship factory should build a Charon now.
     pub fn drops_want_charon(&self) -> bool {
         let d = &self.drops;
@@ -320,6 +330,7 @@ impl Ai {
     }
 
     pub fn drops_add_charon(&mut self, unit: Unit) {
+        self.recovery_transport_ready(unit);
         self.drops.ordered = None;
         self.drops.charons.insert(unit.id(), unit);
         self.drops_go_home(unit);
@@ -398,6 +409,7 @@ impl Ai {
         };
         let fits = |f: &Fighter| {
             cargo_allowed(self.defs.name_of(f.unit))
+                && !self.recovery_owns(f.id)
                 && f.unit.health() > 0.0
                 && f.unit.team() == self.team_id
                 && !self.qrf_claims(f.id)
@@ -566,7 +578,17 @@ impl Ai {
     /// somewhere to go.
     fn drops_launch(&mut self, frame: i32) {
         let ferrying = self.drops.ferry.as_ref().map(|f| f.load.charon.id());
-        let charons: Vec<Unit> = self.drops.charons.values().copied().filter(|c| Some(c.id()) != ferrying).collect();
+        let charons: Vec<Unit> = self
+            .drops
+            .charons
+            .values()
+            .copied()
+            .filter(|c| {
+                Some(c.id()) != ferrying
+                    && !self.recovery_owns(c.id())
+                    && c.def().is_some_and(|d| c.rules_param_float("massOverride", d.mass()) <= d.mass() + 1.0)
+            })
+            .collect();
         if charons.len() < FLIGHT || self.dev_off("drops") {
             return;
         }
@@ -962,12 +984,16 @@ impl Ai {
     /// Have a free Charon fly constructor `cargo` to `to` (a colony's
     /// middle), by the cheapest way round the anti-air; whether one goes.
     pub fn drops_ferry(&mut self, cargo: Unit, to: Vec3) -> bool {
-        if self.dev_off("drops") || self.drops.ferry.is_some() {
+        if self.dev_off("drops") || self.drops.ferry.is_some() || self.recovery_owns(cargo.id()) {
             return false;
         }
         let busy: Vec<i32> = self.drops.sortie.iter().flat_map(|s| s.loads.iter().map(|l| l.charon.id())).collect();
         let Some(charon) = (self.drops.charons.values().copied())
-            .filter(|c| !busy.contains(&c.id()))
+            .filter(|c| {
+                !busy.contains(&c.id())
+                    && !self.recovery_owns(c.id())
+                    && c.def().is_some_and(|d| c.rules_param_float("massOverride", d.mass()) <= d.mass() + 1.0)
+            })
             .min_by(|a, b| distance(a.pos(), cargo.pos()).total_cmp(&distance(b.pos(), cargo.pos())))
         else {
             return false;

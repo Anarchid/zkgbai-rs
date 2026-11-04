@@ -568,6 +568,8 @@ impl Ai {
             self.guard("war.idleSweep", |ai| ai.war_idle_sweep());
         }
 
+        self.guard("recovery.update", |ai| ai.recovery_update(frame));
+
         // Before the squads decide: their fight predictions arrive here.
         self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
         self.guard("limpet.update", |ai| ai.limpet_update(frame));
@@ -752,6 +754,10 @@ impl Ai {
 
         if name == "amphtele" {
             self.teleport_add_djinn(unit);
+            return;
+        }
+        if name == "gunshipheavytrans" {
+            self.recovery_transport_ready(unit);
             return;
         }
         if name == "gunshiptrans" {

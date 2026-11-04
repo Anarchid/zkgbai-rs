@@ -25,7 +25,10 @@ const FACTORY_REACH: f32 = 150.0;
 /// buildings, and over which its units must be able to drive out. Comet
 /// Catcher Redux (2026-10-28): two plops in a row faced a crater rim, half
 /// the army stuck behind it.
-pub(super) const EXIT_LANE: f32 = 192.0;
+pub(crate) const EXIT_LANE: f32 = 320.0;
+
+/// Room to turn around the factory and fan out of its mouth, elmos.
+pub(crate) const FACTORY_CLEARANCE: f32 = 64.0;
 
 /// A factory's exit is clear below this cost (see `eco_exit_cost`): a few
 /// steep cells units drive round, nothing across the way.
@@ -39,21 +42,27 @@ const FACING_DIRS: [(f32, f32); 4] = [(0.0, 1.0), (1.0, 0.0), (0.0, -1.0), (-1.0
 
 /// Whether factories (and plates: see `plate`) of this type keep their
 /// exit clear: all but the aircraft plants (their units lift off).
-pub(super) fn keeps_exit(name: &str) -> bool {
+pub(crate) fn keeps_exit(name: &str) -> bool {
     (name.starts_with("factory") || name.starts_with("plate"))
         && !matches!(name, "factoryplane" | "factorygunship" | "plateplane" | "plategunship")
 }
 
 /// The ground in front of a factory of type `def` at `pos` facing `facing`:
-/// as wide as the factory, `EXIT_LANE` deep, as [min x, min z, max x, max z].
-pub(super) fn exit_lane(def: UnitDef, pos: Vec3, facing: i32) -> [f32; 4] {
+/// wider than the factory by the clearance on each side, `EXIT_LANE` deep.
+/// Returned as [min x, min z, max x, max z].
+pub(crate) fn exit_lane(def: UnitDef, pos: Vec3, facing: i32) -> [f32; 4] {
     let (x, z) = (def.x_size() as f32 * 4.0, def.z_size() as f32 * 4.0);
     let (hx, hz) = if facing % 2 == 0 { (x, z) } else { (z, x) };
+    exit_rect(pos, hx, hz, facing)
+}
+
+pub(crate) fn exit_rect(pos: Vec3, hx: f32, hz: f32, facing: i32) -> [f32; 4] {
+    let pad = FACTORY_CLEARANCE;
     match facing {
-        0 => [pos.x - hx, pos.z + hz, pos.x + hx, pos.z + hz + EXIT_LANE],
-        1 => [pos.x + hx, pos.z - hz, pos.x + hx + EXIT_LANE, pos.z + hz],
-        2 => [pos.x - hx, pos.z - hz - EXIT_LANE, pos.x + hx, pos.z - hz],
-        _ => [pos.x - hx - EXIT_LANE, pos.z - hz, pos.x - hx, pos.z + hz],
+        0 => [pos.x - hx - pad, pos.z + hz, pos.x + hx + pad, pos.z + hz + EXIT_LANE],
+        1 => [pos.x + hx, pos.z - hz - pad, pos.x + hx + EXIT_LANE, pos.z + hz + pad],
+        2 => [pos.x - hx - pad, pos.z - hz - EXIT_LANE, pos.x + hx + pad, pos.z - hz],
+        _ => [pos.x - hx - EXIT_LANE, pos.z - hz - pad, pos.x - hx, pos.z + hz + pad],
     }
 }
 
@@ -2452,6 +2461,30 @@ impl Ai {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn factory_exit_clearance_rotates_with_all_four_facings() {
+        use super::{EXIT_LANE, FACTORY_CLEARANCE, exit_rect};
+        let origin = springai::Vec3::xz(1000.0, 1000.0);
+        for facing in 0..4 {
+            let (hx, hz) = if facing % 2 == 0 { (64.0, 48.0) } else { (48.0, 64.0) };
+            let r = exit_rect(origin, hx, hz, facing);
+            assert!(r[0] < r[2] && r[1] < r[3]);
+            if facing % 2 == 0 {
+                assert_eq!(r[2] - r[0], 2.0 * (hx + FACTORY_CLEARANCE));
+                assert_eq!(r[3] - r[1], EXIT_LANE);
+            } else {
+                assert_eq!(r[3] - r[1], 2.0 * (hz + FACTORY_CLEARANCE));
+                assert_eq!(r[2] - r[0], EXIT_LANE);
+            }
+            match facing {
+                0 => assert_eq!(r[1], origin.z + hz),
+                1 => assert_eq!(r[0], origin.x + hx),
+                2 => assert_eq!(r[3], origin.z - hz),
+                _ => assert_eq!(r[2], origin.x - hx),
+            }
+        }
+    }
+
     use super::*;
 
     fn list(names: &[&str]) -> BTreeSet<String> {
