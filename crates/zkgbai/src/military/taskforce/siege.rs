@@ -766,7 +766,12 @@ impl Ai {
             // a straight-line siege safety test sent the Crab back home.
             // The loner's assault path can route around intervening defenses,
             // and engine fight orders decide where to stop and fire.
-            return (self.war_get_target(leader, false), 0, 0.0, "crab mobile mission");
+            return (
+                self.rush_push_target(leader.id()).unwrap_or_else(|| self.war_get_target(leader, false)),
+                0,
+                0.0,
+                "crab mobile mission",
+            );
         }
         // What climbs a pillar or outranges it refuses the perch (the
         // `refuse_climbers` dial): the enemy's spider or jump factories seen,

@@ -400,6 +400,7 @@ fn every_lines_first_message_reads_back_as_that_line() {
         ("metal", 1240.into()),
         ("fired", 9.into()),
         ("target", "Fusion Reactor".into()),
+        ("heavy", "Krow".into()),
         ("where", "west".into()),
         ("nth", 3.into()),
         ("ospots", 30.into()),
@@ -453,4 +454,45 @@ fn a_taunt_never_calls_their_game_resignable() {
     for l in lex.lines.iter().filter(|l| l.on == "taunt" || l.on == "recovered") {
         assert!(l.say.iter().all(|t| !t.to_lowercase().contains("resignable")), "{}: {:?}", l.id, l.say);
     }
+}
+
+#[test]
+fn conquest_marks_every_committing_ally_with_a_story_and_no_quip_cost() {
+    let (mut a, mut b) = pair(true);
+    let pa = [100.0, 20.0, 200.0];
+    let pb = [500.0, 20.0, 700.0];
+    a.mark(0, "conquest", pa, &Fields::new());
+    b.mark(0, "conquest", pb, &Fields::new());
+    let first = a.due(30);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].marker, Some(pa));
+    assert_eq!(first[0].to, Channel::Allies);
+    relay(&first, a.tag(), &mut b, 31);
+    let second = b.due(60);
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].id, "conquest.seconded");
+    assert_eq!(second[0].marker, Some(pb));
+    assert_eq!((a.used(), b.used()), (0, 0));
+    // A later real commitment follows through, rather than an uninvolved
+    // ally automatically replying to a marker.
+    relay(&second, b.tag(), &mut a, 61);
+    assert!(a.due(100).is_empty());
+}
+
+#[test]
+fn markers_obey_off_and_do_not_leak_enemy_intentions_or_steal_quips() {
+    let (mut a, mut enemy) = pair(false);
+    a.mark(0, "conquest", [1.0, 2.0, 3.0], &Fields::new());
+    let marked = a.due(30);
+    relay(&marked, a.tag(), &mut enemy, 31);
+    enemy.mark(40, "conquest", [4.0, 5.0, 6.0], &Fields::new());
+    let independent = enemy.due(70);
+    assert!(!independent[0].id.contains("seconded"));
+    enemy.budget = 0;
+    enemy.mark(80, "rush", [0.0; 3], &fields([("heavy", "Krow".into())]));
+    assert!(enemy.due(200).is_empty());
+    a.mark(100, "conquest", [1.0; 3], &Fields::new());
+    a.due(130);
+    a.mark(140, "conquest", [2.0; 3], &Fields::new());
+    assert!(a.due(200).is_empty()); // two commitments per game
 }

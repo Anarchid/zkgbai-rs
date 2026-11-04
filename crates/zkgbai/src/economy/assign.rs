@@ -211,7 +211,8 @@ impl Ai {
                 || ((unit.health() < unit.max_health() && w.raid_defense.is_none() || w.get_shields() < 0.5)
                     && view.get_threat(pos) / greed > 0.0
                     && !w.is_working_on_porc(&self.eco.tasks)
-                    && !self.crab_escort(wid)))
+                    && !self.crab_escort(wid)
+                    && !self.rush_push_escort(wid)))
         {
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.is_chicken = true;
@@ -228,6 +229,7 @@ impl Ai {
         // leave it to it.
         let held = self.eco.terraform_hold.get(&wid).is_some_and(|&until| frame < until)
             || self.crab_escort(wid)
+            || self.rush_push_escort(wid)
             || self.rush_holds(wid);
         if !w.is_chicken && (held || super::terraform::is_terraforming(unit) || self.eco_in_transit(wid)) {
             self.eco.assigned.push_back(wid);
@@ -319,6 +321,7 @@ impl Ai {
         // Idle, completion, move-failed and retreat-finished callbacks also
         // enter here directly, bypassing the round-robin reservation check.
         if self.crab_escort(wid)
+            || self.rush_push_escort(wid)
             || self.rush_holds(wid)
             || self.eco.terraform_hold.get(&wid).is_some_and(|&until| until > frame)
         {

@@ -616,6 +616,9 @@ impl Ai {
     /// for a role with `produce`: rolled at its `produce` chance, the first
     /// that comes up; with the doctrine and role, for the log.
     pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
+        if let Some(def) = self.rush_support_produce(options) {
+            return Some((def, "rush".into(), "combat engineer".into()));
+        }
         if let Some(def) = self.crab_support_produce(options) {
             return Some((def, "crab".into(), "Weaver escort".into()));
         }

@@ -44,6 +44,8 @@
 #            allies goes to allies whatever it says)
 #   weight   relative odds among equally specific lines (default 1)
 #   free     true: not counted against the budget, not held by `quiet`
+#   marker   true: allied map label and ally chat; separate tactical limit,
+#            silenced by banter=off, unaffected by quip budget or quiet time
 #   repeat   true: may be said more than once a game
 #   answers  (replies) the line ids it answers: a pattern ("taunt.*") or
 #            ids separated by "|"
@@ -68,6 +70,8 @@
 # capitalised. A line with a field the event lacks is not a candidate.
 #
 # Events and their fields:
+#   conquest       our commander commits to a forward objective (marker)
+#   rush           our rush factory stands: heavy (name), marker
 #   start          the game starts
 #   resign         we resign
 #   taunt          well ahead: more than half the territory, 1.5x the enemy's
@@ -102,6 +106,8 @@ off = []
 
 # The most lines a game on an event (any event not listed: no limit).
 [settings.limit]
+conquest = 2
+rush = 1
 taunt = 3
 hopeless = 2
 inferno = 3
@@ -612,3 +618,43 @@ from = "enemy"
 free = true
 # Not "gg!": text two lines share reads as the reply, which nothing answers.
 say = "gg"
+
+# Tactical intentions: every committing commander marks its own destination.
+# Follow-ups are chosen when the mark is due, after hearing earlier allies.
+[[line]]
+id = "conquest.rushing"
+on = "conquest"
+to = "allies"
+marker = true
+say = "rushing this"
+
+[[line]]
+id = "conquest.porc"
+on = "conquest"
+to = "allies"
+marker = true
+say = "porc here i guess"
+
+[[line]]
+id = "conquest.seconded"
+on = "conquest"
+to = "allies"
+marker = true
+if = ["heard:conquest.* >= 1"]
+say = "seconded. mine's here"
+
+[[line]]
+id = "conquest.committee"
+on = "conquest"
+to = "allies"
+marker = true
+if = ["heard:conquest.* >= 1", "heard:conquest.* >= 2"]
+say = "apparently we're doing this"
+repeat = true
+
+[[line]]
+id = "rush.heavy"
+on = "rush"
+to = "allies"
+marker = true
+say = "{heavy} here. trust the process"

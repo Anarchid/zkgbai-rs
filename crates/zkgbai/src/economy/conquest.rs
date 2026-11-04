@@ -938,6 +938,7 @@ impl Ai {
         let Some(crew) = self.eco.commanders.iter().copied().find(|id| {
             self.eco.workers.get(id).is_some_and(|w| {
                 !w.has_plop()
+                    && !self.rush_holds(*id)
                     && w.unit.health() > 0.0
                     && w.unit.health() >= need * w.unit.max_health()
                     && w.unit.team() == self.team_id
@@ -1034,6 +1035,7 @@ impl Ai {
                    "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len(),
                    "taken": self.eco.conquest.taken.len()}),
         );
+        self.banter_mark("conquest", self.conquest_v3(center), crate::banter::Fields::new());
         // A team of the QRF's to stand on it (`conquestescort`).
         let at = self.conquest_v3(center);
         self.escort_open(at);

@@ -30,6 +30,7 @@ pub mod qrf;
 pub mod radar;
 pub mod raid_test;
 pub mod roles;
+pub(crate) mod rush_push;
 pub mod scouts;
 pub mod shadow_probe;
 pub mod stakeouts;

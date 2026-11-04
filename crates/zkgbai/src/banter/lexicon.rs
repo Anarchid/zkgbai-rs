@@ -7,8 +7,10 @@ use std::collections::BTreeMap;
 use toml::{Table, Value};
 
 /// Events the AI raises (a line on anything else is never said).
-pub const EVENTS: [&str; 19] = [
+pub const EVENTS: [&str; 21] = [
     "start",
+    "conquest",
+    "rush",
     "resign",
     "taunt",
     "turned",
@@ -176,6 +178,7 @@ pub struct Line {
     pub to: Channel,
     pub weight: f32,
     pub free: bool,
+    pub marker: bool,
     pub repeat: bool,
     pub answers: Option<Pattern>,
     pub from: From,
@@ -335,11 +338,25 @@ fn line_from(t: &Table, warnings: &mut Vec<String>) -> Result<Line, String> {
     let flag = |k: &str| t.get(k).and_then(Value::as_bool).unwrap_or(false);
     let weight = t.get("weight").and_then(as_num).unwrap_or(1.0) as f32;
     for k in t.keys() {
-        if !["id", "on", "say", "if", "to", "weight", "free", "repeat", "answers", "from"].contains(&k.as_str()) {
+        if !["id", "on", "say", "if", "to", "weight", "free", "repeat", "answers", "from", "marker"]
+            .contains(&k.as_str())
+        {
             warnings.push(format!("{id}: unknown key \"{k}\""));
         }
     }
-    Ok(Line { id, on, say, when, to, weight, free: flag("free"), repeat: flag("repeat"), answers, from })
+    Ok(Line {
+        id,
+        on,
+        say,
+        when,
+        to,
+        weight,
+        free: flag("free"),
+        marker: flag("marker"),
+        repeat: flag("repeat"),
+        answers,
+        from,
+    })
 }
 
 /// A field in a text: `{name}`, `{name:k}`, `{name:cap}`.
