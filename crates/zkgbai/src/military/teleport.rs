@@ -105,6 +105,11 @@ impl Teleports {
 }
 
 impl Ai {
+    pub(crate) fn teleport_recovery_available(&self) -> Option<Unit> {
+        let d = self.teleports.djinn.as_ref()?;
+        (matches!(d.phase, Phase::Deployed) && self.teleports.evacuating.is_empty()).then_some(d.unit)
+    }
+
     /// Whether an amphibious factory should build a Djinn now.
     pub fn teleport_wants_djinn(&self) -> bool {
         let t = &self.teleports;
@@ -191,6 +196,9 @@ impl Ai {
         self.teleport_update_evacuees();
         let Some(d) = &self.teleports.djinn else { return };
         let unit = d.unit;
+        if self.recovery_owns(unit.id()) {
+            return;
+        }
         if unit.health() <= 0.0 || unit.team() != self.team_id {
             self.log("teleport: Djinn lost");
             let evacuating = std::mem::take(&mut self.teleports.evacuating);

@@ -1352,6 +1352,7 @@ pub const MODULES: &[(&str, &str)] = &[
     ("scouts", "scouting runs"),
     ("drops", "Charon air drops"),
     ("teleport", "Djinn teleports"),
+    ("recovery", "movement stalls, factory jams and evacuation"),
     ("nukes", "nuke firing"),
     ("missiles", "tactical missile silos"),
     ("strikes", "dedicated assassination waves and anti-Phantom support fire"),

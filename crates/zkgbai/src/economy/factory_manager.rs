@@ -809,6 +809,7 @@ impl Ai {
         if kind == FacKind::Plane && self.firefighters_order(kind) != Some(choice) {
             self.airstrike_ordered(fac_id, choice);
         }
+        self.recovery_transport_ordered(choice);
         match choice {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
@@ -860,6 +861,8 @@ impl Ai {
     fn fac_build_ordered(&mut self, fac_id: i32, def: UnitDef) {
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let (unit, pos, kind) = (f.unit, f.get_pos(), f.kind());
+        let recovery_name = self.defs.name(def).to_owned();
+        self.recovery_transport_ordered(&recovery_name);
         match self.defs.name(def) {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
@@ -1852,6 +1855,9 @@ impl Ai {
     }
 
     fn fac_get_gunship(&self, fac: &mut Factory) -> &'static str {
+        if let Some(name) = self.recovery_transport_order() {
+            return name;
+        }
         let tf = self.graph.territory_fraction;
         let eminent = self.graph.eminent_territory;
 

@@ -27,6 +27,7 @@ pub mod los;
 pub mod military;
 pub mod operator;
 pub mod posture;
+pub mod recovery;
 pub mod terrain;
 pub mod util;
 

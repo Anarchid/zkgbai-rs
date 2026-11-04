@@ -107,6 +107,7 @@ getters!(UnitDef.def_id {
     fn x_size() -> i32 = UnitDef_getXSize;
     /// Footprint in heightmap squares (8 elmos).
     fn z_size() -> i32 = UnitDef_getZSize;
+    fn is_not_transportable() -> bool = UnitDef_isNotTransportable;
     fn transport_capacity() -> i32 = UnitDef_getTransportCapacity;
     /// Largest footprint a transport carries (in footprint squares, half
     /// of [`x_size`](Self::x_size)'s units).
