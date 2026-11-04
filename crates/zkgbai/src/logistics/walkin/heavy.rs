@@ -32,6 +32,11 @@
 //!   its reach is in the Lucifer's), is not in front of the place, and sees
 //!   the force's approach. The Desolator stands toward the force on the
 //!   ground, as the Stingers do.
+//! - *Worth it*: a heavy costs no more than what its place loses in an
+//!   outage ([`WORTH_SHARE`]; a place's value is its flow for 120 s), so
+//!   from 12.5 metal a second through the place for a Desolator, 18 for a
+//!   Lucifer (a factory, a fusion, a mex field); cheaper places keep the
+//!   usual turrets.
 //! - *Not an emergency turret*: a heavy may stand after the force arrives,
 //!   within [`ETA`]; its deadline is when it can stand; unstarted, it is
 //!   stood down after [`STAND_DOWN`] without a force calling for it; it is
@@ -43,7 +48,8 @@
 //! gets the usual walk-in turret.
 //!
 //! Journal (`k=walkin`): `heavy` (one opened), `heavy_raise` (a platform
-//! ordered), `heavy_none` (what refused each turret), `heavy_capped`; the
+//! ordered), `heavy_none` (what refused each turret), `heavy_refused` (the
+//! first choice refused, another taken), `heavy_capped`; the
 //! platform's progress in the log.
 
 use std::collections::BTreeMap;
@@ -75,6 +81,10 @@ pub(crate) const HEAVIES: [&str; 2] = [LUCIFER, DESOLATOR];
 /// Ravagers (2200) 0.55, Knights (2500) 0.63, Minotaurs (7200) 0.9,
 /// Cyclopes (12000) 1.
 const LUCIFER_PREY: f32 = 0.5;
+
+/// A heavy costs at most this share of what its place loses in an outage
+/// (its value): no 1500-metal Desolator for three mexes worth 700.
+const WORTH_SHARE: f32 = 1.0;
 
 /// Pylons a heavy's site may need to its power, at most.
 const MAX_PYLONS: f32 = 2.0;
@@ -333,6 +343,9 @@ impl Ai {
                 Err(why) => refused.push(json!([name, why])),
             }
         }
+        if !chosen.is_empty() && !refused.is_empty() {
+            self.walkin_note("heavy_refused", a, json!({"chosen": chosen, "refused": refused}));
+        }
         if chosen.is_empty() {
             self.logistics.walkin.heavy.refused.push((anchor, frame));
             self.logistics.walkin.stats.heavy.none += 1;
@@ -354,6 +367,9 @@ impl Ai {
     ) -> Result<(), &'static str> {
         if def.max_weapon_range() + RANGE_SLACK < a.group.reach {
             return Err("outranged");
+        }
+        if def.cost(self.metal) > WORTH_SHARE * a.place.value {
+            return Err("dear");
         }
         let name = self.defs.name(def).to_owned();
         let (anchor, approach, frame) = (a.place.anchor, a.approach, self.frame);
