@@ -1332,8 +1332,12 @@ impl Ai {
             if !over_threat {
                 // Rallying squads may be sent to block an incursion's way.
                 let block = self.incursion_block(sid);
-                let rally = block.unwrap_or_else(|| self.war_get_raider_rally(pos));
-                let rally = if block.is_some() { rally } else { self.raider_squad_rally(sid, rally) };
+                // An opening heavy needs its screen before these squads
+                // reach full size. Rally on its safe flank as they form.
+                let screen = self.rush_push_screen(sid);
+                let rally = block.or(screen).unwrap_or_else(|| self.war_get_raider_rally(pos));
+                let rally =
+                    if block.is_some() || screen.is_some() { rally } else { self.raider_squad_rally(sid, rally) };
                 self.raider_squad_raid(sid, rally);
                 self.squad_note(sid, if block.is_some() { Branch::Block } else { Branch::Rally }, rally, pos, None);
             } else {
