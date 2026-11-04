@@ -6,6 +6,7 @@
 //!          (--factory factoryveh | --with vehsupport,vehraid,...)
 //!          [--spread 150] [--win 0.8] [--loss 0.5] [--metal 1500] [--units 12]
 //!          [--sim plain|focus|2d] [--goal seize|fight] [--horizon 90] [--moves amove|kiting]
+//!          [--income 15 --walk 3000 --stake 6]   (time to clear and price, see plan::Logistics)
 //!
 //! goal seize (the default when everything there is a building): every armed
 //! defender dies within the horizon, by the mechanics fight with ZK's unit
@@ -15,54 +16,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use zkgbai::military::fightsim::plan::{Caps, Moves, Plan, cheapest_force, cheapest_seizure};
-use zkgbai::military::fightsim::{Model, SimFlags, UnitSpec, WeaponSpec};
-
-struct Row {
-    spec: Arc<UnitSpec>,
-    human: String,
-    builds: Vec<String>,
-}
-
-fn load(path: &str) -> BTreeMap<String, Row> {
-    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
-    let mut out = BTreeMap::new();
-    for line in text.lines().skip(1) {
-        let f: Vec<&str> = line.split('\t').collect();
-        if f.len() < 12 {
-            continue;
-        }
-        let num = |s: &str| s.parse::<f32>().unwrap_or(0.0);
-        let weapons = (f[9].split('|').filter(|w| !w.is_empty()))
-            .filter_map(|w| {
-                let p: Vec<&str> = w.split(':').collect();
-                (p.len() == 6).then(|| WeaponSpec {
-                    name: p[0].into(),
-                    weapon_type: p[1].into(),
-                    range: num(p[2]),
-                    reload: num(p[3]),
-                    salvo: p[4].parse().unwrap_or(1),
-                    damage: num(p[5]),
-                })
-            })
-            .collect();
-        let spec = UnitSpec {
-            def: f[0].into(),
-            cost: num(f[1]),
-            health: num(f[2]),
-            speed: num(f[3]),
-            mobile: f[4] == "1",
-            air: f[5] == "1",
-            builder: f[6] == "1",
-            com: f[7] == "1",
-            radius: num(f[8]),
-            weapons,
-        };
-        let builds = f[11].split(',').filter(|s| !s.is_empty()).map(String::from).collect();
-        out.insert(f[0].to_string(), Row { spec: Arc::new(spec), human: f[10].to_string(), builds });
-    }
-    out
-}
+use zkgbai::military::fightsim::plan::{
+    Caps, Logistics, Moves, Plan, cheapest_force, cheapest_seizure, load_specs, plan_timing, priced_seizure,
+};
+use zkgbai::military::fightsim::{Model, SimFlags, UnitSpec};
 
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
@@ -90,6 +47,9 @@ fn main() {
         _ => Moves::AMove,
     };
     let horizon: f32 = flag("--horizon").and_then(|v| v.parse().ok()).unwrap_or(90.0);
+    let num = |v: Option<String>| v.and_then(|v| v.parse::<f32>().ok());
+    let (income, walk, stake) = (num(flag("--income")), num(flag("--walk")), num(flag("--stake")));
+    let lg = stake.map(|st| Logistics::factory(income.unwrap_or(15.0), walk.unwrap_or(3000.0), st));
     let flags = match flag("--sim").as_deref() {
         Some("plain") => SimFlags::default(),
         Some("2d") => SimFlags::from_switches(true, false, true),
@@ -99,7 +59,7 @@ fn main() {
         eprintln!("usage: force_plan <specs.tsv> --against \"3 turretlaser\" (--factory factoryveh | --with a,b)");
         std::process::exit(2);
     };
-    let db = load(&path);
+    let db = load_specs(&path).unwrap_or_else(|e| panic!("{e}"));
     let get = |n: &str| db.get(n).unwrap_or_else(|| panic!("no unit def {n} in {path}"));
     // What stands there, on a ring `spread` apart.
     let mut what: Vec<Arc<UnitSpec>> = Vec::new();
@@ -187,6 +147,7 @@ fn main() {
         println!("Goal: fight: P(win) >= {:.2} by the fight model", caps.win);
     }
     let crit = if seize { "defenders dead" } else { "P(win)" };
+    let specs_t: Vec<Arc<UnitSpec>> = options.iter().map(|o| o.1.clone()).collect();
     let show = |label: &str, pick: &[usize], plan: &Plan, names: &[String]| {
         let mut c: BTreeMap<usize, usize> = BTreeMap::new();
         for &k in pick {
@@ -203,10 +164,23 @@ fn main() {
             plan.killed * 100.0,
             if plan.met { "" } else { "(not enough within the caps)" }
         );
+        if let Some(lg) = &lg {
+            // `pick` indexes the full option list (a single-kind plan's own
+            // indices are into its one-kind slice).
+            let t = plan_timing(&Plan { pick: pick.to_vec(), ..plan.clone() }, &specs_t, horizon, lg);
+            println!(
+                "{:<16} build {:>3.0} s + walk {:>3.0} s + fight {:>3.0} s = {:>3.0} s; lost {:>4.0} + their pay {:>4.0} = {:>4.0} metal",
+                "", t.produce, t.walk, t.fight, t.total, t.lost, t.waited, t.price
+            );
+        }
     };
     let names_v: Vec<String> = options.iter().map(|o| o.0.clone()).collect();
     let best = plan_with(&specs);
     show("Cheapest mix:", &best.pick, &best, &names_v);
+    if let (Some(lg), true) = (&lg, seize) {
+        let priced = priced_seizure(&model, &against, &specs, flags, &caps, frames, moves, lg);
+        show("Best by price:", &priced.pick, &priced, &names_v);
+    }
     for (i, o) in options.iter().enumerate() {
         let one = plan_with(std::slice::from_ref(&specs[i]));
         let pick: Vec<usize> = one.pick.iter().map(|_| i).collect();

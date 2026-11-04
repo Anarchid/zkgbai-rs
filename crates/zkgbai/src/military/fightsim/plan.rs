@@ -15,9 +15,10 @@
 //! `qrf::escort`); the `force_plan` tool asks it offline ("three Lotuses on
 //! a mex triplet: what of a vehicle factory's takes them?").
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::{FateMode, FightSnapshot, Model, SimFlags, SnapUnit, UnitSpec};
+use super::{FateMode, FightSnapshot, Model, SimFlags, SnapUnit, UnitSpec, WeaponSpec};
 
 /// When a force is enough, and how much it may be.
 #[derive(Clone, Copy, Debug)]
@@ -50,6 +51,69 @@ pub struct Plan {
     pub secs: f32,
 }
 
+/// What waiting costs (user, 2026-11-03: "if it takes 20 s to clear with
+/// standing forces and 50 s + 50 s to produce + 20 s to walk with Slings,
+/// then this adds 100 s of input from this area to the enemy, which is 600
+/// metal on a typical Ravaged triplet, and the situation can move"): a
+/// force is priced by the metal it is expected to lose plus what the place
+/// pays its holder until it is cleared, the force built (at the lesser of
+/// a factory's build power and our income), walked there at its slowest
+/// unit's speed, and fought.
+#[derive(Clone, Copy, Debug)]
+pub struct Logistics {
+    /// Metal per second going into the force.
+    pub rate: f32,
+    /// Ground elmos from where the force is built to the place.
+    pub walk: f32,
+    /// Metal per second the place pays whoever holds it.
+    pub stake: f32,
+}
+
+/// A ZK factory's build power: metal per second (Shared.FACTORY_BUILDPOWER).
+pub const FACTORY_BUILD_POWER: f32 = 10.0;
+
+impl Logistics {
+    /// One factory building at the lesser of its build power and `income`.
+    pub fn factory(income: f32, walk: f32, stake: f32) -> Logistics {
+        Logistics { rate: income.clamp(0.5, FACTORY_BUILD_POWER), walk, stake }
+    }
+}
+
+/// A force's time to clear and its price (see [`Logistics`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Timing {
+    pub produce: f32,
+    pub walk: f32,
+    pub fight: f32,
+    /// Seconds from the decision to the place cleared.
+    pub total: f32,
+    /// Expected metal lost, the place's pay over `total`, and their sum.
+    pub lost: f32,
+    pub waited: f32,
+    pub price: f32,
+}
+
+/// The time and price of a force of `cost` metal whose slowest unit moves
+/// `speed` elmos a frame, `fight` seconds to clear (0: it does not clear,
+/// counted as `horizon`), losing `loss` of its metal: `built` forces are
+/// produced first and walk `lg.walk`; standing ones are where they stand.
+pub fn timing(cost: f32, speed: f32, fight: f32, horizon: f32, loss: f32, built: bool, lg: &Logistics) -> Timing {
+    let produce = if built { cost / lg.rate.max(0.1) } else { 0.0 };
+    let walk = if built { lg.walk / (speed.max(0.1) * 30.0) } else { 0.0 };
+    let fight = if fight > 0.0 { fight } else { horizon };
+    let total = produce + walk + fight;
+    let lost = loss * cost;
+    let waited = lg.stake * total;
+    Timing { produce, walk, fight, total, lost, waited, price: lost + waited }
+}
+
+/// [`timing`] of a plan built from `options`.
+pub fn plan_timing(plan: &Plan, options: &[Arc<UnitSpec>], horizon: f32, lg: &Logistics) -> Timing {
+    let speed = plan.pick.iter().map(|&k| options[k].speed).fold(f32::INFINITY, f32::min);
+    let speed = if speed.is_finite() { speed } else { 1.0 };
+    timing(plan.cost, speed, plan.secs, horizon, plan.loss, true, lg)
+}
+
 /// Elmos our force starts beyond the farthest reach in the fight.
 const CLEAR: f32 = 150.0;
 /// Spacing of a force's units on its line, elmos.
@@ -74,10 +138,10 @@ pub fn staged_fight(
     for (i, &k) in pick.iter().enumerate() {
         let s = options[k].clone();
         let z = mid + SPACING * (i as f32 - (pick.len() as f32 - 1.0) / 2.0);
-        units.push(SnapUnit { side: 0, hp: s.health, x: x0, z, spec: s });
+        units.push(SnapUnit { side: 0, hp: s.health, x: x0, z, spec: s, tubes: Vec::new() });
     }
     for (s, x, z) in against {
-        units.push(SnapUnit { side: 1, hp: s.health, x: *x, z: *z, spec: s.clone() });
+        units.push(SnapUnit { side: 1, hp: s.health, x: *x, z: *z, spec: s.clone(), tubes: Vec::new() });
     }
     FightSnapshot { units, flags }
 }
@@ -97,7 +161,7 @@ struct Judged {
 /// adds most margin per metal) and every single-kind force, grown until it
 /// meets the caps; the cheapest that meets them, else the one closest to
 /// the criterion.
-fn search(options: &[Arc<UnitSpec>], caps: &Caps, judge: &dyn Fn(&[usize]) -> Judged) -> Plan {
+fn search(options: &[Arc<UnitSpec>], caps: &Caps, judge: &dyn Fn(&[usize]) -> Judged, price: Option<&dyn Fn(&Plan) -> f32>) -> Plan {
     let usable: Vec<usize> =
         (0..options.len()).filter(|&k| options[k].cost > 0.0 && !options[k].weapons.is_empty()).collect();
     let grow = |kinds: &[usize]| -> Plan {
@@ -131,7 +195,8 @@ fn search(options: &[Arc<UnitSpec>], caps: &Caps, judge: &dyn Fn(&[usize]) -> Ju
     };
     let mut plans = vec![grow(&usable)];
     plans.extend(usable.iter().map(|&k| grow(&[k])));
-    let met = plans.iter().filter(|p| p.met).min_by(|a, b| a.cost.total_cmp(&b.cost)).cloned();
+    let key = |p: &Plan| price.map_or(p.cost, |f| f(p));
+    let met = plans.iter().filter(|p| p.met).min_by(|a, b| key(a).total_cmp(&key(b))).cloned();
     met.unwrap_or_else(|| plans.into_iter().max_by(|a, b| a.p_win.total_cmp(&b.p_win)).unwrap_or_default())
 }
 
@@ -153,10 +218,15 @@ pub fn cheapest_force(
         // Nothing there fights back: the force is nobody (a builder takes it).
         return Plan { p_win: 1.0, loss: 0.0, met: true, ..Plan::default() };
     }
-    search(options, caps, &|pick: &[usize]| {
-        let out = model.predict(&staged_fight(against, options, pick, flags));
-        Judged { margin: out.mean_b - out.mean_a, crit: out.p_a_wins, loss: out.mean_a, killed: out.mean_b, secs: 0.0 }
-    })
+    search(
+        options,
+        caps,
+        &|pick: &[usize]| {
+            let out = model.predict(&staged_fight(against, options, pick, flags));
+            Judged { margin: out.mean_b - out.mean_a, crit: out.p_a_wins, loss: out.mean_a, killed: out.mean_b, secs: 0.0 }
+        },
+        None,
+    )
 }
 
 /// How our force moves in a seizure's fight.
@@ -186,49 +256,161 @@ pub fn cheapest_seizure(
     horizon: i32,
     moves: Moves,
 ) -> Plan {
+    seizure_search(model, against, options, flags, caps, horizon, moves, None)
+}
+
+/// [`cheapest_seizure`] by price instead of metal: of the forces that meet
+/// the caps, the one whose expected loss plus the place's pay until it is
+/// cleared is least (see [`Logistics`]).
+#[allow(clippy::too_many_arguments)]
+pub fn priced_seizure(
+    model: &Model,
+    against: &[(Arc<UnitSpec>, f32, f32)],
+    options: &[Arc<UnitSpec>],
+    flags: SimFlags,
+    caps: &Caps,
+    horizon: i32,
+    moves: Moves,
+    lg: &Logistics,
+) -> Plan {
+    let h = horizon as f32 / 30.0;
+    seizure_search(model, against, options, flags, caps, horizon, moves, Some(&|p: &Plan| plan_timing(p, options, h, lg).price))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn seizure_search(
+    model: &Model,
+    against: &[(Arc<UnitSpec>, f32, f32)],
+    options: &[Arc<UnitSpec>],
+    flags: SimFlags,
+    caps: &Caps,
+    horizon: i32,
+    moves: Moves,
+    price: Option<&dyn Fn(&Plan) -> f32>,
+) -> Plan {
     if nothing_armed(against) {
         return Plan { p_win: 1.0, loss: 0.0, met: true, ..Plan::default() };
     }
-    let armed: f32 = against.iter().filter(|a| !a.0.weapons.is_empty()).map(|a| a.0.cost).sum::<f32>().max(1.0);
-    let theirs: f32 = against.iter().map(|a| a.0.cost).sum::<f32>().max(1.0);
-    search(options, caps, &|pick: &[usize]| {
-        let snap = staged_fight(against, options, pick, flags);
-        let fates = match moves {
-            Moves::Kiting => model.kiting_fates(&snap, horizon),
-            Moves::AMove => model.fates(&snap, horizon, FateMode::AMove),
-        };
-        let (mut ours, mut lost, mut hurt_ours) = (0.0f32, 0.0f32, 0.0f32);
-        let (mut killed, mut killed_armed, mut hurt_theirs) = (0.0f32, 0.0f32, 0.0f32);
-        let (mut last, mut all) = (0i32, true);
-        for (u, f) in snap.units.iter().zip(&fates) {
-            let hurt = u.spec.cost * (1.0 - (f.hp_left / u.spec.health.max(1.0)).clamp(0.0, 1.0));
-            if u.side == 0 {
-                ours += u.spec.cost;
-                hurt_ours += hurt;
-                if f.dead {
-                    lost += u.spec.cost;
+    search(
+        options,
+        caps,
+        &|pick: &[usize]| {
+            let j = judge_seizure(model, &staged_fight(against, options, pick, flags), horizon, moves);
+            Judged { margin: j.margin, crit: j.crit, loss: j.loss, killed: j.killed, secs: j.secs }
+        },
+        price,
+    )
+}
+
+/// What the mechanics fight with no stopping rule does to a snapshot in
+/// `horizon` frames (see [`cheapest_seizure`]): side 1 holds, side 0 moves
+/// as `moves` says.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Seizure {
+    /// Damage dealt less damage taken, in metal.
+    pub margin: f32,
+    /// Share of side 1's armed metal dead.
+    pub crit: f32,
+    /// Share of side 0's metal dead, and of side 1's.
+    pub loss: f32,
+    pub killed: f32,
+    /// Seconds until side 1's last armed unit died (0: not all of them).
+    pub secs: f32,
+}
+
+/// The seizure fight on any snapshot: a planned force (`staged_fight`) or
+/// one recorded in a game, at its places (`force_post`).
+pub fn judge_seizure(model: &Model, snap: &FightSnapshot, horizon: i32, moves: Moves) -> Seizure {
+    let fates = match moves {
+        Moves::Kiting => model.kiting_fates(snap, horizon),
+        Moves::AMove => model.fates(snap, horizon, FateMode::AMove),
+    };
+    let (mut ours, mut lost, mut hurt_ours) = (0.0f32, 0.0f32, 0.0f32);
+    let (mut theirs, mut armed, mut killed, mut killed_armed, mut hurt_theirs) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let (mut last, mut all) = (0i32, true);
+    for (u, f) in snap.units.iter().zip(&fates) {
+        // Damage is counted from the health the unit came in with.
+        let hurt = u.spec.cost * ((u.hp - f.hp_left.max(0.0)) / u.spec.health.max(1.0)).clamp(0.0, 1.0);
+        if u.side == 0 {
+            ours += u.spec.cost;
+            hurt_ours += hurt;
+            if f.dead {
+                lost += u.spec.cost;
+            }
+        } else {
+            theirs += u.spec.cost;
+            hurt_theirs += hurt;
+            let gun = !u.spec.weapons.is_empty();
+            if gun {
+                armed += u.spec.cost;
+            }
+            if f.dead {
+                killed += u.spec.cost;
+                if gun {
+                    killed_armed += u.spec.cost;
+                    last = last.max(f.death_frame.unwrap_or(horizon));
                 }
-            } else {
-                hurt_theirs += hurt;
-                if f.dead {
-                    killed += u.spec.cost;
-                    if !u.spec.weapons.is_empty() {
-                        killed_armed += u.spec.cost;
-                        last = last.max(f.death_frame.unwrap_or(horizon));
-                    }
-                } else if !u.spec.weapons.is_empty() {
-                    all = false;
-                }
+            } else if gun {
+                all = false;
             }
         }
-        Judged {
-            margin: hurt_theirs - hurt_ours,
-            crit: killed_armed / armed,
-            loss: lost / ours.max(1.0),
-            killed: killed / theirs,
-            secs: if all { last as f32 / 30.0 } else { 0.0 },
+    }
+    Seizure {
+        margin: hurt_theirs - hurt_ours,
+        crit: killed_armed / armed.max(1.0),
+        loss: lost / ours.max(1.0),
+        killed: killed / theirs.max(1.0),
+        secs: if all && armed > 0.0 { last as f32 / 30.0 } else { 0.0 },
+    }
+}
+
+/// A unit def as `tools/forceplan/dump_specs.lua` writes it from ZK's unit
+/// files: its fight spec, name and build options.
+pub struct SpecRow {
+    pub spec: Arc<UnitSpec>,
+    pub human: String,
+    pub builds: Vec<String>,
+}
+
+/// specs.tsv (see [`SpecRow`]), by def name.
+pub fn load_specs(path: &str) -> Result<BTreeMap<String, SpecRow>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let mut out = BTreeMap::new();
+    for line in text.lines().skip(1) {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 12 {
+            continue;
         }
-    })
+        let num = |s: &str| s.parse::<f32>().unwrap_or(0.0);
+        let weapons = (f[9].split('|').filter(|w| !w.is_empty()))
+            .filter_map(|w| {
+                let p: Vec<&str> = w.split(':').collect();
+                (p.len() == 6).then(|| WeaponSpec {
+                    name: p[0].into(),
+                    weapon_type: p[1].into(),
+                    range: num(p[2]),
+                    reload: num(p[3]),
+                    salvo: p[4].parse().unwrap_or(1),
+                    damage: num(p[5]),
+                })
+            })
+            .collect();
+        let spec = UnitSpec {
+            def: f[0].into(),
+            cost: num(f[1]),
+            health: num(f[2]),
+            speed: num(f[3]),
+            mobile: f[4] == "1",
+            air: f[5] == "1",
+            builder: f[6] == "1",
+            com: f[7] == "1",
+            radius: num(f[8]),
+            weapons,
+        };
+        let builds = f[11].split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        out.insert(f[0].to_string(), SpecRow { spec: Arc::new(spec), human: f[10].to_string(), builds });
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -313,6 +495,47 @@ mod tests {
         let both =
             cheapest_seizure(&m, &triplet, &[scorcher(), fencer()], SimFlags::default(), &caps, 30 * 40, Moves::AMove);
         assert!(both.met && both.cost <= fencers.cost, "{both:?}");
+    }
+
+    #[test]
+    fn a_rich_place_pays_for_a_fast_force_over_slow_cheap_artillery() {
+        let Some(m) = model() else { return };
+        let triplet = [(lotus(), 0.0, 0.0), (lotus(), 150.0, -100.0), (lotus(), 150.0, 100.0)];
+        let options = [fencer(), scorcher()];
+        let caps = Caps { win: 1.0, metal: 1500.0, units: 12, ..Caps::default() };
+        let (h, flags) = (30 * 90, SimFlags::default());
+        let cheap = cheapest_seizure(&m, &triplet, &options, flags, &caps, h, Moves::AMove);
+        let poor = priced_seizure(&m, &triplet, &options, flags, &caps, h, Moves::AMove, &Logistics::factory(10.0, 3000.0, 0.0));
+        assert_eq!(poor.pick, cheap.pick, "nothing at stake: the cheapest force");
+        let t = plan_timing(&cheap, &options, 90.0, &Logistics::factory(10.0, 3000.0, 6.0));
+        assert!(t.produce > 0.0 && t.walk > 0.0 && t.total > t.fight, "{t:?}");
+        let rich = priced_seizure(&m, &triplet, &options, flags, &caps, h, Moves::AMove, &Logistics::factory(10.0, 3000.0, 50.0));
+        let tr = plan_timing(&rich, &options, 90.0, &Logistics::factory(10.0, 3000.0, 50.0));
+        assert!(tr.price <= plan_timing(&cheap, &options, 90.0, &Logistics::factory(10.0, 3000.0, 50.0)).price, "{rich:?} {tr:?}");
+    }
+
+    fn puppy() -> Arc<UnitSpec> {
+        spec("jumpscout", 45.0, 80.0, 3.5, true, ("jumpscout_missile", "MissileLauncher", 168.0, 1.5, 410.1))
+    }
+
+    /// A tough unarmed building: only what a shot does to it counts.
+    fn block() -> Arc<UnitSpec> {
+        Arc::new(UnitSpec { def: "staticstorage".into(), cost: 100.0, health: 5000.0, radius: 20.0, ..UnitSpec::default() })
+    }
+
+    #[test]
+    fn a_puppy_is_spent_by_its_one_missile() {
+        let Some(m) = model() else { return };
+        let snap = staged_fight(&[(block(), 0.0, 0.0)], &[puppy()], &[0], SimFlags::from_switches(false, true, true));
+        let fates = m.fates(&snap, 30 * 20, FateMode::AMove);
+        let (pup, wall) = (&fates[0], &fates[1]);
+        assert!(pup.dead, "the Puppy is gone once it fires: {pup:?}");
+        assert!(wall.hp_left >= 5000.0 - 420.0, "one missile at most in 20 s: {wall:?}");
+        // The plain fight too: a short-ranged tough turret outlasts one
+        // missile (refiring, eight would have killed it).
+        let stub = spec("turretstub", 100.0, 3000.0, 0.0, false, ("turretstub_gun", "Cannon", 50.0, 1.0, 1.0));
+        let out = m.predict(&staged_fight(&[(stub, 0.0, 0.0)], &[puppy()], &[0], SimFlags::default()));
+        assert!(out.killed_b == 0.0, "one Puppy, one missile: {out:?}");
     }
 
     #[test]
