@@ -27,7 +27,10 @@
 //!   or waste, [`energy_value`]), a factory our metal income, which it
 //!   turns into units (shared among factories by build power, its
 //!   caretakers' included). A place counts when the flow within
-//!   [`VAR_RADIUS`] is [`PLACE_FLOW`] metal a second or more, and is worth
+//!   [`VAR_RADIUS`] is [`PLACE_FLOW`] metal a second or more and
+//!   [`PLACE_SHARE`] of our metal income (what the factories turn into
+//!   units) or more ([`place_bar`]; user, 2026-11-04: three mexes early,
+//!   about 9 a second at 60 income, the factory always), and is worth
 //!   that flow for [`OUTAGE`] seconds (a lone mex no longer is). The places
 //!   the group can get within its weapons' reach of within [`HORIZON`]
 //!   seconds, soonest first (factories and the base count, not only the
@@ -98,8 +101,13 @@ const PLACE_LINK: f32 = 350.0;
 const VAR_RADIUS: f32 = 600.0;
 
 /// A place is something we value from this much economy flowing through it
-/// on, metal a second (three mexes; a factory nearly always).
+/// on, metal a second (three mexes; a factory nearly always)...
 const PLACE_FLOW: f32 = 6.0;
+
+/// ...and from this share of our metal income on (smoke6, 2026-11-04:
+/// with the bar at 6 alone, a 6.4-8.6 metal/s mex field got 4 of 18
+/// turrets in a game ending at 60 income).
+const PLACE_SHARE: f32 = 0.15;
 
 /// A place that falls is taken to lose its flow for this long, seconds:
 /// its value at stake is flow x this.
@@ -330,6 +338,11 @@ fn worth_value(w: &Worth) -> f32 {
     }
 }
 
+/// The flow a place needs to count, metal a second, at our metal `income`.
+fn place_bar(income: f32) -> f32 {
+    PLACE_FLOW.max(PLACE_SHARE * income)
+}
+
 /// Metal one energy of `income` is worth: the share construction spends
 /// is worth a metal each (ZK builds take metal and energy alike), the share
 /// overdrive spends (`overdrive`) what overdrive makes of it
@@ -541,6 +554,7 @@ impl Ai {
         }
         let bp: f32 = factories.iter().map(|f| f.2).sum();
         let income = self.eco.static_income.max(0.0);
+        let bar = place_bar(income);
         let mut flows: Vec<(Vec3, f32)> =
             (factories.iter()).filter(|_| bp > 0.0).map(|f| (f.1, income * f.2 / bp)).collect();
         // Mexes and energy.
@@ -566,7 +580,7 @@ impl Ai {
         (anchors.into_iter())
             .filter_map(|anchor| {
                 let flow: f32 = flows.iter().filter(|(p, _)| distance(*p, anchor) <= VAR_RADIUS).map(|x| x.1).sum();
-                (flow >= PLACE_FLOW).then_some(Place { anchor, flow, value: flow * OUTAGE })
+                (flow >= bar).then_some(Place { anchor, flow, value: flow * OUTAGE })
             })
             .collect()
     }
@@ -1066,6 +1080,14 @@ mod tests {
         assert!((energy_value(40.0, 20.0, 10.0, 4.0) - 0.35).abs() < 1e-5);
         // Everything to overdrive.
         assert!((energy_value(40.0, 40.0, 0.0, 8.0) - 0.2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_place_needs_three_mexes_early_and_a_share_of_the_economy_later() {
+        assert_eq!(place_bar(15.0), PLACE_FLOW);
+        assert_eq!(place_bar(40.0), PLACE_FLOW);
+        assert!((place_bar(60.0) - 9.0).abs() < 1e-4);
+        assert!((place_bar(100.0) - 15.0).abs() < 1e-4);
     }
 
     #[test]
