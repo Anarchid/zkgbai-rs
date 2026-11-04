@@ -73,7 +73,7 @@ use super::{
 use crate::Ai;
 use crate::economy::TaskId;
 use crate::economy::grid::GridAccess;
-use crate::economy::porcmix::{blast, blast_room};
+use crate::economy::porcmix::{MIX_RADIUS, blast, blast_room, kind_cap};
 use crate::economy::terraform::is_terraforming;
 use crate::logistics::{Kind, MARGIN, MAX_CREW, Worth, finish_time, porc_power};
 use crate::util::{distance, get_directional_point};
@@ -175,6 +175,10 @@ const RAISER_TRAVEL: f32 = 20.0;
 const RAISE_FRAMES: i32 = 30 * 60;
 const RAISE_TRIES: u32 = 3;
 const RAISE_GRACE: i32 = 90;
+/// A heavy refused on its finished platform (an enemy about, a frame in
+/// the way) is tried again every pass this many times before it is given
+/// up (wirestank/w1: 3 of 5 platforms ended with no site, one 93 of 99 up).
+const PLACE_TRIES: u32 = 15;
 
 /// A platform going up for a Lucifer.
 struct Raise {
@@ -196,6 +200,9 @@ struct Raise {
     by: f32,
     against: f32,
     why: String,
+    /// Passes the heavy has been refused on the finished platform (see
+    /// [`PLACE_TRIES`]).
+    placing: u32,
 }
 
 #[derive(Default)]
@@ -531,6 +538,7 @@ impl Ai {
                 by,
                 against: a.group.power,
                 why,
+                placing: 0,
             });
             self.logistics.walkin.stats.heavy.platforms += 1;
             self.walkin_note("heavy_raise", a, extra);
@@ -585,11 +593,14 @@ impl Ai {
         let war = &self.war;
         // Out of our turrets' death blasts, and they of its (`porcmix`).
         let mine = blast(def);
-        let others: Vec<(Vec3, f32)> = if self.dev_off(PORCMIX) {
+        let others: Vec<(Vec3, f32, bool)> = if self.dev_off(PORCMIX) {
             Vec::new()
         } else {
-            (self.eco_turrets_near(middle, cover + 300.0).into_iter()).map(|(p, d)| (p, blast(d))).collect()
+            (self.eco_turrets_near(middle, cover + MIX_RADIUS).into_iter())
+                .map(|(p, d)| (p, blast(d), d.id() == def.id()))
+                .collect()
         };
+        let kind = kind_cap(self.defs.name(def));
         let mut spots: Vec<(f32, f32, Vec3)> = Vec::new();
         for i in -n..=n {
             for j in -n..=n {
@@ -601,7 +612,13 @@ impl Ai {
                 if distance(p, approach) < front || (d > STEP && !self.graph.is_ally_territory(p)) {
                     continue;
                 }
-                if others.iter().any(|&(o, b)| blast_room(distance(o, p), mine, b) < 1.0) {
+                // The whole `porcmix` rule: the kind's cap about the spot (a
+                // Desolator beyond the place's own reach, nearer the spot,
+                // refused a finished platform's top in wirestank/w1) and the
+                // blasts.
+                if others.iter().any(|&(o, b, _)| blast_room(distance(o, p), mine, b) < 1.0)
+                    || others.iter().filter(|o| o.2 && distance(o.0, p) <= MIX_RADIUS).count() >= kind
+                {
                     continue;
                 }
                 let raise = (PLATFORM - (ground(p) - base)).max(0.0);
@@ -784,17 +801,36 @@ impl Ai {
         if !(done || beset || quiet || frame - since > RAISE_FRAMES) {
             return;
         }
-        let Some(r) = self.logistics.walkin.heavy.raise.take() else { return };
+        let Some(mut r) = self.logistics.walkin.heavy.raise.take() else { return };
+        // On top; else (the half-raised top refused) the nearest legal site.
+        let task = self
+            .eco_logistics_porc_at(r.def, site, SITE_SLACK)
+            .or_else(|| self.eco_logistics_porc(r.def, site, 0.0).map(|(t, _)| t));
+        if task.is_none() && r.placing < PLACE_TRIES {
+            // Again next pass (the raisers stay held: they build it).
+            r.placing += 1;
+            self.logistics.walkin.heavy.raise = Some(r);
+            return;
+        }
         self.eco_release_terraform(&r.workers);
         if done {
             self.logistics.walkin.stats.heavy.raised += 1;
         } else {
             self.logistics.walkin.stats.heavy.short += 1;
         }
-        // On top; else (the half-raised top refused) the nearest legal site.
-        let task = self
-            .eco_logistics_porc_at(r.def, site, SITE_SLACK)
-            .or_else(|| self.eco_logistics_porc(r.def, site, 0.0).map(|(t, _)| t));
+        // Why a site was refused: the mix rule, an enemy outgunning us there,
+        // or the ground.
+        let why_not = if task.is_some() {
+            String::new()
+        } else {
+            format!(
+                " (mix allows {}, threat {:.0} vs ours {:.0}, buildable {})",
+                self.eco_mix_allows(r.def, site),
+                self.war.get_effective_threat(site),
+                self.war.get_total_friendly_threat(site),
+                self.cb.map().is_possible_to_build_at(r.def, site, 0)
+            )
+        };
         // Who raised it, and whether an enemy stood by (the 20x penalty).
         let raisers: Vec<String> = (r.workers.iter())
             .map(|&u| {
@@ -815,7 +851,11 @@ impl Ai {
             site.z,
             (frame - since) as f32 / 30.0,
             raisers.join(", "),
-            if task.is_some() { "it goes on top (or nearest)" } else { "no site for it about the platform" }
+            if task.is_some() {
+                "it goes on top (or nearest)".to_owned()
+            } else {
+                format!("no site for it about the platform{why_not}")
+            }
         ));
         let Some(task) = task else { return };
         let hands = self.walkin_hands(site, &[], None, false);
