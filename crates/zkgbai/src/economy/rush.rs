@@ -1,14 +1,15 @@
 //! Rush (user, 2026-11-04): in a 3v3 or bigger on a small map (Alien
 //! Desert, Fairyland), the alliance's ZKGBAIs now and then rush a
-//! demi-strider (Cyclops, Crab, Grizzly). The odds rise with how crowded the
+//! heavy (Cyclops, Crab, Grizzly, or a Krow at high density). The odds rise with how crowded the
 //! front is: its width per player a side. On RUSH, one of us opens with the
-//! heavy's factory, all of us start together around it (user: "when
+//! heavy's factory, the recruited crew starts together around it (user: "when
 //! planning to do this the guys should start together"), its first unit is
-//! the heavy, and every ZKGBAI's commander guards that factory before doing
+//! the heavy, and the recruited commanders guard that factory before doing
 //! anything else: the engine turns a guard on a factory into assisting what
 //! it builds, and each helper's team pays for its own build power. The
-//! other ZKGBAIs' factories wait. When the heavy walks out, everyone goes
-//! back to work, and the heavy fights as a loner does.
+//! recruited teams' other factories wait; nonparticipants open normally.
+//! When the heavy walks out, everyone goes back to work. The heavy keeps a
+//! coordinated assault mission (see military::rush_push).
 //!
 //! The plan comes before the starts are chosen, so it is made while the AIs
 //! initialize, before any unit exists and with no shared random seed in
@@ -87,11 +88,12 @@ const NEAR_FACTORY: f32 = 300.0;
 /// the heavy is ordered again only if it does not stand this long after.
 const REORDER: i32 = 150;
 
-/// The factories with a demi-strider: (factory, heavy, its name).
-pub(crate) const HEAVIES: [(&str, &str, &str); 3] = [
+/// The factories with a rush heavy: (factory, heavy, its name).
+pub(crate) const HEAVIES: [(&str, &str, &str); 4] = [
     ("factorytank", "tankheavyassault", "Cyclops"),
     ("factoryspider", "spidercrabe", "Crab"),
     ("factoryamph", "amphassault", "Grizzly"),
+    ("factorygunship", "gunshipkrow", "Krow"),
 ];
 
 /// One game's plan, as the first of the alliance's instances rolled it.
@@ -117,6 +119,11 @@ static PACTS: Mutex<Vec<(String, Instant, Pact)>> = Mutex::new(Vec::new());
 #[derive(Default)]
 pub struct Rush {
     pub state: State,
+    /// One commander per recruited team; the others open normally.
+    participating: bool,
+    commander: Option<i32>,
+    /// Every allied instance observes the heavy, including non-builders.
+    pub(crate) push: Option<crate::military::rush_push::Push>,
     /// Our start in the plan.
     start: Option<Vec3>,
 }
@@ -167,6 +174,28 @@ pub(crate) fn odds(front: f32, side: f32) -> f32 {
         return 0.0;
     }
     (1.0 - front / side / FRONT_ZERO).clamp(0.0, MAX_ODDS)
+}
+
+/// Early demi-striders pay with three commanders; a Krow has room for seven.
+/// This is a total crew cap, including the factory owner's commander.
+fn commander_cap(factory: &str) -> usize {
+    if factory == "factorygunship" { 7 } else { 3 }
+}
+
+/// Density expressed as players on a typical 6400-elmo front. Never plan
+/// more build power than the AI participants actually provide. At Krow
+/// density choose the larger tier; terrain-filtered demi-striders remain
+/// the fallback if gunships cannot open this map.
+fn rush_choices<'a>(factories: &[&'a str], front: f32, side: f32, available: usize) -> Vec<&'a str> {
+    let density = if front > 0.0 { side * 6400.0 / front } else { 0.0 };
+    let krow = available >= 7 && density >= 7.0 && factories.contains(&"factorygunship");
+    factories
+        .iter()
+        .copied()
+        .filter(|&f| {
+            commander_cap(f) <= available && (if krow { f == "factorygunship" } else { f != "factorygunship" })
+        })
+        .collect()
 }
 
 /// The front: the mean passable width of `map` at [`DEPTHS`] between the
@@ -278,6 +307,7 @@ impl Ai {
             return self.rush_off(&format!("no {heavy} unit def"));
         };
         self.eco.rush.start = pact.starts.get(&self.team_id).copied();
+        self.eco.rush.participating = self.eco.rush.start.is_some();
         self.log(&format!(
             "rush: RUSH! ({whose}) {}: team {rusher} opens with {factory} for a {called}, we start together{}",
             pact.why,
@@ -288,7 +318,7 @@ impl Ai {
         ));
         self.op_emit(
             "rush",
-            json!({"rush": true, "by": pact.by, "rusher": rusher, "factory": factory, "why": pact.why}),
+            json!({"rush": true, "by": pact.by, "rusher": rusher, "factory": factory, "why": pact.why, "participants": pact.starts.keys().collect::<Vec<_>>() }),
         );
         self.eco.rush.state = State::Planned { rusher, factory, heavy, called };
     }
@@ -380,8 +410,8 @@ impl Ai {
             HEAVIES.iter().map(|h| h.0).filter(|f| self.eco.potential_fac_list.contains(*f)).collect();
         let no_rush = if self.dev_off("rush") {
             Some("switched off")
-        } else if self.iq.peers.is_empty() {
-            Some("no other ZKGBAI on our side to assist")
+        } else if self.iq.peers.len() + 1 < MIN_SIDE {
+            Some("fewer than three ZKGBAIs on our side to assist")
         } else if self.eco.water_side.is_some() {
             Some("one of us takes the water side")
         } else if factories.is_empty() {
@@ -403,8 +433,21 @@ impl Ai {
         us.sort_unstable();
         let pick = |n: usize| ((kgb_rand() * n as f64) as usize).min(n - 1);
         let rusher = us.remove(pick(us.len()));
-        let factory = factories[pick(factories.len())];
-        let starts = self.rush_starts(1 + us.len());
+        let available = us.len() + 1;
+        let candidates = rush_choices(&factories, front, per_side, available);
+        if candidates.is_empty() {
+            pact.why.push_str(": no heavy fits the available crew");
+            return pact;
+        }
+        let factory = candidates[pick(candidates.len())];
+        let count = commander_cap(factory);
+        us.truncate(count - 1);
+        let starts = self.rush_starts(count);
+        if starts.len() < count {
+            pact.why.push_str(": not enough room for the rush crew");
+            return pact;
+        }
+        pact.why.push_str(&format!(", {count} commanders recruited of {available}"));
         for (team, start) in [rusher].into_iter().chain(us).zip(starts) {
             pact.starts.insert(team, start);
         }
@@ -457,7 +500,7 @@ impl Ai {
     /// rusher).
     pub(crate) fn rush_planned_factory(&self) -> Option<&'static str> {
         match self.eco.rush.state {
-            State::Planned { factory, .. } => Some(factory),
+            State::Planned { factory, .. } if self.eco.rush.participating => Some(factory),
             _ => None,
         }
     }
@@ -478,6 +521,7 @@ impl Ai {
         if frame % PERIOD != 0 {
             return;
         }
+        self.rush_push_update(frame);
         match self.eco.rush.state {
             State::Planned { rusher, factory, heavy, called } => self.rush_await(frame, rusher, factory, heavy, called),
             State::On(_) => self.rush_drive(frame),
@@ -498,11 +542,17 @@ impl Ai {
             }
             return;
         };
-        self.log(&format!("rush: team {rusher}'s {factory} stands (unit {}): every commander to it", unit.id()));
+        self.log(&format!("rush: team {rusher}'s {factory} stands (unit {}): recruited commanders to it", unit.id()));
+        if self.eco.rush.participating {
+            self.eco.rush.commander = self
+                .eco
+                .commanders
+                .iter()
+                .copied()
+                .find(|id| self.eco.workers.get(id).is_some_and(|w| w.unit.health() > 0.0));
+        }
         if rusher == self.team_id {
-            let tag = self.banter.as_ref().map_or("ZKGBAI", |b| b.tag());
-            let line = format!("/say a:<{tag}> Rush! A {called} from my factory: help build it");
-            self.cb.game().send_text_message(&line, 0);
+            self.banter_mark("rush", unit.pos(), crate::banter::fields([("heavy", called.into())]));
         }
         self.eco.rush.state = State::On(Plan { rusher, factory: unit, heavy, since: frame, nano: None, ordered: None });
     }
@@ -511,9 +561,10 @@ impl Ai {
         let State::On(plan) = &self.eco.rush.state else { return };
         let (rusher, factory, heavy, since) = (plan.rusher, plan.factory, plan.heavy, plan.since);
         let nano = plan.nano.or_else(|| {
-            self.cb.friendly_units_in(factory.pos(), NEAR_FACTORY).into_iter().find(|u| {
-                u.team() == rusher && u.is_being_built() && u.health() > 0.0 && u.def().is_some_and(|d| d == heavy)
-            })
+            self.cb
+                .friendly_units_in_cylinder(factory.pos(), NEAR_FACTORY)
+                .into_iter()
+                .find(|u| u.team() == rusher && u.health() > 0.0 && u.def().is_some_and(|d| d == heavy))
         });
         let end = if factory.health() <= 0.0 && nano.is_none() {
             Some("its factory is gone")
@@ -527,6 +578,10 @@ impl Ai {
             None
         };
         if let Some(why) = end {
+            if let Some(unit) = nano.filter(|n| n.health() > 0.0 && n.team() == rusher && !n.is_being_built()) {
+                self.eco.rush.push = Some(crate::military::rush_push::Push::new(unit, rusher));
+                self.op_emit("rush-push", json!({"event": "launched", "unit": unit.id(), "rusher": rusher}));
+            }
             return self.rush_end(why);
         }
         if let State::On(plan) = &mut self.eco.rush.state
@@ -547,7 +602,7 @@ impl Ai {
             self.fac_assign_factory_task(factory.id());
         }
         // Our commanders guard the factory (and so assist the heavy).
-        for wid in self.eco.commanders.clone() {
+        for wid in self.eco.rush.commander.into_iter() {
             let Some(w) = self.eco.workers.get_mut(&wid) else { continue };
             if w.is_chicken || w.raid_defense.is_some() || w.has_plop() {
                 continue;
@@ -569,7 +624,7 @@ impl Ai {
         self.op_emit("rush", json!({"over": why, "minutes": minutes}));
         // The commanders stop guarding (the factory builds on), and go back
         // to work.
-        for wid in self.eco.commanders.clone() {
+        for wid in self.eco.rush.commander.into_iter() {
             let Some(w) = self.eco.workers.get(&wid) else { continue };
             if guards(w.unit, plan.factory) {
                 w.unit.stop(0);
@@ -593,7 +648,7 @@ impl Ai {
     /// plop spent, while a rush is on.
     pub(crate) fn rush_holds(&self, wid: i32) -> bool {
         matches!(self.eco.rush.state, State::On(_))
-            && self.eco.commanders.contains(&wid)
+            && self.eco.rush.commander == Some(wid)
             && self.eco.workers.get(&wid).is_some_and(|w| !w.has_plop())
     }
 
@@ -608,6 +663,9 @@ impl Ai {
     /// is on its way meanwhile); every other factory nothing.
     pub(crate) fn rush_factory(&self, fac_id: i32) -> Option<RushOrder> {
         let State::On(plan) = &self.eco.rush.state else { return None };
+        if !self.eco.rush.participating {
+            return None;
+        }
         if plan.rusher == self.team_id && plan.factory.id() == fac_id {
             if plan.nano.is_some() {
                 return None;
@@ -666,8 +724,20 @@ mod tests {
     }
 
     #[test]
+    fn density_and_available_commanders_choose_the_tier() {
+        let all: Vec<_> = HEAVIES.iter().map(|h| h.0).collect();
+        assert_eq!(rush_choices(&all, 6400.0, 3.0, 3), all[..3]);
+        assert_eq!(rush_choices(&all, 6400.0, 10.0, 10), vec!["factorygunship"]);
+        assert_eq!(rush_choices(&all, 6400.0, 10.0, 3), all[..3]);
+        assert_eq!(rush_choices(&all, 12000.0, 10.0, 10), all[..3]);
+        assert!(rush_choices(&all, 6400.0, 10.0, 2).is_empty());
+        assert_eq!(commander_cap("factoryamph"), 3);
+        assert_eq!(commander_cap("factorygunship"), 7);
+    }
+
+    #[test]
     fn every_heavy_factory_has_its_heavy() {
         let factories: Vec<&str> = HEAVIES.iter().map(|h| h.0).collect();
-        assert_eq!(factories, ["factorytank", "factoryspider", "factoryamph"]);
+        assert_eq!(factories, ["factorytank", "factoryspider", "factoryamph", "factorygunship"]);
     }
 }

@@ -1416,6 +1416,11 @@ impl Ai {
             m.bailed = None;
             m.shun.retain(|&(_, until)| until > frame);
         }
+        if let Some(screen) = self.rush_push_screen(sid) {
+            self.raider_squad_raid(sid, screen);
+            self.squad_note(sid, Branch::Rally, screen, pos, None);
+            return;
+        }
         // Sent to block an incursion's way.
         if let Some(block) = self.incursion_block(sid) {
             if self.raider_fight_veto(sid, pos, block, courage) {

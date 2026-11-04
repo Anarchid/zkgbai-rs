@@ -108,6 +108,7 @@ pub struct Say {
     pub text: String,
     /// The line it is (or continues).
     pub id: String,
+    pub marker: Option<[f32; 3]>,
 }
 
 struct Pending {
@@ -119,6 +120,14 @@ struct Pending {
     due: i32,
     until: i32,
     spec: f32,
+}
+
+struct Mark {
+    event: String,
+    pos: [f32; 3],
+    extra: Fields,
+    due: i32,
+    until: i32,
 }
 
 pub struct Banter {
@@ -136,6 +145,7 @@ pub struct Banter {
     last_event: BTreeMap<String, i32>,
     state: Fields,
     pending: Vec<Pending>,
+    marks: Vec<Mark>,
     /// Where the claim "it's over" stands (kept by the AI, see `glue`).
     pub claim: glue::Claim,
 }
@@ -159,6 +169,7 @@ impl Banter {
             last_event: BTreeMap::new(),
             state: Fields::new(),
             pending: Vec::new(),
+            marks: Vec::new(),
             claim: glue::Claim::None,
         }
     }
@@ -316,7 +327,11 @@ impl Banter {
         env.insert("nth".to_owned(), Val::from(nth as f64));
         env.extend(extra.iter().map(|(k, v)| (k.clone(), v.clone())));
         let candidates: Vec<usize> = (0..self.lex.lines.len())
-            .filter(|&i| self.lex.lines[i].on == event && self.usable(&self.lex.lines[i], frame, false))
+            .filter(|&i| {
+                !self.lex.lines[i].marker
+                    && self.lex.lines[i].on == event
+                    && self.usable(&self.lex.lines[i], frame, false)
+            })
             .collect();
         let Some((line, texts, spec)) = self.choose(candidates, &env) else { return };
         let free = self.lex.lines[line].free;
@@ -357,12 +372,17 @@ impl Banter {
         // Ambiguous text reads as a reply (which is never answered).
         let lines = self.lex.recognise(body);
         let Some(line) = lines.iter().find(|l| l.is_reply()).or(lines.first()).copied() else { return };
-        if line.to == Channel::Allies && !allied {
+        if (line.to == Channel::Allies || line.marker) && !allied {
             return;
         }
         let (id, free, reply, event) = (line.id.clone(), line.free, line.is_reply(), line.on.clone());
         let to_allies = line.to == Channel::Allies;
         self.heard.push(id.clone());
+        // Markers carry tactical intentions, not a shared joke budget or
+        // a request that uninvolved allies should answer.
+        if line.marker {
+            return;
+        }
         if free {
             // Another said the moment's free line (glhf): ours is not needed.
             self.pending.retain(|p| p.event != event);
@@ -413,7 +433,7 @@ impl Banter {
             }
             let to = if p.to_allies { Channel::Allies } else { line.to };
             let (id, free) = (line.id.clone(), line.free);
-            out.extend(p.texts.into_iter().map(|text| Say { to, text, id: id.clone() }));
+            out.extend(p.texts.into_iter().map(|text| Say { to, text, id: id.clone(), marker: None }));
             self.said.push(id);
             *self.spoken.entry(p.event).or_insert(0) += 1;
             if !free {
@@ -422,7 +442,59 @@ impl Banter {
             }
         }
         self.pending = keep;
+        self.due_marks(frame, &mut out);
         out
+    }
+
+    /// Tactical labels share the lexicon but have their own small per-AI
+    /// limit. Banter off silences them; ordinary quiet time does not hide
+    /// the other commanders' destinations.
+    pub fn mark(&mut self, frame: i32, event: &str, pos: [f32; 3], extra: &Fields) {
+        if self.budget == 0 || self.marks.iter().any(|m| m.event == event) {
+            return;
+        }
+        let limit = self.lex.settings.limit.get(event).copied().unwrap_or(2);
+        if self.spoken.get(event).copied().unwrap_or(0) >= limit {
+            return;
+        }
+        // Rank among allies gives simultaneous commitments time to hear
+        // one another before selecting the next line in the story. Allow
+        // a full second for the engine to deliver an allied chat command.
+        let rank = self.siblings.iter().filter(|s| s.ally_team == self.me.ally_team && s.team < self.me.team).count();
+        self.marks.push(Mark {
+            event: event.into(),
+            pos,
+            extra: extra.clone(),
+            due: frame + 30 + rank as i32 * 60,
+            until: frame + 30 * 60,
+        });
+    }
+
+    fn due_marks(&mut self, frame: i32, out: &mut Vec<Say>) {
+        for m in std::mem::take(&mut self.marks) {
+            if m.due > frame {
+                self.marks.push(m);
+                continue;
+            }
+            if self.budget == 0 || frame > m.until {
+                continue;
+            }
+            let mut env = self.state.clone();
+            env.extend(m.extra);
+            let candidates = (0..self.lex.lines.len())
+                .filter(|&i| {
+                    let l = &self.lex.lines[i];
+                    l.marker && l.on == m.event && !self.lex.is_off(&l.id) && (l.repeat || !self.said.contains(&l.id))
+                })
+                .collect();
+            if let Some((i, texts, _)) = self.choose(candidates, &env) {
+                let id = self.lex.lines[i].id.clone();
+                // A marker is one label, even when an override has several texts.
+                out.push(Say { to: Channel::Allies, text: texts.join(" "), id: id.clone(), marker: Some(m.pos) });
+                self.said.push(id);
+                *self.spoken.entry(m.event).or_insert(0) += 1;
+            }
+        }
     }
 }
 

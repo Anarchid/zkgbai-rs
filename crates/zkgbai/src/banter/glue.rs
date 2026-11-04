@@ -110,8 +110,17 @@ impl Ai {
             Channel::Allies => ("a:", "allies"),
             Channel::Specs => ("s:", "specs"),
         };
+        if let Some(p) = s.marker {
+            self.marker(springai::Vec3::new(p[0], p[1], p[2]), &s.text);
+        }
         self.cb.game().send_text_message(&format!("/say {prefix}<{tag}> {}", s.text), 0);
-        self.op_emit("say", json!({"text": s.text, "id": s.id, "to": to}));
+        self.op_emit("say", json!({"text": s.text, "id": s.id, "to": to, "marker": s.marker}));
+    }
+
+    pub(crate) fn banter_mark(&mut self, event: &str, pos: springai::Vec3, extra: Fields) {
+        if let Some(b) = self.banter.as_mut() {
+            b.mark(self.frame, event, [pos.x, pos.y, pos.z], &extra);
+        }
     }
 
     /// Something happened (see the events in `data/banter.toml`).
