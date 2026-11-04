@@ -45,7 +45,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "heavyporc",
         "Defense",
-        "where the walk-in guard would want more than 3 Stingers at a place and a 50-energy grid reaches it: a Lucifer on a spire or a raised platform (against heavies and long reach) or a Desolator (against light forces), or both (default on)",
+        "where the walk-in guard would want more than 3 Stingers at a place and a 50-energy grid reaches it: a Lucifer on a spire or a raised platform (against heavies and long reach) or a Desolator (against light forces; raised too, its plasma gains range), or both (default on)",
     ),
     ("currency", "Economy", "a job's raid danger priced in metal against its crew's bonus"),
     ("pairs", "Economy", "Constables pair up on builds"),
