@@ -129,6 +129,7 @@ impl Ai {
         doctrine.heal_to = 0.9;
         doctrine.judge = Judge::Fates;
         doctrine.fate_secs = 8.0;
+        doctrine.pass_reach = 0.9;
         doctrine.lasting = 2.5;
         doctrine.fire_state = (name == "rush").then_some(0);
         let shape = Arc::new(doctrine.shape(&self.defs, &self.taskforces.classes));
