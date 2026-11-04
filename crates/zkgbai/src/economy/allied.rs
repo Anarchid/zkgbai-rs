@@ -121,10 +121,13 @@ struct FrameProgress {
 
 impl FrameProgress {
     fn observe(&mut self, built: f32, team: i32, frame: i32) {
-        if team != self.team || built < self.built || built > self.built + 0.0001 {
+        if team != self.team || built > self.built + 0.0001 {
             self.built = built;
             self.advanced = frame;
             self.team = team;
+        } else if built < self.built {
+            // Reclaiming the frame does not renew its coverage claim.
+            self.built = built;
         }
     }
 
@@ -554,6 +557,9 @@ impl Ai {
                         "economy: an allied anti-nuke at ({:.0}, {:.0}) covers ours, queued at ({:.0}, {:.0}); dropped",
                         p.x, p.z, at.x, at.z
                     ));
+                    if self.logistics_close(id, "covered_by_ally").is_some() {
+                        self.logistics.stats.met += 1;
+                    }
                     self.eco.drop_construction_task(id);
                     self.eco.anti_nuke = false;
                     continue;
@@ -778,6 +784,8 @@ mod tests {
         assert!(p.active(ALLY_STALL - 1));
         p.observe(0.1, 3, ALLY_STALL);
         assert!(!p.active(ALLY_STALL));
+        p.observe(0.05, 3, ALLY_STALL + 15);
+        assert!(!p.active(ALLY_STALL + 15), "reclaiming is not construction progress");
         p.observe(0.11, 3, ALLY_STALL + 30);
         assert!(p.active(ALLY_STALL + 30));
         p.observe(0.11, 4, ALLY_STALL * 2);

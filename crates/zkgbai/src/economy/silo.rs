@@ -430,14 +430,17 @@ impl Ai {
             // nanoframe still prevents commissioning a replacement.
             return;
         }
+        // Keep the selected project (ours or an ally's). Pending own jobs
+        // can still be adopted by eco_watch_allied_projects; do not open a
+        // second assist each time another allied frame overtakes this one.
+        if self.eco_silo_plan().is_some() {
+            return;
+        }
         if !self.dev_off("missiles")
             && !self.eco.estalled
             && self.eco.adjusted_income >= missiles::SILO_INCOME
             && self.eco_assist_ally(silo)
         {
-            return;
-        }
-        if self.eco_silo_plan().is_some() {
             return;
         }
         if self.dev_off("missiles")
