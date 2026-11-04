@@ -66,6 +66,17 @@ impl ArrayGraphics {
     /// Add a linear falloff outside an existing hard circle, without raising
     /// threat inside it. Radii are in grid cells; width may be fractional.
     pub fn paint_soft_band(&mut self, cx: i32, cy: i32, inner: f32, width: f32, intensity: i32) {
+        self.paint_falloff(cx, cy, inner, width, intensity, false);
+    }
+
+    /// Full threat through `inner`, then a linear falloff over `width`.
+    /// Unlike a separately painted integer circle and band, this keeps the
+    /// fractional weapon-range boundary filled, including cardinal cells.
+    pub fn paint_soft_circle(&mut self, cx: i32, cy: i32, inner: f32, width: f32, intensity: i32) {
+        self.paint_falloff(cx, cy, inner, width, intensity, true);
+    }
+
+    fn paint_falloff(&mut self, cx: i32, cy: i32, inner: f32, width: f32, intensity: i32, fill: bool) {
         if width <= 0.0 || !width.is_finite() || intensity <= 0 {
             return;
         }
@@ -76,8 +87,8 @@ impl ArrayGraphics {
             let dx = (i as i32 % grid_width - cx) as f32;
             let dy = (i as i32 / grid_width - cy) as f32;
             let distance = (dx * dx + dy * dy).sqrt();
-            if distance > inner && distance < outer {
-                let amount = (intensity as f32 * (outer - distance) / width).round() as i32;
+            if distance < outer && (fill || distance > inner) {
+                let amount = (intensity as f32 * ((outer - distance) / width).min(1.0)).round() as i32;
                 data[i] = data[i].saturating_add(amount).min(32767);
             }
         });
