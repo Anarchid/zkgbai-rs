@@ -354,7 +354,7 @@ pub struct EnergyWorker {
 pub enum Stage {
     /// The commander puts up the home guard before it sets out.
     Prepare,
-    /// The commander goes there and takes the spots.
+    /// The commander walks directly there; mex jobs resume on arrival.
     Walk,
     /// Arrived, the turrets did not pay yet: asked again every update.
     Watch,
@@ -1153,16 +1153,16 @@ impl Ai {
     /// Reserve opening mexes for ordinary constructors while the trip's
     /// objective search, factory plop and home guard are still pending.
     pub(super) fn conquest_skips_opening_mexes(&self, wid: i32) -> bool {
-        !self.dev_off("conquest")
-            && !self.conquest_push()
-            && !self.eco.conquest.done
-            && self.eco.commanders.contains(&wid)
-            && self
-                .eco
-                .conquest
-                .op
-                .as_ref()
-                .is_none_or(|op| op.crew == wid && matches!(op.stage, Stage::Prepare | Stage::Walk))
+        let c = &self.eco.conquest;
+        if self.dev_off("conquest") || self.conquest_push() || c.done || !self.eco.commanders.contains(&wid) {
+            return false;
+        }
+        match &c.op {
+            Some(op) => op.crew == wid && matches!(op.stage, Stage::Prepare | Stage::Walk),
+            // No objective on this map, or a search that never became ready:
+            // release the opening instead of withholding mexes indefinitely.
+            None => !c.objectives.is_empty() || (self.frame < 30 * 100 && !(c.asked && c.job.is_none())),
+        }
     }
 
     /// Own the commander's travel until arrival. Keep emergency retreats and
@@ -2182,6 +2182,11 @@ mod tests {
         let mex = WorkerTask::construction(UnitDef::from_id(ai.cb, 1).unwrap(), Vec3::default(), 0);
         assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], &mex));
         assert!(!ai.conquest_skips_opening_mexes(11), "ordinary constructors keep expanding");
+        ai.eco.conquest.asked = true;
+        assert!(!ai.conquest_skips_opening_mexes(10), "an empty search releases the opening");
+        ai.eco.conquest.asked = false;
+        ai.frame = 30 * 100;
+        assert!(!ai.conquest_skips_opening_mexes(10), "missing terrain cannot starve the opening forever");
         ai.eco.conquest.op = Some(walking());
         assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], &mex));
         ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Fortify;
