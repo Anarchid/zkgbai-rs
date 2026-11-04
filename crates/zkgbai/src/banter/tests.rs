@@ -467,16 +467,16 @@ fn conquest_marks_every_committing_ally_with_a_story_and_no_quip_cost() {
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].marker, Some(pa));
     assert_eq!(first[0].to, Channel::Allies);
-    relay(&first, a.tag(), &mut b, 31);
-    let second = b.due(60);
+    relay(&first, a.tag(), &mut b, 60);
+    let second = b.due(90);
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].id, "conquest.seconded");
     assert_eq!(second[0].marker, Some(pb));
     assert_eq!((a.used(), b.used()), (0, 0));
     // A later real commitment follows through, rather than an uninvolved
     // ally automatically replying to a marker.
-    relay(&second, b.tag(), &mut a, 61);
-    assert!(a.due(100).is_empty());
+    relay(&second, b.tag(), &mut a, 120);
+    assert!(a.due(130).is_empty());
 }
 
 #[test]
@@ -495,4 +495,40 @@ fn markers_obey_off_and_do_not_leak_enemy_intentions_or_steal_quips() {
     a.due(130);
     a.mark(140, "conquest", [2.0; 3], &Fields::new());
     assert!(a.due(200).is_empty()); // two commitments per game
+}
+
+#[test]
+fn conquest_story_survives_engine_chat_delivery_delay() {
+    let speakers: Vec<_> = (0..3).map(|i| speaker(&format!("ZKGBAI ({i})"), i, 0)).collect();
+    let mut bots: Vec<_> = speakers
+        .iter()
+        .map(|s| {
+            Banter::new(
+                Lexicon::builtin(),
+                s.clone(),
+                speakers.iter().filter(|p| p.team != s.team).cloned().collect(),
+                11,
+                None,
+            )
+        })
+        .collect();
+    for b in &mut bots {
+        b.mark(0, "conquest", [1.0; 3], &Fields::new());
+    }
+    for i in 0..3 {
+        let frame = 30 + i as i32 * 60;
+        let said = bots[i].due(frame);
+        assert_eq!(said.len(), 1);
+        if i == 1 {
+            assert_eq!(said[0].id, "conquest.seconded");
+        }
+        if i == 2 {
+            assert_eq!(said[0].id, "conquest.committee");
+        }
+        for (j, b) in bots.iter_mut().enumerate() {
+            if i != j {
+                relay(&said, &speakers[i].tag, b, frame + 30);
+            }
+        }
+    }
 }

@@ -458,13 +458,14 @@ impl Banter {
             return;
         }
         // Rank among allies gives simultaneous commitments time to hear
-        // one another before selecting the next line in the story.
+        // one another before selecting the next line in the story. Allow
+        // a full second for the engine to deliver an allied chat command.
         let rank = self.siblings.iter().filter(|s| s.ally_team == self.me.ally_team && s.team < self.me.team).count();
         self.marks.push(Mark {
             event: event.into(),
             pos,
             extra: extra.clone(),
-            due: frame + 30 + rank as i32 * 30,
+            due: frame + 30 + rank as i32 * 60,
             until: frame + 30 * 60,
         });
     }
