@@ -2831,6 +2831,58 @@ impl Ai {
                 }
             }
         }
+        self.eco_adopt_own_mex_frames(mex);
+    }
+
+    /// A job for each mex frame of ours that no job builds. Dropping a
+    /// job does not stop its worker, so a worker near the site can still
+    /// put the frame down before its next order. In team games this happens
+    /// at the start: a pregame spot that an ally's queue claims is dropped,
+    /// and a commander that starts beside the spot starts the mex anyway.
+    /// The frame makes the spot ours (`graph_unit_created`), so the capture
+    /// loop above never makes a job for it, and allies leave a frame this
+    /// cheap alone ([`super::allied::ASSIST_LEFT`]). On Adamantine Mountain 2
+    /// (3v3), two such frames in the shared base stayed at 1-5% all game.
+    fn eco_adopt_own_mex_frames(&mut self, mex: UnitDef) {
+        let frames: Vec<(Vec3, Unit)> = (self.graph.metal_spots.iter())
+            .filter_map(|ms| ms.extractor.map(|u| (ms.position, u)))
+            .filter(|&(_, u)| {
+                u.team() == self.team_id
+                    && u.health() > 0.0
+                    && u.is_being_built()
+                    && u.def().is_some_and(|d| d.id() == mex.id())
+            })
+            .collect();
+        for (position, u) in frames {
+            // A job at the spot not yet aimed at the frame gets it in
+            // `eco_clean_orders`.
+            let has_job = (self.eco.construction_tasks.iter()).any(|&id| {
+                self.eco.tasks.get(id).is_some_and(|t| {
+                    t.as_construction().is_some_and(|c| {
+                        c.target == Some(u)
+                            || (c.target.is_none()
+                                && c.build_type.id() == mex.id()
+                                && distance(t.position, position) < 1.0)
+                    })
+                })
+            });
+            if has_job || self.war.get_porc_threat(position) > 0.0 {
+                continue;
+            }
+            self.log(&format!(
+                "economy: our mex frame at ({:.0},{:.0}) ({:.0}% built) had no job: one made",
+                position.x,
+                position.z,
+                100.0 * u.build_progress()
+            ));
+            let mut ct = WorkerTask::construction(mex, position, 0);
+            if let Some(c) = ct.as_construction_mut() {
+                c.target = Some(u);
+                c.frame_issued = self.frame;
+            }
+            let id = self.eco.tasks.insert(ct);
+            self.eco.construction_tasks.push(id);
+        }
     }
 
     /// Commander upgrades; disabled in the original (`update` has the call
