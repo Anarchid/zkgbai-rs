@@ -146,8 +146,7 @@ impl Ai {
         let old = self.eco.rush.push.as_ref().and_then(|p| p.screen);
         let eligible = |sid: SquadId| {
             self.squads.get(sid).is_some_and(|s| {
-                s.status == 'a'
-                    && !s.fighters.is_empty()
+                !s.fighters.is_empty()
                     && !self.qrf_drafted(sid)
                     && !self.coalesce_owns_squad(sid)
                     && self.op_squad_target(sid).is_none()
@@ -167,7 +166,8 @@ impl Ai {
         }
     }
 
-    /// One active raider squad per allied AI screens the heavy. Its normal
+    /// One raider squad per allied AI screens the heavy, including a forming
+    /// squad rallying around its flank. Its normal
     /// QRF/operator/retreat checks take priority; unreachable or lethal
     /// ground is never a screen point (especially underneath a flying Krow).
     pub(crate) fn rush_push_screen(&self, sid: SquadId) -> Option<Vec3> {
