@@ -632,7 +632,7 @@ impl Ai {
     }
 
     /// Queue the next unit for factory (or strider hub) `fac_id`.
-    fn fac_assign_factory_task(&mut self, fac_id: i32) {
+    pub(crate) fn fac_assign_factory_task(&mut self, fac_id: i32) {
         // A new production decision means any uncreated prior scout order
         // was canceled; unfinished aircraft are counted from the team roster.
         self.scouts_air_idle(fac_id);
@@ -663,6 +663,17 @@ impl Ai {
         // of the factory's scout allowance.)
         if f.building_for.take() == Some(Role::SoloRaider) {
             f.scout_allowance -= 1;
+        }
+        // A rush (see `rush`): the rusher's factory builds its heavy, the
+        // others wait for it.
+        match self.rush_factory(fac_id) {
+            Some(super::rush::RushOrder::Heavy(def)) => {
+                self.log(&format!("rush: factory {fac_id} builds the {}", self.defs.name(def)));
+                self.rush_ordered();
+                return self.fac_build_ordered(fac_id, def);
+            }
+            Some(super::rush::RushOrder::Hold) => return,
+            None => {}
         }
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let mut fac = f.clone();

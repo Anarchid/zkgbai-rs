@@ -21,6 +21,7 @@ mod planning;
 mod plate;
 mod plop;
 mod rebuild;
+pub mod rush;
 mod safespot;
 mod silo;
 mod sparrow;
@@ -260,6 +261,8 @@ pub struct EconomyManager {
     /// The alliance's water side, decided in the pregame (see `plop`):
     /// (team, start spot).
     pub(crate) water_side: Option<(i32, Vec3)>,
+    /// The alliance's heavy rush (see `rush`).
+    pub(crate) rush: rush::Rush,
     /// When it was last said that no Bertha site was found.
     bertha_report: i32,
     last_repaired_unit: i32,
@@ -464,6 +467,7 @@ impl EconomyManager {
             plates: Vec::new(),
             plate_orphaned: BTreeMap::new(),
             water_side: None,
+            rush: rush::Rush::default(),
             bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
@@ -934,6 +938,7 @@ impl Ai {
         }
 
         self.eco_coordinate_plops();
+        self.rush_update(frame);
         self.eco_guard_commanders(frame);
         self.eco_assign_workers();
         self.iq_tick();

@@ -223,7 +223,9 @@ impl Ai {
         };
         // Busy terraforming (or just ordered to), or flown to a colony:
         // leave it to it.
-        let held = self.eco.terraform_hold.get(&wid).is_some_and(|&until| frame < until) || self.crab_escort(wid);
+        let held = self.eco.terraform_hold.get(&wid).is_some_and(|&until| frame < until)
+            || self.crab_escort(wid)
+            || self.rush_holds(wid);
         if !w.is_chicken && (held || super::terraform::is_terraforming(unit) || self.eco_in_transit(wid)) {
             self.eco.assigned.push_back(wid);
             return;
@@ -313,7 +315,10 @@ impl Ai {
         let frame = self.frame;
         // Idle, completion, move-failed and retreat-finished callbacks also
         // enter here directly, bypassing the round-robin reservation check.
-        if self.crab_escort(wid) || self.eco.terraform_hold.get(&wid).is_some_and(|&until| until > frame) {
+        if self.crab_escort(wid)
+            || self.rush_holds(wid)
+            || self.eco.terraform_hold.get(&wid).is_some_and(|&until| until > frame)
+        {
             return;
         }
         if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some() || self.jump_in_progress(w.unit)) {
