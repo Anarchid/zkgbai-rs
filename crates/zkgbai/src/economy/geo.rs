@@ -94,7 +94,7 @@ pub struct Geothermal {
     vents: Vec<Vec3>,
     scanned: bool,
     /// The plant morphing into an advanced one: (unit, where, since).
-    morph: Option<(Unit, Vec3, i32)>,
+    pub(super) morph: Option<(Unit, Vec3, i32)>,
     /// No upgrade before this frame.
     upgrade_after: i32,
     /// Why the last upgrade look found none, and when that was logged

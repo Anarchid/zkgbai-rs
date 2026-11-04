@@ -25,6 +25,7 @@ mod safespot;
 mod silo;
 mod sparrow;
 pub mod tasks;
+mod team_energy;
 pub mod terraform;
 mod watchtower;
 mod wind;
@@ -70,6 +71,7 @@ pub struct EconomyManager {
     /// (`energy_reserve`; see the scouts).
     pub energy: f32,
     pub energy_reserve: f32,
+    team_energy: team_energy::TeamEnergy,
     pub adjusted_income: f32,
     pub greed: f32,
     pub defended_fac: bool,
@@ -329,6 +331,7 @@ impl EconomyManager {
             metal: 0.0,
             energy: 0.0,
             energy_reserve: 0.0,
+            team_energy: team_energy::TeamEnergy::default(),
             adjusted_income: 0.0,
             greed: 0.0,
             defended_fac: false,
@@ -823,6 +826,7 @@ impl Ai {
             self.eco_watch_allied_projects();
             // remove finished or invalidated tasks
             self.eco_clean_orders();
+            self.eco_plan_team_energy();
             self.eco_plan_army_support();
 
             for u in &self.eco.screamers {

@@ -375,6 +375,7 @@ impl Ai {
         // too while metal floats for want of it.)
         if (!is_greedy || self.eco_floating_on_energy())
             && self.eco.estalled
+            && self.eco_team_energy_needed()
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {
             self.eco_create_energy_task(wid, position);
@@ -2214,6 +2215,10 @@ impl Ai {
     }
 
     fn eco_create_fusion_task(&mut self) {
+        // Allied reactors use one shared demand and starter, once a second.
+        if !self.allies.is_empty() {
+            return;
+        }
         if self.fac.factories.is_empty() {
             return;
         }

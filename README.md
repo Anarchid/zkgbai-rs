@@ -382,6 +382,15 @@ a side's metal lies under water, one instance takes the start nearest it and an 
 3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on
 the ally's (`disable=plates` builds our own instead).
 
+In allied games, reactors follow an alliance-wide energy goal based on total mex income and the existing
+territory/phase ramp. Existing production, unfinished energy plants (at full completed output), geothermal
+upgrades and the starter's queued energy jobs count toward it. Three standing reactors anywhere in the
+alliance unlock a Singularity for a deficit of at least two Fusions' output; smaller gaps use a Fusion or
+small plants. The lowest eligible ZKGBAI team starts reactors, one at a time, and nearby allies help finish
+them. A replacement starter waits two seconds for old unstarted orders to be cleared. Small plants may
+still bridge an immediate energy shortage while a reactor builds. The `team energy:` log lines report
+the goal, production, committed output, deficit and starter. Solo reactor progression is unchanged.
+
 Operator API and run journal
 ----------------------------
 
