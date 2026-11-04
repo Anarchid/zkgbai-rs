@@ -20,12 +20,13 @@
 
 use std::collections::BTreeSet;
 
-use springai::Vec3;
+use springai::{UnitDef, Vec3};
 use zk_terrain::Tier;
 
-use super::planning::factory_tier;
+use super::planning::{exit_lane, factory_tier, keeps_exit};
 use crate::Ai;
-use crate::util::{NULLPOS, distance};
+use crate::iq::CLAIM_LAPSES;
+use crate::util::{NULLPOS, distance, get_directional_point};
 
 /// Land constructors wade this deep, elmos (`maxWaterDepth`).
 const WADE: f32 = 22.0;
@@ -83,6 +84,29 @@ fn diverse(viable: &BTreeSet<String>, used: &BTreeSet<String>) -> BTreeSet<Strin
     let unused: BTreeSet<_> = viable.difference(used).cloned().collect();
     // A duplicate that can play the map is better than no factory.
     if unused.is_empty() { viable.clone() } else { unused }
+}
+
+/// Half the sides (x, z) of `def`'s footprint at `facing`, padded by `pad`
+/// squares, elmos.
+fn half_extents(def: UnitDef, facing: i32, pad: f32) -> (f32, f32) {
+    let (x, z) = ((def.x_size() as f32 + pad) * 4.0, (def.z_size() as f32 + pad) * 4.0);
+    if facing % 2 == 0 { (x, z) } else { (z, x) }
+}
+
+/// Whether a footprint of half sides `(hx, hz)` at `pos` stays clear of a
+/// factory planned at `plan` (`(pdef, ppos, pface)`): its footprint padded
+/// by a square, and the lane its units leave by.
+fn clear_of_plan(pos: Vec3, (hx, hz): (f32, f32), plan: (UnitDef, Vec3, i32), name: &str) -> bool {
+    let (pdef, ppos, pface) = plan;
+    let (px, pz) = half_extents(pdef, pface, 1.0);
+    let on_frame = (ppos.x - pos.x).abs() < hx + px && (ppos.z - pos.z).abs() < hz + pz;
+    let lane = exit_lane(pdef, ppos, pface);
+    let in_lane = keeps_exit(name)
+        && pos.x + hx > lane[0]
+        && pos.x - hx < lane[2]
+        && pos.z + hz > lane[1]
+        && pos.z - hz < lane[3];
+    !on_frame && !in_lane
 }
 
 impl Ai {
@@ -176,6 +200,73 @@ impl Ai {
             site.z
         ));
         Some((team, site))
+    }
+
+    /// Whether commander `wid`'s plop job is gone with the plop unspent and
+    /// no factory of ours standing: dropped unbuilt, its site blocked (an
+    /// ally's plop landed on it first, as on AlienDesert 2026-11-03, where
+    /// a commander then built turrets for 15 minutes and never a factory).
+    /// The commander is then free for a new plop job (see
+    /// `eco_generate_tasks`), which this logs.
+    pub(super) fn eco_plop_lost(&mut self, wid: i32) -> bool {
+        let queued = (self.eco.factory_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)))
+            .any(|t| t.as_construction().is_some_and(|c| c.fac_plop && c.assigned_plop == wid));
+        if queued || !self.fac.factories.is_empty() {
+            return false;
+        }
+        if let Some(w) = self.eco.workers.get_mut(&wid) {
+            w.assigned_plop = false;
+        }
+        self.log("economy: our plop job is gone and the plop unspent (its site blocked?); replanning it");
+        true
+    }
+
+    /// The factories queued by the allies we give way to (see
+    /// `iq_gives_way`) with none of theirs standing yet, until the claims
+    /// lapse: where they will plop. (def, position, facing, name) None
+    /// with `disable=plopclear`.
+    fn eco_allied_plop_plans(&self) -> Vec<(UnitDef, Vec3, i32, String)> {
+        if self.allies.is_empty() || self.frame >= CLAIM_LAPSES || self.dev_off("plopclear") {
+            return Vec::new();
+        }
+        (self.iq.teams.iter())
+            .filter(|&(&team, _)| self.iq_gives_way(team) && !self.iq.placed_factories.contains_key(&team))
+            .flat_map(|(_, plans)| plans.iter())
+            .filter(|p| p.def_name.starts_with("factory"))
+            .filter_map(|p| Some((self.defs.get(&p.def_name)?, p.pos, p.face, p.def_name.clone())))
+            .collect()
+    }
+
+    /// Whether `def` at `pos` facing `facing` stays clear of the factories
+    /// allies we give way to will plop (see `eco_allied_plop_plans`): a
+    /// plop lands at once, so ours queued on the same frame on top of theirs
+    /// is blocked when its builder gets there.
+    pub(crate) fn eco_clear_of_allied_plops(&self, def: UnitDef, pos: Vec3, facing: i32) -> bool {
+        let ours = half_extents(def, facing, 0.0);
+        (self.eco_allied_plop_plans().into_iter())
+            .all(|(pdef, ppos, pface, name)| clear_of_plan(pos, ours, (pdef, ppos, pface), &name))
+    }
+
+    /// Where to look for our first factory site from `from`: off the
+    /// factories allies we give way to will plop, by as much as our factory
+    /// plus the reach of the site search (commanders that start on top of
+    /// each other, as when a start box has fewer spots than players).
+    pub(crate) fn eco_plop_search_origin(&self, factory: UnitDef, from: Vec3, reach: f32) -> Vec3 {
+        let mut from = from;
+        let ours = factory.x_size().max(factory.z_size()) as f32 * 4.0;
+        for (pdef, ppos, _, _) in self.eco_allied_plop_plans() {
+            let theirs = (pdef.x_size().max(pdef.z_size()) as f32 + 1.0) * 4.0;
+            let need = theirs + ours + reach + 40.0;
+            let d = distance(ppos, from);
+            if d < need {
+                from = if d > 1.0 {
+                    get_directional_point(ppos, from, need)
+                } else {
+                    get_directional_point(ppos, self.graph.get_map_center(), -need)
+                };
+            }
+        }
+        from
     }
 
     pub(super) fn eco_wait_for_allied_plop(&self) -> bool {
@@ -348,8 +439,13 @@ mod tests {
             STOPS.with(|s| s.set(s.get() + 1));
             0
         }
+        unsafe extern "C" fn squares(_: i32, _: i32) -> i32 {
+            8
+        }
         DEFS_READY.with(|v| v.set(false));
         let mut ai = test_ai_with(|t| {
+            t.UnitDef_getXSize = Some(squares);
+            t.UnitDef_getZSize = Some(squares);
             t.getUnitDefs = Some(ids);
             t.UnitDef_getName = Some(name);
             t.UnitDef_getBuildSpeed = Some(power);
@@ -385,6 +481,62 @@ mod tests {
         ai.eco.assigned.push_back(10);
         STOPS.with(|s| s.set(0));
         (ai, id)
+    }
+
+    #[test]
+    fn a_plop_job_dropped_unbuilt_frees_the_commander_for_another() {
+        let (mut ai, id) = pending_plop();
+        assert!(ai.eco.workers[&10].has_plop());
+        assert!(!ai.eco_plop_lost(10), "the job still stands");
+        assert!(ai.eco.workers[&10].assigned_plop);
+        // As `eco_clean_orders` drops it when an ally's plop blocks its site.
+        ai.eco.drop_construction_task(id);
+        assert!(ai.eco.workers[&10].assigned_plop, "the stuck state: assigned, plop unspent, no job");
+        assert!(ai.eco_plop_lost(10));
+        assert!(!ai.eco.workers[&10].assigned_plop);
+    }
+
+    #[test]
+    fn first_factory_sites_keep_off_the_plops_of_allies_we_give_way_to() {
+        let (mut ai, _) = pending_plop();
+        assert_eq!(ai.team_id, 2);
+        let def = ai.defs.get("factorygunship").unwrap(); // 8 x 8 squares
+        let plan = |x: f32| crate::iq::Plan {
+            def_name: "factorygunship".into(),
+            def_id: def.id(),
+            pos: Vec3::xz(x, 1000.0),
+            face: 0,
+            frame: 0,
+        };
+        ai.iq.teams.insert(0, vec![plan(1000.0)]); // a lower AI: we give way
+        ai.iq.teams.insert(4, vec![plan(3000.0)]); // a higher AI: it gives way
+        // Half sides 32 (ours) + 36 (theirs, padded a square) = 68.
+        assert!(!ai.eco_clear_of_allied_plops(def, Vec3::xz(1060.0, 1000.0), 0));
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(1070.0, 1000.0), 0));
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(3000.0, 1000.0), 0));
+        let from = ai.eco_plop_search_origin(def, Vec3::xz(1020.0, 1000.0), 52.0);
+        assert!((from.x - (1000.0 + 36.0 + 32.0 + 52.0 + 40.0)).abs() < 0.5 && (from.z - 1000.0).abs() < 0.5);
+        let far = Vec3::xz(1000.0, 1500.0);
+        assert_eq!(ai.eco_plop_search_origin(def, far, 52.0), far);
+        // Once theirs stands, the engine keeps us off it; the plan binds no more.
+        ai.iq.placed_factories.insert(0, names(&["factorygunship"]));
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(1060.0, 1000.0), 0));
+        ai.iq.placed_factories.clear();
+        // Nor once the claims lapse.
+        ai.frame = CLAIM_LAPSES;
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(1060.0, 1000.0), 0));
+    }
+
+    #[test]
+    fn a_planned_factory_keeps_its_exit_lane_unless_it_makes_aircraft() {
+        let (ai, _) = pending_plop();
+        let def = ai.defs.get("factorygunship").unwrap();
+        let plan = (def, Vec3::xz(1000.0, 1000.0), 0); // facing south
+        let ours = half_extents(def, 0, 0.0);
+        let south = Vec3::xz(1000.0, 1000.0 + 36.0 + 32.0 + 40.0); // off its frame, in its lane
+        assert!(clear_of_plan(south, ours, plan, "factorygunship"));
+        assert!(!clear_of_plan(south, ours, plan, "factoryveh"));
+        assert!(clear_of_plan(Vec3::xz(1000.0, 1000.0 - 36.0 - 32.0 - 40.0), ours, plan, "factoryveh"));
     }
 
     #[test]

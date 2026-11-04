@@ -446,10 +446,13 @@ impl Ai {
             return;
         };
         let position = worker.get_pos();
-        let (is_com, is_greedy, assigned_plop) = (worker.is_com, worker.is_greedy, worker.assigned_plop);
+        let (is_com, is_greedy, mut assigned_plop) = (worker.is_com, worker.is_greedy, worker.assigned_plop);
 
         // do we need a factory?
         let has_plop = worker.has_plop();
+        if has_plop && assigned_plop && self.eco_plop_lost(wid) {
+            assigned_plop = false;
+        }
         {
             let eco = &self.eco;
             // Income for factory timing, on the phase clock (`densgate`).
@@ -877,13 +880,17 @@ impl Ai {
     /// when nothing fits. Also run from `init` for the pregame
     /// announcement, before any unit exists.
     pub(crate) fn eco_first_factory_site(&self, factory: UnitDef, from: Vec3) -> Option<(Vec3, i32)> {
+        let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
+        // Off where allies we give way to will plop (see `plop`).
+        let from = self.eco_plop_search_origin(factory, from, clearance + 20.0);
         let facings = self.eco_factory_facings(from);
         let facing = facings[0];
         let exit = self.eco_exit_check(factory);
         let mut best: Option<(Vec3, i32, f32)> = None;
+        // The best site found on an ally's plop, if none is clear of them.
+        let mut best_on_plop: Option<(Vec3, i32, f32)> = None;
         let map_center = self.graph.get_map_center();
         let closest_spot = |p: Vec3| self.graph.get_closest_spot(p).map(|s| s.get_pos());
-        let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
         for i in 1..=11 {
             let mut position = get_directional_point(from, map_center, clearance + 20.0);
             position = self.eco_build_site(factory, position, facing);
@@ -895,6 +902,7 @@ impl Ai {
                 || !self.cb.features_in(position, clearance).is_empty()
                 || closest.is_some_and(|c| distance(c, position) < 100.0)
                 || !self.eco_build_check(factory, position, 0)
+                || !self.eco_clear_of_allied_plops(factory, position, facing)
             {
                 if j > 5 {
                     break;
@@ -909,16 +917,18 @@ impl Ai {
                 closest = closest_spot(position);
             }
             // only for preventing stupid placement; then a way out for its units
-            if let Some(site) = self.eco_factory_exit(factory, position, facings, exit.as_ref())
-                && best.is_none_or(|b| site.2 < b.2)
-            {
-                best = Some(site);
+            if let Some(site) = self.eco_factory_exit(factory, position, facings, exit.as_ref()) {
+                let slot =
+                    if self.eco_clear_of_allied_plops(factory, site.0, site.1) { &mut best } else { &mut best_on_plop };
+                if slot.is_none_or(|b| site.2 < b.2) {
+                    *slot = Some(site);
+                }
             }
             if best.is_some_and(|b| b.2 < EXIT_CLEAR) {
                 break;
             }
         }
-        best.map(|(pos, face, _)| (pos, face))
+        best.or(best_on_plop).map(|(pos, face, _)| (pos, face))
     }
 
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
@@ -1157,7 +1167,11 @@ impl Ai {
         } else if self.fac.factories.is_empty() || is_plop {
             // Where the pregame announced it to allies, if it still fits.
             let announced = (self.eco.opening_site.take())
-                .filter(|&(def, pos, face)| def.id() == factory.id() && self.eco_build_check(factory, pos, face))
+                .filter(|&(def, pos, face)| {
+                    def.id() == factory.id()
+                        && self.eco_build_check(factory, pos, face)
+                        && self.eco_clear_of_allied_plops(factory, pos, face)
+                })
                 .map(|(_, pos, face)| (pos, face));
             let Some(site) = announced.or_else(|| self.eco_first_factory_site(factory, wpos)) else {
                 restore(self, &fac_name);
