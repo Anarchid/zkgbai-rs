@@ -1,8 +1,10 @@
 //! Opening heavies use Pack navigation with a fixed strategic destination.
 //! Local probes may bend the route; sightings never replace the destination.
 use super::*;
+use crate::defs::cmd;
 use crate::military::rush_push::rush_prize;
 use crate::military::taskforce::Aim;
+use springai::NO_TIMEOUT;
 
 const PROBE_EVERY: i32 = 90;
 const COMMIT_FOR: i32 = 240;
@@ -229,6 +231,7 @@ impl Ai {
         let destination = if retreating { home } else { st.waypoint.unwrap_or(goal) };
         if retreating {
             if st.shot.take().is_some() {
+                heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
                 st.driven = 0;
             }
             heavy.set_fire_state(0, 0);
@@ -334,12 +337,13 @@ impl Ai {
             self.op_emit("rush-pack",json!({"event":"range-hold","unit":heavy.id(),"target":id,"range":reach,"distance":distance(heavy.pos(),at)}));
         }
         st.driven = 0;
-        heavy.set_move_state(0, 0); // Explicit attack cannot chase beyond this firing position.
+        heavy.set_move_state(0, 0);
         if distance(heavy.pos(), at) < 0.82 * reach {
             let angle = (heavy.pos().z - at.z).atan2(heavy.pos().x - at.x);
             let stand = Vec3::xz(at.x + 0.9 * reach * angle.cos(), at.z + 0.9 * reach * angle.sin());
             if heavy.def().is_some_and(|d| self.terrain_reaches(d, heavy.pos(), stand, 0.0)) {
                 st.shot = None;
+                heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
                 self.pack_go(sid, heavy.pos(), heading(heavy.vel(), heavy.pos(), stand), stand, false);
                 return true;
             }
@@ -381,6 +385,7 @@ impl Ai {
                 return true;
             }
             st.shot = None;
+            heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
             st.next_shot = frame + MOVE_BETWEEN_SHOTS;
             st.driven = 0; // Replace the bounded attack immediately with movement.
             return false;
@@ -421,7 +426,10 @@ impl Ai {
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             heavy.set_fire_state(0, 0);
-            if heavy.attack(target, 0) {
+            // An explicit ATTACK can path toward a clearer firing line even
+            // on hold-position. Aim only the weapon while movement is stopped.
+            heavy.stop(0);
+            if heavy.execute_custom_command(cmd::UNIT_SET_TARGET, &[target.id() as f32], 0, NO_TIMEOUT) {
                 st.shot = Some(Shot {
                     target: target.id(),
                     until: frame + SHOT_FOR,
