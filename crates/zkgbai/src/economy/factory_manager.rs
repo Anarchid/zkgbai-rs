@@ -341,14 +341,17 @@ impl Ai {
         if frame % 60 != self.offset % 60 {
             return;
         }
-        // Deliberately idle air plants need another decision when missions change;
-        // the engine does not keep sending idle events for an empty queue.
+        // Deliberately idle air plants need another decision when missions change
+        // (or an `airstall` ends); the engine does not keep sending idle events for
+        // an empty queue.
         let idle_air: Vec<i32> = self
             .fac
             .factories
             .iter()
             .filter(|(_, f)| {
-                f.kind() == FacKind::Plane && !f.unit.is_being_built() && f.unit.num_current_commands() == 0
+                matches!(f.kind(), FacKind::Plane | FacKind::Gunship)
+                    && !f.unit.is_being_built()
+                    && f.unit.num_current_commands() == 0
             })
             .map(|(&id, _)| id)
             .collect();
@@ -742,7 +745,11 @@ impl Ai {
                 || self.firefighters_order(kind) == Some(choice)
                 || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
         let picked = choice;
-        let choice = match (ai_wants_builder || special, fac.unit) {
+        // An air plant idle for an `airstall` stays idle: home defenders and
+        // taskforce units from it would be aircraft too (the floor's
+        // garrison took 15 Locusts so, 2026-11-04).
+        let hold = choice.is_empty() && self.air_stalled();
+        let choice = match (ai_wants_builder || special || hold, fac.unit) {
             (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
             _ => choice,
         };
@@ -761,6 +768,7 @@ impl Ai {
         let options = fac.unit.def().map(|d| d.build_options()).unwrap_or_default();
         if !ai_wants_builder
             && !special
+            && !hold
             && let Some((def, doctrine, role)) = self.squad_produce(&options)
         {
             let name = self.defs.name(def).to_owned();
@@ -784,6 +792,18 @@ impl Ai {
         // Empty is an intentional production pause, not a missing unit def.
         if choice.is_empty() {
             return;
+        }
+        // (Firefighters and anti-air gunships are meant; anything else that
+        // fights from a stalled plant is a leak to find.)
+        if self.airstall_leaks(choice)
+            && self.firefighters_order(kind) != Some(choice)
+            && !self.unit_classes.aas.contains(choice)
+        {
+            self.log(&format!(
+                "airstall: factory {fac_id} builds a {choice} while air stands stalled (picked {picked}, special \
+                 {special}, hold {hold}, strike {})",
+                strike.is_some()
+            ));
         }
         if kind == FacKind::Plane && self.firefighters_order(kind) != Some(choice) {
             self.airstrike_ordered(fac_id, choice);
@@ -1828,12 +1848,13 @@ impl Ai {
         // The C++ port no longer builds Blastwings (gunshipbomb) for
         // raider spam: the AI does not know how to use them.
 
-        if fac.expensive_raider_spam < 0.0 {
+        // (Owed Nimbuses wait out an `airstall` too.)
+        if fac.expensive_raider_spam < 0.0 && !self.air_stalled() {
             fac.expensive_raider_spam += 1.0;
             return "gunshipheavyskirm";
         }
 
-        if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
+        if self.fac_need_workers(fac) || self.eco_wants_air_colonist() || self.airstall_wants_con() {
             return "gunshipcon";
         }
         if let Some(name) = self.firefighters_order(FacKind::Gunship) {
@@ -1846,6 +1867,12 @@ impl Ai {
 
         if eminent && self.fac_aa_roll() {
             return "gunshipaa";
+        }
+
+        // `airstall`: no gunships while ours do not pay (see
+        // `military::airstall`); the metal goes elsewhere.
+        if self.air_stalled() {
+            return "";
         }
 
         if kgb_rand() > 0.75 {
@@ -1873,6 +1900,11 @@ impl Ai {
     }
 
     fn fac_get_planes(&self, fac: &mut Factory) -> &'static str {
+        // (Grounded but for the constructors an air-only `airstall` wants: they
+        // raise its plate or superweapon.)
+        if self.airstall_wants_con() {
+            return "planecon";
+        }
         if self.bomber_handler.grounded {
             return "";
         }
@@ -1884,6 +1916,11 @@ impl Ai {
         }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
             return scouts::OWL;
+        }
+        // `airstall`: no bombers while ours do not pay (see
+        // `military::airstall`), whatever the missions say.
+        if self.air_stalled() {
+            return "";
         }
         // Primary missions buy aircraft; secondary missions only use the fleet.
         self.airstrike_production().unwrap_or("")

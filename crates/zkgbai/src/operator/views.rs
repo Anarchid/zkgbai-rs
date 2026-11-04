@@ -1268,6 +1268,7 @@ pub fn tick_value(ai: &Ai) -> Value {
         f.contact.1.round() as i64,
         ai.front_retired()
     ]);
+    let (air_killed, air_lost) = ai.war.air.trade();
     json!({
         "m": res(ai.metal),
         "e": res(ai.energy),
@@ -1290,6 +1291,9 @@ pub fn tick_value(ai: &Ai) -> Value {
         // off): smoothed, ratchet, escalation, our metal in contact, all ours,
         // and whether pickets, garrisons and scouts stood down (`frontretire`).
         "front": front,
+        // `airstall`: metal our armed aircraft killed and lost in the last 5
+        // minutes, and whether air production stands stalled.
+        "air": [air_killed.round() as i64, air_lost.round() as i64, ai.air_stalled()],
         // `densgate`: phase minute, income scale, phase income, map diagonal.
         "phase": if ai.phase_on() {
             json!([r1(ai.phase_minutes()), r2(ai.phase_scale()), r1(ai.phase_income()), ai.phase_map_diag().round() as i64])

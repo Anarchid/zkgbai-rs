@@ -298,6 +298,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Defense",
         "once the fight density reaches 2000, pickets, lookers, garrisons and scout builds stand down for good; QRF teams stay (default on)",
     ),
+    (
+        "airstall",
+        "Army",
+        "air plants stop building combat aircraft while ours lose 1500+ metal in 5 minutes and kill under 0.6 of it; with nothing but air factories, a plate on an ally's ground factory, else a superweapon (default on)",
+    ),
     ("jumps", "Army", "jumpjets jump"),
     (
         "lobsters",
