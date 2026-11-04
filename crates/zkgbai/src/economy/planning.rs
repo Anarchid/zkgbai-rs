@@ -171,6 +171,11 @@ pub(super) const AIR_TEMPO_WHY: &str = "air tempo";
 /// game. `disable=airfire`.
 pub(super) const AIR_FIRE_WHY: &str = "air fire";
 
+/// Air stall: our aircraft do not pay and every factory of ours makes
+/// them (see `military::airstall`): a plate on an ally's ground factory,
+/// and nothing but a plate (no factory of our own for it).
+pub(super) const AIR_STALL_WHY: &str = "air stall";
+
 /// Whether a requisition's reason is one of the air ones (fire or tempo).
 pub(super) fn is_air_requisition(why: &str) -> bool {
     why.starts_with(AIR_FIRE_WHY) || why.starts_with(AIR_TEMPO_WHY)
@@ -503,6 +508,11 @@ impl Ai {
                         || (eco.requisition.as_ref().is_some_and(|(_, why)| is_air_requisition(why))
                             && (nfac as f32) < 1.0 + phase_static / NEW_FAC_PER))
                     && no_fac_tasks)
+                // a plate in place of the air that stopped paying (cheap:
+                // no income gate)
+                || (eco.requisition.as_ref().is_some_and(|(f, why)| why.starts_with(AIR_STALL_WHY) && !self.eco_has_factory(f))
+                    && nfac >= 1
+                    && no_fac_tasks)
                 || (phase_static > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
                 // a factory of a new type, now and then
                 || (eco.new_fac_due && nfac >= 1 && no_fac_tasks)
@@ -664,11 +674,17 @@ impl Ai {
         } else {
             self.eco_alliance_reactors()
         };
+        // (`airstall`: nothing but air factories, air stalled and no ally's
+        // ground factory to plate: a superweapon whatever the reactors.)
+        let air_super = reactors <= 4 && self.eco_air_stall_super();
         if !self.eco.chose_sup_wep
             && !self.eco_energy_starved()
             && (self.merged_allies == 0 || (self.eco.has_striders && self.fac.num_striders > 1))
-            && reactors > 4
+            && (reactors > 4 || air_super)
         {
+            if air_super {
+                self.log("airstall: nothing but air factories and no allied ground factory to plate: a superweapon");
+            }
             self.eco_choose_super_weapon();
         }
 
@@ -1152,8 +1168,9 @@ impl Ai {
         // A type an ally has (standing or rising): a plate on theirs instead
         // (see `plate`). Else ours in our turn, so allies that want the
         // type at once do not each build one. Not the opening, nor while
-        // energy is what we lack.
-        if !is_plop && nfac > 0 && !self.eco_energy_starved() {
+        // energy is what we lack (but the air stall's 150-metal plate).
+        let stall_plate = asked.as_ref().is_some_and(|(f, why)| *f == fac_name && why.starts_with(AIR_STALL_WHY));
+        if !is_plop && nfac > 0 && (!self.eco_energy_starved() || stall_plate) {
             if let Some(id) = self.eco_plate_instead(wid, factory) {
                 if let Some((f, why)) = &asked
                     && *f == fac_name
@@ -1172,6 +1189,16 @@ impl Ai {
                 self.eco.new_fac_due = fac_due;
                 return;
             }
+        }
+        // The air stall asks for a plate; no plate (yet), no factory of our
+        // own for it (the requisition stays asked for, see `airstall`).
+        if stall_plate {
+            if self.frame - self.war.air.plate_logged >= 30 * 60 {
+                self.war.air.plate_logged = self.frame;
+                let why = self.eco_plate_blocked(wid, &fac_name);
+                self.log(&format!("airstall: no plate for the {fac_name} yet (worker {wid}): {why}"));
+            }
+            return;
         }
 
         let Some(wpos) = self.eco.workers.get(&wid).map(|w| w.get_pos()) else {
@@ -1810,6 +1837,9 @@ impl Ai {
     /// The factory a module wants, why, and what that answers in metal
     /// (for `logistics`).
     fn eco_find_requisition(&self) -> Option<(String, String, f32)> {
+        if let Some(r) = self.eco_air_stall_requisition() {
+            return Some(r);
+        }
         if let Some((f, gap, fills)) = self.eco_reach_gap() {
             // The metal out of reach, as income over a payback period.
             let value = gap * self.eco.static_income * crate::logistics::PAYBACK;
