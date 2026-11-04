@@ -27,7 +27,10 @@
 //!   way, and nothing climbs to it (the terraform skirt falls at 74
 //!   degrees, steeper than even spiders take). On a spire near the place as
 //!   it stands (the site needing least raising, then the nearest); else the
-//!   nearest constructors raise the rest first and it goes up on top. The
+//!   nearest constructors raise the rest first and it goes up on top (not
+//!   with an enemy within [`RAISE_CLEAR`] of the site: the gadget then
+//!   raises 20 times slower; one that comes that close mid-raise has the
+//!   Lucifer go up on what there is). The
 //!   site covers the place against the force (whatever has the place in
 //!   its reach is in the Lucifer's), is not in front of the place, and sees
 //!   the force's approach. The Desolator stands toward the force on the
@@ -140,6 +143,12 @@ const SITE_SLACK: f32 = 24.0;
 /// A place no heavy could be had for is not looked at again for this many
 /// frames (the spire search is some thousand points).
 const REFUSED: i32 = 300;
+
+/// No platform is raised (or raised on) with an enemy seen within this of
+/// its site lately: the gadget raises 20 times slower with one within
+/// about 170 of it (smoke1/g3: 0 of 80 in 61 s), elmos and frames.
+const RAISE_CLEAR: f32 = 300.0;
+const RAISE_SEEN: i32 = 90;
 
 /// Constructors that raise a platform; frames it gets; constructors sent
 /// one after another as they are called away; frames before their orders
@@ -402,11 +411,10 @@ impl Ai {
         } else {
             0.0
         };
-        // A platform only if it is up before the force arrives: with an
-        // enemy beside it the raise goes 20 times slower (the gadget's
-        // enemy penalty; smoke1/g3 got 0 of 80 in 61 s), and a Lucifer on
-        // the ground fires sooner than none.
-        let raising = raise > UP_SLACK && raise_s <= a.seconds.max(a.dwell) - MARGIN;
+        // No platform where an enemy stands by already (see `RAISE_CLEAR`):
+        // the Lucifer goes on the ground there.
+        let clear = self.walkin_heavy_enemy_near(site) > RAISE_CLEAR;
+        let raising = raise > UP_SLACK && clear;
         let eta = if raising { raise_s } else { 0.0 }
             + finish_time(&hands[..k], def.build_time(), def.cost(self.metal), metal, income) * STRETCH;
         if eta > ETA {
@@ -426,7 +434,7 @@ impl Ai {
             porc_power(def),
             match &perch {
                 Some(p) if raising => format!(", on a platform raised {:.0}", p.raise),
-                Some(p) if p.raise > UP_SLACK => format!(" on the ground (raising {:.0} takes {raise_s:.0}s)", p.raise),
+                Some(p) if p.raise > UP_SLACK => format!(" on the ground (an enemy within {RAISE_CLEAR:.0})"),
                 Some(_) => " on a spire".to_owned(),
                 None => String::new(),
             }
@@ -633,6 +641,14 @@ impl Ai {
         }
     }
 
+    /// How far the nearest enemy seen lately ([`RAISE_SEEN`]) is from `p`.
+    fn walkin_heavy_enemy_near(&self, p: Vec3) -> f32 {
+        (self.war.targets.values())
+            .filter(|e| !e.is_dead && self.frame - e.last_seen <= RAISE_SEEN)
+            .map(|e| distance(e.position, p))
+            .fold(f32::INFINITY, f32::min)
+    }
+
     /// See to the platform going up: another constructor when one is
     /// called away, the Lucifer on top once it is up (or has had its time),
     /// dropped when no force calls for it.
@@ -648,6 +664,9 @@ impl Ai {
         let quiet = frame - r.ordered > RAISE_GRACE && !busy;
         let done = up >= asked - UP_SLACK;
         let (since, tries, called) = (r.since, r.tries, r.called);
+        // An enemy at the platform: the Lucifer goes up on what there is.
+        let enemy = self.walkin_heavy_enemy_near(site);
+        let beset = !done && enemy <= RAISE_CLEAR;
         if frame - called > STAND_DOWN {
             let Some(r) = self.logistics.walkin.heavy.raise.take() else { return };
             self.eco_release_terraform(&r.workers);
@@ -659,7 +678,7 @@ impl Ai {
             ));
             return;
         }
-        if !done && quiet && tries < RAISE_TRIES && frame - since <= RAISE_FRAMES {
+        if !done && !beset && quiet && tries < RAISE_TRIES && frame - since <= RAISE_FRAMES {
             let workers = self.walkin_heavy_raisers(site);
             if workers.is_empty() {
                 return;
@@ -679,7 +698,7 @@ impl Ai {
             }
             return;
         }
-        if !(done || quiet || frame - since > RAISE_FRAMES) {
+        if !(done || beset || quiet || frame - since > RAISE_FRAMES) {
             return;
         }
         let Some(r) = self.logistics.walkin.heavy.raise.take() else { return };
@@ -703,10 +722,6 @@ impl Ai {
                 format!("{}@{:.0} {state}", u.id(), distance(u.pos(), site))
             })
             .collect();
-        let enemy = (self.war.targets.values())
-            .filter(|e| !e.is_dead && frame - e.last_seen <= 90)
-            .map(|e| distance(e.position, site))
-            .fold(f32::INFINITY, f32::min);
         self.log(&format!(
             "walkin: heavy: platform at ({:.0}, {:.0}) {up:.0} of {asked:.0} up after {:.0}s (raisers {}; nearest \
              enemy seen {enemy:.0} off); {}",

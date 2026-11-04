@@ -889,7 +889,9 @@ impl Ai {
     fn walkin_note(&mut self, event: &'static str, a: &Assessment, extra: Value) {
         let key = ((a.place.anchor.x / 256.0) as i32, (a.place.anchor.z / 256.0) as i32, event);
         let frame = self.frame;
-        if event != "open" && self.logistics.walkin.notes.get(&key).is_some_and(|&f| frame - f < NOTE_FRAMES) {
+        if !matches!(event, "open" | "heavy" | "heavy_raise")
+            && self.logistics.walkin.notes.get(&key).is_some_and(|&f| frame - f < NOTE_FRAMES)
+        {
             return;
         }
         self.logistics.walkin.notes.insert(key, frame);
