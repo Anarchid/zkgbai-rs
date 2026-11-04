@@ -37,6 +37,12 @@ use crate::posture::Posture;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
+/// Allied starts at least this far apart, elmos: where our start box has
+/// fewer metal spots than we are, the later ones start off the spots.
+const START_SPREAD: f32 = 300.0;
+/// No start is worth more for being farther than this from the others.
+const START_ROOM: f32 = 450.0;
+
 /// Experimental features that are off unless named in the `enable` option
 /// (or ZKGBAI_ENABLE): `pairs` (Constables pair up on builds) lost its
 /// mirror 3-5, expanding slower (12.5 mexes to 16.5 at minute 10) though
@@ -1185,18 +1191,21 @@ impl Ai {
         if self.allies.len() > 1 {
             cached.push(central_spot(&spots));
         }
+        // (Where the box has fewer spots than we are, a start off them: see
+        // `spread_start`.)
+        let box_spots = spots.clone();
         let mut best = *spots
             .iter()
             .max_by(|a, b| distance(**a, map_center).total_cmp(&distance(**b, map_center)))
             .expect("spots is not empty");
+        if cached.iter().any(|&c| distance(c, best) < START_SPREAD) {
+            best = self.spread_start(&cached, &box_spots).unwrap_or(best);
+        }
         cached.push(best);
         spots.retain(|&s| s != best);
 
         if priority_starts > 1 || (self.allies.len() == 1 && priority_starts > 0) {
             for _ in 0..priority_starts.saturating_sub(1).max(1) {
-                if spots.is_empty() {
-                    break;
-                }
                 // The spot farthest from its closest already-chosen position.
                 let mut dist = 0.0;
                 let mut chosen = None;
@@ -1207,7 +1216,15 @@ impl Ai {
                         chosen = Some(ms);
                     }
                 }
-                best = chosen.expect("spots is not empty");
+                if chosen.is_none() || dist < START_SPREAD {
+                    // Out of spots: AlienDesert's box has two for three of us,
+                    // and the third started on the first (2026-11-03).
+                    chosen = self.spread_start(&cached, &box_spots).or(chosen);
+                }
+                let Some(pick) = chosen else {
+                    break;
+                };
+                best = pick;
                 cached.push(best);
                 spots.retain(|&s| s != best);
             }
@@ -1215,6 +1232,42 @@ impl Ai {
 
         self.send_start_pos(best, map_center);
         self.log("Teams Mode: Start Position Selected!");
+    }
+
+    /// A start in our box at least [`START_SPREAD`] from each of `taken`,
+    /// for when the box has fewer metal spots than allies: on rings around
+    /// the taken starts, the most spread one (up to [`START_ROOM`]), then
+    /// the one nearest the box's metal (`spots`). Deterministic, since
+    /// later allies replay the earlier ones' picks. `None` if no ring point
+    /// is in the box that far from them all.
+    fn spread_start(&self, taken: &[Vec3], spots: &[Vec3]) -> Option<Vec3> {
+        let size = self.graph.get_map_center() * 2.0;
+        let mut best: Option<(f32, Vec3)> = None;
+        for &t in taken {
+            for radius in [START_SPREAD, 1.5 * START_SPREAD] {
+                for k in 0..16 {
+                    let a = k as f32 * std::f32::consts::TAU / 16.0;
+                    let p = Vec3::xz(t.x + radius * a.cos(), t.z + radius * a.sin());
+                    if p.x < 64.0 || p.z < 64.0 || p.x > size.x - 64.0 || p.z > size.z - 64.0 {
+                        continue;
+                    }
+                    let spread = taken.iter().map(|&q| distance(q, p)).fold(f32::MAX, f32::min);
+                    if spread < START_SPREAD {
+                        continue;
+                    }
+                    let metal = spots.iter().map(|&s| distance(s, p)).fold(f32::MAX, f32::min);
+                    let score = spread.min(START_ROOM) - 0.25 * metal;
+                    if best.is_some_and(|(b, _)| b >= score) {
+                        continue;
+                    }
+                    let check = format!("ai_is_valid_startpos:{:.6}/{:.6}", p.x, p.z);
+                    if self.cb.call_lua_rules(&check).as_deref() == Some("1") {
+                        best = Some((score, p));
+                    }
+                }
+            }
+        }
+        best.map(|(_, p)| p)
     }
 
     /// Start a little toward the map center from the chosen spot, unless

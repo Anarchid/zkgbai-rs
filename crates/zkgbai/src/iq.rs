@@ -204,6 +204,20 @@ impl Ai {
             }
         }
         if !self.iq.started {
+            // An ally we give way to queued its factory where ours was to
+            // go: ours moves off it (see `plop`).
+            if let Some((def, pos, face)) = self.eco.opening_site
+                && !self.eco_clear_of_allied_plops(def, pos, face)
+            {
+                let start = self.graph.get_start_pos();
+                self.eco.opening_site = self.eco_first_factory_site(def, start).map(|(p, f)| (def, p, f));
+                let moved =
+                    self.eco.opening_site.map_or("nowhere".to_owned(), |(_, p, _)| format!("({:.0}, {:.0})", p.x, p.z));
+                self.log(&format!(
+                    "iq: ally {team}'s factory is queued on our opening site ({:.0}, {:.0}); moved to {moved}",
+                    pos.x, pos.z
+                ));
+            }
             self.iq_announce();
         }
     }
@@ -233,7 +247,7 @@ impl Ai {
 
     /// Whether we give way to `team`'s queue: a human's, or a lower-numbered
     /// AI's.
-    fn iq_gives_way(&self, team: i32) -> bool {
+    pub(crate) fn iq_gives_way(&self, team: i32) -> bool {
         !self.iq.ai_allies.contains(&team) || team < self.team_id
     }
 
