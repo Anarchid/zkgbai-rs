@@ -147,6 +147,7 @@ mod tests {
                         WeaponSpec {
                             name: p[0].into(),
                             weapon_type: p[1].into(),
+                            leading: None,
                             range: p[2].parse().unwrap(),
                             reload: p[3].parse().unwrap(),
                             salvo: p[4].parse().unwrap(),
@@ -209,6 +210,7 @@ mod tests {
                 weapons: vec![WeaponSpec {
                     name: "vehriot_vehriot_weapon".into(),
                     weapon_type: "Cannon".into(),
+                    leading: None,
                     range: 285.0,
                     reload: 1.77,
                     salvo: 1,
@@ -317,6 +319,7 @@ mod tests {
             mobile: true,
             radius: 12.0,
             weapons: vec![WeaponSpec {
+                leading: None,
                 name: "vehriot_vehriot_weapon".into(),
                 weapon_type: "Cannon".into(),
                 range: 285.0,

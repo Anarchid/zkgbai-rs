@@ -32,6 +32,7 @@ fn main() {
                     .map(|w| WeaponSpec {
                         name: w["name"].as_str().unwrap().into(),
                         weapon_type: w["weapon_type"].as_str().unwrap().into(),
+                        leading: None,
                         range: num(w, "range"),
                         reload: num(w, "reload"),
                         salvo: w["salvo"].as_i64().unwrap() as i32,

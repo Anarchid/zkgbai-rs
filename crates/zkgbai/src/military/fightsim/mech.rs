@@ -1334,6 +1334,10 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         // Nanoframes do not explode with the finished unit's weapon blast.
         target.death = None;
     }
+    let leading = us.iter().any(|m| m.u.weapons.iter().any(|w| w.leading.is_some()));
+    // Reuse storage; derive world velocity from this step's actual, slowed move.
+    // Separation is a numerical overlap correction, not target velocity.
+    let mut motion = if leading { vec![(0.0, 0.0); n] } else { Vec::new() };
     if let Some(b) = run.bomb
         && b.mode == BombMode::Down
         && us.get(b.index).is_some_and(|u| u.u.alive)
@@ -1499,6 +1503,11 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         }
         // Movement towards the nearest enemy alive at the top of the step
         // (mech.py reads the step's opening sides here).
+        if leading {
+            for (p, u) in motion.iter_mut().zip(&us) {
+                *p = (u.u.x, u.lat);
+            }
+        }
         let mut moved = false;
         for &i in &alive {
             us[i].u.moving = false;
@@ -1606,6 +1615,11 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 moved = true;
             }
         }
+        if leading {
+            for (p, u) in motion.iter_mut().zip(&us) {
+                *p = ((u.u.x - p.0) / dt, (u.lat - p.1) / dt);
+            }
+        }
         // mech.py runs the overlap pass on the step's opening list (a
         // kamikaze that blew up in the moves still pushes).
         if run.twod {
@@ -1652,6 +1666,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 for &j in &foes {
                     let e = &us[j];
                     let d = apart(e, &us[i]);
+                    // Engine range checks use the led aim point. Lead uses the
+                    // target's world velocity, not shooter-relative velocity.
+                    let aim_distance = us[i].u.weapons[wi].leading.map_or(d, |lead| {
+                        let (vx, vz) = motion[j];
+                        lead.aim_distance(e.u.x - us[i].u.x, e.lat - us[i].lat, vx, vz)
+                    });
                     // focus: the least health left first, then the nearest (mech.py `focus`)
                     let better = |t: (f64, usize)| {
                         if run.least_health {
@@ -1661,7 +1681,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                         }
                     };
                     if e.u.alive
-                        && d <= range
+                        && aim_distance <= range
                         && (if e.air { m.can_air } else { m.can_ground })
                         && target.is_none_or(better)
                     {
@@ -1838,6 +1858,32 @@ mod tests {
     /// Absolute tolerance on killed shares against the Python model.
     const TOL: f64 = 1e-3;
 
+    #[test]
+    fn moving_target_can_enter_led_range_before_nominal_range() {
+        let model = Model::load().unwrap();
+        let defs = specs();
+        let mut shooter = (*defs["tankraid"]).clone();
+        shooter.mobile = false;
+        shooter.speed = 0.0;
+        let mut target = (*defs["vehraid"]).clone();
+        target.weapons[0].range = 50.0; // approach through the firing boundary
+        let make = |spec: UnitSpec| FightSnapshot {
+            flags: Default::default(),
+            units: vec![
+                SnapUnit { tubes: Vec::new(), reloads: Vec::new(), side: 0, spec: Arc::new(spec), hp: 660.0, x: 0.0, z: 0.0 },
+                SnapUnit { tubes: Vec::new(), reloads: Vec::new(), side: 1, spec: Arc::new(target.clone()), hp: 480.0, x: 260.0, z: 0.0 },
+            ],
+        };
+        let baseline = model.fates(&make(shooter.clone()), DT, FateMode::AMove);
+        shooter.weapons[0].leading = super::super::ShotLead::new("Cannon", 520.0 / 30.0, 90.0);
+        let led = model.fates(&make(shooter.clone()), DT, FateMode::AMove);
+        assert_eq!(baseline[1].hp_left, 480.0);
+        assert!(led[1].hp_left < baseline[1].hp_left);
+        // The same distant target, stopped by EMP, gains no lead range.
+        let stopped = model.fates_with_paralysis(&make(shooter), DT, FateMode::AMove, &[(1, 2.0)]);
+        assert_eq!(stopped[1].hp_left, 480.0);
+    }
+
     fn specs() -> HashMap<String, Arc<UnitSpec>> {
         specs_from(UNITS)
     }
@@ -1854,6 +1900,7 @@ mod tests {
                         WeaponSpec {
                             name: p[0].into(),
                             weapon_type: p[1].into(),
+                            leading: None,
                             range: p[2].parse().unwrap(),
                             reload: p[3].parse().unwrap(),
                             salvo: p[4].parse().unwrap(),
@@ -2082,6 +2129,7 @@ mod tests {
                 salvo: 1,
                 damage: 150.1,
                 weapon_type: "Cannon".into(),
+                leading: None,
             }],
         });
         let lance = Arc::new(UnitSpec {
@@ -2101,6 +2149,7 @@ mod tests {
                 salvo: 1,
                 damage: 3000.1,
                 weapon_type: "BeamLaser".into(),
+                leading: None,
             }],
         });
         let mut snap = FightSnapshot {
@@ -2748,6 +2797,7 @@ mod tests {
             mobile: true,
             radius: 13.0,
             weapons: vec![WeaponSpec {
+                leading: None,
                 name: "vehcapture_captureray".into(),
                 weapon_type: "BeamLaser".into(),
                 range: 450.0,

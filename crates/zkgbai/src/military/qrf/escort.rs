@@ -397,6 +397,7 @@ mod tests {
             speed,
             mobile: true,
             weapons: vec![WeaponSpec {
+                leading: None,
                 name: weapon.0.into(),
                 range: weapon.1,
                 reload: weapon.2,

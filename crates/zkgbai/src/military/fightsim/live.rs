@@ -433,6 +433,11 @@ impl Ai {
                 salvo: wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1),
                 damage,
                 weapon_type: wd.weapon_type(),
+                leading: crate::military::fightsim::ShotLead::new(
+                    &wd.weapon_type(),
+                    wd.projectile_speed(),
+                    wd.lead_limit(),
+                ),
             });
         }
         let spec = Arc::new(UnitSpec {
@@ -993,6 +998,7 @@ mod veto_tests {
                     WeaponSpec {
                         name: p[0].into(),
                         weapon_type: p[1].into(),
+                        leading: None,
                         range: p[2].parse().unwrap(),
                         reload: p[3].parse().unwrap(),
                         salvo: p[4].parse().unwrap(),
@@ -1090,6 +1096,7 @@ mod comspec_tests {
         WeaponSpec {
             name: name.into(),
             weapon_type: "BeamLaser".into(),
+            leading: None,
             range: 300.0,
             reload: 1.0,
             salvo: 1,

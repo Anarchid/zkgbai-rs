@@ -46,6 +46,8 @@ getters!(WeaponDef.def_id {
     fn start_velocity() -> f32 = WeaponDef_getStartVelocity;
     fn max_velocity() -> f32 = WeaponDef_getMaxVelocity;
     fn projectile_speed() -> f32 = WeaponDef_getProjectileSpeed;
+    /// Maximum target-leading offset in elmos; zero disables it, negative is unlimited.
+    fn lead_limit() -> f32 = WeaponDef_getLeadLimit;
     /// Vertical launch duration in seconds; acceleration and turn rate below
     /// are in engine units (elmos/frame² and radians/frame).
     fn up_time() -> f32 = WeaponDef_getUpTime;

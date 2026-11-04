@@ -415,6 +415,7 @@ pub fn load_specs(path: &str) -> Result<BTreeMap<String, SpecRow>, String> {
             .filter_map(|w| {
                 let p: Vec<&str> = w.split(':').collect();
                 (p.len() == 6).then(|| WeaponSpec {
+                    leading: None,
                     name: p[0].into(),
                     weapon_type: p[1].into(),
                     range: num(p[2]),
@@ -461,6 +462,7 @@ mod tests {
             speed,
             mobile,
             weapons: vec![WeaponSpec {
+                leading: None,
                 name: w.0.into(),
                 weapon_type: w.1.into(),
                 range: w.2,

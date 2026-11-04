@@ -124,6 +124,11 @@ impl Ai {
                 salvo: wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1),
                 damage,
                 weapon_type: wd.weapon_type(),
+                leading: crate::military::fightsim::ShotLead::new(
+                    &wd.weapon_type(),
+                    wd.projectile_speed(),
+                    wd.lead_limit(),
+                ),
             });
         }
         if self.defs.is_commander(def) && !self.dev_off(COMSPEC) {
