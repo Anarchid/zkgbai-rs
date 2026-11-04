@@ -36,8 +36,12 @@
 //!   Lucifer go up on what there is). The
 //!   site covers the place against the force (whatever has the place in
 //!   its reach is in the Lucifer's), is not in front of the place, and sees
-//!   the force's approach. The Desolator stands toward the force on the
-//!   ground, as the Stingers do.
+//!   the force's approach. The Desolator gets a pillar too (user,
+//!   2026-11-04: "Desolator actually gains range from being on a pillar";
+//!   its plasma cannon has the engine's cannon height boost), looked for
+//!   [`DESOLATOR_SEARCH`] about its own site toward the force (it is the
+//!   brawler); with no spire or platform to be had it stands on the ground
+//!   beside the other turrets.
 //! - *Worth it*: a heavy costs no more than what its place loses in an
 //!   outage ([`WORTH_SHARE`]; a place's value is its flow for 120 s), so
 //!   from 12.5 metal a second through the place for a Desolator, 18 for a
@@ -130,6 +134,9 @@ const TARGET: f32 = 20.0;
 const STEP: f32 = 32.0;
 const SEARCH: f32 = 600.0;
 const SIGHT_TRIES: usize = 24;
+/// A Desolator's raised site is looked for this far about its own (toward
+/// the force from the place), elmos.
+const DESOLATOR_SEARCH: f32 = 240.0;
 
 /// The Lucifer's reach less the force's, less this, is how far from the
 /// place it may stand, elmos.
@@ -220,7 +227,8 @@ pub struct Stats {
     pub wanted: u32,
     pub lucifers: u32,
     pub desolators: u32,
-    /// Lucifers on a spire as it stood; on the ground, a platform too slow.
+    /// Heavies on a spire as it stood; on the ground where a platform was
+    /// wanted.
     pub spires: u32,
     pub flat: u32,
     /// Platforms ordered; up; given up short.
@@ -402,7 +410,13 @@ impl Ai {
         }
         let name = self.defs.name(def).to_owned();
         let (anchor, approach, frame) = (a.place.anchor, a.approach, self.frame);
-        let perch = if name == LUCIFER { Some(self.walkin_heavy_perch(def, a).ok_or("nosite")?) } else { None };
+        // On a spire or a platform (a Desolator on the ground, beside the
+        // other turrets, if none is to be had).
+        let perch = match self.walkin_heavy_perch(def, a) {
+            Some(p) => Some(p),
+            None if name == LUCIFER => return Err("nosite"),
+            None => None,
+        };
         // The Desolator out of our turrets' death blasts and theirs of it,
         // beside the others across the approach (`porcmix`).
         let spaced = if perch.is_none() && !self.dev_off(PORCMIX) {
@@ -437,7 +451,7 @@ impl Ai {
         let raise = perch.as_ref().map_or(0.0, |p| p.raise);
         let side = def.x_size().max(def.z_size()) as f32 * 8.0 + 2.0 * RING;
         // No platform where an enemy stands by already (see `RAISE_CLEAR`)
-        // or with nobody near to raise it: the Lucifer goes on the ground.
+        // or with nobody near to raise it: the heavy goes on the ground.
         let raisers = if raise > UP_SLACK { self.walkin_heavy_raiser_hands(site) } else { Vec::new() };
         let clear = self.walkin_heavy_enemy_near(site) > RAISE_CLEAR;
         let raising = raise > UP_SLACK && clear && !raisers.is_empty();
@@ -492,7 +506,7 @@ impl Ai {
             self.terraform_level(&workers, &square, top, false);
             self.eco_hold_terraform(&workers, RAISE_FRAMES);
             self.log(&format!(
-                "walkin: heavy: raising a platform {:.0} up at ({:.0}, {:.0}) for a Lucifer guarding ({:.0}, {:.0}) \
+                "walkin: heavy: raising a platform {:.0} up at ({:.0}, {:.0}) for a {name} guarding ({:.0}, {:.0}) \
                  ({} constructors)",
                 top - ground,
                 site.x,
@@ -543,33 +557,44 @@ impl Ai {
         Ok(())
     }
 
-    /// Where a Lucifer guarding breach `a`'s place stands: of the sites in
-    /// reach that are not in front of the place and that we hold, the one
-    /// needing least raising to [`PLATFORM`] (a spire needs none), then the
-    /// nearest, that sees the force's approach from its top.
+    /// Where a heavy guarding breach `a`'s place stands raised: of the sites
+    /// we hold about its middle, the one needing least raising to
+    /// [`PLATFORM`] (a spire needs none), then the nearest, that sees the
+    /// force's approach from its top. A Lucifer's middle is the place, out
+    /// to where its reach still covers the place against the force, and not
+    /// in front of it; a Desolator's (a brawler: its plasma cannon gains
+    /// range with height) [`OFFSET`] toward the force, out to
+    /// [`DESOLATOR_SEARCH`].
     fn walkin_heavy_perch(&self, def: UnitDef, a: &Assessment) -> Option<Perch> {
         let (anchor, approach) = (a.place.anchor, a.approach);
         let map = self.cb.map();
         let ground = |p: Vec3| map.elevation_at(p.x, p.z).max(0.0);
         let base = ground(anchor).max(ground(approach));
-        let touch = a.group.reach.max(TOUCH_MIN);
-        let cover = (def.max_weapon_range() - touch - COVER_SLACK).clamp(0.0, SEARCH);
+        let lucifer = self.defs.name(def) == LUCIFER;
+        let (middle, cover) = if lucifer {
+            let touch = a.group.reach.max(TOUCH_MIN);
+            (anchor, (def.max_weapon_range() - touch - COVER_SLACK).clamp(0.0, SEARCH))
+        } else if distance(anchor, approach) > 1.0 {
+            (get_directional_point(anchor, approach, OFFSET), DESOLATOR_SEARCH)
+        } else {
+            (anchor, DESOLATOR_SEARCH)
+        };
         let n = (cover / STEP) as i32;
         let (w, h) = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
-        let front = distance(anchor, approach) - FRONT_SLACK;
+        let front = if lucifer { distance(anchor, approach) - FRONT_SLACK } else { 0.0 };
         let war = &self.war;
         // Out of our turrets' death blasts, and they of its (`porcmix`).
         let mine = blast(def);
         let others: Vec<(Vec3, f32)> = if self.dev_off(PORCMIX) {
             Vec::new()
         } else {
-            (self.eco_turrets_near(anchor, cover + 300.0).into_iter()).map(|(p, d)| (p, blast(d))).collect()
+            (self.eco_turrets_near(middle, cover + 300.0).into_iter()).map(|(p, d)| (p, blast(d))).collect()
         };
         let mut spots: Vec<(f32, f32, Vec3)> = Vec::new();
         for i in -n..=n {
             for j in -n..=n {
-                let p = Vec3::xz(anchor.x + i as f32 * STEP, anchor.z + j as f32 * STEP);
-                let d = distance(p, anchor);
+                let p = Vec3::xz(middle.x + i as f32 * STEP, middle.z + j as f32 * STEP);
+                let d = distance(p, middle);
                 if d > cover || p.x < 64.0 || p.z < 64.0 || p.x > w - 64.0 || p.z > h - 64.0 {
                     continue;
                 }
@@ -706,7 +731,7 @@ impl Ai {
     }
 
     /// See to the platform going up: another constructor when one is
-    /// called away, the Lucifer on top once it is up (or has had its time),
+    /// called away, the heavy on top once it is up (or has had its time),
     /// dropped when no force calls for it.
     pub(super) fn walkin_heavy_update(&mut self, now: f32) {
         let frame = self.frame;
@@ -720,7 +745,7 @@ impl Ai {
         let quiet = frame - r.ordered > RAISE_GRACE && !busy;
         let done = up >= asked - UP_SLACK;
         let (since, tries, called) = (r.since, r.tries, r.called);
-        // An enemy at the platform: the Lucifer goes up on what there is.
+        // An enemy at the platform: the heavy goes up on what there is.
         let enemy = self.walkin_heavy_enemy_near(site);
         let beset = !done && enemy <= RAISE_CLEAR;
         if frame - called > STAND_DOWN {
@@ -728,9 +753,11 @@ impl Ai {
             self.eco_release_terraform(&r.workers);
             self.logistics.walkin.stats.heavy.stood_down += 1;
             self.log(&format!(
-                "walkin: heavy: no force calls for the Lucifer at ({:.0}, {:.0}) any more; its platform stays {up:.0} of \
+                "walkin: heavy: no force calls for the {} at ({:.0}, {:.0}) any more; its platform stays {up:.0} of \
                  {asked:.0} up",
-                site.x, site.z
+                self.defs.name(r.def),
+                site.x,
+                site.z
             ));
             return;
         }
@@ -788,7 +815,7 @@ impl Ai {
             site.z,
             (frame - since) as f32 / 30.0,
             raisers.join(", "),
-            if task.is_some() { "the Lucifer goes on top (or nearest)" } else { "no site for the Lucifer about it" }
+            if task.is_some() { "it goes on top (or nearest)" } else { "no site for it about the platform" }
         ));
         let Some(task) = task else { return };
         let hands = self.walkin_hands(site, &[], None, false);
