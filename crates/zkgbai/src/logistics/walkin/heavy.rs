@@ -71,8 +71,10 @@ pub(crate) const HEAVIES: [&str; 2] = [LUCIFER, DESOLATOR];
 
 /// The Lucifer goes first against a force that puts at least this share of
 /// a Lucifer shot into what it kills (value-weighted; see [`shot_use`]):
-/// Glaives 0.06, Thugs 0.3, Ravagers 0.5, Cyclopes and Grizzlies 0.6+.
-const LUCIFER_PREY: f32 = 0.4;
+/// Glaives (230 health) 0.06, Thugs (960) 0.24, Ogres (1950) 0.49,
+/// Ravagers (2200) 0.55, Knights (2500) 0.63, Minotaurs (7200) 0.9,
+/// Cyclopes (12000) 1.
+const LUCIFER_PREY: f32 = 0.5;
 
 /// Pylons a heavy's site may need to its power, at most.
 const MAX_PYLONS: f32 = 2.0;
@@ -698,21 +700,24 @@ mod tests {
         let shot = 4000.0;
         // Glaives (230 hp): 6% of each shot.
         assert!((shot_use(&[(230.0, 65.0); 10], shot) - 0.0575).abs() < 1e-3);
-        // A Cyclops (4000) takes all of one; a Goliath (12500) four shots.
-        assert!((shot_use(&[(4000.0, 1650.0)], shot) - 1.0).abs() < 1e-3);
-        assert!((shot_use(&[(12500.0, 3000.0)], shot) - 0.78125).abs() < 1e-3);
-        // By value: three Ravagers (2000 each, 0.5) and 600 of Glaives.
-        let m = [(2000.0, 300.0), (2000.0, 300.0), (2000.0, 300.0), (230.0, 300.0), (230.0, 300.0)];
+        // A Cyclops (12000) takes three whole shots; a Minotaur (7200) two,
+        // the second not all used.
+        assert!((shot_use(&[(12000.0, 2200.0)], shot) - 1.0).abs() < 1e-3);
+        assert!((shot_use(&[(7200.0, 850.0)], shot) - 0.9).abs() < 1e-3);
+        // By value: three Ravagers (2200 each, 0.55) and 600 of Glaives.
+        let m = [(2200.0, 250.0), (2200.0, 250.0), (2200.0, 250.0), (230.0, 300.0), (230.0, 300.0)];
         let u = shot_use(&m, shot);
-        assert!((u - (0.5 * 900.0 + 0.0575 * 600.0) / 1500.0).abs() < 1e-3, "{u}");
+        assert!((u - (0.55 * 750.0 + 0.0575 * 600.0) / 1350.0).abs() < 1e-3, "{u}");
+        // Under the bar: the Desolator first.
+        assert!(u < LUCIFER_PREY);
         // Nothing known: no waste assumed.
         assert_eq!(shot_use(&[], shot), 1.0);
     }
 
     #[test]
     fn lucifer_first_against_heavies_and_long_reach() {
-        assert_eq!(order(0.6, true), [LUCIFER, DESOLATOR]);
-        assert_eq!(order(0.1, true), [DESOLATOR, LUCIFER]);
+        assert_eq!(order(0.55, true), [LUCIFER, DESOLATOR]);
+        assert_eq!(order(0.24, true), [DESOLATOR, LUCIFER]);
         // Fencers outrange a Desolator: whatever they weigh.
         assert_eq!(order(0.1, false), [LUCIFER, DESOLATOR]);
     }
