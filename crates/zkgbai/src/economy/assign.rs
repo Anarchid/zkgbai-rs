@@ -1238,6 +1238,7 @@ impl Ai {
         let frame = self.frame;
         //remove invalid jobs from the queue
         let mut invalid: Vec<TaskId> = Vec::new();
+        let mut adopted = Vec::new();
         let map = self.cb.map();
 
         for id in self.eco.construction_tasks.clone() {
@@ -1268,6 +1269,9 @@ impl Ai {
                 });
                 match nano {
                     Some(u) => {
+                        if u.team() != self.team_id {
+                            adopted.push(id);
+                        }
                         target = Some(u);
                         if let Some(c) = self.eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut()) {
                             c.target = Some(u);
@@ -1331,6 +1335,9 @@ impl Ai {
 
         for id in invalid {
             self.eco.drop_construction_task(id);
+        }
+        for id in adopted {
+            self.logistics_assist(id);
         }
 
         let invalid: Vec<TaskId> = self

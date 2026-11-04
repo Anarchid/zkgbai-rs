@@ -173,6 +173,7 @@ pub enum Kind {
     Antinuke,
     Energy,
     Operator,
+    Allied,
 }
 
 impl Kind {
@@ -186,6 +187,7 @@ impl Kind {
             Kind::Antinuke => "antinuke",
             Kind::Energy => "energy",
             Kind::Operator => "operator",
+            Kind::Allied => "allied",
         }
     }
 }
@@ -211,6 +213,9 @@ pub struct Issue {
     pub value: f32,
     pub share: f32,
     pub started: bool,
+    def_id: i32,
+    target: Option<Unit>,
+    target_team: Option<i32>,
     progress: projects::Progress,
     retry_at: i32,
     state: &'static str,
@@ -219,6 +224,27 @@ pub struct Issue {
 }
 
 impl Issue {
+    fn reset_execution(&mut self, frame: i32) {
+        self.crew.clear();
+        self.assigned = 0;
+        self.share = 0.0;
+        self.value = 0.0;
+        self.eta = f32::INFINITY;
+        self.retry_at = 0;
+        self.progress = projects::Progress::new(frame);
+        self.state = "pending";
+        self.reason = "retargeted";
+    }
+
+    fn matches_task(&self, task: &crate::economy::WorkerTask) -> bool {
+        task.as_construction().is_some_and(|c| {
+            self.def_id == c.build_type.id()
+                && self.target == c.target
+                && self.target_team == c.target.map(|u| u.team())
+                && distance(self.pos, task.get_pos()) < 0.1
+        })
+    }
+
     fn json(&self) -> Value {
         json!({
             "id": self.id,
@@ -235,6 +261,7 @@ impl Issue {
             "value": self.value.round(),
             "share": self.share.round(),
             "started": self.started,
+            "target": self.target.map(|u| u.id()), "target_team": self.target_team,
             "opened": self.opened,
             "state": self.state, "reason": self.reason, "assigned": self.assigned,
             "last_progress": self.progress.last, "retry_at": self.retry_at,
@@ -468,7 +495,10 @@ impl Ai {
             return None;
         }
         let issue = self.logistics.issues.get(&task)?;
-        if issue.share <= 0.0 || !issue.crew.contains(&wid) {
+        if !self.eco.tasks.get(task).is_some_and(|t| issue.matches_task(t))
+            || issue.share <= 0.0
+            || !issue.crew.contains(&wid)
+        {
             return None;
         }
         let own = self.eco.workers.get(&wid).is_some_and(|w| w.task == Some(task));
@@ -484,14 +514,19 @@ impl Ai {
         self.logistics
             .issues
             .values()
-            .find(|i| i.crew.contains(&wid) && (!self.eco.hard_estalled || i.kind == Kind::Energy))
+            .find(|i| {
+                self.eco.tasks.get(i.task).is_some_and(|t| i.matches_task(t))
+                    && i.crew.contains(&wid)
+                    && (!self.eco.hard_estalled || i.kind == Kind::Energy)
+            })
             .map(|i| i.task)
     }
 
     pub(crate) fn logistics_allows(&self, wid: i32, task: TaskId) -> bool {
         self.dev_off("logistics")
             || self.logistics.issues.get(&task).is_none_or(|i| {
-                i.state == "pending"
+                self.eco.tasks.get(task).is_some_and(|t| !i.matches_task(t))
+                    || i.state == "pending"
                     || (i.crew.contains(&wid)
                         && (!self.eco.hard_estalled || i.kind == Kind::Energy)
                         && self.eco_project_hand(wid, task))
@@ -531,6 +566,7 @@ impl Ai {
 
     /// Open an issue on construction task `task` (or re-value one).
     pub fn logistics_open(&mut self, task: TaskId, kind: Kind, worth: Worth, why: &str, against: f32) -> Option<u32> {
+        self.logistics_sync_task(task);
         let t = self.eco.tasks.get(task)?;
         let c = t.as_construction()?;
         let what = self.defs.name(c.build_type).to_owned();
@@ -562,6 +598,9 @@ impl Ai {
             value: 0.0,
             share: 0.0,
             started: c.target.is_some(),
+            def_id: c.build_type.id(),
+            target: c.target,
+            target_team: c.target.map(|u| u.team()),
             progress: projects::Progress::new(self.frame),
             retry_at: 0,
             state: "pending",
@@ -583,6 +622,72 @@ impl Ai {
         self.logistics.issues.insert(task, issue);
         self.logistics.stats.opened += 1;
         Some(id)
+    }
+
+    /// Task identity survives allied adoption, relocation and type changes;
+    /// the crew and forecasts belong to the actual implementation of that task.
+    pub(crate) fn logistics_sync_task(&mut self, task: TaskId) {
+        let Some(t) = self.eco.tasks.get(task) else { return };
+        let Some(c) = t.as_construction() else { return };
+        let Some(i) = self.logistics.issues.get_mut(&task) else { return };
+        if i.matches_task(t) {
+            return;
+        }
+        i.what = self.defs.name(c.build_type).to_owned();
+        i.pos = t.get_pos();
+        i.def_id = c.build_type.id();
+        i.target = c.target;
+        i.target_team = c.target.map(|u| u.team());
+        i.cost = c.build_type.cost(self.metal);
+        i.build_time = c.build_type.build_time();
+        i.started = c.target.is_some();
+        i.reset_execution(self.frame);
+        let note = i.json();
+        self.op_emit("issue", json!({"event": "retarget", "issue": note}));
+    }
+
+    /// Two local jobs now refer to one frame: preserve the existing project
+    /// valuation rather than closing it as a vanished construction site.
+    pub(crate) fn logistics_handoff(&mut self, from: TaskId, to: TaskId) {
+        if from == to {
+            self.logistics_sync_task(to);
+            return;
+        }
+        let Some(mut issue) = self.logistics.issues.remove(&from) else { return };
+        if self.logistics.issues.get(&to).is_some_and(|i| i.kind == Kind::Operator) {
+            self.op_emit("issue", json!({"event": "superseded", "id": issue.id, "task": to}));
+            return;
+        }
+        issue.task = to;
+        issue.reset_execution(self.frame);
+        self.op_emit("issue", json!({"event": "handoff", "id": issue.id, "from": from, "task": to}));
+        self.logistics.issues.insert(to, issue);
+        self.logistics_sync_task(to);
+    }
+
+    /// The economy has already decided to help this allied frame. Give that
+    /// decision a crew without introducing a new alliance-wide planner.
+    pub(crate) fn logistics_assist(&mut self, task: TaskId) {
+        if self.dev_off("logistics") || self.dev_off("clients") {
+            return;
+        }
+        self.logistics_sync_task(task);
+        if self.logistics.issues.contains_key(&task) {
+            return;
+        }
+        let Some(c) = self.eco.tasks.get(task).and_then(|t| t.as_construction()) else { return };
+        let Some(u) = c.target.filter(|u| u.team() != self.team_id && self.allies.contains(&u.team())) else { return };
+        let def = c.build_type;
+        let kind = if self.defs.name(def).starts_with("energy") { Kind::Energy } else { Kind::Allied };
+        let now = self.frame as f32 / 30.0;
+        let value = def.cost(self.metal) * (1.0 - u.build_progress()).clamp(0.0, 1.0);
+        self.logistics_open(
+            task,
+            kind,
+            Worth::Stream { value, from: now, rate: value / PAYBACK },
+            "finish the allied project selected by the economy",
+            0.0,
+        );
     }
 
     /// Close the issue on `task`, saying how it ended.
@@ -652,8 +757,9 @@ impl Ai {
             // ground the engine's sphere missed a finished Lucifer beside it
             // (11-04 Thornford: built, closed "gone").
             let about = self.cb.friendly_units_in_cylinder(issue.pos, 48.0);
-            let stands = (self.eco.porcs.iter().chain(about.iter())).any(|u| {
+            let stands = (issue.target.iter().chain(self.eco.porcs.iter()).chain(about.iter())).any(|u| {
                 !u.is_being_built()
+                    && (u.team() == self.team_id || self.allies.contains(&u.team()))
                     && u.health() > 0.0
                     && distance(u.pos(), issue.pos) < 48.0
                     && self.defs.name_of(*u) == issue.what
@@ -836,6 +942,7 @@ impl Ai {
         let mut abandon = Vec::new();
         let mut expired = Vec::new();
         for task in tasks {
+            self.logistics_sync_task(task);
             let Some(t) = self.eco.tasks.get(task) else { continue };
             let Some(c) = t.as_construction() else { continue };
             let built = c.target.map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0));

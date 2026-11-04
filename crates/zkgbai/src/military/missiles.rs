@@ -381,7 +381,12 @@ fn ally_covers(silos: &[Vec3], target: Vec3) -> bool {
 impl Ai {
     fn missiles_allied_silos(&self, own: Option<Unit>) -> Vec<Vec3> {
         let Some(silo) = self.defs.get(SILO) else { return Vec::new() };
-        allied_silos(self.cb.friendly_units().into_iter(), self.team_id, silo, own)
+        allied_silos(
+            self.cb.friendly_units().into_iter().filter(|&u| self.eco_ally_project_active(u)),
+            self.team_id,
+            silo,
+            own,
+        )
     }
 
     pub(crate) fn missiles_note_loss(&mut self, pos: Vec3) {
@@ -450,12 +455,16 @@ impl Ai {
     /// seen standing since).
     fn missiles_eos_targets(&self) -> Vec<Target> {
         let allies = self.missiles_allied_silos(self.missiles_silo());
+        self.missiles_eos_targets_outside(&allies)
+    }
+
+    fn missiles_eos_targets_outside(&self, allies: &[Vec3]) -> Vec<Target> {
         let struck = |id: i32, seen: i32| self.missiles.struck.get(&id).is_some_and(|&t| seen < t + LOOK_AFTER);
         (self.war.targets.values())
             .filter(|e| e.identified && e.is_static && !e.is_dead && !struck(e.unit_id, e.last_seen))
             // A rival silo is an immediate threat to ours; do not delegate
             // it merely because an allied silo also happens to reach it.
-            .filter(|e| e.def_name == SILO || !ally_covers(&allies, e.position))
+            .filter(|e| e.def_name == SILO || !ally_covers(allies, e.position))
             .filter_map(|e| {
                 eos_target(
                     e.unit_id,
@@ -472,13 +481,17 @@ impl Ai {
     /// Known anti-nukes guarding something from our nukes (their value is
     /// more than their cost), shielded or not: what Shockleys are for.
     fn missiles_stun_targets(&self) -> Vec<(i32, Vec3, f32)> {
+        let allies = self.missiles_allied_silos(self.missiles_silo());
+        self.missiles_stun_targets_outside(&allies)
+    }
+
+    fn missiles_stun_targets_outside(&self, allies: &[Vec3]) -> Vec<(i32, Vec3, f32)> {
         if !self.misc_has_nuke() {
             return Vec::new();
         }
-        let allies = self.missiles_allied_silos(self.missiles_silo());
         (self.war.targets.values())
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke")
-            .filter(|e| !ally_covers(&allies, e.position))
+            .filter(|e| !ally_covers(allies, e.position))
             .filter(|e| e.ud.is_some_and(|ud| e.value > ud.cost(self.metal)))
             .filter(|e| self.missiles_shield(e.position) != Some(true))
             .map(|e| (e.unit_id, e.position, e.value))
@@ -599,6 +612,26 @@ impl Ai {
             }
         }
         chosen
+    }
+
+    /// Assess an ally's actual footprint against our unclaimed strategic
+    /// demand. Do not filter out its own targets before deciding to help it.
+    pub(crate) fn missiles_ally_site_wanted(&self, pos: Vec3) -> bool {
+        let eos = self.missiles_eos_targets_outside(&[]);
+        let stun = self.missiles_stun_targets_outside(&[]);
+        let mut targets: Vec<_> = eos.iter().map(|t| (t.pos, t.value - MISSILE_COST * t.needed as f32)).collect();
+        targets.extend(stun.iter().filter(|a| !eos.iter().any(|t| t.id == a.0)).map(|a| (a.1, a.2 - MISSILE_COST)));
+        let territory: Vec<_> = self.graph.enemy_territory_cells().collect();
+        choose_silo_site(
+            &[],
+            std::iter::once(pos),
+            &targets,
+            &self.missiles_static_value(),
+            &territory,
+            self.missiles_siege_readiness(),
+            self.graph.get_enemy_center(),
+        )
+        .is_some()
     }
 
     /// Where a silo would do most: a safe place on our ground within reach

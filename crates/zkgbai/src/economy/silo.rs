@@ -430,6 +430,13 @@ impl Ai {
             // nanoframe still prevents commissioning a replacement.
             return;
         }
+        if !self.dev_off("missiles")
+            && !self.eco.estalled
+            && self.eco.adjusted_income >= missiles::SILO_INCOME
+            && self.eco_assist_ally(silo)
+        {
+            return;
+        }
         if self.eco_silo_plan().is_some() {
             return;
         }

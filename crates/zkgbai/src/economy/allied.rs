@@ -48,8 +48,16 @@ use crate::util::distance;
 
 /// Projects an ally's frame of the same type is helped with before we
 /// start our own.
-pub(super) const ASSISTED: [&str; 7] =
-    ["staticnuke", "zenith", "raveparty", "staticheavyarty", "energysingu", "energyfusion", "staticantinuke"];
+pub(super) const ASSISTED: [&str; 8] = [
+    "staticnuke",
+    "zenith",
+    "raveparty",
+    "staticheavyarty",
+    "energysingu",
+    "energyfusion",
+    "staticantinuke",
+    "staticmissilesilo",
+];
 /// One superweapon at a time per instance (see `eco_generate_tasks`), so
 /// one turn order for the three.
 pub(super) const SUPERWEAPONS: [&str; 3] = ["staticnuke", "zenith", "raveparty"];
@@ -98,6 +106,31 @@ pub struct AlliedProjects {
     anchors: Vec<(i32, Vec3)>,
     /// The alliance's air scouts (Owls, Sparrows) by team.
     scouts: Vec<(i32, &'static str)>,
+    progress: BTreeMap<i32, FrameProgress>,
+}
+
+/// An unfinished tactical silo claims coverage while construction advances.
+/// A fresh sighting gets time for its builders to arrive (90 seconds).
+const ALLY_STALL: i32 = 30 * 90;
+
+struct FrameProgress {
+    built: f32,
+    advanced: i32,
+    team: i32,
+}
+
+impl FrameProgress {
+    fn observe(&mut self, built: f32, team: i32, frame: i32) {
+        if team != self.team || built < self.built || built > self.built + 0.0001 {
+            self.built = built;
+            self.advanced = frame;
+            self.team = team;
+        }
+    }
+
+    fn active(&self, frame: i32) -> bool {
+        frame - self.advanced < ALLY_STALL
+    }
 }
 
 /// A wish for the next of a kind: the alliance's count of it when asked,
@@ -263,6 +296,10 @@ impl Ai {
         std::iter::once(self.graph.get_ally_center()).chain(self.fac.factories.values().map(|f| f.unit.pos())).collect()
     }
 
+    pub(crate) fn eco_ally_project_active(&self, u: Unit) -> bool {
+        !u.is_being_built() || self.eco.allied.progress.get(&u.id()).is_none_or(|p| p.active(self.frame))
+    }
+
     /// Whether enough of the allied frame `u` is left to build to be worth
     /// sending help (see [`ASSIST_LEFT`]).
     pub(super) fn eco_worth_helping(&self, u: Unit) -> bool {
@@ -289,6 +326,8 @@ impl Ai {
                     && self.eco_ally_site_safe(p)
                     && !u.def().is_some_and(|d| self.eco_super_project_exposed(d, p))
                     && self.eco_worth_helping(*u)
+                    && (name != crate::military::missiles::SILO
+                        || (self.eco_ally_project_active(*u) && self.missiles_ally_site_wanted(p)))
             })
             .max_by(|a, b| a.build_progress().total_cmp(&b.build_progress()))
     }
@@ -310,6 +349,10 @@ impl Ai {
 
     /// A job helping to build the allied frame `u`.
     pub(super) fn eco_help_frame(&mut self, u: Unit, list: List) -> Option<TaskId> {
+        if let Some(id) = self.eco_task_on(u) {
+            self.logistics_assist(id);
+            return Some(id);
+        }
         let def = u.def()?;
         if self.eco_super_project_exposed(def, u.pos()) {
             return None;
@@ -334,6 +377,7 @@ impl Ai {
             p.z,
             100.0 * u.build_progress()
         ));
+        self.logistics_assist(id);
         Some(id)
     }
 
@@ -345,11 +389,20 @@ impl Ai {
             return false;
         }
         let Some(u) = self.eco_ally_frame(def) else { return false };
-        if self.eco_task_on(u).is_none() {
+        let pending = self.eco.construction_tasks.iter().copied().find(|&id| {
+            self.eco
+                .tasks
+                .get(id)
+                .and_then(|t| t.as_construction())
+                .is_some_and(|c| c.target.is_none() && !c.fac_plop && c.build_type == def)
+        });
+        if let Some(id) = pending {
+            self.eco_adopt_ally_frame(id, u);
+            true
+        } else {
             let list = self.eco_project_list(def);
-            self.eco_help_frame(u, list);
+            self.eco_help_frame(u, list).is_some()
         }
-        true
     }
 
     /// The alliance's nuke silo, if it has one, standing or rising: ours,
@@ -439,6 +492,15 @@ impl Ai {
             }
         }
         let a = &mut self.eco.allied;
+        a.progress.retain(|id, _| census.iter().any(|(u, _)| u.id() == *id));
+        for (u, _) in &census {
+            let progress = a.progress.entry(u.id()).or_insert_with(|| FrameProgress {
+                built: u.build_progress(),
+                advanced: self.frame,
+                team: u.team(),
+            });
+            progress.observe(u.build_progress(), u.team(), self.frame);
+        }
         (a.census, a.factories, a.plates, a.anchors, a.scouts) = (census, factories, plates, anchors, scouts);
         let mut ended = Vec::new();
         let mut pending = Vec::new();
@@ -448,8 +510,22 @@ impl Ai {
             match c.target {
                 Some(u) if u.team() != self.team_id => {
                     let gone = u.health() <= 0.0 || !self.allies.contains(&u.team());
-                    if gone || !u.is_being_built() {
-                        ended.push((id, gone, self.defs.name(c.build_type), t.position));
+                    let stalled = self.defs.name(c.build_type) == crate::military::missiles::SILO
+                        && !self.eco_ally_project_active(u)
+                        && !self.op_priority(id);
+                    if gone || !u.is_being_built() || stalled {
+                        ended.push((
+                            id,
+                            if gone {
+                                "is gone"
+                            } else if stalled {
+                                "stalled"
+                            } else {
+                                "stands"
+                            },
+                            self.defs.name(c.build_type).to_owned(),
+                            t.position,
+                        ));
                     }
                 }
                 None if !c.fac_plop && ASSISTED.contains(&self.defs.name(c.build_type)) => {
@@ -458,13 +534,11 @@ impl Ai {
                 _ => {}
             }
         }
-        for (id, gone, name, p) in ended {
-            self.log(&format!(
-                "economy: the allied {name} we helped at ({:.0}, {:.0}) {}",
-                p.x,
-                p.z,
-                if gone { "is gone" } else { "stands" }
-            ));
+        for (id, outcome, name, p) in ended {
+            self.log(&format!("economy: the allied {name} we helped at ({:.0}, {:.0}) {}", p.x, p.z, outcome));
+            if outcome == "stalled" {
+                self.logistics_close(id, "stalled_ally");
+            }
             self.eco.drop_construction_task(id);
         }
         for (id, def, at) in pending {
@@ -492,32 +566,7 @@ impl Ai {
             if anti {
                 self.eco.anti_nuke = false;
             }
-            if self.eco_task_on(u).is_some() {
-                // Another job of ours already helps it.
-                self.eco.drop_construction_task(id);
-                continue;
-            }
-            let p = u.pos();
-            self.log(&format!(
-                "economy: team {} started a {} at ({:.0}, {:.0}); our queued {} helps it instead",
-                u.team(),
-                self.defs.name_of(u),
-                p.x,
-                p.z,
-                self.defs.name(def)
-            ));
-            let idle = self.eco.stop_workers(id);
-            if let Some(t) = self.eco.tasks.get_mut(id) {
-                t.position = p;
-                if let Some(c) = t.as_construction_mut() {
-                    // (A superweapon's may be another of the three.)
-                    c.build_type = u.def().unwrap_or(def);
-                    c.target = Some(u);
-                    c.facing = u.building_facing();
-                    c.frame_issued = self.frame;
-                }
-            }
-            self.eco.idle_workers(&idle);
+            self.eco_adopt_ally_frame(id, u);
         }
         if let Some((def, _)) = self.eco_awaiting()
             && ASSISTED.contains(&self.defs.name(def))
@@ -527,11 +576,213 @@ impl Ai {
             self.eco_assist_ally(def);
         }
     }
+
+    pub(super) fn eco_adopt_ally_frame(&mut self, id: TaskId, u: Unit) {
+        let Some(def) = self.eco.tasks.get(id).and_then(|t| t.as_construction()).map(|c| c.build_type) else { return };
+        if let Some(other) = self.eco_task_on(u).filter(|&other| other != id) {
+            self.logistics_handoff(id, other);
+            self.eco.drop_construction_task(id);
+            self.logistics_assist(other);
+            return;
+        }
+        let p = u.pos();
+        self.log(&format!(
+            "economy: team {} started a {} at ({:.0}, {:.0}); our queued {} helps it instead",
+            u.team(),
+            self.defs.name_of(u),
+            p.x,
+            p.z,
+            self.defs.name(def)
+        ));
+        let idle = self.eco.stop_workers(id);
+        if let Some(t) = self.eco.tasks.get_mut(id) {
+            t.position = p;
+            if let Some(c) = t.as_construction_mut() {
+                // (A superweapon's may be another of the three.)
+                c.build_type = u.def().unwrap_or(def);
+                c.target = Some(u);
+                c.facing = u.building_facing();
+                c.frame_issued = self.frame;
+                // Prerequisites were sited for our old footprint.
+                c.prerequisites.clear();
+            }
+        }
+        self.logistics_sync_task(id);
+        self.logistics_assist(id);
+        self.eco.idle_workers(&idle);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static BUILD: std::cell::Cell<f32> = const { std::cell::Cell::new(0.25) };
+        static TEAM: std::cell::Cell<i32> = const { std::cell::Cell::new(3) };
+    }
+
+    fn project_ai() -> Ai {
+        BUILD.set(0.25);
+        TEAM.set(3);
+        unsafe extern "C" fn cost(_: i32, def: i32, _: i32) -> f32 {
+            def as f32 * 1000.0
+        }
+        unsafe extern "C" fn time(_: i32, def: i32) -> f32 {
+            def as f32 * 2000.0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            TEAM.get()
+        }
+        unsafe extern "C" fn def(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn facing(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn progress(_: i32, _: i32) -> f32 {
+            BUILD.get()
+        }
+        unsafe extern "C" fn building(_: i32, _: i32) -> bool {
+            BUILD.get() < 1.0
+        }
+        unsafe extern "C" fn near(_: i32, _: *mut f32, _: f32, _: bool, _: *mut i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.UnitDef_getCost = Some(cost);
+            t.UnitDef_getBuildTime = Some(time);
+            t.Unit_getDef = Some(def);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getBuildingFacing = Some(facing);
+            t.Unit_getBuildProgress = Some(progress);
+            t.Unit_isBeingBuilt = Some(building);
+            t.getFriendlyUnitsIn = Some(near);
+            t.Unit_getHealth = Some(health);
+        });
+        ai.allies.push(3);
+        ai.dev_enable("clients");
+        ai.dev_enable("logistics");
+        ai.frame = 90;
+        ai.offset = 0;
+        ai
+    }
+
+    #[test]
+    fn allied_handoff_keeps_the_goal_and_refreshes_the_site_type_and_crew() {
+        use crate::logistics::{Kind, Worth};
+        let mut ai = project_ai();
+        let def = UnitDef::from_id(ai.cb, 1).unwrap();
+        let id = ai.eco.tasks.insert(WorkerTask::construction(def, Vec3::xz(50.0, 0.0), 0));
+        ai.eco.construction_tasks.push(id);
+        let project = ai
+            .logistics_open(id, Kind::Operator, Worth::Deadline { value: 9000.0, by: 500.0 }, "cover targets", 0.0)
+            .unwrap();
+        let i = ai.logistics.issues.get_mut(&id).unwrap();
+        i.crew = vec![10];
+        i.share = 100.0;
+        let frame = Unit::from_id(ai.cb, 20).unwrap();
+        ai.eco_adopt_ally_frame(id, frame);
+        let i = &ai.logistics.issues[&id];
+        assert_eq!(i.id, project);
+        assert_eq!(i.kind, Kind::Operator);
+        assert_eq!(i.worth.at(500.0), 9000.0);
+        assert_eq!(i.pos, frame.pos());
+        assert_eq!((i.cost, i.build_time), (2000.0, 4000.0));
+        assert!(i.crew.is_empty());
+        assert!(ai.logistics_bonus(10, id).is_none());
+        assert!(ai.logistics_assignment(10).is_none());
+        assert_eq!(ai.eco.tasks.get(id).unwrap().as_construction().unwrap().target, Some(frame));
+    }
+
+    #[test]
+    fn duplicate_assistance_jobs_keep_one_commitment_and_the_existing_frame_task() {
+        use crate::logistics::{Kind, Worth};
+        let mut ai = project_ai();
+        let frame = Unit::from_id(ai.cb, 20).unwrap();
+        let help = ai.eco_help_frame(frame, List::Construction).unwrap();
+        assert!(ai.logistics_tracks(help), "an assistance decision receives a commitment");
+        assert_eq!(ai.eco_help_frame(frame, List::Construction), Some(help));
+        let def = UnitDef::from_id(ai.cb, 1).unwrap();
+        let old = ai.eco.tasks.insert(WorkerTask::construction(def, Vec3::xz(50.0, 0.0), 0));
+        ai.eco.construction_tasks.push(old);
+        let project = ai.logistics_open(old, Kind::Operator, Worth::Flat(9000.0), "cover targets", 0.0).unwrap();
+        ai.eco_adopt_ally_frame(old, frame);
+        assert!(ai.eco.tasks.get(old).is_none());
+        assert_eq!(ai.eco.construction_tasks, vec![help]);
+        assert_eq!(ai.logistics.issues.len(), 1);
+        let i = &ai.logistics.issues[&help];
+        assert_eq!((i.id, i.task, i.kind), (project, help, Kind::Operator));
+        assert_eq!(i.pos, frame.pos());
+    }
+
+    #[test]
+    fn direct_task_retargeting_cannot_keep_an_old_crew_until_the_next_forecast() {
+        use crate::logistics::{Kind, Worth};
+        let mut ai = project_ai();
+        let def = UnitDef::from_id(ai.cb, 1).unwrap();
+        let id = ai.eco.tasks.insert(WorkerTask::construction(def, Vec3::xz(50.0, 0.0), 0));
+        ai.logistics_open(id, Kind::Grid, Worth::Flat(5000.0), "grid", 0.0);
+        let i = ai.logistics.issues.get_mut(&id).unwrap();
+        i.crew = vec![10];
+        i.share = 500.0;
+        assert!(ai.logistics_bonus(10, id).is_some());
+        ai.eco.tasks.get_mut(id).unwrap().position = Vec3::xz(2000.0, 0.0);
+        assert!(ai.logistics_bonus(10, id).is_none());
+        assert!(ai.logistics_assignment(10).is_none());
+        assert!(ai.logistics_allows(11, id), "an old crew cannot exclude the new site's builders");
+        // Revaluation is another entry point and must refresh the binding too.
+        ai.logistics_open(id, Kind::Grid, Worth::Flat(6000.0), "moved grid", 0.0);
+        assert_eq!(ai.logistics.issues[&id].pos, Vec3::xz(2000.0, 0.0));
+        assert!(ai.logistics.issues[&id].crew.is_empty());
+    }
+
+    #[test]
+    fn adopted_completion_is_detected_even_without_a_spatial_search_result() {
+        let mut ai = project_ai();
+        let u = Unit::from_id(ai.cb, 20).unwrap();
+        let task = ai.eco_help_frame(u, List::Construction).unwrap();
+        BUILD.set(1.0);
+        ai.eco.drop_construction_task(task);
+        ai.frame = 107;
+        ai.logistics_update(107);
+        assert!(!ai.logistics_tracks(task));
+        assert_eq!(ai.logistics.stats.met, 1);
+    }
+
+    #[test]
+    fn unfinished_or_captured_ally_frames_do_not_count_as_completed_projects() {
+        for captured in [false, true] {
+            let mut ai = project_ai();
+            let u = Unit::from_id(ai.cb, 20).unwrap();
+            let task = ai.eco_help_frame(u, List::Construction).unwrap();
+            if captured {
+                BUILD.set(1.0);
+                TEAM.set(4);
+            }
+            ai.eco.drop_construction_task(task);
+            ai.frame = 107;
+            ai.logistics_update(107);
+            assert_eq!(ai.logistics.stats.met, 0);
+            assert_eq!(ai.logistics.stats.gone, 1);
+        }
+    }
+
+    #[test]
+    fn an_unfinished_ally_claim_needs_observed_progress_and_recovers_when_it_resumes() {
+        let mut p = FrameProgress { built: 0.1, advanced: 0, team: 3 };
+        p.observe(0.1, 3, ALLY_STALL - 1);
+        assert!(p.active(ALLY_STALL - 1));
+        p.observe(0.1, 3, ALLY_STALL);
+        assert!(!p.active(ALLY_STALL));
+        p.observe(0.11, 3, ALLY_STALL + 30);
+        assert!(p.active(ALLY_STALL + 30));
+        p.observe(0.11, 4, ALLY_STALL * 2);
+        assert!(p.active(ALLY_STALL * 2), "a new owner receives its own grace period");
+    }
 
     /// Ask every 30 frames (as the planners do, more often) from `from`
     /// through `to`; the last answer.

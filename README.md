@@ -190,6 +190,14 @@ Started frames are preserved. Replacement workers value partial construction too
 Resource forecasts cover tracked projects; factories and untracked jobs can still compete for
 the actual economy, so these remain forecasts rather than guaranteed completion times.
 
+Allied construction selected by the existing economy planner receives a local commitment too
+(with `clients` enabled). Adopting another frame, moving a task, or changing its building type
+refreshes the site, remaining-work forecast and crew; merging duplicate jobs retains one project.
+Tactical silo assistance must satisfy the normal missile target/range or siege-coverage checks
+at the ally's actual position. An unfinished allied silo stops reserving coverage after 90 seconds
+without observed construction progress, and resumes reserving it if construction resumes.
+These budgets remain local to each AI; allied contributions are observed through frame progress.
+
 Combat gangs (`coalesce`) temporarily lease command authority as well as borrowing units from
 their regular handlers. Returning a lease restores the underlying role; a role change invalidates
 the lease, and operator reservations and module mutes continue to apply.
