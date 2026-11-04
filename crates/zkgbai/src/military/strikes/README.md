@@ -15,6 +15,13 @@ sighting nor a waiting/returning wave can start commander-driven production.
 Halberds and Dirtbags can use such opportunities without a stun; Fleas and Darts
 require one.
 
+Dominatrices are direct Flea and Dart targets, without a wound or stun requirement,
+and can requisition these waves. Their target value is their metal cost plus the
+metal value of each known captive linked by `capture_controller`. Last observed
+links survive fog while the enemy remains tracked; seeing a release or transfer
+updates the bounty, and dead/forgotten captives no longer contribute. The ordinary
+escort, terrain and kill-prediction gates still apply.
+
 While Phantom evidence remains within the three-minute memory, an existing hover
 factory also requisitions one Halberd every 30 seconds, topping up to 5–10 owned
 Halberds even without a launchable job or during a strike cooldown. Existing

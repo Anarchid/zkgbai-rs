@@ -9,6 +9,8 @@ pub mod build_ids;
 mod colonize;
 pub mod comguard;
 mod commander;
+#[cfg(test)]
+pub(crate) use commander::tests::test_ai_with;
 mod conquest;
 pub mod factory;
 pub mod factory_manager;

@@ -12,6 +12,7 @@ use crate::util::{NULLPOS, distance};
 use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod captors;
 mod evasion;
 mod fragile;
 mod lobsters;
@@ -77,6 +78,7 @@ impl Tactic {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Prey {
     GlassCannon,
+    Captor,
     Fragile,
     Defenseless,
     Commander,
@@ -92,6 +94,7 @@ impl Prey {
     fn allows(self, tactic: Tactic, stunned: bool) -> bool {
         match self {
             Self::GlassCannon | Self::Fragile => true,
+            Self::Captor => tactic.light_swarm(),
             Self::Defenseless => tactic.light_swarm(),
             Self::Commander => matches!(tactic, Tactic::Halberd | Tactic::Dirtbag) || (tactic.light_swarm() && stunned),
             Self::Heavy => tactic.light_swarm() && stunned,
@@ -240,6 +243,7 @@ impl Ai {
                 prey: Prey::GlassCannon,
             })
             .collect();
+        let captive_values = captors::values(self.war.targets.values(), self.metal);
         for e in self.war.targets.values().filter(|e| {
             e.identified && !e.is_dead && !e.can_fly() && self.frame - e.last_seen < age && e.position != NULLPOS
         }) {
@@ -249,6 +253,8 @@ impl Ai {
                 Prey::GlassCannon
             } else if self.strike_fragile(e) {
                 Prey::Fragile
+            } else if e.def_name == "vehcapture" {
+                Prey::Captor
             } else if e.ud.is_some_and(|d| self.strike_defenseless(d)) {
                 Prey::Defenseless
             } else if super::jaeger::is_heavy(e, self.metal)
@@ -286,7 +292,12 @@ impl Ai {
                 pos: e.position,
                 last: e.last_seen,
                 count: 1,
-                value: e.ud.map_or(e.value, |d| d.cost(self.metal)),
+                value: e.ud.map_or(e.value, |d| d.cost(self.metal))
+                    + if e.def_name == "vehcapture" {
+                        captive_values.get(&e.unit_id).copied().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    },
                 name: e.def_name.clone(),
                 prey,
             });
