@@ -153,11 +153,12 @@ impl Ai {
         // The priority gadget turns off upkeep (including cloakers) when
         // it cannot pay. Their reduced actual draw is not spare energy.
         self.eco.hard_estalled
-            || self
-                .cb
-                .friendly_units()
-                .into_iter()
-                .any(|u| u.health() > 0.0 && !u.is_being_built() && u.rules_param_float("forcedOff", 0.0) > 0.0)
+            || self.cb.friendly_units().into_iter().any(|u| {
+                u.health() > 0.0
+                    && !u.is_being_built()
+                    && u.rules_param_float("forcedOff", 0.0) > 0.0
+                    && u.is_activated()
+            })
     }
 
     fn eco_planned_energy(&self, def: UnitDef, pos: springai::Vec3, wind: Option<super::wind::WindModel>) -> f32 {
@@ -379,6 +380,7 @@ mod tests {
         thread_local! {
             static FORCED_OFF: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
             static OWNER: std::cell::Cell<i32> = const { std::cell::Cell::new(2) };
+            static ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
         }
         unsafe extern "C" fn units(_: i32, out: *mut i32, size: i32) -> i32 {
             if !out.is_null() && size > 0 {
@@ -391,6 +393,9 @@ mod tests {
         }
         unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
             OWNER.with(std::cell::Cell::get)
+        }
+        unsafe extern "C" fn active(_: i32, _: i32) -> bool {
+            ACTIVE.with(std::cell::Cell::get)
         }
         unsafe extern "C" fn resource(_: i32, name: *const c_char) -> i32 {
             i32::from(unsafe { CStr::from_ptr(name) } == c"Energy")
@@ -411,6 +416,7 @@ mod tests {
             t.Unit_getTeam = Some(team);
             t.getResourceByName = Some(resource);
             t.Unit_getResourceUse = Some(used);
+            t.Unit_isActivated = Some(active);
             t.Unit_getRulesParamFloat = Some(rules);
         });
         ai.eco.effective_income_energy = 160.0;
@@ -423,6 +429,10 @@ mod tests {
         OWNER.with(|v| v.set(3));
         ai.allies.push(3);
         assert!(ai.eco_geo_energy_stalled());
+        // The gadget may leave forcedOff set on a deliberately disabled
+        // unit; that stale flag must not veto upgrades indefinitely.
+        ACTIVE.with(|v| v.set(false));
+        assert!(!ai.eco_geo_energy_stalled());
         FORCED_OFF.with(|v| v.set(0.0));
         ai.eco.hard_estalled = true;
         assert!(ai.eco_geo_energy_stalled());
