@@ -640,8 +640,11 @@ impl Ai {
             };
             // (A shadowing team never strikes, judged or not.)
             let ostrike = verdict == Some(true) && tune.strike > 0.0;
-            let tune =
-                if outranged && !ostrike { Tune { standoff: t.reach + STANDOFF_MARGIN, goal: false, ..tune } } else { tune };
+            let tune = if outranged && !ostrike {
+                Tune { standoff: t.reach + STANDOFF_MARGIN, goal: false, ..tune }
+            } else {
+                tune
+            };
             let mut spot = self.qrf_mark_spot(ids, t, tune, tf.as_deref());
             // Goalkeeping: stand on the asset the raid heads for, a little
             // toward it, if we get there first (our guns outrange raiders'
@@ -816,7 +819,14 @@ impl Ai {
     /// Some(true) strike, Some(false) stand clear, None no judgement. At
     /// most every [`OJUDGE_EVERY`] frames; a strike holds while the judge
     /// stays over the hold bar. Changes of call are journalled.
-    fn qrf_mark_outranged(&mut self, team: usize, ids: &[i32], t: &Target, team_range: f32, frame: i32) -> Option<bool> {
+    fn qrf_mark_outranged(
+        &mut self,
+        team: usize,
+        ids: &[i32],
+        t: &Target,
+        team_range: f32,
+        frame: i32,
+    ) -> Option<bool> {
         let prev = self.qrf.mark.outranged.get(&team).copied();
         if let Some(p) = prev
             && frame - p.judged < OJUDGE_EVERY

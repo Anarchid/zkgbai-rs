@@ -14,14 +14,24 @@
 //! engine-made attack (internal, or ahead of the fight it came from) on a
 //! frame under [`KEEP_FRAME`] built inside a visible enemy factory turns to
 //! the nearest armed enemy within its reach that it can hit and that can
-//! hit it, or, with none, to the factory: an attack inserted at the front of
+//! hit it from its own range, or, with none, to the factory: an attack inserted at the front of
 //! its queue, the frame's attack removed. A unit so turned to a factory
 //! turns again to an armed enemy that comes within its reach. When its
 //! attack ends (the factory dead, the unit leashed back), the fight it came
 //! from goes on. Off (`disable=facframe`) it only counts.
+//!
+//! A turned unit is this module's (`springai::reserved::own`) while its
+//! attack lasts, at most [`HOLD_MAX`]: handlers re-issue their fights on a
+//! clock (loners every 3 s), each new fight takes the frame again, and a
+//! slow gun fired its one shot at the frame in the moment before the next
+//! turn (Adamantine Mountain 11-04: a Cyclops cannon killed Venom frames
+//! for minutes while its beam held the factory). The retreat handler and
+//! the helpers every ground unit keeps still order it; its owner before is
+//! restored when the hold ends.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use springai::reserved::{self, Owner};
 use springai::{Unit, UnitDef, Vec3, opt};
 
 use crate::Ai;
@@ -40,6 +50,9 @@ const KEEP_FRAME: f32 = 0.85;
 /// A unit's reach: its range and the engine's fight leash at manoeuvre
 /// (100 * move state squared).
 const REACH_SLACK: f32 = 100.0;
+/// An armed enemy counts as fighting a unit of ours within its own range
+/// and this much more.
+const THREAT_SLACK: f32 = 50.0;
 /// Our units this far from a factory with a frame are looked at (the
 /// longest ranges plus their leash).
 const SCAN: f32 = 2000.0;
@@ -48,6 +61,28 @@ const SCAN: f32 = 2000.0;
 const PAD_SLACK: f32 = 16.0;
 /// Each factory's turns are logged at most this often (frames).
 const LOG_EVERY: i32 = 600;
+/// A turned unit is held at most this long (frames); then its handlers
+/// order it again, and a fight that takes a frame is turned anew.
+const HOLD_MAX: i32 = 900;
+/// A unit lent away when its hold ended is waited for this long (frames).
+const LENT_MAX: i32 = 5400;
+/// The owner of a turned unit: this module, the retreat handler, those that
+/// move every ground unit (jumps, teleport, water, nuke blasts) and the
+/// Cyclops drive into cannon reach.
+const OWNER: Owner = Owner {
+    module: "facframe",
+    helpers: &["retreat", "war.unitDamaged", "jumps", "teleport", "water", "blasts", "cyclops"],
+};
+
+/// A unit turned: what it attacks, the factory if that is one, its owner
+/// before, and since when.
+#[derive(Clone, Copy)]
+struct Hold {
+    target: i32,
+    factory: Option<i32>,
+    prev: Option<Owner>,
+    since: i32,
+}
 
 /// A frame inside an enemy factory.
 #[derive(Clone, Copy)]
@@ -100,8 +135,12 @@ fn on_pad(at: Vec3, fac: Vec3, x_size: i32, z_size: i32) -> bool {
 
 #[derive(Default)]
 pub struct FacFrames {
-    /// Our units turned to a factory: the factory.
-    turned: BTreeMap<i32, i32>,
+    /// Our units turned, while their attack lasts.
+    held: BTreeMap<i32, Hold>,
+    /// Units whose hold ended while another module had borrowed them (a
+    /// stayveto stand): the owner they go back to if returned to us, and
+    /// since when.
+    lent: BTreeMap<i32, (Option<Owner>, i32)>,
     /// Whether a shooter def can hurt a target def.
     hits: BTreeMap<(i32, i32), bool>,
     /// Whether a def is a factory: a static builder with build options.
@@ -121,9 +160,68 @@ pub struct FacFrames {
     killed: u32,
     /// Turns whose order was refused.
     refused: u32,
+    /// Holds that ran out ([`HOLD_MAX`]).
+    expired: u32,
 }
 
 impl Ai {
+    /// Hold `id`, turned to `target` (a factory if `factory`).
+    fn facframe_hold(&mut self, id: i32, target: i32, factory: Option<i32>, frame: i32) {
+        let prev = match self.facframes.held.get(&id) {
+            Some(h) => h.prev,
+            None => reserved::owner(self.cb, id).filter(|&o| o != OWNER),
+        };
+        reserved::own(self.cb, id, OWNER);
+        self.facframes.held.insert(id, Hold { target, factory, prev, since: frame });
+    }
+
+    /// End `id`'s hold: its owner before gets it back; if another module
+    /// borrowed it meanwhile, once that module gives it back to us.
+    fn facframe_release(&mut self, id: i32) {
+        let Some(h) = self.facframes.held.remove(&id) else { return };
+        if reserved::owner(self.cb, id) == Some(OWNER) {
+            self.facframe_restore(id, h.prev);
+        } else {
+            self.facframes.lent.insert(id, (h.prev, self.frame));
+        }
+    }
+
+    /// A unit of ours died: no owner comes back to its id.
+    pub fn facframe_unit_destroyed(&mut self, id: i32) {
+        self.facframes.lent.remove(&id);
+        if self.facframes.held.remove(&id).is_some() && reserved::owner(self.cb, id) == Some(OWNER) {
+            reserved::disown(self.cb, id);
+        }
+    }
+
+    fn facframe_restore(&mut self, id: i32, prev: Option<Owner>) {
+        match prev {
+            Some(o) => {
+                reserved::own(self.cb, id, o);
+            }
+            None => {
+                reserved::disown(self.cb, id);
+            }
+        }
+    }
+
+    /// Units lent away when their hold ended: returned to us, they go to
+    /// their owner before; dead, or someone else's a long while, forgotten.
+    fn facframe_returns(&mut self, frame: i32) {
+        let lent: Vec<(i32, Option<Owner>, i32)> =
+            self.facframes.lent.iter().map(|(&id, &(prev, since))| (id, prev, since)).collect();
+        for (id, prev, since) in lent {
+            let alive = Unit::from_id(self.cb, id).is_some_and(|u| u.health() > 0.0);
+            let ours = reserved::owner(self.cb, id) == Some(OWNER);
+            if ours && !self.facframes.held.contains_key(&id) {
+                self.facframe_restore(id, prev);
+            }
+            if ours || !alive || frame - since > LENT_MAX {
+                self.facframes.lent.remove(&id);
+            }
+        }
+    }
+
     /// Whether `shooter` has a weapon that damages `target`.
     fn facframe_hits(&mut self, shooter: UnitDef, target: UnitDef) -> bool {
         let key = (shooter.id(), target.id());
@@ -146,7 +244,9 @@ impl Ai {
     }
 
     /// The nearest enemy within `unit`'s reach that it can hit and that can
-    /// hit it, frames aside.
+    /// hit it from where it stands (its range and [`THREAT_SLACK`]), frames
+    /// aside. One out of its own range is not fighting us: going for it
+    /// walks us into it (a Lotus at 485 pulled a Cyclops back in, 11-04).
     fn facframe_fighter(&mut self, unit: Unit, def: UnitDef) -> Option<i32> {
         let at = unit.pos();
         let reach = unit.max_range() + REACH_SLACK;
@@ -158,6 +258,9 @@ impl Ai {
             let Some(edef) = e.def() else { continue };
             let d = distance(at, e.pos());
             if best.is_some_and(|(bd, _)| bd <= d) {
+                continue;
+            }
+            if d > e.max_range().max(edef.max_weapon_range()) + THREAT_SLACK {
                 continue;
             }
             if self.facframe_hits(def, edef) && self.facframe_hits(edef, def) {
@@ -173,33 +276,44 @@ impl Ai {
             self.log(&format!(
                 "facframe: in the last minute {} engine attacks on factory frames, turned {} to the factory and {} \
                  to an armed enemy, {} more from the factory to an armed enemy; {} turned-to factories died; {} \
-                 turns refused{}",
+                 turns refused; {} holds ran out{}",
                 f.seen,
                 f.to_factory,
                 f.to_fighter,
                 f.from_factory,
                 f.killed,
                 f.refused,
+                f.expired,
                 if self.dev_off("facframe") { " (facframe off)" } else { "" }
             ));
             let f = &mut self.facframes;
-            (f.seen, f.to_factory, f.to_fighter, f.from_factory, f.killed, f.refused) = (0, 0, 0, 0, 0, 0);
+            (f.seen, f.to_factory, f.to_fighter, f.from_factory, f.killed, f.refused, f.expired) =
+                (0, 0, 0, 0, 0, 0, 0);
             f.counted.clear();
         }
         if frame % PERIOD != (self.offset + 4) % PERIOD {
             return;
         }
         let off = self.dev_off("facframe");
+        if !self.facframes.lent.is_empty() {
+            self.facframe_returns(frame);
+        }
 
-        // Turned-to factories gone: dead, or out of sight (the unit's own
-        // attack ends then too).
-        let gone: Vec<i32> = (self.facframes.turned.iter())
-            .filter(|(_, fac)| self.war.targets.get(fac).is_none_or(|e| e.is_dead))
-            .map(|(&u, _)| u)
+        // Turned-to targets dead (the unit's own attack ends then too), and
+        // holds run out.
+        let gone: Vec<(i32, Option<i32>, bool)> = (self.facframes.held.iter())
+            .filter_map(|(&u, h)| {
+                let dead = self.war.targets.get(&h.target).is_none_or(|e| e.is_dead);
+                (dead || frame - h.since > HOLD_MAX).then_some((u, h.factory.filter(|_| dead), dead))
+            })
             .collect();
-        for u in gone {
-            if let Some(fac) = self.facframes.turned.remove(&u)
-                && !self.facframes.turned.values().any(|&f| f == fac)
+        for (u, fac, dead) in gone {
+            self.facframe_release(u);
+            if !dead {
+                self.facframes.expired += 1;
+            }
+            if let Some(fac) = fac
+                && !self.facframes.held.values().any(|h| h.factory == Some(fac))
             {
                 self.facframes.killed += 1;
             }
@@ -238,7 +352,7 @@ impl Ai {
                 busy.push((fid, at));
             }
         }
-        if busy.is_empty() && self.facframes.turned.is_empty() {
+        if busy.is_empty() && self.facframes.held.is_empty() {
             return;
         }
 
@@ -252,7 +366,7 @@ impl Ai {
                 }
             }
         }
-        for &id in self.facframes.turned.keys() {
+        for &id in self.facframes.held.keys() {
             if let Some(u) = Unit::from_id(self.cb, id) {
                 units.insert(id, u);
             }
@@ -263,13 +377,13 @@ impl Ai {
         let mut turns: BTreeMap<i32, (u32, u32, f32, String)> = BTreeMap::new();
         for (id, unit) in units {
             if unit.health() <= 0.0 || unit.is_being_built() {
-                self.facframes.turned.remove(&id);
+                self.facframe_release(id);
                 continue;
             }
             let Some(def) = unit.def() else { continue };
             let queue = unit.current_commands();
             let Some(first) = queue.first() else {
-                self.facframes.turned.remove(&id);
+                self.facframe_release(id);
                 continue;
             };
             let params = first.params();
@@ -277,11 +391,14 @@ impl Ai {
             let engine_made =
                 first.options() & opt::INTERNAL_ORDER != 0 || queue.get(1).is_some_and(|c| c.id() == CMD_FIGHT);
             let front = Front { target, engine_made };
-            let turned = self.facframes.turned.get(&id).copied();
-            if turned.is_some() && turned != target {
-                // Its handler gave it other orders, or the attack ended.
-                self.facframes.turned.remove(&id);
+            let held = self.facframes.held.get(&id).copied();
+            if held.is_some_and(|h| Some(h.target) != target) {
+                // A helper gave it other orders (a retreat, say), or the
+                // attack ended.
+                self.facframe_release(id);
             }
+            // The factory it was turned to, if it still attacks it.
+            let turned = held.filter(|h| Some(h.target) == target).and_then(|h| h.factory);
             let on_frame = target.and_then(|t| frames.get(&t)).copied();
             let young = on_frame.filter(|f| engine_made && f.progress < KEEP_FRAME);
             if young.is_none() && turned.is_none_or(|f| Some(f) != target) {
@@ -295,7 +412,7 @@ impl Ai {
             let fighter = self.facframe_fighter(unit, def);
             let hits_factory =
                 on_frame.and_then(|f| fac_defs.get(&f.factory)).is_some_and(|&(fdef, _)| self.facframe_hits(def, fdef));
-            let t = turn(front, on_frame, turned.filter(|&f| Some(f) == target), fighter, hits_factory);
+            let t = turn(front, on_frame, turned, fighter, hits_factory);
             let to = match t {
                 Turn::Keep => continue,
                 Turn::ToFactory(f) | Turn::ToFighter(f) => f,
@@ -337,17 +454,19 @@ impl Ai {
                     self.facframes.to_factory += u32::from(new);
                     entry.0 += 1;
                     if !off {
-                        self.facframes.turned.insert(id, f);
+                        self.facframe_hold(id, f, Some(f), frame);
                     }
                 }
-                Turn::ToFighter(_) => {
+                Turn::ToFighter(e) => {
                     if on_frame.is_some() {
                         self.facframes.to_fighter += u32::from(new);
                     } else {
                         self.facframes.from_factory += 1;
                     }
                     entry.1 += 1;
-                    self.facframes.turned.remove(&id);
+                    if !off {
+                        self.facframe_hold(id, e, None, frame);
+                    }
                 }
                 Turn::Keep => {}
             }
