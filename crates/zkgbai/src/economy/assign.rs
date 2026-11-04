@@ -889,6 +889,7 @@ impl Ai {
                     // and with `compush` the commander's toward the enemy.
                     let cluster = self.eco_mex_cluster_bonus(task_pos)
                         + self.conquest_ground_bonus(task_pos)
+                        + self.invade_spot_bonus(task_pos)
                         + self.compush_face_bonus(worker, wpos, task_pos)
                         + self.conquest_route_pull(worker.id, task.id, dist);
                     if worker.is_greedy {
@@ -1036,10 +1037,11 @@ impl Ai {
                     return (dist * dist) + (1000.0 * cost_mod);
                 }
 
-                let mut rec_mod = 100.0;
+                // A cleared invasion target's wrecks first (see `invade`).
+                let mut rec_mod = 100.0 + self.invade_reclaim_bonus(task_pos);
                 if self.graph.is_ally_territory(task_pos) {
                     let tf = self.graph.territory_fraction;
-                    rec_mod = 100.0 + (200.0 * tf * tf);
+                    rec_mod += 200.0 * tf * tf;
                 }
 
                 if rtask.metal_value > 50.0 {

@@ -22,6 +22,7 @@
 
 mod async_fields;
 pub mod cover;
+pub mod escort;
 pub mod field;
 pub mod floor;
 pub mod intent;
@@ -192,6 +193,8 @@ pub struct Qrf {
     /// The operator's roles for teams (and the floor's zones, see `floor`).
     pub roles: BTreeMap<usize, live::Role>,
     pub floor: floor::Floor,
+    /// The conquest escort (see `escort`).
+    pub escort: escort::Escorts,
     predict: predict::Predictor,
     /// Moonlighting squads sent at a raid, with the frame last sent;
     /// periods each has gone unmatched since; and every squad ever drafted

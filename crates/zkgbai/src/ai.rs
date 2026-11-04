@@ -97,7 +97,8 @@ const START_ROOM: f32 = 450.0;
 /// (2026-11-02; sym - on +0.07). `conquestleash`
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
-/// sym) stay off.
+/// sym) stay off, as does `conquestescort` (a QRF team sized by the fight
+/// predictor stands on the objective, 2026-11-03; battery e1 -0.14).
 /// `compush` (with or without `conquest`): no conquest trip; the
 /// commander's mex jobs lean toward the enemy, a constructor builds the
 /// home energy, and objectives whose spots become ours by any hands get
@@ -113,7 +114,7 @@ const START_ROOM: f32 = 450.0;
 /// snapshots, military/ammo.rs) is off: its A/B (zkgbai-runs/ammo/ab,
 /// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
 /// ledger that is 99.5% right; the ledger still counts and journals.
-pub(crate) const OFF_BY_DEFAULT: [&str; 24] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 25] = [
     "pairs",
     "currency",
     "permanence",
@@ -136,6 +137,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 24] = [
     "compush",
     "conquestleash",
     "conquestseq",
+    "conquestescort",
     "conquestroute",
     "ammo",
 ];
@@ -248,6 +250,8 @@ pub struct Ai {
     pub missiles: Missiles,
     pub sweeps: Sweeps,
     pub strikes: Strikes,
+    /// Invasion targets (`invade`).
+    pub invade: crate::military::invade::Invade,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
@@ -385,6 +389,7 @@ impl SkirmishAi for Ai {
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
             strikes: Strikes::default(),
+            invade: Default::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),

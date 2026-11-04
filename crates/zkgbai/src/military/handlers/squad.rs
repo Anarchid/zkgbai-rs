@@ -1124,6 +1124,13 @@ impl Ai {
             self.squad_set_target(sid, target);
             return;
         }
+        // Sent at an invasion target's defenders (see `invade`).
+        if let Some(target) = self.invade_squad_target(sid) {
+            self.squad_strike_cancel(sid);
+            self.fire_release(sid);
+            self.squad_set_target(sid, target);
+            return;
+        }
         if self.squad_strike(sid).is_some() {
             self.fire_release(sid);
             return;

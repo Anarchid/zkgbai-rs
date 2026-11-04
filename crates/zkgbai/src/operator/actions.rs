@@ -86,6 +86,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("conquestleash", "Economy", "a commander holding an objective prices far jobs higher and stays near it"),
     ("conquestseq", "Economy", "a held objective sends the commander on to the next"),
+    ("conquestescort", "Economy", "a home defense team sized by the fight predictor stands on the conquest objective"),
     ("artemis", "Economy", "an Artemis at the centroid of our front against over 4000 metal of enemy air"),
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
@@ -320,6 +321,21 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "strikechain",
         "Army",
         "a strike whose dive ends looks round its wave first: another target near it, or its own hurt by a fifth of its health or more, put to the predictor with the wave as it stands (default on)",
+    ),
+    (
+        "dirtpack",
+        "Army",
+        "Dirtbags on hand go in packs of four or more at a light turret (Lotus, Picket) nothing else armed covers, when the predictor gives its death 55% or more (default on)",
+    ),
+    (
+        "fightpath",
+        "Army",
+        "strike predictions set our units out at their ground route to the target, not the straight line (default on)",
+    ),
+    (
+        "invade",
+        "Army",
+        "invasion targets: the enemy holding, raider ground or empty ground that nets most is taken with an assault squad on hand, then its spots and wrecks are first for our constructors (default on in the wip line)",
     ),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     (

@@ -26,6 +26,7 @@ mod bomb;
 pub mod live;
 pub mod local;
 pub mod mech;
+pub mod plan;
 pub mod scenario;
 pub mod worker;
 
@@ -177,7 +178,39 @@ impl FightSnapshot {
     pub fn armed(&self, side: u8) -> usize {
         self.units.iter().filter(|u| u.side == side && !u.spec.weapons.is_empty()).count()
     }
+
+    /// The fight walks every unit straight at its foe; the ground may not
+    /// (2026-11-04, Trojan Hills: shield bots 800 elmos from two turrets
+    /// across a ridge walked 2,000 round it and arrived after 50 s, where the
+    /// seizure fight had them there in 13). Each mobile unit of `side` moves
+    /// out along its own bearing from `at` until its distance is `route`'s
+    /// ground distance from it; `None` (no way there) puts it `UNREACHABLE`
+    /// elmos out. Units nearer than `range` keep their place (in reach
+    /// already, or round the corner of a straight route). Returns how many
+    /// moved.
+    pub fn unfold(&mut self, side: u8, at: (f32, f32), range: f32, route: impl Fn(f32, f32) -> Option<f32>) -> usize {
+        let mut moved = 0;
+        for u in self.units.iter_mut().filter(|u| u.side == side && u.spec.mobile && !u.spec.air) {
+            let (dx, dz) = (u.x - at.0, u.z - at.1);
+            let d = (dx * dx + dz * dz).sqrt();
+            if d <= range {
+                continue;
+            }
+            let walk = route(u.x, u.z).unwrap_or(UNREACHABLE);
+            if walk > d * 1.05 {
+                let k = walk / d;
+                u.x = at.0 + dx * k;
+                u.z = at.1 + dz * k;
+                moved += 1;
+            }
+        }
+        moved
+    }
 }
+
+/// Where `FightSnapshot::unfold` puts a unit with no ground way in: out of
+/// any fight's reach in its horizon.
+pub const UNREACHABLE: f32 = 20000.0;
 
 /// What the model expects of a fight.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1012,6 +1045,39 @@ mod tests {
             ..UnitSpec::default()
         };
         SnapUnit { side, hp: health, x, z: 0.0, spec: Arc::new(spec), tubes: Vec::new() }
+    }
+
+    /// A unit whose ground route is longer than the straight line stands
+    /// as far out as the route; one in reach, or straight, keeps its place.
+    #[test]
+    fn unfold_puts_units_at_their_route_distance() {
+        let mk = |side: u8, x: f32, z: f32, speed: f32| SnapUnit {
+            side,
+            hp: 100.0,
+            x,
+            z,
+            spec: Arc::new(UnitSpec {
+                def: "u".into(),
+                cost: 50.0,
+                health: 100.0,
+                speed,
+                mobile: speed > 0.0,
+                ..UnitSpec::default()
+            }),
+            tubes: Vec::new(),
+        };
+        let mut snap = FightSnapshot {
+            units: vec![mk(0, 800.0, 0.0, 2.0), mk(0, 0.0, 300.0, 2.0), mk(0, 0.0, -900.0, 2.0), mk(1, 0.0, 0.0, 0.0)],
+            flags: SimFlags::default(),
+        };
+        let moved = snap.unfold(0, (0.0, 0.0), 400.0, |x, _| if x > 100.0 { Some(2000.0) } else { Some(910.0) });
+        assert_eq!(moved, 1);
+        assert!((snap.units[0].x - 2000.0).abs() < 1e-3 && snap.units[0].z.abs() < 1e-3);
+        assert_eq!((snap.units[1].x, snap.units[1].z), (0.0, 300.0));
+        assert_eq!((snap.units[2].x, snap.units[2].z), (0.0, -900.0));
+        assert_eq!((snap.units[3].x, snap.units[3].z), (0.0, 0.0));
+        snap.unfold(0, (0.0, 0.0), 400.0, |_, _| None);
+        assert!(snap.units[2].z <= -UNREACHABLE + 1.0);
     }
 
     /// The Puppy is its own missile: one shot, then it is gone, in both

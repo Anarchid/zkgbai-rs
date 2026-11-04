@@ -460,6 +460,7 @@ pub fn military(ai: &mut Ai, _: &Args) -> Out {
         "incursions": incursions,
         "blocks": blocks,
         "strikes": ai.strikes_status(),
+        "invade": ai.invade_json(),
         "airstrikes": ai.airstrikes_status(),
         "intel": {
             "enemy_produced": r1(i.produced),

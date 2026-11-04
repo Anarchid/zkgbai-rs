@@ -287,6 +287,34 @@ impl Ai {
                 tubes: self.snap_tubes(e.unit_id),
             });
         }
+        // `fightpath`: the fight walks straight at the target; ours stand out
+        // at their ground route to it instead (a ridge between is a long way).
+        if !self.dev_off("fightpath")
+            && let Some(map) = (members.first())
+                .and_then(|id| self.fighters.get(id))
+                .and_then(|f| f.unit.def())
+                .and_then(crate::terrain::tier_of)
+                .and_then(|t| self.terrain()?.tier(t))
+        {
+            let paths = zk_terrain::paths::Paths::new(map, crate::terrain::pos(end), |_| false);
+            if paths.origin_region().is_some() {
+                snapshot.unfold(0, (end.x, end.z), 150.0, |x, z| paths.distance_to(zk_terrain::Pos::new(x, z)));
+            }
+        }
+        if job.prey == super::Prey::LoneTurret {
+            // What a Dirtbag pack is judged against (`dirtpack`).
+            let mut theirs: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            for u in snapshot.units.iter().filter(|u| u.side == 1) {
+                *theirs.entry(u.spec.def.as_str()).or_default() += 1;
+            }
+            let near = (snapshot.units.iter().filter(|u| u.side == 0))
+                .map(|u| ((u.x - end.x).powi(2) + (u.z - end.z).powi(2)).sqrt())
+                .fold(f32::INFINITY, f32::min);
+            self.log(&format!(
+                "strikes: dirtpack judged: {} ours from {near:.0} elmos, against {theirs:?}",
+                members.len()
+            ));
+        }
         let paralysis = self.strike_stun(job).map(|(ratio, _)| ratio);
         if stun_required && paralysis.is_none() {
             return None;

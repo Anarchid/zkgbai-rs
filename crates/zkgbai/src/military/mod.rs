@@ -18,6 +18,7 @@ pub mod handlers;
 pub mod impalers;
 pub mod incursions;
 pub mod intel;
+pub mod invade;
 pub mod jaeger;
 pub mod jumps;
 pub mod missiles;
@@ -571,6 +572,7 @@ impl Ai {
         self.guard("ammo.update", |ai| ai.ammo_update(frame));
         self.guard("coalesce.update", |ai| ai.coalesce_update(frame));
         self.guard("raider.update", |ai| ai.raider_update(frame));
+        self.guard("invade.update", |ai| ai.invade_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
         self.guard("cyclops.update", |ai| ai.cyclops_update(frame));
@@ -887,6 +889,16 @@ impl Ai {
         // Pyros give themselves away firing at radar dots.
         if name == "jumpraid" {
             unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[1.0], 0, NO_TIMEOUT);
+        }
+        // A conquest escort short of this kind takes it first, from the
+        // raider handler too, never from the stakeouts (see `qrf::escort`).
+        if self.escort_wants(unit) && self.role_of(unit.id()) != Some(Role::Stakeout) {
+            if self.role_of(unit.id()).is_some() {
+                self.raider_remove_unit(unit);
+            }
+            if self.escort_take(unit) {
+                return;
+            }
         }
         // Units with a role are their handler's already (see `roles`), but
         // for raiding Venoms: the spider raider phase makes them to be the
