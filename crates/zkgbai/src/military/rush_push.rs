@@ -1,14 +1,17 @@
 //! A completed opening heavy keeps its mission across normal handler ticks.
 //! All allied instances can screen it and lend engineers; only its owner
-//! drives it. Crab terrain work remains in the Crab doctrine alone.
-use std::collections::BTreeMap;
+//! drives it as a Pack toward the enemy start zone. Normal Crabs retain
+//! their siege doctrine; the opening rush stays mobile.
+use std::sync::Arc;
 
 use serde_json::json;
 use springai::{Unit, UnitDef, Vec3};
 
 use crate::Ai;
-use crate::military::SquadId;
-use crate::util::{NULLPOS, distance, get_directional_point};
+use crate::military::taskforce::{Aim, Doctrine, Judge, Keep};
+use crate::military::{SquadId, SquadKind};
+use crate::nav;
+use crate::util::{distance, get_directional_point};
 
 pub(crate) struct Push {
     pub unit: Unit,
@@ -17,39 +20,31 @@ pub(crate) struct Push {
     engineers: Vec<Unit>,
     screen: Option<SquadId>,
     turret_at: i32,
-    last_order: i32,
+    force: Option<SquadId>,
+    guard: Option<SquadId>,
 }
 
 impl Push {
     pub(crate) fn new(unit: Unit, owner: i32) -> Self {
-        Self { unit, owner, target: None, engineers: Vec::new(), screen: None, turret_at: 0, last_order: 0 }
+        Self { unit, owner, target: None, engineers: Vec::new(), screen: None, turret_at: 0, force: None, guard: None }
     }
 }
 
-/// Compact enemy metal, with a modest travel discount. Retain a productive
-/// destination until another cluster offers at least 25% more value.
-fn concentration_target(samples: &[(Vec3, f32)], from: Vec3, old: Option<Vec3>) -> Option<Vec3> {
-    let mut cells: BTreeMap<(i32, i32), (Vec3, f32)> = BTreeMap::new();
-    for &(p, value) in samples {
-        let cell = cells.entry(((p.x / 400.0) as i32, (p.z / 400.0) as i32)).or_insert((p, 0.0));
-        cell.1 += value.max(0.0);
-    }
-    let score = |p: Vec3| {
-        let (x, z) = ((p.x / 400.0) as i32, (p.z / 400.0) as i32);
-        let mut value = 0.0;
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                value += cells.get(&(x + dx, z + dz)).map_or(0.0, |c| c.1);
-            }
-        }
-        value / (1.0 + distance(from, p) / 8000.0)
-    };
-    let best = cells.values().map(|c| c.0).max_by(|a, b| score(*a).total_cmp(&score(*b)))?;
-    Some(old.filter(|&p| score(p) > 0.0 && score(best) < score(p) * 1.25).unwrap_or(best))
+/// Lights still count as danger in combat predictions, but they never
+/// earn a diversion or a heavy shot. Structures are lasting damage.
+pub(crate) fn rush_prize(is_static: bool, is_raider: bool, value: f32) -> bool {
+    is_static || (!is_raider && value >= 500.0)
+}
+
+pub(crate) fn rush_riot(name: &str) -> bool {
+    matches!(
+        name,
+        "cloakriot" | "shieldriot" | "vehriot" | "tankriot" | "hoverriot" | "amphriot" | "spiderriot" | "shipriot"
+    )
 }
 
 impl Ai {
-    fn rush_push_unit(&self) -> Option<Unit> {
+    pub(crate) fn rush_push_unit(&self) -> Option<Unit> {
         let p = self.eco.rush.push.as_ref()?;
         (p.unit.health() > 0.0 && p.unit.team() == p.owner && !p.unit.is_being_built()).then_some(p.unit)
     }
@@ -83,62 +78,108 @@ impl Ai {
             }
             return;
         };
-        let Some(def) = heavy.def() else { return };
-        if frame % 90 == 0 || self.eco.rush.push.as_ref().unwrap().target.is_none() {
-            let hits = self.war.reach(Some(def));
-            let samples: Vec<_> = self
-                .war
-                .targets
-                .values()
-                .filter(|e| !e.is_dead && e.position != NULLPOS && !e.can_fly() && self.war.can_hit(hits, e))
-                .filter(|e| e.is_static || self.frame - e.last_seen <= 30 * 15)
-                .filter(|e| {
-                    def.is_able_to_fly() || self.terrain_reaches(def, heavy.pos(), e.position, def.max_weapon_range())
-                })
-                .map(|e| (e.position, e.value.max(50.0)))
-                .collect();
-            let old = self.eco.rush.push.as_ref().unwrap().target;
-            let target = concentration_target(&samples, heavy.pos(), old).or_else(|| self.graph.get_enemy_base());
+        if self.eco.rush.push.as_ref().unwrap().target.is_none() {
+            // Inferred once from enemy start boxes, never from sighted units.
+            let target = Some(self.graph.get_enemy_base().unwrap_or_else(|| {
+                // Maps without enemy start-box metal spots still get a fixed
+                // mission, mirrored across the map from our own starting side.
+                let c = self.graph.get_map_center();
+                let a = self.graph.get_ally_base();
+                Vec3::xz(
+                    (2.0 * c.x - a.x).clamp(32.0, 2.0 * c.x - 32.0),
+                    (2.0 * c.z - a.z).clamp(32.0, 2.0 * c.z - 32.0),
+                )
+            }));
             self.eco.rush.push.as_mut().unwrap().target = target;
-            if target != old {
-                self.op_emit(
-                    "rush-push",
-                    json!({"event": "target", "unit": heavy.id(), "target": target.map(|p| [p.x,p.z])}),
-                );
-            }
+            self.op_emit(
+                "rush-push",
+                json!({"event": "mission", "unit": heavy.id(),
+                "target": target.map(|p| [p.x, p.z])}),
+            );
         }
-        // Crab keeps its perch and repair doctrine, but its mobile mission
-        // uses the same concentration target. No other unit ever enters it.
-        let crab = self.defs.name_of(heavy) == "spidercrabe";
-        let crab_doctrine = crab
-            && self
-                .fighters
-                .get(&heavy.id())
-                .and_then(|f| f.squad)
-                .and_then(|sid| self.squads.get(sid))
-                .is_some_and(|s| s.shape.doctrine == "crab");
         if heavy.team() == self.team_id
-            && !crab_doctrine
-            && !self.retreat_is_retreating(heavy)
-            && heavy.rules_param_float("disarmed", 0.0) <= 0.0
-            && !self.cyclopes.holds(heavy.id(), frame)
-            && let Some(target) = self.rush_push_target(heavy.id())
+            && self.eco.rush.push.as_ref().unwrap().force.is_none()
+            && self.fighters.contains_key(&heavy.id())
         {
-            let p = self.eco.rush.push.as_mut().unwrap();
-            // Avoid resetting weapons or the command queue every second.
-            let on_course = heavy.current_commands().iter().any(|c| {
-                let args = c.params();
-                c.id() == 16 && args.len() >= 3 && distance(Vec3::new(args[0], args[1], args[2]), target) < 120.0
-            });
-            if !on_course && frame - p.last_order >= 90 {
-                heavy.fight(target, 0);
-                p.last_order = frame;
-            }
+            let sid = self.rush_force(heavy, "rush");
+            self.eco.rush.push.as_mut().unwrap().force = Some(sid);
+            self.retreat_remove_unit(heavy); // Pack owns its predicted repair sorties.
+            heavy.set_fire_state(0, 0); // Only deliberate, bounded shots; no chasing chaff.
         }
         self.rush_push_recruit_screen(heavy);
-        // The Crab owner's existing doctrine already maintains its engineers.
-        if !crab_doctrine {
-            self.rush_push_engineers(heavy);
+        self.rush_recruit_riot(heavy);
+        self.rush_push_engineers(heavy);
+    }
+
+    fn rush_force(&mut self, unit: Unit, name: &str) -> SquadId {
+        self.squad_leave_squad(unit.id());
+        // Transfer the existing Fighter rather than letting two handlers drive it.
+        self.misc_handler.loners.remove(&unit.id());
+        self.misc_handler.krows.remove(&unit.id());
+        self.misc_handler.striders.remove(&unit.id());
+        self.misc_handler.arties.remove(&unit.id());
+        self.squad_handler.fighters.insert(unit.id());
+        let mut doctrine = Doctrine::new(name);
+        doctrine.core = vec![self.defs.name_of(unit).into()];
+        doctrine.aim = Aim::Pack;
+        doctrine.core_keep = Keep::Formation;
+        doctrine.cores_to_go = 1;
+        doctrine.cores_to_stay = 1;
+        doctrine.retreat_health = 0.3;
+        doctrine.heal_to = 0.9;
+        doctrine.judge = Judge::Fates;
+        doctrine.fate_secs = 8.0;
+        doctrine.lasting = 2.5;
+        doctrine.fire_state = (name == "rush").then_some(0);
+        let shape = Arc::new(doctrine.shape(&self.defs, &self.taskforces.classes));
+        let sid = self.squads.create(SquadKind::Taskforce, self.team_id);
+        self.squad_handler.taskforces.push_back(sid);
+        let frame = self.frame;
+        let mut nav = nav!(self);
+        if let Some(s) = self.squads.get_mut(sid) {
+            s.shape = shape;
+            s.formed = frame;
+            s.status = 'a';
+            s.add_unit_nav(unit.id(), &mut self.fighters, &mut nav);
+        }
+        self.op_emit("rush-push", json!({"event": "force", "unit": unit.id(), "squad": sid, "role": name}));
+        sid
+    }
+
+    fn rush_recruit_riot(&mut self, heavy: Unit) {
+        if self
+            .eco
+            .rush
+            .push
+            .as_ref()
+            .unwrap()
+            .guard
+            .is_some_and(|sid| self.squads.get(sid).is_some_and(|s| !s.is_dead(&self.fighters)))
+        {
+            return;
+        }
+        // One riot per allied instance; borrow ordinary troops, never another
+        // doctrine's core, a QRF defender or an operator-controlled squad.
+        let riot = self
+            .fighters
+            .values()
+            .filter(|f| rush_riot(self.defs.name_of(f.unit)))
+            .filter(|f| f.unit.health() > f.unit.max_health() * 0.5 && !self.retreat_is_retreating(f.unit))
+            .filter(|f| !self.coalesce_owns(f.id))
+            .filter(|f| {
+                f.squad.is_none_or(|sid| {
+                    self.squads.get(sid).is_some_and(|s| {
+                        !s.is_taskforce() && !self.qrf_drafted(sid) && self.op_squad_target(sid).is_none()
+                    })
+                })
+            })
+            .filter(|f| distance(f.get_pos(), heavy.pos()) < 2000.0)
+            .filter(|f| f.unit.def().is_some_and(|d| self.terrain_reaches(d, f.get_pos(), heavy.pos(), 300.0)))
+            .min_by(|a, b| distance(a.get_pos(), heavy.pos()).total_cmp(&distance(b.get_pos(), heavy.pos())))
+            .map(|f| f.unit);
+        if let Some(unit) = riot {
+            let sid = self.rush_force(unit, "rush-guard");
+            self.eco.rush.push.as_mut().unwrap().guard = Some(sid);
         }
     }
 
@@ -191,13 +232,25 @@ impl Ai {
 
     pub(crate) fn rush_support_produce(&self, options: &[UnitDef]) -> Option<UnitDef> {
         let heavy = self.rush_push_unit()?;
-        if self.defs.name_of(heavy) == "spidercrabe" && heavy.team() == self.team_id {
-            return None;
+        let units = self.cb.team_units();
+        let con = options.iter().copied().find(|d| d.is_builder() && d.speed() > 0.0 && d.is_able_to_repair());
+        let cons = con.map_or(0, |d| units.iter().filter(|u| u.def() == Some(d) && u.health() > 0.0).count());
+        // Keep an economy first, then request one riot before filling the
+        // repair complement. Unfinished units count so requests cannot pile up.
+        if cons < 2 && con.is_some() {
+            return con;
         }
-        let con = options.iter().copied().find(|d| d.is_builder() && d.speed() > 0.0 && d.is_able_to_repair())?;
-        let have = self.cb.team_units().iter().filter(|u| u.def() == Some(con) && u.health() > 0.0).count();
-        // Two stay with the economy, two join the push; unfinished ones count.
-        (have < 4).then_some(con)
+        if !units.iter().any(|u| u.health() > 0.0 && rush_riot(self.defs.name_of(*u)))
+            && let Some(riot) = options
+                .iter()
+                .copied()
+                .filter(|d| rush_riot(self.defs.name(*d)))
+                .min_by(|a, b| a.cost(self.metal).total_cmp(&b.cost(self.metal)))
+        {
+            return Some(riot);
+        }
+        let _ = heavy;
+        if cons < 4 { con } else { None }
     }
 
     fn rush_push_engineers(&mut self, heavy: Unit) {
@@ -347,13 +400,12 @@ fn order_unit(u: Unit, cmd: i32, target: Unit, order: impl FnOnce(Unit, Unit)) {
 mod tests {
     use super::*;
     #[test]
-    fn concentration_beats_nearest_straggler_and_keeps_a_productive_front() {
-        let close = Vec3::xz(100.0, 100.0);
-        let mass = Vec3::xz(3000.0, 3000.0);
-        let samples = [(close, 100.0), (mass, 2000.0), (Vec3::xz(3100.0, 3000.0), 1000.0)];
-        assert_eq!(concentration_target(&samples, Vec3::ZERO, None), Some(mass));
-        assert_eq!(concentration_target(&samples, Vec3::ZERO, Some(close)), Some(mass));
-        assert_eq!(concentration_target(&samples, Vec3::ZERO, Some(mass)), Some(mass));
-        assert_eq!(concentration_target(&[], Vec3::ZERO, Some(mass)), None);
+    fn lights_never_earn_a_heavy_diversion_but_buildings_do() {
+        assert!(!rush_prize(false, true, 900.0));
+        assert!(!rush_prize(false, false, 499.0));
+        assert!(rush_prize(false, false, 1000.0));
+        assert!(rush_prize(true, false, 85.0));
+        assert!(rush_riot("vehriot") && rush_riot("shieldriot"));
+        assert!(!rush_riot("vehraid") && !rush_riot("gunshipkrow"));
     }
 }

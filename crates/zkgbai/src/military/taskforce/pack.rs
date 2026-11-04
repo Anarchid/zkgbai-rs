@@ -59,6 +59,8 @@
 //! back to its screen, parks / is repaired, takes in (merges), is led from
 //! its bulk; engages and break-offs as other forces'.
 
+mod rush;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -179,6 +181,7 @@ impl Pass {
 /// A pack's state between conducts.
 #[derive(Clone, Debug)]
 pub struct Pack {
+    rush: rush::RushRun,
     /// What it dives (`NULLPOS`: nothing), since which frame, the pass it
     /// is on, and how many passes it made over it.
     pub target: Vec3,
@@ -214,6 +217,7 @@ pub struct Pack {
 impl Default for Pack {
     fn default() -> Self {
         Pack {
+            rush: rush::RushRun::default(),
             target: NULLPOS,
             since: 0,
             pass: None,
@@ -577,6 +581,11 @@ impl Ai {
     /// A pack's conduct (see the module): where it dives now, if it does;
     /// else why not.
     pub(crate) fn taskforce_pack(&mut self, sid: SquadId) -> (Option<Vec3>, String) {
+        match self.squads.get(sid).map(|s| s.shape.doctrine.as_str()) {
+            Some("rush") => return self.taskforce_rush_pack(sid),
+            Some("rush-guard") => return self.taskforce_rush_guard(sid),
+            _ => {}
+        }
         self.pack_merge(sid);
         self.pack_lead(sid);
         let turn = self.pack_turn_distance(sid);
@@ -1166,13 +1175,26 @@ impl Ai {
         let s = self.squads.get(sid)?;
         let (horizon, lasting) = ((s.shape.fate_secs * 30.0) as i32, s.shape.lasting);
         let reach_share = s.shape.pass_reach;
-        let ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+        let rush = s.shape.doctrine == "rush";
+        let mut ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
             .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())) && f.unit.health() > 0.0)
             .filter_map(|f| f.unit.def().map(|d| (f.unit.id(), d, f.unit.health(), f.get_pos())))
             .collect();
+        if rush && let Some(leader) = s.get_leader(&self.fighters) {
+            let mut nearby = self.cb.friendly_units_in_cylinder(leader.pos(), 650.0);
+            nearby.sort_by(|a, b| distance(a.pos(), leader.pos()).total_cmp(&distance(b.pos(), leader.pos())));
+            for unit in nearby.into_iter().filter(|u| u.health() > 0.0 && !u.is_being_built()).take(24) {
+                if ours.iter().any(|u| u.0 == unit.id()) {
+                    continue;
+                }
+                if let Some(def) = unit.def().filter(|d| d.is_able_to_attack() && !d.is_builder() && d.speed() > 0.0) {
+                    ours.push((unit.id(), def, unit.health(), unit.pos()));
+                }
+            }
+        }
         let frame = self.frame;
         let seen: Vec<(i32, UnitDef, f32, Vec3, bool)> = (self.war.targets.values())
-            .filter(|e| !e.is_dead && e.identified && frame - e.last_seen <= JUDGE_SEEN)
+            .filter(|e| !e.is_dead && e.identified && ((rush && e.is_static) || frame - e.last_seen <= JUDGE_SEEN))
             .filter_map(|e| e.ud.map(|d| (e.unit_id, d, e.get_health() * e.def_health(), e.position, e.can_fly())))
             .collect();
         let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> =
@@ -1233,7 +1255,12 @@ impl Ai {
             let (ours_f, theirs_f) = fates.split_at(pack.len());
             let loss: f32 = pack.iter().zip(ours_f).map(|(u, f)| f.p_dead * u.0.cost).sum();
             let gain: f32 = (group.iter().zip(theirs_f))
-                .map(|(&i, f)| f.p_dead * near[i].1.cost * if near[i].1.mobile { 1.0 } else { lasting })
+                .map(|(&i, f)| {
+                    let e = self.war.targets.get(&near[i].0);
+                    let prize = !rush
+                        || e.is_some_and(|e| crate::military::rush_push::rush_prize(e.is_static, e.is_raider, e.value));
+                    if prize { f.p_dead * near[i].1.cost * if near[i].1.mobile { 1.0 } else { lasting } } else { 0.0 }
+                })
                 .sum();
             j.loss += loss;
             j.gain += gain;
