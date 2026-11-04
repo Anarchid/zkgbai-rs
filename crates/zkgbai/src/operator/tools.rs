@@ -192,7 +192,7 @@ pub static TOOLS: &[Tool] = &[
         description: "The project tracker: construction jobs valued in metal by when they finish (defenses against \
                        forecast raids; pylons for a building that waits for power, requisitioned factories and \
                        anti-nukes, each worth less for every second late; operator issues), each with its crew, \
-                       completion forecast, value and the bonus its crew gets; the totals (opened, met, late, \
+                       completion forecast, value, execution state, pause reason and last observed progress; the totals (opened, met, late, \
                        abandoned) and whether other construction is paused for an urgent one.",
         params: &[],
         writes: false,

@@ -24,7 +24,7 @@ use crate::util::NULLPOS;
 /// next decision; a few only where it decides once (the lanes, the doctrine
 /// set).
 pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
-    ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
+    ("logistics", "Economy", "the project tracker: exclusive crews, shared resource forecasts and observed progress"),
     ("clients", "Economy", "pylons, requisitioned factories and anti-nukes tracked as valued issues"),
     ("pause", "Economy", "an urgent issue holds back the metal of other construction"),
     (

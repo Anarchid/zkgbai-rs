@@ -47,7 +47,7 @@
 //! [`SIZE_STEPS`] times, and only then the whole cluster (the lobby, 11-04:
 //! six raiders chasing one Dagger, seven one Ravager, whole clusters on a
 //! lone Dart). A raider squad is split too: the members taken are lent to
-//! this module (see `roles::role_lend`), so the squad's own orders no
+//! this module (see `springai::reserved::lend`), so the squad's own orders no
 //! longer reach them, and its handler drives the rest on (it skips a squad
 //! only when its leader, or all of it, is borrowed; the leader is never
 //! taken into a prefix, so the squad keeps its place). A clean gang
@@ -69,7 +69,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use springai::{Unit, Vec3};
+use springai::{Unit, Vec3, reserved};
 
 use crate::Ai;
 use crate::military::SquadId;
@@ -233,6 +233,7 @@ pub struct Coalesce {
     gangs: Vec<Gang>,
     /// Unit id -> gang id.
     owner: BTreeMap<i32, u32>,
+    leases: BTreeMap<i32, reserved::CommandLease>,
     next_id: u32,
     windows: Vec<Window>,
     /// Shadow records: unit id -> frame until which it is not recorded.
@@ -434,6 +435,7 @@ impl Ai {
             let Some(def) = u.def() else { return false };
             u.health() > 0.0
                 && u.team() == self.team_id
+                && !reserved::is_reserved(self.cb, id)
                 && !u.is_being_built()
                 && !def.is_able_to_fly()
                 && def.max_weapon_range() > 0.0
@@ -535,6 +537,8 @@ impl Ai {
                 .filter(|&(id, origin, u)| {
                     u.health() > 0.0
                         && u.team() == self.team_id
+                        && !reserved::is_reserved(self.cb, id)
+                        && self.coalesce.leases.get(&id).is_some_and(|l| l.active())
                         && !self.retreat_handler.is_retreating(id)
                         && !self.squad_strike_owns(id)
                         && !self.fire_controls(id)
@@ -552,6 +556,9 @@ impl Ai {
                 .collect();
             for &(id, ..) in members.iter().filter(|m| !kept.iter().any(|k| k.0 == m.0)) {
                 self.coalesce.owner.remove(&id);
+                if let Some(lease) = self.coalesce.leases.remove(&id) {
+                    lease.release();
+                }
             }
             if let Some(g) = self.coalesce.gangs.iter_mut().find(|g| g.id == gid) {
                 g.members = kept.clone();
@@ -792,6 +799,25 @@ impl Ai {
         c.forms += 1;
         for m in &members {
             c.owner.insert(m.0, gid);
+            c.leases.insert(
+                m.0,
+                reserved::lend(
+                    self.cb,
+                    m.0,
+                    reserved::Owner {
+                        module: "coalesce",
+                        helpers: &[
+                            "fac.unitCreated",
+                            "war.unitFinished",
+                            "war.unitIdle",
+                            "retreat",
+                            "teleport",
+                            "water",
+                            "facframe",
+                        ],
+                    },
+                ),
+            );
         }
         c.gangs.push(Gang {
             id: gid,
@@ -811,13 +837,6 @@ impl Ai {
                 && let Some(f) = self.fighters.get_mut(&m.0)
             {
                 f.task = None;
-            }
-        }
-        // A squad raider is lent to this module: its squad's orders no
-        // longer reach it (`coalsize`).
-        if !self.dev_off(SIZE) {
-            for m in members.iter().filter(|m| matches!(m.1, Origin::Squad(_) | Origin::Loose)) {
-                self.role_lend(m.0, "coalesce");
             }
         }
         self.op_emit("coalesce", rec);
@@ -859,8 +878,11 @@ impl Ai {
         let g = self.coalesce.gangs.remove(i);
         for (id, origin, _) in &g.members {
             self.coalesce.owner.remove(id);
+            if let Some(lease) = self.coalesce.leases.remove(id) {
+                lease.release();
+            }
             match origin {
-                Origin::Squad(_) | Origin::Loose => self.role_reown(*id),
+                Origin::Squad(_) | Origin::Loose => {}
                 Origin::Stakeout => self.stakeouts_release(*id),
                 Origin::Solo | Origin::Kodachi => {
                     if let Some(f) = self.fighters.get_mut(id) {

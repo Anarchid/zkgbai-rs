@@ -345,7 +345,7 @@ pub struct State {
     called: BTreeMap<TaskId, i32>,
     /// Caretakers off their factory to help build: the nanoframe each
     /// repairs.
-    helping: BTreeMap<i32, Unit>,
+    pub(super) helping: BTreeMap<i32, Unit>,
     /// Last journal note per place (on a 256-elmo grid) and event.
     notes: BTreeMap<(i32, i32, &'static str), i32>,
     /// Places a force has within reach: anchor, first and last frame.
@@ -465,7 +465,6 @@ impl Ai {
         let frame = self.frame;
         self.walkin_stand_down(frame);
         self.walkin_heavy_update(now);
-        self.walkin_caretakers();
         let groups = self.walkin_groups(frame);
         self.logistics.walkin.stats.groups += groups.len() as u32;
         if groups.is_empty() {
@@ -1114,15 +1113,24 @@ impl Ai {
     /// Caretakers in reach of a walk-in turret under construction leave
     /// their factory to help build it, and go back once it stands or is
     /// gone.
-    fn walkin_caretakers(&mut self) {
+    pub(super) fn walkin_caretakers(&mut self) {
         let team = self.team_id;
+        let crews: BTreeMap<i32, Vec<i32>> = self
+            .logistics
+            .issues
+            .values()
+            .filter(|i| i.kind == Kind::Walkin)
+            .filter_map(|i| Some((self.eco.tasks.get(i.task)?.as_construction()?.target?.id(), i.crew.clone())))
+            .collect();
         let frames: Vec<Unit> = (self.logistics.issues.values())
             .filter(|i| i.kind == Kind::Walkin)
             .filter_map(|i| self.eco.tasks.get(i.task)?.as_construction()?.target)
             .filter(|u| u.health() > 0.0 && u.is_being_built())
             .collect();
-        let done: Vec<i32> =
-            (self.logistics.walkin.helping.iter()).filter(|(_, f)| !frames.contains(f)).map(|(&id, _)| id).collect();
+        let done: Vec<i32> = (self.logistics.walkin.helping.iter())
+            .filter(|(id, f)| !frames.contains(f) || !crews.get(&f.id()).is_some_and(|c| c.contains(id)))
+            .map(|(&id, _)| id)
+            .collect();
         for id in done {
             self.logistics.walkin.helping.remove(&id);
             if let Some(n) = self.eco.nanos.get(&id)
@@ -1137,6 +1145,7 @@ impl Ai {
             let near: Vec<Unit> = (self.eco.nanos.values())
                 .filter(|n| n.unit.health() > 0.0 && n.unit.team() == team && !n.unit.is_being_built())
                 .filter(|n| !self.logistics.walkin.helping.contains_key(&n.unit.id()))
+                .filter(|n| crews.get(&f.id()).is_some_and(|c| c.contains(&n.unit.id())))
                 .filter(|n| n.unit.def().is_some_and(|d| distance(n.unit.pos(), at) <= d.build_distance() + 24.0))
                 .map(|n| n.unit)
                 .collect();
