@@ -691,7 +691,11 @@ impl Ai {
         // their cheapest fast unit for the stakeouts while they are short
         // (feature `anyscout`), then scouts for raiding alone as before.
         let short = self.stakeouts_short(fac.kind());
-        self.fac.scout_budget = if self.stakeouts_own(fac.kind()) || short > 0 {
+        // `frontretire`: no scouts once the fights are dense (radar sees
+        // all; see `military::front`), so pickets let go are not rebuilt.
+        self.fac.scout_budget = if self.front_retired() {
+            0
+        } else if self.stakeouts_own(fac.kind()) || short > 0 {
             short
         } else {
             scouts_needed.min(fac.scout_allowance).max(0)

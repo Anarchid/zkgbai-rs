@@ -203,6 +203,15 @@ impl Ai {
         }
     }
 
+    /// A stakeout leaves for a module without a role (a Puppy for its
+    /// herd, see `frontretire`): the stakeouts forget it, its role ends.
+    pub(crate) fn role_end_stakeout(&mut self, unit: Unit) {
+        self.stakeouts_forget(unit);
+        if self.role_of(unit.id()) == Some(Role::Stakeout) {
+            self.role_release(unit.id());
+        }
+    }
+
     /// End the unit's role: any module may order it again.
     fn role_release(&mut self, id: i32) {
         if self.roles.of.remove(&id).is_some() {

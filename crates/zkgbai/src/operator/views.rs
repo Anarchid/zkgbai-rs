@@ -1265,7 +1265,8 @@ pub fn tick_value(ai: &Ai) -> Value {
         f.ratchet.round() as i64,
         r2(f.escalation()),
         f.contact.0.round() as i64,
-        f.contact.1.round() as i64
+        f.contact.1.round() as i64,
+        ai.front_retired()
     ]);
     json!({
         "m": res(ai.metal),
@@ -1286,7 +1287,8 @@ pub fn tick_value(ai: &Ai) -> Value {
         "share": r2(ai.posture.share),
         "forecast": ai.projected_metal_density().round() as i64,
         // Fight density (see `military::front`; measured with `frontgate` on or
-        // off): smoothed, ratchet, escalation, our metal in contact, all ours.
+        // off): smoothed, ratchet, escalation, our metal in contact, all ours,
+        // and whether pickets, garrisons and scouts stood down (`frontretire`).
         "front": front,
         // `densgate`: phase minute, income scale, phase income, map diagonal.
         "phase": if ai.phase_on() {
