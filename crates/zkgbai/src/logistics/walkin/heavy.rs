@@ -10,7 +10,9 @@
 //!
 //! - *More than 3 Stingers*: the walk-in turrets the place has had in the
 //!   last [`CAP_WINDOW`] and the Stingers it would take to make up what the
-//!   force has over all that meets it, together more than [`PLACE_CAP`].
+//!   force has over all that meets it, together more than [`PLACE_CAP`];
+//!   or any shortfall at a place that has [`super::MID_CAP`] mid-heavy
+//!   turrets standing already (`midcap`: past those, a heavy or units).
 //! - *Energy and grid*: Lucifer and Desolator fire only on a grid making 50
 //!   energy (`neededlink`). A site has it if the grids it would join make
 //!   that much, or if [`MAX_PYLONS`] pylons link it to grids that do (they
@@ -310,7 +312,7 @@ impl Ai {
     /// (`here` walk-in turrets it had lately): a Lucifer, a Desolator or
     /// both in their stead, where the grid powers them. Whether one was
     /// planned (else the usual turret goes).
-    pub(super) fn walkin_heavy(&mut self, a: &Assessment, now: f32, here: usize) -> bool {
+    pub(super) fn walkin_heavy(&mut self, a: &Assessment, now: f32, here: usize, mid_full: bool) -> bool {
         if self.dev_off(FEATURE) {
             return false;
         }
@@ -318,7 +320,7 @@ impl Ai {
         let s = porc_power(stinger);
         let shortfall = a.group.power - a.ours.total();
         let wanted = stingers_wanted(here, shortfall, s);
-        if wanted <= PLACE_CAP {
+        if wanted <= PLACE_CAP && !mid_full {
             return false;
         }
         let (frame, anchor) = (self.frame, a.place.anchor);
@@ -329,7 +331,10 @@ impl Ai {
         }
         st.opened.retain(|o| frame - o.1 < CAP_WINDOW);
         let open = st.tasks.len() + usize::from(st.raise.is_some());
-        let at_place = st.opened.iter().filter(|o| distance(o.0, anchor) <= CAP_RADIUS).count();
+        let lately = st.opened.iter().filter(|o| distance(o.0, anchor) <= CAP_RADIUS).count();
+        // At most PER_PLACE opened lately, and as many standing (a rolling
+        // window alone lets them pile up: see `MIDCAP`).
+        let at_place = lately.max(self.walkin_standing(anchor, &HEAVIES));
         self.logistics.walkin.stats.heavy.wanted += 1;
         if open >= MAX_OPEN || at_place >= PER_PLACE {
             self.logistics.walkin.stats.heavy.capped += 1;

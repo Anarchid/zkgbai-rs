@@ -55,8 +55,11 @@
 //!   under way, [`PLACE_CAP`] per place per [`CAP_WINDOW`] (dropped ones
 //!   not counted).
 //!
+//! A place keeps at most [`MID_CAP`] mid-heavy turrets (Gauss, Stinger);
+//! past that only a heavy (`heavy`) or none (`midcap`, see [`MIDCAP`]).
+//!
 //! Journal: `k=walkin` per decision (`event`: open, defended, pending,
-//! capped, outranged, late, nosite, stood_down), at most one per place and
+//! capped, full, outranged, late, nosite, stood_down), at most one per place and
 //! event every [`NOTE_FRAMES`].
 
 use std::collections::BTreeMap;
@@ -160,6 +163,20 @@ const STAND_DOWN: i32 = DWELL_GAP;
 
 /// Frames between journal notes for the same place and event.
 const NOTE_FRAMES: i32 = 300;
+
+/// The mid-heavy turrets (Gauss, Stinger), of which a place keeps at most
+/// [`MID_CAP`] standing or planned within [`CAP_RADIUS`], whoever built
+/// them (`midcap`, on by default; `disable=midcap`). User, 2026-11-04,
+/// after a Mecharavaged lobby game where one place got four Gausses and two
+/// Stardusts in seven minutes (the [`PLACE_CAP`] window rolled over):
+/// "Probably should limit to no more than 2 mid-heavy turrets per place; if
+/// we want more porc after that, it's get desolator or maek units". So a
+/// place with as many gets no ordinary walk-in turret: a heavy if the grid
+/// powers one (see `heavy`), else nothing, and the metal stays with the
+/// factories.
+pub const MIDCAP: &str = "midcap";
+pub(super) const MID_HEAVY: [&str; 2] = ["turretgauss", "turretheavylaser"];
+pub(super) const MID_CAP: usize = 2;
 
 /// Candidate turrets: Stardust, Faraday, Gauss, Stinger, Lotus.
 const TURRETS: [&str; 5] = ["turretriot", "turretemp", "turretgauss", "turretheavylaser", "turretlaser"];
@@ -270,6 +287,8 @@ pub struct Stats {
     pub nosite: u32,
     pub stood_down: u32,
     pub bumped: u32,
+    /// The place has [`MID_CAP`] mid-heavies and no heavy was to be had.
+    pub full: u32,
     /// Lucifers and Desolators (`heavyporc`).
     pub heavy: heavy::Stats,
 }
@@ -280,7 +299,7 @@ impl Stats {
             "heavy": self.heavy.json(),
             "groups": self.groups, "threats": self.threats, "defended": self.defended, "breaches": self.breaches,
             "opened": self.opened, "pending": self.pending, "capped": self.capped, "outranged": self.outranged,
-            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped,
+            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped, "full": self.full,
         })
     }
 }
@@ -777,9 +796,17 @@ impl Ai {
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
             .count();
-        // More than PLACE_CAP Stingers' worth wanted here: a Lucifer or a
-        // Desolator instead, where the grid powers one.
-        if self.walkin_heavy(a, now, here) {
+        // More than PLACE_CAP Stingers' worth wanted here, or more than
+        // MID_CAP mid-heavies: a Lucifer or a Desolator instead, where the
+        // grid powers one.
+        let midcap = !self.dev_off(MIDCAP);
+        let mid = if midcap { self.walkin_standing(a.place.anchor, &MID_HEAVY) } else { 0 };
+        if self.walkin_heavy(a, now, here, mid >= MID_CAP) {
+            return;
+        }
+        if midcap && mid >= MID_CAP {
+            self.logistics.walkin.stats.full += 1;
+            self.walkin_note("full", a, json!({"mid": mid}));
             return;
         }
         // The slot this place would take (see `bump`); given up only once
@@ -883,6 +910,25 @@ impl Ai {
                                "hands": hands.len()});
             self.walkin_note("open", a, extra);
         }
+    }
+
+    /// Our turrets named `names` standing (built or not) or planned within
+    /// [`CAP_RADIUS`] of `anchor`.
+    pub(super) fn walkin_standing(&self, anchor: Vec3, names: &[&str]) -> usize {
+        let team = self.team_id;
+        let standing = (self.cb.friendly_units_in(anchor, CAP_RADIUS).into_iter())
+            .filter(|u| u.team() == team && u.health() > 0.0 && names.contains(&self.defs.name_of(*u)))
+            .count();
+        let planned = (self.eco.porc_tasks.iter())
+            .filter_map(|&id| {
+                let t = self.eco.tasks.get(id)?;
+                t.as_construction().map(|c| (t.get_pos(), c.build_type, c.target))
+            })
+            .filter(|&(pos, def, target)| {
+                target.is_none() && names.contains(&self.defs.name(def)) && distance(pos, anchor) <= CAP_RADIUS
+            })
+            .count();
+        standing + planned
     }
 
     /// Journal decision `event` on assessment `a` (rate limited per place).
