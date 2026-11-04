@@ -1599,7 +1599,9 @@ impl Ai {
         }
         self.eco_weigh_factories_by_reach(start);
         let mut opening = opening;
+        // (A chosen factory or a rusher's opening stays.)
         if self.eco.user_fac.is_empty()
+            && !self.rush_binds_opening()
             && let Some(was) = opening.clone().filter(|f| !self.eco.potential_fac_list.contains(f))
         {
             opening = self.eco_roll_opening();
