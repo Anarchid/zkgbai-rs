@@ -19,7 +19,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use springai::Vec3;
+use serde_json::json;
+use springai::{Unit, Vec3};
 
 use super::field::{Field, NEVER};
 use super::live::{DRAFT_COOLDOWN, Doing, MOON, PRESSED_RECALL, RoleKind, Tactic};
@@ -71,6 +72,27 @@ const DOUBLE_RATIO: f32 = 0.8;
 /// A team sent at a raid keeps this many times the raid's power, the rest
 /// split off (see `qrf_mark_split`).
 const JUST_ENOUGH: f32 = 2.0;
+
+/// Switch `standoff` (default on): a raid whose guns reach past its team's
+/// (by more than [`OUTRANGE`]) and past the standoff ring is not marked
+/// from inside its guns. Raiders at 300 elmos from Rockos (455), Rogues
+/// (530), Recluses (570) or Knights (340) were shot while they waited to
+/// be 1.5x stronger (Horus, 11-04: skirmisher detachments killed eco 64
+/// times with enough of our raiders in reach). The fight judge decides, as
+/// it does for picket strikes: strike (raiders close on skirmishers), or
+/// stand beyond the raid's reach plus [`STANDOFF_MARGIN`], off the asset
+/// it shells. Teams on a predicted plan already go at their raid.
+pub const STANDOFF_SWITCH: &str = "standoff";
+const OUTRANGE: f32 = 30.0;
+const STANDOFF_MARGIN: f32 = 60.0;
+/// The judge's bar (each side's killed share of its armed metal over the
+/// veto horizon) to strike an outranging raid, and to keep striking it.
+const OSTRIKE_WIN: f32 = 0.5;
+const OSTRIKE_LOSS: f32 = 0.25;
+const OSTRIKE_HOLD_WIN: f32 = 0.3;
+const OSTRIKE_HOLD_LOSS: f32 = 0.4;
+/// Frames between judgements for one team.
+const OJUDGE_EVERY: i32 = 30;
 
 /// Entry points remembered.
 const ENTRIES: usize = 48;
@@ -137,6 +159,17 @@ pub struct Mark {
     posts: Vec<Vec3>,
     sited: i32,
     stats: Stats,
+    /// Team -> the judge's last call on the raid that outranges it.
+    outranged: BTreeMap<usize, Outranged>,
+}
+
+#[derive(Clone, Copy)]
+struct Outranged {
+    judged: i32,
+    strike: bool,
+    /// The judge's killed shares (ours, theirs); None: no judgement (no
+    /// predictor, unidentified enemies, shields, too many units).
+    loss: Option<[f32; 2]>,
 }
 
 #[derive(Default)]
@@ -146,6 +179,12 @@ struct Stats {
     /// Members split off a team sent at a raid weaker than it needs.
     splits: u32,
     screens: u32,
+    /// Team orders against a raid that outranges the team (`standoff`):
+    /// strikes the judge allowed, stand-offs beyond its reach, and orders
+    /// with no judgement (stand-off ring, metal rule).
+    ostrikes: u32,
+    ostands: u32,
+    onojudge: u32,
 }
 
 /// One or more raids a team marks.
@@ -158,6 +197,10 @@ pub(super) struct Target {
     pub(super) threatened: Vec<(usize, f32)>,
     pub(super) urgency: f32,
     prediction_only: bool,
+    /// The longest weapon range among its known members.
+    range: f32,
+    /// How far from its centre its guns reach: range plus spread.
+    reach: f32,
 }
 
 /// The assignment of rows (teams) to distinct columns (targets), one per
@@ -326,6 +369,9 @@ impl Ai {
                 continue;
             }
             let urgency = threatened.iter().map(|&(i, t)| self.qrf.assets[i].cost / (t + 5.0)).sum();
+            let reach = (g.members.iter().filter_map(|id| self.qrf.tracks.get(id)))
+                .map(|t| distance(t.pos, g.center) + t.kind().map_or(0.0, |d| d.max_weapon_range()))
+                .fold(range, f32::max);
             targets.push(Target {
                 groups: vec![gi],
                 center: g.center,
@@ -333,6 +379,8 @@ impl Ai {
                 threatened,
                 urgency,
                 prediction_only: g.prediction_only,
+                range,
+                reach,
             });
         }
         // More raids than teams: pair the closest raids up.
@@ -354,9 +402,12 @@ impl Ai {
             let b = targets.remove(best.2);
             let a = &mut targets[best.1];
             let (wa, wb) = (a.power.max(1.0), b.power.max(1.0));
+            let old = a.center;
             a.center = (a.center * wa + b.center * wb) * (1.0 / (wa + wb));
             a.power += b.power;
             a.urgency += b.urgency;
+            a.range = a.range.max(b.range);
+            a.reach = (a.reach + distance(old, a.center)).max(b.reach + distance(b.center, a.center));
             a.groups.extend(b.groups);
             for (i, t) in b.threatened {
                 match a.threatened.iter_mut().find(|(j, _)| *j == i) {
@@ -536,6 +587,8 @@ impl Ai {
         }
 
         let mut marks = BTreeMap::new();
+        let standoff = !self.dev_off(STANDOFF_SWITCH);
+        let mut judged = BTreeSet::new();
         for &(team, ti) in &plan {
             let tune = self.qrf_mark_team_tune(team, tune);
             let t = &targets[ti];
@@ -569,6 +622,22 @@ impl Ai {
                 Some(i) => fields[i].clone(),
                 None => team_field(self, team, ids),
             };
+            // A raid whose guns reach the standoff ring and beyond the
+            // team's (`standoff`): the judge says strike or stand clear.
+            let team_range =
+                (ids.iter().filter_map(|id| self.qrf.members.get(id))).map(|m| m.range).fold(0.0, f32::max);
+            let outranged =
+                standoff && !predicted && t.range > team_range + OUTRANGE && t.reach + STANDOFF_MARGIN > tune.standoff;
+            let verdict = if outranged {
+                judged.insert(team);
+                self.qrf_mark_outranged(team, ids, t, team_range, frame)
+            } else {
+                None
+            };
+            // (A shadowing team never strikes, judged or not.)
+            let ostrike = verdict == Some(true) && tune.strike > 0.0;
+            let tune =
+                if outranged && !ostrike { Tune { standoff: t.reach + STANDOFF_MARGIN, goal: false, ..tune } } else { tune };
             let mut spot = self.qrf_mark_spot(ids, t, tune, tf.as_deref());
             // Goalkeeping: stand on the asset the raid heads for, a little
             // toward it, if we get there first (our guns outrange raiders'
@@ -629,6 +698,28 @@ impl Ai {
                     g.center + g.vel
                 })
             });
+            // Outranged: a judged strike goes at the nearest raid wherever
+            // it is; a judged loss neither strikes nor dives on a breach
+            // (it stands beyond the raid's reach); with no judgement the
+            // metal rule stands, from the wider ring.
+            let (near, strong) = if ostrike {
+                let aim = (t.groups.iter().map(|&g| &self.qrf.groups[g]))
+                    .min_by(|a, b| distance(a.center, pos).total_cmp(&distance(b.center, pos)))
+                    .map(|g| g.center + g.vel);
+                (aim, true)
+            } else if verdict.is_some() {
+                (None, false)
+            } else {
+                (near, strong)
+            };
+            if outranged {
+                let s = &mut self.qrf.mark.stats;
+                match verdict {
+                    _ if ostrike => s.ostrikes += 1,
+                    Some(_) => s.ostands += 1,
+                    None => s.onojudge += 1,
+                }
+            }
             let raid_power = t.power;
             match near {
                 Some(aim) if strong => {
@@ -644,6 +735,7 @@ impl Ai {
             }
         }
         self.qrf.mark.marks = marks;
+        self.qrf.mark.outranged.retain(|t, _| judged.contains(t));
 
         // Teams with a place of the operator's go there; moonlighters not
         // sent are their squads' again.
@@ -697,17 +789,71 @@ impl Ai {
         if frame % (30 * 30) < super::PERIOD {
             let s = &self.qrf.mark.stats;
             let line = format!(
-                "qrfmark: t={} marks={} strikes={} splits={} screens={} entries={} posts={}",
+                "qrfmark: t={} marks={} strikes={} splits={} screens={} ostrikes={} ostands={} onojudge={} entries={} posts={}",
                 frame / 30,
                 s.marks,
                 s.strikes,
                 s.splits,
                 s.screens,
+                s.ostrikes,
+                s.ostands,
+                s.onojudge,
                 self.qrf.mark.entries.len(),
                 self.qrf.mark.posts.iter().map(|p| format!("{:.0},{:.0}", p.x, p.z)).collect::<Vec<_>>().join(" ")
             );
+            let v = json!({"event": "stats", "t": frame / 30, "on": standoff, "marks": s.marks, "strikes": s.strikes,
+                           "ostrikes": s.ostrikes, "ostands": s.ostands, "onojudge": s.onojudge});
             self.log(&line);
+            self.op_emit("qrf-standoff", v);
         }
+    }
+
+    /// The judge's call on `team` against `t`, a raid that outranges it:
+    /// Some(true) strike, Some(false) stand clear, None no judgement. At
+    /// most every [`OJUDGE_EVERY`] frames; a strike holds while the judge
+    /// stays over the hold bar. Changes of call are journalled.
+    fn qrf_mark_outranged(&mut self, team: usize, ids: &[i32], t: &Target, team_range: f32, frame: i32) -> Option<bool> {
+        let prev = self.qrf.mark.outranged.get(&team).copied();
+        if let Some(p) = prev
+            && frame - p.judged < OJUDGE_EVERY
+        {
+            return p.loss.map(|_| p.strike);
+        }
+        let units: Vec<Unit> = ids.iter().filter_map(|id| self.qrf.members.get(id)).map(|m| m.unit).collect();
+        let theirs: Vec<i32> = t.groups.iter().flat_map(|&g| self.qrf.groups[g].members.iter().copied()).collect();
+        let loss = self.fight_judge_units(&units, &theirs);
+        let was = prev.is_some_and(|p| p.strike);
+        let strike = loss.is_some_and(|l| {
+            if was {
+                l[1] >= OSTRIKE_HOLD_WIN && l[0] <= OSTRIKE_HOLD_LOSS
+            } else {
+                l[1] >= OSTRIKE_WIN && l[0] <= OSTRIKE_LOSS
+            }
+        });
+        self.qrf.mark.outranged.insert(team, Outranged { judged: frame, strike, loss });
+        if prev.is_none_or(|p| p.strike != strike || p.loss.is_some() != loss.is_some()) {
+            let mut foes: BTreeMap<String, usize> = BTreeMap::new();
+            for id in &theirs {
+                let name = self.qrf.tracks.get(id).and_then(|t| t.kind()).map_or("?", |d| self.defs.name(d));
+                *foes.entry(name.to_owned()).or_default() += 1;
+            }
+            let mut ours: BTreeMap<String, usize> = BTreeMap::new();
+            for id in ids {
+                if let Some(m) = self.qrf.members.get(id) {
+                    *ours.entry(self.defs.name(m.def).to_owned()).or_default() += 1;
+                }
+            }
+            let r2 = |x: f32| (x * 100.0).round() / 100.0;
+            let v = json!({
+                "event": match (loss.is_some(), strike) { (false, _) => "nojudge", (true, true) => "strike", _ => "stand" },
+                "t": frame / 30, "team": team, "moon": team >= MOON, "ours": ours, "foes": foes,
+                "raid_range": t.range.round(), "reach": t.reach.round(), "team_range": team_range.round(),
+                "standoff": (t.reach + STANDOFF_MARGIN).round(), "loss": loss.map(|l| [r2(l[0]), r2(l[1])]),
+                "power": self.qrf_team_power(ids).round(), "raid_power": t.power.round(),
+            });
+            self.op_emit("qrf-standoff", v);
+        }
+        loss.map(|_| strike)
     }
 
     /// A team's members split for a raid of `power` at `at`: those to keep
