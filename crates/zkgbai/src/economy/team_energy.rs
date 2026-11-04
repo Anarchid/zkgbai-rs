@@ -37,6 +37,8 @@ struct Budget {
     made: f32,
     /// Current unit energy use, excluding discretionary overdrive.
     used: f32,
+    /// Energy-only spending (cloak, radar, repairs, etc.), additional to metal.
+    energy_only: f32,
     pending: f32,
     queued: f32,
     target: f32,
@@ -67,10 +69,16 @@ impl Budget {
         self.made < self.metal.max(self.used) || self.shortfall() > 0.0
     }
 
-    /// Only working production can fund a morph. Reserve enough energy
-    /// for current spending and for spending the ongoing metal income.
+    fn spending(&mut self, energy: f32, metal: f32) {
+        self.used += energy.max(0.0);
+        self.energy_only += (energy - metal.max(0.0)).max(0.0);
+    }
+
+    /// Only working production can fund a morph. Energy-only costs must
+    /// be reserved in addition to spending the ongoing metal income, even
+    /// when builders are idle. Also cover any higher live spending.
     fn surplus(self) -> f32 {
-        self.made - self.metal.max(self.used)
+        self.made - (self.metal + self.energy_only).max(self.used)
     }
 
     fn reactor(self, eminent: bool, fusion_output: f32) -> Option<&'static str> {
@@ -133,17 +141,23 @@ impl Ai {
         if !self.allies.is_empty() {
             return self.eco.team_energy.budget.map(Budget::surplus);
         }
-        let used = self
-            .cb
-            .friendly_units()
-            .into_iter()
-            .filter(|u| u.team() == self.team_id && u.health() > 0.0)
-            .map(|u| u.resource_use(self.energy))
-            .sum::<f32>();
-        Some(
-            Budget { made: self.eco.effective_income_energy, metal: self.eco.static_income, used, ..Budget::default() }
-                .surplus(),
-        )
+        let mut budget =
+            Budget { made: self.eco.effective_income_energy, metal: self.eco.static_income, ..Budget::default() };
+        for u in self.cb.friendly_units().into_iter().filter(|u| u.team() == self.team_id && u.health() > 0.0) {
+            budget.spending(u.resource_use(self.energy), u.resource_use(self.metal));
+        }
+        Some(budget.surplus())
+    }
+
+    pub(super) fn eco_geo_energy_stalled(&self) -> bool {
+        // The priority gadget turns off upkeep (including cloakers) when
+        // it cannot pay. Their reduced actual draw is not spare energy.
+        self.eco.hard_estalled
+            || self
+                .cb
+                .friendly_units()
+                .into_iter()
+                .any(|u| u.health() > 0.0 && !u.is_being_built() && u.rules_param_float("forcedOff", 0.0) > 0.0)
     }
 
     fn eco_planned_energy(&self, def: UnitDef, pos: springai::Vec3, wind: Option<super::wind::WindModel>) -> f32 {
@@ -180,7 +194,7 @@ impl Ai {
             let team = u.team();
             teams.insert(team);
             let building = u.is_being_built();
-            budget.used += u.resource_use(self.energy).max(0.0);
+            budget.spending(u.resource_use(self.energy), u.resource_use(self.metal));
             let output = u.rules_param_float("current_energyIncome", 0.0).max(0.0);
             let expected = if building { self.eco_planned_energy(def, u.pos(), wind) } else { output };
             budget.production(output, expected, building);
@@ -345,11 +359,73 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_surplus_reserves_live_spending_and_ignores_unfinished_capacity() {
-        let b = Budget { made: 160.0, metal: 100.0, pending: 1000.0, queued: 1000.0, ..Budget::default() };
+    fn upgrade_surplus_adds_misc_to_metal_and_ignores_unfinished_capacity() {
+        let mut b = Budget { made: 160.0, metal: 100.0, pending: 1000.0, queued: 1000.0, ..Budget::default() };
         assert_eq!(b.surplus(), 60.0);
-        assert_eq!(Budget { used: 140.0, ..b }.surplus(), 20.0);
-        assert_eq!(Budget { used: 180.0, ..b }.surplus(), -20.0);
+        // Idle builders do not make a 25 E/s cloaker free: preserve the
+        // 100 E/s needed to spend the metal income when building resumes.
+        b.spending(25.0, 0.0);
+        assert_eq!(b.surplus(), 35.0);
+        b.spending(80.0, 80.0);
+        assert_eq!(b.surplus(), 35.0);
+        // Spending stored/reclaimed metal can exceed ongoing income.
+        b.spending(40.0, 40.0);
+        assert_eq!(b.surplus(), 15.0);
+    }
+
+    #[test]
+    fn geo_budget_counts_cloakers_and_rejects_priority_disabled_upkeep() {
+        use std::ffi::{CStr, c_char};
+        thread_local! {
+            static FORCED_OFF: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+            static OWNER: std::cell::Cell<i32> = const { std::cell::Cell::new(2) };
+        }
+        unsafe extern "C" fn units(_: i32, out: *mut i32, size: i32) -> i32 {
+            if !out.is_null() && size > 0 {
+                unsafe { *out = 10 };
+            }
+            1
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            OWNER.with(std::cell::Cell::get)
+        }
+        unsafe extern "C" fn resource(_: i32, name: *const c_char) -> i32 {
+            i32::from(unsafe { CStr::from_ptr(name) } == c"Energy")
+        }
+        unsafe extern "C" fn used(_: i32, _: i32, res: i32) -> f32 {
+            if res == 1 { 25.0 } else { 0.0 }
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, name: *const c_char, default: f32) -> f32 {
+            if unsafe { CStr::from_ptr(name) } == c"forcedOff" {
+                FORCED_OFF.with(std::cell::Cell::get)
+            } else {
+                default
+            }
+        }
+        let mut ai = super::super::test_ai_with(|t| {
+            t.getFriendlyUnits = Some(units);
+            t.Unit_getHealth = Some(health);
+            t.Unit_getTeam = Some(team);
+            t.getResourceByName = Some(resource);
+            t.Unit_getResourceUse = Some(used);
+            t.Unit_getRulesParamFloat = Some(rules);
+        });
+        ai.eco.effective_income_energy = 160.0;
+        ai.eco.static_income = 100.0;
+        assert_eq!(ai.eco_geo_upgrade_surplus(), Some(35.0));
+        assert!(!ai.eco_geo_energy_stalled());
+        FORCED_OFF.with(|v| v.set(1.0));
+        assert!(ai.eco_geo_energy_stalled());
+        // An ally losing upkeep also forbids the upgrade.
+        OWNER.with(|v| v.set(3));
+        ai.allies.push(3);
+        assert!(ai.eco_geo_energy_stalled());
+        FORCED_OFF.with(|v| v.set(0.0));
+        ai.eco.hard_estalled = true;
+        assert!(ai.eco_geo_energy_stalled());
     }
 
     #[test]

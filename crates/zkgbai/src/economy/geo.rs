@@ -15,8 +15,9 @@
 //! place of the next Fusion or Singularity, with High miscellaneous
 //! priority so the morph gets funded promptly. It no longer waits for
 //! three Fusions, but still needs safe ground, little of ours within its
-//! blast, and 30 energy/s spare after the plant goes offline and the morph
-//! draw is paid. As it starts, the
+//! blast, and at least 30 energy/s above metal spending and existing Misc
+//! draw. The remaining generation must also cover the outage and morph
+//! without an energy deficit. As it starts, the
 //! plant is linked to a grid with metal spots, and constructors raise a box
 //! of walls round it, high enough to hide its aim point from direct fire
 //! over level ground (the engine fires only on a clear ground ray to the
@@ -38,13 +39,13 @@ const ADVANCED: &str = "energyheavygeo";
 /// early expansion gets cheap wind/solar instead of a 500-metal commitment.
 const GEO_MIN_INCOME: f32 = 25.0;
 
-/// Keep this much live energy spare throughout an upgrade, after losing
-/// the basic plant's output and paying the morph's energy cost per second.
+/// Minimum surplus before the upgrade, above metal spending and Misc draw.
+/// The outage and morph must fit inside this surplus, not leave another 30.
 const UPGRADE_SURPLUS: f32 = 30.0;
 const MORPH_SECONDS: f32 = 90.0;
 
 fn upgrade_has_surplus(surplus: f32, output: f32, morph_cost: f32, seconds: f32) -> bool {
-    seconds > 0.0 && surplus - output.max(0.0) - morph_cost.max(0.0) / seconds >= UPGRADE_SURPLUS
+    seconds > 0.0 && surplus >= UPGRADE_SURPLUS && surplus - output.max(0.0) - morph_cost.max(0.0) / seconds > 0.0
 }
 
 #[cfg(test)]
@@ -52,16 +53,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn upgrade_keeps_thirty_energy_spare_after_outage_and_morph_spending() {
-        // A working basic geo loses 25 E/s and its 1000-energy morph spends
-        // another 11.1 E/s. A nominal 30 E/s surplus would cause a stall.
+    fn upgrade_requires_income_margin_and_no_deficit_during_morph() {
+        // The 30 E/s is a pre-upgrade margin, not an additional reserve
+        // after paying for the lost 25 E/s and the 11.1 E/s morph.
         assert!(!upgrade_has_surplus(30.0, 25.0, 1000.0, 90.0));
-        assert!(!upgrade_has_surplus(55.0, 25.0, 1000.0, 90.0));
-        assert!(!upgrade_has_surplus(66.0, 25.0, 1000.0, 90.0));
-        assert!(upgrade_has_surplus(67.0, 25.0, 1000.0, 90.0));
-        // Exactly 30 E/s remaining is sufficient; invalid morph time isn't.
-        assert!(upgrade_has_surplus(65.0, 25.0, 900.0, 90.0));
-        assert!(!upgrade_has_surplus(64.99, 25.0, 900.0, 90.0));
+        assert!(!upgrade_has_surplus(36.0, 25.0, 1000.0, 90.0));
+        assert!(upgrade_has_surplus(37.0, 25.0, 1000.0, 90.0));
+        assert!(upgrade_has_surplus(55.0, 25.0, 1000.0, 90.0));
+        // Even a cheaper outage needs the full pre-upgrade margin.
+        assert!(!upgrade_has_surplus(29.99, 15.0, 900.0, 90.0));
+        assert!(upgrade_has_surplus(30.0, 15.0, 900.0, 90.0));
+        // Exact balance leaves no headroom; invalid morph time isn't safe.
+        assert!(!upgrade_has_surplus(35.0, 25.0, 900.0, 90.0));
         assert!(!upgrade_has_surplus(1000.0, 25.0, 1000.0, 0.0));
     }
 }
@@ -324,7 +327,7 @@ impl Ai {
             return false;
         }
         let surplus = self.eco_geo_upgrade_surplus();
-        let why = if self.allies.is_empty() && self.eco.hard_estalled {
+        let why = if self.eco_geo_energy_stalled() {
             "energy stalled".to_owned()
         } else if surplus.is_none() {
             "waiting for shared energy budget".to_owned()
@@ -345,7 +348,7 @@ impl Ai {
                     .unwrap_or_else(|| advanced.cost(self.metal) - def.cost(self.metal));
                 if !upgrade_has_surplus(surplus.unwrap_or(0.0), output, cost, seconds) {
                     reasons.push(format!(
-                        "({:.0}, {:.0}) needs {UPGRADE_SURPLUS:.0} E/s spare during the morph",
+                        "({:.0}, {:.0}) needs {UPGRADE_SURPLUS:.0} E/s above spending and enough to cover the outage and morph",
                         pos.x, pos.z
                     ));
                     continue;
