@@ -234,7 +234,7 @@ impl Ai {
                 heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
                 st.driven = 0;
             }
-            heavy.set_fire_state(0, 0);
+            heavy.set_fire_state(2, 0);
         } else if self.rush_hold_range(sid, heavy, st) {
             pack.target = goal;
             self.taskforces.packs.insert(sid, pack);
@@ -425,7 +425,7 @@ impl Ai {
                 })
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            heavy.set_fire_state(0, 0);
+            heavy.set_fire_state(2, 0);
             // An explicit ATTACK can path toward a clearer firing line even
             // on hold-position. Aim only the weapon while movement is stopped.
             heavy.stop(0);
