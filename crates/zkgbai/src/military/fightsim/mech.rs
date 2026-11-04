@@ -465,6 +465,8 @@ pub(super) struct MechUnit {
     /// the plane fight keeps apart (mech.py `goes_off`).
     kcontact: bool,
     death: Option<Death>,
+    /// amphbomb.lua death-blast customparams (all mechanics formulations).
+    limpet: bool,
     /// P(the unit fires at all in this fight).
     engage: f64,
     para: f64,
@@ -943,6 +945,7 @@ impl Model {
                     kreach: kamikaze_reach(&su.spec.def, snap.flags.bombs),
                     kcontact: snap.flags.bombs,
                     death: t.death.get(&su.spec.def).copied(),
+                    limpet: su.spec.def == "amphbomb",
                     engage: 1.0,
                     para: 0.0,
                     slowdmg: 0.0,
@@ -1031,27 +1034,27 @@ fn engage_features(snap: &FightSnapshot, i: usize, max_range: f64) -> [f64; 13] 
 }
 
 /// Damage `t`; a kill counts its cost if armed and sets off its death.
-fn hurt(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, dmg: f64) {
+fn hurt(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, dmg: f64, f: i32) {
     if !us[t].u.alive {
         return;
     }
     us[t].u.hp -= dmg;
     if us[t].u.hp <= 0.0 {
-        kill(us, killed, t);
+        kill(us, killed, t, f);
     }
 }
 
 /// mech.py `kill`: no check that `t` lives (a kamikaze caught in a blast
 /// still blows up when it reaches the enemy, as in the Python model). A
 /// captured unit was counted lost to its owner when taken.
-fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize) {
+fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, f: i32) {
     us[t].u.alive = false;
     if us[t].u.armed && us[t].u.side == us[t].orig_side {
         killed[us[t].orig_side as usize] += us[t].u.cost;
     }
     let Some(d) = us[t].death else { return };
     for o in 0..us.len() {
-        if !us[o].u.alive {
+        if !us[o].u.alive || (us[t].limpet && us[o].u.side == us[t].u.side) {
             continue;
         }
         let dd = apart(&us[o], &us[t]);
@@ -1060,7 +1063,17 @@ fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize) {
             if d.paralyzer {
                 us[o].para += v;
             } else {
-                hurt(us, killed, o, v);
+                if us[t].limpet {
+                    // unit_timeslow.lua scales by actual damage, with 60 frames
+                    // of overslow: 60 * 0.04 / 30 = 0.08 of current health.
+                    us[o].slowdmg += 10.0 * v;
+                    us[o].slow_last = f;
+                    us[o].ovs = us[o].ovs.max(0.08);
+                }
+                hurt(us, killed, o, v, f);
+                if us[t].limpet {
+                    us[o].cap_slow();
+                }
             }
         }
     }
@@ -1255,7 +1268,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         && b.mode == BombMode::Down
         && us.get(b.index).is_some_and(|u| u.u.alive)
     {
-        kill(&mut us, &mut killed, b.index);
+        kill(&mut us, &mut killed, b.index, 0);
     }
     while f < run.horizon {
         if let Some(hz) = hazard
@@ -1359,7 +1372,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 let b: f64 = us[i].burns.iter().filter(|(end, _)| *end > f).map(|(_, r)| r).sum();
                 us[i].burns.retain(|(end, _)| *end > f + DT);
                 if b > 0.0 {
-                    hurt(&mut us, &mut killed, i, b * dt);
+                    hurt(&mut us, &mut killed, i, b * dt, f);
                 }
             }
             let m = &mut us[i];
@@ -1414,7 +1427,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             let speed = us[i].u.speed * (1.0 - us[i].slowed());
             if run.pass && side == 0 {
                 if us[i].kamikaze && goes_off(&us[i], &us[nj], dist) {
-                    kill(&mut us, &mut killed, i);
+                    kill(&mut us, &mut killed, i, f);
                     continue;
                 }
                 us[i].u.x += speed * dt;
@@ -1430,7 +1443,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             if run.defense.is_some() {
                 if us[i].kamikaze && goes_off(&us[i], &us[nj], dist) {
-                    kill(&mut us, &mut killed, i);
+                    kill(&mut us, &mut killed, i, f);
                     continue;
                 }
                 if us[i].u.armed && dist > us[i].u.max_range * 0.95 {
@@ -1445,7 +1458,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             if us[i].kamikaze {
                 if goes_off(&us[i], &us[nj], dist) {
-                    kill(&mut us, &mut killed, i);
+                    kill(&mut us, &mut killed, i, f);
                     continue;
                 }
                 let step = (speed * dt).min(dist);
@@ -1622,7 +1635,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                         let kappa = if us[o].u.side == us[j].u.side { sp.kappa_target } else { sp.kappa_shooter };
                         let v = kappa * falloff * nominal * shots * eff;
                         if v > 0.0 {
-                            hurt(&mut us, &mut killed, o, v);
+                            hurt(&mut us, &mut killed, o, v, f);
                         }
                     }
                 }
@@ -1631,7 +1644,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                         let (p, d1) = (hit.p_tgt * eff, frac_t * nominal);
                         tr.var[j] += shots * p * (1.0 - p) * d1 * d1;
                     }
-                    hurt(&mut us, &mut killed, j, dmg);
+                    hurt(&mut us, &mut killed, j, dmg, f);
                 }
                 // The Puppy is its own missile (`SPENT_ON_FIRING`).
                 if us[i].u.spent {
@@ -1701,6 +1714,7 @@ mod tests {
     /// export_mech.VARIANTS by name (both with `sreload` since 2026-11-03).
     fn variant(name: &str) -> SimFlags {
         match name {
+            "base" => SimFlags::default(),
             "focus" => SimFlags::from_switches(false, true, true),
             "2d" => SimFlags::from_switches(true, false, true),
             "sr" => SimFlags::from_switches(false, false, true),
@@ -2380,6 +2394,67 @@ mod tests {
         }
     }
 
+    #[test]
+    fn limpet_blast_slows_enemies_and_spares_escorts() {
+        let m = Model::load().unwrap();
+        let s = specs_from(BOMBS_UNITS);
+        let mut snap = snapshot("0:amphbomb:400:0:0;0:amphraid:360:0:0;1:amphraid:360:0:0", &s);
+        for flags in [SimFlags::default(), variant("sr"), variant("focus"), variant("2d")] {
+            for bombs in [false, true] {
+                snap.flags = SimFlags { bombs, ..flags };
+                let mut us = m.mech_units(&snap);
+                kill(&mut us, &mut [0.0; 2], 0, 123);
+                assert_eq!(us[1].u.hp, 360.0);
+                assert_eq!(us[1].slowdmg, 0.0);
+                assert!((us[2].u.hp - 239.9).abs() < 1e-6);
+                assert!((us[2].slowdmg - 0.58 * 239.9).abs() < 1e-6);
+                assert_eq!(us[2].slowed(), 0.5);
+                assert_eq!(us[2].slow_last, 123);
+                assert_eq!(us[2].ovs, 0.08);
+            }
+        }
+    }
+
+    #[test]
+    fn limpet_fates_match_python() {
+        let m = Model::load().unwrap();
+        let s = specs_from(BOMBS_UNITS);
+        for line in data_lines(include_str!("testdata/mech_limpet_fates.tsv")) {
+            let f: Vec<_> = line.split('\t').collect();
+            let mut snap = snapshot(f[3], &s);
+            snap.flags = SimFlags { bombs: f[2] == "1", ordered: true, ..variant(f[1]) };
+            let got = m.fates(&snap, f[4].parse().unwrap(), FateMode::AMove);
+            for (i, (g, want)) in got.iter().zip(f[5].split(';')).enumerate() {
+                let w: Vec<_> = want.split(':').collect();
+                assert_eq!(g.dead, w[0] == "1", "{} {} unit {i}", f[0], f[1]);
+                assert_eq!(g.death_frame.unwrap_or(-1), w[1].parse::<i32>().unwrap(), "{} {} unit {i}", f[0], f[1]);
+                assert!(
+                    (g.hp_left as f64 - w[2].parse::<f64>().unwrap()).abs() < 0.01,
+                    "{} {} unit {i}: {g:?} vs {want}",
+                    f[0],
+                    f[1]
+                );
+                assert!(
+                    (g.p_raw as f64 - w[3].parse::<f64>().unwrap()).abs() < 1e-3,
+                    "{} {} unit {i}: {g:?} vs {want}",
+                    f[0],
+                    f[1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn limpet_cost_is_not_justified_by_targets_the_escorts_kill_anyway() {
+        let m = Model::load().unwrap();
+        let s = specs_from(BOMBS_UNITS);
+        let mut snap =
+            snapshot("0:amphbomb:400:80:0;0:amphraid:360:0:0;0:amphraid:360:-20:40;1:amphcon:1000:320.3:0", &s);
+        snap.flags = SimFlags { ordered: true, ..SimFlags::from_switches(true, true, true) };
+        let v = m.bomb_charge(&snap, 0, &[], 900);
+        assert!(v.spent > 0.99 && v.net < -150.0, "{v:?}");
+    }
+
     /// The Dominatrix as the AI reads it (units/vehcapture.lua).
     fn dominatrix() -> Arc<UnitSpec> {
         Arc::new(UnitSpec {
@@ -2504,14 +2579,14 @@ mod tests {
         assert_eq!((us[1].u.side, killed), (0, [0.0, 210.0]));
         release(&mut us, &mut killed, 60);
         assert_eq!(us[1].u.side, 0, "its captor lives");
-        kill(&mut us, &mut killed, 0);
+        kill(&mut us, &mut killed, 0, 0);
         assert_eq!(killed, [420.0, 210.0]);
         release(&mut us, &mut killed, 90);
         assert_eq!((us[1].u.side, us[1].controller, killed), (1, None, [420.0, 0.0]));
         assert!((us[1].cap - 0.95 * 1820.0).abs() < 1e-9 && us[1].cap_hit == 90);
         // Taken again and killed while held: lost once.
         transfer(&mut us, &mut killed, 1, 0, false, 120);
-        kill(&mut us, &mut killed, 1);
+        kill(&mut us, &mut killed, 1, 0);
         assert_eq!(killed, [420.0, 210.0]);
     }
 
