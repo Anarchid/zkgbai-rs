@@ -344,6 +344,17 @@ are on by default: `colonize_policy=combined`. Use `enemy_distance` or `density`
 to keep only one, or `baseline` for the original scoring and bonus.
 `disable=colonize` still disables colonization entirely.
 
+### Allied reactor budget
+
+In allied games, reactors follow an alliance-wide energy goal based on total mex income and the existing
+territory/phase ramp. Existing production, unfinished energy plants (at full completed output), geothermal
+upgrades and the starter's queued energy jobs count toward it. Three standing reactors anywhere in the
+alliance unlock a Singularity for a deficit of at least two Fusions' output; smaller gaps use a Fusion or
+small plants. The lowest eligible ZKGBAI team starts reactors, one at a time, and nearby allies help finish
+them. A replacement starter waits two seconds for old unstarted orders to be cleared. Small plants may
+still bridge an immediate energy shortage while a reactor builds. The `team energy:` log lines report
+the goal, production, committed output, deficit and starter. Solo reactor progression is unchanged.
+
 Operator API and run journal
 ----------------------------
 
