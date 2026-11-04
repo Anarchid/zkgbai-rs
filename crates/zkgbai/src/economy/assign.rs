@@ -600,7 +600,10 @@ impl Ai {
     pub(crate) fn eco_project_hand(&self, wid: i32, task: TaskId) -> bool {
         let Some(w) = self.eco.workers.get(&wid) else { return false };
         let Some(t) = self.eco.tasks.get(task) else { return false };
-        let finishing = !self.op_priority(task) && self.eco_finishing_task(w).is_some_and(|id| id != task);
+        // The finishing check validates its current crew through this method.
+        // Only ask it when proposing a different job, avoiding that cycle.
+        let finishing =
+            w.task != Some(task) && !self.op_priority(task) && self.eco_finishing_task(w).is_some_and(|id| id != task);
         let dedicated = finishing
             || w.task.is_some_and(|id| {
                 id != task
@@ -1584,6 +1587,17 @@ mod tests {
         assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "an explicit priority can preempt");
         assert!(ai.eco_project_hand(10, next));
         ai.op.over.priority_tasks.clear();
+        ai.logistics_open(finish, Kind::Energy, Worth::Flat(5000.0), "current project", 0.0);
+        ai.frame = 17;
+        ai.offset = 0;
+        ai.eco.metal = 1000.0;
+        ai.eco.energy = 1000.0;
+        ai.eco.effective_income = 10.0;
+        ai.logistics_update(17);
+        assert_eq!(ai.logistics.issues[&finish].crew, vec![10]);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), Some(finish));
+        assert!(ai.eco_project_hand(10, finish), "a finishing builder remains eligible for its own crew");
+        assert!(!ai.eco_project_hand(10, next), "current crew validation must not recurse");
         SPENDING.set(0.0);
         assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None, "a stalled build does not pin a worker");
         SPENDING.set(0.01);
