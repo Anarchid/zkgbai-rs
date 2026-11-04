@@ -1375,8 +1375,7 @@ impl Ai {
                         if self.defs.name_of(target) == AIRPAD {
                             self.eco_adopt_pad_nano(unit, target);
                         } else {
-                            unit.set_repeat(true, 0);
-                            unit.guard(nt.target, 0);
+                            self.eco_nano_post(nt);
                         }
                         self.eco_defend_nano(nt);
                     }
@@ -1749,13 +1748,48 @@ impl Ai {
     }
 
     fn eco_check_nanos(&mut self) {
+        // An airpad's caretaker off its area repair (idle, or told something
+        // else) and not lent to the walk-in guard goes back to it: guarding
+        // the pad would repair the pad and nothing on it.
+        let mut off_post = Vec::new();
         for n in self.eco.nanos.values() {
             if n.target.health() <= 0.0 {
                 n.unit.self_destruct(0);
-            } else if n.unit.num_current_commands() == 0 && self.defs.name_of(n.target) == AIRPAD {
-                Self::eco_pad_nano_order(*n);
+            } else if self.defs.name_of(n.target) == AIRPAD
+                && !self.walkin_lends(n.unit.id())
+                && !Self::eco_on_pad_post(n.unit)
+            {
+                off_post.push((*n, n.unit.current_commands().first().map(|c| c.id())));
             }
         }
+        for (n, order) in off_post {
+            Self::eco_pad_nano_order(n);
+            if let Some(order) = order {
+                self.log(&format!(
+                    "economy: airpad caretaker {} back on its area repair over pad {} (was on order {order})",
+                    n.unit.id(),
+                    n.target.id()
+                ));
+            }
+        }
+    }
+
+    /// Send a caretaker back to its post (after the walk-in guard lent it):
+    /// an airpad's to its area repair over the pad, any other to guard its
+    /// target (a factory, or a superweapon under construction).
+    pub(crate) fn eco_nano_post(&self, n: Nanotower) {
+        if self.defs.name_of(n.target) == AIRPAD {
+            Self::eco_pad_nano_order(n);
+        } else {
+            n.unit.set_repeat(true, 0);
+            n.unit.guard(n.target, 0);
+        }
+    }
+
+    /// Whether a caretaker holds an area repair (its airpad post; a repair
+    /// it found there goes in front of it, so look down the queue).
+    fn eco_on_pad_post(unit: Unit) -> bool {
+        unit.current_commands().iter().any(|c| c.id() == cmd::REPAIR && c.params().len() == 4)
     }
 
     /// Adopt a finished caretaker as this airpad's (`padnano`), as the

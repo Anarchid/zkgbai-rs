@@ -1098,6 +1098,19 @@ impl Ai {
         self.eco.nanos.contains_key(&id)
     }
 
+    /// Whether the walk-in guard has caretaker `id` helping build a turret.
+    pub(crate) fn walkin_lends(&self, id: i32) -> bool {
+        self.logistics.walkin.helping.contains_key(&id)
+    }
+
+    /// Lend a caretaker to build `frame` as [`Self::walkin_caretakers`]
+    /// does (the staged fixtures; it comes back on the next pass once
+    /// `frame` is no walk-in turret under construction).
+    pub(crate) fn walkin_lend_caretaker(&mut self, nano: Unit, frame: Unit) {
+        nano.repair(frame, 0);
+        self.logistics.walkin.helping.insert(nano.id(), frame);
+    }
+
     /// Caretakers in reach of a walk-in turret under construction leave
     /// their factory to help build it, and go back once it stands or is
     /// gone.
@@ -1116,7 +1129,7 @@ impl Ai {
                 && n.unit.health() > 0.0
                 && n.target.health() > 0.0
             {
-                n.unit.guard(n.target, 0);
+                self.eco_nano_post(*n);
             }
         }
         for f in frames {

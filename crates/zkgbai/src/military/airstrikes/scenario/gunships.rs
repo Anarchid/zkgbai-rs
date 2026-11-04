@@ -9,8 +9,12 @@
 //! longer) and, unless `padnano` is off, a caretaker beside the airpad
 //! adopted as the economy adopts a built one: hurt Raptors come home to it,
 //! and with `padlaunch` leave the pad at 70% while a job is open.
+//! `airstrike-raptors-pad-lend`: the same, and the caretaker is lent away at
+//! 0:30 as the walk-in guard lends one (back on the next logistics pass) and
+//! ordered to guard the pad at 3:00 (any other order): each time it must
+//! go back to its area repair over the pad.
 use crate::{Ai, util::get_directional_point};
-use springai::Vec3;
+use springai::{Unit, Vec3};
 
 impl Ai {
     pub(super) fn airstrike_gunship_scenario(&mut self, test: &str, frame: i32) {
@@ -46,7 +50,7 @@ impl Ai {
                 for (dx, dz) in [(90.0, 0.0), (-90.0, 0.0), (0.0, 90.0)] {
                     spawn.push(("energysolar", Vec3::xz(site.x + dx, site.z + dz)));
                 }
-                if test == "airstrike-raptors-pad" {
+                if test.starts_with("airstrike-raptors-pad") {
                     for (dx, dz) in [(180.0, 0.0), (-180.0, 0.0), (0.0, 180.0), (90.0, 180.0), (-90.0, 180.0)] {
                         spawn.push(("energysolar", Vec3::xz(site.x + dx, site.z + dz)));
                     }
@@ -62,7 +66,7 @@ impl Ai {
                 self.log(&format!("airstrike-test: spawned {name} {} at {:.0},{:.0}", u.id(), u.pos().x, u.pos().z));
             }
         }
-        if test == "airstrike-raptors-pad"
+        if test.starts_with("airstrike-raptors-pad")
             && frame == 90
             && !self.dev_off("padnano")
             && let Some(pad) = self.cb.team_units().into_iter().find(|u| self.defs.name_of(*u) == "staticrearm")
@@ -72,6 +76,25 @@ impl Ai {
             let p = map.find_closest_build_site(d, near, 120.0, 1, 0);
             if let Some(u) = self.cb.cheat_new_unit(d, if p.x >= 0.0 { p } else { near }) {
                 self.eco_adopt_pad_nano(u, pad);
+            }
+        }
+        if test == "airstrike-raptors-pad-lend" && matches!(frame, 900 | 5400) {
+            let pad_nanos: Vec<(Unit, Unit)> = (self.eco.nanos.values())
+                .filter(|n| self.defs.name_of(n.target) == "staticrearm")
+                .map(|n| (n.unit, n.target))
+                .collect();
+            for (nano, pad) in pad_nanos {
+                if frame == 900 {
+                    self.walkin_lend_caretaker(nano, pad);
+                } else {
+                    nano.guard(pad, 0);
+                }
+                self.log(&format!(
+                    "airstrike-test: caretaker {} {} pad {}",
+                    nano.id(),
+                    if frame == 900 { "lent away from" } else { "told to guard" },
+                    pad.id()
+                ));
             }
         }
         // The fixture alone flies the Revenants: over the outpost, shooting.
@@ -106,6 +129,12 @@ impl Ai {
                         p.x,
                         p.z
                     ));
+                    if name == "staticcon" {
+                        // Its orders: command id.parameter count.
+                        let q: Vec<String> =
+                            u.current_commands().iter().map(|c| format!("{}.{}", c.id(), c.params().len())).collect();
+                        line.push_str(&format!(":q{}", q.join(",")));
+                    }
                 }
             }
             self.log(&format!("airstrike-test: standing{line}"));
