@@ -71,3 +71,13 @@ printf 'stamp %s\nbranch %s\ncommit %s\nfrom %s\nsha256 %s\ninstalled %s\n' "$st
 mv -f "$dst/.INSTALLED.tmp" "$dst/INSTALLED"
 echo "installed $stamp as ZKGBAI $version in $dst (operator and journal on)"
 grep -n -A4 "key    = 'operator'\|key    = 'journal'" "$dst/AIOptions.lua" | grep "def"
+# A Chobby that has played a game keeps the library it loaded first: games
+# in it go on with the old build until it is restarted (11-03 and 11-04:
+# a night of lobby games ran a build several installs old). Say so.
+for pid in $(pgrep -f -- '--menu Chobby' 2> /dev/null); do
+    # (the engine names its thread recoil-main: match its binary)
+    [[ "$(basename "$(readlink "/proc/$pid/exe" 2> /dev/null)")" == spring* ]] || continue
+    started=$(ps -o lstart= -p "$pid" 2> /dev/null) || continue
+    echo "WARNING: Chobby (pid $pid, running since $started) keeps the library it already loaded;" \
+         "restart it to play $stamp (check a game's journal: \"k\":\"run\" -> build)" >&2
+done
