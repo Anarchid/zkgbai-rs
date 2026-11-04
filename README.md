@@ -290,7 +290,12 @@ anti-nuke rising near our base gets our help before we start our own. Allied ins
 anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. One nuke is
 enough for an alliance: none of ours starts while anyone's silo stands or rises (Berthas, Zeniths and Disco Rave
 Parties may follow). Opening
-factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Where much of
+factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Turns wait for
+actual allied placements, with a bounded, staggered fallback if a predecessor never places; a pregame announcement
+alone does not release the next turn. A visible own factory is preserved even before its creation event arrives.
+Autonomous factory expansion waits two actual game minutes after our first factory becomes usable, regardless of
+the density-scaled phase clock. Free openings, replacement of the last lost factory, and explicit operator or
+developer factory choices bypass this floor. Where much of
 a side's metal lies under water, one instance takes the start nearest it and an amphibious or hover opening; from
 3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on
 the ally's (`disable=plates` builds our own instead).

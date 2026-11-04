@@ -62,7 +62,8 @@ fn movetype(name: &str) -> &str {
     }
 }
 
-/// Ten seconds for an earlier controller to declare or place its factory.
+/// Ten seconds for an earlier controller to place its factory. Pregame
+/// declarations can change when reach and diversity are resolved at startup.
 /// Stagger the fallback by rank, too: a missing AI must neither block the
 /// opening forever nor release every waiting controller on the same frame.
 const WAIT: i32 = 300;
@@ -270,10 +271,7 @@ impl Ai {
     }
 
     pub(super) fn eco_wait_for_allied_plop(&self) -> bool {
-        waits(self.frame, self.team_id, &self.iq.peers, |team| {
-            self.iq.placed_factories.contains_key(&team)
-                || self.iq.teams.get(&team).is_some_and(|ps| ps.iter().any(|p| p.def_name.starts_with("factory")))
-        })
+        waits(self.frame, self.team_id, &self.iq.peers, |team| self.iq.placed_factories.contains_key(&team))
     }
 
     pub(super) fn eco_coordinate_plops(&mut self) {
@@ -281,15 +279,32 @@ impl Ai {
             return;
         }
         self.iq.placed_factories.clear();
+        let mut ours = Vec::new();
         for u in self.cb.friendly_units() {
             let team = u.team();
-            if !self.allies.contains(&team) || u.health() <= 0.0 {
+            if u.health() <= 0.0 {
                 continue;
             }
             let name = self.defs.name_of(u);
             if name.starts_with("factory") {
-                self.iq.placed_factories.entry(team).or_default().insert(name.to_owned());
+                if team == self.team_id {
+                    ours.push(u);
+                } else if self.allies.contains(&team) {
+                    self.iq.placed_factories.entry(team).or_default().insert(name.to_owned());
+                }
             }
+        }
+        // Update precedes UnitCreated, and facplop can still read as unspent.
+        // Bind an already placed opening before duplicate replanning can
+        // cancel its task and order a second factory (Adamantine, 2026-11-04).
+        for &id in &self.eco.factory_tasks {
+            let Some(t) = self.eco.tasks.get_mut(id) else { continue };
+            let pos = t.position;
+            let Some(c) = t.as_construction_mut().filter(|c| c.fac_plop && c.target.is_none()) else { continue };
+            c.target = ours
+                .iter()
+                .copied()
+                .find(|u| u.def() == Some(c.build_type) && distance(u.pos(), pos) < super::SITE_SLACK);
         }
         // Explicit player/developer choices remain binding.
         // (And a rusher's opening: see `rush`.)
@@ -392,6 +407,7 @@ mod tests {
     thread_local! {
         static STOPS: Cell<usize> = const { Cell::new(0) };
         static DEFS_READY: Cell<bool> = const { Cell::new(false) };
+        static OWN_FRAME: Cell<bool> = const { Cell::new(false) };
     }
 
     fn pending_plop() -> (Ai, super::super::TaskId) {
@@ -414,7 +430,10 @@ mod tests {
             if id == 10 { 1 } else { 2 }
         }
         unsafe extern "C" fn team(_: i32, id: i32) -> i32 {
-            if id == 10 { 2 } else { 0 }
+            if id == 10 || id == 30 { 2 } else { 0 }
+        }
+        unsafe extern "C" fn pos(_: i32, _: i32, out: *mut f32) {
+            unsafe { std::ptr::copy_nonoverlapping([100.0, 0.0, 100.0].as_ptr(), out, 3) };
         }
         unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
             1000.0
@@ -429,12 +448,16 @@ mod tests {
             1.0
         }
         unsafe extern "C" fn units(_: i32, out: *mut i32, max: i32) -> i32 {
-            if !out.is_null() && max > 0 {
+            let count = if OWN_FRAME.get() { 2 } else { 1 };
+            if !out.is_null() && max >= count {
                 unsafe {
                     out.write(20);
+                    if OWN_FRAME.get() {
+                        out.add(1).write(30);
+                    }
                 }
             }
-            1
+            count
         }
         unsafe extern "C" fn command(_: i32, _: i32, _: i32, _: i32, _: *mut c_void) -> i32 {
             STOPS.with(|s| s.set(s.get() + 1));
@@ -444,6 +467,7 @@ mod tests {
             8
         }
         DEFS_READY.with(|v| v.set(false));
+        OWN_FRAME.set(false);
         let mut ai = test_ai_with(|t| {
             t.UnitDef_getXSize = Some(squares);
             t.UnitDef_getZSize = Some(squares);
@@ -453,6 +477,7 @@ mod tests {
             t.Unit_getDef = Some(def);
             t.Unit_getTeam = Some(team);
             t.Unit_getHealth = Some(health);
+            t.Unit_getPos = Some(pos);
             t.Unit_getWeapons = Some(zero);
             t.Unit_getRulesParamFloat = Some(rules);
             t.getFriendlyUnits = Some(units);
@@ -590,9 +615,23 @@ mod tests {
         ai.iq.ai_allies.remove(&4); // human plans have priority regardless of id
         assert_eq!(ai.eco_allied_plop_types(), names(&["factoryveh"]));
         ai.iq.teams.insert(0, vec![plan("factorycloak")]);
-        assert!(!ai.eco_wait_for_allied_plop());
+        assert!(ai.eco_wait_for_allied_plop(), "a pregame declaration can still change at the plop");
         ai.eco_coordinate_plops(); // team 0 actually placed gunships
+        assert!(!ai.eco_wait_for_allied_plop());
         assert_eq!(ai.eco_allied_plop_types(), names(&["factoryveh", "factorygunship"]));
+    }
+
+    #[test]
+    fn an_own_plop_visible_before_its_event_is_not_replanned_as_a_second_factory() {
+        let (mut ai, id) = pending_plop();
+        OWN_FRAME.set(true);
+        assert!(ai.eco.workers[&10].has_plop(), "the rules param has not caught up either");
+        ai.eco_coordinate_plops();
+        let c = ai.eco.tasks.get(id).unwrap().as_construction().unwrap();
+        assert_eq!(c.target, Unit::from_id(ai.cb, 30));
+        assert!(ai.eco.workers[&10].assigned_plop);
+        assert_eq!(STOPS.get(), 0);
+        assert_eq!(ai.eco.factory_tasks, vec![id]);
     }
 
     fn test_ai_with(customize: impl FnOnce(&mut ffi::SSkirmishAICallback)) -> Ai {
