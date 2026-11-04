@@ -9,13 +9,14 @@
 //! threat) is built once the income can carry it, if its energy (at the
 //! solars' price) pays for the plant, the Lotus that will guard it, and the
 //! constructor's walk there (early on, a walk across Eye of Horus is mexes
-//! not taken). Standing, it gets the Lotus: a fusion-lite. The
-//! upgrade is for the overdrive phase only: it takes the place of the next
-//! singularity reactor the fusion planner orders (a third of its metal for
-//! a third of its energy), if a plant stands on safe ground with little of
-//! ours within the blast. Started at an income of 30 (minutes 5 to 7), it
-//! cost a won game in three: 1000 metal off expansion for energy nothing
-//! could use yet (base 10 - 3 in series s1, Oct 23). As it starts, the
+//! not taken). New plants wait for 25 metal/s across our allied economy
+//! (our own income in solo games). Standing, a plant gets a
+//! Lotus: a fusion-lite. At the reactor stage, a safe upgrade takes the
+//! place of the next Fusion or Singularity, with High miscellaneous
+//! priority so the morph gets funded promptly. It no longer waits for
+//! three Fusions, but still needs safe ground, little of ours within its
+//! blast, and 30 energy/s spare after the plant goes offline and the morph
+//! draw is paid. As it starts, the
 //! plant is linked to a grid with metal spots, and constructors raise a box
 //! of walls round it, high enough to hide its aim point from direct fire
 //! over level ground (the engine fires only on a clear ground ray to the
@@ -33,11 +34,37 @@ use crate::util::{distance, get_directional_point};
 const PLANT: &str = "energygeo";
 const ADVANCED: &str = "energyheavygeo";
 
-/// A plant is built once the energy we lack (against the economy's own
-/// target) is this share of what it makes, or from this income on (metal/s;
-/// 500 metal is then half a minute of it).
-const GEO_SHORTFALL: f32 = 0.5;
-const GEO_MIN_INCOME: f32 = 15.0;
+/// New plants wait for this allied metal income (our own in solo games):
+/// early expansion gets cheap wind/solar instead of a 500-metal commitment.
+const GEO_MIN_INCOME: f32 = 25.0;
+
+/// Keep this much live energy spare throughout an upgrade, after losing
+/// the basic plant's output and paying the morph's energy cost per second.
+const UPGRADE_SURPLUS: f32 = 30.0;
+const MORPH_SECONDS: f32 = 90.0;
+
+fn upgrade_has_surplus(surplus: f32, output: f32, morph_cost: f32, seconds: f32) -> bool {
+    seconds > 0.0 && surplus - output.max(0.0) - morph_cost.max(0.0) / seconds >= UPGRADE_SURPLUS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrade_keeps_thirty_energy_spare_after_outage_and_morph_spending() {
+        // A working basic geo loses 25 E/s and its 1000-energy morph spends
+        // another 11.1 E/s. A nominal 30 E/s surplus would cause a stall.
+        assert!(!upgrade_has_surplus(30.0, 25.0, 1000.0, 90.0));
+        assert!(!upgrade_has_surplus(55.0, 25.0, 1000.0, 90.0));
+        assert!(!upgrade_has_surplus(66.0, 25.0, 1000.0, 90.0));
+        assert!(upgrade_has_surplus(67.0, 25.0, 1000.0, 90.0));
+        // Exactly 30 E/s remaining is sufficient; invalid morph time isn't.
+        assert!(upgrade_has_surplus(65.0, 25.0, 900.0, 90.0));
+        assert!(!upgrade_has_surplus(64.99, 25.0, 900.0, 90.0));
+        assert!(!upgrade_has_surplus(1000.0, 25.0, 1000.0, 0.0));
+    }
+}
 
 /// A plant's site is this close to its vent, elmos.
 const VENT_SNAP: f32 = 48.0;
@@ -162,15 +189,12 @@ impl Ai {
     /// A plant on the free vent of ours nearest to the worker `wid`, if the
     /// income carries one and none is planned. Returns whether one was.
     pub(super) fn eco_create_geo_task(&mut self, wid: i32) -> bool {
-        if self.dev_off("geo") {
+        let income = self.eco_geo_income();
+        if self.dev_off("geo") || income < GEO_MIN_INCOME || !self.eco_team_energy_needed() {
             return false;
         }
         let vents = self.eco_geo_vents();
         let Some(plant) = self.defs.get(PLANT).filter(|_| !vents.is_empty()) else { return false };
-        let short = self.eco.energy_target - self.eco.effective_income_energy;
-        if short < GEO_SHORTFALL * super::wind::energy_make(plant) && self.eco.static_income < GEO_MIN_INCOME {
-            return false;
-        }
         let planned = self.eco.construction_tasks.iter().any(|&t| {
             self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == plant.id())
         });
@@ -194,7 +218,7 @@ impl Ai {
         // the first energy built).
         let lotus = self.defs.get(GEO_GUARD).map_or(0.0, |d| d.cost(self.metal));
         let (speed, power) = (wdef.speed().max(30.0), wdef.build_speed());
-        let walk = walk_worth(self.eco.static_income);
+        let walk = walk_worth(income);
         let cost = |s: Vec3| plant.cost(self.metal) + lotus + walk * power * distance(s, wpos) / speed;
         let site = (vents.into_iter())
             .filter(|&v| self.eco_safe_ground(v))
@@ -209,11 +233,11 @@ impl Ai {
         let why = format!("a geothermal plant on the vent at ({:.0}, {:.0})", vent.x, vent.z);
         self.logistics_energy(task, value, &why);
         self.log(&format!(
-            "geo: a plant on the vent at ({:.0}, {:.0}) (income {:.1}, energy {:.1} of {:.1} wanted, {:.0} elmos from \
+            "geo: a plant on the vent at ({:.0}, {:.0}) (shared income {:.1}, local energy {:.1} of {:.1} wanted, {:.0} elmos from \
              the constructor; costs {price:.0} with guard and walk, worth {value:.0})",
             vent.x,
             vent.z,
-            self.eco.static_income,
+            income,
             self.eco.effective_income_energy,
             self.eco.energy_target,
             distance(site, wpos)
@@ -283,10 +307,10 @@ impl Ai {
     }
 
     /// Upgrade a plant that is safe enough to stand as a bomb, in place of
-    /// the singularity reactor the fusion planner is about to order. Returns
+    /// the reactor the energy planner is about to order. Returns
     /// whether an upgrade started.
     pub(super) fn eco_upgrade_geo(&mut self, frame: i32) -> bool {
-        if self.eco.geo.morph.is_some() || frame < self.eco.geo.upgrade_after {
+        if self.dev_off("geo") || self.eco.geo.morph.is_some() || frame < self.eco.geo.upgrade_after {
             return false;
         }
         let Some(advanced) = self.defs.get(ADVANCED) else { return false };
@@ -295,12 +319,33 @@ impl Ai {
         if plants.is_empty() {
             return false;
         }
-        let why = if self.eco.hard_estalled { "energy stalled".to_owned() } else { String::new() };
+        let surplus = self.eco_geo_upgrade_surplus();
+        let why = if self.allies.is_empty() && self.eco.hard_estalled {
+            "energy stalled".to_owned()
+        } else if surplus.is_none() {
+            "waiting for shared energy budget".to_owned()
+        } else {
+            String::new()
+        };
         let mut best: Option<(Unit, f32)> = None;
         let mut reasons = Vec::new();
         if why.is_empty() {
             for g in plants {
                 let pos = g.pos();
+                let Some(def) = g.def() else { continue };
+                let output = g.rules_param_float("current_energyIncome", super::wind::energy_make(def));
+                let seconds = def.custom_param("morphtime").and_then(|v| v.parse().ok()).unwrap_or(MORPH_SECONDS);
+                let cost = def
+                    .custom_param("morphcost")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| advanced.cost(self.metal) - def.cost(self.metal));
+                if !upgrade_has_surplus(surplus.unwrap_or(0.0), output, cost, seconds) {
+                    reasons.push(format!(
+                        "({:.0}, {:.0}) needs {UPGRADE_SURPLUS:.0} E/s spare during the morph",
+                        pos.x, pos.z
+                    ));
+                    continue;
+                }
                 if !self.eco_safe_ground(pos) {
                     reasons.push(format!("({:.0}, {:.0}) unsafe", pos.x, pos.z));
                     continue;
@@ -320,7 +365,7 @@ impl Ai {
             // Logged when the reason changes kind (not on every number).
             let kind: String = why.chars().filter(|c| !c.is_ascii_digit()).collect();
             if kind != self.eco.geo.waiting && frame - self.eco.geo.waiting_logged >= 30 * 60 {
-                self.log(&format!("geo: no upgrade (a singularity instead): {why}"));
+                self.log(&format!("geo: no upgrade (a reactor instead): {why}"));
                 (self.eco.geo.waiting, self.eco.geo.waiting_logged) = (kind, frame);
             }
             return false;
@@ -328,10 +373,13 @@ impl Ai {
         self.eco.geo.waiting.clear();
         let pos = g.pos();
         g.execute_custom_command(cmd::MORPH, &[advanced.id() as f32], 0, NO_TIMEOUT);
+        // Morphs spend through the game's miscellaneous-priority channel,
+        // independently of the construction priority on a nanoframe.
+        g.execute_custom_command(cmd::MISC_PRIORITY, &[2.0], 0, NO_TIMEOUT);
         self.eco.geo.morph = Some((g, pos, frame));
         let eco = &self.eco;
         self.log(&format!(
-            "geo: upgrading the plant at ({:.0}, {:.0}) before a singularity (energy {:.1}, metal {:.1}, {} fusions; \
+            "geo: upgrading the plant at ({:.0}, {:.0}) before a reactor (energy {:.1}, metal {:.1}, {} fusions; \
              {var:.0} metal of ours within the blast)",
             pos.x,
             pos.z,

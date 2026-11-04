@@ -267,15 +267,16 @@ impl Ai {
             return;
         }
         // Cancel the old engine order even if no safe replacement exists.
-        let blocked_construction = self.eco.workers.get(&wid).is_some_and(|w| {
+        let blocked_task = self.eco.workers.get(&wid).is_some_and(|w| {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
-                !self.eco.silo_work_allowed(t)
+                self.eco_repair_paused(t)
+                    || !self.eco.silo_work_allowed(t)
                     || !self.eco_prerequisites_ready(t)
                     || (t.as_construction().is_some_and(|c| c.fortification)
                         && self.eco_fortify_travel(w, t.get_pos()).is_none())
             })
         });
-        if blocked_construction && let Some(w) = self.eco.workers.get_mut(&wid) {
+        if blocked_task && let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }
         let Some(task_id) = self.eco_get_cheapest_job(wid) else {
@@ -451,6 +452,12 @@ impl Ai {
         w.shunned.iter().any(|&(s, until)| until > frame && distance(s, p) < APPROACH_SHUN_RADIUS)
     }
 
+    /// Save buildpower for restoring energy during a hard stall. Repair
+    /// tasks also finish nanoframes, so keep construction assistance eligible.
+    fn eco_repair_paused(&self, task: &WorkerTask) -> bool {
+        self.eco.hard_estalled && matches!(&task.kind, TaskKind::Repair(r) if !r.target.is_being_built())
+    }
+
     fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
@@ -480,7 +487,8 @@ impl Ai {
             {
                 return false;
             }
-            eco.silo_work_allowed(t)
+            !self.eco_repair_paused(t)
+                && eco.silo_work_allowed(t)
                 && self.eco_prerequisites_ready(t)
                 && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
                 && !self.eco_worker_shuns(worker, t.get_pos())
@@ -620,6 +628,9 @@ impl Ai {
     /// with a commander holding conquered ground kept near it
     /// (`conquestleash`).
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+        if self.eco_repair_paused(task) {
+            return NEVER;
+        }
         let cost = self.eco_cost_of_job_alone(worker, wpos, task);
         if cost >= NEVER {
             return cost;
@@ -1164,6 +1175,95 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn energy_stall_releases_repairs_and_recovery_allows_them_again() {
+        use springai::{Unit, ffi};
+        use std::ffi::{c_char, c_void};
+        thread_local! {
+            static ORDERS: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            id == 12
+        }
+        unsafe extern "C" fn pos(_: i32, _: i32, out: *mut f32) {
+            unsafe { std::ptr::copy_nonoverlapping([100.0, 0.0, 100.0].as_ptr(), out, 3) };
+        }
+        unsafe extern "C" fn params(_: i32, _: i32, _: *mut *const c_char, _: *mut *const c_char) -> i32 {
+            0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const c_char, default: f32) -> f32 {
+            default
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, _: *mut c_void) -> i32 {
+            ORDERS.with_borrow_mut(|orders| orders.push(topic));
+            0
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(scalar);
+            t.Unit_getMaxHealth = Some(scalar);
+            t.Unit_getPos = Some(pos);
+            t.Unit_isBeingBuilt = Some(building);
+            t.Unit_getWeapons = Some(zero);
+            t.Unit_getRulesParamFloat = Some(rules);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(scalar);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_isAbleToAttack = Some(no);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_getMaxWaterDepth = Some(scalar);
+            t.Engine_handleCommand = Some(command);
+        });
+        let worker = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        ai.eco.workers.insert(10, worker);
+        let repair =
+            ai.eco.tasks.insert(WorkerTask::repair(Unit::from_id(ai.cb, 11).unwrap(), "staticcon", &ai.unit_classes));
+        ai.eco.repair_tasks.push(repair);
+        ai.eco_assign_worker(10);
+        assert_eq!(ai.eco.workers[&10].task, Some(repair));
+
+        ai.eco.hard_estalled = true;
+        assert_eq!(ai.eco_current_job_cost(&ai.eco.workers[&10]), NEVER);
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_assign_worker(10);
+        assert_eq!(ai.eco.workers[&10].task, None);
+        assert!(ai.eco.tasks.get(repair).unwrap().assigned_workers.is_empty());
+        ORDERS.with_borrow(|orders| assert_eq!(orders.as_slice(), &[ffi::CommandTopic::COMMAND_UNIT_STOP as i32]));
+        assert_eq!(ai.eco_get_cheapest_job(10), None);
+        // Greedy workers must not bypass the stall either.
+        ai.eco.workers.get_mut(&10).unwrap().is_greedy = true;
+        assert_eq!(ai.eco_get_cheapest_job(10), None);
+
+        // A repair command can also finish a nanoframe, including a power
+        // plant. Those jobs must remain available during the shortage.
+        let nanoframe =
+            ai.eco.tasks.insert(WorkerTask::repair(Unit::from_id(ai.cb, 12).unwrap(), "energysolar", &ai.unit_classes));
+        ai.eco.repair_tasks.push(nanoframe);
+        ai.eco_assign_worker(10);
+        assert_eq!(ai.eco.workers[&10].task, Some(nanoframe));
+        ai.eco.workers.get_mut(&10).unwrap().clear_task(&mut ai.eco.tasks);
+        ai.eco.repair_tasks.retain(|&id| id != nanoframe);
+
+        // Wanting more energy for growth alone does not block repairs.
+        ai.eco.hard_estalled = false;
+        ai.eco.estalled = true;
+        ai.eco_assign_worker(10);
+        assert_eq!(ai.eco.workers[&10].task, Some(repair));
+    }
 
     #[test]
     fn clustered_spot_beats_lone_one() {

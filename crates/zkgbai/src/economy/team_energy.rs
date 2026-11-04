@@ -35,6 +35,8 @@ struct Budget {
     raw_metal: f32,
     metal: f32,
     made: f32,
+    /// Current unit energy use, excluding discretionary overdrive.
+    used: f32,
     pending: f32,
     queued: f32,
     target: f32,
@@ -59,6 +61,16 @@ impl Budget {
 
     fn shortfall(self) -> f32 {
         (self.target - self.made - self.pending - self.queued).max(0.0)
+    }
+
+    fn needs_energy(self) -> bool {
+        self.made < self.metal.max(self.used) || self.shortfall() > 0.0
+    }
+
+    /// Only working production can fund a morph. Reserve enough energy
+    /// for current spending and for spending the ongoing metal income.
+    fn surplus(self) -> f32 {
+        self.made - self.metal.max(self.used)
     }
 
     fn reactor(self, eminent: bool, fusion_output: f32) -> Option<&'static str> {
@@ -100,7 +112,38 @@ impl Ai {
     /// Small plants can bridge an actual alliance-wide stall while a reactor
     /// builds. Otherwise don't fill a deficit already covered by projects.
     pub(super) fn eco_team_energy_needed(&self) -> bool {
-        self.allies.is_empty() || self.eco.team_energy.budget.is_none_or(|b| b.made < b.metal || b.shortfall() > 0.0)
+        if self.allies.is_empty() {
+            self.eco.estalled
+        } else {
+            self.eco.team_energy.budget.map_or(self.eco.estalled, Budget::needs_energy)
+        }
+    }
+
+    /// Shared income lets allied economies invest in a geo earlier than
+    /// one player's income would allow. Wait for the census in team games.
+    pub(super) fn eco_geo_income(&self) -> f32 {
+        if self.allies.is_empty() {
+            self.eco.static_income
+        } else {
+            self.eco.team_energy.budget.map_or(0.0, |b| b.metal)
+        }
+    }
+
+    pub(super) fn eco_geo_upgrade_surplus(&self) -> Option<f32> {
+        if !self.allies.is_empty() {
+            return self.eco.team_energy.budget.map(Budget::surplus);
+        }
+        let used = self
+            .cb
+            .friendly_units()
+            .into_iter()
+            .filter(|u| u.team() == self.team_id && u.health() > 0.0)
+            .map(|u| u.resource_use(self.energy))
+            .sum::<f32>();
+        Some(
+            Budget { made: self.eco.effective_income_energy, metal: self.eco.static_income, used, ..Budget::default() }
+                .surplus(),
+        )
     }
 
     fn eco_planned_energy(&self, def: UnitDef, pos: springai::Vec3, wind: Option<super::wind::WindModel>) -> f32 {
@@ -137,6 +180,7 @@ impl Ai {
             let team = u.team();
             teams.insert(team);
             let building = u.is_being_built();
+            budget.used += u.resource_use(self.energy).max(0.0);
             let output = u.rules_param_float("current_energyIncome", 0.0).max(0.0);
             let expected = if building { self.eco_planned_energy(def, u.pos(), wind) } else { output };
             budget.production(output, expected, building);
@@ -245,7 +289,7 @@ impl Ai {
         }
         let Some(wanted) = budget.reactor(self.graph.eminent_territory, energy_make(fusion)) else { return };
         let name = if wanted == SINGU && !singu_builders.contains(&self.team_id) { FUSION } else { wanted };
-        if name == SINGU && !self.dev_off("geo") && self.eco_upgrade_geo(self.frame) {
+        if self.eco_upgrade_geo(self.frame) {
             return;
         }
         let Some(def) = self.defs.get(name) else { return };
@@ -271,6 +315,41 @@ mod tests {
 
     fn rich() -> Budget {
         Budget { raw_metal: 90.0, metal: 100.0, made: 150.0, target: 300.0, reactors: 3, ..Budget::default() }
+    }
+
+    #[test]
+    fn geo_timing_uses_allied_income_and_demand_even_when_locally_energy_rich() {
+        let mut ai = super::super::test_ai_with(|_| {});
+        ai.eco.static_income = 12.0;
+        ai.eco.estalled = false;
+        assert_eq!(ai.eco_geo_income(), 12.0);
+        assert!(!ai.eco_team_energy_needed());
+        ai.allies.push(3);
+        assert_eq!(ai.eco_geo_income(), 0.0);
+        assert_eq!(ai.eco_geo_upgrade_surplus(), None);
+
+        let b = Budget { metal: 30.0, made: 40.0, target: 90.0, ..Budget::default() };
+        ai.eco.team_energy.budget = Some(b);
+        assert_eq!(ai.eco_geo_income(), 30.0);
+        assert!(ai.eco_team_energy_needed());
+        assert_eq!(ai.eco_geo_upgrade_surplus(), Some(10.0));
+
+        // Enough future production stops duplicate projects, but cannot
+        // pay for an upgrade now. An actual shortage still needs relief.
+        ai.eco.team_energy.budget = Some(Budget { pending: 100.0, ..b });
+        assert!(!ai.eco_team_energy_needed());
+        assert_eq!(ai.eco_geo_upgrade_surplus(), Some(10.0));
+        ai.eco.team_energy.budget = Some(Budget { made: 20.0, pending: 100.0, ..b });
+        assert!(ai.eco_team_energy_needed());
+        assert_eq!(ai.eco_geo_upgrade_surplus(), Some(-10.0));
+    }
+
+    #[test]
+    fn upgrade_surplus_reserves_live_spending_and_ignores_unfinished_capacity() {
+        let b = Budget { made: 160.0, metal: 100.0, pending: 1000.0, queued: 1000.0, ..Budget::default() };
+        assert_eq!(b.surplus(), 60.0);
+        assert_eq!(Budget { used: 140.0, ..b }.surplus(), 20.0);
+        assert_eq!(Budget { used: 180.0, ..b }.surplus(), -20.0);
     }
 
     #[test]
