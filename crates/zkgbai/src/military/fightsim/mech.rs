@@ -25,6 +25,16 @@
 //!   its skirm range, farther while reloading; one that flees it keeps
 //!   out of its range. Not in the fitted answer: mech2 found it moved
 //!   skirmisher losses the right way without changing who wins overall.
+//! - capture (Rust only, [`SimFlags::capture`]): unit_capture.lua. A capture
+//!   ray (Dominatrix, the Reef's Gulls) does no health damage; its hits fill
+//!   the target's capture meter, faster the more hurt the target is, and a
+//!   full meter hands the unit to the capturer's side, where it fights its
+//!   old friends. The capturer then cannot fire for its post-capture
+//!   reload; a meter left alone drains. A Dominatrix that dies frees what it
+//!   took, still 95% captured. A captured unit counts as lost to its owner
+//!   (killed shares, fates) while the enemy holds it. The logs have no hits
+//!   for these rays (the gadget zeroes their damage), so they hit as a
+//!   donor beam's cells say.
 //!
 //! The parameters and a calibration refitted on these outputs are compiled
 //! in from `data/fightsim_mech.tsv`, written by
@@ -65,6 +75,45 @@ fn goes_off(k: &MechUnit, n: &MechUnit, dist: f64) -> bool {
 fn kamikaze_reach(def: &str, bombs: bool) -> f64 {
     (KAMIKAZE_DIST.iter().find(|(d, _)| bombs && *d == def)).map_or(KAMIKAZE_REACH, |&(_, r)| r)
 }
+/// A capture weapon (capture_defs.lua, the def's customparams).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Capture {
+    /// Frames the capturer's weapons stop after a capture
+    /// (`post_capture_reload`, for a finished unit).
+    reload: i32,
+    /// What it took goes back when it dies. The Reef's Gulls hand their
+    /// captures to the carrier (`capture_to_drone_controller`), which stays
+    /// out of the fight here, so they keep them.
+    reverts: bool,
+    /// The weapon whose hit cells stand in for its own: a beam on a similar
+    /// shooter (the Lotus laser, 4.9M logged shots, hits its target 83% in
+    /// range; the commander drone's laser for the Gulls).
+    donor: &'static str,
+}
+
+/// The capture rays: weapon def, its capture rules.
+const CAPTURES: [(&str, Capture); 2] = [
+    ("vehcapture_captureray", Capture { reload: 360, reverts: true, donor: "turretlaser_laser" }),
+    ("dronecarry_captureray", Capture { reload: 150, reverts: false, donor: "dronelight_laser" }),
+];
+
+fn capture_def(weapon: &str) -> Option<Capture> {
+    CAPTURES.iter().find(|(w, _)| *w == weapon).map(|(_, c)| *c)
+}
+
+/// unit_capture.lua FIREWALL_HEALTH: the meter fills at max health plus
+/// this, and each hit counts (max health + this) / (health + this) times
+/// its damage, so a hurt unit goes faster.
+const CAPTURE_FIREWALL: f64 = 1000.0;
+/// Share of a full meter lost per 32 frames once it is left alone
+/// (DEGRADE_FACTOR)...
+const CAPTURE_DECAY: f64 = 0.04;
+/// ...which starts on the sixth 32-frame tick after the last hit
+/// (GENERAL_DEGRADE_TIMER 5): 176 frames on average.
+const CAPTURE_HOLD: i32 = 176;
+/// A freed unit's meter for its dead capturer's side (CAPTURE_LINGER).
+const CAPTURE_LINGER: f64 = 0.95;
+
 /// Seconds for full paralysis to wear off (unit_paralysis_damage.lua).
 const STUN_DECAY_S: f64 = 40.0;
 
@@ -120,6 +169,9 @@ struct WeaponMech {
     paralyzer: bool,
     /// Damage landed over nominal by range band (heatrays).
     dyn_frac: Option<[Option<f64>; RBANDS as usize + 1]>,
+    /// A capture ray, with [`SimFlags::capture`] (set by
+    /// [`Model::mech_units`], not the tables).
+    capture: Option<Capture>,
 }
 
 const PLAIN: WeaponMech = WeaponMech {
@@ -132,6 +184,7 @@ const PLAIN: WeaponMech = WeaponMech {
     overslow: 0.0,
     paralyzer: false,
     dyn_frac: None,
+    capture: None,
 };
 
 /// A unit def's death explosion.
@@ -327,6 +380,7 @@ impl MechTables {
                         paralyzer: num(8)? != 0.0,
                         overslow: if f.len() > 9 { num(9)? } else { 0.0 },
                         dyn_frac: None,
+                        capture: None,
                     };
                     weapons.insert(name, w);
                 }
@@ -428,9 +482,21 @@ pub(super) struct MechUnit {
     rad: f64,
     /// Per weapon, in `u.weapons` order: its splash in the plane fight.
     splash: Vec<Option<Splash>>,
+    /// The side it started on; `u.side` changes when it is captured.
+    orig_side: u8,
+    /// Capture meter: the other side's capture damage on it, full at
+    /// [`MechUnit::cap_full`], and the frame of the last capture hit.
+    cap: f64,
+    cap_hit: i32,
+    /// The unit holding it, if it goes back when that one dies.
+    controller: Option<usize>,
 }
 
 impl MechUnit {
+    fn cap_full(&self) -> f64 {
+        self.maxhp + CAPTURE_FIREWALL
+    }
+
     fn stunned(&self) -> bool {
         self.para > self.maxhp
     }
@@ -554,6 +620,8 @@ pub(super) enum BombMode {
 struct Track {
     var: Vec<f64>,
     death_f: Vec<Option<i32>>,
+    /// The frame the enemy took it, while it holds it.
+    captured_f: Vec<Option<i32>>,
 }
 
 /// mech.py `_pdead`: P(dead by the horizon), the expected damage taken by
@@ -740,7 +808,7 @@ impl Model {
             }
         };
         let n = units.len();
-        let track = Track { var: vec![0.0; n], death_f: vec![None; n] };
+        let track = Track { var: vec![0.0; n], death_f: vec![None; n], captured_f: vec![None; n] };
         let focus = match mode {
             FateMode::Assassinate { target } => Some(target),
             _ => None,
@@ -776,14 +844,18 @@ impl Model {
             .zip(&end)
             .enumerate()
             .map(|(i, (u0, u))| {
-                let raw = p_dead(u0.u.hp, u.u.hp, tr.death_f[i], tr.var[i], horizon);
+                // Held by the enemy at the horizon: lost to its owner, a
+                // death as every consumer counts one.
+                let captured = u.u.alive && u.u.side != u.orig_side;
+                let raw = if captured { 1.0 } else { p_dead(u0.u.hp, u.u.hp, tr.death_f[i], tr.var[i], horizon) };
                 let z = c[1] * logit(raw.clamp(0.005, 0.995)) + c[2] * if u0.u.mobile { 0.0 } else { 1.0 };
                 UnitFate {
-                    dead: !u.u.alive,
-                    death_frame: tr.death_f[i],
-                    hp_left: if u.u.alive { u.u.hp.max(0.0) as f32 } else { 0.0 },
+                    dead: !u.u.alive || captured,
+                    death_frame: if captured { tr.captured_f[i] } else { tr.death_f[i] },
+                    hp_left: if u.u.alive && !captured { u.u.hp.max(0.0) as f32 } else { 0.0 },
                     p_dead: expit(c[0] + z + c[3] * ln_h) as f32,
                     p_raw: raw as f32,
+                    captured,
                 }
             })
             .collect();
@@ -821,7 +893,8 @@ impl Model {
 
     /// The snapshot's units for the mechanics fight. Pure EMP weapons go
     /// last with no health damage (mech.py adds them back after the base
-    /// weapons); weapons doing neither are dropped.
+    /// weapons); weapons doing neither are dropped. With
+    /// [`SimFlags::capture`] a capture ray hits as its donor's cells say.
     pub(super) fn mech_units(&self, snap: &FightSnapshot) -> Vec<MechUnit> {
         let t = &self.mech;
         let twod = snap.flags.twod;
@@ -846,12 +919,19 @@ impl Model {
                 for (w, m) in ordered {
                     let empty: &[i32] = if first.is_some_and(|f| std::ptr::eq(f, *w)) { &su.tubes } else { &[] };
                     let mut sw = self.sim_weapon(w, snap.flags, empty);
+                    let mut m = *m;
                     if m.paralyzer {
                         sw.nominal = 0.0;
                     }
+                    if snap.flags.capture
+                        && let Some(c) = capture_def(&w.name)
+                    {
+                        m.capture = Some(c);
+                        sw.key = self.hits.weapon(c.donor);
+                    }
                     splash.push(if twod && !sw.hitscan { t.splash.get(&w.name).copied() } else { None });
                     weapons.push(sw);
-                    mech.push(*m);
+                    mech.push(m);
                 }
                 let hp = su.hp as f64;
                 MechUnit {
@@ -872,6 +952,10 @@ impl Model {
                     lat,
                     rad: if su.spec.radius > 0.0 { su.spec.radius as f64 } else { 12.0 },
                     splash,
+                    orig_side: su.side,
+                    cap: 0.0,
+                    cap_hit: -1_000_000_000,
+                    controller: None,
                 }
             })
             .collect();
@@ -958,11 +1042,12 @@ fn hurt(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, dmg: f64) {
 }
 
 /// mech.py `kill`: no check that `t` lives (a kamikaze caught in a blast
-/// still blows up when it reaches the enemy, as in the Python model).
+/// still blows up when it reaches the enemy, as in the Python model). A
+/// captured unit was counted lost to its owner when taken.
 fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize) {
     us[t].u.alive = false;
-    if us[t].u.armed {
-        killed[us[t].u.side as usize] += us[t].u.cost;
+    if us[t].u.armed && us[t].u.side == us[t].orig_side {
+        killed[us[t].orig_side as usize] += us[t].u.cost;
     }
     let Some(d) = us[t].death else { return };
     for o in 0..us.len() {
@@ -976,6 +1061,48 @@ fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize) {
                 us[o].para += v;
             } else {
                 hurt(us, killed, o, v);
+            }
+        }
+    }
+}
+
+/// unit_capture.lua `recusivelyTransfer`: `t` goes to `side`, and what it
+/// holds goes there first (in a two-sided fight that is home, so freed). A
+/// unit held by the enemy counts in its owner's killed share. `linger`: its
+/// meter stays 95% full for the side it left (its capturer died), else
+/// empty. The engine stops it (CMD_STOP).
+fn transfer(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, side: u8, linger: bool, f: i32) {
+    for o in 0..us.len() {
+        if us[o].controller == Some(t) {
+            us[o].controller = None;
+            if us[o].u.alive {
+                transfer(us, killed, o, side, linger, f);
+            }
+        }
+    }
+    let m = &mut us[t];
+    let (was_lost, lost) = (m.u.side != m.orig_side, side != m.orig_side);
+    if m.u.armed && was_lost != lost {
+        killed[m.orig_side as usize] += if lost { m.u.cost } else { -m.u.cost };
+    }
+    m.u.side = side;
+    m.controller = None;
+    m.cap = if linger { CAPTURE_LINGER * m.cap_full() } else { 0.0 };
+    m.cap_hit = f;
+    m.u.moving = false;
+}
+
+/// unit_capture.lua `UnitDestroyed`: units held by a capturer that died go
+/// back to their owners, still 95% captured by its side.
+fn release(us: &mut [MechUnit], killed: &mut [f64; 2], f: i32) {
+    for o in 0..us.len() {
+        if let Some(c) = us[o].controller
+            && !us[c].u.alive
+        {
+            us[o].controller = None;
+            if us[o].u.alive {
+                let home = us[o].orig_side;
+                transfer(us, killed, o, home, true, f);
             }
         }
     }
@@ -1122,6 +1249,8 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut foes: Vec<usize> = Vec::with_capacity(n);
     let mut raid_focus = vec![None; n];
     let mut engagement_members = Vec::new();
+    // A unit has changed sides (capture): look for capturers that died.
+    let mut captures = false;
     if let Some(b) = run.bomb
         && b.mode == BombMode::Down
         && us.get(b.index).is_some_and(|u| u.u.alive)
@@ -1138,6 +1267,9 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             exp_k[0] += surv * h * k[0];
             exp_k[1] += surv * h * k[1];
             surv *= 1.0 - h;
+        }
+        if captures {
+            release(&mut us, &mut killed, f);
         }
         alive.clear();
         alive
@@ -1242,6 +1374,9 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             if m.slowdmg > 0.0 {
                 m.cap_slow();
+            }
+            if m.cap > 0.0 && f - m.cap_hit > CAPTURE_HOLD {
+                m.cap = (m.cap - CAPTURE_DECAY * m.cap_full() * dt / 32.0).max(0.0);
             }
         }
         alive.retain(|&i| us[i].u.alive);
@@ -1365,8 +1500,10 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             let side = us[i].u.side as usize;
             foes.clear();
+            // (A unit captured earlier in this step has changed sides.)
             foes.extend(sides[1 - side].iter().copied().filter(|&j| {
                 us[j].u.alive
+                    && us[j].u.side as usize != side
                     && (side != 0 || run.focus.is_none_or(|target| target == j))
                     && (side != 1 || raid_focus[i].is_none_or(|target| target == j))
             }));
@@ -1414,6 +1551,27 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 let rb = if range > 0.0 { ((RBANDS as f64 * dist / range) as i32).min(RBANDS) } else { RBANDS };
                 let sb = speed_band(if us[j].u.moving { us[j].u.speed } else { 0.0 });
                 let hit = hits.lookup(key, us[j].u.target, rb as u8, sb);
+                if let Some(c) = m.capture {
+                    // No health damage: the ray (a shot every frame, more
+                    // than one a step) fills the meter, each hit scaled up
+                    // by the health the target is missing.
+                    let period = if sf > 0.0 { reload as f64 / (1.0 - sf) } else { reload as f64 };
+                    let k = (dt / period.max(1.0)).max(1.0);
+                    let t = &mut us[j];
+                    let full = t.cap_full();
+                    t.cap += k * hit.p_tgt * eff * nominal * full / (t.u.hp.max(0.0) + CAPTURE_FIREWALL);
+                    t.cap_hit = f;
+                    if t.cap >= full {
+                        transfer(&mut us, &mut killed, j, side as u8, false, f);
+                        us[j].controller = c.reverts.then_some(i);
+                        captures = true;
+                        for w in &mut us[i].u.weapons {
+                            w.next = w.next.max(f + c.reload);
+                        }
+                        break;
+                    }
+                    continue;
+                }
                 let frac = m.dyn_frac.and_then(|d| d[rb as usize]).unwrap_or(hit.frac);
                 let shots = if hitscan { 1.0 } else { salvo as f64 };
                 // The plane fight lands splash on the units around the target
@@ -1489,6 +1647,15 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     *d = Some(f);
                 }
             }
+            if captures {
+                for (c, m) in tr.captured_f.iter_mut().zip(&us) {
+                    if m.u.side == m.orig_side {
+                        *c = None;
+                    } else if c.is_none() {
+                        *c = Some(f);
+                    }
+                }
+            }
             f += DT;
             continue;
         }
@@ -1497,6 +1664,10 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             break;
         }
         f += DT;
+    }
+    // A capturer killed in the last step frees what it held.
+    if captures {
+        release(&mut us, &mut killed, f);
     }
     let k = kfrac(&killed);
     let shares = if hazard.is_some() { (exp_k[0] + surv * k[0], exp_k[1] + surv * k[1]) } else { (k[0], k[1]) };
@@ -2207,6 +2378,164 @@ mod tests {
             let b = m.predict_with(&FightSnapshot { flags: SimFlags::default(), units: snap.units.clone() }, true);
             assert_eq!(a, b, "{name}");
         }
+    }
+
+    /// The Dominatrix as the AI reads it (units/vehcapture.lua).
+    fn dominatrix() -> Arc<UnitSpec> {
+        Arc::new(UnitSpec {
+            def: "vehcapture".into(),
+            cost: 420.0,
+            health: 820.0,
+            speed: 58.5 / 30.0,
+            mobile: true,
+            radius: 13.0,
+            weapons: vec![WeaponSpec {
+                name: "vehcapture_captureray".into(),
+                weapon_type: "BeamLaser".into(),
+                range: 450.0,
+                reload: 1.0 / 30.0,
+                salvo: 1,
+                damage: 22.0,
+            }],
+            ..Default::default()
+        })
+    }
+
+    fn capture_on() -> SimFlags {
+        SimFlags { capture: true, ..SimFlags::from_switches(false, true, true) }
+    }
+
+    #[test]
+    fn capture_changes_nothing_without_a_capture_ray() {
+        let m = Model::load().unwrap();
+        for (name, snap, _) in cases() {
+            let on = FightSnapshot { flags: SimFlags { capture: true, ..snap.flags }, units: snap.units.clone() };
+            assert_eq!(m.predict_with(&snap, true), m.predict_with(&on, true), "{name}");
+            let (a, b) = (m.fates(&snap, 300, FateMode::AMove), m.fates(&on, 300, FateMode::AMove));
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{name}");
+        }
+    }
+
+    /// A full Glaive needs (230 + 1000) / 22 = 56 ray hits: about 2 s.
+    #[test]
+    fn a_dominatrix_takes_a_glaive_in_about_two_seconds() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let units = vec![
+            SnapUnit { side: 0, spec: dominatrix(), hp: 820.0, x: 0.0, z: 0.0, tubes: vec![] },
+            SnapUnit { side: 1, spec: defs["cloakraid"].clone(), hp: 230.0, x: 420.0, z: 0.0, tubes: vec![] },
+        ];
+        let on = m.fates(&FightSnapshot { flags: capture_on(), units: units.clone() }, 300, FateMode::AMove);
+        let off_flags = SimFlags { capture: false, ..capture_on() };
+        let off = m.fates(&FightSnapshot { flags: off_flags, units }, 300, FateMode::AMove);
+        let g = &on[1];
+        assert!(g.captured && g.dead && g.hp_left == 0.0 && g.p_raw == 1.0, "{g:?}");
+        let at = g.death_frame.unwrap();
+        assert!((55..=120).contains(&at), "captured at frame {at}");
+        assert!(!on[0].dead && on[0].hp_left > 700.0, "{:?}", on[0]);
+        // Off, the ray never lands: the Glaive lives and chews on it.
+        assert!(!off[1].dead && !off[1].captured && off[1].hp_left == 230.0, "{:?}", off[1]);
+        assert!(off[0].hp_left < on[0].hp_left, "{off:?}");
+    }
+
+    /// After a capture the ray is out for 12 s: a second Glaive standing by
+    /// is taken only then, and a meter left alone drains.
+    #[test]
+    fn the_ray_is_out_for_twelve_seconds_after_a_capture() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let mut glaive = (*defs["cloakraid"]).clone();
+        glaive.weapons.clear();
+        let glaive = Arc::new(glaive);
+        let snap = FightSnapshot {
+            flags: capture_on(),
+            units: vec![
+                SnapUnit { side: 0, spec: dominatrix(), hp: 820.0, x: 0.0, z: 0.0, tubes: vec![] },
+                SnapUnit { side: 1, spec: glaive.clone(), hp: 230.0, x: 400.0, z: 0.0, tubes: vec![] },
+                SnapUnit { side: 1, spec: glaive, hp: 230.0, x: 430.0, z: 0.0, tubes: vec![] },
+            ],
+        };
+        let f = m.fates(&snap, 900, FateMode::AMove);
+        let (a, b) = (f[1].death_frame.unwrap(), f[2].death_frame.unwrap());
+        assert!(f[1].captured && f[2].captured, "{f:?}");
+        assert!(b - a >= 360 && b - a < 360 + 120, "taken at {a} and {b}");
+        let mut us = m.mech_units(&snap);
+        us[1].cap = 0.5 * us[1].cap_full();
+        us[1].cap_hit = 0;
+        us[0].u.weapons[0].next = 10_000;
+        let mut run = Run {
+            defense: None,
+            defense_engagement: None,
+            hazard: None,
+            withdraw: false,
+            pass: false,
+            focus: None,
+            insertion: None,
+            kiting: None,
+            horizon: 30 * 20,
+            track: Some(Track { var: vec![0.0; 3], death_f: vec![None; 3], captured_f: vec![None; 3] }),
+            twod: false,
+            least_health: true,
+            bomb: None,
+            bomb_ln_survive: 0.0,
+        };
+        let (_, end) = run_mech(&us, &m.hits, m.mech.stun_cap_s, &mut run);
+        // 20 s: held 176 frames, then 4% of a full meter per 32 frames.
+        let left = 0.5 - CAPTURE_DECAY * (600.0 - CAPTURE_HOLD as f64) / 32.0;
+        assert!((end[1].cap / end[1].cap_full() - left.max(0.0)).abs() < 0.02, "{} vs {left}", end[1].cap);
+    }
+
+    #[test]
+    fn a_captured_unit_counts_lost_once_and_goes_home_when_its_captor_dies() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let snap = FightSnapshot {
+            flags: capture_on(),
+            units: vec![
+                SnapUnit { side: 0, spec: dominatrix(), hp: 820.0, x: 0.0, z: 0.0, tubes: vec![] },
+                SnapUnit { side: 1, spec: defs["cloakriot"].clone(), hp: 820.0, x: 300.0, z: 0.0, tubes: vec![] },
+            ],
+        };
+        let mut us = m.mech_units(&snap);
+        assert_eq!(us[0].mech[0].capture.map(|c| c.reload), Some(360));
+        let mut killed = [0.0; 2];
+        transfer(&mut us, &mut killed, 1, 0, false, 30);
+        us[1].controller = Some(0);
+        assert_eq!((us[1].u.side, killed), (0, [0.0, 210.0]));
+        release(&mut us, &mut killed, 60);
+        assert_eq!(us[1].u.side, 0, "its captor lives");
+        kill(&mut us, &mut killed, 0);
+        assert_eq!(killed, [420.0, 210.0]);
+        release(&mut us, &mut killed, 90);
+        assert_eq!((us[1].u.side, us[1].controller, killed), (1, None, [420.0, 0.0]));
+        assert!((us[1].cap - 0.95 * 1820.0).abs() < 1e-9 && us[1].cap_hit == 90);
+        // Taken again and killed while held: lost once.
+        transfer(&mut us, &mut killed, 1, 0, false, 120);
+        kill(&mut us, &mut killed, 1);
+        assert_eq!(killed, [420.0, 210.0]);
+    }
+
+    /// A worn Dominatrix takes a Conjurer, then walks into a Lotus's reach
+    /// and dies while its ray is still out after the capture: the
+    /// Conjurer goes home, after the Lotus shot it as an enemy.
+    #[test]
+    fn what_a_dead_dominatrix_took_goes_home() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let snap = FightSnapshot {
+            flags: capture_on(),
+            units: vec![
+                SnapUnit { side: 0, spec: dominatrix(), hp: 300.0, x: 0.0, z: 0.0, tubes: vec![] },
+                SnapUnit { side: 1, spec: defs["cloakcon"].clone(), hp: 600.0, x: 400.0, z: 0.0, tubes: vec![] },
+                SnapUnit { side: 1, spec: defs["turretlaser"].clone(), hp: 785.0, x: 700.0, z: 0.0, tubes: vec![] },
+            ],
+        };
+        let early = m.fates(&snap, 150, FateMode::AMove);
+        let late = m.fates(&snap, 600, FateMode::AMove);
+        assert!(early[1].captured && !early[0].dead, "{early:?}");
+        assert!(late[0].dead && !late[0].captured && late[0].death_frame > Some(360), "{late:?}");
+        let con = &late[1];
+        assert!(!con.captured && !con.dead && con.hp_left > 0.0 && con.hp_left < 600.0, "{late:?}");
     }
 
     /// A ring of Glaives round a Kodachi: the plane puts them round it, the

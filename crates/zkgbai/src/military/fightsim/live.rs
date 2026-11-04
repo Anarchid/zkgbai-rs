@@ -1043,7 +1043,8 @@ mod veto_tests {
     #[test]
     fn losses_are_armed_metal_weighted_death_chances() {
         let snap = encounter(2, 1);
-        let fate = |p| UnitFate { dead: false, death_frame: None, hp_left: 0.0, p_dead: 0.5, p_raw: p };
+        let fate =
+            |p| UnitFate { dead: false, death_frame: None, hp_left: 0.0, p_dead: 0.5, p_raw: p, captured: false };
         let (loss, metal) = kiting_losses(&snap, &[fate(1.0), fate(0.0), fate(0.5)]);
         assert_eq!(metal, [700.0, 220.0]);
         assert_eq!(loss, [0.5, 0.5]);

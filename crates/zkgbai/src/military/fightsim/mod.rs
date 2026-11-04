@@ -152,12 +152,17 @@ pub struct SimFlags {
     /// coalesce forms the 10-s member-loss correlation rose +0.016 [+0.011,
     /// +0.021] and the MAE fell 4.4 metal.
     pub ordered: bool,
+    /// Capture rays (Dominatrix, Reef Gulls) fill their targets' capture
+    /// meters, and a full one hands the unit to their side (Rust only; the
+    /// AI's `capture` switch). Off, the rays fire as the logs saw them:
+    /// never landing a hit, since the gadget zeroes their damage.
+    pub capture: bool,
 }
 
 impl SimFlags {
     /// The flags as the AI's switches set them.
     pub fn from_switches(fight2d: bool, focus: bool, sreload: bool) -> SimFlags {
-        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false, ordered: false }
+        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false, ordered: false, capture: false }
     }
 
     /// Whether shots go to the least-health target (always in the plane).
@@ -262,7 +267,7 @@ pub enum FateMode {
 /// One unit's fate at a fates query's horizon.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UnitFate {
-    /// Dead by the horizon in the expected-damage fight.
+    /// Dead (or captured) by the horizon in the expected-damage fight.
     pub dead: bool,
     /// The frame it died at (to the sim's step).
     pub death_frame: Option<i32>,
@@ -274,6 +279,9 @@ pub struct UnitFate {
     /// The sim's own P(dead by the horizon): the hits' spread around the
     /// expected damage. It ranks units well but is far too sure of itself.
     pub p_raw: f32,
+    /// Held by the enemy at the horizon ([`SimFlags::capture`]): then also
+    /// `dead`, with no health left and `p_raw` 1, as lost to its owner.
+    pub captured: bool,
 }
 
 // ----------------------------------------------------------------------------- hit tables

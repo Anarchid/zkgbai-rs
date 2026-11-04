@@ -392,6 +392,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "hits on our units count the enemy tube weapons' shots: the fight predictor sees their empty tubes, and a lone raider beside an emptied Picket takes it (off by default: lost its A/B)",
     ),
+    (
+        "capture",
+        "Army",
+        "the fight predictor lets Dominatrix and Reef capture rays take units over (a captured unit is lost and fights for them) instead of doing nothing (default on)",
+    ),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("intel", "Intel", "the estimate of enemy production (for anti-nukes)"),

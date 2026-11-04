@@ -1328,13 +1328,18 @@ impl Ai {
     /// `fightfocus` (least-health targeting on the axis, on by default in the
     /// wip line; `disable=fightfocus`). `fight2d` is off by default.
     /// `sreload` (on; `disable=sreload`): tube weapons (Picket, Ogre, ...)
-    /// fire from tubes that each reload on their own clock.
+    /// fire from tubes that each reload on their own clock. `capture` (on;
+    /// `disable=capture`): Dominatrix and Reef Gull capture rays take units
+    /// over instead of doing nothing.
     pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
-        crate::military::fightsim::SimFlags::from_switches(
-            !self.dev_off("fight2d"),
-            !self.dev_off("fightfocus"),
-            !self.dev_off("sreload"),
-        )
+        crate::military::fightsim::SimFlags {
+            capture: !self.dev_off("capture"),
+            ..crate::military::fightsim::SimFlags::from_switches(
+                !self.dev_off("fight2d"),
+                !self.dev_off("fightfocus"),
+                !self.dev_off("sreload"),
+            )
+        }
     }
 
     /// Whom raiders shoot in the QRF predictor's raid-defense rollouts:
