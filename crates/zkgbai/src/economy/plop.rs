@@ -292,7 +292,8 @@ impl Ai {
             }
         }
         // Explicit player/developer choices remain binding.
-        if !self.eco.user_fac.is_empty() || self.eco.dev_pick.is_some() {
+        // (And a rusher's opening: see `rush`.)
+        if !self.eco.user_fac.is_empty() || self.eco.dev_pick.is_some() || self.rush_binds_opening() {
             return;
         }
         let used = self.eco_allied_plop_types();

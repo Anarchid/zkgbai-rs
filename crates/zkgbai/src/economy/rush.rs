@@ -1,25 +1,31 @@
 //! Rush (user, 2026-11-04): in a 3v3 or bigger on a small map (Alien
-//! Desert, Fairyland), when an allied ZKGBAI opened with a factory that
-//! builds a demi-strider (Cyclops, Crab, Grizzly), the alliance rolls a dice
-//! weighted by how crowded the front is: its width per player a side. On
-//! RUSH that factory builds the heavy next, every allied ZKGBAI's commander
-//! guards it before doing anything else (the engine turns a guard on a
-//! factory into assisting what it builds, and each helper's team pays for
-//! its own build power), and the other ZKGBAIs' factories wait. When the
-//! heavy walks out, everyone goes back to work, and the heavy fights as a
-//! loner does.
+//! Desert, Fairyland), the alliance's ZKGBAIs now and then rush a
+//! demi-strider (Cyclops, Crab, Grizzly). The odds rise with how crowded the
+//! front is: its width per player a side. On RUSH, one of us opens with the
+//! heavy's factory, all of us start together around it (user: "when
+//! planning to do this the guys should start together"), its first unit is
+//! the heavy, and every ZKGBAI's commander guards that factory before doing
+//! anything else: the engine turns a guard on a factory into assisting what
+//! it builds, and each helper's team pays for its own build power. The
+//! other ZKGBAIs' factories wait. When the heavy walks out, everyone goes
+//! back to work, and the heavy fights as a loner does.
 //!
-//! Every allied instance decides alike, with no message: the inputs are the
-//! map, the start boxes, the teams and the alliance's opening factories, and
-//! the dice is a hash of those factories' unit ids, which the engine draws
-//! from the game's synced random seed. So the roll changes from game to game
-//! and agrees across the alliance.
+//! The plan comes before the starts are chosen, so it is made while the AIs
+//! initialize, before any unit exists and with no shared random seed in
+//! sight. The alliance's instances run in one engine process when one player
+//! hosts them all (a local skirmish, an arena match) and share this library:
+//! the first to initialize rolls the plan, rusher and starts included, and
+//! leaves it in a process-wide table for the others, keyed by game. Allied
+//! ZKGBAIs hosted by different players cannot share it, so there is no rush
+//! then.
 //!
 //! `disable=rush` turns it off; the (undeclared) option `rush=force` takes
 //! every eligible roll, for staged games.
 
 use std::collections::BTreeMap;
-use std::sync::mpsc;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use springai::{Unit, UnitDef, Vec3};
@@ -28,7 +34,7 @@ use zk_terrain::{Pos, Tier, TierMap};
 
 use crate::Ai;
 use crate::terrain::pos;
-use crate::util::distance;
+use crate::util::{distance, kgb_rand};
 
 /// The engine's CMD_GUARD.
 const GUARD: i32 = 25;
@@ -47,11 +53,23 @@ const MAX_ODDS: f32 = 0.75;
 /// passable widths average into the front, and the half-width of each band.
 const DEPTHS: [f32; 3] = [0.4, 0.5, 0.6];
 const BAND: f32 = 0.05;
-/// Decide with what is known by this frame, whatever is missing.
-const DECIDE_BY: i32 = 30 * 45;
-/// A rush whose heavy is not out this long after the roll is given up.
+/// How long the first instance waits for the terrain model to measure the
+/// front (the first analysis takes ~0.1 s).
+const TERRAIN_WAIT: Duration = Duration::from_secs(5);
+/// A plan in the table is this game's if it is younger than this (the
+/// alliance's instances initialize within seconds of each other; a lobby
+/// may run its next game in the same process).
+const PLAN_FRESH: Duration = Duration::from_secs(120);
+/// Together: starts at least this far apart (the commanders' own room) and
+/// at most this far from the rusher's.
+const START_GAP: f32 = 120.0;
+const START_NEAR: f32 = 600.0;
+/// The rusher's factory must stand by this frame, or the rush is off.
+const FACTORY_BY: i32 = 30 * 45;
+/// A rush whose heavy is not out this long after its factory stood is
+/// given up.
 const GIVE_UP: i32 = 30 * 60 * 4;
-/// Frames between checks (alike in every instance: no offset).
+/// Frames between checks.
 const PERIOD: i32 = 15;
 /// The heavy's nanoframe stands this near its factory, elmos.
 const NEAR_FACTORY: f32 = 300.0;
@@ -66,15 +84,28 @@ pub(crate) const HEAVIES: [(&str, &str, &str); 3] = [
     ("factoryamph", "amphassault", "Grizzly"),
 ];
 
+/// One game's plan, as the first of the alliance's instances rolled it.
+#[derive(Clone, Debug)]
+struct Pact {
+    /// The team whose instance rolled it.
+    by: i32,
+    /// The rusher's team and the heavy's factory; `None`: no rush.
+    rush: Option<(i32, &'static str)>,
+    /// The start of each of us.
+    starts: BTreeMap<i32, Vec3>,
+    /// The roll, or why there was none.
+    why: String,
+}
+
+/// This process's plans: (game key, when, plan).
+static PACTS: Mutex<Vec<(String, Instant, Pact)>> = Mutex::new(Vec::new());
+
 /// The rush's state (in the economy).
 #[derive(Default)]
 pub struct Rush {
-    job: Option<mpsc::Receiver<Option<f32>>>,
-    started: bool,
-    /// The front's width, elmos, once measured (`Some(None)`: it could not
-    /// be).
-    front: Option<Option<f32>>,
     pub state: State,
+    /// Our start in the plan.
+    start: Option<Vec3>,
 }
 
 #[derive(Default)]
@@ -83,6 +114,13 @@ pub enum State {
     Undecided,
     /// No rush this game.
     Off,
+    /// Planned: waiting for the rusher's factory.
+    Planned {
+        rusher: i32,
+        factory: &'static str,
+        heavy: UnitDef,
+        called: &'static str,
+    },
     On(Plan),
     /// The rush is over.
     Over,
@@ -93,7 +131,7 @@ pub struct Plan {
     pub rusher: i32,
     pub factory: Unit,
     pub heavy: UnitDef,
-    /// When it was rolled.
+    /// When its factory stood.
     pub since: i32,
     /// The heavy's nanoframe, once it stands.
     pub nano: Option<Unit>,
@@ -118,22 +156,6 @@ pub(crate) fn odds(front: f32, side: f32) -> f32 {
     (1.0 - front / side / FRONT_ZERO).clamp(0.0, MAX_ODDS)
 }
 
-fn splitmix(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    z ^ (z >> 31)
-}
-
-/// A throw in [0, 1) that every instance makes alike from the same unit
-/// ids (in any order).
-pub(crate) fn dice(ids: &[i32]) -> f64 {
-    let mut ids = ids.to_vec();
-    ids.sort_unstable();
-    let h = ids.iter().fold(0x5EED_u64, |h, &id| splitmix(h ^ u64::from(id as u32)));
-    (h >> 11) as f64 / (1u64 << 53) as f64
-}
-
 /// The front: the mean passable width of `map` at [`DEPTHS`] between the
 /// two starts (see `zk_terrain::lanes`, the closure profile's `available`).
 pub(crate) fn front_width(map: &TierMap, ours: Pos, theirs: Pos) -> Option<f32> {
@@ -145,12 +167,58 @@ pub(crate) fn front_width(map: &TierMap, ours: Pos, theirs: Pos) -> Option<f32> 
     (!widths.is_empty()).then(|| widths.iter().sum::<f32>() / widths.len() as f32)
 }
 
-/// Of the `candidates` (factory positions), the index of the one nearest
-/// all the `factories` (by summed distance; the first on ties): the
-/// helpers walk least.
-pub(crate) fn pick_rusher(candidates: &[Vec3], factories: &[Vec3]) -> Option<usize> {
-    let walk = |c: Vec3| factories.iter().map(|&f| distance(c, f)).sum::<f32>();
-    (0..candidates.len()).min_by(|&a, &b| walk(candidates[a]).total_cmp(&walk(candidates[b])).then(a.cmp(&b)))
+/// The host player of each AI team in the start script.
+pub(crate) fn ai_hosts(script: &str) -> BTreeMap<i32, i32> {
+    let mut hosts = BTreeMap::new();
+    let (mut depth, mut section) = (0, None::<i32>);
+    let (mut team, mut host) = (None, None);
+    for raw in script.lines() {
+        let line: String = raw.trim().to_ascii_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+        if line.starts_with("[ai") {
+            section = Some(depth);
+            (team, host) = (None, None);
+        }
+        // The section's own keys, not those of its [Options].
+        if section.is_some_and(|d| depth == d + 1) {
+            for kv in line.split([';', '{', '}']) {
+                if let Some(v) = kv.strip_prefix("team=").and_then(|t| t.parse().ok()) {
+                    team = Some(v);
+                } else if let Some(v) = kv.strip_prefix("host=").and_then(|t| t.parse().ok()) {
+                    host = Some(v);
+                }
+            }
+        }
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        if let Some(d) = section
+            && line.contains('}')
+            && depth <= d
+        {
+            if let (Some(t), Some(h)) = (team, host) {
+                hosts.insert(t, h);
+            }
+            section = None;
+        }
+    }
+    hosts
+}
+
+/// Starts for `n` of us together: `anchor` first, then the metal `spots`
+/// nearest it, each at least [`START_GAP`] from the others and at most
+/// [`START_NEAR`] from it. Fewer than `n` if the spots run out.
+pub(crate) fn together(anchor: Vec3, spots: &[Vec3], n: usize) -> Vec<Vec3> {
+    let mut near: Vec<Vec3> = spots.iter().copied().filter(|&s| distance(s, anchor) <= START_NEAR).collect();
+    near.sort_by(|a, b| distance(*a, anchor).total_cmp(&distance(*b, anchor)));
+    let mut starts = vec![anchor];
+    for s in near {
+        if starts.len() >= n {
+            break;
+        }
+        if starts.iter().all(|&t| distance(t, s) >= START_GAP) {
+            starts.push(s);
+        }
+    }
+    starts
 }
 
 /// Whether `unit` has a guard on `target` in its queue (the engine pushes
@@ -162,50 +230,178 @@ fn guards(unit: Unit, target: Unit) -> bool {
 }
 
 impl Ai {
-    /// Decide the rush, then drive it.
-    pub(crate) fn rush_update(&mut self, frame: i32) {
-        if frame % PERIOD != 0 {
+    /// Plan the rush at init, before the opening and the starts: take this
+    /// game's plan from the table, or roll it (see the module docs).
+    pub(crate) fn rush_plan(&mut self) {
+        if !matches!(self.eco.rush.state, State::Undecided) {
             return;
         }
-        self.rush_measure();
+        if let Some(why) = self.rush_ineligible() {
+            return self.rush_off(&why);
+        }
+        let script = self.cb.game().setup_script();
+        let mut h = DefaultHasher::new();
+        script.hash(&mut h);
+        let key = format!("{}:{:016x}", self.ally_team_id, h.finish());
+        let found = {
+            let mut table = PACTS.lock().unwrap_or_else(|e| e.into_inner());
+            table.retain(|(_, at, _)| at.elapsed() < PLAN_FRESH);
+            table.iter().find(|(k, _, _)| *k == key).map(|(_, _, p)| p.clone())
+        };
+        // (Instances initialize one after another on the engine's thread:
+        // no other rolls meanwhile.)
+        let pact = found.unwrap_or_else(|| {
+            let p = self.rush_roll();
+            PACTS.lock().unwrap_or_else(|e| e.into_inner()).push((key, Instant::now(), p.clone()));
+            p
+        });
+        let whose = if pact.by == self.team_id { "rolled".to_owned() } else { format!("team {}'s roll", pact.by) };
+        let Some((rusher, factory)) = pact.rush else {
+            return self.rush_off(&format!("{whose}: {}", pact.why));
+        };
+        let Some(&(_, heavy, called)) = HEAVIES.iter().find(|h| h.0 == factory) else { return };
+        let Some(heavy) = self.defs.get(heavy) else {
+            return self.rush_off(&format!("no {heavy} unit def"));
+        };
+        self.eco.rush.start = pact.starts.get(&self.team_id).copied();
+        self.log(&format!(
+            "rush: RUSH! ({whose}) {}: team {rusher} opens with {factory} for a {called}, we start together{}",
+            pact.why,
+            match self.eco.rush.start {
+                Some(s) => format!(", ours at ({:.0}, {:.0})", s.x, s.z),
+                None => String::new(),
+            }
+        ));
+        self.op_emit(
+            "rush",
+            json!({"rush": true, "by": pact.by, "rusher": rusher, "factory": factory, "why": pact.why}),
+        );
+        self.eco.rush.state = State::Planned { rusher, factory, heavy, called };
+    }
+
+    /// Why this game is no rush for us, whatever the roll.
+    fn rush_ineligible(&self) -> Option<String> {
+        if self.dev_off("rush") {
+            return Some("switched off".into());
+        }
+        let (side, enemies) = (self.allies.len() + 1, self.enemy_teams.len());
+        if self.is_ffa || side.min(enemies) < MIN_SIDE {
+            return Some(format!("{side} v {enemies}, not 3v3 or bigger"));
+        }
+        if self.map_diag > SMALL_DIAG {
+            return Some(format!("the map's diagonal is {:.0}, over {SMALL_DIAG:.0}", self.map_diag));
+        }
+        if self.iq.peers.is_empty() {
+            return Some("no other ZKGBAI on our side to assist".into());
+        }
+        if self.eco.water_side.is_some() {
+            return Some("one of us takes the water side".into());
+        }
+        let hosts = ai_hosts(&self.cb.game().setup_script());
+        let ours = hosts.get(&self.team_id);
+        if ours.is_none() || self.iq.peers.iter().any(|t| hosts.get(t) != ours) {
+            return Some("allied ZKGBAIs on other hosts cannot share a plan".into());
+        }
+        None
+    }
+
+    /// Roll this game's plan, for the alliance's instances in this process.
+    fn rush_roll(&mut self) -> Pact {
+        let mut pact = Pact { by: self.team_id, rush: None, starts: BTreeMap::new(), why: String::new() };
+        let factories: Vec<&'static str> =
+            HEAVIES.iter().map(|h| h.0).filter(|f| self.eco.potential_fac_list.contains(*f)).collect();
+        if factories.is_empty() {
+            pact.why = "no demi-strider factory plays the map".into();
+            return pact;
+        }
+        let (ally, enemy) = (self.graph.get_ally_base(), self.graph.get_enemy_base());
+        let ready = self.terrain_wait(TERRAIN_WAIT);
+        let map = ready.then(|| self.terrain().and_then(|t| t.tier(Tier::Bot))).flatten();
+        let front = map.zip(enemy).and_then(|(m, e)| front_width(m, pos(ally), pos(e)));
+        let Some(front) = front else {
+            pact.why = "the front could not be measured".into();
+            return pact;
+        };
+        let per_side = (self.allies.len() + 1 + self.enemy_teams.len()) as f32 / 2.0;
+        let natural = odds(front, per_side);
+        let force = self.cb.option("rush").is_some_and(|v| v.trim().eq_ignore_ascii_case("force"));
+        let p = if force { 1.0 } else { natural };
+        let throw = kgb_rand();
+        pact.why = format!(
+            "front {front:.0} elmos for {per_side:.1} players a side ({:.0} each), odds {natural:.2}{}: rolled {throw:.3}",
+            front / per_side,
+            if force { " (forced)" } else { "" }
+        );
+        if throw >= f64::from(p) {
+            return pact;
+        }
+        // The rusher, its factory, and our starts around its.
+        let mut us: Vec<i32> = self.iq.peers.iter().copied().chain([self.team_id]).collect();
+        us.sort_unstable();
+        let pick = |n: usize| ((kgb_rand() * n as f64) as usize).min(n - 1);
+        let rusher = us.remove(pick(us.len()));
+        let factory = factories[pick(factories.len())];
+        let starts = self.rush_starts(1 + us.len());
+        for (team, start) in [rusher].into_iter().chain(us).zip(starts) {
+            pact.starts.insert(team, start);
+        }
+        pact.rush = Some((rusher, factory));
+        pact
+    }
+
+    /// Starts for `n` of us together: the box's spot nearest the map center
+    /// first, then the spots nearest it, then points around it where the
+    /// box has too few (see [`together`]).
+    fn rush_starts(&self, n: usize) -> Vec<Vec3> {
+        let spots: Vec<Vec3> = self.graph.get_ally_territory().iter().map(|s| s.get_pos()).collect();
+        let center = self.graph.get_map_center();
+        let Some(&anchor) = spots.iter().min_by(|a, b| distance(**a, center).total_cmp(&distance(**b, center))) else {
+            return Vec::new();
+        };
+        let mut starts = together(anchor, &spots, n);
+        'more: for radius in [1.5 * START_GAP, 2.5 * START_GAP] {
+            for k in 0..16 {
+                if starts.len() >= n {
+                    break 'more;
+                }
+                let a = k as f32 * std::f32::consts::TAU / 16.0;
+                let p = Vec3::xz(anchor.x + radius * a.cos(), anchor.z + radius * a.sin());
+                let check = format!("ai_is_valid_startpos:{:.6}/{:.6}", p.x, p.z);
+                if starts.iter().all(|&t| distance(t, p) >= START_GAP)
+                    && self.cb.call_lua_rules(&check).as_deref() == Some("1")
+                {
+                    starts.push(p);
+                }
+            }
+        }
+        starts
+    }
+
+    /// Our start in the rush plan, if any.
+    pub(crate) fn rush_start(&self) -> Option<Vec3> {
+        matches!(self.eco.rush.state, State::Planned { .. }).then_some(self.eco.rush.start).flatten()
+    }
+
+    /// The opening the plan gives us: the heavy's factory, for the rusher.
+    pub(crate) fn rush_opening(&self) -> Option<&'static str> {
         match self.eco.rush.state {
-            State::Undecided => self.rush_decide(frame),
-            State::On(_) => self.rush_drive(frame),
-            State::Off | State::Over => {}
+            State::Planned { rusher, factory, .. } if rusher == self.team_id => Some(factory),
+            _ => None,
         }
     }
 
-    /// Measure the front once, on a thread, when the terrain model is in.
-    /// From the start boxes, not our own start: alike for every ally.
-    fn rush_measure(&mut self) {
-        let r = &mut self.eco.rush;
-        if let Some(rx) = &r.job
-            && let Ok(front) = rx.try_recv()
-        {
-            r.job = None;
-            r.front = Some(front);
+    /// The heavy's factory in a planned rush (the others leave it to the
+    /// rusher).
+    pub(crate) fn rush_planned_factory(&self) -> Option<&'static str> {
+        match self.eco.rush.state {
+            State::Planned { factory, .. } => Some(factory),
+            _ => None,
         }
-        if r.started || !matches!(r.state, State::Undecided) {
-            return;
-        }
-        let (ally, enemy) = (self.graph.get_ally_base(), self.graph.get_enemy_base());
-        let Some(enemy) = enemy else { return };
-        let Some(map) = self.terrain().and_then(|t| t.tier(Tier::Bot)).cloned() else { return };
-        let (ours, theirs) = (pos(ally), pos(enemy));
-        let (tx, rx) = mpsc::channel();
-        // Pure computation: the thread must never call into the engine.
-        let spawned = std::thread::Builder::new().name("zkgbai-rush".into()).spawn(move || {
-            let _ = tx.send(front_width(&map, ours, theirs));
-        });
-        let r = &mut self.eco.rush;
-        r.started = true;
-        match spawned {
-            Ok(_) => r.job = Some(rx),
-            Err(e) => {
-                r.front = Some(None);
-                self.log(&format!("rush: cannot measure the front ({e})"));
-            }
-        }
+    }
+
+    /// Whether our opening is the plan's and stays (no diversity replans).
+    pub(crate) fn rush_binds_opening(&self) -> bool {
+        self.rush_opening().is_some()
     }
 
     fn rush_off(&mut self, why: &str) {
@@ -214,98 +410,38 @@ impl Ai {
         self.eco.rush.state = State::Off;
     }
 
-    /// The alliance's ZKGBAIs (us included) and their living factories.
-    fn rush_factories(&self) -> BTreeMap<i32, Vec<Unit>> {
-        let mut teams: BTreeMap<i32, Vec<Unit>> =
-            self.iq.peers.iter().chain([&self.team_id]).map(|&t| (t, Vec::new())).collect();
-        let mut units = self.cb.friendly_units();
-        units.extend(self.cb.team_units());
-        units.sort_by_key(|u| u.id());
-        units.dedup_by_key(|u| u.id());
-        for u in units {
-            if u.health() > 0.0
-                && self.defs.name_of(u).starts_with("factory")
-                && let Some(list) = teams.get_mut(&u.team())
-            {
-                list.push(u);
-            }
-        }
-        teams
-    }
-
-    fn rush_decide(&mut self, frame: i32) {
-        let force = self.cb.option("rush").is_some_and(|v| v.trim().eq_ignore_ascii_case("force"));
-        if self.dev_off("rush") {
-            return self.rush_off("switched off");
-        }
-        let (side, enemies) = (self.allies.len() + 1, self.enemy_teams.len());
-        if self.is_ffa || side.min(enemies) < MIN_SIDE {
-            return self.rush_off(&format!("{side} v {enemies}, not 3v3 or bigger"));
-        }
-        if self.map_diag > SMALL_DIAG {
-            return self.rush_off(&format!("the map's diagonal is {:.0}, over {SMALL_DIAG:.0}", self.map_diag));
-        }
-        if self.iq.peers.is_empty() {
-            return self.rush_off("no other ZKGBAI on our side to assist");
-        }
-        // Wait for the front and every ZKGBAI's opening factory.
-        let factories = self.rush_factories();
-        let ready = factories.values().all(|f| !f.is_empty()) && self.eco.rush.front.is_some();
-        if !ready && frame < DECIDE_BY {
+    /// Wait for the rusher's factory, then drive the rush.
+    pub(crate) fn rush_update(&mut self, frame: i32) {
+        if frame % PERIOD != 0 {
             return;
         }
-        let Some(front) = self.eco.rush.front.flatten() else {
-            return self.rush_off("the front could not be measured");
-        };
-        let mut candidates: Vec<(i32, Unit, UnitDef, &str)> = Vec::new();
-        for (&team, list) in &factories {
-            for &f in list {
-                let name = self.defs.name_of(f);
-                let Some(&(_, heavy, called)) = HEAVIES.iter().find(|h| h.0 == name) else { continue };
-                if let Some(def) = self.defs.get(heavy) {
-                    candidates.push((team, f, def, called));
-                }
+        match self.eco.rush.state {
+            State::Planned { rusher, factory, heavy, called } => self.rush_await(frame, rusher, factory, heavy, called),
+            State::On(_) => self.rush_drive(frame),
+            State::Undecided | State::Off | State::Over => {}
+        }
+    }
+
+    fn rush_await(&mut self, frame: i32, rusher: i32, factory: &str, heavy: UnitDef, called: &str) {
+        let mut units = self.cb.friendly_units();
+        units.extend(self.cb.team_units());
+        let found =
+            units.into_iter().find(|u| u.team() == rusher && u.health() > 0.0 && self.defs.name_of(*u) == factory);
+        let Some(unit) = found else {
+            if frame > FACTORY_BY {
+                self.log(&format!("rush: over: team {rusher}'s {factory} never stood"));
+                self.op_emit("rush", json!({"over": "no factory"}));
+                self.eco.rush.state = State::Over;
             }
-        }
-        let per_side = (side + enemies) as f32 / 2.0;
-        let natural = odds(front, per_side);
-        let crowd = format!(
-            "front {front:.0} elmos for {per_side:.1} players a side ({:.0} each), odds {natural:.2}",
-            front / per_side
-        );
-        if candidates.is_empty() {
-            let opened: Vec<String> = (factories.iter())
-                .map(|(t, l)| format!("{t}: {}", l.iter().map(|&u| self.defs.name_of(u)).collect::<Vec<_>>().join("+")))
-                .collect();
-            return self
-                .rush_off(&format!("no demi-strider factory among our openings ({}); {crowd}", opened.join(", ")));
-        }
-        let p = if force { 1.0 } else { natural };
-        let ids: Vec<i32> = factories.values().flatten().map(|u| u.id()).collect();
-        let throw = dice(&ids);
-        let rolled = format!("{crowd}{}: rolled {throw:.3}", if force { " (forced)" } else { "" });
-        if throw >= f64::from(p) {
-            return self.rush_off(&rolled);
-        }
-        let all: Vec<Vec3> = factories.values().flatten().map(|u| u.pos()).collect();
-        let at: Vec<Vec3> = candidates.iter().map(|c| c.1.pos()).collect();
-        let Some(k) = pick_rusher(&at, &all) else { return };
-        let (rusher, factory, heavy, called) = candidates[k];
-        self.log(&format!(
-            "rush: RUSH! {rolled}: team {rusher}'s {} builds a {called}; every ZKGBAI's commander assists",
-            self.defs.name_of(factory)
-        ));
-        self.op_emit(
-            "rush",
-            json!({"rush": true, "front": front, "side": per_side, "odds": p, "natural": natural, "dice": throw,
-                   "rusher": rusher, "factory": factory.id(), "heavy": self.defs.name(heavy)}),
-        );
+            return;
+        };
+        self.log(&format!("rush: team {rusher}'s {factory} stands (unit {}): every commander to it", unit.id()));
         if rusher == self.team_id {
             let tag = self.banter.as_ref().map_or("ZKGBAI", |b| b.tag());
             let line = format!("/say a:<{tag}> Rush! A {called} from my factory: help build it");
             self.cb.game().send_text_message(&line, 0);
         }
-        self.eco.rush.state = State::On(Plan { rusher, factory, heavy, since: frame, nano: None, ordered: None });
+        self.eco.rush.state = State::On(Plan { rusher, factory: unit, heavy, since: frame, nano: None, ordered: None });
     }
 
     fn rush_drive(&mut self, frame: i32) {
@@ -444,24 +580,26 @@ mod tests {
     }
 
     #[test]
-    fn the_dice_agrees_whatever_the_order_and_moves_with_the_ids() {
-        let a = dice(&[17, 4021, 9]);
-        assert_eq!(a, dice(&[9, 17, 4021]));
-        assert!((0.0..1.0).contains(&a));
-        assert_ne!(a, dice(&[9, 17, 4022]));
-        // Spread: of 1000 id sets, about half under one half.
-        let under = (0..1000).filter(|&i| dice(&[i, i * 7 + 3, i * 13 + 5]) < 0.5).count();
-        assert!((400..600).contains(&under), "{under}");
+    fn hosts_come_from_each_ai_section_not_its_options() {
+        let script = "[GAME]\n{\n  [AI0]\n  {\n    Name=ZKGBAI_0;\n    Team=0;\n    Host=0;\n    [Options]\n    {\n      \
+                      team=7;\n      host=9;\n    }\n  }\n  [ai1]\n  {\n    team=2;\n    host=3;\n  }\n  [PLAYER0]\n  {\n    \
+                      Team=5;\n  }\n}\n";
+        assert_eq!(ai_hosts(script), BTreeMap::from([(0, 0), (2, 3)]));
     }
 
     #[test]
-    fn the_rusher_is_the_heavy_factory_the_helpers_walk_least_to() {
-        let all = [Vec3::xz(0.0, 0.0), Vec3::xz(1000.0, 0.0), Vec3::xz(2000.0, 0.0)];
-        // Both ends against the middle: the middle.
-        assert_eq!(pick_rusher(&[all[0], all[1]], &all), Some(1));
-        // Two alike: the first.
-        assert_eq!(pick_rusher(&[all[0], all[2]], &all), Some(0));
-        assert_eq!(pick_rusher(&[], &all), None);
+    fn together_takes_the_nearest_spots_with_room_and_no_farther() {
+        let anchor = Vec3::xz(1000.0, 1000.0);
+        let spots = [
+            Vec3::xz(1000.0, 1000.0), // the anchor itself
+            Vec3::xz(1050.0, 1000.0), // too close to it
+            Vec3::xz(1300.0, 1000.0),
+            Vec3::xz(1000.0, 1250.0),
+            Vec3::xz(2000.0, 1000.0), // too far
+        ];
+        let starts = together(anchor, &spots, 3);
+        assert_eq!(starts, vec![anchor, Vec3::xz(1000.0, 1250.0), Vec3::xz(1300.0, 1000.0)]);
+        assert_eq!(together(anchor, &spots, 9).len(), 3);
     }
 
     #[test]

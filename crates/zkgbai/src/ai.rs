@@ -1132,6 +1132,12 @@ impl Ai {
 
     fn choose_start_pos(&mut self) {
         let map_center = self.graph.get_map_center();
+        // A rush planned (see `economy::rush`): we start together.
+        if let Some(site) = self.rush_start() {
+            self.send_start_pos(site, map_center);
+            self.log("Teams Mode: Start Position together, for the rush.");
+            return;
+        }
         let mut spots: Vec<Vec3> = self.graph.get_ally_territory().iter().map(|s| s.get_pos()).collect();
         let all_spots: Vec<Vec3> = self.graph.get_metal_spots().iter().map(|s| s.get_pos()).collect();
         if spots.is_empty() {

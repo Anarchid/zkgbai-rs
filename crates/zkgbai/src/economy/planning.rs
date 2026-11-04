@@ -1045,11 +1045,13 @@ impl Ai {
 
         // Allies reserve types only for a plop. Keep the underlying viable
         // pool intact for retries, exhausted diversity and later factories.
-        let choices = if is_plop && self.eco.user_fac.is_empty() && self.eco.dev_pick.is_none() {
-            self.eco_plop_choices(&self.eco.potential_fac_list)
-        } else {
-            self.eco.potential_fac_list.clone()
-        };
+        // (A rusher's opening is the plan's: see `rush`.)
+        let choices =
+            if is_plop && self.eco.user_fac.is_empty() && self.eco.dev_pick.is_none() && !self.rush_binds_opening() {
+                self.eco_plop_choices(&self.eco.potential_fac_list)
+            } else {
+                self.eco.potential_fac_list.clone()
+            };
         let mut fac_name = String::new();
         let factory: Option<UnitDef>;
         // Keep the announced opening unless reach or allied diversity
@@ -1738,6 +1740,15 @@ impl Ai {
     pub(crate) fn eco_roll_opening(&mut self) -> Option<String> {
         // Decided first: the starts of the others depend on it too.
         self.eco.water_side = self.eco_water_side();
+        // A rush (see `rush`) is planned now, since the starts depend on it
+        // too: its rusher opens with the heavy's factory, which the others
+        // leave to it.
+        self.rush_plan();
+        if let Some(f) = self.rush_opening() {
+            self.eco.opening = Some(f.to_owned());
+            return self.eco.opening.clone();
+        }
+        let rushed = self.rush_planned_factory();
         if !self.eco.user_fac.is_empty() {
             return Some(self.eco.user_fac.clone());
         }
@@ -1771,6 +1782,7 @@ impl Ai {
         let rest: Vec<&String> = (list.iter())
             .filter(|f| !super::plop::AIR_FACTORIES.contains(&f.as_str()))
             .filter(|f| !(others_water && super::plop::WATER_FACTORIES.contains(&f.as_str())))
+            .filter(|f| rushed != Some(f.as_str()))
             .collect();
         let pick = |v: &[&str]| v[((kgb_rand() * v.len() as f64) as usize).min(v.len() - 1)].to_owned();
         let roll = if list.contains("factoryship") && !others_water && kgb_rand() < 0.5 {
