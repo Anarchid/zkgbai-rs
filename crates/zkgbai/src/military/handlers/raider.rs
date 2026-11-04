@@ -1285,6 +1285,11 @@ impl Ai {
                 let block = self.incursion_block(sid);
                 let rally = block.unwrap_or_else(|| self.war_get_raider_rally(pos));
                 let rally = if block.is_some() { rally } else { self.raider_squad_rally(sid, rally) };
+                // Forming squads can meet the same crushing fights as active
+                // raiders, even when the threat map allows their rally order.
+                if self.raider_fight_veto(sid, pos, rally, courage) {
+                    return;
+                }
                 self.raider_squad_raid(sid, rally);
                 self.squad_note(sid, if block.is_some() { Branch::Block } else { Branch::Rally }, rally, pos, None);
             } else {
