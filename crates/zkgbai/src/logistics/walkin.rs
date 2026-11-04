@@ -3,6 +3,14 @@
 //! The rule (user, 2026-11-03): is there an enemy force worth 1500 metal or
 //! more, known where it stands, that no force of ours would intercept
 //! before it gets to something we value? Then fortify that thing.
+//! Recalibrated 2026-11-04 (user: "it almost let a ravager ball into its
+//! factory, and the factory was never defended"): on Comet Catcher 4
+//! Ravagers and a Leveler (1000 metal seen at 8:20, 1240 at 8:25) drove
+//! into our factory, under the 1500 bar; a forming constructor 450 away
+//! and 3 caretakers stood by. The bar is [`MIN_VALUE`] = 800 now (raider
+//! packs of 300-700 stay under it), the dearest places are fortified
+//! first, and a place worth [`BUMP_RATIO`] times an unstarted turret's
+//! place takes its slot under [`MAX_OPEN`].
 //!
 //! - *A force*: identified enemy ground fighters (commanders too, not
 //!   constructors) seen within the last [`KNOWN`] frames, linked into
@@ -10,9 +18,17 @@
 //!   moves at the speed at which [`MIN_VALUE`] of it arrives (its fastest
 //!   members first), on the movement tier of most of its value, never
 //!   through a chokepoint our turrets hold against it.
-//! - *Something we value*: places round our dearest buildings, one per
-//!   [`PLACE_LINK`]; a place counts when our buildings and constructors
-//!   within [`VAR_RADIUS`] are worth [`PLACE_VALUE`] or more. The places
+//! - *Something we value* (user, 2026-11-04: "a good value of dearth
+//!   would be the total amount of our economy that goes through that
+//!   place"): places round what our economy flows through, one per
+//!   [`PLACE_LINK`], the richest first. A mex streams its metal income, an
+//!   energy building its energy at what energy is worth now (one metal
+//!   while construction spends it, less the more of it goes to overdrive
+//!   or waste, [`energy_value`]), a factory our metal income, which it
+//!   turns into units (shared among factories by build power, its
+//!   caretakers' included). A place counts when the flow within
+//!   [`VAR_RADIUS`] is [`PLACE_FLOW`] metal a second or more, and is worth
+//!   that flow for [`OUTAGE`] seconds (a lone mex no longer is). The places
 //!   the group can get within its weapons' reach of within [`HORIZON`]
 //!   seconds, soonest first (factories and the base count, not only the
 //!   metal spots the Defense client watches).
@@ -50,7 +66,7 @@ use springai::{Unit, UnitDef, Vec3};
 use zk_terrain::Tier;
 use zk_terrain::paths::Paths;
 
-use super::{Hand, IN_TIME, Kind, MARGIN, UNIT_COST_CAP, Worth, best_crew_stretched, porc_power};
+use super::{Hand, IN_TIME, Kind, MARGIN, Worth, best_crew_stretched, porc_power};
 use crate::Ai;
 use crate::economy::TaskId;
 use crate::terrain::{pos, tier_of};
@@ -59,8 +75,9 @@ use crate::util::{distance, get_directional_point};
 /// The switch.
 pub const FEATURE: &str = "walkin";
 
-/// A force worth this much metal or more counts.
-pub const MIN_VALUE: f32 = 1500.0;
+/// A force worth this much metal or more counts (the user's 1500 until
+/// 2026-11-04, see the module notes).
+pub const MIN_VALUE: f32 = 800.0;
 
 /// Enemies seen within this many frames are known where they stand.
 const KNOWN: i32 = 300;
@@ -77,11 +94,16 @@ const MAX_PLACES: usize = 8;
 /// One place per this much ground round our dearest buildings, elmos.
 const PLACE_LINK: f32 = 350.0;
 
-/// What a place holds: our buildings and constructors this close, elmos.
+/// What a place holds: our flows this close, elmos.
 const VAR_RADIUS: f32 = 600.0;
 
-/// A place is something we value from this much metal on.
-const PLACE_VALUE: f32 = 600.0;
+/// A place is something we value from this much economy flowing through it
+/// on, metal a second (three mexes; a factory nearly always).
+const PLACE_FLOW: f32 = 6.0;
+
+/// A place that falls is taken to lose its flow for this long, seconds:
+/// its value at stake is flow x this.
+const OUTAGE: f32 = 120.0;
 
 /// Our units this close to a place fight there, elmos.
 const PRESENT: f32 = 500.0;
@@ -119,6 +141,10 @@ const DWELL_LINK: f32 = 300.0;
 
 /// Walk-in turrets under way at once, at most.
 const MAX_OPEN: usize = 2;
+
+/// With [`MAX_OPEN`] under way, a place worth this many times the place of
+/// an unstarted walk-in turret takes its slot (the cheapest such goes).
+const BUMP_RATIO: f32 = 1.5;
 
 /// Walk-in turrets per place (within [`CAP_RADIUS`]) per [`CAP_WINDOW`].
 const PLACE_CAP: usize = 3;
@@ -164,9 +190,11 @@ impl Group {
 /// Something of ours worth defending.
 #[derive(Clone, Copy, Debug)]
 struct Place {
-    /// Its dearest building.
+    /// Where its richest flow is.
     anchor: Vec3,
-    /// Our buildings and constructors within [`VAR_RADIUS`], metal.
+    /// Our economy through it (within [`VAR_RADIUS`]), metal a second.
+    flow: f32,
+    /// What it stands to lose, metal: `flow` x [`OUTAGE`].
     value: f32,
 }
 
@@ -237,6 +265,7 @@ pub struct Stats {
     pub late: u32,
     pub nosite: u32,
     pub stood_down: u32,
+    pub bumped: u32,
 }
 
 impl Stats {
@@ -244,7 +273,7 @@ impl Stats {
         json!({
             "groups": self.groups, "threats": self.threats, "defended": self.defended, "breaches": self.breaches,
             "opened": self.opened, "pending": self.pending, "capped": self.capped, "outranged": self.outranged,
-            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down,
+            "late": self.late, "nosite": self.nosite, "stood_down": self.stood_down, "bumped": self.bumped,
         })
     }
 }
@@ -283,6 +312,36 @@ fn stand(standing: &mut Vec<(Vec3, i32, i32)>, anchor: Vec3, frame: i32) -> f32 
             0.0
         }
     }
+}
+
+/// The open walk-in turret that gives way to a place worth `value`: of
+/// those not started, the one guarding the least, if `value` is
+/// [`BUMP_RATIO`] times that or more. `open`: (task, its place's worth,
+/// started).
+fn bump<T: Copy>(open: &[(T, f32, bool)], value: f32) -> Option<T> {
+    (open.iter()).filter(|o| !o.2 && o.1 * BUMP_RATIO <= value).min_by(|a, b| a.1.total_cmp(&b.1)).map(|o| o.0)
+}
+
+/// What an issue's worth stands for, undiscounted (walk-in turrets: their
+/// place's value).
+fn worth_value(w: &Worth) -> f32 {
+    match *w {
+        Worth::Flat(value) | Worth::Deadline { value, .. } | Worth::Stream { value, .. } => value,
+    }
+}
+
+/// Metal one energy of `income` is worth: the share construction spends
+/// is worth a metal each (ZK builds take metal and energy alike), the share
+/// overdrive spends (`overdrive`) what overdrive makes of it
+/// (`overdrive_metal` for all of it), the share wasted nothing.
+fn energy_value(income: f32, overdrive: f32, waste: f32, overdrive_metal: f32) -> f32 {
+    if income <= 0.0 {
+        return 1.0;
+    }
+    let od = (overdrive.max(0.0) / income).clamp(0.0, 1.0);
+    let wasted = (waste.max(0.0) / income).clamp(0.0, 1.0 - od);
+    let rate = if overdrive > 0.0 { (overdrive_metal.max(0.0) / overdrive).clamp(0.0, 1.0) } else { 0.0 };
+    1.0 - od - wasted + od * rate
 }
 
 /// Distance from `p` to the polyline `line` (on the ground plane).
@@ -366,6 +425,8 @@ impl Ai {
                 }
             }
         }
+        // The dearest places first: they get the turrets under the caps.
+        assessed.sort_by(|a, b| b.place.value.total_cmp(&a.place.value));
         for a in assessed {
             if a.breach {
                 self.logistics.walkin.stats.breaches += 1;
@@ -461,48 +522,66 @@ impl Ai {
         groups
     }
 
-    /// Our places worth [`PLACE_VALUE`] or more.
+    /// Our places with [`PLACE_FLOW`] or more going through them.
     fn walkin_places(&self) -> Vec<Place> {
         let team = self.team_id;
-        let mut buildings: Vec<(Vec3, f32)> = Vec::new();
-        for u in self.cb.team_units() {
-            if u.team() != team || u.health() <= 0.0 {
+        let alive = |u: &Unit| u.health() > 0.0 && u.team() == team && !u.is_being_built();
+        // Factories: our metal income, by build power.
+        let mut factories: Vec<(i32, Vec3, f32)> = (self.fac.factories.values())
+            .filter(|f| alive(&f.unit))
+            .map(|f| (f.id, f.unit.pos(), f.unit.def().map_or(0.0, |d| d.build_speed())))
+            .collect();
+        for n in self.eco.nanos.values() {
+            if !alive(&n.unit) {
                 continue;
             }
-            let Some(d) = u.def() else { continue };
-            if d.speed() > 0.0 {
-                continue;
-            }
-            let cost = d.cost(self.metal);
-            // Terraform placeholders cost 100000 on paper.
-            if cost >= UNIT_COST_CAP {
-                continue;
-            }
-            let cost = if u.is_being_built() { cost * u.build_progress().clamp(0.0, 1.0) } else { cost };
-            if cost > 0.0 {
-                buildings.push((u.pos(), cost));
+            if let Some(f) = factories.iter_mut().find(|f| f.0 == n.target.id()) {
+                f.2 += n.unit.def().map_or(0.0, |d| d.build_speed());
             }
         }
-        let workers: Vec<(Vec3, f32)> = (self.eco.workers.values())
-            .filter(|w| w.unit.health() > 0.0 && w.unit.team() == team)
-            .filter_map(|w| Some((w.get_pos(), w.unit.def()?.cost(self.metal))))
-            .collect();
-        buildings.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let bp: f32 = factories.iter().map(|f| f.2).sum();
+        let income = self.eco.static_income.max(0.0);
+        let mut flows: Vec<(Vec3, f32)> =
+            (factories.iter()).filter(|_| bp > 0.0).map(|f| (f.1, income * f.2 / bp)).collect();
+        // Mexes and energy.
+        let energy = self.walkin_energy_value();
+        for u in self.cb.team_units() {
+            if !alive(&u) || u.def().is_none_or(|d| d.speed() > 0.0) || self.fac.factories.contains_key(&u.id()) {
+                continue;
+            }
+            let metal = u.rules_param_float("current_metalIncome", 0.0).max(0.0);
+            let e = u.rules_param_float("current_energyIncome", 0.0).max(0.0);
+            let flow = metal + e * energy;
+            if flow > 0.0 {
+                flows.push((u.pos(), flow));
+            }
+        }
+        flows.sort_by(|a, b| b.1.total_cmp(&a.1));
         let mut anchors: Vec<Vec3> = Vec::new();
-        for &(p, _) in &buildings {
+        for &(p, _) in &flows {
             if anchors.iter().all(|&a| distance(a, p) > PLACE_LINK) {
                 anchors.push(p);
             }
         }
         (anchors.into_iter())
             .filter_map(|anchor| {
-                let value: f32 = (buildings.iter().chain(&workers))
-                    .filter(|(p, _)| distance(*p, anchor) <= VAR_RADIUS)
-                    .map(|x| x.1)
-                    .sum();
-                (value >= PLACE_VALUE).then_some(Place { anchor, value })
+                let flow: f32 = flows.iter().filter(|(p, _)| distance(*p, anchor) <= VAR_RADIUS).map(|x| x.1).sum();
+                (flow >= PLACE_FLOW).then_some(Place { anchor, flow, value: flow * OUTAGE })
             })
             .collect()
+    }
+
+    /// Metal an energy is worth now (see [`energy_value`]), from the
+    /// overdrive gadget's team figures.
+    fn walkin_energy_value(&self) -> f32 {
+        let game = self.cb.game();
+        let param = |name: &str| game.team_rules_param_float(self.team_id, name, 0.0);
+        energy_value(
+            self.eco.effective_income_energy,
+            -param("OD_energyOverdrive"),
+            param("OD_team_energyWaste"),
+            param("OD_metalOverdrive"),
+        )
     }
 
     /// Our armed units, and whether each is free to answer a call.
@@ -671,7 +750,19 @@ impl Ai {
         let here = (self.logistics.walkin.opened.iter())
             .filter(|(p, _, _)| distance(*p, a.place.anchor) <= CAP_RADIUS)
             .count();
-        if under_way >= MAX_OPEN || here >= PLACE_CAP {
+        // The slot this place would take (see `bump`); given up only once
+        // this place's turret stands planned, else the cheaper place would
+        // reopen its own in the same pass.
+        let bumped = if under_way >= MAX_OPEN && here < PLACE_CAP {
+            let open: Vec<(TaskId, f32, bool)> = (self.logistics.issues.values())
+                .filter(|i| i.kind == Kind::Walkin)
+                .map(|i| (i.task, worth_value(&i.worth), i.started))
+                .collect();
+            bump(&open, a.place.value)
+        } else {
+            None
+        };
+        if bumped.is_none() && (under_way >= MAX_OPEN || here >= PLACE_CAP) {
             self.logistics.walkin.stats.capped += 1;
             self.walkin_note("capped", a, json!({"under_way": under_way, "here": here}));
             return;
@@ -720,6 +811,13 @@ impl Ai {
             self.walkin_note("nosite", a, json!({"turret": self.defs.name(def)}));
             return;
         };
+        if let Some(old) = bumped {
+            self.logistics.walkin.opened.retain(|o| o.2 != old);
+            self.logistics.walkin.called.remove(&old);
+            self.logistics.walkin.stats.bumped += 1;
+            self.logistics_close(old, "bumped");
+            self.eco.eco_logistics_drop(old);
+        }
         // Unstamped: the economy drops stamped porc nobody took up within
         // 20 s; this one stays while a force calls for it (`STAND_DOWN`).
         if let Some(c) = self.eco.tasks.get_mut(task).and_then(|t| t.as_construction_mut()) {
@@ -765,7 +863,8 @@ impl Ai {
         self.logistics.walkin.notes.insert(key, frame);
         let mut note = json!({
             "event": event, "group": a.group.json(),
-            "place": {"pos": [a.place.anchor.x.round(), a.place.anchor.z.round()], "value": a.place.value.round()},
+            "place": {"pos": [a.place.anchor.x.round(), a.place.anchor.z.round()], "value": a.place.value.round(),
+                      "flow": (a.place.flow * 10.0).round() / 10.0},
             "seconds": (a.seconds * 10.0).round() / 10.0, "dwell": (a.dwell * 10.0).round() / 10.0,
             "ours": a.ours.json(), "met": a.ours.total().round(),
         });
@@ -774,9 +873,11 @@ impl Ai {
         }
         if event == "open" {
             self.log(&format!(
-                "walkin: fortify ({:.0}, {:.0}) worth {:.0} against {} units worth {:.0} {:.0}s out, met by {:.0} of {:.0}",
+                "walkin: fortify ({:.0}, {:.0}) ({:.1} metal/s, worth {:.0}) against {} units worth {:.0} {:.0}s out, \
+                 met by {:.0} of {:.0}",
                 a.place.anchor.x,
                 a.place.anchor.z,
+                a.place.flow,
                 a.place.value,
                 a.group.units,
                 a.group.value,
@@ -941,6 +1042,30 @@ mod tests {
         let frame = 600 + 30 * 100 + DWELL_GAP + 1;
         standing.retain(|&(_, _, last)| frame - last <= DWELL_GAP);
         assert_eq!(stand(&mut standing, base, frame), 0.0);
+    }
+
+    #[test]
+    fn a_dearer_place_takes_the_slot_of_the_cheapest_unstarted_turret() {
+        let open = [(1, 700.0, false), (2, 600.0, false), (3, 500.0, true)];
+        // The factory (2000): the cheapest unstarted goes, not the started one.
+        assert_eq!(bump(&open, 2000.0), Some(2));
+        // Not dear enough against either.
+        assert_eq!(bump(&open, 850.0), None);
+        assert_eq!(bump(&open, 900.0), Some(2));
+        // Everything started: no slot.
+        assert_eq!(bump(&[(1, 600.0, true)], 5000.0), None);
+    }
+
+    #[test]
+    fn energy_is_worth_less_the_more_of_it_overdrive_spends() {
+        // No overdrive: a metal each.
+        assert_eq!(energy_value(40.0, 0.0, 0.0, 0.0), 1.0);
+        // Half to overdrive at 0.2 metal per energy: 0.5 + 0.1.
+        assert!((energy_value(40.0, 20.0, 0.0, 4.0) - 0.6).abs() < 1e-5);
+        // A quarter wasted besides: 0.25 + 0.1.
+        assert!((energy_value(40.0, 20.0, 10.0, 4.0) - 0.35).abs() < 1e-5);
+        // Everything to overdrive.
+        assert!((energy_value(40.0, 40.0, 0.0, 8.0) - 0.2).abs() < 1e-5);
     }
 
     #[test]
