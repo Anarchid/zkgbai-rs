@@ -42,6 +42,8 @@ pub struct Enemy {
     pub is_minor_cancer: bool,
     pub is_major_cancer: bool,
     pub is_nano_spam: bool,
+    /// Last observed construction progress. Never extrapolated through fog.
+    pub build_progress: f32,
     pub is_strong: bool,
     pub is_dead: bool,
     /// Internal name of `ud` (`""` while unidentified), cached so hot loops
@@ -100,6 +102,7 @@ impl Enemy {
             is_minor_cancer: false,
             is_major_cancer: false,
             is_nano_spam: false,
+            build_progress: 0.0,
             is_strong: false,
             is_dead: false,
             def_name: String::new(),
@@ -133,7 +136,8 @@ impl Enemy {
     }
 
     pub fn check_nano(&mut self) {
-        self.is_nano_spam = self.unit.is_being_built() && self.unit.build_progress() < 0.25;
+        self.build_progress = self.unit.build_progress().clamp(0.0, 1.0);
+        self.is_nano_spam = self.unit.is_being_built() && self.build_progress < 0.25;
     }
 
     pub fn update_from_unit_def(&mut self, ud: UnitDef, cost: f32) {

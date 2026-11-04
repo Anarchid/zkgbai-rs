@@ -533,7 +533,7 @@ pub fn regime(ai: &mut Ai, _: &Args) -> Out {
         "lanes": lanes,
         "note": "openness: 0 closed off by narrow fronts for free, 1 no lane worth holding (perimeter and closure \
              averaged); laneness: how much the deciding tier's openness counts as lanes; density: standing metal \
-             (ours and the enemy's as known) per square kilo-elmo of usable ground (F12 label 1500); share: of our \
+             (all allies and the enemy's as known) per square kilo-elmo of usable ground (F12 label 1500); share: of our \
              standing metal the posture keeps in its fixed defenses. Density is measured with posture off; \
              missiles also measure lanes without enabling the defense budget. Before lanes are measured, \
              the silo uses the full density threshold.",

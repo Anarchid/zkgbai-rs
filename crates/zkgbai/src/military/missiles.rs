@@ -2,7 +2,7 @@
 //! goes up where it is safe and within Eos range of more than one enemy
 //! building worth a missile (a Fusion and up), or of an anti-nuke in the
 //! way of our nukes. Coverage of more than 70% of known and inferred static
-//! value is another trigger once observed battlefield density exceeds
+//! value or held enemy territory is another trigger once battlefield density exceeds
 //! `missile_silo_density`, discounted on lane-like terrain. Constructors rush it once
 //! threatened sites have completed their defenses (see `economy::silo`).
 //! Its Eos (`tacnuke`: 600 metal, 3502 damage,
@@ -17,6 +17,8 @@
 //! (the burning ground keeps their builders from repairing them).
 //! Two identified Phantoms together also warrant an Inferno, provided
 //! neither is covered by an Aspis, Aegis or Funnelweb.
+//! Enemy silos take priority over ordinary targets, even as nanoframes:
+//! reserve Eos immediately, and fire once observed progress exceeds 50%.
 //!
 //! The AI hears of no death it does not see, and an Eos is gone from the
 //! game once launched: a building an Eos hit (all it took, its shield
@@ -45,6 +47,8 @@ const PADS: usize = 4;
 
 /// Eos and Shockley range (3500), less a margin for the pads.
 pub const REACH: f32 = 3450.0;
+/// Enemy threat uses the full weapon range, without our aiming margin.
+pub const ENEMY_REACH: f32 = 3500.0;
 
 /// Silo sites are tried at our metal and this far ahead of it, elmos.
 const SITE_STEPS: [f32; 3] = [400.0, 800.0, 1200.0];
@@ -62,6 +66,7 @@ pub struct SiloSite {
     pub payoff: f32,
     pub targets: usize,
     pub coverage: StaticCoverage,
+    pub territory_share: f32,
     pub siege: SiegeReadiness,
 }
 
@@ -243,6 +248,75 @@ struct Target {
     needed: usize,
     /// Under an Aegis or Aspis: the first Eos drains it, the rest follow.
     shielded: bool,
+    /// A rival silo reserves ammunition before it becomes worth firing at.
+    silo: bool,
+    launch: bool,
+}
+
+impl Target {
+    fn priority(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .silo
+            .cmp(&self.silo)
+            .then_with(|| other.launch.cmp(&self.launch))
+            .then_with(|| (other.value / other.needed as f32).total_cmp(&(self.value / self.needed as f32)))
+            .then_with(|| self.id.cmp(&other.id))
+    }
+}
+
+fn eos_target(
+    id: i32,
+    pos: Vec3,
+    value: f32,
+    health: f32,
+    shield: Option<bool>,
+    silo_progress: Option<f32>,
+) -> Option<Target> {
+    if shield == Some(true) {
+        return None;
+    }
+    let shielded = shield.is_some();
+    let needed = (health / EOS_DAMAGE).ceil().max(1.0) as usize + usize::from(shielded);
+    let silo = silo_progress.is_some();
+    ((silo || value / needed as f32 >= WORTH) && needed <= PADS).then_some(Target {
+        id,
+        pos,
+        value,
+        needed,
+        shielded,
+        silo,
+        launch: silo_progress.is_none_or(|progress| progress > 0.5),
+    })
+}
+
+/// Reserve complete salvos in priority order. An early silo frame holds
+/// its Eos; a shield opener also holds the follow-up ammunition. Every
+/// selected pad must reach the target, not just one pad in the salvo.
+fn eos_salvos(mut targets: Vec<Target>, pads: &[Vec3], mut reserved: usize) -> Vec<(Target, Vec<usize>)> {
+    targets.retain(|t| pads.iter().any(|&p| distance(p, t.pos) <= REACH));
+    targets.sort_by(Target::priority);
+    let mut available = vec![true; pads.len()];
+    let mut orders = Vec::new();
+    for t in targets {
+        let free = available.iter().filter(|&&a| a).count();
+        let near: Vec<_> = (0..pads.len()).filter(|&i| available[i] && distance(pads[i], t.pos) <= REACH).collect();
+        if !t.launch || free < t.needed + reserved || near.len() < t.needed {
+            if t.silo {
+                reserved += t.needed;
+            }
+            continue;
+        }
+        let now = if t.shielded { 1 } else { t.needed };
+        let chosen: Vec<_> = near.into_iter().take(now).collect();
+        for &i in &chosen {
+            available[i] = false;
+        }
+        if t.shielded {
+            reserved += t.needed - 1;
+        }
+        orders.push((t, chosen));
+    }
+    orders
 }
 
 struct LightTarget {
@@ -324,6 +398,17 @@ impl Ai {
         self.missiles.shuns(pos, self.frame)
     }
 
+    /// A superproject must survive a tactical silo placed anywhere in held
+    /// enemy ground, or a known silo outside that ground.
+    pub(crate) fn missiles_enemy_reaches(&self, pos: Vec3) -> bool {
+        self.graph.enemy_territory_reaches(pos, ENEMY_REACH)
+            || self
+                .war
+                .targets
+                .values()
+                .any(|e| !e.is_dead && e.def_name == SILO && distance(e.position, pos) <= ENEMY_REACH)
+    }
+
     pub(crate) fn missiles_siege_readiness(&self) -> SiegeReadiness {
         let minimum = siege_density_option(self.cb.option("missile_silo_density").as_deref());
         SiegeReadiness::new(self.posture.density, minimum, self.posture.laneness())
@@ -368,17 +453,18 @@ impl Ai {
         let struck = |id: i32, seen: i32| self.missiles.struck.get(&id).is_some_and(|&t| seen < t + LOOK_AFTER);
         (self.war.targets.values())
             .filter(|e| e.identified && e.is_static && !e.is_dead && !struck(e.unit_id, e.last_seen))
-            .filter(|e| !ally_covers(&allies, e.position))
+            // A rival silo is an immediate threat to ours; do not delegate
+            // it merely because an allied silo also happens to reach it.
+            .filter(|e| e.def_name == SILO || !ally_covers(&allies, e.position))
             .filter_map(|e| {
-                let needed = (e.ud?.health() / EOS_DAMAGE).ceil().max(1.0) as usize;
-                let shielded = match self.missiles_shield(e.position) {
-                    Some(true) => return None,
-                    Some(false) => true,
-                    None => false,
-                };
-                let needed = needed + usize::from(shielded);
-                let t = Target { id: e.unit_id, pos: e.position, value: e.value, needed, shielded };
-                (e.value / needed as f32 >= WORTH && needed <= PADS).then_some(t)
+                eos_target(
+                    e.unit_id,
+                    e.position,
+                    e.value,
+                    e.ud?.health(),
+                    self.missiles_shield(e.position),
+                    (e.def_name == SILO).then_some(e.build_progress),
+                )
             })
             .collect()
     }
@@ -519,13 +605,16 @@ impl Ai {
     /// of enough to pay for it and its missiles (three Fusions, one
     /// Singularity or anti-nuke; an anti-nuke a Shockley would stun counts
     /// for what it keeps from our nukes), or covering most static value at
-    /// sufficient density. Returns the actual buildable site and its value.
+    /// sufficient density. Held-territory coverage supplies the same siege
+    /// trigger without needing the enemy's buildings located first.
+    /// Returns the actual buildable site and its value.
     pub fn missiles_site(&self) -> Option<SiloSite> {
         let eos = self.missiles_eos_targets();
         let stun = self.missiles_stun_targets();
         let allies = self.missiles_allied_silos(None);
         let statics = self.missiles_static_value();
-        if eos.is_empty() && stun.is_empty() && statics.is_empty() {
+        let territory: Vec<_> = self.graph.enemy_territory_cells().collect();
+        if eos.is_empty() && stun.is_empty() && statics.is_empty() && territory.is_empty() {
             return None;
         }
         let enemy = self.graph.get_enemy_center();
@@ -549,7 +638,7 @@ impl Ai {
         });
         let mut targets: Vec<_> = eos.iter().map(|t| (t.pos, t.value - MISSILE_COST * t.needed as f32)).collect();
         targets.extend(stun.iter().filter(|a| !eos.iter().any(|t| t.id == a.0)).map(|a| (a.1, a.2 - MISSILE_COST)));
-        choose_silo_site(&allies, sites, &targets, &statics, self.missiles_siege_readiness(), enemy)
+        choose_silo_site(&allies, sites, &targets, &statics, &territory, self.missiles_siege_readiness(), enemy)
     }
 
     /// Remembered live statics plus spatially inferred mexes. A shadowed
@@ -598,9 +687,11 @@ impl Ai {
         let value: f32 = targets.iter().map(|t| t.value).sum();
         let siege = self.missiles_siege_readiness();
         let static_value: f32 = self.missiles_static_value().iter().map(|t| t.1).sum();
+        let territory_area = self.graph.enemy_territory_cells().count() as f32 * 64.0 * 64.0 / 1e6;
         self.log(&format!(
             "missiles: no silo site: {} targets worth Eos ({value:.0} metal), the nearest {nearest} from our metal \
-             (reach {REACH:.0}); {static_value:.0} known/inferred static metal, coverage needs >70%; \
+             (reach {REACH:.0}); {static_value:.0} known/inferred static metal, \
+             {territory_area:.2} Melmo² held enemy territory, either coverage needs >70%; \
              battlefield density {:.0}, needs >{:.0} metal/Melmo² (laneness {:.2})",
             targets.len(),
             siege.density,
@@ -677,17 +768,11 @@ impl Ai {
             }
             self.missiles_strike_due(id, p);
         }
-        let reserved: usize = self.missiles.followups.iter().map(|f| f.2).sum();
-        let mut targets = self.missiles_eos_targets();
-        targets.retain(|t| free.iter().any(|m| distance(m.pos(), t.pos) <= REACH));
-        targets.sort_by(|a, b| (b.value / b.needed as f32).total_cmp(&(a.value / a.needed as f32)));
-        for t in targets {
-            if free.len() < t.needed + reserved {
-                continue;
-            }
-            let now = if t.shielded { 1 } else { t.needed };
-            for m in free.drain(..now).collect::<Vec<_>>() {
-                self.missiles_launch(m, t.pos);
+        let reserved = self.missiles.followups.iter().map(|f| f.2).sum();
+        let pads: Vec<_> = free.iter().map(|m| m.pos()).collect();
+        for (t, chosen) in eos_salvos(self.missiles_eos_targets(), &pads, reserved) {
+            for i in chosen {
+                self.missiles_launch(free[i], t.pos);
             }
             if t.shielded {
                 self.missiles.followups.push((t.id, t.pos, t.needed - 1, frame + STAGGER));
@@ -816,8 +901,8 @@ impl Ai {
         self.missiles.ready.retain(|r| r.id() != missile.id());
     }
 
-    /// Keep the pads stocked: Shockleys for the anti-nukes in the way of
-    /// our nukes, Eos for what is worth them, and with neither left in
+    /// Keep the pads stocked: Eos for rival silos first, then Shockleys for
+    /// the anti-nukes in the way of our nukes, Eos for what is worth them, and with neither left in
     /// reach, a few Infernos for clusters of light things.
     fn missiles_restock(&mut self, silo: Unit) {
         let (Some(eos), Some(shockley)) = (self.defs.get(EOS), self.defs.get(SHOCKLEY)) else { return };
@@ -832,8 +917,9 @@ impl Ai {
         }
         let here = silo.pos();
         let stun = self.missiles_stun_targets().iter().filter(|a| distance(a.1, here) <= REACH).count();
-        let needed: usize =
-            self.missiles_eos_targets().iter().filter(|t| distance(t.pos, here) <= REACH).map(|t| t.needed).sum();
+        let targets = self.missiles_eos_targets();
+        let urgent: usize = targets.iter().filter(|t| t.silo && distance(t.pos, here) <= REACH).map(|t| t.needed).sum();
+        let needed: usize = targets.iter().filter(|t| distance(t.pos, here) <= REACH).map(|t| t.needed).sum();
         let needed = needed + self.missiles.followups.iter().map(|f| f.2).sum::<usize>();
         let infernos = || {
             let def = self.defs.get(INFERNO)?;
@@ -847,7 +933,9 @@ impl Ai {
                 .iter()
                 .any(|(p, n)| *n >= 2 && distance(*p, here) <= REACH && !self.missiles_ground_burning(*p));
         let urgent_inferno = if phantom { infernos() } else { None };
-        let def = if n_shock < stun.min(2) {
+        let def = if n_eos < urgent.min(PADS) {
+            eos
+        } else if n_shock < stun.min(2) {
             shockley
         } else if let Some(inferno) = urgent_inferno {
             inferno
@@ -860,7 +948,7 @@ impl Ai {
         };
         silo.build(def, here, 0, 0);
         self.log(&format!(
-            "missiles: queued {} ({stun} anti-nukes in reach, {needed} Eos needed)",
+            "missiles: queued {} ({urgent} Eos for rival silos, {stun} anti-nukes in reach, {needed} Eos needed)",
             self.defs.name(def)
         ));
     }
@@ -906,16 +994,28 @@ impl Ai {
         }
     }
 
-    /// Struck anti-nukes still on the books and not seen for a while: where
-    /// to look whether they are gone.
+    /// Hidden rival silos need a progress check; struck anti-nukes still
+    /// on the books need a look to confirm whether they are gone.
     pub fn missiles_looks(&self) -> Vec<Vec3> {
         let frame = self.frame;
-        (self.missiles.struck.iter())
+        let silos = self
+            .war
+            .targets
+            .values()
+            .filter(|e| {
+                !e.is_dead
+                    && !e.visible
+                    && e.def_name == SILO
+                    && self.missiles_silo().is_some_and(|s| distance(s.pos(), e.position) <= REACH)
+                    && self.missiles.struck.get(&e.unit_id).is_none_or(|&at| frame - at > LOOK_AFTER)
+            })
+            .map(|e| e.position);
+        let antis = (self.missiles.struck.iter())
             .filter(|&(_, &t)| frame - t > LOOK_AFTER)
             .filter_map(|(id, _)| self.war.targets.get(id))
             .filter(|e| !e.is_dead && e.def_name == "staticantinuke" && frame - e.last_seen > LOOK_AFTER)
-            .map(|e| e.position)
-            .collect()
+            .map(|e| e.position);
+        silos.chain(antis).collect()
     }
 
     /// What our Eos strike or would: worth watching by radar, to hear
@@ -941,15 +1041,18 @@ fn choose_silo_site(
     sites: impl Iterator<Item = Vec3>,
     targets: &[(Vec3, f32)],
     statics: &[(Vec3, f32)],
+    territory: &[Vec3],
     siege: SiegeReadiness,
     enemy: Vec3,
 ) -> Option<SiloSite> {
-    // Score only work not already claimed by an ally, for both triggers.
+    // Score only work not already claimed by an ally, for every trigger.
     // The coverage share stays a share of all the enemy's static value,
     // claimed or not: of what allied silos leave, any site reaches most,
     // so each ally after the first built one more (Red Comet 3v3,
     // 2026-11-03: three silos, the third for "100%" of 470 metal).
     let total: f32 = statics.iter().map(|t| t.1).sum();
+    let territory_total = territory.len();
+    let territory: Vec<_> = territory.iter().filter(|&&p| !ally_covers(allies, p)).collect();
     let targets: Vec<_> = targets.iter().filter(|t| !ally_covers(allies, t.0)).collect();
     let statics: Vec<_> = statics.iter().filter(|t| !ally_covers(allies, t.0)).collect();
     let scored: Vec<_> = sites
@@ -958,13 +1061,14 @@ fn choose_silo_site(
                 targets.iter().filter(|t| distance(t.0, p) <= REACH).fold((0.0, 0), |(v, n), t| (v + t.1, n + 1));
             let value: f32 = statics.iter().filter(|t| distance(t.0, p) <= REACH).map(|t| t.1).sum();
             let coverage = StaticCoverage { value, share: if total > 0.0 { value / total } else { 0.0 } };
-            (payoff >= SILO_COST || coverage.warrants_silo(siege)).then_some(SiloSite {
-                pos: p,
-                payoff,
-                targets: n,
-                coverage,
-                siege,
-            })
+            let territory_share = if territory_total == 0 {
+                0.0
+            } else {
+                territory.iter().filter(|&&&t| distance(t, p) <= REACH).count() as f32 / territory_total as f32
+            };
+            let territory_coverage = StaticCoverage { value: 0.0, share: territory_share };
+            (payoff >= SILO_COST || coverage.warrants_silo(siege) || territory_coverage.warrants_silo(siege))
+                .then_some(SiloSite { pos: p, payoff, targets: n, coverage, territory_share, siege })
         })
         .collect();
     // The coverage trigger admits a site even without a known Eos target.
@@ -1042,7 +1146,7 @@ mod site_tests {
         let enemy = Vec3::xz(4000.0, 4000.0);
         let targets = [(enemy, 5000.0)];
         let candidates = [lost, shifted, other].into_iter().filter(|&p| !missiles.shuns(p, when + 1));
-        let chosen = choose_silo_site(&[], candidates, &targets, &[], EARLY, enemy).unwrap();
+        let chosen = choose_silo_site(&[], candidates, &targets, &[], &[], EARLY, enemy).unwrap();
         assert_eq!(chosen.pos, other);
         assert!(missiles.shuns(lost, when + LOSS_MEMORY - 1));
         assert!(!missiles.shuns(lost, when + LOSS_MEMORY));
@@ -1058,18 +1162,20 @@ mod site_tests {
         let enemy = Vec3::xz(3000.0, 1000.0);
         let targets = [(enemy, 2400.0)];
         let statics = [(enemy, 60000.0)];
-        assert!(choose_silo_site(&[], [at].into_iter(), &targets, &statics, DENSE, enemy).is_some());
-        assert!(choose_silo_site(&[at], [at].into_iter(), &targets, &statics, DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &targets, &statics, &[], DENSE, enemy).is_some());
+        assert!(choose_silo_site(&[at], [at].into_iter(), &targets, &statics, &[], DENSE, enemy).is_none());
         let boundary = Vec3::xz(enemy.x + REACH, enemy.z);
-        assert!(choose_silo_site(&[boundary], [at].into_iter(), &targets, &statics, DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[boundary], [at].into_iter(), &targets, &statics, &[], DENSE, enemy).is_none());
         let outside = Vec3::xz(boundary.x + 1.0, boundary.z);
-        assert!(choose_silo_site(&[outside], [at].into_iter(), &targets, &statics, DENSE, enemy).is_some());
+        assert!(choose_silo_site(&[outside], [at].into_iter(), &targets, &statics, &[], DENSE, enemy).is_some());
         // An ally covering one side of the map must not block a silo on
         // another side, nor make its covered value count toward our payoff.
         let uncovered = Vec3::xz(9000.0, 1000.0);
         let targets = [(enemy, 2400.0), (uncovered, 600.0)];
-        assert!(choose_silo_site(&[at], [uncovered].into_iter(), &targets, &[], DENSE, enemy).is_none());
-        assert!(choose_silo_site(&[at], [uncovered].into_iter(), &[], &[(uncovered, 60000.0)], DENSE, enemy).is_some());
+        assert!(choose_silo_site(&[at], [uncovered].into_iter(), &targets, &[], &[], DENSE, enemy).is_none());
+        assert!(
+            choose_silo_site(&[at], [uncovered].into_iter(), &[], &[(uncovered, 60000.0)], &[], DENSE, enemy).is_some()
+        );
     }
 
     #[test]
@@ -1081,14 +1187,14 @@ mod site_tests {
         let rest = Vec3::xz(9000.0, 1000.0);
         let site = Vec3::xz(7000.0, 1000.0);
         let statics = [(enemy, 6000.0), (rest, 2000.0)];
-        assert!(choose_silo_site(&[ally], [site].into_iter(), &[], &statics, DENSE, rest).is_none());
+        assert!(choose_silo_site(&[ally], [site].into_iter(), &[], &statics, &[], DENSE, rest).is_none());
         // Most of the value out of the ally's reach still warrants one.
         let statics = [(enemy, 2000.0), (rest, 6000.0)];
-        let chosen = choose_silo_site(&[ally], [site].into_iter(), &[], &statics, DENSE, rest).unwrap();
+        let chosen = choose_silo_site(&[ally], [site].into_iter(), &[], &statics, &[], DENSE, rest).unwrap();
         assert_eq!((chosen.coverage.value, chosen.coverage.share), (6000.0, 0.75));
         // Eos targets out of the ally's reach still pay for their own.
         let targets = [(rest, 2400.0)];
-        assert!(choose_silo_site(&[ally], [site].into_iter(), &targets, &[], DENSE, rest).is_some());
+        assert!(choose_silo_site(&[ally], [site].into_iter(), &targets, &[], &[], DENSE, rest).is_some());
     }
 
     #[test]
@@ -1143,11 +1249,11 @@ mod site_tests {
         let seed = Vec3::xz(1600.0, 1000.0);
         let shifted = Vec3::xz(1000.0, 1000.0);
         let targets = [(target, 2400.0)];
-        assert!(choose_silo_site(&[], [seed].into_iter(), &targets, &[], EARLY, target).is_some());
-        assert!(choose_silo_site(&[], [shifted].into_iter(), &targets, &[], EARLY, target).is_none());
+        assert!(choose_silo_site(&[], [seed].into_iter(), &targets, &[], &[], EARLY, target).is_some());
+        assert!(choose_silo_site(&[], [shifted].into_iter(), &targets, &[], &[], EARLY, target).is_none());
         let fallback = Vec3::xz(1800.0, 1000.0);
         assert_eq!(
-            choose_silo_site(&[], [shifted, fallback].into_iter(), &targets, &[], EARLY, target).unwrap().pos,
+            choose_silo_site(&[], [shifted, fallback].into_iter(), &targets, &[], &[], EARLY, target).unwrap().pos,
             fallback
         );
     }
@@ -1157,8 +1263,9 @@ mod site_tests {
         let targets = [(Vec3::xz(5000.0, 1000.0), 600.0), (Vec3::xz(5000.0, 1800.0), 600.0)];
         let only_one = Vec3::xz(1550.0, 1000.0);
         let both = Vec3::xz(2000.0, 1400.0);
-        assert!(choose_silo_site(&[], [only_one].into_iter(), &targets, &[], EARLY, targets[0].0).is_none());
-        let chosen = choose_silo_site(&[], [only_one, both].into_iter(), &targets, &[], EARLY, targets[0].0).unwrap();
+        assert!(choose_silo_site(&[], [only_one].into_iter(), &targets, &[], &[], EARLY, targets[0].0).is_none());
+        let chosen =
+            choose_silo_site(&[], [only_one, both].into_iter(), &targets, &[], &[], EARLY, targets[0].0).unwrap();
         assert_eq!((chosen.pos, chosen.payoff, chosen.targets), (both, 1200.0, 2));
     }
 
@@ -1170,19 +1277,19 @@ mod site_tests {
         // No individually worthwhile Eos targets: battlefield density,
         // not the amount of metal inside the firing disk, enables siege.
         let statics = [(enemy, 6000.0), (far, 2000.0)];
-        let site = choose_silo_site(&[], [at].into_iter(), &[], &statics, DENSE, enemy).unwrap();
+        let site = choose_silo_site(&[], [at].into_iter(), &[], &statics, &[], DENSE, enemy).unwrap();
         assert_eq!(site.targets, 0);
         assert_eq!(site.coverage.share, 0.75);
         assert_eq!(site.coverage.value, 6000.0);
-        assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, EARLY, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, &[], EARLY, enemy).is_none());
         // Value beyond missile range belongs in the denominator, whether
         // observed or inferred. Exactly 70% is not enough.
         let only_seventy_percent = [(enemy, 7000.0), (far, 3000.0)];
-        assert!(choose_silo_site(&[], [at].into_iter(), &[], &only_seventy_percent, DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &only_seventy_percent, &[], DENSE, enemy).is_none());
         let coverage = StaticCoverage { share: 0.71, value: 1.0 };
         assert!(!coverage.warrants_silo(SiegeReadiness { density: 1500.0, ..EARLY }));
         assert!(coverage.warrants_silo(SiegeReadiness { density: 1500.1, ..EARLY }));
-        assert!(choose_silo_site(&[], [at].into_iter(), &[], &[], DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &[], &[], DENSE, enemy).is_none());
     }
 
     #[test]
@@ -1191,8 +1298,8 @@ mod site_tests {
         let statics = [(enemy, 6000.0)];
         let seed = Vec3::xz(1600.0, 1000.0);
         let shifted = Vec3::xz(1000.0, 1000.0);
-        assert!(choose_silo_site(&[], [seed].into_iter(), &[], &statics, DENSE, enemy).is_some());
-        assert!(choose_silo_site(&[], [shifted].into_iter(), &[], &statics, DENSE, enemy).is_none());
+        assert!(choose_silo_site(&[], [seed].into_iter(), &[], &statics, &[], DENSE, enemy).is_some());
+        assert!(choose_silo_site(&[], [shifted].into_iter(), &[], &statics, &[], DENSE, enemy).is_none());
     }
 
     #[test]
@@ -1217,13 +1324,92 @@ mod site_tests {
         let enemy = Vec3::xz(3000.0, 3000.0);
         let statics = [(enemy, 5435.0)];
         let siege = SiegeReadiness::new(2254.0, 1500.0, 0.7);
-        assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, siege, enemy).is_some());
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, &[], siege, enemy).is_some());
         // Ravaged's laneness discounts the default to about 1111, not zero.
         assert!((siege.threshold - 1111.11).abs() < 0.1);
         assert!(
-            choose_silo_site(&[], [at].into_iter(), &[], &statics, SiegeReadiness::new(1000.0, 1500.0, 0.7), enemy)
-                .is_none()
+            choose_silo_site(
+                &[],
+                [at].into_iter(),
+                &[],
+                &statics,
+                &[],
+                SiegeReadiness::new(1000.0, 1500.0, 0.7),
+                enemy
+            )
+            .is_none()
         );
+    }
+
+    #[test]
+    fn held_territory_can_commission_a_silo_without_located_value() {
+        let at = Vec3::xz(1000.0, 1000.0);
+        let near = Vec3::xz(3000.0, 1000.0);
+        let far = Vec3::xz(9000.0, 1000.0);
+        let territory = [near, near, near, far];
+        let pick = |allies: &[Vec3], site, siege| {
+            choose_silo_site(allies, [site].into_iter(), &[], &[], &territory, siege, near)
+        };
+        let chosen = pick(&[], at, DENSE).unwrap();
+        assert_eq!(chosen.territory_share, 0.75);
+        assert_eq!(chosen.coverage.value, 0.0);
+        assert!(pick(&[], at, EARLY).is_none());
+        assert!(pick(&[at], at, DENSE).is_none());
+        // An ally covers 75%; reaching all of the remainder is only 25%.
+        assert!(pick(&[at], far, DENSE).is_none());
+        // Score the final footprint, including the exact range boundary.
+        assert!(pick(&[], Vec3::xz(near.x - REACH, near.z), DENSE).is_some());
+        assert!(pick(&[], Vec3::xz(near.x - REACH - 1.0, near.z), DENSE).is_none());
+        let seventy = [near, near, near, near, near, near, near, far, far, far];
+        assert!(choose_silo_site(&[], [at].into_iter(), &[], &[], &seventy, DENSE, near).is_none());
+    }
+
+    fn rival(progress: f32, shield: Option<bool>) -> Target {
+        eos_target(1, Vec3::xz(2000.0, 1000.0), 1200.0, 1500.0, shield, Some(progress)).unwrap()
+    }
+
+    fn valuable() -> Target {
+        eos_target(2, Vec3::xz(2200.0, 1000.0), 50000.0, 3000.0, None, None).unwrap()
+    }
+
+    #[test]
+    fn silo_nanoframes_reserve_eos_and_only_observed_progress_over_half_authorizes_fire() {
+        let pad = Vec3::xz(1000.0, 1000.0);
+        for progress in [0.0, 0.01, 0.25, 0.5] {
+            let t = rival(progress, None);
+            assert!(t.silo);
+            assert_eq!(t.needed, 1); // Production demand exists even for an empty frame.
+            assert!(!t.launch);
+            assert!(eos_salvos(vec![valuable(), t], &[pad], 0).is_empty());
+        }
+        for progress in [0.5001, 0.75, 1.0] {
+            let orders = eos_salvos(vec![valuable(), rival(progress, None)], &[pad], 0);
+            assert_eq!(orders.len(), 1);
+            assert_eq!(orders[0].0.id, 1); // Even 50k of ordinary value loses.
+        }
+        // An unseen, out-of-range frame cannot reserve local ammunition.
+        let orders = eos_salvos(vec![valuable(), rival(0.1, None)], &[Vec3::xz(5500.0, 1000.0)], 0);
+        assert_eq!(orders[0].0.id, 2);
+    }
+
+    #[test]
+    fn protected_silo_bypasses_payoff_but_reserves_a_complete_reachable_salvo() {
+        let pad = Vec3::xz(1000.0, 1000.0);
+        // 1200 / two Eos would fail the ordinary payoff test.
+        assert!(eos_target(1, pad, 1200.0, 1500.0, Some(false), None).is_none());
+        let t = rival(1.0, Some(false));
+        assert_eq!(t.needed, 2);
+        assert!(eos_salvos(vec![valuable(), t], &[pad], 0).is_empty());
+        let orders = eos_salvos(vec![valuable(), rival(1.0, Some(false))], &[pad, pad], 0);
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].0.id, 1);
+        assert_eq!(orders[0].1.len(), 1); // Shield opener; the other Eos stays reserved.
+        let far = Vec3::xz(8000.0, 1000.0);
+        assert!(eos_salvos(vec![rival(1.0, Some(false))], &[pad, far], 0).is_empty());
+        // Existing committed shield follow-ups retain their ammunition.
+        assert!(eos_salvos(vec![rival(1.0, None)], &[pad], 1).is_empty());
+        // A Funnelweb remains beyond a four-pad Eos salvo's capability.
+        assert!(eos_target(1, pad, 1200.0, 1500.0, Some(true), Some(1.0)).is_none());
     }
 
     #[test]

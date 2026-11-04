@@ -392,3 +392,28 @@ fn ascii_graph_shows_spots_and_links() {
     // B is both ally- and enemy-shadowed: contested outline
     assert!(text.contains('c'));
 }
+
+#[test]
+fn enemy_territory_area_counts_overlap_once_and_exposes_sites_from_its_edge() {
+    let mut g = graph(&[(1024.0, 1024.0), (1536.0, 1024.0)]);
+    assert_eq!(g.enemy_territory_cells().count(), 0);
+    // An inferred neighbour alone is not held ground.
+    g.metal_spots[0].enemy_shadowed = true;
+    assert_eq!(g.enemy_territory_cells().count(), 0);
+    g.set_hostile(0);
+    let first = g.enemy_territory_cells().count();
+    assert!(first > 0);
+    g.set_hostile(1);
+    let both = g.enemy_territory_cells().count();
+    assert!(both > first && both < 2 * first);
+    assert!(g.enemy_territory_cells().all(|p| g.is_enemy_territory(p)));
+    let edge = g.enemy_territory_cells().map(|p| p.x).fold(0.0, f32::max);
+    let reach = 3500.0;
+    let half_cell = 32.0 * std::f32::consts::SQRT_2;
+    // A site outside missile reach of the mex itself can still be hit
+    // by a silo on the near edge of that mex's held territory.
+    let site = Vec3::xz(edge + reach, 1024.0);
+    assert!(super::distance(site, g.metal_spots[1].position) > reach);
+    assert!(g.enemy_territory_reaches(site, reach));
+    assert!(!g.enemy_territory_reaches(Vec3::xz(edge + reach + half_cell + 1.0, 1024.0), reach));
+}

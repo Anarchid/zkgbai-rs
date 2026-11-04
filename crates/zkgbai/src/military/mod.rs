@@ -1712,6 +1712,9 @@ impl Ai {
             let war = &mut self.war;
             let los = &self.los;
             for (&id, t) in war.targets.iter_mut() {
+                if t.visible {
+                    t.check_nano();
+                }
                 let tpos = t.unit.pos();
                 if tpos != NULLPOS {
                     t.last_seen = frame;

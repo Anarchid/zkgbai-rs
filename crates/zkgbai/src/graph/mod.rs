@@ -761,6 +761,25 @@ impl GraphManager {
         self.enemy_territory_graphics.get_value(x, y) > 0.0
     }
 
+    /// Equal-area samples of held enemy territory, including the ground
+    /// around hostile mexes, not just the mex footprints. Overlapping
+    /// territory circles count once. Shadows alone do not establish control.
+    pub fn enemy_territory_cells(&self) -> impl Iterator<Item = Vec3> + '_ {
+        let grid = &self.enemy_territory_graphics;
+        (0..grid.height).flat_map(move |z| {
+            (0..grid.width)
+                .filter(move |&x| grid.get_value(x, z) > 0.0)
+                .map(move |x| Vec3::xz(x as f32 * 64.0, z as f32 * 64.0))
+        })
+    }
+
+    /// Could a weapon anywhere in held enemy territory reach this site?
+    /// Include each cell's half-diagonal so a cell edge cannot hide a threat.
+    pub fn enemy_territory_reaches(&self, position: Vec3, range: f32) -> bool {
+        let reach = range + 32.0 * std::f32::consts::SQRT_2;
+        self.enemy_territory_cells().any(|p| distance(p, position) <= reach)
+    }
+
     pub fn is_front_line(&self, position: Vec3) -> bool {
         let (x, y) = grid_coords(position);
         self.front_line_graphics.get_value(x, y) > 0.0
