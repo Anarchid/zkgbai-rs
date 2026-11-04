@@ -367,6 +367,12 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "invasion targets: the enemy holding, raider ground or empty ground that nets most is taken with an assault squad on hand, then its spots and wrecks are first for our constructors (default on in the wip line)",
     ),
+    (
+        "limpet",
+        "Army",
+        "ordinary squads reserve Limpets unless a committed strike pays for the bomb and the whole squad; default on in wip, off in main",
+    ),
+    ("limpetshadow", "Army", "with limpet disabled, journal its commitment verdicts without changing orders"),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     (
         "coalesce",

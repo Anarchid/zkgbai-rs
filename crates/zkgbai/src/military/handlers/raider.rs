@@ -1275,6 +1275,9 @@ impl Ai {
     }
 
     fn raider_assign_raider_squad(&mut self, sid: SquadId) {
+        if self.limpet_squad_committed(sid) {
+            return;
+        }
         use super::squad_trace::{Bail, Branch};
         let here = self.squads.get(sid).map_or(NULLPOS, |rs| rs.get_pos(&self.fighters));
         // Moonlighting at home against a raid (see `qrf::live`).
@@ -1399,6 +1402,10 @@ impl Ai {
                 .max_by(|a, b| a.0.total_cmp(&b.0))
                 .unwrap_or((0.0, 0.0));
             let bail = Bail { at_target: danger(rs_target), at_member: worst.0, own: threat, straggle: worst.1 };
+            // A beneficial committed Limpet strike can pay for this danger.
+            if self.limpet_verdict(sid, rs_target, true) == Some(false) {
+                return;
+            }
             if hyst {
                 let frame = self.frame;
                 let m = self.raider_handler.memo.entry(sid).or_default();

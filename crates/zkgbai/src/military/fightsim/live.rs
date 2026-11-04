@@ -712,6 +712,9 @@ impl Ai {
     /// latches (see the module notes): the squad is told to retreat at every
     /// check until the latch ends.
     pub fn fight_verdict(&mut self, sid: SquadId, pos: Vec3, target: Vec3, courage: f32, flat: bool) -> bool {
+        if let Some(retreat) = self.limpet_verdict(sid, target, flat) {
+            return retreat;
+        }
         if !self.fightsim_runs() {
             return flat;
         }

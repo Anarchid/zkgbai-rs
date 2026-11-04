@@ -23,6 +23,7 @@ pub mod intel;
 pub mod invade;
 pub mod jaeger;
 pub mod jumps;
+pub mod limpets;
 pub mod missiles;
 pub mod nukes;
 pub mod precision;
@@ -209,6 +210,7 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    pub limpets: limpets::Limpets,
     /// The density of our fights (see [`front`]).
     pub front: front::Front,
     /// The Jugglenaut's def while they walk past enemy buildings rather
@@ -280,6 +282,7 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            limpets: Default::default(),
             front: front::Front::default(),
             sumo_walks: None,
         }
@@ -571,6 +574,7 @@ impl Ai {
 
         // Before the squads decide: their fight predictions arrive here.
         self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
+        self.guard("limpet.update", |ai| ai.limpet_update(frame));
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
         self.guard("ammo.update", |ai| ai.ammo_update(frame));
         self.guard("coalesce.update", |ai| ai.coalesce_update(frame));

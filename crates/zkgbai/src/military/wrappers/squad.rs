@@ -314,7 +314,7 @@ impl Squad {
             // The original wonders why this is done here too.
             self.set_target(self.target, fighters, nav);
         }
-        !self.fighters.iter().filter_map(|id| fighters.get(id)).any(|f| f.out_of_range)
+        !self.fighters.iter().filter_map(|id| fighters.get(id)).any(|f| !f.limpet_controlled && f.out_of_range)
     }
 
     /// Whether the squad has no members left (taskforces: nor a leader).
@@ -1108,7 +1108,9 @@ impl Squad {
     }
 
     fn get_new_leader(&self, fighters: &FighterStore) -> Option<i32> {
-        let members = self.fighters.iter().filter_map(|id| fighters.get(id));
+        let has_escort = self.fighters.iter().filter_map(|id| fighters.get(id)).any(|f| !f.limpet_controlled);
+        let members =
+            self.fighters.iter().filter_map(|id| fighters.get(id)).filter(|f| !has_escort || !f.limpet_controlled);
         match self.kind {
             SquadKind::Taskforce => {
                 let mut best: Option<(i32, i32)> = None;
@@ -1149,7 +1151,9 @@ impl Squad {
     }
 
     fn get_best_leader(&mut self, fighters: &FighterStore) -> Option<i32> {
-        let alive = self.leader_fighter(fighters).is_some_and(|l| l.unit.health() > 0.0 && l.unit.team() == self.team);
+        let alive = self
+            .leader_fighter(fighters)
+            .is_some_and(|l| !l.limpet_controlled && l.unit.health() > 0.0 && l.unit.team() == self.team);
         if !alive {
             self.leader = self.get_new_leader(fighters);
         }
@@ -1158,7 +1162,7 @@ impl Squad {
         let mut new_leader = leader.id;
         let mut minspeed = leader.unit.def().map_or(f32::MAX, |d| d.speed());
         for f in self.fighters.iter().filter_map(|id| fighters.get(id)) {
-            if distance(f.get_pos(), leader_pos) > 300.0 {
+            if f.limpet_controlled || distance(f.get_pos(), leader_pos) > 300.0 {
                 continue;
             }
             let speed = f.unit.speed();
