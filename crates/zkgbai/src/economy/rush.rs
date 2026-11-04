@@ -19,8 +19,18 @@
 //! ZKGBAIs hosted by different players cannot share it, so there is no rush
 //! then.
 //!
-//! `disable=rush` turns it off; the (undeclared) option `rush=force` takes
-//! every eligible roll, for staged games.
+//! The same games roll a second dice of the same odds, on its own throw, for
+//! conquest (user: "let's also add a similar probability term for
+//! conquer=on in those games"): on a hit, every ZKGBAI of ours plays with the
+//! `conquest` switch on (the commander's trip to forward ground a few turrets
+//! hold; off by default), unless its options set the switch either way. It
+//! needs no helpers, so a lone ZKGBAI among humans rolls it too. With a rush
+//! as well, the trip waits for the heavy: conquest pulls the commander only
+//! through job prices, and the rush holds it off the jobs meanwhile.
+//!
+//! `disable=rush` and `disable=conquestroll` turn either off; the
+//! (undeclared) options `rush=force` and `conquestroll=force` take every
+//! eligible roll, for staged games.
 
 use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -95,6 +105,9 @@ struct Pact {
     starts: BTreeMap<i32, Vec3>,
     /// The roll, or why there was none.
     why: String,
+    /// Conquest on, and its roll (or why there was none).
+    conquest: bool,
+    conquest_why: String,
 }
 
 /// This process's plans: (game key, when, plan).
@@ -236,8 +249,8 @@ impl Ai {
         if !matches!(self.eco.rush.state, State::Undecided) {
             return;
         }
-        if let Some(why) = self.rush_ineligible() {
-            return self.rush_off(&why);
+        if let Some(why) = self.plan_ineligible() {
+            return self.rush_off(&format!("{why} (no conquest roll either)"));
         }
         let script = self.cb.game().setup_script();
         let mut h = DefaultHasher::new();
@@ -256,6 +269,7 @@ impl Ai {
             p
         });
         let whose = if pact.by == self.team_id { "rolled".to_owned() } else { format!("team {}'s roll", pact.by) };
+        self.conquest_by_roll(&pact, &whose);
         let Some((rusher, factory)) = pact.rush else {
             return self.rush_off(&format!("{whose}: {}", pact.why));
         };
@@ -279,23 +293,14 @@ impl Ai {
         self.eco.rush.state = State::Planned { rusher, factory, heavy, called };
     }
 
-    /// Why this game is no rush for us, whatever the roll.
-    fn rush_ineligible(&self) -> Option<String> {
-        if self.dev_off("rush") {
-            return Some("switched off".into());
-        }
+    /// Why this game gets no team roll at all (rush nor conquest).
+    fn plan_ineligible(&self) -> Option<String> {
         let (side, enemies) = (self.allies.len() + 1, self.enemy_teams.len());
         if self.is_ffa || side.min(enemies) < MIN_SIDE {
             return Some(format!("{side} v {enemies}, not 3v3 or bigger"));
         }
         if self.map_diag > SMALL_DIAG {
             return Some(format!("the map's diagonal is {:.0}, over {SMALL_DIAG:.0}", self.map_diag));
-        }
-        if self.iq.peers.is_empty() {
-            return Some("no other ZKGBAI on our side to assist".into());
-        }
-        if self.eco.water_side.is_some() {
-            return Some("one of us takes the water side".into());
         }
         let hosts = ai_hosts(&self.cb.game().setup_script());
         let ours = hosts.get(&self.team_id);
@@ -305,34 +310,92 @@ impl Ai {
         None
     }
 
+    /// Whether the `disable` option (or ZKGBAI_DISABLE) names `feature`
+    /// (and not just its being off by default).
+    fn listed_off(&self, feature: &str) -> bool {
+        let list = self.cb.option("disable").filter(|v| !v.trim().is_empty());
+        let list = list.or_else(|| std::env::var("ZKGBAI_DISABLE").ok()).unwrap_or_default();
+        list.split(',').any(|f| f.trim() == feature)
+    }
+
+    /// Whether conquest is ours to roll: off only by default, and the roll
+    /// not switched off.
+    fn conquest_rollable(&self) -> bool {
+        self.dev_off("conquest") && !self.listed_off("conquest") && !self.dev_off("conquestroll")
+    }
+
+    /// Switch conquest on if the team's roll says so (see the module docs).
+    fn conquest_by_roll(&mut self, pact: &Pact, whose: &str) {
+        if !self.conquest_rollable() {
+            return;
+        }
+        if pact.conquest {
+            self.dev_enable("conquest");
+            self.log(&format!("conquest: switched on by the team's roll ({whose}) {}", pact.conquest_why));
+        } else {
+            self.log(&format!("conquest: stays off by the team's roll ({whose}) {}", pact.conquest_why));
+        }
+        self.op_emit("conquestroll", json!({"on": pact.conquest, "by": pact.by, "why": pact.conquest_why}));
+    }
+
     /// Roll this game's plan, for the alliance's instances in this process.
     fn rush_roll(&mut self) -> Pact {
-        let mut pact = Pact { by: self.team_id, rush: None, starts: BTreeMap::new(), why: String::new() };
-        let factories: Vec<&'static str> =
-            HEAVIES.iter().map(|h| h.0).filter(|f| self.eco.potential_fac_list.contains(*f)).collect();
-        if factories.is_empty() {
-            pact.why = "no demi-strider factory plays the map".into();
-            return pact;
-        }
+        let mut pact = Pact {
+            by: self.team_id,
+            rush: None,
+            starts: BTreeMap::new(),
+            why: String::new(),
+            conquest: false,
+            conquest_why: String::new(),
+        };
         let (ally, enemy) = (self.graph.get_ally_base(), self.graph.get_enemy_base());
         let ready = self.terrain_wait(TERRAIN_WAIT);
         let map = ready.then(|| self.terrain().and_then(|t| t.tier(Tier::Bot))).flatten();
         let front = map.zip(enemy).and_then(|(m, e)| front_width(m, pos(ally), pos(e)));
         let Some(front) = front else {
             pact.why = "the front could not be measured".into();
+            pact.conquest_why.clone_from(&pact.why);
             return pact;
         };
         let per_side = (self.allies.len() + 1 + self.enemy_teams.len()) as f32 / 2.0;
         let natural = odds(front, per_side);
-        let force = self.cb.option("rush").is_some_and(|v| v.trim().eq_ignore_ascii_case("force"));
-        let p = if force { 1.0 } else { natural };
-        let throw = kgb_rand();
-        pact.why = format!(
-            "front {front:.0} elmos for {per_side:.1} players a side ({:.0} each), odds {natural:.2}{}: rolled {throw:.3}",
-            front / per_side,
-            if force { " (forced)" } else { "" }
+        let crowd = format!(
+            "front {front:.0} elmos for {per_side:.1} players a side ({:.0} each), odds {natural:.2}",
+            front / per_side
         );
-        if throw >= f64::from(p) {
+        // Each dice: (hit, what it rolled).
+        let dice = |key: &str| {
+            let force = self.cb.option(key).is_some_and(|v| v.trim().eq_ignore_ascii_case("force"));
+            let throw = kgb_rand();
+            let hit = throw < f64::from(if force { 1.0 } else { natural });
+            (hit, format!("{crowd}{}: rolled {throw:.3}", if force { " (forced)" } else { "" }))
+        };
+        // Conquest's first (it needs no helpers).
+        if self.conquest_rollable() {
+            (pact.conquest, pact.conquest_why) = dice("conquestroll");
+        } else {
+            pact.conquest_why = "not rolled: conquest is set by the options".into();
+        }
+        let factories: Vec<&'static str> =
+            HEAVIES.iter().map(|h| h.0).filter(|f| self.eco.potential_fac_list.contains(*f)).collect();
+        let no_rush = if self.dev_off("rush") {
+            Some("switched off")
+        } else if self.iq.peers.is_empty() {
+            Some("no other ZKGBAI on our side to assist")
+        } else if self.eco.water_side.is_some() {
+            Some("one of us takes the water side")
+        } else if factories.is_empty() {
+            Some("no demi-strider factory plays the map")
+        } else {
+            None
+        };
+        if let Some(why) = no_rush {
+            pact.why = why.into();
+            return pact;
+        }
+        let hit;
+        (hit, pact.why) = dice("rush");
+        if !hit {
             return pact;
         }
         // The rusher, its factory, and our starts around its.
