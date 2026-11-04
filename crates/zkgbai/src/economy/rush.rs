@@ -662,10 +662,14 @@ impl Ai {
     /// factory the heavy until it stands (once per [`REORDER`]: the order
     /// is on its way meanwhile); every other factory nothing.
     pub(crate) fn rush_factory(&self, fac_id: i32) -> Option<RushOrder> {
-        let State::On(plan) = &self.eco.rush.state else { return None };
         if !self.eco.rush.participating {
             return None;
         }
+        let State::On(plan) = &self.eco.rush.state else {
+            // Factory-finished can run before the next rush tick sees the
+            // factory. Do not slip a normal opening unit ahead of the heavy.
+            return matches!(self.eco.rush.state, State::Planned { .. }).then_some(RushOrder::Hold);
+        };
         if plan.rusher == self.team_id && plan.factory.id() == fac_id {
             if plan.nano.is_some() {
                 return None;
