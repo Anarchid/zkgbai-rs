@@ -187,6 +187,10 @@ available metal and energy is released, with the project reconsidered after 10 s
 projects remain visible and are reassessed every second. Expired, unstarted deadline jobs are
 cancelled; other exhausted valuations return their tasks to the ordinary economy for reassessment.
 Started frames are preserved. Replacement workers value partial construction too.
+An on-site builder actively spending on construction at least 80% complete keeps the job when
+at most ten seconds remain at its current spending/build rate. Ordinary job bidding and new
+project crews both respect this final work; explicit priorities, danger, and energy emergencies
+can still preempt it. A stalled build receives no indefinite hold.
 Resource forecasts cover tracked projects; factories and untracked jobs can still compete for
 the actual economy, so these remain forecasts rather than guaranteed completion times.
 
