@@ -1041,6 +1041,26 @@ mod veto_tests {
     }
 
     #[test]
+    fn lone_scorcher_is_vetoed_before_rallying_into_scalpels() {
+        let model = Model::load().unwrap();
+        for enemies in [2, 3] {
+            let mut snap = encounter(1, enemies);
+            let scorcher = fixture("vehraid");
+            snap.units[0].hp = scorcher.health;
+            snap.units[0].spec = scorcher;
+            // The observed forming squad was about 440 elmos from the
+            // Scalpels when their first salvo started.
+            for unit in snap.units.iter_mut().filter(|u| u.side == 1) {
+                unit.x = 440.0;
+            }
+            let (loss, crushing) = judge(&model, &snap);
+            assert!(crushing, "Scorcher vs {enemies} Scalpels: killed {loss:?}");
+            assert!(apply_veto(false, true, crushing));
+            assert!(!apply_veto(false, false, crushing), "shadow mode must not issue a veto");
+        }
+    }
+
+    #[test]
     fn a_latch_holds_its_minimum_then_while_crushing_never_past_its_maximum() {
         let never = || -> bool { panic!("judged inside the minimum or past the maximum") };
         assert!(latch_holds(0, never));
