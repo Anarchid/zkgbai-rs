@@ -318,6 +318,9 @@ impl Ai {
 
     pub(super) fn eco_assign_worker(&mut self, wid: i32) {
         let frame = self.frame;
+        if springai::reserved::is_reserved(self.cb, wid) {
+            return;
+        }
         // Idle, completion, move-failed and retreat-finished callbacks also
         // enter here directly, bypassing the round-robin reservation check.
         if self.crab_escort(wid)
@@ -335,6 +338,7 @@ impl Ai {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
                 !self.eco.silo_work_allowed(t)
                     || !self.eco_prerequisites_ready(t)
+                    || (!self.op_priority(t.id) && !self.logistics_allows(wid, t.id))
                     || (t.as_construction().is_some_and(|c| c.fortification)
                         && self.eco_fortify_travel(w, t.get_pos()).is_none())
             })
@@ -534,6 +538,59 @@ impl Ai {
             .any(|w| distance(w.get_pos(), p) <= w.unit.def().map_or(0.0, |d| d.build_distance()) + 100.0)
     }
 
+    /// Shared admission rule for the project planner and the executor.
+    fn eco_worker_can_take(&self, w: &Worker, t: &WorkerTask) -> bool {
+        let def = w.unit.def();
+        let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
+        let jumps_cliffs = w.is_com
+            && !self.dev_off("comreach")
+            && def.is_some_and(|d| crate::military::jumps::JumpDef::of(d).is_some());
+        let spider_reach = jumps_cliffs
+            && self
+                .reach_terrain()
+                .and_then(|t| t.tier(Tier::Spider))
+                .is_some_and(|m| m.reaches_within(terrain_pos(w.get_pos()), terrain_pos(t.get_pos()), range, SNAP));
+        !(t.as_construction().is_some_and(|c| c.fortification) && self.eco_fortify_travel(w, t.get_pos()).is_none())
+            && self.eco.silo_work_allowed(t)
+            && self.eco_prerequisites_ready(t)
+            && def.is_none_or(|d| self.terrain_reaches(d, w.get_pos(), t.get_pos(), range) || spider_reach)
+            && !self.eco_worker_shuns(w, t.get_pos())
+            && !(w.is_com && self.comguard_avoids(w.id, t.get_pos()))
+    }
+
+    /// A project may lease only a usable, safe worker, never a commander
+    /// already carrying an explicit mission or a worker held by another controller.
+    pub(crate) fn eco_project_hand(&self, wid: i32, task: TaskId) -> bool {
+        let Some(w) = self.eco.workers.get(&wid) else { return false };
+        let Some(t) = self.eco.tasks.get(task) else { return false };
+        let dedicated = w.task.is_some_and(|id| {
+            id != task
+                && (self.op_priority(id)
+                    || self.conquest_bonus(wid, id).is_some()
+                    || self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.fac_plop))
+        });
+        let pos = t.get_pos();
+        let raiders = self.eco_raiders_near(pos);
+        let recent_danger = raiders > 0.0
+            && raiders > RAID_HOLD * self.war.get_total_friendly_power(pos)
+            && !self.conquest_ground_safe(pos);
+        let view = self.war.view(w.unit.def());
+        !dedicated
+            && !w.is_chicken
+            && w.raid_defense.is_none()
+            && w.unit.health() > 0.0
+            && w.unit.team() == self.team_id
+            && !springai::reserved::is_reserved(self.cb, wid)
+            && !self.eco_worker_held(wid)
+            && !self.jump_in_progress(w.unit)
+            && !super::terraform::is_terraforming(w.unit)
+            && self.eco_worker_can_take(w, t)
+            && !recent_danger
+            // Match the worker's arrival retreat threshold: planning must
+            // not commit it to a site the executor immediately flees.
+            && view.get_effective_threat(pos) / self.op_greed() <= view.get_total_friendly_threat(pos)
+    }
+
     fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
@@ -563,29 +620,8 @@ impl Ai {
         // Only jobs the worker can get to (bots cannot build out at sea).
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
-        // A commander that jumps (recon) gets over cliffs too: spider
-        // ground stands for its jumps (its ways and travel jump, see
-        // `military::jumps`); a walking reach would keep one that started
-        // on a plateau there (`comreach`).
-        let jumps_cliffs = worker.is_com
-            && !self.dev_off("comreach")
-            && def.is_some_and(|d| crate::military::jumps::JumpDef::of(d).is_some());
-        let spider_reach = |p: Vec3| {
-            jumps_cliffs
-                && (self.reach_terrain().and_then(|t| t.tier(Tier::Spider)))
-                    .is_some_and(|m| m.reaches_within(terrain_pos(wpos), terrain_pos(p), range, SNAP))
-        };
         let reaches = |t: &WorkerTask| {
-            if t.as_construction().is_some_and(|c| c.fortification)
-                && self.eco_fortify_travel(worker, t.get_pos()).is_none()
-            {
-                return false;
-            }
-            eco.silo_work_allowed(t)
-                && self.eco_prerequisites_ready(t)
-                && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range) || spider_reach(t.get_pos()))
-                && !self.eco_worker_shuns(worker, t.get_pos())
-                && !(worker.is_com && self.comguard_avoids(worker.id, t.get_pos()))
+            self.eco_worker_can_take(worker, t) && (self.op_priority(t.id) || self.logistics_allows(wid, t.id))
         };
         // Metal only this type of constructor gets to goes first.
         let others = match def {
@@ -605,10 +641,6 @@ impl Ai {
         if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)).filter(|&t| reaches(t)) {
             task = Some(t.id);
             cost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
-            if let Some(target) = t.as_construction().and_then(|c| c.target) {
-                let p = target.build_progress();
-                cost -= 1000.0 * (p * p);
-            }
             cost += threat_cost(t);
         }
 
@@ -677,6 +709,20 @@ impl Ai {
             }
         }
 
+        // Explicit missions and the energy emergency still preempt a lease.
+        // Otherwise execute the project crew we actually forecast, including
+        // its travel, instead of silently bidding the same worker elsewhere.
+        let preempt = task.is_some_and(|id| {
+            self.op_priority(id)
+                || self.conquest_bonus(wid, id).is_some()
+                || eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.fac_plop)
+        });
+        if !preempt
+            && let Some(project) = self.logistics_assignment(wid)
+            && self.eco_project_hand(wid, project)
+        {
+            return Some(project);
+        }
         task
     }
 
@@ -776,7 +822,9 @@ impl Ai {
             return cost;
         }
         // A commander holding conquered ground stays near it (`conquestleash`).
-        let cost = cost + self.conquest_leash(worker.id, task.get_pos());
+        let progress =
+            task.as_construction().and_then(|c| c.target).map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0));
+        let cost = cost + self.conquest_leash(worker.id, task.get_pos()) - 1000.0 * progress * progress;
         if self.dev_off("pairs") || self.defs.name_of(worker.unit) != PAIRED_CON {
             return cost;
         }
@@ -793,12 +841,7 @@ impl Ai {
     pub(super) fn eco_current_job_cost(&self, w: &Worker) -> f32 {
         let Some(t) = w.task.and_then(|id| self.eco.tasks.get(id)) else { return NEVER };
         let mex = t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id);
-        let mut cost = self.eco_cost_of_job(w, w.get_pos(), t) - self.eco_colony_bonus(w.id, t.get_pos(), mex);
-        if let Some(target) = t.as_construction().and_then(|c| c.target) {
-            let p = target.build_progress();
-            cost -= 1000.0 * (p * p);
-        }
-        cost
+        self.eco_cost_of_job(w, w.get_pos(), t) - self.eco_colony_bonus(w.id, t.get_pos(), mex)
     }
 
     fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
@@ -1346,6 +1389,93 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_crews_reach_the_scheduler_and_yield_to_new_safety_evidence() {
+        use crate::logistics::{Kind, Worth};
+        use springai::{Unit, UnitDef};
+        use std::ffi::{c_char, c_void};
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn cost(_: i32, _: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn params(_: i32, _: i32, _: *mut *const c_char, _: *mut *const c_char) -> i32 {
+            0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const c_char, default: f32) -> f32 {
+            default
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, _: i32, _: *mut c_void) -> i32 {
+            0
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(scalar);
+            t.Unit_getWeapons = Some(zero);
+            t.Unit_getCurrentCommands = Some(zero);
+            t.Unit_getRulesParamFloat = Some(rules);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(scalar);
+            t.UnitDef_getBuildTime = Some(scalar);
+            t.UnitDef_getCost = Some(cost);
+            t.UnitDef_getSpeed = Some(scalar);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_isAbleToAttack = Some(no);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_getMaxWaterDepth = Some(scalar);
+            t.Engine_handleCommand = Some(command);
+        });
+        ai.frame = 17;
+        ai.offset = 0;
+        ai.eco.metal = 1000.0;
+        ai.eco.energy = 1000.0;
+        ai.eco.effective_income = 10.0;
+        for id in [10, 11] {
+            let w = Worker::new(Unit::from_id(ai.cb, id).unwrap(), ai.team_id);
+            ai.eco.workers.insert(id, w);
+        }
+        let mut jobs = Vec::new();
+        for x in [1000.0, 1400.0] {
+            let task =
+                ai.eco.tasks.insert(WorkerTask::construction(UnitDef::from_id(ai.cb, 1).unwrap(), Vec3::xz(x, 0.0), 0));
+            ai.eco.construction_tasks.push(task);
+            ai.logistics_open(task, Kind::Energy, Worth::Flat(1000.0), "test", 0.0);
+            jobs.push(task);
+        }
+        ai.logistics_update(17);
+        assert_eq!(ai.logistics.issues[&jobs[0]].crew, vec![10]);
+        assert_eq!(ai.logistics.issues[&jobs[1]].crew, vec![11]);
+        ai.eco_assign_worker(10);
+        ai.eco_assign_worker(11);
+        assert_eq!(ai.eco.workers[&10].task, Some(jobs[0]));
+        assert_eq!(ai.eco.workers[&11].task, Some(jobs[1]));
+        // A failed approach immediately cancels the lease's permission,
+        // without waiting for the next planner tick or finishing a timer.
+        ai.eco.workers.get_mut(&10).unwrap().shunned.push((Vec3::xz(1000.0, 0.0), 1000));
+        ai.eco_assign_worker(10);
+        assert_eq!(ai.eco.workers[&10].task, None);
+        assert_eq!(ai.eco.workers[&11].task, Some(jobs[1]));
+        springai::reserved::reserve(ai.cb, 11);
+        assert!(!ai.eco_project_hand(11, jobs[1]));
+        springai::reserved::release(ai.cb, 11);
+        ai.logistics_open(jobs[1], Kind::Energy, Worth::Flat(0.0), "obsolete valuation", 0.0);
+        ai.frame = 47;
+        ai.logistics_update(47);
+        assert!(!ai.logistics.issues.contains_key(&jobs[1]));
+        assert!(ai.eco.tasks.get(jobs[1]).is_some(), "return the task for fresh valuation, do not strand it");
+    }
 
     #[test]
     fn clustered_spot_beats_lone_one() {

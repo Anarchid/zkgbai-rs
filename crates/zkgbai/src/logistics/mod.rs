@@ -5,8 +5,10 @@
 //! before the raid arrives. Every second the tracker forecasts each
 //! issue's completion from the workers that could crew it (travel, build
 //! power as each arrives, metal), picks the smallest crew that gets the
-//! value, and hands each crew member's share of it to the assignment loop
-//! as a bonus ([`Ai::logistics_bonus`]). While an urgent issue is under way
+//! value, and leases disjoint crews to the assignment loop. Forecasts share
+//! one metal budget; observed approach and construction renew execution.
+//! Paused projects retain their identity and report why they cannot proceed.
+//! While an urgent issue is under way
 //! it can also hold back the metal of other construction and of the
 //! factories (Zero-K build priority; the `pause` feature).
 //!
@@ -38,6 +40,7 @@ use crate::economy::{TaskId, Worker};
 use crate::military::wrappers::weapon_power;
 use crate::util::{distance, get_directional_point};
 
+mod projects;
 pub mod walkin;
 
 /// Frames between assessments.
@@ -208,6 +211,11 @@ pub struct Issue {
     pub value: f32,
     pub share: f32,
     pub started: bool,
+    progress: projects::Progress,
+    retry_at: i32,
+    state: &'static str,
+    reason: &'static str,
+    assigned: usize,
 }
 
 impl Issue {
@@ -228,6 +236,8 @@ impl Issue {
             "share": self.share.round(),
             "started": self.started,
             "opened": self.opened,
+            "state": self.state, "reason": self.reason, "assigned": self.assigned,
+            "last_progress": self.progress.last, "retry_at": self.retry_at,
         })
     }
 }
@@ -329,7 +339,13 @@ fn finish_time(hands: &[Hand], work: f32, cost: f32, metal: f32, income: f32) ->
 }
 
 fn metal_time(cost: f32, metal: f32, income: f32) -> f32 {
-    (cost - metal).max(0.0) / income.max(1.0)
+    if cost <= metal {
+        0.0
+    } else if income > 0.0 {
+        (cost - metal) / income
+    } else {
+        f32::INFINITY
+    }
 }
 
 /// The smallest crew (nearest hands first) that gets nearly all the value
@@ -390,6 +406,7 @@ impl Ai {
         }
         self.logistics_grid(now);
         self.logistics_forecast(now);
+        self.walkin_caretakers();
         if !self.dev_off("pause") {
             self.logistics_pause(now);
         }
@@ -447,12 +464,38 @@ impl Ai {
     /// at 200-250 for conquest turrets, bonused mexes and home turbines, the
     /// crew changing 25 times in five minutes (smokes of 2026-11-03).
     pub fn logistics_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
+        if self.dev_off("logistics") {
+            return None;
+        }
         let issue = self.logistics.issues.get(&task)?;
         if issue.share <= 0.0 || !issue.crew.contains(&wid) {
             return None;
         }
         let own = self.eco.workers.get(&wid).is_some_and(|w| w.task == Some(task));
         Some(if own { issue.value.min(BONUS_CAP).max(issue.share) } else { issue.share })
+    }
+
+    /// The crew's assignment is a contract with the worker scheduler, not
+    /// merely a forecast of workers it might decide to borrow.
+    pub(crate) fn logistics_assignment(&self, wid: i32) -> Option<TaskId> {
+        if self.dev_off("logistics") {
+            return None;
+        }
+        self.logistics
+            .issues
+            .values()
+            .find(|i| i.crew.contains(&wid) && (!self.eco.hard_estalled || i.kind == Kind::Energy))
+            .map(|i| i.task)
+    }
+
+    pub(crate) fn logistics_allows(&self, wid: i32, task: TaskId) -> bool {
+        self.dev_off("logistics")
+            || self.logistics.issues.get(&task).is_none_or(|i| {
+                i.state == "pending"
+                    || (i.crew.contains(&wid)
+                        && (!self.eco.hard_estalled || i.kind == Kind::Energy)
+                        && self.eco_project_hand(wid, task))
+            })
     }
 
     /// Whether `task` is an open issue.
@@ -519,6 +562,11 @@ impl Ai {
             value: 0.0,
             share: 0.0,
             started: c.target.is_some(),
+            progress: projects::Progress::new(self.frame),
+            retry_at: 0,
+            state: "pending",
+            reason: "new",
+            assigned: 0,
         };
         self.log(&format!(
             "logistics: issue #{id} ({}): {what} at ({:.0}, {:.0}) worth {} ({why})",
@@ -565,12 +613,13 @@ impl Ai {
     }
 
     /// Workers that could crew a job at `pos`, nearest first (the current
-    /// `crew` a little nearer than it is; a worker whose job it already is,
-    /// `task`, first of all: see [`Ai::logistics_bonus`]).
+    /// `crew` a little nearer than it is), using shared admission rules
+    /// when the concrete `task` is known.
     fn logistics_hands(&self, pos: Vec3, crew: &[i32], task: Option<TaskId>) -> Vec<Hand> {
         let mut hands: Vec<Hand> = (self.eco.workers.values())
             .filter(|w| !w.is_chicken && w.bp > 0.0)
-            .filter(|w| crew.contains(&w.id) || !self.eco_worker_held(w.id))
+            .filter(|w| !self.eco_worker_held(w.id))
+            .filter(|w| task.is_none_or(|t| self.eco_project_hand(w.id, t)))
             .filter_map(|w| {
                 let d = w.unit.def()?;
                 let speed = d.speed();
@@ -579,16 +628,12 @@ impl Ai {
                 }
                 let wpos = w.get_pos();
                 let range = d.build_distance();
-                if !self.terrain_reaches(d, wpos, pos, range + 32.0) {
+                if task.is_none() && !self.terrain_reaches(d, wpos, pos, range + 32.0) {
                     return None;
                 }
                 let mut travel = (distance(wpos, pos) - range).max(0.0) / speed;
                 if crew.contains(&w.id) {
                     travel = (travel - HYSTERESIS).max(0.0);
-                }
-                // On its way or at it: it stays on the crew (ranked first).
-                if task.is_some() && w.task == task {
-                    travel = 0.0;
                 }
                 Some((w.id, travel, w.bp))
             })
@@ -607,8 +652,12 @@ impl Ai {
             // ground the engine's sphere missed a finished Lucifer beside it
             // (11-04 Thornford: built, closed "gone").
             let about = self.cb.friendly_units_in_cylinder(issue.pos, 48.0);
-            let stands = (self.eco.porcs.iter().chain(about.iter()))
-                .any(|u| distance(u.pos(), issue.pos) < 48.0 && self.defs.name_of(*u) == issue.what);
+            let stands = (self.eco.porcs.iter().chain(about.iter())).any(|u| {
+                !u.is_being_built()
+                    && u.health() > 0.0
+                    && distance(u.pos(), issue.pos) < 48.0
+                    && self.defs.name_of(*u) == issue.what
+            });
             let outcome = if !stands {
                 self.logistics.stats.gone += 1;
                 "gone"
@@ -780,53 +829,145 @@ impl Ai {
     /// Forecast every open issue: its crew, when it is done, what it is
     /// worth then; drop jobs past saving.
     fn logistics_forecast(&mut self, now: f32) {
-        let metal = self.eco.metal;
-        let income = self.eco.effective_income;
+        let frame = self.frame;
         let tasks: Vec<TaskId> = self.logistics.issues.keys().copied().collect();
+        let mut requests = Vec::new();
+        let mut reasons = BTreeMap::new();
         let mut abandon = Vec::new();
+        let mut expired = Vec::new();
         for task in tasks {
             let Some(t) = self.eco.tasks.get(task) else { continue };
             let Some(c) = t.as_construction() else { continue };
-            let progress = c.target.map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0));
+            let built = c.target.map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0));
             let started = c.target.is_some();
-            let Some(issue) = self.logistics.issues.get(&task) else { continue };
-            let work = issue.build_time * (1.0 - progress);
-            let cost = issue.cost * (1.0 - progress);
-            let walkin = issue.kind == Kind::Walkin;
-            let hands = if walkin {
-                self.walkin_hands(issue.pos, &issue.crew, Some(task), started)
-            } else {
-                self.logistics_hands(issue.pos, &issue.crew, Some(task))
-            };
-            let stretch = if walkin { walkin::STRETCH } else { PESSIMISM };
-            let (k, eta, value) = best_crew_stretched(&hands, work, cost, metal, income, &issue.worth, now, stretch);
-            // (Caretakers take no share: they go where they are told.)
-            let mobile = hands.iter().take(k).filter(|h| !self.walkin_is_caretaker(h.0)).count();
-            let hopeless = value <= 0.0 && !started && issue.worth.deadline().is_some_and(|by| now > by + DECAY);
-            let Some(issue) = self.logistics.issues.get_mut(&task) else { continue };
+            let issue = &self.logistics.issues[&task];
+            let pos = issue.pos;
+            let distances: BTreeMap<_, _> = issue
+                .crew
+                .iter()
+                .filter_map(|id| {
+                    if self.logistics.walkin.helping.get(id).is_some_and(|u| Some(*u) == c.target) {
+                        return Some((*id, 0.0));
+                    }
+                    let w = self.eco.workers.get(id).filter(|w| w.task == Some(task) && !w.is_chicken)?;
+                    Some((*id, (distance(w.get_pos(), pos) - w.unit.def()?.build_distance()).max(0.0)))
+                })
+                .collect();
+            let assigned = distances.len();
+            let issue = self.logistics.issues.get_mut(&task).unwrap();
             issue.started = started;
-            issue.eta = eta;
-            issue.value = value;
-            let crew: Vec<i32> = hands.iter().take(k).map(|h| h.0).collect();
-            let share = if mobile > 0 && value > 0.0 { (value / mobile as f32).min(BONUS_CAP) } else { 0.0 };
-            // Journaled when the crew changes or its bonus comes or goes.
-            let changed = crew != issue.crew || (share > 0.0) != (issue.share > 0.0);
-            issue.crew = crew;
-            issue.share = share;
-            if changed {
-                let note = json!({"event": "crew", "id": issue.id, "what": issue.what, "crew": issue.crew,
-                                  "share": share.round(), "value": value.round(), "eta": (eta * 10.0).round() / 10.0,
-                                  "hands": hands.iter().take(4).map(|h| json!([h.0, (h.1 * 10.0).round() / 10.0])).collect::<Vec<_>>()});
-                self.op_emit("issue", note);
+            issue.assigned = assigned;
+            issue.progress.observe(frame, built, distances);
+            // No headway despite resources: release the crew and retry the
+            // persistent project after the workers have had a chance to recover.
+            if !issue.crew.is_empty() && issue.progress.stalled(frame) && self.eco.metal > 5.0 && self.eco.energy > 5.0
+            {
+                issue.retry_at = frame + 30 * 10;
             }
-            if hopeless {
+            let reason = if frame < issue.retry_at {
+                "no_progress"
+            } else if self.eco.hard_estalled && issue.kind != Kind::Energy {
+                "energy"
+            } else if issue.worth.at(now) <= 0.0 {
+                "no_value"
+            } else {
+                ""
+            };
+            if !started && issue.worth.deadline().is_some_and(|by| now > by + DECAY) {
                 abandon.push(task);
+            } else if issue.worth.at(now) <= 0.0 {
+                // The old valuation is exhausted, not proof that the frame
+                // has no use. Hand it back for the economy's current valuation
+                // instead of leaving a permanently paused, unassignable task.
+                expired.push(task);
             }
+            let (work, cost, worth, crew) =
+                (issue.build_time * (1.0 - built), issue.cost * (1.0 - built), issue.worth, issue.crew.clone());
+            let walkin = issue.kind == Kind::Walkin;
+            let mut hands = if walkin {
+                self.walkin_hands(pos, &crew, Some(task), started)
+            } else {
+                self.logistics_hands(pos, &crew, Some(task))
+            };
+            hands.retain(|h| {
+                self.eco_project_hand(h.0, task)
+                    || (self.walkin_is_caretaker(h.0) && !springai::reserved::is_reserved(self.cb, h.0))
+            });
+            let support = hands.iter().filter(|h| self.walkin_is_caretaker(h.0)).map(|h| h.0).collect();
+            let stretch = if walkin { walkin::STRETCH } else { PESSIMISM };
+            reasons.insert(
+                task,
+                if !reason.is_empty() {
+                    reason
+                } else if hands.is_empty() {
+                    "no_safe_available_workers"
+                } else {
+                    "resources_or_deadline"
+                },
+            );
+            if reason.is_empty() {
+                requests.push(projects::Request {
+                    task,
+                    worth,
+                    work,
+                    cost,
+                    incumbent: !crew.is_empty(),
+                    hands,
+                    stretch,
+                    support,
+                    start_required: !started,
+                });
+            }
+        }
+        let mut allocations = projects::allocate(requests, self.eco.metal, self.eco.effective_income, now);
+        let mut changed = Vec::new();
+        for (&task, issue) in &mut self.logistics.issues {
+            let old = (issue.state, issue.reason, issue.crew.clone());
+            if let Some(a) = allocations.remove(&task) {
+                issue.crew = a.crew;
+                issue.eta = a.eta;
+                issue.value = a.value;
+            } else {
+                issue.crew.clear();
+                issue.eta = f32::INFINITY;
+                issue.value = 0.0;
+            }
+            let mobile = issue.crew.iter().filter(|id| !self.eco.nanos.contains_key(id)).count();
+            issue.share = if mobile == 0 { 0.0 } else { (issue.value / mobile as f32).min(BONUS_CAP) };
+            if old.2 != issue.crew && !issue.crew.is_empty() {
+                issue.progress.start(frame);
+            }
+            issue.assigned = issue
+                .crew
+                .iter()
+                .filter(|id| {
+                    self.eco.workers.get(id).is_some_and(|w| w.task == Some(task) && !w.is_chicken)
+                        || self.logistics.walkin.helping.get(id).is_some_and(|u| {
+                            self.eco.tasks.get(task).and_then(|t| t.as_construction()?.target) == Some(*u)
+                        })
+                })
+                .count();
+            (issue.state, issue.reason) = if issue.crew.is_empty() {
+                ("paused", reasons.get(&task).copied().unwrap_or("task_gone"))
+            } else if issue.assigned == 0 {
+                ("assigned", "awaiting_worker")
+            } else {
+                ("executing", "crew")
+            };
+            if old != (issue.state, issue.reason, issue.crew.clone()) {
+                changed.push(issue.json());
+            }
+        }
+        for issue in changed {
+            self.op_emit("issue", json!({"event": "execution", "issue": issue}));
         }
         for task in abandon {
             self.logistics.stats.abandoned += 1;
             self.logistics_close(task, "abandoned");
             self.eco.eco_logistics_drop(task);
+        }
+        for task in expired {
+            self.logistics_close(task, "valuation_expired");
         }
     }
 
