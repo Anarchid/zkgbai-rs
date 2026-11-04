@@ -292,6 +292,13 @@ impl Ai {
         budget.queries += 1;
         Some(model.fates(&local.snap, HORIZON, mode))
     }
+
+    /// A committed local Fight order with tactical movement on both sides.
+    pub(crate) fn local_ordered_kiting_fates(&mut self, local: &Local, budget: &mut Budget) -> Option<Vec<UnitFate>> {
+        let model = self.local_model()?;
+        budget.queries += 1;
+        Some(model.ordered_kiting_fates(&local.snap, HORIZON))
+    }
 }
 
 /// Snapshot index of their unit `i` (into `theirs`).

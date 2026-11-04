@@ -643,6 +643,12 @@ impl Model {
         self.fates_config(snap, horizon, FateMode::AMove, &[], None, None, true)
     }
 
+    /// A committed Fight order: our units engage, while both sides retain
+    /// tactical movement. Other kiting queries keep their engagement prior.
+    pub(crate) fn ordered_kiting_fates(&self, snap: &FightSnapshot, horizon: i32) -> Vec<UnitFate> {
+        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, true, &[], None, true).0
+    }
+
     pub fn defense_fates(
         &self,
         snap: &FightSnapshot,
@@ -1838,6 +1844,28 @@ mod tests {
         assert!(kiting[1..].iter().all(|f| !f.dead && f.p_raw < 0.01 && f.hp_left >= 659.0), "{kiting:?}");
         let plain = m.fates(&snap, 450, FateMode::AMove);
         assert!(plain[1..].iter().any(|f| f.hp_left < 659.0), "{plain:?}");
+        // Committing our Knight must not disable the enemy's kiting.
+        let ordered = m.ordered_kiting_fates(&snap, 450);
+        assert!(ordered[0].dead && ordered[0].p_raw > 0.99, "{ordered:?}");
+        assert!(ordered[1..].iter().all(|f| !f.dead && f.hp_left >= 659.0), "{ordered:?}");
+    }
+
+    #[test]
+    fn ordered_kiting_commits_our_fire_without_committing_the_enemy() {
+        let model = Model::load().unwrap();
+        let defs = specs_from(TACAI_UNITS);
+        let snap = FightSnapshot {
+            flags: variant("focus"),
+            units: vec![
+                SnapUnit { side: 0, spec: defs["cloakraid"].clone(), hp: 100000.0, x: 0.0, z: 0.0 },
+                SnapUnit { side: 1, spec: defs["cloakraid"].clone(), hp: 100000.0, x: 100.0, z: 0.0 },
+            ],
+        };
+        // No deaths or tactical retreat can hide the engagement difference.
+        let prior = model.kiting_fates(&snap, 300);
+        let ordered = model.ordered_kiting_fates(&snap, 300);
+        assert!(ordered[1].hp_left < prior[1].hp_left, "prior={prior:?}, ordered={ordered:?}");
+        assert_eq!(ordered[0].hp_left, prior[0].hp_left);
     }
 
     #[test]
