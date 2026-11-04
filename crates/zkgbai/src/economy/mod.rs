@@ -36,6 +36,8 @@ pub mod worker;
 
 pub(crate) use assign::repair_loses_to_mex;
 pub use build_ids::BuildIds;
+#[cfg(test)]
+pub(crate) use commander::tests::test_ai_with;
 pub use factory::Factory;
 pub use factory_manager::FactoryManager;
 pub use tasks::{Nanotower, TaskId, TaskKind, TaskStore, WorkerTask};

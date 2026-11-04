@@ -24,7 +24,7 @@
 //!   open, a Lotus ([`TURRET_COST`]), at [`CON_BUILD_POWER`], by our
 //!   constructor nearest by ground; income from halfway through the build;
 //! - sources: each assault squad of ours on its ground route there (and a
-//!   lone constructor where nobody defends); P(clear) and the share lost
+//!   lone constructor on open ground); P(clear) and the share lost
 //!   from the metal ratio as 782 recorded assaults put them;
 //! - hold: every enemy army seen lately away from the piece that can walk
 //!   there before the build stands (+60 s) retakes it by the same odds, and
@@ -32,11 +32,16 @@
 //! - net = P x hold x (gain x (HORIZON - income start) + reclaim) - lost -
 //!   the squad's time (its metal over [`TIE_UP_SECS`]) - the build.
 //!
+//! Free and defended ground compete on net, including free captures still
+//! awaiting construction. An attack starts only if it beats the best free
+//! expansion; an existing attack yields after its minimum commitment when
+//! free expansion pays `SWITCH` times more. Constructor travel uses the
+//! constructor's own movement tier (or flight), independently of the army.
 //! The defended piece with the best net > 0 is the target: its squad is
 //! sent at the defenders (in place of the squad's own target, as an
 //! operator would send it), kept on it at least [`MIN_COMMIT`] and until
-//! another piece nets [`SWITCH`] times more. Once nothing armed is known
-//! there it becomes a capture and the squad goes back to its own business.
+//! another piece nets [`SWITCH`] times more. Once no defenders or enemy
+//! mexes remain it becomes a capture and the squad goes back to its own business.
 //! Captures (at most [`MAX_CAPTURES`]; also the best empty piece that pays)
 //! put their spots and wrecks first for our constructors ([`SPOT_BONUS`],
 //! [`RECLAIM_BONUS`]) until the spots are all ours, defenders show again,
@@ -189,7 +194,7 @@ pub struct Target {
     bad: u8,
 }
 
-/// Ground with nothing armed known on it, first for our constructors: a
+/// Ground with no defenders or enemy mexes, first for our constructors: a
 /// target the squad cleared, or empty ground that pays.
 pub struct Capture {
     pub region: usize,
@@ -230,13 +235,28 @@ struct Piece {
 }
 
 impl Ai {
-    /// Our ground tier: the tier of our biggest assault squad's leader.
+    /// Our ground tier: the biggest assault squad's, or a constructor's
+    /// before an army exists. Free expansion must not wait for an army.
     fn invade_tier(&self) -> Option<Tier> {
         self.invade_squads()
             .into_iter()
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .and_then(|(sid, _, _, _)| self.squads.get(sid)?.get_leader(&self.fighters)?.def())
             .and_then(tier_of)
+            .or(self.invade.tier)
+            .or_else(|| self.invade_constructors().find_map(|w| w.unit.def().and_then(tier_of)))
+    }
+
+    fn invade_constructors(&self) -> impl Iterator<Item = &crate::economy::Worker> {
+        self.eco.workers.values().filter(|w| {
+            !w.is_com
+                && !w.is_chicken
+                && !w.assigned_plop
+                && !w.unit.is_being_built()
+                && !self.eco_worker_held(w.id)
+                && w.unit.health() > 0.0
+                && w.unit.def().is_some_and(|d| d.speed() > 0.0)
+        })
     }
 
     /// A squad's metal by health, position and speed (elmos a second).
@@ -353,14 +373,19 @@ impl Ai {
             return;
         }
         self.invade.cooldown.retain(|(_, f)| frame - *f < COOLDOWN);
-        if self.invade.tier.is_none() {
-            self.invade.tier = self.invade_tier();
-        }
-        let Some(tier) = self.invade.tier else { return };
+        let Some(tier) = self.invade_tier() else { return };
         let pieces = {
             let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
             self.invade_weigh(map)
         };
+        if self.invade.tier.is_some_and(|old| old != tier) {
+            // The first army can use a different tier from the builders.
+            // Region ids belong to one tier and cannot carry over to another.
+            self.invade_end("movement tier changed", false);
+            self.invade.captures.clear();
+            self.invade.cooldown.clear();
+        }
+        self.invade.tier = Some(tier);
         let piece = |r: usize| pieces.iter().find(|p| p.region == r);
         let ours = |ai: &Ai, spots: &[usize]| {
             spots.iter().all(|&i| ai.graph.metal_spots.get(i).is_none_or(|s| s.owned || s.allied))
@@ -373,7 +398,7 @@ impl Ai {
                 Some(("built", false))
             } else if frame - c.since > BUILD_LIMIT {
                 Some(("not built in time", true))
-            } else if piece(c.region).is_some_and(|p| p.weigh.d_metal > 0.0) {
+            } else if piece(c.region).is_some_and(|p| p.kind != Kind::Open) {
                 Some(("defended again", false))
             } else {
                 None
@@ -406,7 +431,7 @@ impl Ai {
             let state = self.invade_squad_state(sid);
             if now.is_none() || ours(self, &t.spots) {
                 self.invade_end("piece ours or gone", false);
-            } else if let Some(p) = now.filter(|p| p.weigh.d_metal <= 0.0) {
+            } else if let Some(p) = now.filter(|p| p.kind == Kind::Open) {
                 self.invade.clears += 1;
                 self.invade_end("cleared", false);
                 self.invade_capture(p, "cleared");
@@ -415,7 +440,7 @@ impl Ai {
             } else if frame - since > SEND_LIMIT {
                 self.invade_end("too slow to clear", true);
             } else if let (Some(p), Some((m, at, sp))) = (now, state) {
-                let walk = self.invade_walk(tier, at, region).map_or(f32::INFINITY, |d| d / sp);
+                let walk = self.invade_walk(tier, at, p.aim).map_or(f32::INFINITY, |d| d / sp);
                 let net = evaluate(&p.weigh, m, walk).3;
                 let t = self.invade.cur.as_mut().expect("checked");
                 t.bad = if net < 0.0 { t.bad + 1 } else { 0 };
@@ -425,14 +450,33 @@ impl Ai {
                 }
             }
         }
+        self.invade_choose(&pieces);
+    }
+
+    /// Rank expansion against conquest, also while an earlier capture is
+    /// being built. Removing captures from this comparison made a free
+    /// piece stop competing as soon as it was queued.
+    fn invade_choose(&mut self, pieces: &[Piece]) {
+        let frame = self.frame;
+        let free_net = pieces
+            .iter()
+            .filter(|p| p.kind == Kind::Open)
+            .filter(|p| !self.invade.cooldown.iter().any(|c| c.0 == p.region))
+            .filter_map(|p| p.best.map(|b| b.2))
+            .filter(|net| net.is_finite())
+            .fold(0.0f32, f32::max);
+        if self.invade.cur.as_ref().is_some_and(|t| frame - t.since >= MIN_COMMIT && free_net > SWITCH * t.net.max(1.0))
+        {
+            self.invade_end("better free expansion", false);
+        }
         let busy: Vec<usize> =
             self.invade.cooldown.iter().map(|c| c.0).chain(self.invade.captures.iter().map(|c| c.region)).collect();
-        let open = |p: &&Piece| !busy.contains(&p.region) && p.best.is_some_and(|b| b.2 > 0.0);
+        let open = |p: &&Piece| !busy.contains(&p.region) && p.best.is_some_and(|b| b.2.is_finite() && b.2 > 0.0);
         // Empty ground that pays: first for the constructors.
         if self.invade.captures.len() < MAX_CAPTURES
             && let Some(p) = (pieces.iter())
                 .filter(open)
-                .filter(|p| p.weigh.d_metal <= 0.0)
+                .filter(|p| p.kind == Kind::Open)
                 .max_by(|a, b| a.best.map_or(f32::MIN, |x| x.2).total_cmp(&b.best.map_or(f32::MIN, |x| x.2)))
         {
             self.invade_capture(p, "empty ground");
@@ -440,7 +484,7 @@ impl Ai {
         // Defended ground: a squad, unless the one sent is still committed.
         let best = (pieces.iter())
             .filter(open)
-            .filter(|p| p.weigh.d_metal > 0.0)
+            .filter(|p| p.kind != Kind::Open)
             .filter_map(|p| match p.best {
                 Some((Some(sid), m, net, pc)) => Some((p, sid, m, net, pc)),
                 _ => None,
@@ -460,6 +504,9 @@ impl Ai {
                 .collect()
         };
         let Some((p, squad, metal, net, pc)) = best else { return };
+        if net <= free_net {
+            return;
+        }
         if let Some(t) = self.invade.cur.as_ref() {
             if t.region == p.region || frame - t.since < MIN_COMMIT || net < SWITCH * t.net.max(1.0) {
                 return;
@@ -500,11 +547,10 @@ impl Ai {
         });
     }
 
-    /// Ground elmos from `from` into region `r` of `tier`.
-    fn invade_walk(&self, tier: Tier, from: Vec3, r: usize) -> Option<f32> {
+    /// Ground elmos to the target, including travel inside its region.
+    fn invade_walk(&self, tier: Tier, from: Vec3, to: Vec3) -> Option<f32> {
         let map = self.terrain()?.tier(tier)?;
-        let d = Paths::new(map, pos(from), |_| false).to_region(r);
-        d.is_finite().then_some(d)
+        Paths::new(map, pos(from), |_| false).distance_to(pos(to))
     }
 
     fn invade_weigh(&self, map: &TierMap) -> Vec<Piece> {
@@ -593,10 +639,23 @@ impl Ai {
             })
             .map(|(sid, m, at, sp)| (sid, m, at, sp, Paths::new(map, pos(at), |_| false)))
             .collect();
-        let cons: Vec<(f32, Paths)> = (self.eco.workers.values())
-            .filter(|w| !w.is_com)
+        // Constructors do not inherit the army's movement capabilities:
+        // a bot constructor cannot follow a hover squad across a lake.
+        // Aircraft use direct flight; ground builders use their own map.
+        let cons: Vec<(f32, Vec3, Option<Paths>)> = self
+            .invade_constructors()
+            .filter_map(|w| {
+                let def = w.unit.def()?;
+                let at = w.get_pos();
+                let paths = if def.is_able_to_fly() {
+                    None
+                } else {
+                    let own_map = self.terrain()?.tier(tier_of(def)?)?;
+                    Some(Paths::new(own_map, pos(at), |_| false))
+                };
+                Some((def.speed(), at, paths))
+            })
             .take(MAX_CONS)
-            .filter_map(|w| Some((w.unit.def()?.speed().max(10.0), Paths::new(map, pos(w.get_pos()), |_| false))))
             .collect();
         let mut out = Vec::new();
         for (r, ks) in regions {
@@ -632,7 +691,9 @@ impl Ai {
             };
             let d_metal: f32 = defenders.iter().map(|f| f.metal).sum();
             let aim = if defenders.is_empty() {
-                center
+                // An unguarded enemy mex still needs clearing before our
+                // constructor can build. Aim at an actual occupied spot.
+                spots.iter().find(|s| s.hostile).map_or(center, |s| s.position)
             } else {
                 // The buildings first: they hold the ground.
                 let pick: Vec<&&Foe> = if defenders.iter().any(|f| !f.mobile) {
@@ -650,7 +711,21 @@ impl Ai {
                 .sum();
             let turret = if kind == Kind::Open { 0.0 } else { TURRET_COST };
             let build_metal = MEX_COST * spots.len() as f32 + turret;
-            let t_con = cons.iter().map(|(sp, paths)| paths.to_region(r) / sp).fold(f32::INFINITY, f32::min);
+            let t_con = cons
+                .iter()
+                .map(|(sp, at, paths)| {
+                    // All of the valued spots must be accessible to the builder.
+                    spots
+                        .iter()
+                        .map(|s| {
+                            paths.as_ref().map_or_else(
+                                || distance(*at, s.position),
+                                |paths| paths.distance_to(pos(s.position)).unwrap_or(f32::INFINITY),
+                            ) / sp
+                        })
+                        .fold(0.0f32, f32::max)
+                })
+                .fold(f32::INFINITY, f32::min);
             if !t_con.is_finite() {
                 continue;
             }
@@ -675,15 +750,15 @@ impl Ai {
                 base_walk,
             };
             let mut best: Option<(Option<SquadId>, f32, f32, f32)> = None;
-            if d_metal <= 0.0 {
+            if kind == Kind::Open {
                 let (pc, _, _, net) = evaluate(&weigh, 0.0, 0.0);
                 best = Some((None, 0.0, net, pc));
             }
             for (sid, m, _, sp, paths) in &squads {
-                let d = paths.to_region(r);
-                if !d.is_finite() || d_metal <= 0.0 {
+                if kind == Kind::Open {
                     continue;
                 }
+                let Some(d) = paths.distance_to(pos(aim)) else { continue };
                 let (pc, _, _, net) = evaluate(&weigh, *m, d / sp);
                 if best.is_none_or(|b| net > b.2) {
                     best = Some((Some(*sid), *m, net, pc));
@@ -764,5 +839,218 @@ mod tests {
         let (p, lost, hold, net) = evaluate(&w, 0.0, 0.0);
         assert_eq!((p, lost, hold), (1.0, 0.0, 1.0));
         assert!(net > 0.0);
+    }
+
+    fn piece(region: usize, defended: bool, net: f32) -> Piece {
+        Piece {
+            region,
+            kind: if defended { Kind::Held } else { Kind::Open },
+            center: Vec3::xz(1000.0 * region as f32, 1000.0),
+            radius: 300.0,
+            spots: vec![region],
+            aim: Vec3::xz(1000.0 * region as f32, 1000.0),
+            weigh: weigh(if defended { 200.0 } else { 0.0 }, vec![]),
+            best: Some((defended.then_some(7), if defended { 1200.0 } else { 0.0 }, net, 1.0)),
+        }
+    }
+
+    #[test]
+    fn nearby_free_mexes_beat_a_profitable_remote_attack_on_every_pass() {
+        let mut ai = crate::economy::test_ai_with(|_| {});
+        let free = Weigh {
+            build_metal: 2.0 * MEX_COST,
+            build_secs: 2.0 * MEX_COST / CON_BUILD_POWER,
+            turret: 0.0,
+            t_con: 10.0,
+            ..weigh(0.0, vec![])
+        };
+        let remote = Weigh { gain: 8.0, t_con: 150.0, ..weigh(200.0, vec![]) };
+        let free_net = evaluate(&free, 0.0, 0.0).3;
+        let attack_net = evaluate(&remote, 1200.0, 150.0).3;
+        assert!(free_net > attack_net && attack_net > 0.0);
+        let pieces = [piece(1, true, attack_net), piece(2, false, free_net)];
+        for _ in 0..4 {
+            ai.invade_choose(&pieces);
+            assert!(ai.invade.cur.is_none(), "queuing the free ground must not remove it from the comparison");
+            assert_eq!(ai.invade.captures.len(), 1);
+            assert_eq!(ai.invade.captures[0].region, 2);
+        }
+        // Once the free mexes are taken, the profitable attack can proceed.
+        ai.invade.captures.clear();
+        ai.invade_choose(&pieces[..1]);
+        assert_eq!(ai.invade.cur.as_ref().unwrap().region, 1);
+    }
+
+    #[test]
+    fn a_more_valuable_attack_is_still_allowed_but_equal_value_prefers_free_ground() {
+        for (free, attack) in [(100.0, true), (200.0, false), (-100.0, true)] {
+            let mut ai = crate::economy::test_ai_with(|_| {});
+            ai.invade_choose(&[piece(1, true, 200.0), piece(2, false, free)]);
+            assert_eq!(ai.invade.cur.is_some(), attack);
+        }
+    }
+
+    #[test]
+    fn stalled_expansion_on_cooldown_does_not_block_conquest() {
+        let mut ai = crate::economy::test_ai_with(|_| {});
+        ai.invade.cooldown.push((2, ai.frame));
+        ai.invade_choose(&[piece(1, true, 100.0), piece(2, false, 1000.0)]);
+        assert_eq!(ai.invade.cur.as_ref().unwrap().region, 1);
+        assert!(ai.invade.captures.is_empty());
+    }
+
+    #[test]
+    fn an_existing_attack_yields_to_better_expansion_after_its_commitment() {
+        let mut ai = crate::economy::test_ai_with(|_| {});
+        let attack = [piece(1, true, 100.0)];
+        ai.invade_choose(&attack);
+        let pieces = [piece(1, true, 100.0), piece(2, false, 200.0)];
+        ai.frame += MIN_COMMIT - 1;
+        ai.invade_choose(&pieces);
+        assert!(ai.invade.cur.is_some());
+        ai.frame += 1;
+        ai.invade_choose(&pieces);
+        assert!(ai.invade.cur.is_none());
+        assert!(ai.invade.cooldown.is_empty(), "deferral is not a failed attack");
+    }
+
+    #[test]
+    fn full_capture_slots_do_not_make_free_ground_disappear_from_ranking() {
+        let mut ai = crate::economy::test_ai_with(|_| {});
+        let free: Vec<_> = (2..2 + MAX_CAPTURES).map(|r| piece(r, false, 200.0)).collect();
+        for p in &free {
+            ai.invade_capture(p, "empty ground");
+        }
+        let pieces = [piece(1, true, 100.0), piece(2, false, 200.0), piece(5, false, 300.0)];
+        ai.invade_choose(&pieces);
+        assert!(ai.invade.cur.is_none());
+        assert_eq!(ai.invade.captures.len(), MAX_CAPTURES);
+    }
+
+    /// Bot (1), hover (2), or flying (3) constructor on the west shore.
+    fn coastal_ai(builder: i32) -> Ai {
+        unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
+            id
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            1000.0
+        }
+        unsafe extern "C" fn speed(_: i32, _: i32) -> f32 {
+            60.0
+        }
+        unsafe extern "C" fn bp(_: i32, _: i32) -> f32 {
+            5.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn depth(_: i32, _: i32) -> f32 {
+            0.0
+        }
+        unsafe extern "C" fn slope(_: i32, _: i32) -> f32 {
+            0.2
+        }
+        unsafe extern "C" fn class(_: i32, id: i32) -> i32 {
+            if id == 2 { 2 } else { 1 }
+        }
+        unsafe extern "C" fn flies(_: i32, id: i32) -> bool {
+            id == 3
+        }
+        unsafe extern "C" fn moves(_: i32, id: i32) -> bool {
+            id != 3
+        }
+        unsafe extern "C" fn pos(_: i32, _: i32, out: *mut f32) {
+            unsafe { std::ptr::copy_nonoverlapping([128.0, 0.0, 256.0].as_ptr(), out, 3) };
+        }
+        unsafe extern "C" fn features(_: i32, _: *mut f32, _: f32, _: bool, _: *mut i32, _: i32) -> i32 {
+            0
+        }
+        let mut ai = crate::economy::test_ai_with(|t| {
+            t.Unit_getDef = Some(def);
+            t.Unit_getHealth = Some(health);
+            t.Unit_getPos = Some(pos);
+            t.UnitDef_getSpeed = Some(speed);
+            t.UnitDef_getBuildSpeed = Some(bp);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.Unit_getWeapons = Some(zero);
+            t.UnitDef_getMinWaterDepth = Some(depth);
+            t.UnitDef_getMaxWaterDepth = Some(depth);
+            t.UnitDef_MoveData_getMaxSlope = Some(slope);
+            t.UnitDef_MoveData_getSpeedModClass = Some(class);
+            t.UnitDef_isAbleToFly = Some(flies);
+            t.UnitDef_isMoveDataAvailable = Some(moves);
+            t.getFeaturesIn = Some(features);
+        });
+        let data = zk_terrain::SpringMapData {
+            map_width: 128,
+            map_height: 64,
+            slope_width: 64,
+            slope_height: 32,
+            slope_map: vec![0.0; 64 * 32],
+            height_map: (0..128 * 64).map(|i| if (32..96).contains(&(i % 128)) { -100.0 } else { 20.0 }).collect(),
+        };
+        let terrain = zk_terrain::Terrain::build_with(
+            &data,
+            &[(Tier::Bot, Tier::Bot.zero_k_class()), (Tier::Hover, Tier::Hover.zero_k_class())],
+        );
+        ai.terrain = crate::terrain::TerrainModel::Ready { terrain, rebuild: None, split: 0 };
+        ai.eco
+            .workers
+            .insert(builder, crate::economy::Worker::new(springai::Unit::from_id(ai.cb, builder).unwrap(), ai.team_id));
+        ai
+    }
+
+    #[test]
+    fn constructor_access_uses_its_own_tier_even_when_the_army_can_cross_water() {
+        for builder in [1, 2, 3] {
+            let mut ai = coastal_ai(builder);
+            ai.graph.metal_spots.push(crate::graph::MetalSpot::new(0, 896.0, 0.0, 256.0, 2.0));
+            let army_map = ai.terrain().unwrap().tier(Tier::Hover).unwrap();
+            let pieces = ai.invade_weigh(army_map);
+            if builder == 1 {
+                assert!(pieces.is_empty(), "a bot constructor cannot cross the lake with the hover army");
+            } else {
+                assert_eq!(pieces.len(), 1, "hover and air constructors can reach the other shore");
+                assert!(pieces[0].weigh.t_con >= 768.0 / 60.0, "crossing a single region still takes time");
+            }
+        }
+    }
+
+    #[test]
+    fn free_expansion_starts_without_an_assault_squad() {
+        let mut ai = coastal_ai(1);
+        ai.graph.metal_spots.push(crate::graph::MetalSpot::new(0, 160.0, 0.0, 256.0, 2.0));
+        assert!(ai.invade_squads().is_empty());
+        assert_eq!(ai.invade_tier(), Some(Tier::Bot));
+        ai.frame = FROM;
+        ai.offset = 0;
+        ai.set_feature_off("invade", false);
+        ai.invade_update(FROM);
+        assert!(ai.invade.cur.is_none());
+        assert_eq!(ai.invade.captures.len(), 1);
+        assert_eq!(ai.invade.captures[0].spots, vec![0]);
+    }
+
+    #[test]
+    fn an_unguarded_enemy_mex_is_not_a_constructor_only_expansion() {
+        let mut ai = coastal_ai(1);
+        let mut spot = crate::graph::MetalSpot::new(0, 160.0, 0.0, 256.0, 2.0);
+        spot.hostile = true;
+        ai.graph.metal_spots.push(spot);
+        let pieces = ai.invade_weigh(ai.terrain().unwrap().tier(Tier::Bot).unwrap());
+        assert_eq!(pieces.len(), 1);
+        assert_eq!(pieces[0].kind, Kind::Held);
+        assert_eq!(pieces[0].weigh.d_metal, 0.0);
+        assert_eq!(pieces[0].aim, Vec3::xz(160.0, 256.0));
+        assert!(pieces[0].best.is_none(), "a constructor alone cannot replace an enemy mex");
+        ai.invade_choose(&pieces);
+        assert!(ai.invade.captures.is_empty());
+
+        let mut enemy = piece(1, true, 200.0);
+        enemy.weigh.d_metal = 0.0;
+        ai.invade_choose(&[enemy, piece(2, false, 100.0)]);
+        assert_eq!(ai.invade.cur.as_ref().unwrap().region, 1, "a squad must clear the enemy mex");
+        assert_eq!(ai.invade.captures.len(), 1);
+        assert_eq!(ai.invade.captures[0].region, 2);
     }
 }
