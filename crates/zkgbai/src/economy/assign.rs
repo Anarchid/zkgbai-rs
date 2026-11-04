@@ -1175,7 +1175,9 @@ impl Ai {
                 return false;
             }
         }
-        true
+        // No ground turret among too many of its kind, or in a death blast
+        // (`porcmix`).
+        self.eco_mix_allows(def, pos)
     }
 
     /// Remove finished or invalid tasks, sending their workers to be reassigned.

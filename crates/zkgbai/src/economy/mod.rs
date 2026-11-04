@@ -20,6 +20,7 @@ mod phase;
 mod planning;
 mod plate;
 mod plop;
+pub mod porcmix;
 mod rebuild;
 pub mod rush;
 mod safespot;

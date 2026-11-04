@@ -64,11 +64,11 @@ use springai::{Unit, UnitDef, Vec3};
 
 use super::{
     Assessment, CAP_RADIUS, CAP_WINDOW, OFFSET, PLACE_CAP, PORCMIX, RANGE_SLACK, STRETCH, TOUCH_MIN, VAR_RADIUS,
-    blast_room,
 };
 use crate::Ai;
 use crate::economy::TaskId;
 use crate::economy::grid::GridAccess;
+use crate::economy::porcmix::{blast, blast_room};
 use crate::economy::terraform::is_terraforming;
 use crate::logistics::{Kind, MARGIN, MAX_CREW, Worth, finish_time, porc_power};
 use crate::util::{distance, get_directional_point};
@@ -553,12 +553,11 @@ impl Ai {
         let front = distance(anchor, approach) - FRONT_SLACK;
         let war = &self.war;
         // Out of our turrets' death blasts, and they of its (`porcmix`).
-        let blast = |d: UnitDef| d.death_explosion().map_or(0.0, |w| w.area_of_effect());
         let mine = blast(def);
         let others: Vec<(Vec3, f32)> = if self.dev_off(PORCMIX) {
             Vec::new()
         } else {
-            (self.walkin_turrets_near(anchor, cover + 300.0).into_iter()).map(|(p, d)| (p, blast(d))).collect()
+            (self.eco_turrets_near(anchor, cover + 300.0).into_iter()).map(|(p, d)| (p, blast(d))).collect()
         };
         let mut spots: Vec<(f32, f32, Vec3)> = Vec::new();
         for i in -n..=n {
