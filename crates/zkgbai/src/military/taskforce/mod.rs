@@ -20,6 +20,7 @@
 //!
 //! A patch that does not apply or check is refused, and logged.
 
+pub mod arrowhead;
 pub mod doctrine;
 pub mod expr;
 pub mod marksman;
@@ -33,7 +34,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-pub use doctrine::{Aim, Attack, Doctrine, Judge, Keep, Role, Shape, seeds};
+pub use doctrine::{Aim, Arrowhead, Attack, Doctrine, Judge, Keep, Role, Shape, seeds};
 pub use expr::{Expr, Force};
 
 use crate::Ai;
