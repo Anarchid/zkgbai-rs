@@ -25,8 +25,9 @@ use springai::{Unit, UnitDef, Vec3};
 use super::TaskId;
 use super::WorkerTask;
 use super::allied::ASSIST_REACH;
-use super::planning::{exit_lane, keeps_exit};
+use super::planning::{AIR_STALL_WHY, exit_lane, keeps_exit};
 use crate::Ai;
+use crate::military::airstall::AIR_FACTORIES;
 use crate::util::distance;
 
 /// How far from its factory a plate works (`FACTORY_PLATE_RANGE`), elmos.
@@ -133,6 +134,52 @@ impl Ai {
         self.eco.construction_tasks.push(id);
         self.eco.factory_tasks.push(id);
         Some(id)
+    }
+
+    /// `airstall`: for an AI with nothing but air factories whose air does
+    /// not pay, a requisition for the type of the nearest allied ground
+    /// factory we would plate (worth the window's losses).
+    pub(super) fn eco_air_stall_requisition(&self) -> Option<(String, String, f32)> {
+        if !self.air_stalled() || !self.air_only() || self.allies.is_empty() || self.dev_off("plates") {
+            return None;
+        }
+        let homes = self.eco_homes();
+        let near = |u: Unit| homes.iter().map(|&h| distance(h, u.pos())).fold(f32::MAX, f32::min);
+        let mut types: Vec<String> = (self.eco.allied.factories.iter())
+            .filter(|u| u.team() != self.team_id && u.health() > 0.0)
+            .map(|&u| self.defs.name_of(u).to_owned())
+            .filter(|n| !AIR_FACTORIES.contains(&n.as_str()) && self.eco_plate_of(n).is_some())
+            .collect();
+        types.sort();
+        types.dedup();
+        let (name, parent) = (types.into_iter())
+            .filter_map(|n| self.eco_plate_parent(&n).map(|p| (n, p)))
+            .min_by(|a, b| near(a.1).total_cmp(&near(b.1)))?;
+        let (killed, lost) = self.war.air.trade();
+        let why = format!(
+            "{AIR_STALL_WHY}: our aircraft killed {killed:.0} metal for {lost:.0} lost in 5 minutes; a plate on team \
+             {}'s {name}",
+            parent.team()
+        );
+        Some((name, why, lost))
+    }
+
+    /// Why no plate of factory type `name` went up for worker `wid` (for
+    /// the air stall's log).
+    pub(super) fn eco_plate_blocked(&mut self, wid: i32, name: &str) -> &'static str {
+        let Some(plate) = self.eco_plate_of(name) else { return "the type has no plate" };
+        let Some(parent) = self.eco_plate_parent(name) else { return "no allied one safe and near our base now" };
+        let Some((pos, facing)) = self.eco_plate_site(plate, parent) else { return "no site by the ally's" };
+        if self.eco.tasks.contains(&self.eco.factory_tasks, &WorkerTask::construction(plate, pos, facing)) {
+            return "one planned already";
+        }
+        if !self.eco_can_reach(wid, pos) { "out of the worker's reach" } else { "no reason found" }
+    }
+
+    /// `airstall`: nothing but air factories, air stalled, and no allied
+    /// ground factory to plate: the metal goes to a superweapon.
+    pub(super) fn eco_air_stall_super(&self) -> bool {
+        self.air_stalled() && self.air_only() && self.eco_air_stall_requisition().is_none()
     }
 
     /// Whether `plate` has a factory to work from now.

@@ -178,32 +178,19 @@ impl Ai {
         }
     }
 
-    /// Lend `id` to `module` until `role_reown`: its orders (and the setup,
-    /// retreat, teleport and water helpers') reach the unit, its role's
-    /// handler's are dropped as foreign (a squad raider in a gang, see
-    /// `coalesce`: its squad goes on without it).
-    pub(crate) fn role_lend(&self, id: i32, module: &'static str) {
-        let helpers: &'static [&'static str] =
-            &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water", "facframe"];
-        reserved::own(self.cb, id, Owner { module, helpers });
-    }
-
-    /// Put the unit back under its role's module (after `role_lend`).
-    pub(crate) fn role_reown(&mut self, id: i32) {
-        match self.role_of(id).and_then(Role::owner) {
-            Some(o) => {
-                reserved::own(self.cb, id, o);
-            }
-            None => {
-                reserved::disown(self.cb, id);
-            }
-        }
-    }
-
     /// The unit left the stakeouts.
     pub(crate) fn role_left_stakeouts(&mut self, id: i32) {
         if self.role_of(id) == Some(Role::Stakeout) {
             self.role_release(id);
+        }
+    }
+
+    /// A stakeout leaves for a module without a role (a Puppy for its
+    /// herd, see `frontretire`): the stakeouts forget it, its role ends.
+    pub(crate) fn role_end_stakeout(&mut self, unit: Unit) {
+        self.stakeouts_forget(unit);
+        if self.role_of(unit.id()) == Some(Role::Stakeout) {
+            self.role_release(unit.id());
         }
     }
 

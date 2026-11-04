@@ -182,7 +182,9 @@ impl Ai {
         let mexes: Vec<Vec3> = (self.qrf.assets.iter()).filter(|a| a.is_mex).map(|a| a.pos).collect();
         let naked = mexes.iter().filter(|&&p| !covered(self, p)).count();
         self.qrf.floor.naked = naked;
-        let want = naked.div_ceil(self.qrf.floor.per).min(MAX_GUARDS);
+        // `frontretire`: no garrison once the fights are dense (see
+        // `military::front`); the guards go back (`qrf_floor_assign`).
+        let want = if self.front_retired() { 0 } else { naked.div_ceil(self.qrf.floor.per).min(MAX_GUARDS) };
         if want == 0 {
             self.qrf.floor.sectors.clear();
             self.qrf.floor.rim = 0;

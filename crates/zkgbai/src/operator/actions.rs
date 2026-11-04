@@ -24,7 +24,7 @@ use crate::util::NULLPOS;
 /// next decision; a few only where it decides once (the lanes, the doctrine
 /// set).
 pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
-    ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
+    ("logistics", "Economy", "the project tracker: exclusive crews, shared resource forecasts and observed progress"),
     ("clients", "Economy", "pylons, requisitioned factories and anti-nukes tracked as valued issues"),
     ("pause", "Economy", "an urgent issue holds back the metal of other construction"),
     (
@@ -288,6 +288,21 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
     ),
     ("venomphase", "Army", "spiders raid with Venoms until the enemy fields a line or the map fills up"),
+    (
+        "frontallies",
+        "Army",
+        "the fight density counts allied armed ground units beside ours, so team fights read as dense as they are (default on)",
+    ),
+    (
+        "frontretire",
+        "Defense",
+        "once the fight density reaches 2000, pickets, lookers, garrisons and scout builds stand down for good; QRF teams stay (default on)",
+    ),
+    (
+        "airstall",
+        "Army",
+        "air plants stop building combat aircraft while ours lose 1500+ metal in 5 minutes and kill under 0.6 of it; with nothing but air factories, a plate on an ally's ground factory, else a superweapon (default on)",
+    ),
     ("jumps", "Army", "jumpjets jump"),
     (
         "lobsters",
