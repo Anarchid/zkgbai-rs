@@ -128,6 +128,9 @@ struct Tune {
     /// Screen posts over our value where raids reach it (clusters of our
     /// assets by cost and exposure), not only at the gates raids used.
     value: bool,
+    /// The standoff is a floor, not a preference: no spot nearer the raid
+    /// (`standoff` stand-clear calls).
+    clear: bool,
 }
 
 impl Default for Tune {
@@ -144,6 +147,7 @@ impl Default for Tune {
             intercept: false,
             goal: true,
             value: false,
+            clear: false,
         }
     }
 }
@@ -264,6 +268,7 @@ impl Ai {
             intercept: f("mark_intercept", 0.0) > 0.0,
             goal: f("mark_goal", 1.0) > 0.0,
             value: f("mark_value", 0.0) > 0.0,
+            clear: false,
         };
         self.log(&format!(
             "qrfmark: strike={} commit={} fight={} standoff={} ahead={} latew={} breach={} standw={} intercept={} goal={} value={}",
@@ -640,8 +645,20 @@ impl Ai {
             };
             // (A shadowing team never strikes, judged or not.)
             let ostrike = verdict == Some(true) && tune.strike > 0.0;
-            let tune =
-                if outranged && !ostrike { Tune { standoff: t.reach + STANDOFF_MARGIN, goal: false, ..tune } } else { tune };
+            // Judged a loss: out of its guns for sure (the ring a floor, a
+            // move order: a fight order drags the team in). No judgement:
+            // the wider ring as a preference.
+            let tune = match (outranged, ostrike, verdict.is_some()) {
+                (true, false, true) => Tune {
+                    standoff: t.reach + STANDOFF_MARGIN,
+                    goal: false,
+                    clear: true,
+                    fight: false,
+                    ..tune
+                },
+                (true, false, false) => Tune { standoff: t.reach + STANDOFF_MARGIN, goal: false, ..tune },
+                _ => tune,
+            };
             let mut spot = self.qrf_mark_spot(ids, t, tune, tf.as_deref());
             // Goalkeeping: stand on the asset the raid heads for, a little
             // toward it, if we get there first (our guns outrange raiders'
@@ -918,11 +935,23 @@ impl Ai {
                     .sum::<f32>()
                     / value;
                 let gap = raids.iter().map(|&r| distance(r, x)).fold(f32::INFINITY, f32::min);
+                if tune.clear && gap < standoff {
+                    continue;
+                }
                 let score = latew * late + TRANSIT_COST * transit + tune.standw * (gap - standoff).abs();
                 if score < best.0 {
                     best = (score, x);
                 }
             }
+        }
+        // Nowhere clear in reach: straight away from the nearest raid.
+        if tune.clear
+            && best.0 == f32::INFINITY
+            && let Some(&c) = raids.iter().min_by(|a, b| distance(**a, pos).total_cmp(&distance(**b, pos)))
+            && distance(c, pos) < standoff
+        {
+            let d = distance(c, pos).max(1.0);
+            return c + (pos - c) * (standoff / d);
         }
         best.1
     }
