@@ -46,6 +46,11 @@ getters!(WeaponDef.def_id {
     fn start_velocity() -> f32 = WeaponDef_getStartVelocity;
     fn max_velocity() -> f32 = WeaponDef_getMaxVelocity;
     fn projectile_speed() -> f32 = WeaponDef_getProjectileSpeed;
+    /// Vertical launch duration in seconds; acceleration and turn rate below
+    /// are in engine units (elmos/frame² and radians/frame).
+    fn up_time() -> f32 = WeaponDef_getUpTime;
+    fn weapon_acceleration() -> f32 = WeaponDef_getWeaponAcceleration;
+    fn turn_rate() -> f32 = WeaponDef_getTurnRate;
     fn only_target_category() -> i32 = WeaponDef_getOnlyTargetCategory;
     fn trajectory_height() -> f32 = WeaponDef_getTrajectoryHeight;
     fn is_shield() -> bool = WeaponDef_isShield;
