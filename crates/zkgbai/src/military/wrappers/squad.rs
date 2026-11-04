@@ -26,6 +26,25 @@ use crate::util::{
 
 pub type SquadId = u32;
 
+/// Install the suffix before the first waypoint. GiveCommand can finish
+/// an already-reached raw move synchronously and generate an idle ATTACK
+/// before the next shifted order arrives. Prepending onto a live suffix
+/// leaves movement at the front even when a short waypoint finishes.
+fn drive_unit(unit: Unit, waypoints: &[Vec3], offset: (f32, f32), frame: i32) {
+    let Some((last, prefix)) = waypoints.split_last() else { return };
+    let shifted = |p: Vec3| Vec3::new(p.x + offset.0, p.y, p.z + offset.1);
+    kgb_move_to(unit, shifted(*last), 0, frame);
+    for &p in prefix.iter().rev() {
+        let p = shifted(p);
+        unit.execute_custom_command(
+            1, // CMD_INSERT, at queue position zero (ALT).
+            &[0.0, cmd::RAW_MOVE as f32, springai::opt::RIGHT_MOUSE_KEY as f32, p.x, p.y, p.z],
+            springai::opt::ALT_KEY,
+            NO_TIMEOUT,
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SquadKind {
     Assault,
@@ -1072,10 +1091,7 @@ impl Squad {
         let frame = nav.frame;
         self.collect_stragglers(fighters, frame, Some(&mut *nav));
         let Some((leader, lpos)) = self.leader_fighter(fighters).map(|l| (l.unit, l.get_pos())) else { return };
-        let opts = |i: usize| if i == 0 { 0 } else { OPTION_SHIFT_KEY };
-        for (i, &wp) in waypoints.iter().enumerate() {
-            kgb_move_to(leader, wp, opts(i), frame);
-        }
+        drive_unit(leader, waypoints, (0.0, 0.0), frame);
         let (dx, dz) = (waypoints[0].x - lpos.x, waypoints[0].z - lpos.z);
         let len = (dx * dx + dz * dz).sqrt();
         let travel = (len > 1.0).then(|| (dx / len, dz / len));
@@ -1089,9 +1105,7 @@ impl Squad {
                 f.move_to(place, nav);
                 top
             } else {
-                for (i, wp) in waypoints.iter().enumerate() {
-                    kgb_move_to(unit, Vec3::xz(wp.x + ox, wp.z + oz), opts(i), frame);
-                }
+                drive_unit(unit, waypoints, (ox, oz), frame);
                 let lag = travel.map_or(f32::INFINITY, |(tx, tz)| (place.x - pos.x) * tx + (place.z - pos.z) * tz);
                 (pace + CATCH_UP * lag).clamp(0.5 * pace, top)
             };
