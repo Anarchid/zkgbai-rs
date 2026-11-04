@@ -565,7 +565,6 @@ impl Ai {
         // is there sufficient energy to cover metal income? (Greedy workers
         // too while metal floats for want of it: `energycrew`.)
         if (!is_greedy || self.eco_floating_on_energy())
-            && self.eco.estalled
             && self.eco_team_energy_needed()
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {
@@ -3061,7 +3060,7 @@ impl Ai {
         if !self.allies.is_empty() {
             return;
         }
-        if self.fac.factories.is_empty() {
+        if self.fac.factories.is_empty() || self.eco.geo.morph.is_some() {
             return;
         }
         let eco = &self.eco;
@@ -3109,14 +3108,16 @@ impl Ai {
             && !self.fac.factories.is_empty()
             && eco.fusion_tasks.is_empty()
         {
-            // for singus; a geothermal plant is upgraded first
-            if self.eco_upgrade_geo(self.frame) {
-                return;
-            }
             "energysingu"
         } else {
             return;
         };
+        // Upgrade a standing geo as soon as the economy can fund a reactor,
+        // instead of waiting for three Fusions to unlock a Singularity.
+        // Finish any reactor already queued before committing to the morph.
+        if self.eco.fusion_tasks.is_empty() && self.eco_upgrade_geo(self.frame) {
+            return;
+        }
         let Some(def) = self.defs.get(name) else {
             return;
         };

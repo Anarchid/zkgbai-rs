@@ -59,6 +59,10 @@ use crate::util::distance;
 /// (build sites snap to the build grid), elmos.
 pub(super) const SITE_SLACK: f32 = 25.0;
 
+fn is_energy_plant(name: &str) -> bool {
+    matches!(name, "energysolar" | "energywind" | "energyfusion" | "energysingu" | "energygeo" | "energyheavygeo")
+}
+
 /// Airpads repair at 2.5 buildpower (`unit_refuel_pad_handler`: HP/s =
 /// 2.5 x max HP / (0.5 x cost), a Likho 5.9, an Odin 17, a Raptor 18; the
 /// staged fixture measured 18.8 for a Raptor). A caretaker repairs at 15
@@ -164,6 +168,7 @@ pub struct EconomyManager {
     new_mexes: Vec<Unit>,
     /// Where our finished mexes died, and when (see [`REMEX_MEMORY`]).
     lost_mexes: Vec<(Vec3, i32)>,
+    /// Unfinished power plants of every type, for game build priority.
     new_energy: Vec<Unit>,
     reclaim_record: VecDeque<f32>,
 
@@ -1154,9 +1159,7 @@ impl Ai {
             self.eco.new_mexes.push(unit);
         }
 
-        if def_name == "energysolar" || def_name == "energywind" {
-            self.eco.new_energy.push(unit);
-        }
+        self.eco_track_energy_construction(unit, def_name);
 
         // An advanced plant from a morph comes finished.
         if def_name == "energyheavygeo" && !unit.is_being_built() && !self.eco.geos.contains(&unit) {
@@ -1293,7 +1296,7 @@ impl Ai {
             self.eco.geos.push(unit);
         }
 
-        if def_name == "energysolar" || def_name == "energywind" {
+        if is_energy_plant(def_name) {
             erase_one(&mut self.eco.new_energy, &unit);
             unit.execute_custom_command(cmd::PRIORITY, &[1.0], 0, NO_TIMEOUT);
         }
@@ -1606,6 +1609,8 @@ impl Ai {
             self.eco.repair_tasks.push(id);
         }
 
+        self.eco_track_energy_construction(unit, def_name);
+
         if matches!(
             def_name,
             "turretmissile"
@@ -1838,6 +1843,19 @@ impl Ai {
         );
     }
 
+    /// Track every unfinished power plant, including gifted nanoframes.
+    /// Set the target's game priority so all assisting builders inherit it.
+    fn eco_track_energy_construction(&mut self, unit: Unit, name: &str) {
+        if !is_energy_plant(name) || !unit.is_being_built() {
+            return;
+        }
+        if !self.eco.new_energy.contains(&unit) {
+            self.eco.new_energy.push(unit);
+        }
+        let prio = if self.eco.hard_estalled { 2.0 } else { 1.0 };
+        unit.execute_custom_command(cmd::PRIORITY, &[prio], 0, NO_TIMEOUT);
+    }
+
     fn eco_set_eco_priorities(&mut self) {
         let eco = &self.eco;
         let team = self.team_id;
@@ -1858,7 +1876,7 @@ impl Ai {
         }
 
         let prio = if eco.hard_estalled { 2.0 } else { 1.0 };
-        for u in eco.new_energy.iter().chain(&eco.fusions).filter(|u| building(u)) {
+        for u in eco.new_energy.iter().filter(|u| building(u)) {
             u.execute_custom_command(cmd::PRIORITY, &[prio], 0, NO_TIMEOUT);
         }
     }
@@ -1889,6 +1907,73 @@ mod energyneed_tests {
         assert_eq!(energy_shortfall(12.0, 20.0), 1.0, "0.6x: full");
         assert_eq!(energy_shortfall(0.0, 20.0), 1.0);
         assert_eq!(energy_shortfall(5.0, 0.0), 0.0, "no metal income: nothing to match");
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+    use springai::ffi;
+    use std::ffi::c_void;
+
+    #[test]
+    fn power_plants_use_game_high_priority_only_during_hard_stalls() {
+        thread_local! {
+            static ORDERS: std::cell::RefCell<Vec<(i32, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
+            if id == 17 { 0.0 } else { 100.0 }
+        }
+        unsafe extern "C" fn team(_: i32, id: i32) -> i32 {
+            if id == 18 { 3 } else { 2 }
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            id != 16
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, data: *mut c_void) -> i32 {
+            assert_eq!(topic as u32, ffi::CommandTopic::COMMAND_UNIT_CUSTOM);
+            let c = unsafe { &*data.cast::<ffi::SCustomUnitCommand>() };
+            assert_eq!(c.cmdId, cmd::PRIORITY);
+            assert_eq!(c.params_size, 1);
+            ORDERS.with_borrow_mut(|orders| orders.push((c.unitId, unsafe { *c.params })));
+            0
+        }
+        let mut ai = test_ai_with(|t| {
+            t.Unit_getHealth = Some(health);
+            t.Unit_getTeam = Some(team);
+            t.Unit_isBeingBuilt = Some(building);
+            t.Engine_handleCommand = Some(command);
+        });
+        let plants = ["energysolar", "energywind", "energyfusion", "energysingu", "energygeo", "energyheavygeo"];
+        ai.eco.hard_estalled = true;
+        for (i, name) in plants.iter().enumerate() {
+            ai.eco_track_energy_construction(Unit::from_id(ai.cb, 10 + i as i32).unwrap(), name);
+        }
+        let expected = |prio| (10..16).map(|id| (id, prio)).collect::<Vec<_>>();
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, expected(2.0)));
+        assert_eq!(ai.eco.new_energy.len(), 6);
+
+        // Repeated creation/adoption callbacks do not duplicate tracking;
+        // completed plants and non-generators do not enter it.
+        ai.eco_track_energy_construction(Unit::from_id(ai.cb, 10).unwrap(), "energysolar");
+        ai.eco_track_energy_construction(Unit::from_id(ai.cb, 16).unwrap(), "energyheavygeo");
+        ai.eco_track_energy_construction(Unit::from_id(ai.cb, 19).unwrap(), "energypylon");
+        assert_eq!(ai.eco.new_energy.len(), 6);
+        // Stale entries must never command finished, dead or transferred units.
+        ai.eco.new_energy.extend((16..19).map(|id| Unit::from_id(ai.cb, id).unwrap()));
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_set_eco_priorities();
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, expected(2.0)));
+
+        ai.eco.hard_estalled = false;
+        ai.eco.estalled = true; // Extra energy wanted for growth is not a hard stall.
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_set_eco_priorities();
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, expected(1.0)));
+        ai.eco.hard_estalled = true;
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_set_eco_priorities();
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, expected(2.0)));
     }
 }
 
