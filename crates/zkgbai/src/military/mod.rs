@@ -1134,6 +1134,7 @@ impl Ai {
         self.puppies_remove_unit(unit);
         self.stakeouts_remove_unit(unit, attacker);
         self.roles_unit_destroyed(id);
+        self.facframe_unit_destroyed(id);
 
         if is_nuke {
             self.war.has_nuke = false;
