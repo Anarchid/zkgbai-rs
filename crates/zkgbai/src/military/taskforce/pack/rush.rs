@@ -2,7 +2,7 @@
 //! Local probes may bend the route; sightings never replace the destination.
 use super::*;
 use crate::defs::cmd;
-use crate::military::rush_push::rush_prize;
+use crate::military::rush_push::{rush_bait_allows, rush_prize};
 use crate::military::taskforce::Aim;
 use springai::NO_TIMEOUT;
 
@@ -13,6 +13,7 @@ const ARRIVED: f32 = 900.0;
 const SHOT_FOR: i32 = 90;
 const MOVE_BETWEEN_SHOTS: i32 = 90;
 const REPAIR_FOR: i32 = 450;
+const BLOCKED_FOR: i32 = 30 * 30;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct RushRun {
@@ -24,7 +25,20 @@ pub(super) struct RushRun {
     next_shot: i32,
     driven: i32,
     hold: Option<RangeHold>,
-    blocked: Option<(i32, i32)>,
+    blocked: Vec<(i32, i32)>,
+}
+
+fn blocked_target(blocked: &[(i32, i32)], target: i32, frame: i32) -> bool {
+    blocked.iter().any(|&(id, until)| id == target && frame < until)
+}
+
+impl RushRun {
+    fn block_target(&mut self, target: i32, frame: i32) {
+        self.blocked.retain(|&(id, until)| id != target && frame < until);
+        self.blocked.push((target, frame + BLOCKED_FOR));
+        self.hold = None;
+        self.driven = 0;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -98,7 +112,15 @@ fn heavy_danger(detail: &[Value], id: i32) -> f32 {
 }
 
 impl Ai {
-    fn rush_probe(&mut self, sid: SquadId, heavy: Unit, goal: Vec3, at: Vec3, assault: bool) -> Option<Probe> {
+    fn rush_probe(
+        &mut self,
+        sid: SquadId,
+        heavy: Unit,
+        goal: Vec3,
+        at: Vec3,
+        assault: bool,
+        blocked: &[(i32, i32)],
+    ) -> Option<Probe> {
         let pos = heavy.pos();
         let def = heavy.def()?;
         let map = self.cb.map();
@@ -111,7 +133,7 @@ impl Ai {
             return None;
         }
         let way = self.pack_way(sid, pos, heading(heavy.vel(), pos, at), at, assault);
-        let way = if assault { self.rush_range_way(heavy, &way, None) } else { way };
+        let way = if assault { self.rush_range_way(heavy, &way, blocked) } else { way };
         if way.is_empty() {
             return None;
         }
@@ -144,6 +166,7 @@ impl Ai {
         let health = health_fraction(heavy);
         let mut pack = self.taskforces.packs.remove(&sid).unwrap_or_default();
         let st = &mut pack.rush;
+        st.blocked.retain(|&(_, until)| frame < until);
         let home = if heavy.def().is_some_and(|d| d.is_able_to_fly()) {
             self.graph_get_closest_air_haven(pos)
         } else {
@@ -163,16 +186,16 @@ impl Ai {
         }
         if st.retreat_since.is_none() && (frame - st.probed >= PROBE_EVERY || st.waypoint.is_none()) {
             let axis = heading(Vec3::ZERO, pos, goal);
-            let old = st.waypoint.and_then(|at| self.rush_probe(sid, heavy, goal, at, true));
+            let old = st.waypoint.and_then(|at| self.rush_probe(sid, heavy, goal, at, true, &st.blocked));
             let mut probes: Vec<_> = directions(pos, goal, axis)
                 .into_iter()
-                .filter_map(|at| self.rush_probe(sid, heavy, goal, at, true))
+                .filter_map(|at| self.rush_probe(sid, heavy, goal, at, true, &st.blocked))
                 .collect();
             // The strategic path supplies a way through terrain when local
             // angular probes are obstructed. It keeps the same destination.
             let strategic = self.pack_way(sid, pos, axis, goal, true);
             if let Some(at) = strategic.last().copied()
-                && let Some(p) = self.rush_probe(sid, heavy, goal, at, true)
+                && let Some(p) = self.rush_probe(sid, heavy, goal, at, true, &st.blocked)
             {
                 probes.push(p);
             }
@@ -201,7 +224,7 @@ impl Ai {
             };
             if let Some(p) = selected {
                 let retreat = if p.danger > 0.45 || (health < 0.8 && p.judgement.worth() < 0.0) {
-                    self.rush_probe(sid, heavy, goal, home, false)
+                    self.rush_probe(sid, heavy, goal, home, false, &st.blocked)
                 } else {
                     None
                 };
@@ -248,11 +271,7 @@ impl Ai {
         // route change. These are Pack raw-move waypoints, never fight orders.
         if frame - st.driven >= PROBE_EVERY || heavy.num_current_commands() == 0 || st.driven == 0 {
             let way = self.pack_way(sid, pos, heading(heavy.vel(), pos, destination), destination, !retreating);
-            let way = if retreating {
-                way
-            } else {
-                self.rush_range_way(heavy, &way, st.blocked.filter(|b| b.1 > frame).map(|b| b.0))
-            };
+            let way = if retreating { way } else { self.rush_range_way(heavy, &way, &st.blocked) };
             self.pack_drive(sid, &way);
             st.driven = frame;
         }
@@ -282,7 +301,7 @@ impl Ai {
             .map_or(0.0, |v| v.1)
     }
 
-    fn rush_range_way(&self, heavy: Unit, way: &[Vec3], blocked: Option<i32>) -> Vec<Vec3> {
+    fn rush_range_way(&self, heavy: Unit, way: &[Vec3], blocked: &[(i32, i32)]) -> Vec<Vec3> {
         let range = 0.9 * self.rush_gun_range(heavy);
         if range <= 0.0 {
             return way.to_vec();
@@ -290,7 +309,12 @@ impl Ai {
         let hits = self.war.reach(heavy.def());
         let mut out = way.to_vec();
         for e in self.war.targets.values().filter(|e| {
-            !e.is_dead && e.visible && e.is_static && blocked != Some(e.unit_id) && self.war.can_hit(hits, e)
+            !e.is_dead
+                && e.visible
+                && e.is_static
+                && !blocked_target(blocked, e.unit_id, self.frame)
+                && rush_bait_allows(e)
+                && self.war.can_hit(hits, e)
         }) {
             out = super::range::stop_at_range(heavy.pos(), &out, e.position, range);
         }
@@ -307,7 +331,8 @@ impl Ai {
                 && e.is_static
                 && self.war.can_hit(hits, e)
                 && distance(heavy.pos(), e.position) <= 0.92 * reach
-                && !st.blocked.is_some_and(|(id, until)| id == e.unit_id && frame < until)
+                && rush_bait_allows(e)
+                && !blocked_target(&st.blocked, e.unit_id, frame)
         };
         let target = st
             .hold
@@ -328,8 +353,9 @@ impl Ai {
             if frame - h.progress > 450 {
                 // A blocked shot must not pin the rush forever. A fresh
                 // position may clear terrain; bounded shots still apply.
-                st.blocked = Some((id, frame + 300));
-                st.hold = None;
+                st.block_target(id, frame);
+                st.shot = None;
+                heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
                 return false;
             }
         } else {
@@ -349,6 +375,9 @@ impl Ai {
             }
         }
         if !self.rush_pause_for_shot(heavy, st, Some(id)) {
+            if blocked_target(&st.blocked, id, frame) {
+                return false;
+            }
             // Reload here. The old mandatory three-second advance spent
             // the entire range advantage between cannon shots.
             heavy.stop(0);
@@ -375,6 +404,8 @@ impl Ai {
                 && focus.is_none_or(|id| e.unit_id == id)
                 && e.visible
                 && rush_prize(e.is_static, e.is_raider, e.value)
+                && rush_bait_allows(e)
+                && !blocked_target(&st.blocked, e.unit_id, frame)
                 && self.war.can_hit(hits, e)
                 && weapons.iter().any(|w| distance(heavy.pos(), e.position) <= w.range() * 0.92)
         };
@@ -383,6 +414,15 @@ impl Ai {
             let in_reach = self.war.targets.get(&shot.target).is_some_and(valid);
             if !fired && in_reach && frame < shot.until {
                 return true;
+            }
+            if !fired && in_reach && frame >= shot.until {
+                let target = shot.target;
+                st.block_target(target, frame);
+                self.op_emit(
+                    "rush-pack",
+                    json!({"event":"shot-blocked", "unit":heavy.id(),
+                    "target":target, "until":frame + BLOCKED_FOR}),
+                );
             }
             st.shot = None;
             heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
@@ -481,6 +521,19 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn blocked_shots_do_not_reacquire_each_other_before_their_cooldown() {
+        let mut st = RushRun::default();
+        st.block_target(1, 90);
+        st.block_target(2, 180);
+        assert!(blocked_target(&st.blocked, 1, 180));
+        assert!(blocked_target(&st.blocked, 2, 180));
+        assert!(!blocked_target(&st.blocked, 3, 180));
+        assert!(!blocked_target(&st.blocked, 1, 90 + BLOCKED_FOR));
+        assert_eq!(st.driven, 0, "move immediately after the rejected shot");
+        assert!(st.hold.is_none(), "do not keep waiting for reload on an unfired shot");
+    }
+
     #[test]
     fn advance_probes_cannot_turn_back_for_a_nearby_sighting() {
         let p = Vec3::xz(1000.0, 1000.0);

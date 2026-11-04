@@ -1312,7 +1312,10 @@ impl Ai {
                 .map(|(&i, f)| {
                     let e = self.war.targets.get(&near[i].0);
                     let prize = !rush
-                        || e.is_some_and(|e| crate::military::rush_push::rush_prize(e.is_static, e.is_raider, e.value));
+                        || e.is_some_and(|e| {
+                            crate::military::rush_push::rush_prize(e.is_static, e.is_raider, e.value)
+                                && crate::military::rush_push::rush_bait_allows(e)
+                        });
                     if prize { f.p_dead * near[i].1.cost * if near[i].1.mobile { 1.0 } else { lasting } } else { 0.0 }
                 })
                 .sum();

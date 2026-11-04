@@ -37,6 +37,24 @@ pub(crate) fn rush_prize(is_static: bool, is_raider: bool, value: f32) -> bool {
     is_static || (!is_raider && value >= 500.0)
 }
 
+/// Mirror the minimum enabled native bait policy for known targets. Solars
+/// and wind generators explicitly opt out even though their cost is above
+/// the ordinary threshold. Armor-dependent rejection is handled by the
+/// rush controller's bounded shot and cooldown, since the AI API does not
+/// expose the live armored state.
+fn minimum_bait_allows(level: Option<f32>, cost: f32, progress: Option<f32>) -> bool {
+    let level = level.unwrap_or(if cost > 0.0 && cost <= 10.0 { 1.0 } else { f32::INFINITY });
+    level > 1.0 && progress.is_none_or(|p| p >= 1.0 || cost * p > 50.0)
+}
+
+pub(crate) fn rush_bait_allows(e: &crate::military::enemy::Enemy) -> bool {
+    e.ud.is_none_or(|d| {
+        let level = d.custom_param("bait_level_target").and_then(|v| v.parse::<f32>().ok());
+        let progress = (e.visible && e.unit.is_being_built()).then(|| e.unit.build_progress());
+        minimum_bait_allows(level, d.build_time(), progress)
+    })
+}
+
 pub(crate) fn rush_riot(name: &str) -> bool {
     matches!(
         name,
@@ -411,6 +429,18 @@ fn order_unit(u: Unit, cmd: i32, target: Unit, order: impl FnOnce(Unit, Unit)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn minimum_bait_policy_skips_solars_but_keeps_mexes_and_factories() {
+        assert!(!minimum_bait_allows(Some(1.0), 70.0, None), "Solar's explicit native exclusion");
+        assert!(!minimum_bait_allows(Some(1.0), 35.0, None), "wind generator");
+        assert!(minimum_bait_allows(None, 75.0, None), "mex");
+        assert!(minimum_bait_allows(None, 600.0, None), "finished factory");
+        assert!(!minimum_bait_allows(None, 600.0, Some(0.05)), "cheap nanoframe");
+        assert!(minimum_bait_allows(None, 600.0, Some(0.5)), "valuable nanoframe");
+        assert!(!minimum_bait_allows(None, 10.0, None), "ordinary minimum threshold");
+        assert!(minimum_bait_allows(Some(2.0), 80.0, None), "higher exclusions still shoot at level one");
+    }
+
     #[test]
     fn lights_never_earn_a_heavy_diversion_but_buildings_do() {
         assert!(!rush_prize(false, true, 900.0));
