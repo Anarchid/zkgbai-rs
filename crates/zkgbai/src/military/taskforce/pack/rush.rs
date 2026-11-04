@@ -1,8 +1,10 @@
 //! Opening heavies use Pack navigation with a fixed strategic destination.
 //! Local probes may bend the route; sightings never replace the destination.
 use super::*;
+use crate::defs::cmd;
 use crate::military::rush_push::rush_prize;
 use crate::military::taskforce::Aim;
+use springai::NO_TIMEOUT;
 
 const PROBE_EVERY: i32 = 90;
 const COMMIT_FOR: i32 = 240;
@@ -21,6 +23,15 @@ pub(super) struct RushRun {
     shot: Option<Shot>,
     next_shot: i32,
     driven: i32,
+    hold: Option<RangeHold>,
+    blocked: Option<(i32, i32)>,
+}
+
+#[derive(Clone, Debug)]
+struct RangeHold {
+    target: i32,
+    hp: f32,
+    progress: i32,
 }
 
 #[derive(Clone, Debug)]
@@ -100,15 +111,16 @@ impl Ai {
             return None;
         }
         let way = self.pack_way(sid, pos, heading(heavy.vel(), pos, at), at, assault);
+        let way = if assault { self.rush_range_way(heavy, &way, None) } else { way };
         if way.is_empty() {
             return None;
         }
         let route: Vec<_> = std::iter::once(pos).chain(way).collect();
-        let (judgement, detail) = self.pack_fates(sid, &route, true)?;
+        let (judgement, detail) = self.pack_fates(sid, &route, false)?;
         let danger = heavy_danger(&detail, heavy.id());
         // Killing infrastructure dominates a small forward-progress bonus.
         // Zero-contact probes still advance instead of parking for a sighting.
-        let progress = (distance(pos, goal) - distance(at, goal)).clamp(-STEP, STEP);
+        let progress = (distance(pos, goal) - distance(*route.last()?, goal)).clamp(-STEP, STEP);
         let score = judgement.worth() + 0.2 * progress;
         Some(Probe { at, judgement, detail, danger, score })
     }
@@ -219,10 +231,15 @@ impl Ai {
         let destination = if retreating { home } else { st.waypoint.unwrap_or(goal) };
         if retreating {
             if st.shot.take().is_some() {
+                heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
                 st.driven = 0;
             }
-            heavy.set_fire_state(0, 0);
-        } else if self.rush_pause_for_shot(heavy, st) {
+            heavy.set_fire_state(2, 0);
+        } else if self.rush_hold_range(sid, heavy, st) {
+            pack.target = goal;
+            self.taskforces.packs.insert(sid, pack);
+            return (Some(goal), "rush fires from range".into());
+        } else if self.rush_pause_for_shot(heavy, st, None) {
             pack.target = goal;
             self.taskforces.packs.insert(sid, pack);
             return (Some(goal), "rush firing pause".into());
@@ -230,7 +247,13 @@ impl Ai {
         // Repath at most every three seconds, or immediately after a shot or
         // route change. These are Pack raw-move waypoints, never fight orders.
         if frame - st.driven >= PROBE_EVERY || heavy.num_current_commands() == 0 || st.driven == 0 {
-            self.pack_go(sid, pos, heading(heavy.vel(), pos, destination), destination, !retreating);
+            let way = self.pack_way(sid, pos, heading(heavy.vel(), pos, destination), destination, !retreating);
+            let way = if retreating {
+                way
+            } else {
+                self.rush_range_way(heavy, &way, st.blocked.filter(|b| b.1 > frame).map(|b| b.0))
+            };
+            self.pack_drive(sid, &way);
             st.driven = frame;
         }
         pack.target = destination;
@@ -241,7 +264,99 @@ impl Ai {
         )
     }
 
-    fn rush_pause_for_shot(&mut self, heavy: Unit, st: &mut RushRun) -> bool {
+    /// Use the actual main damaging gun, not a fake weapon or a long-range
+    /// utility beam, to decide where the heavy can stop and keep firing.
+    fn rush_gun_range(&self, heavy: Unit) -> f32 {
+        heavy
+            .weapons()
+            .into_iter()
+            .filter_map(|w| {
+                let d = w.def()?;
+                if crate::military::water::is_fake(&d.name()) {
+                    return None;
+                }
+                let damage = d.damage_types().into_iter().fold(0.0, f32::max);
+                (damage > 0.0 && w.range() > 0.0).then_some((damage, w.range()))
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(0.0, |v| v.1)
+    }
+
+    fn rush_range_way(&self, heavy: Unit, way: &[Vec3], blocked: Option<i32>) -> Vec<Vec3> {
+        let range = 0.9 * self.rush_gun_range(heavy);
+        if range <= 0.0 {
+            return way.to_vec();
+        }
+        let hits = self.war.reach(heavy.def());
+        let mut out = way.to_vec();
+        for e in self.war.targets.values().filter(|e| {
+            !e.is_dead && e.visible && e.is_static && blocked != Some(e.unit_id) && self.war.can_hit(hits, e)
+        }) {
+            out = super::range::stop_at_range(heavy.pos(), &out, e.position, range);
+        }
+        out
+    }
+
+    fn rush_hold_range(&mut self, sid: SquadId, heavy: Unit, st: &mut RushRun) -> bool {
+        let frame = self.frame;
+        let reach = self.rush_gun_range(heavy);
+        let hits = self.war.reach(heavy.def());
+        let valid = |e: &crate::military::enemy::Enemy| {
+            !e.is_dead
+                && e.visible
+                && e.is_static
+                && self.war.can_hit(hits, e)
+                && distance(heavy.pos(), e.position) <= 0.92 * reach
+                && !st.blocked.is_some_and(|(id, until)| id == e.unit_id && frame < until)
+        };
+        let target = st
+            .hold
+            .as_ref()
+            .and_then(|h| self.war.targets.get(&h.target))
+            .filter(|e| valid(e))
+            .or_else(|| self.war.targets.values().filter(|e| valid(e)).max_by(|a, b| a.value.total_cmp(&b.value)))
+            .map(|e| (e.unit_id, e.position, e.get_health() * e.def_health()));
+        let Some((id, at, hp)) = target else {
+            st.hold = None;
+            return false;
+        };
+        if let Some(h) = st.hold.as_mut().filter(|h| h.target == id) {
+            if hp < h.hp - 1.0 {
+                h.progress = frame;
+            }
+            h.hp = hp;
+            if frame - h.progress > 450 {
+                // A blocked shot must not pin the rush forever. A fresh
+                // position may clear terrain; bounded shots still apply.
+                st.blocked = Some((id, frame + 300));
+                st.hold = None;
+                return false;
+            }
+        } else {
+            st.hold = Some(RangeHold { target: id, hp, progress: frame });
+            self.op_emit("rush-pack",json!({"event":"range-hold","unit":heavy.id(),"target":id,"range":reach,"distance":distance(heavy.pos(),at)}));
+        }
+        st.driven = 0;
+        heavy.set_move_state(0, 0);
+        if distance(heavy.pos(), at) < 0.82 * reach {
+            let angle = (heavy.pos().z - at.z).atan2(heavy.pos().x - at.x);
+            let stand = Vec3::xz(at.x + 0.9 * reach * angle.cos(), at.z + 0.9 * reach * angle.sin());
+            if heavy.def().is_some_and(|d| self.terrain_reaches(d, heavy.pos(), stand, 0.0)) {
+                st.shot = None;
+                heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
+                self.pack_go(sid, heavy.pos(), heading(heavy.vel(), heavy.pos(), stand), stand, false);
+                return true;
+            }
+        }
+        if !self.rush_pause_for_shot(heavy, st, Some(id)) {
+            // Reload here. The old mandatory three-second advance spent
+            // the entire range advantage between cannon shots.
+            heavy.stop(0);
+        }
+        true
+    }
+
+    fn rush_pause_for_shot(&mut self, heavy: Unit, st: &mut RushRun, focus: Option<i32>) -> bool {
         let frame = self.frame;
         let weapons: Vec<_> = heavy
             .weapons()
@@ -257,6 +372,7 @@ impl Ai {
         let hits = self.war.reach(heavy.def());
         let valid = |e: &crate::military::enemy::Enemy| {
             !e.is_dead
+                && focus.is_none_or(|id| e.unit_id == id)
                 && e.visible
                 && rush_prize(e.is_static, e.is_raider, e.value)
                 && self.war.can_hit(hits, e)
@@ -269,6 +385,7 @@ impl Ai {
                 return true;
             }
             st.shot = None;
+            heavy.execute_custom_command(cmd::UNIT_CANCEL_TARGET, &[], 0, NO_TIMEOUT);
             st.next_shot = frame + MOVE_BETWEEN_SHOTS;
             st.driven = 0; // Replace the bounded attack immediately with movement.
             return false;
@@ -308,8 +425,11 @@ impl Ai {
                 })
                 .map(|(i, _)| i)
                 .unwrap_or(0);
-            heavy.set_fire_state(0, 0);
-            if heavy.attack(target, 0) {
+            heavy.set_fire_state(2, 0);
+            // An explicit ATTACK can path toward a clearer firing line even
+            // on hold-position. Aim only the weapon while movement is stopped.
+            heavy.stop(0);
+            if heavy.execute_custom_command(cmd::UNIT_SET_TARGET, &[target.id() as f32], 0, NO_TIMEOUT) {
                 st.shot = Some(Shot {
                     target: target.id(),
                     until: frame + SHOT_FOR,

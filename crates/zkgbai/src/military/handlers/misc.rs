@@ -335,7 +335,7 @@ impl Ai {
         let enemy_center = self.graph.get_enemy_center();
         let ally_center = self.graph.get_ally_center();
         for u in self.misc_handler.active_swifts.values() {
-            if u.health() <= 0.0 {
+            if u.health() <= 0.0 || self.sweeps_claims(u.id()) || springai::reserved::is_reserved(self.cb, u.id()) {
                 continue;
             }
             let Some(best) = pick_swift_spot(&spots, frame) else { continue };
@@ -346,6 +346,10 @@ impl Ai {
             }
             spots.remove(best);
         }
+    }
+
+    pub(crate) fn misc_recon_swifts(&self) -> Vec<Unit> {
+        self.misc_handler.swifts.values().chain(self.misc_handler.active_swifts.values()).copied().collect()
     }
 
     fn misc_fight_to(&mut self, id: i32, target: Vec3) {

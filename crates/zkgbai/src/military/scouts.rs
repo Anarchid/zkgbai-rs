@@ -332,6 +332,8 @@ impl Ai {
             .map(|e| e.value)
             .sum();
         let mut policy = scout_policy(area, self.eco.effective_income, self.projected_metal_density(), aa_metal);
+        policy.sparrows =
+            policy.sparrows.max(super::sweeps::dive_budget(self.war.front.ratchet, self.eco.effective_income));
         // The map's quotas are the alliance's, not each ally's (user,
         // 2026-11-02: three instances built three times the Owls): the
         // Owls and deep Widows one of us builds, the first in team order
@@ -522,6 +524,19 @@ impl Ai {
             .collect()
     }
 
+    /// Last LOS observation, independent of radar contacts or scout ownership.
+    pub(crate) fn scouts_last_seen(&self, p: Vec3) -> i32 {
+        if self.los.is_in_los(p) {
+            return self.frame;
+        }
+        let x = (p.x / SEEN_CELL).floor() as i32;
+        let z = (p.z / SEEN_CELL).floor() as i32;
+        if x < 0 || z < 0 || x >= self.scouts.seen_width {
+            return -STALE_CAP;
+        }
+        self.scouts.seen.get((z * self.scouts.seen_width + x) as usize).copied().unwrap_or(-STALE_CAP)
+    }
+
     /// Note which cells (see [`SEEN_CELL`]) are in our sight now.
     fn scouts_update_seen(&mut self, frame: i32) {
         if (frame + self.offset + 11) % SEEN_PERIOD != 0 {
@@ -658,6 +673,9 @@ impl Ai {
 
     pub fn scouts_update(&mut self, frame: i32) {
         self.scouts_update_seen(frame);
+        if (frame + self.offset + 7) % REPATH == 0 {
+            self.sweeps_recon_update();
+        }
         if (frame + self.offset + 7) % PERIOD == 0 {
             self.scouts_reserve();
         }

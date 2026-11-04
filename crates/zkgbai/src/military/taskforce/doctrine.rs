@@ -1451,6 +1451,7 @@ pub fn seeds() -> Vec<Doctrine> {
         cores_to_go: 2,
         cores_to_stay: 2,
         attack: Attack::Pass,
+        pass_reach: 0.9,
         ..ravager.clone()
     };
     minotaur.name = "minotaur".into();

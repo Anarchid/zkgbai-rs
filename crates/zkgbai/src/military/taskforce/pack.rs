@@ -59,6 +59,7 @@
 //! back to its screen, parks / is repaired, takes in (merges), is led from
 //! its bulk; engages and break-offs as other forces'.
 
+mod range;
 mod rush;
 
 use std::collections::BTreeMap;
@@ -344,7 +345,7 @@ pub fn plan_pass(
     guns: &[((f32, f32), f32)],
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
-    plan_pass_inner(pos, heading, target, guns, None, clear)
+    plan_pass_inner(pos, heading, target, guns, None, None, clear)
 }
 
 /// A forced tangential pass keeps the entire formation to one side of
@@ -358,7 +359,32 @@ fn plan_tangent_pass(
     clearance: f32,
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
-    plan_pass_inner(pos, heading, target, guns, Some(clearance), clear)
+    // Do not buy one extra gun by bringing the near edge of a broad
+    // formation pointblank. Prefer a partial volley at useful range.
+    let reach = guns.iter().map(|g| g.1).filter(|r| *r > 0.0).reduce(f32::min).unwrap_or(0.0);
+    let axis = super::pack::heading(Vec3::ZERO, pos, target);
+    let mut best: Option<(Pass, usize, f32, f32)> = None;
+    // A line parallel to a broad formation can put every gun at range.
+    // Merely shifting a head-on line sideways unnecessarily sacrifices guns.
+    for degrees in [-90.0f32, -60.0, -30.0, 0.0, 30.0, 60.0, 90.0] {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let way = (axis.0 * cos - axis.1 * sin, axis.0 * sin + axis.1 * cos);
+        let Some((p, n)) =
+            plan_pass_inner(pos, heading, target, guns, Some(clearance.max(0.85 * reach)), Some(way), &clear)
+        else {
+            continue;
+        };
+        let left = p.left();
+        let gap =
+            guns.iter().map(|&((x, z), _)| (p.side + x * left.0 + z * left.1).abs()).fold(f32::INFINITY, f32::min);
+        let approach = distance(pos, p.point(target)) + 100.0 * (1.0 - heading.0 * way.0 - heading.1 * way.1);
+        if best
+            .is_none_or(|(_, m, g, a)| n > m || (n == m && (gap > g + 0.1 || ((gap - g).abs() <= 0.1 && approach < a))))
+        {
+            best = Some((p, n, gap, approach));
+        }
+    }
+    best.map(|(p, n, _, _)| (p, n))
 }
 
 fn plan_pass_inner(
@@ -367,11 +393,12 @@ fn plan_pass_inner(
     target: Vec3,
     guns: &[((f32, f32), f32)],
     tangent: Option<f32>,
+    direction: Option<(f32, f32)>,
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
     let (dx, dz) = (target.x - pos.x, target.z - pos.z);
     let d = (dx * dx + dz * dz).sqrt();
-    let way = if d > 1.0 { (dx / d, dz / d) } else { heading };
+    let way = direction.unwrap_or_else(|| if d > 1.0 { (dx / d, dz / d) } else { heading });
     let left = (-way.1, way.0);
     // Where the heading's line runs by the target, across the way.
     let ahead = (dx * heading.0 + dz * heading.1).max(0.0);
@@ -1043,7 +1070,34 @@ impl Ai {
             let [a, b] = pass_way(pos, st.pass_target, &pass);
             // Swinging round to come back over it.
             let way: Vec<Vec3> = turn_point(pos, head, a, turn).into_iter().chain([a, b]).collect();
-            self.pack_drive(sid, &way);
+            let way = if shape.attack == Attack::Pass {
+                range::around_range(pos, &way, st.pass_target, pass.side.abs())
+            } else {
+                way
+            };
+            // Raw-move cannot safely navigate an arbitrary geometric arc
+            // through a cliff or off-map waypoint.
+            let map = self.cb.map();
+            let mut from = pos;
+            let clear = shape.attack != Attack::Pass
+                || way.iter().all(|&to| {
+                    let valid = to.x >= 0.0
+                        && to.z >= 0.0
+                        && to.x <= map.width() as f32 * 8.0
+                        && to.z <= map.height() as f32 * 8.0
+                        && leader.def().is_some_and(|d| self.terrain_reaches(d, from, to, 0.0));
+                    from = to;
+                    valid
+                });
+            if clear {
+                self.pack_drive(sid, &way);
+            } else {
+                // Drop the unsafe pass and clear its previously queued path.
+                st.pass = None;
+                st.shun.push((target, self.frame + SHUN_FOR));
+                st.target = NULLPOS;
+                self.pack_go(sid, pos, head, home, false);
+            }
         }
         self.pack_screen(sid, home, false);
         self.taskforces.packs.insert(sid, st);
@@ -1720,16 +1774,16 @@ mod tests {
         let guns = [((0.0, 0.0), 252.0), ((0.0, 75.0), 252.0)];
         let (pass, n) = plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |_| true).unwrap();
         assert_eq!(n, 2);
-        for &((_, z), reach) in &guns {
-            assert!((pass.side + z).abs() >= 170.0);
-            assert!((pass.side + z).abs() <= reach);
+        for &((x, z), reach) in &guns {
+            let gap = (pass.side + x * pass.left().0 + z * pass.left().1).abs();
+            assert!(gap >= 0.85 * reach && gap <= reach + 0.01);
         }
         // If only a head-on line is clear, abandon it rather than ram.
         assert!(plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |p| p.side.abs() < 5.0).is_none());
         // Turn away from a blocked side, keeping both guns outside the body.
         let (other, n) = plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |p| p.side < 0.0).unwrap();
         assert_eq!(n, 2);
-        assert!(other.side < -170.0);
+        assert!(other.side < -250.0);
     }
 
     #[test]

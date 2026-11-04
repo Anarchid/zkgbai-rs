@@ -5,9 +5,10 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use springai::{Unit, UnitDef, Vec3};
+use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
 use crate::Ai;
+use crate::defs::cmd;
 use crate::military::taskforce::{Aim, Doctrine, Judge, Keep};
 use crate::military::{SquadId, SquadKind};
 use crate::nav;
@@ -104,7 +105,10 @@ impl Ai {
             let sid = self.rush_force(heavy, "rush");
             self.eco.rush.push.as_mut().unwrap().force = Some(sid);
             self.retreat_remove_unit(heavy); // Pack owns its predicted repair sorties.
-            heavy.set_fire_state(0, 0); // Only deliberate, bounded shots; no chasing chaff.
+            // Apply only the game's minimum bait avoidance: ordinary light
+            // units are still worth shooting while we advance or retreat.
+            heavy.execute_custom_command(cmd::PREVENT_BAIT, &[1.0], 0, NO_TIMEOUT);
+            heavy.set_fire_state(2, 0);
         }
         self.rush_push_recruit_screen(heavy);
         self.rush_recruit_riot(heavy);
@@ -129,8 +133,9 @@ impl Ai {
         doctrine.heal_to = 0.9;
         doctrine.judge = Judge::Fates;
         doctrine.fate_secs = 8.0;
+        doctrine.pass_reach = 0.9;
         doctrine.lasting = 2.5;
-        doctrine.fire_state = (name == "rush").then_some(0);
+        doctrine.fire_state = (name == "rush").then_some(2);
         let shape = Arc::new(doctrine.shape(&self.defs, &self.taskforces.classes));
         let sid = self.squads.create(SquadKind::Taskforce, self.team_id);
         self.squad_handler.taskforces.push_back(sid);
