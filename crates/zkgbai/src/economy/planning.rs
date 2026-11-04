@@ -2798,8 +2798,9 @@ impl Ai {
 
         for position in spots {
             // A spot an ally queued a mex at in the pregame is the ally's
-            // (see `iq`): no task for it, and one made before the queue
-            // arrived is dropped, until the claim lapses.
+            // (see `iq`; one our queue holds too goes by team order): no
+            // task for it, and one made before the queue arrived is
+            // dropped, until the claim lapses.
             if let Some(team) = self.iq_spot_claimed(position) {
                 if self.iq_note_skipped(position) {
                     self.log(&format!(

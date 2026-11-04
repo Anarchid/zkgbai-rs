@@ -77,6 +77,8 @@ pub struct AllyPlans {
     pub started: bool,
     /// Our orders as last sent, one message each.
     announced: Vec<String>,
+    /// Where the mexes of our orders as last sent stand.
+    own_mexes: Vec<Vec3>,
 }
 
 impl AllyPlans {
@@ -90,6 +92,17 @@ impl AllyPlans {
         self.teams.iter().filter(|&(&team, _)| among(team)).find_map(|(&team, plans)| {
             plans.iter().any(|p| p.def_name == "staticmex" && distance(p.pos, pos) <= MEX_CLAIM).then_some(team)
         })
+    }
+
+    /// The ally we leave the spot at `pos` to: one whose queue has a mex
+    /// there, unless ours has one there too and we do not give way to that
+    /// ally (`gives_way`). Announcements cross in the pregame, so two
+    /// queues can both hold a spot; each then left it to the other until
+    /// the claims lapsed (Adamantine Mountain 2, 3v3: five spots for 3 min).
+    /// Team order settles it instead.
+    pub fn mex_left_to(&self, pos: Vec3, gives_way: impl Fn(i32) -> bool) -> Option<i32> {
+        let ours = self.own_mexes.iter().any(|&p| distance(p, pos) <= MEX_CLAIM);
+        self.mex_claim_among(pos, |t| !ours || gives_way(t))
     }
 }
 
@@ -297,15 +310,18 @@ impl Ai {
         self.log(&format!("iq: sent {} {what} items", orders.len()));
         self.op_emit("iq", json!({"sent": sent, "what": what}));
         self.iq.announced = msgs;
+        self.iq.own_mexes =
+            (orders.iter()).filter(|(def, _, _)| self.defs.name(*def) == "staticmex").map(|&(_, p, _)| p).collect();
     }
 
-    /// The team whose queued mex claims the spot at `pos`, while the claim
-    /// stands (before [`CLAIM_LAPSES`]; an owned spot never asks).
+    /// The team whose queued mex claims the spot at `pos` for itself, while
+    /// the claim stands (before [`CLAIM_LAPSES`]; an owned spot never asks):
+    /// see [`AllyPlans::mex_left_to`].
     pub fn iq_spot_claimed(&self, pos: Vec3) -> Option<i32> {
         if self.allies.is_empty() || self.frame >= CLAIM_LAPSES {
             return None;
         }
-        self.iq.mex_claim(pos)
+        self.iq.mex_left_to(pos, |t| self.iq_gives_way(t))
     }
 
     /// Whether a spot left to an ally was logged before (and note it).
@@ -444,6 +460,29 @@ mod tests {
         plans.teams.insert(3, vec![plan(1000.0), plan(3000.0)]);
         assert_eq!(plans.mex_claim_among(Vec3::xz(1000.0, 0.0), |t| t != 1), Some(3));
         assert_eq!(plans.mex_claim_among(Vec3::xz(3000.0, 0.0), |t| t < 2), None);
+    }
+
+    #[test]
+    fn a_spot_both_queues_hold_goes_by_team_order() {
+        // We are team 2 among AI allies 1 and 3: we give way to team 1 only.
+        let plan = |x: f32| Plan { def_name: "staticmex".into(), def_id: 1, pos: Vec3::xz(x, 0.0), face: 0, frame: 0 };
+        let gives_way = |t: i32| t < 2;
+        let mut plans =
+            AllyPlans { own_mexes: vec![Vec3::xz(1000.0, 0.0), Vec3::xz(2000.0, 0.0)], ..Default::default() };
+        plans.teams.insert(1, vec![plan(1000.0)]);
+        plans.teams.insert(3, vec![plan(2000.0), plan(3000.0)]);
+        // Held by team 1 and us: team 1's.
+        assert_eq!(plans.mex_left_to(Vec3::xz(1000.0, 0.0), gives_way), Some(1));
+        // Held by team 3 and us: ours (team 3 gives way to us).
+        assert_eq!(plans.mex_left_to(Vec3::xz(2000.0, 0.0), gives_way), None);
+        // Held by team 3 alone: team 3's.
+        assert_eq!(plans.mex_left_to(Vec3::xz(3000.0, 0.0), gives_way), Some(3));
+        // Team 3 sees the other side: it leaves 2000 to us.
+        let mut theirs =
+            AllyPlans { own_mexes: vec![Vec3::xz(2000.0, 0.0), Vec3::xz(3000.0, 0.0)], ..Default::default() };
+        theirs.teams.insert(2, vec![plan(1000.0), plan(2000.0)]);
+        assert_eq!(theirs.mex_left_to(Vec3::xz(2000.0, 0.0), |_| true), Some(2));
+        assert_eq!(theirs.mex_left_to(Vec3::xz(3000.0, 0.0), |_| true), None);
     }
 
     #[test]
