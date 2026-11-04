@@ -288,6 +288,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
     ),
     ("venomphase", "Army", "spiders raid with Venoms until the enemy fields a line or the map fills up"),
+    (
+        "frontallies",
+        "Army",
+        "the fight density counts allied armed ground units beside ours, so team fights read as dense as they are (default on)",
+    ),
+    (
+        "frontretire",
+        "Defense",
+        "once the fight density reaches 2000, pickets, lookers, garrisons and scout builds stand down for good; QRF teams stay (default on)",
+    ),
     ("jumps", "Army", "jumpjets jump"),
     (
         "lobsters",

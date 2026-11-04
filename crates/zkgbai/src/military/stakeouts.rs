@@ -384,6 +384,8 @@ pub struct Post {
 struct Stats {
     claimed: u32,
     lost: u32,
+    /// Pickets let go once the fights were dense (`frontretire`).
+    retired: u32,
     sightings: u32,
     flights: u32,
     follows: u32,
@@ -728,6 +730,10 @@ impl Ai {
     /// stakeouts: what they are short of (less those being built), if its
     /// scout is one of theirs or, with `anyscout`, it has a unit for them.
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
+        // `frontretire`: none once the fights are dense (`military::front`).
+        if self.front_retired() {
+            return 0;
+        }
         let builds = self.stakeouts_own(kind)
             || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && !scout_roster(kind).is_empty());
         if !builds || self.stakeouts_hot() {
@@ -755,7 +761,14 @@ impl Ai {
         }
         // Posts are planned before any scout exists: the factory builds
         // for them.
-        if frame % 30 == (self.offset + 11) % 30 {
+        // `frontretire`: the fights are dense, the pickets stand down. Those
+        // still on loan, striking or running are let go when they are free
+        // (they are ticked meanwhile, so a strike can end).
+        if self.front_retired() {
+            if frame % 30 == (self.offset + 11) % 30 {
+                self.stakeouts_stand_down(frame);
+            }
+        } else if frame % 30 == (self.offset + 11) % 30 {
             self.stakeouts.home_range = self.defs.get("turretlaser").map_or(460.0, |d| d.max_weapon_range());
             self.stakeouts.home = (self.cb.team_units().into_iter())
                 .filter(|u| !u.is_being_built() && u.def().is_some_and(|d| d.speed() <= 0.0))
@@ -780,6 +793,48 @@ impl Ai {
         if frame % SUMMARY_PERIOD == (self.offset + 17) % SUMMARY_PERIOD {
             self.stakeouts_summary(frame);
         }
+    }
+
+    /// `frontretire`: the free pickets and lookers leave, Puppies to their
+    /// herd (see `puppies`), the rest to the raider squads (which the QRF
+    /// can still draft). None is built again (`stakeouts_short`).
+    fn stakeouts_stand_down(&mut self, frame: i32) {
+        let free: Vec<Unit> = (self.stakeouts.members.iter())
+            .filter(|&(&id, m)| {
+                m.strike.is_none()
+                    && !self.coalesce_owns(id)
+                    && !self.stayveto_borrowed(id)
+                    && !self.qrf.members.contains_key(&id)
+                    && !self.retreat_handler.is_retreating(id)
+            })
+            .map(|(_, m)| m.f.unit)
+            .collect();
+        if free.is_empty() {
+            return;
+        }
+        let (mut herd, mut squads) = (0, 0);
+        for unit in free {
+            if self.defs.name_of(unit) == puppies::PUPPY {
+                self.role_end_stakeout(unit);
+                self.puppies_add(unit);
+                herd += 1;
+            } else {
+                unit.stop(0);
+                self.assign_role(unit, Role::SquadRaider);
+                squads += 1;
+            }
+        }
+        // Loans need not come back.
+        self.stakeouts.loaned.clear();
+        let left = self.stakeouts.members.len();
+        self.stakeouts.stats.retired += (herd + squads) as u32;
+        self.op_emit(
+            "stakeout",
+            json!({"event": "retire", "t": frame / 30, "herd": herd, "squads": squads, "left": left}),
+        );
+        self.log(&format!(
+            "stakeouts: dense fights, {herd} pickets to the Puppy herd, {squads} to raider squads, {left} busy"
+        ));
     }
 
     /// Plan the posts from the strategic analysis: for each region holding
@@ -1703,7 +1758,7 @@ impl Ai {
             "stakeout",
             json!({"event": "summary", "t": frame / 30, "members": s.count(), "look": look, "post": post, "shadow": shadow,
                    "posts": posts, "manned": manned, "wanted": s.wanted(self.phase_frame()), "pickets": members,
-                   "claimed": st.claimed, "lost": st.lost, "sightings": st.sightings, "flights": st.flights,
+                   "claimed": st.claimed, "lost": st.lost, "retired": st.retired, "sightings": st.sightings, "flights": st.flights,
                    "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks,
                    "strikes": st.strikes, "strike_kills": st.strike_kills, "strike_losses": st.strike_losses,
                    "strike_breaks": st.strike_breaks, "strike_asks": st.strike_asks, "strike_joins": st.strike_joins}),
