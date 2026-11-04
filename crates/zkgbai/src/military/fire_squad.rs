@@ -263,7 +263,11 @@ impl Ai {
         let Some(s) = self.squads.get(sid) else {
             return false;
         };
-        if self.dev_off("firesquads") || s.kind != SquadKind::Assault || s.is_air_squad {
+        if self.limpet_squad_managed(sid)
+            || self.dev_off("firesquads")
+            || s.kind != SquadKind::Assault
+            || s.is_air_squad
+        {
             self.fire_release(sid);
             return false;
         }

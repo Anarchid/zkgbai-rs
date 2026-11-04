@@ -37,6 +37,8 @@ pub struct BombVerdict {
     pub spent: f32,
     /// `gain + saved - spent * cost`: what charging is worth over sitting.
     pub net: f32,
+    /// Enemy losses less allied losses while reserving this bomb.
+    pub reserve_trade: f32,
     /// When the bomb went off or died in the run that got through, in the
     /// middle phase (frames).
     pub went_off: Option<i32>,
@@ -52,6 +54,23 @@ impl Model {
     /// towards the middle (a Glaive a Snitch surely blows up counted 0.6 of
     /// its metal), while the bomb is spent for certain.
     pub fn bomb_charge(&self, snap: &FightSnapshot, bomb: usize, busy: &[bool], horizon: i32) -> BombVerdict {
+        self.bomb_charge_inner(snap, bomb, busy, horizon, false)
+    }
+
+    /// Squad commitment: the escorts actually receive attack orders, so
+    /// side A fires for certain instead of using the fitted engagement prior.
+    pub fn limpet_charge(&self, snap: &FightSnapshot, bomb: usize, horizon: i32) -> BombVerdict {
+        self.bomb_charge_inner(snap, bomb, &[], horizon, true)
+    }
+
+    fn bomb_charge_inner(
+        &self,
+        snap: &FightSnapshot,
+        bomb: usize,
+        busy: &[bool],
+        horizon: i32,
+        ordered: bool,
+    ) -> BombVerdict {
         let mut snap = snap.clone();
         snap.flags.bombs = true;
         let n = snap.units.len();
@@ -83,16 +102,18 @@ impl Model {
             let phase: Vec<f64> =
                 (0..n).map(|i| if busy.get(i).copied().unwrap_or(false) { ph } else { 0.0 }).collect();
             let sit_phase: Vec<f64> = phase.iter().enumerate().filter(|&(i, _)| i != bomb).map(|(_, &p)| p).collect();
-            let (fs, _) = self.bomb_fates(&sit, horizon, &sit_phase, None);
+            let (fs, _) = self.bomb_fates(&sit, horizon, &sit_phase, None, ordered);
             let (fc, ln_s) =
-                self.bomb_fates(&snap, horizon, &phase, Some(BombRun { index: bomb, mode: BombMode::Charge }));
-            let (fd, _) = self.bomb_fates(&snap, horizon, &phase, Some(BombRun { index: bomb, mode: BombMode::Down }));
+                self.bomb_fates(&snap, horizon, &phase, Some(BombRun { index: bomb, mode: BombMode::Charge }), ordered);
+            let (fd, _) =
+                self.bomb_fates(&snap, horizon, &phase, Some(BombRun { index: bomb, mode: BombMode::Down }), ordered);
             let s = ln_s.exp() as f32;
             let (bs, as_) = tally(&sit, &fs, None);
             let (bc, ac) = tally(&snap, &fc, Some(bomb));
             let (bd, ad) = tally(&snap, &fd, Some(bomb));
             let spent = s * if fc[bomb].dead { 1.0 } else { 0.0 } + (1.0 - s);
             let w = 1.0 / phases.len() as f32;
+            v.reserve_trade += w * (bs - as_);
             v.p_through += w * s;
             v.gain += w * (s * bc + (1.0 - s) * bd - bs);
             v.saved += w * (as_ - (s * ac + (1.0 - s) * ad));
@@ -164,6 +185,64 @@ mod tests {
         let flags = SimFlags::from_switches(twod, true, true);
         let busy = units.iter().map(|u| busy && u.side == 1).collect();
         (FightSnapshot { units, flags }, bomb_i, busy)
+    }
+
+    #[test]
+    fn limpet_squad_trade_prices_the_bomb_and_escorts_in_both_branches() {
+        let mut specs = specs();
+        specs.insert(
+            "vehriot".into(),
+            Arc::new(UnitSpec {
+                def: "vehriot".into(),
+                cost: 240.0,
+                health: 1020.0,
+                speed: 2.1,
+                mobile: true,
+                radius: 12.0,
+                weapons: vec![WeaponSpec {
+                    name: "vehriot_vehriot_weapon".into(),
+                    weapon_type: "Cannon".into(),
+                    range: 285.0,
+                    reload: 1.77,
+                    salvo: 1,
+                    damage: 250.2,
+                }],
+                ..Default::default()
+            }),
+        );
+        let unit = |side, name: &str, x, z| SnapUnit {
+            side,
+            spec: specs[name].clone(),
+            hp: specs[name].health,
+            x,
+            z,
+            tubes: Vec::new(),
+        };
+        let m = Model::load().unwrap();
+        for flags in [
+            SimFlags::default(),
+            SimFlags::from_switches(false, false, true),
+            SimFlags::from_switches(false, true, true),
+            SimFlags::from_switches(true, true, true),
+        ] {
+            let mut units: Vec<_> =
+                (0..4).map(|i| unit(0, "amphraid", -20.0 * (i % 2) as f32, (i as f32 - 1.5) * 35.0)).collect();
+            units.push(unit(0, "amphbomb", 80.0, 0.0));
+            units.push(unit(1, "vehriot", 320.3, -75.0));
+            units.push(unit(1, "vehriot", 320.3, 75.0));
+            let mut snap = FightSnapshot { units, flags };
+            let v = m.limpet_charge(&snap, 4, 600);
+            assert!(v.reserve_trade.is_finite() && v.net.is_finite());
+            assert!((v.net - (v.gain + v.saved - v.spent * 160.0)).abs() < 0.01);
+            if flags.twod {
+                assert!(v.net > 400.0 && v.reserve_trade + v.net > 100.0, "{v:?}");
+            }
+            snap.units.truncate(5);
+            snap.units.extend((0..3).map(|i| unit(1, "energysolar", 320.3, (i as f32 - 1.0) * 35.0)));
+            let waste = m.limpet_charge(&snap, 4, 600);
+            assert!(waste.net < -150.0, "{flags:?} {waste:?}");
+            assert!(waste.reserve_trade > 200.0);
+        }
     }
 
     const ROGUES: [(&str, f32, f32); 4] = [

@@ -4,7 +4,8 @@ The mechanics predictor can express the requested decision after adding Limpet's
 missing explosion effects. This experiment demonstrates the mechanism and its
 counterfactual accounting; it does **not** establish real-game decision accuracy.
 The mechanics correction is now unconditional in every Rust/Python mechanics
-formulation. Recruitment, orders, and retreat behavior are unchanged.
+formulation. The initial probe left recruitment, orders and retreat unchanged;
+the live tactic added later is documented at the end of this file.
 
 Worktree branch: `codex/limpet-probe`, based on `wip` at
 `f5f9dbdad017c405f9a2ada92c039961e6615a8e`.
@@ -140,3 +141,38 @@ cargo test -p zkgbai --lib military::fightsim --offline -j 2
 
 The summary includes input/output SHA-256 hashes. Raw results, input states,
 the summary, ablation, and test log are in this worktree's ignored `target/`.
+
+## Live tactic (`limpet`, 2026-11-04)
+
+The experiment now has an operator-controlled live policy: `limpet` defaults on
+in wip and off in main. `enable=limpet` / `disable=limpet` and the operator
+feature panel control it. `limpetshadow` defaults off; with `limpet` disabled,
+it journals candidate decisions without taking ownership or changing orders.
+
+Recruitment is unchanged. Eligible ordinary raider, assault and hover squads
+reserve their Limpets behind their escorts. A reserved bomb cannot anchor the
+squad formation. At engagement checks, the nearest available Limpet is compared
+with reserving it, with the actual squad as escorts and other reserved Limpets
+removed from both branches. Both branches explicitly commit allied fire, also
+on main; they retain the selected base/tube/focus/2-D mechanics formulation.
+The tactic requires more than 10 metal of marginal benefit, a nonnegative total
+squad trade, and predicted blast delivery. Without that benefit the escorts may
+still attack without the bomb. A profitable strike can override the ordinary
+threat retreat. It uses observed tube state when that branch supplies it, and
+otherwise assumes loaded weapons rather than inventing reload evidence.
+
+The bomb and its escorts receive attack orders and temporary command ownership;
+squad reassignment, coalescing and damage-triggered retreat cannot cancel that
+commitment. It ends when the bomb dies, the target dies or becomes stale, the
+squad becomes unavailable, the switch is disabled, or 20 seconds elapse. Other
+controllers and operator orders take precedence; ownership is only restored if
+it is still ours. A switched-off tactic releases its units on the next update.
+
+The initial policy declines to price unknown, shielded, airborne, submerged or
+larger-than-24-unit fights. Special squads, strikes, QRF drafts and units already
+borrowed by another controller retain their own conduct. At most two fresh
+counterfactual queries run per frame. Journal `k=limpet` records the snapshot,
+member IDs, marginal and total trades, charge/reserve/shadow decision, query
+cost and commitment releases. This is an experimental policy, not a claim of
+validated match performance; the earlier offline and engine-model limitations
+still apply.
