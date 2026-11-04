@@ -197,9 +197,10 @@ pub(super) struct Target {
     pub(super) threatened: Vec<(usize, f32)>,
     pub(super) urgency: f32,
     prediction_only: bool,
-    /// The longest weapon range among its known members.
+    /// The longest weapon range among its identified members (not those
+    /// whose type is only guessed).
     range: f32,
-    /// How far from its centre its guns reach: range plus spread.
+    /// How far from its centre their guns reach: range plus spread.
     reach: f32,
 }
 
@@ -369,9 +370,12 @@ impl Ai {
                 continue;
             }
             let urgency = threatened.iter().map(|&(i, t)| self.qrf.assets[i].cost / (t + 5.0)).sum();
-            let reach = (g.members.iter().filter_map(|id| self.qrf.tracks.get(id)))
-                .map(|t| distance(t.pos, g.center) + t.kind().map_or(0.0, |d| d.max_weapon_range()))
-                .fold(range, f32::max);
+            // For `standoff`, identified types only: a radar dot's type is
+            // guessed from its top speed (Recluses and Grizzlies both go
+            // 45, and chickens or debug units are among the guesses).
+            let known = (g.members.iter().filter_map(|id| self.qrf.tracks.get(id)))
+                .filter_map(|t| t.def.map(|d| (distance(t.pos, g.center), d.max_weapon_range())));
+            let (known_range, reach) = known.fold((0.0f32, 0.0f32), |(r, x), (d, w)| (r.max(w), x.max(d + w)));
             targets.push(Target {
                 groups: vec![gi],
                 center: g.center,
@@ -379,7 +383,7 @@ impl Ai {
                 threatened,
                 urgency,
                 prediction_only: g.prediction_only,
-                range,
+                range: known_range,
                 reach,
             });
         }
