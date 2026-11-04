@@ -5,8 +5,8 @@
 //! the shape is done.
 //!
 //! The AI digs ditches across the chokepoints it fortifies when the enemy's
-//! ground army is vehicles or hovers and ours is not: twelve elmos down is
-//! too steep for those (their slope limit is 27 degrees) while bots and
+//! ground army is vehicles or hovers and the alliance's is not: twelve
+//! elmos down is too steep for those (their slope limit is 27 degrees) while bots and
 //! amphibious units walk straight through. Once dug, the next terrain
 //! re-analysis sees the chokepoint closed to the enemy. With `detour`
 //! (2026-10-28) a ditch is dug only for what it is worth, how much longer
@@ -25,8 +25,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 use zk_terrain::{ChokeKind, Pos, Tier};
 
 use crate::Ai;
-use crate::economy::factory::FacKind;
-use crate::terrain::move_class;
+use crate::terrain::{move_class, tier_of};
 use crate::util::{OPTION_SHIFT_KEY, distance};
 
 /// The gadget's custom commands.
@@ -96,10 +95,47 @@ pub struct Ditch {
 }
 
 impl Ai {
+    /// A ditch closes routes for everyone. Check actual friendly units,
+    /// including humans and other AIs, and production that has not produced
+    /// an army yet (plates and nanoframes count too). Without a route model
+    /// for each ally, any vehicle/hover commitment vetoes new ditches.
+    fn eco_ditch_obstructs_alliance(&self) -> bool {
+        self.cb.friendly_units().into_iter().any(|u| {
+            u.health() > 0.0
+                && u.def().is_some_and(|d| {
+                    ditch_sensitive_factory(self.defs.name(d))
+                        || matches!(tier_of(d), Some(Tier::Vehicle | Tier::Hover))
+                })
+        }) || self.eco.construction_tasks.iter().any(|&id| {
+            self.eco
+                .tasks
+                .get(id)
+                .and_then(|t| t.as_construction())
+                .is_some_and(|c| ditch_sensitive_factory(self.defs.name(c.build_type)))
+        }) || self.iq.teams.iter().any(|(team, plans)| {
+            self.allies.contains(team)
+                && plans.iter().any(|p| self.frame < crate::iq::CLAIM_LAPSES && ditch_sensitive_factory(&p.def_name))
+        })
+    }
+
     /// Dig a ditch across a chokepoint we fortify, if the enemy's ground
-    /// army cannot cross ditches and ours can; check on the one being dug.
+    /// army cannot cross ditches and the alliance's can; check on the one
+    /// being dug.
     pub fn eco_dig_ditches(&mut self, frame: i32) {
         if (frame + self.offset) % DITCH_PERIOD != 0 || self.dev_off("ditch") {
+            return;
+        }
+        // Recheck before the in-progress early return: an ally may have
+        // started a vehicle factory since we began digging.
+        if self.eco_ditch_obstructs_alliance() {
+            if let Some(d) = self.eco.ditch.take() {
+                if self.eco.workers.get(&d.worker.id()).is_some_and(|w| !w.is_chicken) {
+                    d.worker.stop(0);
+                }
+                self.eco_release_terraform(&[d.worker]);
+                self.eco.ditch_tries.push((d.mid, frame));
+                self.log("terraform: stopped digging a ditch to preserve allied vehicle/hover routes");
+            }
             return;
         }
         let map = self.cb.map();
@@ -124,12 +160,7 @@ impl Ai {
         }
 
         let Some(s) = &self.strategy else { return };
-        let vehicle_factory =
-            self.fac.factories.values().any(|f| matches!(f.kind(), FacKind::Veh | FacKind::Tank | FacKind::Hover));
-        if !matches!(s.tier, Tier::Vehicle | Tier::Hover)
-            || vehicle_factory
-            || self.eco.adjusted_income < DITCH_MIN_INCOME
-        {
+        if !matches!(s.tier, Tier::Vehicle | Tier::Hover) || self.eco.adjusted_income < DITCH_MIN_INCOME {
             return;
         }
         let Some(tier_map) = self.terrain().and_then(|t| t.tier(s.tier)) else { return };
@@ -516,4 +547,179 @@ impl Ai {
 
 fn round2(x: f32) -> f32 {
     (x * 100.0).round() / 100.0
+}
+
+fn ditch_sensitive_factory(name: &str) -> bool {
+    matches!(name, "factoryveh" | "factorytank" | "factoryhover" | "plateveh" | "platetank" | "platehover")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::economy::{Worker, WorkerTask};
+    use std::cell::{Cell, RefCell};
+    use std::ffi::{c_char, c_void};
+
+    thread_local! {
+        static READY: Cell<bool> = const { Cell::new(false) };
+        static FRIENDS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+        static ALIVE: Cell<bool> = const { Cell::new(true) };
+        static STOPS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn fixture() -> Ai {
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, max: i32) -> i32 {
+            if !READY.get() {
+                return 0;
+            }
+            if !out.is_null() {
+                for i in 0..max.min(10) {
+                    unsafe {
+                        out.add(i as usize).write(i + 1);
+                    }
+                }
+            }
+            10
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const c_char {
+            match id {
+                1 => c"factoryveh",
+                2 => c"factorytank",
+                3 => c"factoryhover",
+                4 => c"plateveh",
+                5 => c"platetank",
+                6 => c"platehover",
+                7 => c"vehraid",
+                8 => c"hoverraid",
+                9 => c"dyntrainer",
+                _ => c"planefighter",
+            }
+            .as_ptr()
+        }
+        unsafe extern "C" fn friends(_: i32, out: *mut i32, max: i32) -> i32 {
+            FRIENDS.with_borrow(|ids| {
+                if !out.is_null() {
+                    for (i, &id) in ids.iter().take(max as usize).enumerate() {
+                        unsafe {
+                            out.add(i).write(id);
+                        }
+                    }
+                }
+                ids.len() as i32
+            })
+        }
+        unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
+            id
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            if ALIVE.get() { 1000.0 } else { 0.0 }
+        }
+        unsafe extern "C" fn moving(_: i32, id: i32) -> bool {
+            (7..=9).contains(&id)
+        }
+        unsafe extern "C" fn slope(_: i32, id: i32) -> f32 {
+            if id == 9 { 0.3 } else { 0.1 }
+        }
+        unsafe extern "C" fn class(_: i32, id: i32) -> i32 {
+            if id == 8 { 2 } else { 0 }
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> f32 {
+            0.0
+        }
+        unsafe extern "C" fn no_weapons(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn building(_: i32, _: i32) -> bool {
+            true
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, _: *mut c_void) -> i32 {
+            if topic as u32 == springai::ffi::CommandTopic::COMMAND_UNIT_STOP {
+                STOPS.set(STOPS.get() + 1);
+            }
+            0
+        }
+        READY.set(false);
+        FRIENDS.with_borrow_mut(Vec::clear);
+        ALIVE.set(true);
+        STOPS.set(0);
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.getFriendlyUnits = Some(friends);
+            t.Unit_getDef = Some(def);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(health);
+            t.Unit_isBeingBuilt = Some(building);
+            t.UnitDef_isMoveDataAvailable = Some(moving);
+            t.UnitDef_MoveData_getMaxSlope = Some(slope);
+            t.UnitDef_MoveData_getSpeedModClass = Some(class);
+            t.UnitDef_getMinWaterDepth = Some(zero);
+            t.UnitDef_getMaxWaterDepth = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(zero);
+            t.Unit_getWeapons = Some(no_weapons);
+            t.Engine_handleCommand = Some(command);
+        });
+        READY.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai.allies = vec![0]; // A human/other AI: no peer or allied census required.
+        ai.offset = 0;
+        assert!(!ai.dev_off("ditch"));
+        ai
+    }
+
+    #[test]
+    fn allied_factories_plates_and_mobile_units_veto_ditches_even_before_completion() {
+        let ai = fixture();
+        assert!(ai.fac.factories.is_empty());
+        for id in 1..=10 {
+            FRIENDS.with_borrow_mut(|ids| *ids = vec![id]);
+            assert_eq!(ai.eco_ditch_obstructs_alliance(), id <= 8, "unit {id}");
+        }
+        FRIENDS.with_borrow_mut(|ids| *ids = vec![1]);
+        ALIVE.set(false);
+        assert!(!ai.eco_ditch_obstructs_alliance());
+    }
+
+    #[test]
+    fn pending_factories_and_live_allied_opening_plans_veto_ditches() {
+        let mut ai = fixture();
+        let task = WorkerTask::construction(ai.defs.get("factorytank").unwrap(), Vec3::ZERO, 0);
+        let id = ai.eco.tasks.insert(task);
+        ai.eco.construction_tasks.push(id);
+        assert!(ai.eco_ditch_obstructs_alliance());
+        ai.eco.construction_tasks.clear();
+        ai.iq.teams.insert(
+            0,
+            vec![crate::iq::Plan { def_name: "factoryhover".into(), def_id: 3, pos: Vec3::ZERO, face: 0, frame: 0 }],
+        );
+        assert!(ai.eco_ditch_obstructs_alliance());
+        ai.allies.clear();
+        assert!(!ai.eco_ditch_obstructs_alliance());
+        ai.allies.push(0);
+        ai.frame = crate::iq::CLAIM_LAPSES;
+        assert!(!ai.eco_ditch_obstructs_alliance());
+    }
+
+    #[test]
+    fn new_allied_vehicle_production_stops_active_digging_and_releases_worker() {
+        for retreating in [false, true] {
+            let mut ai = fixture();
+            let unit = Unit::from_id(ai.cb, 9).unwrap();
+            let mut worker = Worker::new(unit, ai.team_id);
+            worker.is_chicken = retreating;
+            ai.eco.workers.insert(unit.id(), worker);
+            let mid = Vec3::xz(500.0, 500.0);
+            ai.eco.ditch = Some(Ditch { mid, ground: 100.0, worker: unit, ordered: 0 });
+            ai.eco_hold_terraform(&[unit], 600);
+            FRIENDS.with_borrow_mut(|ids| *ids = vec![1, 9]);
+            ai.eco_dig_ditches(DITCH_PERIOD);
+            assert!(ai.eco.ditch.is_none());
+            assert!(!ai.eco.terraform_hold.contains_key(&unit.id()));
+            assert_eq!(ai.eco.ditch_tries, vec![(mid, DITCH_PERIOD)]);
+            assert_eq!(STOPS.get(), usize::from(!retreating), "preserve retreat orders");
+        }
+    }
 }
