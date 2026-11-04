@@ -603,7 +603,10 @@ impl Ai {
             self.logistics.issues.keys().copied().filter(|&t| self.eco.tasks.get(t).is_none()).collect();
         for task in gone {
             let Some(issue) = self.logistics.issues.get(&task) else { continue };
-            let about = self.cb.friendly_units_in(issue.pos, 48.0);
+            // A cylinder: an issue's position carries no height, and on high
+            // ground the engine's sphere missed a finished Lucifer beside it
+            // (11-04 Thornford: built, closed "gone").
+            let about = self.cb.friendly_units_in_cylinder(issue.pos, 48.0);
             let stands = (self.eco.porcs.iter().chain(about.iter()))
                 .any(|u| distance(u.pos(), issue.pos) < 48.0 && self.defs.name_of(*u) == issue.what);
             let outcome = if !stands {

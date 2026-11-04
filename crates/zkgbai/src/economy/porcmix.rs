@@ -77,7 +77,9 @@ impl Ai {
     /// `radius` of `p`: where, what.
     pub(crate) fn eco_turrets_near(&self, p: Vec3, radius: f32) -> Vec<(Vec3, UnitDef)> {
         let team = self.team_id;
-        let mut out: Vec<(Vec3, UnitDef)> = (self.cb.friendly_units_in(p, radius).into_iter())
+        // A cylinder, not the engine's sphere: sites carry no height, and on
+        // high ground a sphere about one misses what stands beside it.
+        let mut out: Vec<(Vec3, UnitDef)> = (self.cb.friendly_units_in_cylinder(p, radius).into_iter())
             .filter(|u| u.team() == team && u.health() > 0.0)
             .filter_map(|u| u.def().filter(|d| is_mixed(self.defs.name(*d))).map(|d| (u.pos(), d)))
             .collect();
