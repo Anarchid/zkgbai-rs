@@ -46,10 +46,13 @@
 //! small gang fails where a big one passes) the prefix is doubled, up to
 //! [`SIZE_STEPS`] times, and only then the whole cluster (the lobby, 11-04:
 //! six raiders chasing one Dagger, seven one Ravager, whole clusters on a
-//! lone Dart). A clean gang whose focus outruns it (faster than its
-//! slowest member and the gap growing [`CHASE_TICKS`] rechecks running)
-//! breaks off (`chase`), and that enemy is left alone for [`SHY`] frames,
-//! so the same Dart does not form a new gang every few seconds.
+//! lone Dart). A raider squad chasing alone is still the whole squad: its
+//! handler freezes a squad while any member is borrowed. A clean gang
+//! that is not closing on its focus (out of its guns' reach and the gap
+//! not shrinking by [`CHASE_CLOSE`] a recheck, [`CHASE_TICKS`] rechecks
+//! running: the focus kites or flees at our speed) breaks off (`chase`),
+//! and that enemy is left alone for [`SHY`] frames, so the same Dart does
+//! not form a new gang every few seconds.
 //!
 //! `coalesceshadow` (with `coalesce` off) judges the same clusters and
 //! journals what would have formed, with the same windows, for the off arm
@@ -119,10 +122,11 @@ const REORDER: i32 = 60;
 const JUST_ENOUGH: f32 = 2.0;
 /// A failing prefix is doubled this many times before the whole cluster.
 const SIZE_STEPS: u32 = 2;
-/// A clean gang is chasing when its gap to the focus grows this much
-/// (elmos) per recheck, this many rechecks running.
-const CHASE_GAIN: f32 = 30.0;
-const CHASE_TICKS: u8 = 3;
+/// A clean gang out of reach of its focus is chasing when the gap does
+/// not shrink by this much (elmos) per recheck, this many rechecks
+/// running (a closing gang shrinks it by 50 or more at raider speed).
+const CHASE_CLOSE: f32 = 20.0;
+const CHASE_TICKS: u8 = 4;
 /// An enemy that outran a gang is left alone this long (frames).
 const SHY: i32 = 30 * 15;
 /// Frames after a form (or would) over which the outcome is read.
@@ -717,8 +721,8 @@ impl Ai {
         Some(taken.iter().map(|&i| members[i]).collect())
     }
 
-    /// A clean gang whose focus outruns it breaks off, and that enemy is
-    /// left alone a while (`coalsize`).
+    /// A clean gang that is not closing on its focus breaks off, and that
+    /// enemy is left alone a while (`coalsize`).
     fn coalesce_chase(&mut self, gid: u32, fid: i32, units: &[Unit]) {
         let frame = self.frame;
         let Some(e) = self.war.targets.get(&fid) else { return };
@@ -726,7 +730,7 @@ impl Ai {
         if e.is_static || e.is_dead {
             return;
         }
-        let slowest = units.iter().filter_map(|u| u.def()).map(|d| d.speed()).fold(f32::INFINITY, f32::min);
+        let reach = units.iter().filter_map(|u| u.def()).map(|d| d.max_weapon_range()).fold(0.0, f32::max);
         let n = units.len().max(1) as f32;
         let mid = Vec3::xz(
             units.iter().map(|u| u.pos().x).sum::<f32>() / n,
@@ -734,9 +738,9 @@ impl Ai {
         );
         let gap = distance(mid, e.position);
         let Some(g) = self.coalesce.gangs.iter_mut().find(|g| g.id == gid) else { return };
-        let grew = g.gap.is_some_and(|(f, last)| f == fid && gap > last + CHASE_GAIN);
+        let stalled = g.gap.is_some_and(|(f, last)| f == fid && gap > last - CHASE_CLOSE);
         g.gap = Some((fid, gap));
-        g.chasing = if grew && ed.speed() > slowest * 1.05 { g.chasing + 1 } else { 0 };
+        g.chasing = if stalled && gap > reach + 50.0 && ed.speed() > 0.0 { g.chasing + 1 } else { 0 };
         if g.chasing >= CHASE_TICKS {
             self.coalesce.shy.insert(fid, frame + SHY);
             self.coalesce.chases += 1;
