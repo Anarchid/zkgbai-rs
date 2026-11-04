@@ -642,13 +642,26 @@ impl Ai {
                     }
                     last = prefix.len();
                     let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
-                    if let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) {
+                    let judged = self.coalesce_judge(&units, None, budget);
+                    if let Judged::Pass(v) = judged {
                         self.coalesce.sized += 1;
                         self.coalesce_form(prefix, v, shadow, cluster);
                         sized = true;
                         break;
                     }
                     self.coalesce.sized_failed += 1;
+                    // Why the prefix failed (for the read).
+                    let why = match &judged {
+                        Judged::Fail(t, p) => json!({"tally": tally_json(t), "p_prize": p}),
+                        Judged::NoFight => json!("nofight"),
+                        Judged::Unknown => json!("unknown"),
+                        Judged::Pass(_) => json!("pass"),
+                    };
+                    self.op_emit(
+                        "coalesce",
+                        json!({"event": "sized_no", "t": frame / 30, "ratio": ratio, "prefix": prefix.len(),
+                               "cluster": cluster, "why": why}),
+                    );
                     if budget.spent() {
                         sized = true;
                         break;
