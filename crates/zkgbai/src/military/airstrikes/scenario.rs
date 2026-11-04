@@ -36,7 +36,11 @@ impl Ai {
         }
         if matches!(
             test.as_str(),
-            "airstrike-raptors" | "airstrike-raptors-likho" | "airstrike-raptors-pad" | "airstrike-revenants"
+            "airstrike-raptors"
+                | "airstrike-raptors-likho"
+                | "airstrike-raptors-pad"
+                | "airstrike-raptors-pad-lend"
+                | "airstrike-revenants"
         ) {
             self.airstrike_gunship_scenario(&test, frame);
             return;
