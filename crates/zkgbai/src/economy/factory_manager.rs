@@ -1335,7 +1335,14 @@ impl Ai {
             fac.add_scout_allowance(1);
         }
 
-        if eminent && kgb_rand() < f64::from((tf / 10.0) * (1.0 - fm.heavy_arty_value / war.enemy_heavy_porc_value)) {
+        // Dense fronts support a larger battery as well as more frequent orders.
+        let siege_chance = crate::military::siege_cover::production_chance(
+            tf / 10.0,
+            fm.heavy_arty_value,
+            war.enemy_heavy_porc_value,
+            self.front_escalation(),
+        );
+        if eminent && kgb_rand() < f64::from(siege_chance) {
             fac.add_scout_allowance(1);
             return "vehheavyarty";
         }
@@ -1495,10 +1502,13 @@ impl Ai {
             return heavy;
         }
 
-        if income > 25.0
-            && war.enemy_heavy_porc_value > 0.0
-            && kgb_rand() < f64::from(tf * (1.0 - fm.arty_value / war.enemy_porc_value))
-        {
+        let siege_chance = crate::military::siege_cover::production_chance(
+            tf,
+            fm.arty_value,
+            war.enemy_porc_value,
+            self.front_escalation(),
+        );
+        if income > 25.0 && war.enemy_heavy_porc_value > 0.0 && kgb_rand() < f64::from(siege_chance) {
             fac.expensive_raider_spam -= 1.0;
             return "tankarty";
         }

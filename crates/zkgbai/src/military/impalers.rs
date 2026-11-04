@@ -1069,6 +1069,7 @@ impl Ai {
         let buildings: Vec<&Target> = targets.iter().filter(|t| !t.mobile && t.left > 0.0).collect();
         let keep = station.filter(|&s| {
             self.impalers_safe(s)
+                && self.siege_advance_supported(pos, s, None)
                 && (frame - since < RESTATION
                     || (buildings.iter().any(|t| in_range(s, t.pos))
                         && self.war.get_total_friendly_power(s) >= COVER_KEPT * cover))
@@ -1080,7 +1081,12 @@ impl Ai {
                 let s = new.as_ref().map_or_else(
                     || {
                         let toward = buildings.first().map_or(self.graph.get_enemy_center(), |t| t.pos);
-                        self.graph_get_closest_haven(toward)
+                        let haven = self.graph_get_closest_haven(toward);
+                        if self.siege_advance_supported(pos, haven, None) && self.impalers_safe(haven) {
+                            haven
+                        } else {
+                            self.graph_get_closest_haven(pos)
+                        }
                     },
                     |c| c.pos,
                 );
@@ -1175,6 +1181,8 @@ impl Ai {
     /// A station for a battery of `n` guns at `from`, among where it stands,
     /// the places at range from the buildings worth most per missile and
     /// those behind our squads, that are on the map, safe and reachable.
+    /// Reject leaving the friendly screen before ranking target worth (see
+    /// `siege_cover`); moving into stronger allied cover remains valid.
     /// Each is worth what it reaches (outright kills at their bonus) for the
     /// way there, and leaves the guns out of our cover so long (see
     /// [`Ai::impalers_exposure`]): of those worth at least `1 - eps` of the
@@ -1214,7 +1222,11 @@ impl Ai {
             }
         }
         places.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let fits = |p: Vec3| self.impalers_safe(p) && reaches(self.reach_terrain(), def, from, p, AT_STATION);
+        let fits = |p: Vec3| {
+            self.impalers_safe(p)
+                && self.siege_advance_supported(from, p, None)
+                && reaches(self.reach_terrain(), def, from, p, AT_STATION)
+        };
         let &(top, most) = places.iter().find(|c| fits(c.0))?;
         let floor = (1.0 - self.impalers.eps.unwrap_or(EPS)) * most;
         let exposure = |p: Vec3| self.impalers_exposure(from, p, def.speed());

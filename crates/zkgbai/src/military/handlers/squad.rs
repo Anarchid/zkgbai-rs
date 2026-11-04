@@ -648,7 +648,12 @@ impl Ai {
                                 && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
                         })
                 };
-                if room && kgb_rand() < f64::from(d.produce) {
+                let scale = if d.aim == taskforce::Aim::Siege {
+                    crate::military::siege_cover::production_scale(self.front_escalation())
+                } else {
+                    1.0
+                };
+                if room && kgb_rand() < f64::from((d.produce * scale).min(1.0)) {
                     return Some((def, d.name.clone(), "core".to_owned()));
                 }
             }

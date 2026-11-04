@@ -1368,7 +1368,8 @@ pub fn seeds() -> Vec<Doctrine> {
     let mut emissary = Doctrine::new("emissary");
     emissary.note = "A siege detachment (see `siege`): Emissaries park beyond the enemy statics' reach where \
                      they reach the most and fire at everything, Ogres against raiders, an Ettin past 3000 \
-                     metal. Tank factories build an Emissary on 12% of picks while a force has room."
+                     metal. Tank factories build an Emissary on 12% of picks while a force has room, \
+                     rising to 18% at dense fronts."
         .into();
     emissary.enabled = false;
     emissary.core = vec!["tankarty".into()];
