@@ -1240,7 +1240,11 @@ impl Ai {
     /// the one nearest the box's metal (`spots`). Deterministic, since
     /// later allies replay the earlier ones' picks. `None` if no ring point
     /// is in the box that far from them all.
+    /// Off with `disable=startspread`.
     fn spread_start(&self, taken: &[Vec3], spots: &[Vec3]) -> Option<Vec3> {
+        if self.dev_off("startspread") {
+            return None;
+        }
         let size = self.graph.get_map_center() * 2.0;
         let mut best: Option<(f32, Vec3)> = None;
         for &t in taken {
@@ -1266,6 +1270,14 @@ impl Ai {
                     }
                 }
             }
+        }
+        if let Some((_, p)) = best {
+            self.log(&format!(
+                "Teams Mode: {} metal spots in our box for more starts: one off them at ({:.0}, {:.0})",
+                spots.len(),
+                p.x,
+                p.z
+            ));
         }
         best.map(|(_, p)| p)
     }

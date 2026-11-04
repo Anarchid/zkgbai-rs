@@ -223,9 +223,10 @@ impl Ai {
 
     /// The factories queued by the allies we give way to (see
     /// `iq_gives_way`) with none of theirs standing yet, until the claims
-    /// lapse: where they will plop. (def, position, facing)
+    /// lapse: where they will plop. (def, position, facing, name) None
+    /// with `disable=plopclear`.
     fn eco_allied_plop_plans(&self) -> Vec<(UnitDef, Vec3, i32, String)> {
-        if self.allies.is_empty() || self.frame >= CLAIM_LAPSES {
+        if self.allies.is_empty() || self.frame >= CLAIM_LAPSES || self.dev_off("plopclear") {
             return Vec::new();
         }
         (self.iq.teams.iter())
