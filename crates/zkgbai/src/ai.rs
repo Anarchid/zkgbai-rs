@@ -1328,6 +1328,12 @@ impl Ai {
         self.disabled.contains(feature)
     }
 
+    /// Switch `feature` on for this game (the team's conquest roll, see
+    /// `economy::rush`).
+    pub(crate) fn dev_enable(&mut self, feature: &str) {
+        self.disabled.remove(feature);
+    }
+
     /// The fight predictor's mechanics fight as the switches ask for it, on
     /// every snapshot this AI builds: `fight2d` (units keep their places in
     /// the plane, no overlaps, splash, least-health targeting) and
