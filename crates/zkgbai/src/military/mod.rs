@@ -2093,26 +2093,12 @@ impl Ai {
     }
 
     pub fn war_get_arty_target(&mut self, origin: Vec3, defend: bool) -> Vec3 {
-        self.war_get_arty_target_if(origin, defend, |_, _| true)
-    }
-
-    /// Artillery targets whose firing position passes the caller's safety
-    /// policy. Filter before ranking, including counterbattery and fog targets.
-    pub(crate) fn war_get_arty_target_if(
-        &mut self,
-        origin: Vec3,
-        defend: bool,
-        valid: impl Fn(&Self, Vec3) -> bool,
-    ) -> Vec3 {
         let mut target = NULLPOS;
         let mut cost = NO_COST;
         // Firing evidence is useful even without a targetable LOS contact.
         // Ordinary artillery can approach the battery; area weapons may fire
         // at the ground estimate through the strike support-fire path.
         for fix in self.counterbattery_fixes(sweeps::counterbattery::FRESH).filter(|f| f.ground) {
-            if !valid(self, fix.pos) {
-                continue;
-            }
             let score = distance(origin, fix.pos) - fix.range;
             if score < cost {
                 target = fix.pos;
@@ -2124,9 +2110,6 @@ impl Ai {
         // first check defense targets
         if defend {
             for d in &war.defense_targets {
-                if !valid(self, d.position) {
-                    continue;
-                }
                 let tmpcost = distance(origin, d.position) - d.damage;
                 if tmpcost < cost {
                     cost = tmpcost;
@@ -2138,9 +2121,6 @@ impl Ai {
         // then look for enemy mexes to kill, and see which is cheaper
         for ms in self.graph.get_enemy_spots() {
             let p = ms.get_pos();
-            if !valid(self, p) {
-                continue;
-            }
             let tmpcost = (distance(p, origin) / 4.0) - (500.0 * war.get_threat(p));
             if tmpcost < cost {
                 target = p;
@@ -2151,7 +2131,7 @@ impl Ai {
         // then look for enemy units to kill, and see if any are better targets
         // then check for nearby enemies that aren't raiders.
         for e in war.targets.values() {
-            if e.is_dead || (e.identified && e.can_fly()) || e.is_raider || !valid(self, e.position) {
+            if (e.identified && e.can_fly()) || e.is_raider {
                 continue;
             }
             let mut tmpcost = distance(origin, e.position) - (500.0 * war.get_threat(e.position));
@@ -2180,7 +2160,7 @@ impl Ai {
         }
 
         // if no targets are available attack enemyshadowed metal spots until we find one
-        let (target, _) = self.war_shadowed_spot_target(origin, cost, false, &|p| valid(self, p));
+        let (target, _) = self.war_shadowed_spot_target(origin, cost, false, &|_| true);
         if target != NULLPOS {
             return self.war_mark_target(target);
         }

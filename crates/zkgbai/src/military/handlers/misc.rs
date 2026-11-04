@@ -10,7 +10,7 @@ use crate::defs::cmd;
 use crate::kgbutil::kgb_move_to;
 use crate::military::Fighter;
 use crate::nav;
-use crate::util::{NULLPOS, distance, get_directional_point};
+use crate::util::{NULLPOS, distance, get_radial_point};
 
 mod cloaks;
 mod sappers;
@@ -440,40 +440,15 @@ impl Ai {
             }
             let pos = u.pos();
             let name = self.defs.name_of(u);
-            let amph_assault = name == "amphassault";
-            let siege = matches!(
-                name,
-                "vehheavyarty" | "tankarty" | "tankheavyarty" | "striderarty" | "cloakarty" | "veharty" | "jumparty"
-            );
-            if u.rules_param_float("disarmed", 0.0) > 0.0
-                || (self.war.get_effective_threat(pos) > 0.0 && (amph_assault || siege))
+            let (amph_assault, heavy_arty) = (name == "amphassault", name == "vehheavyarty");
+            if u.rules_param_float("disarmed", 0.0) > 0.0 || (self.war.get_effective_threat(pos) > 0.0 && amph_assault)
             {
                 let haven = self.graph_get_closest_haven(pos);
                 self.misc_move_to(id, haven);
-            } else if siege {
-                // Auto-targeting may fire, but may not chase outside the screen.
-                u.set_move_state(0, 0);
-                // Before a siege doctrine unlocks, use the same screen rule
-                // and stop at firing range. A fight order to the target itself
-                // can carry the gun beyond the position we just validated.
-                let range = u.def().map_or(1000.0, |d| (d.max_weapon_range() - 100.0).max(0.0));
-                let station = |target| {
-                    if distance(pos, target) <= range { pos } else { get_directional_point(target, pos, range) }
-                };
-                let target = self.war_get_arty_target_if(pos, false, |ai, target| {
-                    let p = station(target);
-                    ai.war.get_porc_threat(p) <= 0.0
-                        && ai.war.get_effective_threat(p) <= 0.0
-                        && ai.siege_advance_supported(pos, p, None)
-                });
-                let p = if target == NULLPOS { self.graph_get_closest_haven(pos) } else { station(target) };
-                if p != NULLPOS {
-                    if distance(pos, p) > 100.0 {
-                        self.misc_move_to(id, p);
-                    } else if u.num_current_commands() > 0 {
-                        u.stop(0);
-                    }
-                }
+            } else if heavy_arty {
+                let target = self.war_get_arty_target(pos, false);
+                let target = get_radial_point(self.graph_get_closest_haven(target), 350.0);
+                self.misc_move_to(id, target);
             } else {
                 let target = self.war_get_arty_target(pos, false);
                 self.misc_fight_to(id, target);

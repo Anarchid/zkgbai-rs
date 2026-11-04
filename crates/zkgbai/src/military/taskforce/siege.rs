@@ -23,9 +23,6 @@
 //! more and a better station exists; leaving, the guns go back to orbiting
 //! the leader. With no enemy static known, the station is where artillery
 //! would otherwise be sent, pulled back to the guns' reach.
-//! Stations also need a friendly screen proportional to nearby enemy threat
-//! and fight density, unless moving there joins stronger cover. A gun's own
-//! threat paint does not count as its screen (see `military::siege_cover`).
 //!
 //! Log lines (for the A/B scorers): `stations at` when a force picks a
 //! station, `deploys` per gun when it parks (how far off the nearest known
@@ -523,29 +520,8 @@ impl Ai {
 
     fn siege_fits_by(&self, p: Vec3, leader: Unit, statics: &[Static], standoff: f32) -> bool {
         self.siege_safe_by(p, leader, statics, standoff)
-            && self.siege_screened(leader, p)
             && leader.def().is_none_or(|d| reaches(self.reach_terrain(), d, leader.pos(), p, AT_STATION))
             && self.siege_way_clear(leader.pos(), p, leader)
-    }
-
-    /// A siege core's own threat paint is not its escort. The screen may
-    /// include the force's escorts, other squads and friendly defenses.
-    fn siege_screened(&self, leader: Unit, to: Vec3) -> bool {
-        let squad = self.fighters.get(&leader.id()).and_then(|f| f.squad).and_then(|sid| self.squads.get(sid));
-        // Crabs use their separate mobile assault and protective-perch policy.
-        if squad.is_some_and(|s| s.shape.doctrine == "crab") {
-            return true;
-        }
-        let own = squad.map(|s| {
-            let power: f32 = s
-                .everyone()
-                .filter_map(|id| self.fighters.get(&id))
-                .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())))
-                .map(|f| (f.power + f.unit.max_health()) / 10.0)
-                .sum();
-            (s.get_pos(&self.fighters), power)
-        });
-        self.siege_advance_supported(leader.pos(), to, own)
     }
 
     /// Small tops need two terrain cells per axis: the gadget removes
@@ -607,7 +583,6 @@ impl Ai {
             (self.taskforces.siege.forces.get(&sid).and_then(|f| f.perch.as_ref())).is_some_and(|p| !p.abandoned);
         let kept = (self.taskforces.siege.forces.get(&sid).and_then(|f| f.station.as_ref()))
             .filter(|s| perching || self.siege_safe_by(s.pos, leader, &statics_keep, standoff_keep))
-            .filter(|s| perching || crab || self.siege_screened(leader, s.pos))
             .filter(|s| {
                 perching
                     || if crab {
@@ -914,12 +889,8 @@ impl Ai {
             return (back, k, v, "no static to stand off; at reach of the artillery target");
         }
         let haven = self.graph_get_closest_haven(at);
-        if haven != NULLPOS && self.siege_fits(haven, leader, statics) {
-            let (k, v) = in_reach(haven, reach, statics);
-            return (haven, k, v, "no safe stand; the supported haven nearest the artillery target");
-        }
-        let home = self.graph_get_closest_haven(from);
-        (home, 0, 0.0, "no supported stand; regroup at the nearest haven")
+        let (k, v) = in_reach(haven, reach, statics);
+        (haven, k, v, "no safe stand; the haven nearest the artillery target")
     }
 
     /// Each conduct of a siege force: park the guns at the station once the
