@@ -38,7 +38,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use serde_json::json;
-use springai::{UnitDef, Vec3};
+use springai::{Unit, UnitDef, Vec3};
 
 use super::worker::{FightAnswer, FightRequest, FightWorker};
 use super::{FightSnapshot, Model, SnapUnit, UnitFate, UnitSpec, WeaponSpec};
@@ -50,6 +50,9 @@ use crate::util::{NULLPOS, distance};
 pub const FEATURE: &str = "fightsim";
 /// The ordinary shadow switch; fire squads also need the worker.
 pub const SHADOW: &str = "fightshadow";
+/// Commanders fight with the weapons they carry (`disable=comspec`: every
+/// weapon their def mounts; see [`Ai::fight_spec_of`]).
+pub const COMSPEC: &str = "comspec";
 /// Frames an answer stays usable (3 s).
 pub const STALE: i32 = 90;
 /// Enemies within this of the squad are in the fight.
@@ -152,6 +155,43 @@ fn on_approach(p: Vec3, origin: Vec3, target: Vec3, radius: f32) -> bool {
     distance(p, Vec3::xz(origin.x + t * dx, origin.z + t * dz)) <= radius
 }
 
+/// A dynamic commander's weapons in its two slots (weapon def id, manual
+/// fire), read off the unit (`None` when unreadable: out of LOS).
+pub(crate) fn read_loadout(unit: Option<Unit>) -> Option<Vec<(i32, bool)>> {
+    let u = unit?;
+    let l: Vec<(i32, bool)> = (1..=2)
+        .filter_map(|slot| {
+            let wid = u.rules_param_float(&format!("comm_weapon_id_{slot}"), 0.0) as i32;
+            let manual = u.rules_param_float(&format!("comm_weapon_manual_{slot}"), 0.0) > 0.0;
+            (wid > 0).then_some((wid, manual))
+        })
+        .collect();
+    (!l.is_empty()).then_some(l)
+}
+
+/// Of a commander def's weapons `all` (one per weapon def, as built from its
+/// mounts), those it fires: the weapon defs `fired`, or with the loadout
+/// unknown (`None`) one beam laser (else the first).
+pub(crate) fn commander_weapons(all: &[WeaponSpec], def: UnitDef, fired: Option<&[i32]>) -> Vec<WeaponSpec> {
+    let names: Option<Vec<String>> = fired.map(|fired| {
+        (def.weapon_mounts().iter())
+            .filter_map(|m| m.weapon_def())
+            .filter(|wd| fired.contains(&wd.id()))
+            .map(|wd| wd.name())
+            .collect()
+    });
+    pick_weapons(all, names.as_deref())
+}
+
+/// [`commander_weapons`] by the names of the weapon defs fired.
+fn pick_weapons(all: &[WeaponSpec], fired: Option<&[String]>) -> Vec<WeaponSpec> {
+    let Some(fired) = fired else {
+        let beam = all.iter().find(|w| w.name.ends_with("commweapon_beamlaser"));
+        return beam.or(all.first()).cloned().into_iter().collect();
+    };
+    all.iter().filter(|w| fired.contains(&w.name)).cloned().collect()
+}
+
 /// A verdict whose loss window is still open.
 struct Window {
     vid: u64,
@@ -172,6 +212,11 @@ pub struct FightSim {
     /// The model failed to load or start: stay on the flat rule.
     failed: bool,
     specs: HashMap<i32, Arc<UnitSpec>>,
+    /// Dynamic commanders' weapons (weapon def id, manual fire), as last
+    /// read off the unit, by unit id; and their specs by def and the weapon
+    /// def ids it fires (see [`Ai::fight_spec_of`]).
+    loadouts: HashMap<i32, Vec<(i32, bool)>>,
+    com_specs: HashMap<(i32, Vec<i32>), Arc<UnitSpec>>,
     commits: BTreeMap<SquadId, FightAnswer>,
     /// Squads held in retreat by a veto.
     latches: BTreeMap<SquadId, Latch>,
@@ -406,6 +451,69 @@ impl Ai {
         spec
     }
 
+    /// Unit `id` (ours or an enemy's) as the simulation sees it: its def's
+    /// spec, except for a dynamic commander.
+    ///
+    /// A dynamic commander's def mounts every weapon its chassis can take
+    /// (ZK's dyncomm_chassis_generator: 26 mounts on the support chassis,
+    /// about 2000 dps of weapon kinds, multistunner and disruptor bomb
+    /// included), and [`Ai::fight_spec`] armed it with all of them. The
+    /// commander fires the one or two its modules gave it, which ZK's
+    /// commander script names in rules params (`comm_weapon_id_1/2`, and
+    /// `comm_weapon_manual_1/2` for manual fire; in LOS for enemies). A base
+    /// support trainer fires one light particle beam (about 190 dps). With
+    /// every mount the sim said our commander survives 2 Maces or 8 Glaives,
+    /// which kill it with its real gun (2026-11-03).
+    ///
+    /// The loadout last read off the unit stands in while it cannot be read;
+    /// a commander never read fires one beam laser, as the fitted model
+    /// counted commanders. Our commanders' manual weapons are left out: this
+    /// AI never orders them fired. `disable=comspec` restores the def's spec.
+    pub(crate) fn fight_spec_of(&mut self, id: i32, def: UnitDef) -> Arc<UnitSpec> {
+        if !self.defs.is_commander(def) || self.dev_off(COMSPEC) {
+            return self.fight_spec(def);
+        }
+        let read = read_loadout(Unit::from_id(self.cb, id));
+        let fs = &mut self.war.fightsim;
+        let changed = read.as_ref().is_some_and(|l| fs.loadouts.get(&id) != Some(l));
+        if let Some(l) = &read {
+            fs.loadouts.insert(id, l.clone());
+        }
+        let fired = self.commander_fired(id, read);
+        let key = (def.id(), fired.clone().unwrap_or_else(|| vec![-1]));
+        let base = self.fight_spec(def);
+        let spec = match self.war.fightsim.com_specs.get(&key) {
+            Some(s) => s.clone(),
+            None => {
+                let weapons = commander_weapons(&base.weapons, def, fired.as_deref());
+                let spec = Arc::new(UnitSpec { weapons, ..(*base).clone() });
+                self.war.fightsim.com_specs.insert(key, spec.clone());
+                spec
+            }
+        };
+        if changed {
+            let names: Vec<&str> = spec.weapons.iter().map(|w| w.name.as_str()).collect();
+            self.log(&format!(
+                "fightsim: commander {id} ({}) fires {names:?} (its def mounts {})",
+                spec.def,
+                base.weapons.len()
+            ));
+        }
+        spec
+    }
+
+    /// The weapon def ids commander `id` fires, sorted (`None`: never read),
+    /// from `read` (just read off the unit) or as last read; without the
+    /// manual weapons of ours.
+    pub(crate) fn commander_fired(&self, id: i32, read: Option<Vec<(i32, bool)>>) -> Option<Vec<i32>> {
+        let ours = Unit::from_id(self.cb, id).is_some_and(|u| u.team() == self.team_id);
+        let loadout = read.or_else(|| self.war.fightsim.loadouts.get(&id).cloned())?;
+        let mut fired: Vec<i32> = loadout.iter().filter(|&&(_, manual)| !(ours && manual)).map(|w| w.0).collect();
+        fired.sort_unstable();
+        fired.dedup();
+        Some(fired)
+    }
+
     /// The fight a squad at `pos` would be in now: the squad and our other
     /// fighters beside it against every identified enemy within reach as
     /// last seen, or (`only`) the squad alone against those enemies wherever
@@ -489,18 +597,19 @@ impl Ai {
             n: [0; 2],
         };
         for (id, def, hp, p) in ours {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(id, def);
             if !spec.weapons.is_empty() {
                 notes.armed_metal[0] += spec.cost;
             }
             notes.members.push((id, spec.cost));
             notes.metal[0] += spec.cost;
             notes.n[0] += 1;
-            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(id);
+            snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         let (mut air, mut statics) = (0.0, 0.0);
         for (eid, def, hp, p, flies, is_static) in theirs {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(eid, def);
             if !spec.weapons.is_empty() {
                 notes.armed_metal[1] += spec.cost;
             }
@@ -513,7 +622,8 @@ impl Ai {
             if is_static {
                 statics += spec.cost;
             }
-            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(eid);
+            snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         if notes.metal[1] > 0.0 {
             notes.air_share = air / notes.metal[1];
@@ -680,11 +790,14 @@ impl Ai {
         for (side, id, d, hp, p) in raw {
             // A casualty, reinforcement, substantial damage, or movement
             // invalidates the old result even inside the freshness window.
+            // So does a tube weapon firing or loading.
+            let tubes = self.snap_tubes(id);
             (side, id, d.id(), (hp / d.health().max(1.0) * 5.0) as i32, (p.x / 256.0) as i32, (p.z / 256.0) as i32)
                 .hash(&mut hash);
-            let spec = self.fight_spec(d);
+            tubes.len().hash(&mut hash);
+            let spec = self.fight_spec_of(id, d);
             metal[side as usize] += spec.cost;
-            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z });
+            snapshot.units.push(SnapUnit { side, spec, hp, x: p.x, z: p.z, tubes });
         }
         if snapshot.armed(0) == 0 || snapshot.armed(1) == 0 {
             return false;
@@ -825,7 +938,14 @@ mod veto_tests {
         for (side, n, name, x) in [(0, ours, "cloakassault", 0.0), (1, theirs, "hoverskirm", 600.0)] {
             let spec = fixture(name);
             for i in 0..n {
-                units.push(SnapUnit { side, hp: spec.health, spec: spec.clone(), x, z: i as f32 * 40.0 });
+                units.push(SnapUnit {
+                    side,
+                    hp: spec.health,
+                    spec: spec.clone(),
+                    x,
+                    z: i as f32 * 40.0,
+                    tubes: Vec::new(),
+                });
             }
         }
         FightSnapshot { flags: Default::default(), units }
@@ -866,5 +986,43 @@ mod veto_tests {
         let (loss, metal) = kiting_losses(&snap, &[fate(1.0), fate(0.0), fate(0.5)]);
         assert_eq!(metal, [700.0, 220.0]);
         assert_eq!(loss, [0.5, 0.5]);
+    }
+}
+
+#[cfg(test)]
+mod comspec_tests {
+    use super::*;
+
+    fn w(name: &str, dps: f32) -> WeaponSpec {
+        WeaponSpec {
+            name: name.into(),
+            weapon_type: "BeamLaser".into(),
+            range: 300.0,
+            reload: 1.0,
+            salvo: 1,
+            damage: dps,
+        }
+    }
+
+    #[test]
+    fn a_commander_fires_its_loadout_not_every_mount() {
+        // dynsupport1's mounts (the fight spec keeps one per weapon def).
+        let all = vec![
+            w("dyntrainer_support_base_commweapon_peashooter", 120.0),
+            w("dyntrainer_support_base_commweapon_beamlaser", 144.0),
+            w("dyntrainer_support_base_commweapon_lparticlebeam", 192.0),
+            w("dyntrainer_support_base_commweapon_hparticlebeam", 258.0),
+            w("dyntrainer_support_base_commweapon_multistunner", 352.0),
+        ];
+        let fired = ["dyntrainer_support_base_commweapon_lparticlebeam".to_owned()];
+        let got = pick_weapons(&all, Some(&fired));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, fired[0]);
+        // Never read: one beam laser, as the fitted model counted them.
+        let got = pick_weapons(&all, None);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].name.ends_with("commweapon_beamlaser"));
+        // A loadout of manual weapons only (ours, left out): unarmed.
+        assert!(pick_weapons(&all, Some(&[])).is_empty());
     }
 }

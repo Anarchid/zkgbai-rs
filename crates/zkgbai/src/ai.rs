@@ -13,6 +13,7 @@ use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
 use crate::logistics::Logistics;
 use crate::los::LosManager;
+use crate::military::ammo::Ammo;
 use crate::military::blasts::Blasts;
 use crate::military::coalesce::Coalesce;
 use crate::military::drops::Drops;
@@ -80,15 +81,31 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
 /// `conquest` (the commander walks to forward ground a few turrets hold,
-/// takes its metal, and fortifies it when the denial pays) and `conquestsym`
-/// (both sides' walks to an objective measured alike) are on in the wip line
-/// for observation (2026-11-02; batteries in zkgbai-runs/conquest: on - off
-/// +0.03, sym - on +0.07; disable=conquest to opt out). `conquestleash`
+/// takes its metal, and fortifies it when the denial pays) is off in the
+/// wip line since 2026-11-03 (user): in the cloak battery
+/// (zkgbai-runs/conquest/compush b1, 36 pairs against Wires 0.1.2) the trip
+/// was -0.15 +- 0.12 and compush -0.12 +- 0.12 against it off, and the
+/// 317 sweep had the trip -0.14 +- 0.04 over 116 maps (enable=conquest to
+/// opt in: compush, below, unless disable=compush). `conquestsym` (both
+/// sides' walks to an objective measured alike) stays on for it
+/// (2026-11-02; sym - on +0.07). `conquestleash`
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
 /// sym) stay off, as does `conquestescort` (a QRF team sized by the fight
-/// predictor stands on the objective, 2026-11-03) until its battery.
-pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
+/// predictor stands on the objective, 2026-11-03; battery e1 -0.14).
+/// `compush` (on in the wip line, 2026-11-03; acts with `conquest` on): no
+/// conquest trip; the commander's mex jobs lean toward the enemy, and
+/// objectives whose spots become ours by any hands get their turrets
+/// (disable=compush for the trip). `conquestroute` (the trip's start and opening mexes planned
+/// with it, one on one) is off (enable=conquestroute, with compush off).
+/// `eramp` (energy wanted ramps with the alliance's share of the metal
+/// spots and the clock, see economy/mod.rs ERAMP_*) is on in the wip line
+/// (user, 2026-11-03; disable=eramp to opt out) while its A/B runs.
+/// `ammo` (enemy tube-weapon shots counted from hits into the predictor's
+/// snapshots, military/ammo.rs) is off: its A/B (zkgbai-runs/ammo/ab,
+/// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
+/// ledger that is 99.5% right; the ledger still counts and journals.
+pub(crate) const OFF_BY_DEFAULT: [&str; 24] = [
     "pairs",
     "currency",
     "permanence",
@@ -107,9 +124,12 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 21] = [
     "chatcommands",
     "densgate",
     "fight2d",
+    "conquest",
     "conquestleash",
     "conquestseq",
     "conquestescort",
+    "conquestroute",
+    "ammo",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -232,12 +252,16 @@ pub struct Ai {
     pub raid_test: crate::military::raid_test::RaidTest,
     pub stomp_test: crate::military::stomp_test::StompTest,
     pub jumps: Jumps,
+    /// Cyclopes driving into their cannon's reach.
+    pub cyclopes: crate::military::cyclops::Cyclopes,
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
     pub stakeouts: Stakeouts,
     /// Raider gangs judged by the fight predictor (`coalesce`).
     pub coalesce: Coalesce,
+    /// What the enemy's tube weapons have left (`ammo`).
+    pub ammo: Ammo,
     /// Retreats judged by the fight predictor (`stayveto`).
     pub stayveto: StayVeto,
     /// Which handler each unit belongs to (see `military::roles`).
@@ -362,10 +386,12 @@ impl SkirmishAi for Ai {
             raid_test: Default::default(),
             stomp_test: Default::default(),
             jumps: Jumps::default(),
+            cyclopes: Default::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
             coalesce: Coalesce::default(),
+            ammo: Ammo::default(),
             stayveto: StayVeto::default(),
             roles: Default::default(),
             air_intel: Default::default(),
@@ -640,6 +666,7 @@ impl Ai {
                 "anti"
                     | "aafort"
                     | "fort"
+                    | "skirmfort"
                     | "radarfort"
                     | "shadowprobe"
                     | "heavies"
@@ -1133,6 +1160,15 @@ impl Ai {
             best
         };
 
+        // One on one with `conquestroute`: the start for the conquest trip's
+        // walk (see economy/conquest/compush.rs).
+        if self.allies.is_empty()
+            && let Some(site) = self.conquest_route_start()
+        {
+            self.send_start_pos(site, map_center);
+            self.log("Solo Mode: Start Position for the conquest route!");
+            return;
+        }
         if self.allies.is_empty() || (self.allies.len() > 1 && priority_starts == 0) {
             // Starting solo (or first of a team): pick a spot near map center.
             let best = central_spot(&spots);

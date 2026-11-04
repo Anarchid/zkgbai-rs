@@ -7,6 +7,7 @@ mod artemis;
 mod assign;
 pub mod build_ids;
 mod colonize;
+pub mod comguard;
 mod commander;
 mod conquest;
 pub mod factory;
@@ -19,6 +20,7 @@ mod phase;
 mod planning;
 mod plate;
 mod plop;
+mod rebuild;
 mod safespot;
 mod silo;
 mod sparrow;
@@ -96,6 +98,8 @@ pub struct EconomyManager {
     pub commanders: Vec<i32>,
     /// Forward objectives the commander takes and fortifies (see `conquest`).
     pub conquest: conquest::Conquest,
+    /// Commanders out of fights the predictor says they lose (see `comguard`).
+    pub(super) guard: comguard::ComGuard,
     /// Workers waiting for a new assignment (worker ids).
     pub idlers: VecDeque<i32>,
     /// Workers with an assignment, re-evaluated round-robin (worker ids).
@@ -188,6 +192,11 @@ pub struct EconomyManager {
     /// (see `planning::NEW_FAC_INCOME`).
     pub new_fac_at: Option<i32>,
     pub new_fac_due: bool,
+    /// Sites where a factory frame of ours died lately, until when (see
+    /// `rebuild`).
+    pub burned_fac_sites: Vec<(Vec3, i32)>,
+    /// When the last rebuild site search found nothing (see `rebuild`).
+    pub rebuild_tried_at: Option<i32>,
     /// Whether an air factory was taken for firefighters or for tempo (see
     /// `planning::is_air_requisition`): once a game.
     pub air_asked: bool,
@@ -339,6 +348,7 @@ impl EconomyManager {
             tasks: TaskStore::default(),
             commanders: Vec::new(),
             conquest: conquest::Conquest::default(),
+            guard: comguard::ComGuard::default(),
             idlers: VecDeque::new(),
             assigned: VecDeque::new(),
             seeders: VecDeque::new(),
@@ -410,6 +420,8 @@ impl EconomyManager {
             requisition_logged: None,
             new_fac_at: None,
             new_fac_due: false,
+            burned_fac_sites: Vec::new(),
+            rebuild_tried_at: None,
             air_asked: false,
             terraform_tags: 0,
             terraform_test: None,
@@ -591,6 +603,33 @@ impl EconomyManager {
 const OD_ENERGY_RATIO: f32 = 2.6;
 const OD_STORAGE_FROM: i32 = 30 * 60 * 5;
 const OD_STORAGE_FILL: f32 = 0.5;
+
+/// `eramp` (`disable=eramp` turns it off): the energy wanted ramps with
+/// the share of the metal spots the alliance holds, from this many times
+/// our metal income with none held to the overdrive target above at
+/// [`ERAMP_FULL_SHARE`], and on past it as the share grows (user,
+/// 2026-11-03: a lower early target leaves the metal for expansion). At
+/// 6:00 against Wires v2 we made 2.4 energy per mex metal to its 1.9, the
+/// commander building energy half its time (`zkgbai-runs/early-energy`).
+/// The ramp also climbs by one every [`ERAMP_ESCALATE`] frames of the game
+/// whatever the share (user: a slow escalation regardless), so a cramped
+/// game still reaches the overdrive target in the end. The storage rule
+/// (from 5:00) is scaled by the same ramp, up to its full
+/// [`OD_STORAGE_FILL`].
+const ERAMP_FLOOR: f32 = 1.1;
+const ERAMP_FULL_SHARE: f32 = 0.35;
+const ERAMP_ESCALATE: f32 = 30.0 * 60.0 * 30.0;
+
+/// The energy wanted under `eramp`: `metal_income` x [`ERAMP_FLOOR`] with
+/// no spots held at frame 0, `full` (the overdrive target) at
+/// [`ERAMP_FULL_SHARE`] of them, linear in `share` plus `frame` /
+/// [`ERAMP_ESCALATE`] and on past `full` beyond one; never below the floor.
+/// Also the ramp, for the storage rule.
+fn eramp_wanted(full: f32, metal_income: f32, share: f32, frame: i32) -> (f32, f32) {
+    let ramp = share.max(0.0) / ERAMP_FULL_SHARE + frame.max(0) as f32 / ERAMP_ESCALATE;
+    let floor = ERAMP_FLOOR * metal_income.max(0.0);
+    (floor + (full - floor).max(0.0) * ramp, ramp)
+}
 
 /// The overdrive phase (pylons, joined grids, energy wanted as with two
 /// fusions) starts at two fusions, or at this much energy income from any
@@ -838,6 +877,7 @@ impl Ai {
         }
 
         self.eco_coordinate_plops();
+        self.eco_guard_commanders(frame);
         self.eco_assign_workers();
         self.iq_tick();
     }
@@ -848,8 +888,10 @@ impl Ai {
         let merged = self.merged_allies as f32;
         let odreserve = !self.dev_off("odreserve");
         let odphase_off = self.dev_off("odphase");
+        let eramp = !self.dev_off("eramp");
         // (Overdrive storage from 5 min of the phase clock: `densgate`.)
-        let od_storage_time = self.phase_frame() > OD_STORAGE_FROM;
+        let phase_frame = self.phase_frame();
+        let od_storage_time = phase_frame > OD_STORAGE_FROM;
         let (m, e) = (self.metal, self.energy);
         let team = self.team_id;
         let eco = &mut self.eco;
@@ -930,18 +972,24 @@ impl Ai {
         // our 1.3, 2.9x to 2.1 at minute 15).
         let fusions = eco.fusions.len().max(if eco.od_phase.is_some() && !odphase_off { 2 } else { 0 });
         let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + fusions as f32;
-        eco.energy_target = eco.raw_mex_income * eratio;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
         let tf = self.graph.territory_fraction;
+        // (`eramp`: ramped by the spots the alliance holds and the clock.)
+        let (target, ramp) = if eramp {
+            eramp_wanted(eco.raw_mex_income * eratio, eco.static_income, tf, phase_frame)
+        } else {
+            (eco.raw_mex_income * eratio, 1.0)
+        };
+        eco.energy_target = target;
         eco.hard_estalled = (eco.max_storage > 1.0
             && eco.energy < (eco.effective_income_energy * (1.0 + tf)).min(eco.max_storage / 2.0))
             || eco.static_income > eco.effective_income_energy;
         eco.estalled = eco.hard_estalled
-            || eco.raw_mex_income * eratio > eco.effective_income_energy
+            || eco.energy_target > eco.effective_income_energy
             || (odreserve
                 && od_storage_time
                 && eco.max_storage > 1.0
-                && eco.energy + eco.energy_reserve < OD_STORAGE_FILL * eco.max_storage);
+                && eco.energy + eco.energy_reserve < OD_STORAGE_FILL * ramp.min(1.0) * eco.max_storage);
         if eco.max_storage > 1.0 && eco.hard_estalled && eco.metal / eco.max_storage > 0.5 {
             eco.energy_reclaim = true;
         }
@@ -1287,6 +1335,7 @@ impl Ai {
         paralyzer: bool,
     ) {
         let _ = (damage, dir, paralyzer);
+        self.comguard_hit(unit, attacker);
         let h = unit;
         let Some(hdef) = h.def() else {
             return;
@@ -1373,14 +1422,34 @@ impl Ai {
             eco.dporcs.remove(&uid);
             eco.nanos.remove(&uid);
 
+            let mut frame_of = None;
             for &id in &eco.construction_tasks {
                 if let Some(c) = eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut())
                     && c.target == Some(unit)
                 {
                     // if a building was killed while under construction, reset its target.
                     c.target = None;
+                    frame_of = Some(id);
                     break;
                 }
+            }
+            // The frame of the factory that would replace our last one: the
+            // job goes, its site is marked, and the next is sited anew (see
+            // `rebuild`), not where the frame just died.
+            if let Some(id) = frame_of
+                && self.eco_rebuilding()
+                && self.eco.factory_tasks.contains(&id)
+                && def.is_some_and(|d| self.eco.build_ids.fac_ids.contains(&d.id()))
+            {
+                let p = unit.pos();
+                self.log(&format!(
+                    "economy: rebuild: the {} frame at ({:.0}, {:.0}) died; its job goes",
+                    self.defs.name_of(unit),
+                    p.x,
+                    p.z
+                ));
+                self.eco_burn_factory_site(p, "frame killed");
+                self.eco.drop_construction_task(id);
             }
         }
         // A Sparrow still morphing is a static radar. Its death must also
@@ -1639,5 +1708,41 @@ impl EconomyManager {
             let id = self.tasks.insert(t);
             self.combat_reclaim_tasks.push(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod eramp_tests {
+    use super::{ERAMP_ESCALATE, ERAMP_FLOOR, ERAMP_FULL_SHARE, eramp_wanted};
+
+    #[test]
+    fn eramp_runs_from_the_floor_to_the_target_and_past_it() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let full_at = ERAMP_FULL_SHARE;
+        // No spots at the start: 1.1x metal income, the storage rule off.
+        let (want, ramp) = eramp_wanted(44.5, 27.0, 0.0, 0);
+        assert!(close(want, ERAMP_FLOOR * 27.0) && close(ramp, 0.0));
+        // The full share: the overdrive target itself.
+        let (want, ramp) = eramp_wanted(44.5, 27.0, full_at, 0);
+        assert!(close(want, 44.5) && close(ramp, 1.0));
+        // Half of it: halfway between.
+        let (want, _) = eramp_wanted(44.5, 27.0, full_at / 2.0, 0);
+        assert!(close(want, (29.7 + 44.5) / 2.0));
+        // Past it: on past the target.
+        let (want, ramp) = eramp_wanted(44.5, 27.0, 1.5 * full_at, 0);
+        assert!(want > 44.5 && close(ramp, 1.5));
+        // A target under the floor (early, little mex income): the floor.
+        let (want, _) = eramp_wanted(10.0, 11.0, 0.8, 0);
+        assert!(close(want, ERAMP_FLOOR * 11.0));
+        // The clock alone: halfway at half the escalation time, the target
+        // at all of it, with no spots held.
+        let half = (ERAMP_ESCALATE / 2.0) as i32;
+        let (want, ramp) = eramp_wanted(44.5, 27.0, 0.0, half);
+        assert!(close(want, (29.7 + 44.5) / 2.0) && close(ramp, 0.5));
+        let (want, _) = eramp_wanted(44.5, 27.0, 0.0, 2 * half);
+        assert!(close(want, 44.5));
+        // Both add up.
+        let (_, ramp) = eramp_wanted(44.5, 27.0, full_at / 2.0, half);
+        assert!(close(ramp, 1.0));
     }
 }

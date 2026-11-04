@@ -178,7 +178,7 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 `porc` (no turrets where enemy ground forces cannot get), `reach` (reachability checks for jobs,
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
-`artemis` (an Artemis against over 4000 metal of enemy air when one reaches our whole front),
+`artemis` (an Artemis at the centroid of our front against over 4000 metal of enemy air),
 `mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
 `regionsplit` (on by default in the wip line, `disable=regionsplit`; off on main) has the terrain model cut regions
 holding many metal spots into pieces around clusters of them.
@@ -238,7 +238,9 @@ version the lobby leaves the option unset on.
 Playing apart, they (and any ally, human or AI) share their projects instead of racing them. An ally's
 half-built building takes the job of ours that would go there, and an ally's superweapon, Bertha, reactor or
 anti-nuke rising near our base gets our help before we start our own. Allied instances start superweapons and
-anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. Opening
+anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. One nuke is
+enough for an alliance: none of ours starts while anyone's silo stands or rises (Berthas, Zeniths and Disco Rave
+Parties may follow). Opening
 factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Where much of
 a side's metal lies under water, one instance takes the start nearest it and an amphibious or hover opening; from
 3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on

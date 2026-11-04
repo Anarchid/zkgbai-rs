@@ -103,12 +103,14 @@ impl Local {
         [self.ours.iter().map(|o| o.cost).sum(), self.theirs.iter().map(|t| t.cost).sum()]
     }
 
-    /// The same fight without our units `ids`.
+    /// The same fight without our units `ids`, run the same way (it used
+    /// to drop the switches' flags, so stayveto weighed a fightfocus "stay"
+    /// against a frozen-fight "leave").
     pub fn without(&self, ids: &[i32]) -> Local {
         let keep: Vec<bool> = self.ours.iter().map(|o| !ids.contains(&o.id)).collect();
         let n = self.ours.len();
         let snap = FightSnapshot {
-            flags: Default::default(),
+            flags: self.snap.flags,
             units: (self.snap.units.iter().enumerate())
                 .filter(|(i, _)| *i >= n || keep[*i])
                 .map(|(_, u)| u.clone())
@@ -268,18 +270,20 @@ impl Ai {
         let snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
         let mut local = Local { snap, ours: Vec::new(), theirs: Vec::new(), unknown };
         for (u, def, hp) in ours {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(u.id(), def);
             let p = u.pos();
             local.ours.push(Ours { id: u.id(), cost: spec.cost });
-            local.snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(u.id());
+            local.snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         for (eid, def, hp, p, armed, name) in theirs {
-            let spec = self.fight_spec(def);
+            let spec = self.fight_spec_of(eid, def);
             let Some(e) = self.war.targets.get(&eid) else { continue };
             let (value, is_prize) = (spec.cost * weight(e), prize(e, spec.cost));
             let armed = armed && !spec.weapons.is_empty();
             local.theirs.push(Theirs { id: eid, def: name, cost: spec.cost, value, armed, prize: is_prize, pos: p });
-            local.snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(eid);
+            local.snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         Some(local)
     }
@@ -300,7 +304,7 @@ pub fn their_index(local: &Local, i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::military::fightsim::UnitSpec;
+    use crate::military::fightsim::{SimFlags, UnitSpec};
 
     fn fate(p: f32) -> UnitFate {
         UnitFate { p_dead: p, p_raw: p, ..Default::default() }
@@ -311,7 +315,7 @@ mod tests {
         let mut l = Local { snap: FightSnapshot::default(), ours: Vec::new(), theirs: Vec::new(), unknown: false };
         for (i, &c) in ours.iter().enumerate() {
             l.ours.push(Ours { id: i as i32, cost: c });
-            l.snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: 1.0, x: 0.0, z: 0.0 });
+            l.snap.units.push(SnapUnit { side: 0, spec: spec.clone(), hp: 1.0, x: 0.0, z: 0.0, tubes: Vec::new() });
         }
         for (i, &(c, v, armed)) in theirs.iter().enumerate() {
             l.theirs.push(Theirs {
@@ -323,7 +327,7 @@ mod tests {
                 prize: false,
                 pos: Vec3::xz(0.0, 0.0),
             });
-            l.snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: 1.0, x: 0.0, z: 0.0 });
+            l.snap.units.push(SnapUnit { side: 1, spec: spec.clone(), hp: 1.0, x: 0.0, z: 0.0, tubes: Vec::new() });
         }
         l
     }
@@ -343,6 +347,13 @@ mod tests {
         assert_eq!(w.ours[0].id, 1);
         assert_eq!(w.snap.units.len(), 3);
         assert_eq!(their_index(&w, 0), 1);
+    }
+
+    #[test]
+    fn the_fight_without_some_of_ours_runs_the_same_way() {
+        let mut l = local(&[100.0, 50.0], &[(300.0, 450.0, true)]);
+        l.snap.flags = SimFlags::from_switches(false, true, true);
+        assert_eq!(l.without(&[0]).snap.flags, l.snap.flags);
     }
 
     #[test]
@@ -416,7 +427,7 @@ mod probe {
                         pos: springai::Vec3::xz(x, z),
                     });
                 }
-                l.snap.units.push(SnapUnit { side, spec: s.clone(), hp: s.health * hp, x, z });
+                l.snap.units.push(SnapUnit { side, spec: s.clone(), hp: s.health * hp, x, z, tubes: Vec::new() });
             }
         }
         l

@@ -46,6 +46,20 @@ const CROSSING: f32 = 0.2;
 /// Hits are counted over this many reload times.
 const RELOADS: i32 = 4;
 
+/// Shots one weapon fires within `window` frames of its first, at most
+/// [`RELOADS`] (one per reload). A tube weapon (ZK scriptReload.lua,
+/// customParams `script_burst` tubes each reloading `script_reload` s
+/// after it fires; the engine reload only spaces them) fires each tube once
+/// per tube reload: a Hacksaw's two in its 0.8 s window, not four.
+fn fires_within(window: i32, params: &[(String, String)]) -> u32 {
+    let param = |key: &str| params.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.trim().parse::<f32>().ok());
+    let Some(tube) = param("script_reload").map(|s| (s * 30.0).round() as i32).filter(|f| *f > 0) else {
+        return RELOADS as u32;
+    };
+    let tubes = param("script_burst").unwrap_or(1.0).max(1.0) as i32;
+    (tubes * ((window + tube - 1) / tube)).clamp(1, RELOADS) as u32
+}
+
 /// Bearings and hit times kept per contact (a mobile group's latest only).
 const RAYS: usize = 24;
 const MOBILE_RAYS: usize = 6;
@@ -75,9 +89,12 @@ struct Carrier {
     range: f32,
     /// Its weapon's height above the ground, elmos.
     muzzle: f32,
-    /// Frames between shots, and projectiles per shot.
+    /// Frames between shots.
     reload: i32,
-    shots: u32,
+    /// Projectiles one can land within [`RELOADS`] reload times: its
+    /// projectiles per shot times [`RELOADS`] shots, fewer shots for a tube
+    /// weapon (see [`fires_within`]).
+    per_window: u32,
     /// Danger of one, on the scale of `Enemy::get_danger`; its speed.
     danger: f32,
     speed: f32,
@@ -177,14 +194,16 @@ impl Ai {
             let danger = |wd: WeaponDef| (weapon_power(wd, true) + def.health()) / 10.0;
             for wd in def.weapon_mounts().into_iter().filter_map(|m| m.weapon_def()) {
                 let shots = (wd.salvo_size().max(1) * wd.projectiles_per_shot().max(1)) as u32;
+                let reload = ((wd.reload() * 30.0).round() as i32).max(1);
+                let per_window = fires_within(RELOADS * reload, &wd.custom_params()) * shots;
                 self.air_intel.carriers.entry(wd.id()).or_insert_with(|| Carrier {
                     name: def.name(),
                     human: def.human_name(),
                     is_static: def.speed() <= 0.0,
                     range: wd.range(),
                     muzzle: 0.75 * def.height(),
-                    reload: ((wd.reload() * 30.0).round() as i32).max(1),
-                    shots,
+                    reload,
+                    per_window,
                     danger: danger(wd),
                     speed: def.speed(),
                 });
@@ -269,7 +288,7 @@ impl Ai {
             .map(|&h| contact.hits.iter().filter(|&&o| o >= h && o - h < window).count())
             .max()
             .unwrap_or(1) as u32;
-        let per = RELOADS as u32 * c.shots;
+        let per = c.per_window;
         contact.shooters = contact.shooters.max(most.saturating_sub(1).div_ceil(per).max(1));
     }
 
@@ -394,6 +413,21 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tube_weapons_land_fewer_shots_in_a_window() {
+        let p = |r: &str, b: &str| vec![("script_reload".to_owned(), r.to_owned()), ("script_burst".to_owned(), b.to_owned())];
+        // Hacksaw: 0.2 s reload, a 24-frame window, two tubes of 15 s.
+        assert_eq!(fires_within(24, &p("15", "2")), 2);
+        // Trident: 1.2 s, 144 frames, three tubes of 10 s.
+        assert_eq!(fires_within(144, &p("10", "3")), 3);
+        // Angler: four tubes, four shots.
+        assert_eq!(fires_within(36, &p("12", "4")), 4);
+        // Ogre: two tubes of 2.3 s in 36 frames: still two.
+        assert_eq!(fires_within(36, &p("2.3", "2")), 2);
+        // Anything else: one shot a reload.
+        assert_eq!(fires_within(120, &[]), RELOADS as u32);
+    }
 
     /// A bearing from `from` towards `to`, turned by `err` degrees.
     fn ray(from: (f32, f32), to: (f32, f32), err: f32) -> Ray {

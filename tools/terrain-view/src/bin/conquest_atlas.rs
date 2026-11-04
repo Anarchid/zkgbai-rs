@@ -5,13 +5,17 @@
 //!        [--eval "x,z x,z"]   (value these sites instead of searching)
 //!        [--lattice elmos] [--per-tier n] [--shortlist n] [--band lo,hi]   (search variants)
 //!        [--json out.json]    (objectives, shortlists, band shares, spots, bases)
+//!        [--door-slack elmos] [--lines] [--contest]   (doors a turret closes; lines of doors; contested spots)
+//!        [--chokes]           (list the walking tier's chokepoints and door ends)
+//!        [--neutral]          (every spot neutral: sides by the walks alone)
+//!        [--detour-sat share] (a detour of this share counts as a seal)
 //!
 //! The scenario is the AI's dump (`ZKGBAI_DUMP_TERRAIN`); its spot sides are
 //! as the AI saw them at the dump's frame, so dump early (frame 1800).
 use std::path::Path;
 
 use image::{Rgb, RgbImage};
-use zk_terrain::conquest::{Params, covered, evaluate, objectives, shares, shortlists};
+use zk_terrain::conquest::{Params, covered, door_ends, evaluate, objectives, shares, shortlists};
 use zk_terrain::strategy::{Asset, Side};
 use zk_terrain::{CELL, Pos, SpringMapData, Terrain, Tier};
 
@@ -28,6 +32,8 @@ fn main() {
     let json_out = flag("--json");
     let lattice: f32 = flag("--lattice").and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let per_tier: usize = flag("--per-tier").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let door_slack: f32 = flag("--door-slack").and_then(|s| s.parse().ok()).unwrap_or(-1.0);
+    let detour_sat: f32 = flag("--detour-sat").and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let short: Option<usize> = flag("--shortlist").and_then(|s| s.parse().ok());
     let band: Option<[f32; 2]> = flag("--band").and_then(|s| {
         let v: Vec<f32> = s.split(',').filter_map(|x| x.parse().ok()).collect();
@@ -41,6 +47,14 @@ fn main() {
             })
             .collect()
     });
+    let switch = |args: &mut Vec<String>, name: &str| {
+        let at = args.iter().position(|a| a == name);
+        at.map(|i| args.remove(i)).is_some()
+    };
+    let lines = switch(&mut args, "--lines");
+    let contest = switch(&mut args, "--contest");
+    let neutral = switch(&mut args, "--neutral");
+    let list_chokes = switch(&mut args, "--chokes");
     if args.len() < 3 {
         eprintln!("usage: conquest_atlas <map.zktamap> <scenario.json> [range] [sites] [--png out.png]");
         std::process::exit(2);
@@ -59,7 +73,11 @@ fn main() {
                 .map(|s| Asset {
                     pos: Pos::new(s["x"].as_f64().unwrap_or(0.0) as f32, s["z"].as_f64().unwrap_or(0.0) as f32),
                     value: s["value"].as_f64().unwrap_or(1.0) as f32,
+                    // --neutral: no spot is anyone's but by the walks (a dump's
+                    // sides are the spot graph's shadows at the dump's frame,
+                    // not the mexes standing).
                     side: match s["side"].as_str() {
+                        _ if neutral => Side::Neutral,
                         Some("ally") => Side::Ally,
                         Some("enemy") => Side::Enemy,
                         _ => Side::Neutral,
@@ -74,7 +92,23 @@ fn main() {
     let built = t0.elapsed();
     let maps: Vec<_> = tiers.iter().filter_map(|&t| terrain.tier(t)).collect();
     let walk = terrain.tier(Tier::Bot).expect("bot tier");
-    let mut p = Params { range, max_sites, lattice, per_tier, ..Params::default() };
+    let mut p = Params { range, max_sites, lattice, per_tier, door_slack, lines, contest, detour_sat, ..Params::default() };
+    if list_chokes {
+        for c in &walk.chokes {
+            let ends = door_ends(c)
+                .map(|(a, b)| format!("({:.0},{:.0})-({:.0},{:.0}) {:.0} long", a.x, a.z, b.x, b.z, a.distance(b)));
+            println!(
+                "choke {:>3} {:?} at ({:.0},{:.0}) width {:.0} wall {:.0} door {}",
+                c.id,
+                c.kind,
+                c.pos.x,
+                c.pos.z,
+                c.width,
+                c.wall,
+                ends.unwrap_or_else(|| "-".into())
+            );
+        }
+    }
     if let Some(n) = short {
         p.shortlist = n;
     }
@@ -101,10 +135,12 @@ fn main() {
             .map(|&k| format!("({:.0},{:.0}) {:.2}", assets[k].pos.x, assets[k].pos.z, assets[k].value))
             .collect();
         println!(
-            "#{i} design {} score {:.1} income {:.2} walk {:.0} enemy walk {:.0}\n   sites {}\n   spots {}",
+            "#{i}{} design {} score {:.1} income {:.2} contest {:.2} walk {:.0} enemy walk {:.0}\n   sites {}\n   spots {}",
+            if o.line { " LINE" } else { "" },
             o.design.name(),
             o.score,
             o.income,
+            o.contest,
             o.walk,
             o.enemy_walk,
             sites.join(" "),
@@ -128,7 +164,7 @@ fn main() {
             .iter()
             .map(|o| {
                 serde_json::json!({
-                    "design": o.design.name(), "score": o.score, "income": o.income,
+                    "design": o.design.name(), "score": o.score, "income": o.income, "line": o.line, "contest": o.contest,
                     "walk": o.walk, "enemy_walk": o.enemy_walk,
                     "sites": o.sites.iter().map(|&q| pj(q)).collect::<Vec<_>>(),
                     "spots": o.spots,
@@ -151,7 +187,9 @@ fn main() {
         let out_v = serde_json::json!({
             "map": v["map"], "size": [data.map_width * 8, data.map_height * 8],
             "ally": pj(ally), "enemy": pj(enemy), "range": range,
-            "params": {"lattice": p.lattice, "per_tier": p.per_tier, "shortlist": p.shortlist, "band": p.band},
+            "params": {"lattice": p.lattice, "per_tier": p.per_tier, "shortlist": p.shortlist, "band": p.band,
+                       "door_slack": p.door_slack, "lines": p.lines, "contest": p.contest, "detour_sat": p.detour_sat},
+            "doors": walk.chokes.iter().filter_map(|c| door_ends(c).map(|(a, b)| [pj(a), pj(b)])).collect::<Vec<_>>(),
             "assets": assets.iter().map(|a| serde_json::json!({"x": a.pos.x, "z": a.pos.z, "value": a.value,
                 "side": match a.side { Side::Ally => "ally", Side::Enemy => "enemy", Side::Neutral => "neutral" }})).collect::<Vec<_>>(),
             "objectives": objs, "shortlists": lists,

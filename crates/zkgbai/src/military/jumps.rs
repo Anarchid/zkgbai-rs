@@ -21,7 +21,11 @@
 //! their mark: the blast (90) is short of the decloak (180), so one
 //! walking in is seen and shot for nothing. Jugglenauts
 //! pull with their gravity guns and push while they retreat, throwing
-//! chasers off.
+//! chasers off. Their guns cannot touch buildings, but their stomp can:
+//! they jump onto enemy buildings rather than stand and stare at them
+//! (`sumostatic`, see [`SUMO_LOCK`]), and onto what is faster than they
+//! and outranges their guns, landing with it in their pull (`sumopounce`, see
+//! [`POUNCE_WORTH`]).
 
 use std::collections::BTreeMap;
 
@@ -69,6 +73,42 @@ const FRESH: i32 = 45;
 const SUMO_CROWD: f32 = 700.0;
 const SUMO_SPLASH: f32 = 150.0;
 const SUMO_FRIENDS: f32 = 300.0;
+
+/// Jugglenauts and buildings (`sumostatic`): their gravity guns cannot
+/// target buildings (no TURRET or UNARMED among their targets), but their
+/// first weapon, a decoy laser (440) that the unit script never lets fire,
+/// takes anything; and their `noChaseCategory` leaves buildings in. So an
+/// attack-move stops 440 short of the first enemy building within this of
+/// its line (440 and the engine's leash, 100 at move state 1, and some),
+/// and the Jugglenaut stares at it for good. They walk where one is (see
+/// `fight_clear`); one standing locked on a building walks on.
+pub const SUMO_LOCK: f32 = 640.0;
+/// A Jugglenaut jumps onto enemy buildings whose stomp kills this much
+/// metal (in shares of health, the building landed on taking it whole)...
+const STOMP_BUILDINGS: f32 = 60.0;
+/// ...harming no more than this share of that of ours and our allies'
+/// (and no more than [`SUMO_FRIENDS`]), and into no more enemy power than
+/// this many times ours there (as Jacks do).
+const STOMP_BUILDINGS_FRIENDS: f32 = 0.3;
+const SUMO_EDGE: f32 = 1.5;
+/// A Jugglenaut locked on a building worth a stomp out of its jump's reach
+/// walks to this share of its reach from it (to stomp it once its jump is
+/// ready); else on to where it was sent, unless it stands within this of
+/// it (idle, the engine itself locks it on the nearest building in 640:
+/// `CMobileCAI::GenerateAttackCmd` asks its first weapon, the decoy).
+const STOMP_APPROACH: f32 = 0.6;
+const SUMO_AT_GOAL: f32 = 120.0;
+
+/// Pounces (`sumopounce`): a Jugglenaut walks 34.5 and its guns reach 440;
+/// what is faster and reaches farther kites it for ever. A jump lands it
+/// with them in its pull, which holds them: onto them when they are in
+/// reach (stomping them too), else as near as it goes. Worth one for this
+/// much of their metal within [`POUNCE_HOLD`] of its guns' reach of the
+/// landing by then (and what the stomp kills, in shares of health).
+const POUNCE_WORTH: f32 = 100.0;
+const POUNCE_HOLD: f32 = 0.75;
+/// Those within this share of its guns' reach are in its pull already.
+const POUNCE_PULLED: f32 = 0.9;
 
 /// What stomps where it lands.
 const STOMPER: &str = "jumpsumo";
@@ -195,7 +235,7 @@ const ESCAPE_SEEN: i32 = 90;
 
 /// An enemy about: where it is (live while in sight or on radar), where it
 /// goes (elmos a frame; none out of sight, or with `lead` off), its metal
-/// and health.
+/// and health, its top speed (elmos a second) and its guns' reach.
 #[derive(Clone, Copy, Debug)]
 struct Seen {
     id: i32,
@@ -203,6 +243,8 @@ struct Seen {
     vel: Vec3,
     metal: f32,
     health: f32,
+    speed: f32,
+    range: f32,
 }
 
 impl Seen {
@@ -277,6 +319,8 @@ pub struct Jumps {
     guns: BTreeMap<i32, (f32, f32)>,
     /// Frame of each unit's last jump order.
     last: BTreeMap<i32, i32>,
+    /// Where each unit's last jump order landed it.
+    last_to: BTreeMap<i32, Vec3>,
     /// Jump orders not yet seen taking off.
     pending: Vec<Pending>,
     /// Since the summary: jumps seen in the air, orders gone without a jump
@@ -312,9 +356,12 @@ pub struct Jumps {
     /// off for friends under it.
     pub stomp_held: u32,
     pub stomp_aside: u32,
+    /// Since the summary: checks that found a Jugglenaut standing locked on
+    /// an enemy building (see [`SUMO_LOCK`]).
+    pub sumo_locked: u32,
 }
 
-/// A friend about a Jugglenaut's landing.
+/// A unit about a Jugglenaut's landing (a friend, or an enemy it stomps).
 struct Bystander {
     at: Vec3,
     /// Where it goes, elmos a frame.
@@ -328,6 +375,14 @@ struct Bystander {
 /// kills, in shares of their health: each reckoned at the nearest point of
 /// its going by then (up to [`STOMP_LEAD`]), [`STOMP_MARGIN`] nearer still.
 fn stomp_harm(near: &[Bystander], c: Vec3, t: f32) -> f32 {
+    stomp_kills(near, c, t, STOMP_MARGIN)
+}
+
+/// Metal of `near` that a stomp at `c` `t` frames from now kills, in shares
+/// of their health: each reckoned at the nearest point of its going by then
+/// (up to [`STOMP_LEAD`]), `margin` nearer still (none for enemies: the
+/// landing is aimed at them).
+fn stomp_kills(near: &[Bystander], c: Vec3, t: f32, margin: f32) -> f32 {
     (near.iter())
         .map(|b| {
             let mut go = b.vel * t;
@@ -341,13 +396,30 @@ fn stomp_harm(near: &[Bystander], c: Vec3, t: f32) -> f32 {
             } else {
                 0.0
             };
-            let surface = ((b.at + go * k).distance(c) - b.radius - STOMP_MARGIN).max(0.0);
+            let surface = ((b.at + go * k).distance(c) - b.radius - margin).max(0.0);
             if surface >= STOMP_RADIUS {
                 return 0.0;
             }
             b.metal * (STOMP * (1.0 - surface / STOMP_RADIUS) / b.health.max(1.0)).min(1.0)
         })
         .sum()
+}
+
+/// Whether `unit`, sent from `at` to `to`, is a Jugglenaut that should walk
+/// rather than attack-move: an enemy building stands within [`SUMO_LOCK`]
+/// of the way, and an attack-move would stop to stare at it.
+pub(crate) fn sumo_walks(unit: Unit, at: Vec3, to: Vec3, war: &super::MilitaryManager) -> bool {
+    let Some(sumo) = war.sumo_walks else { return false };
+    if unit.def().is_none_or(|d| d.id() != sumo) {
+        return false;
+    }
+    let (wx, wz) = (to.x - at.x, to.z - at.z);
+    let ww = wx * wx + wz * wz;
+    (war.targets.values()).filter(|e| e.is_static && !e.is_dead).any(|e| {
+        let p = e.position;
+        let k = if ww > 0.0 { (((p.x - at.x) * wx + (p.z - at.z) * wz) / ww).clamp(0.0, 1.0) } else { 0.0 };
+        (p.x - at.x - wx * k).hypot(p.z - at.z - wz * k) <= SUMO_LOCK
+    })
 }
 
 fn param(ud: UnitDef, key: &str) -> Option<f32> {
@@ -398,6 +470,19 @@ pub fn arc_clear(ground: impl Fn(f32, f32) -> f32, height: f32, from: Vec3, to: 
 /// Ground position of `p` on the live map.
 fn ground(ai: &Ai, p: Vec3) -> Vec3 {
     Vec3::new(p.x, ai.cb.map().elevation_at(p.x, p.z), p.z)
+}
+
+/// ZK's jumpjets drop a jump order within 1 elmo (in x and in z) of the
+/// unit's last landing as done (`unit_jumpjets.lua` AttemptJump), so a
+/// second stomp on the same building never flew: such a landing moves
+/// [`REPEAT_SHIFT`] aside.
+const REPEAT_SHIFT: f32 = 3.0;
+
+fn unrepeat(to: Vec3, last: Option<Vec3>) -> Vec3 {
+    match last {
+        Some(l) if (to.x - l.x).abs() < 1.5 && (to.z - l.z).abs() < 1.5 => Vec3::xz(to.x + REPEAT_SHIFT, to.z),
+        _ => to,
+    }
 }
 
 /// Damage of a Skuttle's blast to a unit of radius `r` whose middle is
@@ -606,7 +691,8 @@ impl Ai {
     /// Order `unit` to jump to `to` now (replacing its orders); `why` is
     /// counted in the summary.
     fn jump_order(&mut self, unit: Unit, to: Vec3, why: &str) {
-        let to = ground(self, to);
+        let to = ground(self, unrepeat(to, self.jumps.last_to.get(&unit.id()).copied()));
+        self.jumps.last_to.insert(unit.id(), to);
         unit.execute_custom_command(cmd::JUMP, &[to.x, to.y, to.z], 0, NO_TIMEOUT);
         let lands = (unit.def().and_then(|d| self.jump_def(d)))
             .map_or(120.0, |jd| Self::jump_time(jd, distance(unit.pos(), to)));
@@ -1036,6 +1122,7 @@ impl Ai {
     pub fn jumps_remove_unit(&mut self, unit: Unit) {
         self.lobster_remove_unit(unit.id());
         self.jumps.last.remove(&unit.id());
+        self.jumps.last_to.remove(&unit.id());
         self.jumps.sumos.remove(&unit.id());
         self.jumps.takeoff.remove(&unit.id());
         self.jumps.skuttles.remove(&unit.id());
@@ -1156,12 +1243,14 @@ impl Ai {
         for (def, n, ms) in std::mem::take(&mut self.pathfinder.jump_link_builds) {
             self.log(&format!("jumps: {n} jump links for the ways of {def} ({ms:.0} ms)"));
         }
-        if frame % 1800 == (self.offset + 17) % 1800 && (self.jumps.total > 0 || self.jumps.shown > 0) {
+        if frame % 1800 == (self.offset + 17) % 1800
+            && (self.jumps.total > 0 || self.jumps.shown > 0 || self.jumps.sumo_locked > 0)
+        {
             let counts: Vec<String> = self.jumps.counts.iter().map(|(k, n)| format!("{k} {n}")).collect();
             let rises: Vec<String> = self.jumps.way_rises.iter().map(|r| format!("{r:+.0}")).collect();
             self.log(&format!(
                 "jumps: {} in the last minute ({} flew, {} replaced, {} never queued, {} stalled, {} dropped from \
-                 ways): {}{}{}{}",
+                 ways): {}{}{}{}{}",
                 self.jumps.total,
                 self.jumps.flew,
                 self.jumps.replaced,
@@ -1178,8 +1267,14 @@ impl Ai {
                         "; Jugglenauts kept off friends: {} held, {} landed aside",
                         self.jumps.stomp_held, self.jumps.stomp_aside
                     )
+                },
+                if self.jumps.sumo_locked == 0 {
+                    String::new()
+                } else {
+                    format!("; Jugglenauts found locked on buildings {} times", self.jumps.sumo_locked)
                 }
             ));
+            self.jumps.sumo_locked = 0;
             self.jumps.stomp_held = 0;
             self.jumps.stomp_aside = 0;
             self.jumps.way_rises.clear();
@@ -1192,6 +1287,12 @@ impl Ai {
             self.jumps.dropped = 0;
             self.jumps.shown = 0;
         }
+        // Jugglenauts walk past enemy buildings (see `SUMO_LOCK`).
+        self.war.sumo_walks = if self.dev_off("sumostatic") || self.dev_off("jumps") {
+            None
+        } else {
+            self.defs.get(STOMPER).map(|d| d.id())
+        };
         self.jumps_watch(frame);
         self.lobster_update();
         if frame % PERIOD != (self.offset + 5) % PERIOD || self.dev_off("jumps") {
@@ -1221,7 +1322,9 @@ impl Ai {
                     self.jumps_pyro(unit);
                 }
                 "jumpsumo" => {
-                    self.jumps_sumo(unit);
+                    if !self.jumps_sumo(unit) {
+                        self.jumps_sumo_unlock(unit);
+                    }
                 }
                 _ => {}
             }
@@ -1240,7 +1343,15 @@ impl Ai {
             .map(|e| {
                 let (pos, vel) = self.enemy_motion(e);
                 let metal = e.ud.map_or(e.value, |d| d.cost(self.metal));
-                Seen { id: e.unit_id, pos, vel, metal, health: e.current_health() }
+                Seen {
+                    id: e.unit_id,
+                    pos,
+                    vel,
+                    metal,
+                    health: e.current_health(),
+                    speed: e.def_speed(),
+                    range: e.def_max_weapon_range(),
+                }
             })
             .collect()
     }
@@ -1377,17 +1488,32 @@ impl Ai {
     }
 
     /// A Jugglenaut jumps into the thick of a crowd (its landing hits all
-    /// within 170, see [`STOMP`]), sparing friends.
-    fn jumps_sumo(&mut self, unit: Unit) {
-        let Some(jd) = self.jump_ready(unit) else { return };
+    /// within 170, see [`STOMP`]), sparing friends; else onto what is faster
+    /// and outranges it ([`POUNCE_WORTH`]); else onto enemy buildings
+    /// ([`STOMP_BUILDINGS`]). Whether it jumped.
+    fn jumps_sumo(&mut self, unit: Unit) -> bool {
+        let Some(jd) = self.jump_ready(unit) else { return false };
         let pos = unit.pos();
         let near = self.jumps_enemies_near(pos, jd.range * REACH + SUMO_SPLASH + LEAD_LOOK);
-        if near.is_empty() {
-            return;
+        let crowd = if near.is_empty() { None } else { self.jumps_sumo_crowd(unit, jd, &near) };
+        if let Some(to) = crowd {
+            self.jump_order(unit, to, "jugglenaut");
+            unit.fight(to, OPTION_SHIFT_KEY);
+            return true;
         }
+        if !self.dev_off("sumopounce") && self.jumps_sumo_pounce(unit, jd) {
+            return true;
+        }
+        !self.dev_off("sumostatic") && self.jumps_sumo_buildings(unit, jd)
+    }
+
+    /// The landing of a Jugglenaut's jump into the thickest crowd of
+    /// `near`, if one is worth it.
+    fn jumps_sumo_crowd(&mut self, unit: Unit, jd: JumpDef, near: &[Seen]) -> Option<Vec3> {
+        let pos = unit.pos();
         let friends = self.stomp_bystanders(unit, pos, jd.range * REACH).unwrap_or_default();
         let mut best: Option<(f32, Vec3)> = None;
-        for seed in &near {
+        for seed in near {
             // Onto where it will be, and the crowd about it by then.
             let p = Self::jump_lead_point(jd, pos, seed.pos, seed.vel);
             let d = distance(pos, p);
@@ -1403,12 +1529,190 @@ impl Ai {
                 best = Some((metal, p));
             }
         }
-        if let Some((_, to)) = best
-            && self.jump_clear(jd, pos, to)
-        {
-            self.jump_order(unit, to, "jugglenaut");
-            unit.fight(to, OPTION_SHIFT_KEY);
+        best.map(|b| b.1).filter(|&to| self.jump_clear(jd, pos, to))
+    }
+
+    /// Enemies about `c` that a stomp there may hit: buildings (nanoframes
+    /// by how far they are built) and `mobiles`.
+    fn stomp_victims(&self, c: Vec3, mobiles: &[Seen]) -> Vec<Bystander> {
+        let r = STOMP_RADIUS + STOMP_LEAD + 64.0;
+        let buildings = (self.war.targets.values())
+            .filter(|e| e.is_static && !e.is_dead && e.ud.is_some() && distance(e.position, c) <= r)
+            .map(|e| {
+                let ud = e.ud.unwrap();
+                let built = if e.visible && e.unit.is_being_built() { e.unit.build_progress().max(0.05) } else { 1.0 };
+                Bystander {
+                    at: e.position,
+                    vel: Vec3::default(),
+                    radius: e.def_radius().unwrap_or(0.0),
+                    health: e.current_health(),
+                    metal: ud.cost(self.metal) * built,
+                }
+            });
+        let units = (mobiles.iter()).filter(|e| distance(e.pos, c) <= r).map(|e| Bystander {
+            at: e.pos,
+            vel: e.vel,
+            radius: 0.0,
+            health: e.health,
+            metal: e.metal,
+        });
+        buildings.chain(units).collect()
+    }
+
+    /// Our strength about `p` with a Jugglenaut of health `health` there,
+    /// on the scale of enemy power (as Jacks reckon it).
+    fn sumo_mine(&self, p: Vec3, health: f32) -> f32 {
+        self.war.get_total_friendly_power(p) + health / 10.0
+    }
+
+    /// A Jugglenaut pounces on what is faster than it and outranges its
+    /// guns (see [`POUNCE_WORTH`]): onto the led target when in reach, else
+    /// toward it as far as it goes, wherever most such metal ends in its
+    /// pull by the landing, out of defenses and into no more than
+    /// [`SUMO_EDGE`] times our power. Whether it jumped.
+    fn jumps_sumo_pounce(&mut self, unit: Unit, jd: JumpDef) -> bool {
+        let Some(def) = unit.def() else { return false };
+        let (_, guns) = self.jumps_gun(def);
+        let (pos, speed, reach) = (unit.pos(), def.speed(), jd.range * REACH);
+        let hold = guns * POUNCE_HOLD;
+        let near = self.jumps_enemies_near(pos, reach + hold + LEAD_LOOK);
+        let runners: Vec<Seen> = near.iter().filter(|e| e.speed > speed && e.range > guns).copied().collect();
+        if runners.is_empty() {
+            return false;
         }
+        let friends = self.stomp_bystanders(unit, pos, reach).unwrap_or_default();
+        let mine = self.sumo_mine(pos, unit.health());
+        let land = |d: f32| Self::jump_time(jd, d);
+        let mut best: Option<(f32, Vec3, i32)> = None;
+        for seed in &runners {
+            if distance(pos, seed.pos) <= guns * POUNCE_PULLED {
+                continue;
+            }
+            let on = lead_point(pos, seed.pos, seed.vel, land);
+            let d_on = distance(pos, on);
+            let to = if d_on <= reach {
+                on
+            } else {
+                Vec3::xz(pos.x + (on.x - pos.x) * reach / d_on, pos.z + (on.z - pos.z) * reach / d_on)
+            };
+            let d = distance(pos, to);
+            if d < MIN_ENGAGE || self.war.get_porc_threat(to) > 0.0 {
+                continue;
+            }
+            let t = land(d);
+            let held: f32 = runners.iter().filter(|e| distance(e.at(t), to) <= hold).map(|e| e.metal).sum();
+            let g = ground(self, to);
+            let worth = held + stomp_kills(&self.stomp_victims(g, &near), g, t, 0.0);
+            if worth < POUNCE_WORTH || best.as_ref().is_some_and(|b| worth <= b.0) {
+                continue;
+            }
+            if self.war.get_enemy_power(to) > SUMO_EDGE * mine
+                || stomp_harm(&friends, g, t) > SUMO_FRIENDS.min(STOMP_BUILDINGS_FRIENDS * worth)
+                || !self.jump_clear(jd, pos, to)
+            {
+                continue;
+            }
+            best = Some((worth, to, seed.id));
+        }
+        let Some((worth, to, id)) = best else { return false };
+        self.jump_order(unit, to, "jugglenaut pounce");
+        unit.fight(to, OPTION_SHIFT_KEY);
+        let name = self.war.targets.get(&id).map_or("?", |e| e.def_name.as_str());
+        self.log(&format!(
+            "jumps: jumpsumo {} pounces {:.0} toward {name} {id} ({worth:.0} metal of runners in its pull or stomped)",
+            unit.id(),
+            distance(pos, to)
+        ));
+        true
+    }
+
+    /// A Jugglenaut jumps onto the enemy building in reach whose stomp
+    /// kills the most (see [`STOMP_BUILDINGS`]). Whether it jumped.
+    fn jumps_sumo_buildings(&mut self, unit: Unit, jd: JumpDef) -> bool {
+        let (pos, reach) = (unit.pos(), jd.range * REACH);
+        let sites: Vec<(i32, Vec3)> = (self.war.targets.values())
+            .filter(|e| e.is_static && !e.is_dead && e.ud.is_some() && !e.can_fly())
+            .filter(|e| distance(pos, e.position) <= reach)
+            .map(|e| (e.unit_id, e.position))
+            .collect();
+        if sites.is_empty() {
+            return false;
+        }
+        let mobiles = self.jumps_enemies_near(pos, reach + STOMP_RADIUS + LEAD_LOOK);
+        let friends = self.stomp_bystanders(unit, pos, reach).unwrap_or_default();
+        let mine = self.sumo_mine(pos, unit.health());
+        let mut best: Option<(f32, Vec3, i32)> = None;
+        for (id, at) in sites {
+            let to = ground(self, at);
+            let t = Self::jump_time(jd, distance(pos, to));
+            let kills = stomp_kills(&self.stomp_victims(to, &mobiles), to, t, 0.0);
+            if kills < STOMP_BUILDINGS || best.as_ref().is_some_and(|b| kills <= b.0) {
+                continue;
+            }
+            if self.war.get_enemy_power(to) > SUMO_EDGE * mine
+                || stomp_harm(&friends, to, t) > SUMO_FRIENDS.min(STOMP_BUILDINGS_FRIENDS * kills)
+                || !self.jump_clear(jd, pos, to)
+            {
+                continue;
+            }
+            best = Some((kills, to, id));
+        }
+        let Some((kills, to, id)) = best else { return false };
+        self.jump_order(unit, to, "jugglenaut building");
+        let name = self.war.targets.get(&id).map_or("?", |e| e.def_name.as_str());
+        self.log(&format!(
+            "jumps: jumpsumo {} stomps {name} {id} from {:.0} ({kills:.0} metal killed, in shares of health)",
+            unit.id(),
+            distance(pos, to)
+        ));
+        true
+    }
+
+    /// A Jugglenaut standing locked on an enemy building (an attack-move
+    /// or its idle targeting picked it, see [`SUMO_LOCK`]) walks on: into
+    /// its jump's reach of the building if out of it and worth a stomp,
+    /// else toward where it was sent, if it is not there.
+    fn jumps_sumo_unlock(&mut self, unit: Unit) {
+        let Some(c) = unit.current_commands().into_iter().next() else { return };
+        if c.id() != CMD_ATTACK {
+            return;
+        }
+        let params = c.params();
+        let Some(e) = (params.len() == 1).then(|| self.war.targets.get(&(params[0] as i32))).flatten() else {
+            return;
+        };
+        if !e.is_static || e.is_dead {
+            return;
+        }
+        let (at, tid, name) = (e.position, e.unit_id, e.def_name.clone());
+        self.jumps.sumo_locked += 1;
+        if self.dev_off("sumostatic") {
+            return;
+        }
+        let Some(jd) = unit.def().and_then(|d| self.jump_def(d)) else { return };
+        let (pos, reach) = (unit.pos(), jd.range * REACH);
+        let goal = (self.fighters.get(&unit.id()).map(|f| f.target))
+            .filter(|&g| g != NULLPOS && distance(pos, g) > SUMO_AT_GOAL);
+        let d = distance(pos, at);
+        let g = ground(self, at);
+        let worth = d > reach && stomp_kills(&self.stomp_victims(g, &[]), g, 0.0, 0.0) >= STOMP_BUILDINGS;
+        if worth {
+            let k = reach * STOMP_APPROACH / d.max(1.0);
+            kgb_move_to(unit, Vec3::xz(at.x + (pos.x - at.x) * k, at.z + (pos.z - at.z) * k), 0, self.frame);
+            if let Some(g) = goal {
+                kgb_move_to(unit, g, OPTION_SHIFT_KEY, self.frame);
+            }
+        } else if let Some(g) = goal {
+            kgb_move_to(unit, g, 0, self.frame);
+        } else {
+            // Where it was sent: it stands either way.
+            return;
+        }
+        self.log(&format!(
+            "jumps: jumpsumo {} stood locked on {name} {tid} {d:.0} off; walks {}",
+            unit.id(),
+            if worth { "into its jump's reach" } else { "on" }
+        ));
     }
 
     /// Jugglenauts pull, and push while they retreat.
@@ -1644,8 +1948,15 @@ mod tests {
 
     #[test]
     fn a_clump_goes_where_its_members_go_on_average() {
-        let seen =
-            |x: f32, vx: f32| Seen { id: 0, pos: Vec3::xz(x, 0.0), vel: Vec3::xz(vx, 1.0), metal: 0.0, health: 0.0 };
+        let seen = |x: f32, vx: f32| Seen {
+            id: 0,
+            pos: Vec3::xz(x, 0.0),
+            vel: Vec3::xz(vx, 1.0),
+            metal: 0.0,
+            health: 0.0,
+            speed: 0.0,
+            range: 0.0,
+        };
         let (c, v) = middle(&[seen(0.0, 2.0), seen(100.0, 0.0)]);
         assert_eq!((c, v), (Vec3::xz(50.0, 0.0), Vec3::xz(1.0, 1.0)));
         assert_eq!(seen(10.0, 2.0).at(5.0), Vec3::xz(20.0, 5.0));
@@ -1719,5 +2030,40 @@ mod tests {
         assert_eq!(stomp_harm(&[friend(0.0, 2.0, 230.0, 65.0)], c, 90.0), 65.0);
         // The lead stops at STOMP_LEAD: a fast one 600 off is not counted.
         assert_eq!(stomp_harm(&[friend(600.0, -10.0, 230.0, 65.0)], c, 90.0), 0.0);
+    }
+
+    #[test]
+    fn a_repeat_landing_moves_aside_and_back() {
+        let c = Vec3::xz(1000.0, 500.0);
+        assert_eq!(unrepeat(c, None), c);
+        let first = unrepeat(c, Some(Vec3::xz(400.0, 400.0)));
+        assert_eq!(first, c);
+        let again = unrepeat(c, Some(first));
+        assert!((again.x - first.x).abs() >= 1.0, "{again:?}");
+        // The third lands on the middle again: 3 off the second.
+        assert_eq!(unrepeat(c, Some(again)), c);
+    }
+
+    #[test]
+    fn a_stomp_on_a_building_kills_it_if_light_and_halves_a_stout_one() {
+        let building = |x: f32, health: f32, metal: f32| Bystander {
+            at: Vec3::xz(x, 0.0),
+            vel: Vec3::default(),
+            radius: 20.0,
+            health,
+            metal,
+        };
+        let c = Vec3::xz(0.0, 0.0);
+        // Landed on: a Lotus (90 metal, 755 health) whole, worth a jump.
+        let lotus = stomp_kills(&[building(0.0, 755.0, 90.0)], c, 90.0, 0.0);
+        assert_eq!(lotus, 90.0);
+        assert!(lotus >= STOMP_BUILDINGS);
+        // A 2000-health turret: half of it.
+        let stout = stomp_kills(&[building(0.0, 2000.0, 300.0)], c, 90.0, 0.0);
+        assert!((140.0..160.0).contains(&stout), "{stout}");
+        // Enemies get no margin: a solar at 195 is past the rim; a friend
+        // there is not.
+        assert_eq!(stomp_kills(&[building(195.0, 600.0, 70.0)], c, 90.0, 0.0), 0.0);
+        assert!(stomp_harm(&[building(195.0, 600.0, 70.0)], c, 90.0) > 0.0);
     }
 }

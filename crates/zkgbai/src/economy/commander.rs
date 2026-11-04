@@ -59,7 +59,8 @@ impl Ai {
             && !reserved::is_reserved(self.cb, id)
             && !self.qrf_claims(id)
             && !super::terraform::is_terraforming(unit)
-            && !self.eco_in_transit(id);
+            && !self.eco_in_transit(id)
+            && !self.comguard_holds(id);
         let def = unit.def();
         let view = self.war.view(def);
         // The same scale as the commander's paint in war_update_threats,

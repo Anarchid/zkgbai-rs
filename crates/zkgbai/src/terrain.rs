@@ -281,30 +281,48 @@ impl Ai {
         }
         let TerrainModel::Pending { job } = &self.terrain else { return };
         match job.rx.try_recv() {
-            Ok((terrain, compute, split)) => {
-                self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
-                self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
-                if split > 0 {
-                    self.log(&format!("terrain: regions cut around clusters of the {split} metal spots (regionsplit)"));
-                }
-                for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
-                    let count = |k: ChokeKind| t.chokes.iter().filter(|c| c.kind == k).count();
-                    let (gates, seams) = (count(ChokeKind::Gate), count(ChokeKind::Seam));
-                    let pieces = t.regions.iter().filter(|r| r.whole != r.id).count();
-                    self.log(&format!(
-                        "terrain: {:<8} {:>5.1}% passable, {} regions ({pieces} new from cuts), {gates} gates, {} borders, {seams} seams",
-                        t.tier.name(),
-                        t.passable_fraction * 100.0,
-                        t.regions.len(),
-                        count(ChokeKind::Border),
-                    ));
-                }
-            }
+            Ok((terrain, compute, split)) => self.terrain_ready(terrain, compute, split),
             Err(TryRecvError::Empty) => self.terrain_watchdog(frame),
             Err(TryRecvError::Disconnected) => {
                 self.log("terrain: analysis failed; continuing without terrain model");
                 self.terrain = TerrainModel::Unavailable;
             }
+        }
+    }
+
+    /// Wait up to `timeout` for the first analysis (it takes ~0.1 s): for
+    /// choices made before the game starts. Whether the model is ready.
+    pub(crate) fn terrain_wait(&mut self, timeout: Duration) -> bool {
+        if let TerrainModel::Pending { job } = &self.terrain {
+            match job.rx.recv_timeout(timeout) {
+                Ok((terrain, compute, split)) => self.terrain_ready(terrain, compute, split),
+                Err(mpsc::RecvTimeoutError::Timeout) => return false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.log("terrain: analysis failed; continuing without terrain model");
+                    self.terrain = TerrainModel::Unavailable;
+                }
+            }
+        }
+        self.terrain.get().is_some()
+    }
+
+    fn terrain_ready(&mut self, terrain: Terrain, compute: Duration, split: usize) {
+        self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
+        self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
+        if split > 0 {
+            self.log(&format!("terrain: regions cut around clusters of the {split} metal spots (regionsplit)"));
+        }
+        for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
+            let count = |k: ChokeKind| t.chokes.iter().filter(|c| c.kind == k).count();
+            let (gates, seams) = (count(ChokeKind::Gate), count(ChokeKind::Seam));
+            let pieces = t.regions.iter().filter(|r| r.whole != r.id).count();
+            self.log(&format!(
+                "terrain: {:<8} {:>5.1}% passable, {} regions ({pieces} new from cuts), {gates} gates, {} borders, {seams} seams",
+                t.tier.name(),
+                t.passable_fraction * 100.0,
+                t.regions.len(),
+                count(ChokeKind::Border),
+            ));
         }
     }
 
@@ -868,9 +886,15 @@ impl Ai {
                 blocked: false,
             })
             .collect();
+        // A chokepoint within reach of a conquest objective we hold counts
+        // too (see `economy::conquest`).
+        let conquered = self.conquest_held_sites();
+        let reach = self.conquest_reach();
         let held = |c: usize| {
             let p = map.chokes[c].pos;
-            self.war.get_friendly_porc_threat(Vec3::xz(p.x, p.z)) >= HELD_POWER
+            let at = Vec3::xz(p.x, p.z);
+            self.war.get_friendly_porc_threat(at) >= HELD_POWER
+                || conquered.iter().any(|s| crate::util::distance(Vec3::xz(s.x, s.z), at) <= reach)
         };
         // A region our defenses cover in strength holds like a chokepoint.
         let held_region = |r: usize| {
