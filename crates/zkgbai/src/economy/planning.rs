@@ -397,6 +397,23 @@ impl Ai {
     /// it was adopted.
     pub(crate) fn eco_logistics_porc(&mut self, def: UnitDef, pos: Vec3, near: f32) -> Option<(TaskId, bool)> {
         let site = self.eco_build_site(def, pos, 0);
+        self.eco_logistics_porc_on(def, site, near)
+    }
+
+    /// [`Self::eco_logistics_porc`] at `pos` itself, or the legal site
+    /// within `slack` of it (a turret on a platform raised for it: the
+    /// nearest legal site may be off the top).
+    pub(crate) fn eco_logistics_porc_at(&mut self, def: UnitDef, pos: Vec3, slack: f32) -> Option<TaskId> {
+        let map = self.cb.map();
+        let site = if map.is_possible_to_build_at(def, pos, 0) {
+            pos
+        } else {
+            map.find_closest_build_site(def, pos, slack, 0, 0)
+        };
+        self.eco_logistics_porc_on(def, site, 0.0).map(|(t, _)| t)
+    }
+
+    fn eco_logistics_porc_on(&mut self, def: UnitDef, site: Vec3, near: f32) -> Option<(TaskId, bool)> {
         // What `eco_clean_orders` would drop at once: a blocked site, or one
         // enemy defenses cover; and where a worker would not go.
         if site.x < 0.0
