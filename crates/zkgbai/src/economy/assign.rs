@@ -337,6 +337,9 @@ impl Ai {
         if self.eco.workers.get(&wid).is_some_and(|w| w.raid_defense.is_some() || self.jump_in_progress(w.unit)) {
             return;
         }
+        if self.conquest_walk_worker(wid) {
+            return;
+        }
         // Cancel the old engine order even if no safe replacement exists.
         let blocked_construction = self.eco.workers.get(&wid).is_some_and(|w| {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
