@@ -14,7 +14,7 @@
 //! engine-made attack (internal, or ahead of the fight it came from) on a
 //! frame under [`KEEP_FRAME`] built inside a visible enemy factory turns to
 //! the nearest armed enemy within its reach that it can hit and that can
-//! hit it, or, with none, to the factory: an attack inserted at the front of
+//! hit it from its own range, or, with none, to the factory: an attack inserted at the front of
 //! its queue, the frame's attack removed. A unit so turned to a factory
 //! turns again to an armed enemy that comes within its reach. When its
 //! attack ends (the factory dead, the unit leashed back), the fight it came
@@ -50,6 +50,9 @@ const KEEP_FRAME: f32 = 0.85;
 /// A unit's reach: its range and the engine's fight leash at manoeuvre
 /// (100 * move state squared).
 const REACH_SLACK: f32 = 100.0;
+/// An armed enemy counts as fighting a unit of ours within its own range
+/// and this much more.
+const THREAT_SLACK: f32 = 50.0;
 /// Our units this far from a factory with a frame are looked at (the
 /// longest ranges plus their leash).
 const SCAN: f32 = 2000.0;
@@ -241,7 +244,9 @@ impl Ai {
     }
 
     /// The nearest enemy within `unit`'s reach that it can hit and that can
-    /// hit it, frames aside.
+    /// hit it from where it stands (its range and [`THREAT_SLACK`]), frames
+    /// aside. One out of its own range is not fighting us: going for it
+    /// walks us into it (a Lotus at 485 pulled a Cyclops back in, 11-04).
     fn facframe_fighter(&mut self, unit: Unit, def: UnitDef) -> Option<i32> {
         let at = unit.pos();
         let reach = unit.max_range() + REACH_SLACK;
@@ -253,6 +258,9 @@ impl Ai {
             let Some(edef) = e.def() else { continue };
             let d = distance(at, e.pos());
             if best.is_some_and(|(bd, _)| bd <= d) {
+                continue;
+            }
+            if d > e.max_range().max(edef.max_weapon_range()) + THREAT_SLACK {
                 continue;
             }
             if self.facframe_hits(def, edef) && self.facframe_hits(edef, def) {
