@@ -222,6 +222,13 @@ impl State {
         self.tasks.get(&task).is_some_and(|&p| distance(p, anchor) <= VAR_RADIUS)
     }
 
+    /// The heavy a platform is rising for, and where: a turret planned
+    /// there already, for `porcmix` (wirestank2: another planner put one
+    /// beside a rising platform, and its heavy was refused on top).
+    pub(crate) fn raising_turret(&self) -> Option<(Vec3, UnitDef)> {
+        self.raise.as_ref().map(|r| (r.site, r.def))
+    }
+
     /// Whether a platform rises for a heavy guarding the place at `anchor`.
     pub(super) fn raising(&self, anchor: Vec3) -> bool {
         self.raise.as_ref().is_some_and(|r| distance(r.anchor, anchor) <= VAR_RADIUS)
