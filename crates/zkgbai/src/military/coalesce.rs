@@ -46,8 +46,11 @@
 //! small gang fails where a big one passes) the prefix is doubled, up to
 //! [`SIZE_STEPS`] times, and only then the whole cluster (the lobby, 11-04:
 //! six raiders chasing one Dagger, seven one Ravager, whole clusters on a
-//! lone Dart). A raider squad chasing alone is still the whole squad: its
-//! handler freezes a squad while any member is borrowed. A clean gang
+//! lone Dart). A raider squad is split too: the members taken are lent to
+//! this module (see `roles::role_lend`), so the squad's own orders no
+//! longer reach them, and its handler drives the rest on (it skips a squad
+//! only when its leader, or all of it, is borrowed; the leader is never
+//! taken into a prefix, so the squad keeps its place). A clean gang
 //! that is not closing on its focus (out of its guns' reach and the gap
 //! not shrinking by [`CHASE_CLOSE`] a recheck, [`CHASE_TICKS`] rechecks
 //! running: the focus kites or flees at our speed) breaks off (`chase`),
@@ -342,11 +345,16 @@ impl Ai {
         self.coalesce.owner.contains_key(&id)
     }
 
-    /// Whether any member of raider squad `sid` is borrowed.
+    /// Whether raider squad `sid` is a gang's: its leader borrowed, or all
+    /// of it (with `coalsize` a squad lends some members and goes on).
     pub fn coalesce_owns_squad(&self, sid: SquadId) -> bool {
         !self.coalesce.owner.is_empty()
             && self.squads.get(sid).is_some_and(|s| {
-                s.fighters.iter().chain(s.leader.iter()).any(|id| self.coalesce.owner.contains_key(id))
+                let owned = |id: &i32| self.coalesce.owner.contains_key(id);
+                if self.dev_off(SIZE) {
+                    return s.fighters.iter().chain(s.leader.iter()).any(owned);
+                }
+                s.leader.as_ref().is_some_and(owned) || !s.fighters.is_empty() && s.fighters.iter().all(owned)
             })
     }
 
@@ -642,13 +650,26 @@ impl Ai {
                     }
                     last = prefix.len();
                     let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
-                    if let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) {
+                    let judged = self.coalesce_judge(&units, None, budget);
+                    if let Judged::Pass(v) = judged {
                         self.coalesce.sized += 1;
                         self.coalesce_form(prefix, v, shadow, cluster);
                         sized = true;
                         break;
                     }
                     self.coalesce.sized_failed += 1;
+                    // Why the prefix failed (for the read).
+                    let why = match &judged {
+                        Judged::Fail(t, p) => json!({"tally": tally_json(t), "p_prize": p}),
+                        Judged::NoFight => json!("nofight"),
+                        Judged::Unknown => json!("unknown"),
+                        Judged::Pass(_) => json!("pass"),
+                    };
+                    self.op_emit(
+                        "coalesce",
+                        json!({"event": "sized_no", "t": frame / 30, "ratio": ratio, "prefix": prefix.len(),
+                               "cluster": cluster, "why": why}),
+                    );
                     if budget.spent() {
                         sized = true;
                         break;
@@ -690,29 +711,20 @@ impl Ai {
         let focus = (armed.iter()).min_by(|a, b| distance(a.pos, mid).total_cmp(&distance(b.pos, mid)))?.pos;
         let need = ratio * armed.iter().map(|t| t.cost).sum::<f32>();
         let metal = self.metal;
+        // Every raider its own block; a squad's leader stays with its squad.
         let mut blocks: Vec<(f32, f32, Vec<usize>)> = Vec::new();
-        let mut squads: BTreeMap<SquadId, usize> = BTreeMap::new();
         for (i, m) in members.iter().enumerate() {
+            if let Origin::Squad(sid) = m.1
+                && self.squads.get(sid).is_some_and(|s| s.leader == Some(m.0))
+            {
+                continue;
+            }
             let d = distance(m.2.pos(), focus);
             let cost = m.2.def().map_or(0.0, |def| def.cost(metal));
-            let slot = match m.1 {
-                Origin::Squad(sid) => match squads.get(&sid) {
-                    Some(&b) => b,
-                    None => {
-                        blocks.push((d, 0.0, Vec::new()));
-                        squads.insert(sid, blocks.len() - 1);
-                        blocks.len() - 1
-                    }
-                },
-                _ => {
-                    blocks.push((d, 0.0, Vec::new()));
-                    blocks.len() - 1
-                }
-            };
-            let b = &mut blocks[slot];
-            b.0 = b.0.min(d);
-            b.1 += cost;
-            b.2.push(i);
+            blocks.push((d, cost, vec![i]));
+        }
+        if blocks.len() < MIN_MEMBERS {
+            return None;
         }
         let taken = take_blocks(&mut blocks, need, MIN_MEMBERS);
         if taken.len() >= members.len() {
@@ -800,6 +812,13 @@ impl Ai {
                 f.task = None;
             }
         }
+        // A squad raider is lent to this module: its squad's orders no
+        // longer reach it (`coalsize`).
+        if !self.dev_off(SIZE) {
+            for m in members.iter().filter(|m| matches!(m.1, Origin::Squad(_) | Origin::Loose)) {
+                self.role_lend(m.0, "coalesce");
+            }
+        }
         self.op_emit("coalesce", rec);
         self.coalesce_order(gid, v.focus);
     }
@@ -840,13 +859,13 @@ impl Ai {
         for (id, origin, _) in &g.members {
             self.coalesce.owner.remove(id);
             match origin {
+                Origin::Squad(_) | Origin::Loose => self.role_reown(*id),
                 Origin::Stakeout => self.stakeouts_release(*id),
                 Origin::Solo | Origin::Kodachi => {
                     if let Some(f) = self.fighters.get_mut(id) {
                         f.last_task_frame = 0;
                     }
                 }
-                _ => {}
             }
         }
         let alive = g.members.iter().filter(|m| m.2.health() > 0.0 && m.2.team() == self.team_id).count();

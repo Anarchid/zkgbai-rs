@@ -1306,9 +1306,11 @@ impl Ai {
             (rs.status, rs.target, rs.raider_type, rs.leader, rs.courage);
         // The operator's courage (see `Squad::courage`).
         let tolerance = |friendly: f32| (courage - 1.0).max(0.0) * friendly;
+        // Members lent to a gang are the gang's for now (see `coalesce`).
         let members: Vec<(Vec3, bool)> = rs
             .fighters
             .iter()
+            .filter(|id| !self.coalesce_owns(**id))
             .filter_map(|id| self.fighters.get(id))
             .map(|f| (f.get_pos(), f.unit.is_cloaked()))
             .collect();
