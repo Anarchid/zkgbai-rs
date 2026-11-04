@@ -41,8 +41,10 @@
 //! mark sizes a team. The cluster's blocks (a raider squad is one block:
 //! its handler skips the whole squad while any member is borrowed) are
 //! taken nearest the focus first until they are worth [`JUST_ENOUGH`]
-//! times the fight's armed enemy metal, and that prefix is judged; only
-//! if it fails is the whole cluster judged as before (the lobby, 11-04:
+//! times the fight's armed enemy metal, and that prefix is judged; if it
+//! fails (the clean plan's loss is a share of the gang's metal, so a
+//! small gang fails where a big one passes) the prefix is doubled, up to
+//! [`SIZE_STEPS`] times, and only then the whole cluster (the lobby, 11-04:
 //! six raiders chasing one Dagger, seven one Ravager, whole clusters on a
 //! lone Dart). A clean gang whose focus outruns it (faster than its
 //! slowest member and the gap growing [`CHASE_TICKS`] rechecks running)
@@ -115,6 +117,8 @@ const MAX_LIFE: i32 = 30 * 45;
 const REORDER: i32 = 60;
 /// A sized gang is worth this many times the fight's armed enemy metal.
 const JUST_ENOUGH: f32 = 2.0;
+/// A failing prefix is doubled this many times before the whole cluster.
+const SIZE_STEPS: u32 = 2;
 /// A clean gang is chasing when its gap to the focus grows this much
 /// (elmos) per recheck, this many rechecks running.
 const CHASE_GAIN: f32 = 30.0;
@@ -240,6 +244,7 @@ pub struct Coalesce {
     /// Gangs formed as a sized prefix of their cluster, and clean gangs
     /// broken off a chase (`coalsize`).
     sized: u64,
+    sized_failed: u64,
     chases: u64,
     /// Enemies that outran a gang: unit id -> frame until which no gang
     /// forms on them.
@@ -620,19 +625,34 @@ impl Ai {
             let group = &groups[(start + k) % n];
             let members: Vec<(i32, Origin, Unit)> = group.iter().map(|&i| free[i]).collect();
             let cluster = members.len();
-            // Just enough of the cluster first (`coalsize`).
-            if !self.dev_off(SIZE)
-                && let Some(prefix) = self.coalesce_prefix(&members)
-            {
-                let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
-                if let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) {
-                    self.coalesce.sized += 1;
-                    self.coalesce_form(prefix, v, shadow, cluster);
-                    continue;
+            // Just enough of the cluster first, then twice that, then
+            // four times (`coalsize`).
+            let mut sized = false;
+            if !self.dev_off(SIZE) {
+                let mut last = 0;
+                for step in 0..=SIZE_STEPS {
+                    let ratio = JUST_ENOUGH * (1 << step) as f32;
+                    let Some(prefix) = self.coalesce_prefix(&members, ratio) else { break };
+                    if prefix.len() == last {
+                        continue;
+                    }
+                    last = prefix.len();
+                    let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
+                    if let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) {
+                        self.coalesce.sized += 1;
+                        self.coalesce_form(prefix, v, shadow, cluster);
+                        sized = true;
+                        break;
+                    }
+                    self.coalesce.sized_failed += 1;
+                    if budget.spent() {
+                        sized = true;
+                        break;
+                    }
                 }
-                if budget.spent() {
-                    continue;
-                }
+            }
+            if sized {
+                continue;
             }
             let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
             let lone = members.len() == 1;
@@ -647,7 +667,7 @@ impl Ai {
     /// The cluster's blocks nearest the fight's focus until they are worth
     /// [`JUST_ENOUGH`] times its armed enemy metal (`coalsize`); `None`
     /// when that is the whole cluster, or there is no fight to size to.
-    fn coalesce_prefix(&mut self, members: &[(i32, Origin, Unit)]) -> Option<Vec<(i32, Origin, Unit)>> {
+    fn coalesce_prefix(&mut self, members: &[(i32, Origin, Unit)], ratio: f32) -> Option<Vec<(i32, Origin, Unit)>> {
         if members.len() <= MIN_MEMBERS {
             return None;
         }
@@ -664,7 +684,7 @@ impl Ai {
             units.iter().map(|u| u.pos().z).sum::<f32>() / n,
         );
         let focus = (armed.iter()).min_by(|a, b| distance(a.pos, mid).total_cmp(&distance(b.pos, mid)))?.pos;
-        let need = JUST_ENOUGH * armed.iter().map(|t| t.cost).sum::<f32>();
+        let need = ratio * armed.iter().map(|t| t.cost).sum::<f32>();
         let metal = self.metal;
         let mut blocks: Vec<(f32, f32, Vec<usize>)> = Vec::new();
         let mut squads: BTreeMap<SquadId, usize> = BTreeMap::new();
@@ -876,7 +896,7 @@ impl Ai {
             "scans_per_min": c.scans as f64 / minutes, "queries": c.queries,
             "mean_us": c.micros as f64 / c.scans as f64, "over_budget": c.over_budget, "forms": c.forms,
             "gangs": c.gangs.len(), "lone_judged": c.lone_judged, "lone_formed": c.lone_formed,
-            "sized": c.sized, "chases": c.chases,
+            "sized": c.sized, "sized_failed": c.sized_failed, "chases": c.chases,
         });
         c.scans = 0;
         c.micros = 0;
