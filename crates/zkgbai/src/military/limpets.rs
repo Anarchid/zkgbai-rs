@@ -136,13 +136,13 @@ impl Ai {
         }
         let previous = reserved::own(self.cb, id, OWNER);
         self.war.limpets.owned.insert(id, previous);
-        if let Some(f) = self.fighters.get_mut(&id) {
-            if self.defs.name_of(f.unit) == "amphbomb" {
-                f.limpet_controlled = true;
-                f.unit.stop(0);
-                f.unit.set_move_state(0, 0);
-                f.unit.set_fire_state(0, 0);
-            }
+        if let Some(f) = self.fighters.get_mut(&id)
+            && self.defs.name_of(f.unit) == "amphbomb"
+        {
+            f.limpet_controlled = true;
+            f.unit.stop(0);
+            f.unit.set_move_state(0, 0);
+            f.unit.set_fire_state(0, 0);
         }
     }
 
@@ -206,12 +206,11 @@ impl Ai {
         // A reserved bomb must not be the anchor that its escorts rally to.
         for (&sid, ids) in &eligible {
             let escort = ids.iter().find(|id| self.defs.name_of(self.fighters[id].unit) != "amphbomb").copied();
-            if let Some(s) = self.squads.get_mut(sid) {
-                if s.leader.is_none_or(|id| self.fighters.get(&id).is_some_and(|f| f.limpet_controlled)) {
-                    if escort.is_some() {
-                        s.leader = escort;
-                    }
-                }
+            if let Some(s) = self.squads.get_mut(sid)
+                && s.leader.is_none_or(|id| self.fighters.get(&id).is_some_and(|f| f.limpet_controlled))
+                && escort.is_some()
+            {
+                s.leader = escort;
             }
         }
         if frame % PERIOD != self.offset % PERIOD {
