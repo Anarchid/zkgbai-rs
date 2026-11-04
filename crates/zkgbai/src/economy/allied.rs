@@ -112,6 +112,9 @@ pub struct AlliedProjects {
 /// An unfinished tactical silo claims coverage while construction advances.
 /// A fresh sighting gets time for its builders to arrive (90 seconds).
 const ALLY_STALL: i32 = 30 * 90;
+/// Keep substantial paid construction eligible for rescue even without an
+/// active allied crew. Negligible abandoned starts may still be replaced.
+const SILO_RESCUE_PROGRESS: f32 = 0.30;
 
 struct FrameProgress {
     built: f32,
@@ -303,6 +306,12 @@ impl Ai {
         !u.is_being_built() || self.eco.allied.progress.get(&u.id()).is_none_or(|p| p.active(self.frame))
     }
 
+    fn eco_ally_silo_worth_helping(&self, u: Unit) -> bool {
+        // A nearly finished silo is especially cheap to rescue; the normal
+        // minimum remaining-work rule must not exclude it.
+        u.build_progress() >= SILO_RESCUE_PROGRESS || (self.eco_ally_project_active(u) && self.eco_worth_helping(u))
+    }
+
     /// Whether enough of the allied frame `u` is left to build to be worth
     /// sending help (see [`ASSIST_LEFT`]).
     pub(super) fn eco_worth_helping(&self, u: Unit) -> bool {
@@ -328,9 +337,11 @@ impl Ai {
                 homes.iter().any(|&h| distance(h, p) <= ASSIST_REACH)
                     && self.eco_ally_site_safe(p)
                     && !u.def().is_some_and(|d| self.eco_super_project_exposed(d, p))
-                    && self.eco_worth_helping(*u)
-                    && (name != crate::military::missiles::SILO
-                        || (self.eco_ally_project_active(*u) && self.missiles_ally_site_wanted(p)))
+                    && if name == crate::military::missiles::SILO {
+                        self.eco_ally_silo_worth_helping(*u) && self.missiles_ally_site_wanted(p)
+                    } else {
+                        self.eco_worth_helping(*u)
+                    }
             })
             .max_by(|a, b| a.build_progress().total_cmp(&b.build_progress()))
     }
@@ -514,7 +525,7 @@ impl Ai {
                 Some(u) if u.team() != self.team_id => {
                     let gone = u.health() <= 0.0 || !self.allies.contains(&u.team());
                     let stalled = self.defs.name(c.build_type) == crate::military::missiles::SILO
-                        && !self.eco_ally_project_active(u)
+                        && !self.eco_ally_silo_worth_helping(u)
                         && !self.op_priority(id);
                     if gone || !u.is_being_built() || stalled {
                         ended.push((
@@ -790,6 +801,27 @@ mod tests {
         assert!(p.active(ALLY_STALL + 30));
         p.observe(0.11, 4, ALLY_STALL * 2);
         assert!(p.active(ALLY_STALL * 2), "a new owner receives its own grace period");
+    }
+
+    #[test]
+    fn stalled_silos_retain_paid_work_without_claiming_active_coverage() {
+        let mut ai = project_ai();
+        let u = Unit::from_id(ai.cb, 42).unwrap();
+        ai.frame = ALLY_STALL;
+        ai.eco.allied.progress.insert(u.id(), FrameProgress { built: 0.30, advanced: 0, team: 3 });
+        for built in [0.30, 0.60, 0.99] {
+            BUILD.set(built);
+            assert!(ai.eco_ally_silo_worth_helping(u), "rescue {built:.0}% paid construction");
+            assert!(!ai.eco_ally_project_active(u), "paid work alone is not active target coverage");
+        }
+        assert!(!ai.eco_worth_helping(u), "near completion would fail the ordinary remaining-work floor");
+        BUILD.set(0.29);
+        assert!(!ai.eco_ally_silo_worth_helping(u), "a small stalled or reclaimed frame may be replaced");
+        ai.eco.allied.progress.get_mut(&u.id()).unwrap().observe(0.31, 3, ai.frame);
+        BUILD.set(0.31);
+        assert!(ai.eco_ally_project_active(u), "resumed construction restores coverage");
+        BUILD.set(0.10);
+        assert!(ai.eco_ally_silo_worth_helping(u), "small active projects can still receive help");
     }
 
     /// Ask every 30 frames (as the planners do, more often) from `from`

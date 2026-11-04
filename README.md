@@ -196,6 +196,9 @@ refreshes the site, remaining-work forecast and crew; merging duplicate jobs ret
 Tactical silo assistance must satisfy the normal missile target/range or siege-coverage checks
 at the ally's actual position. An unfinished allied silo stops reserving coverage after 90 seconds
 without observed construction progress, and resumes reserving it if construction resumes.
+Silos at least 30% built remain eligible for assistance despite stalling, including nearly
+finished frames with little work left. A suitable rescue is selected before planning a new
+silo, and its assist job survives the stall timeout; the same safety and target checks apply.
 These budgets remain local to each AI; allied contributions are observed through frame progress.
 
 Combat gangs (`coalesce`) temporarily lease command authority as well as borrowing units from
