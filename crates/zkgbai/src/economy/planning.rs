@@ -288,6 +288,11 @@ const ZONE_MIX: [(&str, f32); 7] = [
     ("turretheavy", 80.0),
 ];
 const SAME_KIND: usize = 2;
+/// What the push and front porc fall back to when the kind drawn may not go
+/// (see `porcmix`), in order.
+const PUSH_MIX: [&str; 4] = ["turretmissile", "turretheavylaser", "turretemp", "turretlaser"];
+const FRONT_MIX: [&str; 6] =
+    ["turretmissile", "turretlaser", "turretheavylaser", "turretgauss", "turretriot", "turretemp"];
 /// Posture turrets keep this far from every turret of ours (splash), elmos.
 const TURRET_SPACING: f32 = 150.0;
 /// A posture turret goes only where fewer than this many turrets of ours
@@ -2114,6 +2119,15 @@ impl Ai {
         let Some(def) = def else {
             return;
         };
+        // As many of its kind about as `porcmix` lets stand: the ring's
+        // hundred tries would all be refused.
+        let name = self.defs.name(def);
+        if super::porcmix::is_mixed(name)
+            && !self.dev_off(super::porcmix::FEATURE)
+            && self.eco_turret_kinds(position, radius).get(name).copied().unwrap_or(0) >= super::porcmix::kind_cap(name)
+        {
+            return;
+        }
         if extra == Some(List::Porc)
             && self.eco_share_point_defense(
                 def,
@@ -2640,6 +2654,18 @@ impl Ai {
             || self.eco.porc_tasks.iter().any(|&c| distance(pos, self.eco.task_pos(c)) < porcdist)
     }
 
+    /// `porc` at the site nearest `pos`; with `porcmix`, where that one may
+    /// not go, the first of `mix` that may (see `porcmix`).
+    fn eco_porc_mix(&self, porc: UnitDef, mix: &[&str], pos: Vec3) -> Option<(UnitDef, Vec3)> {
+        if self.dev_off(super::porcmix::FEATURE) {
+            return Some((porc, self.eco_build_site(porc, pos, 0)));
+        }
+        let kinds: Vec<UnitDef> = std::iter::once(porc)
+            .chain(mix.iter().filter_map(|n| self.defs.get(n)).filter(|d| d.id() != porc.id()))
+            .collect();
+        self.eco_mix_pick(&kinds, pos)
+    }
+
     fn eco_porc_push(&mut self, position: Vec3) {
         let tf2 = (self.graph.territory_fraction * 2.0).min(1.0);
         let mut rnd = kgb_rand();
@@ -2662,7 +2688,11 @@ impl Ai {
         };
 
         let pos = get_angular_point(enemy.position, position, ud.max_weapon_range() + 100.0);
-        let pos = self.eco_build_site(porc, pos, 0);
+        // The kind drawn, else the next of the push's mix the site takes
+        // (`porcmix`: not a third Picket beside two).
+        let Some((porc, pos)) = self.eco_porc_mix(porc, &PUSH_MIX, pos) else {
+            return;
+        };
 
         let porcdist = 150.0 + (150.0 * (1.0 - tf2));
         if self.eco_porc_near(pos, porcdist) {
@@ -2707,7 +2737,9 @@ impl Ai {
         let Some(porc) = porc else {
             return;
         };
-        let pos = self.eco_build_site(porc, pos, 0);
+        let Some((porc, pos)) = self.eco_porc_mix(porc, &FRONT_MIX, pos) else {
+            return;
+        };
 
         let porcdist = 200.0 + (150.0 * (1.0 - tf2));
         if self.eco_porc_near(pos, porcdist) {

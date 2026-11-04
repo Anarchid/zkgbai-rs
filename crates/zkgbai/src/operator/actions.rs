@@ -35,7 +35,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "porcmix",
         "Defense",
-        "walk-in turrets mixed and spaced: at a place at most 2 Lotuses and 1 of each other kind (1 of each heavy), each out of the death blast of every turret of ours, side by side across the approach; with every kind there, more porc is a heavy or none (default on)",
+        "ground turrets mixed and spaced, whoever plans them: within 500 elmos at most 2 Lotuses or Pickets and 1 of each other kind, each out of the death blast of every turret of ours; walk-in turrets side by side across the approach, and with every kind at a place more porc there is a heavy or none (default on)",
     ),
     (
         "midcap",

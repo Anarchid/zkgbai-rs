@@ -424,7 +424,21 @@ impl Ai {
         }
         // A longer-ranged first turret may cost less than several short
         // ones. Let it compete on value per metal before a gate has porc.
-        for (name, income) in [("turretlaser", 10.0), ("turretheavylaser", 25.0), ("turretgauss", 60.0)] {
+        // With `porcmix` a kind already at a gate may not go beside it again:
+        // the riot and EMP turrets compete too, so another kind can.
+        let mix = !self.dev_off(super::porcmix::FEATURE);
+        let competing: &[(&str, f32)] = if mix {
+            &[
+                ("turretlaser", 10.0),
+                ("turretheavylaser", 25.0),
+                ("turretgauss", 60.0),
+                ("turretriot", 20.0),
+                ("turretemp", 25.0),
+            ]
+        } else {
+            &[("turretlaser", 10.0), ("turretheavylaser", 25.0), ("turretgauss", 60.0)]
+        };
+        for &(name, income) in competing {
             if self.eco.adjusted_income >= income
                 && let Some(d) = self.defs.get(name)
                 && !types.iter().any(|t| t.id() == d.id())

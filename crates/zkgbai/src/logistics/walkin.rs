@@ -75,6 +75,7 @@ use zk_terrain::paths::Paths;
 use super::{Hand, IN_TIME, Kind, MARGIN, Worth, best_crew_stretched, porc_power};
 use crate::Ai;
 use crate::economy::TaskId;
+use crate::economy::porcmix::{blast, blast_room, kind_cap};
 use crate::terrain::{pos, tier_of};
 use crate::util::{distance, get_directional_point};
 
@@ -199,25 +200,12 @@ pub(super) const MID_CAP: usize = 2;
 /// 90, Desolator and Lucifer 260): sites side by side across the force's
 /// approach, [`SPREAD`] apart, so their lines of fire run alongside. With
 /// every kind there, more porc is a heavy or none, as with [`MIDCAP`].
-pub const PORCMIX: &str = "porcmix";
+pub const PORCMIX: &str = crate::economy::porcmix::FEATURE;
 
 /// Sites are tried this far apart across the approach, this many to either
 /// side, elmos.
 const SPREAD: f32 = 96.0;
 const SPREAD_STEPS: i32 = 3;
-
-/// How many of a kind a place keeps (see [`PORCMIX`]).
-pub(super) fn kind_cap(name: &str) -> usize {
-    if name == "turretlaser" { 2 } else { 1 }
-}
-
-/// How far apart two turrets with death blasts of radius `a` and `b` stand
-/// (`d`) against how far they should: under 1 one's blast reaches the
-/// other.
-fn blast_room(d: f32, a: f32, b: f32) -> f32 {
-    let need = a.max(b);
-    if need <= 0.0 { f32::INFINITY } else { d / need }
-}
 
 /// Candidate turrets: Stardust, Faraday, Gauss, Stinger, Lotus.
 const TURRETS: [&str; 5] = ["turretriot", "turretemp", "turretgauss", "turretheavylaser", "turretlaser"];
@@ -981,29 +969,7 @@ impl Ai {
     /// Our turrets standing (built or not) or planned within [`CAP_RADIUS`]
     /// of `anchor`, by kind.
     pub(super) fn walkin_kinds(&self, anchor: Vec3) -> BTreeMap<String, usize> {
-        let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-        for (_, def) in self.walkin_turrets_near(anchor, CAP_RADIUS) {
-            *kinds.entry(self.defs.name(def).to_owned()).or_default() += 1;
-        }
-        kinds
-    }
-
-    /// Our armed buildings (built or not) and planned porc within `radius`
-    /// of `p`: where, what.
-    fn walkin_turrets_near(&self, p: Vec3, radius: f32) -> Vec<(Vec3, UnitDef)> {
-        let team = self.team_id;
-        let armed = |d: &UnitDef| d.speed() <= 0.0 && !d.weapon_mounts().is_empty();
-        let mut out: Vec<(Vec3, UnitDef)> = (self.cb.friendly_units_in(p, radius).into_iter())
-            .filter(|u| u.team() == team && u.health() > 0.0)
-            .filter_map(|u| u.def().filter(armed).map(|d| (u.pos(), d)))
-            .collect();
-        out.extend((self.eco.porc_tasks.iter()).filter_map(|&id| {
-            let t = self.eco.tasks.get(id)?;
-            let c = t.as_construction()?;
-            let pos = t.get_pos();
-            (c.target.is_none() && distance(pos, p) <= radius).then_some((pos, c.build_type))
-        }));
-        out
+        self.eco_turret_kinds(anchor, CAP_RADIUS)
     }
 
     /// Sites for `def` guarding `anchor` against a force coming from
@@ -1011,11 +977,10 @@ impl Ai {
     /// then at the place. Those out of every death blast (see [`PORCMIX`])
     /// first, nearest the middle first; then the rest, the roomiest first.
     pub(super) fn walkin_spaced_sites(&self, def: UnitDef, anchor: Vec3, approach: Vec3, offset: f32) -> Vec<Vec3> {
-        let blast = |d: UnitDef| d.death_explosion().map_or(0.0, |w| w.area_of_effect());
         let mine = blast(def);
         let reach = offset + SPREAD * SPREAD_STEPS as f32 + 300.0;
         let others: Vec<(Vec3, f32)> =
-            self.walkin_turrets_near(anchor, reach).into_iter().map(|(p, d)| (p, blast(d))).collect();
+            self.eco_turrets_near(anchor, reach).into_iter().map(|(p, d)| (p, blast(d))).collect();
         let d = distance(anchor, approach);
         let (dx, dz) = if d > 1.0 { ((approach.x - anchor.x) / d, (approach.z - anchor.z) / d) } else { (0.0, 1.0) };
         let (px, pz) = (-dz, dx);
@@ -1273,18 +1238,6 @@ mod tests {
         assert_eq!(place_bar(40.0), PLACE_FLOW);
         assert!((place_bar(60.0) - 9.0).abs() < 1e-4);
         assert!((place_bar(100.0) - 15.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn turrets_keep_out_of_each_other_s_blast() {
-        // A Stardust (170) 120 from a Lotus (90): inside its blast.
-        assert!(blast_room(120.0, 90.0, 170.0) < 1.0);
-        // A Stinger (130) 140 from a Faraday (130): clear.
-        assert!(blast_room(140.0, 130.0, 130.0) >= 1.0);
-        assert_eq!(blast_room(10.0, 0.0, 0.0), f32::INFINITY);
-        // Two Lotuses a place, one of the rest.
-        assert_eq!(kind_cap("turretlaser"), 2);
-        assert_eq!(kind_cap("turretriot"), 1);
     }
 
     #[test]
