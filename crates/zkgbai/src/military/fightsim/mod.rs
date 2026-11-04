@@ -72,6 +72,43 @@ pub struct WeaponSpec {
     pub damage: f32,
     /// Engine weapon class (`"Cannon"`, `"BeamLaser"`, ...).
     pub weapon_type: String,
+    /// Engine leading parameters, when known. Old/offline snapshots may omit them.
+    pub leading: Option<ShotLead>,
+}
+
+/// Flat-plane approximation of Recoil's GetLeadVec/GetPredictedImpactTime.
+/// This changes firing eligibility, not nominal movement range or hit calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShotLead {
+    /// Engine units: elmos per frame.
+    pub projectile_speed: f32,
+    /// Elmos; negative means unlimited. No experience bonus is assumed.
+    pub limit: f32,
+}
+
+impl ShotLead {
+    pub fn new(weapon_type: &str, projectile_speed: f32, limit: f32) -> Option<Self> {
+        // These use the engine's distance / projectileSpeed impact estimate.
+        // Do not apply it to hitscan, dropped bombs, or accelerating missiles.
+        (matches!(weapon_type, "Cannon" | "LaserCannon" | "EmgCannon")
+            && projectile_speed.is_finite()
+            && projectile_speed > 0.0
+            && limit.is_finite()
+            && limit != 0.0)
+            .then_some(Self { projectile_speed, limit })
+    }
+
+    fn aim_distance(self, dx: f64, dz: f64, vx: f64, vz: f64) -> f64 {
+        let time = dx.hypot(dz) / self.projectile_speed as f64;
+        let (mut lx, mut lz) = (vx * time, vz * time);
+        let length = lx.hypot(lz);
+        if self.limit >= 0.0 && length > self.limit as f64 {
+            let scale = self.limit as f64 / (length + 0.01);
+            lx *= scale;
+            lz *= scale;
+        }
+        (dx + lx).hypot(dz + lz)
+    }
 }
 
 impl WeaponSpec {
@@ -566,6 +603,7 @@ impl Model {
             // Tubes start loaded.
             tubes: tubes.map_or_else(Vec::new, |(n, _)| vec![0; n]),
             tube_reload: tubes.map_or(0, |(_, r)| r),
+            leading: if hitscan { None } else { w.leading },
         }
     }
 
@@ -632,6 +670,7 @@ impl Model {
 
 #[derive(Clone, Debug)]
 struct SimWeapon {
+    leading: Option<ShotLead>,
     key: Option<u32>,
     range: f64,
     /// Frames.
@@ -885,6 +924,7 @@ mod tests {
                         WeaponSpec {
                             name: p[0].into(),
                             weapon_type: p[1].into(),
+                            leading: None,
                             range: p[2].parse().unwrap(),
                             reload: p[3].parse().unwrap(),
                             salvo: p[4].parse().unwrap(),
@@ -1057,6 +1097,7 @@ mod commit_tests {
                     salvo: 1,
                     damage,
                     weapon_type: "BeamLaser".into(),
+                    leading: None,
                 }],
                 ..Default::default()
             }),
@@ -1101,5 +1142,35 @@ mod commit_tests {
         });
         assert!(win.killed_b > win.killed_a, "{win:?}");
         assert!(lose.killed_a > lose.killed_b, "{lose:?}");
+    }
+}
+
+#[cfg(test)]
+mod leading_tests {
+    use super::ShotLead;
+
+    #[test]
+    fn lead_uses_target_motion_and_preserves_disabled_weapon_classes() {
+        let koda = ShotLead::new("Cannon", 520.0 / 30.0, 90.0).unwrap();
+        assert!(koda.aim_distance(250.0, 0.0, -3.7, 0.0) < 210.0);
+        assert!(koda.aim_distance(190.0, 0.0, 3.7, 0.0) > 210.0);
+        assert_eq!(koda.aim_distance(250.0, 0.0, 0.0, 0.0), 250.0);
+        // Crossing motion does not become a blanket range bonus.
+        assert!(koda.aim_distance(210.0, 0.0, 0.0, 3.7) > 210.0);
+        assert!(ShotLead::new("Cannon", 500.0 / 30.0, 0.0).is_none()); // Glaive
+        assert!(ShotLead::new("LaserCannon", 870.0 / 30.0, 0.0).is_none()); // Bandit
+        assert!(ShotLead::new("Cannon", 2200.0 / 30.0, 0.0).is_none()); // Dagger
+        assert!(ShotLead::new("BeamLaser", 10.0, 90.0).is_none());
+        assert!(ShotLead::new("MissileLauncher", 10.0, 90.0).is_none());
+        assert!(ShotLead::new("Cannon", 0.0, 90.0).is_none());
+        assert!(ShotLead::new("Cannon", f32::NAN, 90.0).is_none());
+    }
+
+    #[test]
+    fn lead_limit_bounds_the_offset_in_both_axes() {
+        let capped = ShotLead::new("Cannon", 1.0, 90.0).unwrap();
+        assert!(capped.aim_distance(400.0, 0.0, -100.0, 0.0) > 310.0);
+        let unlimited = ShotLead::new("Cannon", 10.0, -1.0).unwrap();
+        assert!((unlimited.aim_distance(300.0, 400.0, -3.0, -4.0) - 250.0).abs() < 1e-9);
     }
 }

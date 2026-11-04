@@ -172,6 +172,7 @@ mod tests {
                 salvo: 3,
                 damage: 10.5,
                 weapon_type: "Cannon".into(),
+                leading: None,
             }],
             health: 230.0,
             radius: 9.0,

@@ -46,6 +46,7 @@ fn specs(path: &str) -> HashMap<String, Arc<UnitSpec>> {
                     WeaponSpec {
                         name: p[0].into(),
                         weapon_type: p[1].into(),
+                        leading: None,
                         range: p[2].parse().unwrap(),
                         reload: p[3].parse().unwrap(),
                         salvo: p[4].parse().unwrap(),

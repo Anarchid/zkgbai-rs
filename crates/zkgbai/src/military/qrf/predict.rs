@@ -467,6 +467,7 @@ mod regression {
                 .map(|(name, range, reload, damage)| WeaponSpec {
                     name: name.into(),
                     weapon_type: if def == "spideremp" { "LightningCannon" } else { "Cannon" }.into(),
+                    leading: None,
                     range,
                     reload,
                     damage,
@@ -616,6 +617,7 @@ mod regression {
             weapons: vec![WeaponSpec {
                 name: "hoverriot_laser1".into(),
                 weapon_type: "BeamLaser".into(),
+                leading: None,
                 range: 345.0,
                 reload: 0.1,
                 salvo: 1,
