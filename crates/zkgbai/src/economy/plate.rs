@@ -80,7 +80,10 @@ impl Ai {
         }
         let Some(plate) = self.eco_plate_of(self.defs.name_of(parent)) else { return false };
         let Some((pos, facing)) = self.eco_plate_site(plate, parent) else { return false };
-        let task = WorkerTask::construction(plate, pos, facing);
+        let mut task = WorkerTask::construction(plate, pos, facing);
+        // This spends an upgrade slot in the caretaker budget. Give it
+        // the same worker priority, rather than deferring it as new tech.
+        task.as_construction_mut().unwrap().production_upgrade = true;
         if self.eco.tasks.contains(&self.eco.factory_tasks, &task) || !self.eco_can_reach(wid, pos) {
             return false;
         }
@@ -315,13 +318,13 @@ impl Ai {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{cell::Cell, ffi::c_char};
 
     thread_local! { static BLOCKED: Cell<bool> = const { Cell::new(false) }; }
 
-    fn plate_ai() -> Ai {
+    pub(crate) fn plate_ai() -> Ai {
         unsafe extern "C" fn size(_: i32) -> i32 {
             512
         }

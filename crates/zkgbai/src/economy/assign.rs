@@ -818,10 +818,10 @@ impl Ai {
     /// [`REMEX_RADIUS`] for a new factory, strider hub or plate (not a
     /// commander's plop, nor a factory while we have none); a step past its
     /// reach for the missile silo (see [`REMEX_STEP`]); none for anything
-    /// else, or a job the operator asked for.
+    /// else, a production upgrade replacing a caretaker, or an operator job.
     fn eco_remex_radius(&self, t: &WorkerTask, range: f32) -> Option<f32> {
         let c = t.as_construction()?;
-        if self.op_priority(t.id) {
+        if self.op_priority(t.id) || c.production_upgrade {
             return None;
         }
         let id = c.build_type.id();
@@ -1056,6 +1056,15 @@ impl Ai {
                     return ((dist / 4.0) - 100.0 - cluster) + (600.0 * (cost_mod - 2.0)).max(0.0);
                 }
 
+                if ctask.production_upgrade || def_id == ids.nano_id || def_id == ids.storage_id {
+                    // Production plates replace caretakers, so they need the
+                    // same pull before they can count as usable build power.
+                    if worker.is_com || (eco.hard_estalled && !worker.is_greedy) {
+                        return dist;
+                    }
+                    return dist - 1000.0 + (500.0 * (cost_mod - 2.0));
+                }
+
                 let cost = ctask.build_type.cost(self.metal);
                 if worker.is_greedy
                     && !self.fac.factories.is_empty()
@@ -1115,14 +1124,6 @@ impl Ai {
                 if def_id == ids.airpad_id {
                     // for airpads
                     return (dist / 3.0) - 350.0 + (500.0 * (cost_mod - 2.0)).max(0.0);
-                }
-
-                if def_id == ids.nano_id || def_id == ids.storage_id {
-                    // for nanotowers and storages
-                    if worker.is_com || (eco.hard_estalled && !worker.is_greedy) {
-                        return dist;
-                    }
-                    return dist - 1000.0 + (500.0 * (cost_mod - 2.0));
                 }
 
                 if def_id == ids.pylon_id {
@@ -1841,5 +1842,31 @@ pub(super) mod tests {
     fn cluster_bonus_is_capped() {
         let ring = (0..12).map(|i| Vec3::xz(50.0 * (i as f32).cos(), 50.0 * (i as f32).sin()));
         assert_eq!(cluster_bonus(Vec3::xz(0.0, 0.0), ring), CLUSTER_CAP);
+    }
+}
+
+#[cfg(test)]
+mod production_upgrade_tests {
+    use super::*;
+
+    #[test]
+    fn first_plate_has_caretaker_priority_and_is_not_preempted_by_remex() {
+        let mut ai = super::super::plate::tests::plate_ai();
+        ai.eco.build_ids.nano_id = 4;
+        let parent = springai::Unit::from_id(ai.cb, 1).unwrap();
+        assert!(ai.eco_first_production_plate(3, parent));
+        let task = ai.eco.tasks.get(ai.eco.factory_tasks[0]).unwrap();
+        assert!(task.as_construction().unwrap().production_upgrade);
+        assert_eq!(ai.eco_remex_radius(task, 128.0), None);
+        let worker = &ai.eco.workers[&3];
+        let caretaker = WorkerTask::construction(ai.defs.get("staticcon").unwrap(), task.position, 0);
+        let plate_cost = ai.eco_cost_of_job_alone(worker, worker.get_pos(), task);
+        assert_eq!(plate_cost, ai.eco_cost_of_job_alone(worker, worker.get_pos(), &caretaker));
+        assert!(plate_cost < -1000.0, "the upgrade needs caretaker pull, not factory pricing");
+
+        // A plate acquiring new tech keeps the ordinary expansion rule.
+        let tech_plate = WorkerTask::construction(task.as_construction().unwrap().build_type, task.position, 0);
+        assert!(!tech_plate.as_construction().unwrap().production_upgrade);
+        assert_eq!(ai.eco_remex_radius(&tech_plate, 128.0), Some(REMEX_RADIUS));
     }
 }
