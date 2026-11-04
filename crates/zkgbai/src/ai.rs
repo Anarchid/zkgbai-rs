@@ -613,9 +613,12 @@ impl Ai {
         }
 
         if !saved_game {
+            // The start first: what the opening's units and the commander
+            // get to from it decides both (see `eco_opening_in_reach`).
             let opening = self.eco_roll_opening();
-            self.select_commander(opening.as_deref());
             self.choose_start_pos();
+            let (opening, penned) = self.eco_opening_in_reach(opening);
+            self.select_commander(opening.as_deref(), penned);
             self.guard("iq.init", |ai| ai.iq_init(opening.as_deref()));
         }
         if !self.disabled.is_empty() {
@@ -997,21 +1000,20 @@ impl Ai {
     }
 
     fn select_random_commander(&mut self) {
-        self.select_commander(None);
+        self.select_commander(None, false);
     }
 
     /// The commander for opening with factory `opening`: a recon commander
-    /// for jumpjets and spiders (it jumps too, and goes where they go), a
-    /// support commander otherwise. ZKGBAI_COMMANDER=<def> overrides.
-    fn select_commander(&mut self, opening: Option<&str>) {
+    /// for jumpjets and spiders (it jumps too, and goes where they go), or
+    /// where a walking one would be `penned` in at the start (see
+    /// `eco_opening_in_reach`); a support commander otherwise.
+    /// ZKGBAI_COMMANDER=<def> overrides.
+    fn select_commander(&mut self, opening: Option<&str>, penned: bool) {
+        let jumper = penned || matches!(opening, Some("factoryjump" | "factoryspider"));
         let name = match std::env::var("ZKGBAI_COMMANDER").ok().filter(|c| self.defs.get(c).is_some()) {
             Some(c) => c,
-            None => match opening {
-                Some("factoryjump" | "factoryspider") if self.defs.get("dyntrainer_recon_base").is_some() => {
-                    "dyntrainer_recon_base".to_owned()
-                }
-                _ => "dyntrainer_support_base".to_owned(),
-            },
+            None if jumper && self.defs.get("dyntrainer_recon_base").is_some() => "dyntrainer_recon_base".to_owned(),
+            None => "dyntrainer_support_base".to_owned(),
         };
         let name = name.as_str();
         self.cb.call_lua_rules(&format!("ai_commander:{name}"));

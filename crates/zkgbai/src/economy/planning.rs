@@ -107,6 +107,11 @@ const URCHIN_DEPTH: f32 = 8.0;
 /// share of what the best one's do.
 const REACH_RIVAL: f32 = 0.8;
 
+/// How long the pregame waits for the terrain model to weigh the opening
+/// and the commander by reach from the start (`comreach`; the analysis
+/// takes 0.1-0.5 s).
+const COMREACH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The share of the metal we do not hold, out of our units' reach, for
 /// which another factory is asked for.
 const REACH_GAP: f32 = 0.25;
@@ -1540,19 +1545,12 @@ impl Ai {
     /// (from `from`, by the terrain model's tiers; aircraft get everywhere)
     /// than the best one's do.
     fn eco_weigh_factories_by_reach(&mut self, from: Vec3) {
-        let Some(terrain) = self.reach_terrain() else { return };
-        let reaches = |tier: Tier, p: Vec3| {
-            terrain.tier(tier).is_none_or(|m| m.connected(terrain_pos(from), terrain_pos(p), FACTORY_REACH))
-        };
-        let spots = &self.graph.metal_spots;
-        let share = |tier: Tier| {
-            let (total, reached) = spots
-                .iter()
-                .fold((0.0, 0.0), |(t, r), s| (t + s.value, if reaches(tier, s.position) { r + s.value } else { r }));
-            if total > 0.0 { reached / total } else { 1.0 }
-        };
-        let candidates: Vec<(String, f32)> =
-            self.eco.potential_fac_list.iter().filter_map(|f| Some((f.clone(), share(factory_tier(f)?)))).collect();
+        if self.reach_terrain().is_none() {
+            return;
+        }
+        let candidates: Vec<(String, f32)> = (self.eco.potential_fac_list.iter())
+            .filter_map(|f| Some((f.clone(), self.eco_reach_share(from, factory_tier(f)?))))
+            .collect();
         let best = candidates.iter().map(|c| c.1).fold(0.0, f32::max);
         let out: Vec<String> = candidates.iter().filter(|c| c.1 < REACH_RIVAL * best).map(|c| c.0.clone()).collect();
         if !out.is_empty() {
@@ -1562,6 +1560,68 @@ impl Ai {
                 self.eco.potential_fac_list.remove(&f);
             }
         }
+    }
+
+    /// The share of the map's metal (by value) units of `tier` get to from
+    /// `from`, by the terrain model; 1 without a model of that tier (or
+    /// without metal).
+    pub(crate) fn eco_reach_share(&self, from: Vec3, tier: Tier) -> f32 {
+        let Some(map) = self.reach_terrain().and_then(|t| t.tier(tier)) else { return 1.0 };
+        let (total, reached) = self.graph.metal_spots.iter().fold((0.0, 0.0), |(t, r), s| {
+            let near = map.connected(terrain_pos(from), terrain_pos(s.position), FACTORY_REACH);
+            (t + s.value, if near { r + s.value } else { r })
+        });
+        if total > 0.0 { reached / total } else { 1.0 }
+    }
+
+    /// Before the game, once the start is chosen (`comreach`, on): the
+    /// opening factory weighed by reach from the start as the first factory
+    /// is (see `eco_weigh_factories_by_reach`), and rolled again when ruled
+    /// out; and whether the commander, walking, would be penned in there:
+    /// it gets to less than `REACH_RIVAL` of what the best-placed movement
+    /// tier gets to. Altair Crossing 3v3 (2026-11-04): a start on a corner
+    /// plateau with 2% of the metal for bots rolled an Amphibious Complex,
+    /// so an Engineer was picked; at frame 9 the reach check left only the
+    /// Spider Factory, and the Engineer never got off the plateau.
+    pub(crate) fn eco_opening_in_reach(&mut self, opening: Option<String>) -> (Option<String>, bool) {
+        if self.dev_off("comreach") {
+            return (opening, false);
+        }
+        let start = self.graph.get_start_pos();
+        if start.is_zero() {
+            return (opening, false);
+        }
+        if !self.terrain_wait(COMREACH_WAIT) {
+            self.log("economy: no terrain model before the start; opening and commander as rolled");
+            return (opening, false);
+        }
+        self.eco_weigh_factories_by_reach(start);
+        let mut opening = opening;
+        if self.eco.user_fac.is_empty()
+            && let Some(was) = opening.clone().filter(|f| !self.eco.potential_fac_list.contains(f))
+        {
+            opening = self.eco_roll_opening();
+            self.log(&format!(
+                "economy: opening {was} ruled out by reach from the start; {} instead",
+                opening.as_deref().unwrap_or("none")
+            ));
+        }
+        let walker = (self.defs.get("dyntrainer_support_base").and_then(crate::terrain::tier_of)).unwrap_or(Tier::Bot);
+        let walks = self.eco_reach_share(start, walker);
+        let best = [Tier::Spider, Tier::Bot, Tier::Vehicle, Tier::Hover, Tier::Amphib]
+            .into_iter()
+            .map(|t| self.eco_reach_share(start, t))
+            .fold(0.0, f32::max);
+        let penned = walks < REACH_RIVAL * best;
+        if penned {
+            self.log(&format!(
+                "economy: a walking commander gets to {:.0}% of the metal from the start ({:.0}% the best tier): \
+                 one that jumps",
+                walks * 100.0,
+                best * 100.0
+            ));
+        }
+        (opening, penned)
     }
 
     /// The factory whose units get to most of the metal we do not hold and

@@ -8,7 +8,10 @@ use super::worker::Approach;
 use super::{NEED_PULL, SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
 use crate::military::DefenseTarget;
+use crate::terrain::pos as terrain_pos;
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
+use zk_terrain::Tier;
+use zk_terrain::paths::SNAP;
 
 /// Cost of a job a worker must never take.
 // port: the C++ used 65535/65536 here together with "first task always
@@ -557,6 +560,18 @@ impl Ai {
         // Only jobs the worker can get to (bots cannot build out at sea).
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
+        // A commander that jumps (recon) gets over cliffs too: spider
+        // ground stands for its jumps (its ways and travel jump, see
+        // `military::jumps`); a walking reach would keep one that started
+        // on a plateau there (`comreach`).
+        let jumps_cliffs = worker.is_com
+            && !self.dev_off("comreach")
+            && def.is_some_and(|d| crate::military::jumps::JumpDef::of(d).is_some());
+        let spider_reach = |p: Vec3| {
+            jumps_cliffs
+                && (self.reach_terrain().and_then(|t| t.tier(Tier::Spider)))
+                    .is_some_and(|m| m.reaches_within(terrain_pos(wpos), terrain_pos(p), range, SNAP))
+        };
         let reaches = |t: &WorkerTask| {
             if t.as_construction().is_some_and(|c| c.fortification)
                 && self.eco_fortify_travel(worker, t.get_pos()).is_none()
@@ -565,7 +580,7 @@ impl Ai {
             }
             eco.silo_work_allowed(t)
                 && self.eco_prerequisites_ready(t)
-                && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range))
+                && def.is_none_or(|d| self.terrain_reaches(d, wpos, t.get_pos(), range) || spider_reach(t.get_pos()))
                 && !self.eco_worker_shuns(worker, t.get_pos())
                 && !(worker.is_com && self.comguard_avoids(worker.id, t.get_pos()))
         };

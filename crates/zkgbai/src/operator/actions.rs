@@ -63,6 +63,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Economy",
         "factories and plates are not sited where their units come out on ground cut off from most of the metal (a walled trench beside the start)",
     ),
+    (
+        "comreach",
+        "Economy",
+        "the opening and the commander weighed by reach from the start before the game: a commander penned in on foot (a plateau only spiders leave) is a jumping Recon that takes jobs over the cliffs",
+    ),
     ("colonize", "Economy", "colonists sent to far free metal"),
     (
         "conquest",
