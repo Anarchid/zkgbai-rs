@@ -59,9 +59,11 @@ impl Role {
             // cloak (cowards, see `stakeouts_add`), through a Djinn's lamp
             // if there is one (`teleport`). A raider gang that borrows an
             // armed picket orders it (`coalesce`; stakeouts skip it then).
+            // An engine attack on an enemy factory's frame is turned to the
+            // factory (`facframe`), for every role.
             Role::Stakeout => Some(Owner {
                 module: "stakeouts",
-                helpers: &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water", "coalesce"],
+                helpers: &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water", "coalesce", "facframe"],
             }),
             // Solo raiders also take the retreat handler's orders, fire-shadow
             // raids (`precision`, also on damage), jumps and dives, and a
@@ -80,6 +82,7 @@ impl Role {
                     "jumps",
                     "water",
                     "coalesce",
+                    "facframe",
                 ],
             }),
             Role::SquadRaider => None,
@@ -180,7 +183,8 @@ impl Ai {
     /// handler's are dropped as foreign (a squad raider in a gang, see
     /// `coalesce`: its squad goes on without it).
     pub(crate) fn role_lend(&self, id: i32, module: &'static str) {
-        let helpers: &'static [&'static str] = &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water"];
+        let helpers: &'static [&'static str] =
+            &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water", "facframe"];
         reserved::own(self.cb, id, Owner { module, helpers });
     }
 

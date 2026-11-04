@@ -311,6 +311,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "Cyclopes drive into cannon reach of what their slow beam reaches and their cannon does not (default on)",
     ),
+    (
+        "facframe",
+        "Army",
+        "units attack-moving at an enemy factory shoot the factory (or an armed enemy in reach), not the frame on its pad (default on)",
+    ),
     ("puppies", "Army", "Puppies herded onto wreck fields"),
     ("impalers", "Army", "Impaler batteries against what stands still"),
     ("escorts", "Army", "escorts for Impaler batteries (the impaler doctrine)"),
