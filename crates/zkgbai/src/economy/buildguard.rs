@@ -163,6 +163,7 @@ impl Ai {
             || !(0.0..1.0).contains(&built)
             || def.speed() > 0.0
             || !def.is_able_to_attack()
+            || def.weapon_mounts().is_empty()
             || (target.team() != self.team_id && !self.allies.contains(&target.team()))
             || reserved::is_reserved(self.cb, wid)
             || self.eco_in_transit(wid)
@@ -232,6 +233,7 @@ impl Ai {
             || !local.armed_theirs()
             || local.ours.len() != units.len()
             || !local.ours.iter().zip(&units).all(|(o, u)| o.id == u.id())
+            || local.snap.units[1].spec.weapons.is_empty()
         {
             return None;
         }
