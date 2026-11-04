@@ -33,6 +33,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "a turret at whatever we value that a known enemy force worth 800+ metal gets to with nothing of ours to meet it there, on its way or in time (default on)",
     ),
     (
+        "porcmix",
+        "Defense",
+        "walk-in turrets mixed and spaced: at a place at most 2 Lotuses and 1 of each other kind (1 of each heavy), each out of the death blast of every turret of ours, side by side across the approach; with every kind there, more porc is a heavy or none (default on)",
+    ),
+    (
         "midcap",
         "Defense",
         "a place keeps at most 2 Gauss or Stinger turrets standing or planned, whoever built them; more porc there is a Desolator or Lucifer if the grid powers one, else none (default on)",
