@@ -774,6 +774,7 @@ impl Ai {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
             scouts::OWL => self.scouts_air_ordered(fac_id, scouts::OWL),
+            "planefighter" => self.scouts_air_ordered(fac_id, "planefighter"),
             scouts::WIDOW if self.scouts_want_widow() => self.scouts_ordered(),
             scouts::WIDOW | "striderantiheavy" => self.jaeger_ordered(choice),
             // (Then asked for by the scouts: the factory builds no other
@@ -824,6 +825,7 @@ impl Ai {
             "amphtele" => self.teleport_ordered(),
             "gunshiptrans" => self.drops_ordered(),
             scouts::OWL => self.scouts_air_ordered(fac_id, scouts::OWL),
+            "planefighter" => self.scouts_air_ordered(fac_id, "planefighter"),
             scouts::WIDOW => self.scouts_ordered(),
             _ => {}
         }
@@ -1836,6 +1838,9 @@ impl Ai {
         }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
             return scouts::OWL;
+        }
+        if self.sweeps_wants_swift() {
+            return "planefighter";
         }
         // Primary missions buy aircraft; secondary missions only use the fleet.
         self.airstrike_production().unwrap_or("")

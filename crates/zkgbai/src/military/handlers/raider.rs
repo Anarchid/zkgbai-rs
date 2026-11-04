@@ -295,9 +295,7 @@ impl Ai {
             self.raider_clear_task(id);
             self.raider_drop_fighter(id);
         }
-        if self.sweeps.detonating == Some(id) {
-            self.sweeps.detonating = None;
-        }
+        self.sweeps_forget(id);
     }
 
     pub fn raider_remove_from_squad(&mut self, u: Unit) {
@@ -1056,13 +1054,13 @@ impl Ai {
         let Some((unit, pos)) = self.fighters.get(&sparrow).map(|f| (f.unit, f.get_pos())) else {
             return;
         };
-        if springai::reserved::is_reserved(self.cb, sparrow) || self.sweeps.detonating == Some(sparrow) {
+        if springai::reserved::is_reserved(self.cb, sparrow) || self.sweeps_claims(sparrow) {
             return;
         }
         // A Sparrow (not an Owl) sweeps where unseen snipers shoot from, and
         // whether anti-nukes we struck are gone: it flies at them and, near
         // enough, detonates.
-        let sweeps = self.defs.name_of(unit) == "planelightscout" && self.sweeps.detonating.is_none();
+        let sweeps = self.defs.name_of(unit) == "planelightscout" && self.sweeps.detonating.is_empty();
         let sniper = if sweeps { self.sweeps_sniper_target(pos) } else { None };
         let sweep = sniper.map(|p| (p, true)).or_else(|| self.missiles_scout_target(pos).map(|p| (p, false)));
         if let Some((p, fight)) = sweep.filter(|_| sweeps) {

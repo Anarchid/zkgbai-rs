@@ -373,6 +373,35 @@ impl Ai {
         points.into_iter().find(|&(p, _)| !self.nukes_covered(p))
     }
 
+    /// Verify the same uncovered, worthwhile aim point that firing would use.
+    pub(crate) fn nukes_prelaunch_target(&self) -> Option<Vec3> {
+        if self.dev_off("nukes") || self.nukes.launch.is_some() || self.nukes.bite.is_some() {
+            return None;
+        }
+        let silo = self.misc_nuke().filter(|s| s.health() > 0.0 && !s.is_being_built())?;
+        if !super::sweeps::recon_ready(
+            silo.stockpile(),
+            silo.stockpile_queued(),
+            silo.rules_param_float("gadgetStockpile", 0.0),
+        ) {
+            return None;
+        }
+        self.nukes_target(Purpose::Fire).filter(|&(_, v)| v >= FIRE_VALUE).map(|(p, _)| p)
+    }
+
+    /// Exact known anti-nukes and interception searches narrowed to one sweep.
+    pub(crate) fn nukes_recon_fixes(&self) -> Vec<Vec3> {
+        let mut points: Vec<_> = self.nukes_antis().collect();
+        for i in &self.nukes.intercepted {
+            if let Some(&p) = i.candidates.first()
+                && i.candidates.iter().all(|&c| distance(c, p) <= 640.0)
+            {
+                points.push(p);
+            }
+        }
+        points
+    }
+
     /// Where to aim, and the value there, for `purpose`: at enemy
     /// buildings, and to fire also at units seen lately (less what of ours
     /// the blast takes too, for those worth a missile at all).
@@ -480,6 +509,11 @@ impl Ai {
         // those with Shockleys and fire now, or have the Widows waiting by
         // them bite and fire once they are stunned.
         let mut target = self.nukes_target(Purpose::Fire).filter(|&(_, v)| v >= FIRE_VALUE);
+        if let Some((p, _)) = target
+            && self.sweeps_verify_nuke(p)
+        {
+            return false;
+        }
         let open = target.map_or(0.0, |t| t.1);
         if let Some(c) = self.nukes_combo(|antis| antis.iter().all(|a| self.missiles_can_stun(a.1)))
             && c.value > open
