@@ -198,6 +198,9 @@ impl Ai {
         crowding: bool,
     ) -> Option<TaskId> {
         let c = task.as_construction()?;
+        if self.eco_super_project_exposed(c.build_type, task.position) {
+            return None;
+        }
         if !self.eco_build_check(c.build_type, task.position, c.facing) {
             return None;
         }
@@ -1114,10 +1117,16 @@ impl Ai {
         self.eco.chose_sup_wep = true;
     }
 
-    /// Whether `position` is a poor superweapon site: enemy territory,
-    /// front line, or too close to a factory.
+    pub(super) fn eco_super_project_exposed(&self, def: UnitDef, position: Vec3) -> bool {
+        super::allied::BIG_GUNS.contains(&self.defs.name(def)) && self.missiles_enemy_reaches(position)
+    }
+
+    /// Superweapons need a rear site beyond tactical strikes from enemy
+    /// territory, clear of the front and factory yards.
     fn eco_bad_super_wep_site(&self, position: Vec3) -> bool {
-        self.graph.is_enemy_territory(position)
+        position.x < 0.0
+            || self.missiles_enemy_reaches(position)
+            || self.graph.is_enemy_territory(position)
             || self.graph.is_front_line(position)
             || self.eco_get_nearest_fac(position).is_some_and(|f| distance(position, f.get_pos()) < 300.0)
     }
@@ -1190,7 +1199,7 @@ impl Ai {
             if self.frame - self.eco.bertha_report >= 30 * 300 {
                 self.eco.bertha_report = self.frame;
                 self.log(
-                    "economy: no Bertha site: high ground towards the middle is all front line, enemy land or taken",
+                    "economy: no Bertha site: high ground towards the middle is exposed to tactical missiles, front line, enemy land or taken",
                 );
             }
             return None;

@@ -287,6 +287,7 @@ impl Ai {
                 let p = u.pos();
                 homes.iter().any(|&h| distance(h, p) <= ASSIST_REACH)
                     && self.eco_ally_site_safe(p)
+                    && !u.def().is_some_and(|d| self.eco_super_project_exposed(d, p))
                     && self.eco_worth_helping(*u)
             })
             .max_by(|a, b| a.build_progress().total_cmp(&b.build_progress()))
@@ -310,6 +311,9 @@ impl Ai {
     /// A job helping to build the allied frame `u`.
     pub(super) fn eco_help_frame(&mut self, u: Unit, list: List) -> Option<TaskId> {
         let def = u.def()?;
+        if self.eco_super_project_exposed(def, u.pos()) {
+            return None;
+        }
         let mut ct = WorkerTask::construction(def, u.pos(), u.building_facing());
         if let Some(c) = ct.as_construction_mut() {
             c.target = Some(u);

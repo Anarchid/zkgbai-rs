@@ -245,11 +245,11 @@ and blocked preparation sites are abandoned. Existing defenses can satisfy the p
 Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
 
 Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
-known and inferred enemy static metal and observed battlefield density exceeds the
+known and inferred enemy static metal **or held enemy territory**, and battlefield density exceeds the
 **Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
 step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
 requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
-Density is `regime.density`: our standing metal plus known enemy metal, divided by usable
+Density is `regime.density`: all allied standing metal plus known enemy metal, divided by usable
 ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
 remembered live statics remain counted. Coverage and battlefield density are separate gates;
 the missile firing disk is not the density denominator. Before lanes are available the full
@@ -257,6 +257,21 @@ slider threshold applies.
 Decision logs and the operator `regime` view report the adjusted threshold. Static value
 includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
 confidence), without double-counting known mexes or assigning locations to unobserved spending.
+Territory coverage measures the union of held enemy territory cells around hostile mexes;
+shadow-only territory does not count. Both coverage routes exclude ground/value already reached
+by allied silos, while retaining the whole enemy area/value as the denominator.
+
+Enemy tactical silos have first claim on Eos production and targeting, including newly scouted
+nanoframes. Eos are reserved immediately, and launch once last observed construction progress
+is **greater than 50%**. Ordinary payoff thresholds and allied target delegation do not apply
+to these rivals; range, shield feasibility and committed shield follow-ups still apply. Hidden
+silos request another scout look. Construction progress is remembered from observation, never
+extrapolated through fog.
+
+Berthas, nukes, Zeniths and Disco Rave Parties require sites beyond tactical missile reach
+(3500 elmos) from held enemy territory or a known enemy silo. This also gates assistance to
+allied frames, queued plans that have not started, and sites waiting for grid power.
+
 The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
 and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
 

@@ -985,6 +985,12 @@ impl Ai {
             };
             let (bt, pos, facing) = (c.build_type, t.position, c.facing);
             let mut target = c.target;
+            // Do not start an old plan after enemy territory has advanced
+            // into missile range. Existing frames retain the threat policy.
+            if target.is_none() && self.eco_super_project_exposed(bt, pos) {
+                invalid.push(id);
+                continue;
+            }
             if target.is_none() && !map.is_possible_to_build_at(bt, pos, facing) {
                 // Our own nanoframe (update is called before unitCreated) or
                 // an ally's of the same type with enough left to build: build

@@ -5,7 +5,7 @@
 //!   Horus) reads as lanes; an open map (Comet Catcher, Agalta) does not.
 //!   The tier that decides is the enemy ground army's. Missiles' siege
 //!   readiness and the operator's `regime` view read it.
-//! - **Density**: standing metal per usable area (both sides', the enemy's
+//! - **Density**: standing metal per usable area (all allies and the enemy's
 //!   as known: the F12 regime variable `D_known`, square kilo-elmos). As
 //!   the map fills up, raids stop paying and attrition does. Shared gate
 //!   defenses, missile silos, colonists and a 1v1's opening scouts read
@@ -65,7 +65,7 @@ pub struct Regime {
     pub lanes: Vec<Lanes>,
     /// Index in `lanes` of the tier that decides (the enemy ground army's).
     pub tier: Option<usize>,
-    /// Standing metal per square kilo-elmo, ours and the enemy's as known.
+    /// Standing metal per square kilo-elmo, all allies and known enemies.
     pub density: f32,
     /// The map's own metal density (spot metal per usable area).
     pub richness: f32,
@@ -89,6 +89,14 @@ impl Regime {
 pub fn laneness(tier: Tier, openness: f32) -> f32 {
     let (lane, open) = thresholds(tier);
     ((open - openness) / (open - lane)).clamp(0.0, 1.0)
+}
+
+/// Own standing metal for reporting, and the whole alliance for density.
+/// Friendly-unit enumeration includes our team, so sum it only once.
+fn standing_metal(units: impl Iterator<Item = (i32, f32)>, team: i32) -> (f32, f32) {
+    units
+        .filter(|&(_, cost)| cost < NOMINAL_COST)
+        .fold((0.0, 0.0), |(own, all), (owner, cost)| (own + if owner == team { cost } else { 0.0 }, all + cost))
 }
 
 impl Ai {
@@ -160,11 +168,10 @@ impl Ai {
         let frame = self.frame;
         // Every unit at full cost, nanoframes too (F12), but not terraform
         // units: their nominal cost is a placeholder in the tens of thousands.
-        let standing: f32 = (self.cb.team_units().iter())
-            .filter_map(|u| u.def())
-            .map(|d| d.cost(self.metal))
-            .filter(|&c| c < NOMINAL_COST)
-            .sum();
+        let (standing, friendly) = standing_metal(
+            self.cb.friendly_units().iter().filter_map(|u| Some((u.team(), u.def()?.cost(self.metal)))),
+            self.team_id,
+        );
         let enemy: f32 = (self.war.targets.values())
             .filter(|e| !e.is_dead && (e.is_static || frame - e.last_seen <= MOBILE_RECENT))
             .map(|e| e.value)
@@ -184,7 +191,7 @@ impl Ai {
         let usable = usable.unwrap_or(0.0);
         let metal: f32 = self.graph.metal_spots.iter().map(|s| s.value).sum();
         self.regime.richness = if usable > 0.0 { metal / usable } else { RICH };
-        self.regime.density = if usable > 0.0 { (standing + enemy) / usable } else { 0.0 };
+        self.regime.density = if usable > 0.0 { (friendly + enemy) / usable } else { 0.0 };
         self.regime.standing = standing;
     }
 
@@ -218,6 +225,15 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn density_counts_separate_allies_just_as_it_counts_a_merged_team() {
+        let split = [(1, 3000.0), (2, 4000.0), (3, 5000.0), (2, NOMINAL_COST)];
+        let merged = split.map(|(_, cost)| (1, cost));
+        assert_eq!(standing_metal(split.into_iter(), 1), (3000.0, 12000.0));
+        assert_eq!(standing_metal(merged.into_iter(), 1), (12000.0, 12000.0));
+        assert_eq!(standing_metal([(1, 3000.0)].into_iter(), 1), (3000.0, 3000.0));
+    }
 
     #[test]
     fn lane_maps_read_as_lanes_and_open_maps_do_not() {

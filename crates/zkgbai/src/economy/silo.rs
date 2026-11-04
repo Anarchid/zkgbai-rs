@@ -355,7 +355,7 @@ impl Ai {
         }
         self.log(&format!(
             "missiles: silo at ({:.0}, {:.0}), {:.0} Eos/Shockley payoff ({} targets); \
-             {:.0} static metal in reach ({:.1}%); battlefield density {:.0}, \
+             {:.0} static metal in reach ({:.1}%), {:.1}% held enemy territory; battlefield density {:.0}, \
              coverage trigger needs >{:.0} metal/Melmo² (laneness {:.2}); {}",
             site.x,
             site.z,
@@ -363,6 +363,7 @@ impl Ai {
             choice.targets,
             choice.coverage.value,
             100.0 * choice.coverage.share,
+            100.0 * choice.territory_share,
             choice.siege.density,
             choice.siege.threshold,
             choice.siege.laneness,

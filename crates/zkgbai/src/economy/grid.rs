@@ -147,6 +147,9 @@ impl Ai {
     /// Queue `def` at `pos` (on task list `list`); one that needs power
     /// waits until its site has it, while the planner links it up.
     pub(super) fn eco_add_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
+        if self.eco_super_project_exposed(def, pos) {
+            return;
+        }
         let needs = self.eco.grid_defs.needs(def.id());
         if needs <= 0.0 || self.dev_off("grid") {
             self.eco_start_powered(def, pos, list);
@@ -189,6 +192,10 @@ impl Ai {
     pub fn eco_plan_grid(&mut self, frame: i32) {
         if (frame + self.offset + 13) % GRID_PERIOD != 0 || self.dev_off("grid") {
             return;
+        }
+        if self.eco.pending_power.as_ref().is_some_and(|p| self.eco_super_project_exposed(p.def, p.pos)) {
+            self.eco.pending_power = None;
+            self.log("grid: dropping superweapon site now exposed to tactical missiles");
         }
         let gd = &self.eco.grid_defs;
         let pr = gd.pylon_range;
