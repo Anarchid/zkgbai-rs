@@ -233,9 +233,9 @@ impl Ai {
             // A squad the operator holds somewhere stands still on purpose:
             // not stuck, not for the reclaimers; so does one waiting out
             // a blast of ours (see `blasts`).
-            let held = f
-                .squad
-                .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some())
+            let held = self.limpet_controls(id)
+                || f.squad
+                    .is_some_and(|s| self.op.over.squad_intents.contains_key(&s) || self.op_squad_target(s).is_some())
                 || self.blasts_waiting(unit.pos())
                 || self.fire_controls(id)
                 || self.squad_strike_owns(id);
@@ -1111,6 +1111,9 @@ impl Ai {
     }
 
     fn squad_assign_squad(&mut self, sid: SquadId) {
+        if self.limpet_squad_committed(sid) {
+            return;
+        }
         // Moonlighting at home against a raid (see `qrf::live`).
         if self.qrf_drafted(sid) {
             self.squad_strike_cancel(sid);

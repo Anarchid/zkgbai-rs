@@ -84,7 +84,9 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `bombcharge` (placed Imps and Snitches charge when the fight predictor
 /// says it beats sitting tight) is on for eyeballing (user, 2026-11-03;
 /// disable=bombcharge).
-pub(crate) const OFF_BY_DEFAULT: [&str; 10] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 12] = [
+    "limpet",
+    "limpetshadow",
     "mexporc",
     "firesquads",
     "coalesceshadow",

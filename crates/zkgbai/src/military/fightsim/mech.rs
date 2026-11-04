@@ -664,7 +664,7 @@ impl Model {
         defense: Option<&Defense>,
         kiting: bool,
     ) -> Vec<UnitFate> {
-        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None).0
+        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false).0
     }
 
     /// An a-move's fates for [`Model::bomb_charge`]: each unit's weapons
@@ -677,8 +677,9 @@ impl Model {
         horizon: i32,
         phase: &[f64],
         bomb: Option<BombRun>,
+        ordered: bool,
     ) -> (Vec<UnitFate>, f64) {
-        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb)
+        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -693,8 +694,14 @@ impl Model {
         kiting: bool,
         phase: &[f64],
         bomb: Option<BombRun>,
+        ordered: bool,
     ) -> (Vec<UnitFate>, f64) {
         let mut units = self.mech_units(snap);
+        if ordered {
+            for m in units.iter_mut().filter(|m| m.u.side == 0) {
+                m.engage = 1.0;
+            }
+        }
         for (m, &ph) in units.iter_mut().zip(phase) {
             if ph > 0.0 {
                 for w in &mut m.u.weapons {

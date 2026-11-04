@@ -366,6 +366,7 @@ impl Ai {
                 && !self.retreat_is_retreating(u)
                 && !self.squad_strike_owns(id)
                 && !self.fire_controls(id)
+                && !self.limpet_controls(id)
                 && !self.blasts_waiting(u.pos())
         });
         out

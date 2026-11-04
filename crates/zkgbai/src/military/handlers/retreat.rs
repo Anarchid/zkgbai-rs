@@ -182,7 +182,11 @@ impl Ai {
     pub fn retreat_check_unit(&mut self, unit: Unit, on_fire: bool) {
         let id = unit.id();
         // A raider gang has committed it (see `coalesce`).
-        if self.fire_controls(id) || self.lobster_strike_assessing(id) || self.coalesce_owns(id) {
+        if self.limpet_committed(id)
+            || self.fire_controls(id)
+            || self.lobster_strike_assessing(id)
+            || self.coalesce_owns(id)
+        {
             return;
         }
         let Some(c) = self.retreat_handler.cowards.get_mut(&id) else {

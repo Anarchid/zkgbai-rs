@@ -197,6 +197,12 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "strike non-riots worth at least 600 metal at half a healthy Lance HP/metal or less; default on",
     ),
+    (
+        "limpet",
+        "Army",
+        "ordinary squads reserve Limpets unless a committed strike pays for the bomb and the whole squad; default on in wip, off in main",
+    ),
+    ("limpetshadow", "Army", "with limpet disabled, journal its commitment verdicts without changing orders"),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     (
         "coalesce",

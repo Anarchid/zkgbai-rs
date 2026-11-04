@@ -36,6 +36,8 @@ pub struct Fighter {
     pub squad: Option<SquadId>,
     pub shield_mob: bool,
     pub out_of_range: bool,
+    /// Reserved Limpets follow behind the squad and cannot anchor its formation.
+    pub limpet_controlled: bool,
     pub power: f32,
     /// Raiders: current scout task.
     pub task: Option<ScoutTaskId>,
@@ -99,6 +101,7 @@ impl Fighter {
             squad: None,
             shield_mob: false,
             out_of_range: false,
+            limpet_controlled: false,
             power,
             task: None,
             last_task_frame: 0,
