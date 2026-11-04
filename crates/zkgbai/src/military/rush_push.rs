@@ -105,9 +105,9 @@ impl Ai {
             let sid = self.rush_force(heavy, "rush");
             self.eco.rush.push.as_mut().unwrap().force = Some(sid);
             self.retreat_remove_unit(heavy); // Pack owns its predicted repair sorties.
-            // Filter cheap automatic targets without silencing the heavy on
-            // its raw-move advance or retreat. Deliberate economy shots remain.
-            heavy.execute_custom_command(cmd::PREVENT_BAIT, &[4.0], 0, NO_TIMEOUT);
+            // Apply only the game's minimum bait avoidance: ordinary light
+            // units are still worth shooting while we advance or retreat.
+            heavy.execute_custom_command(cmd::PREVENT_BAIT, &[1.0], 0, NO_TIMEOUT);
             heavy.set_fire_state(2, 0);
         }
         self.rush_push_recruit_screen(heavy);

@@ -28,7 +28,7 @@ pub mod cmd {
     /// fire at will, 2 on fire at will (the Lance's and Phantom's default),
     /// 3 unless a single target is given, 4 always.
     pub const PREVENT_OVERKILL: i32 = 38291;
-    /// ZK's Avoid Bad Targets state (4: heavy, roughly the 420-metal threshold).
+    /// ZK's Avoid Bad Targets state (0 off, 1 minimum enabled, up to 4).
     pub const PREVENT_BAIT: i32 = 38293;
     /// Puppies' wreck eating (ZK's unit_grey_goo): 0 off, 1 on, 2 also
     /// while cloaked.
