@@ -10,6 +10,7 @@ pub mod coalesce;
 pub mod cyclops;
 pub mod drops;
 pub mod enemy;
+pub mod facframe;
 pub mod fightsim;
 pub mod fire_squad;
 pub mod firefighters;
@@ -574,6 +575,7 @@ impl Ai {
         self.guard("raider.update", |ai| ai.raider_update(frame));
         self.guard("invade.update", |ai| ai.invade_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
+        self.guard("facframe.update", |ai| ai.facframe_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
         self.guard("cyclops.update", |ai| ai.cyclops_update(frame));
         self.guard("bomber.update", |ai| ai.bomber_update(frame));
