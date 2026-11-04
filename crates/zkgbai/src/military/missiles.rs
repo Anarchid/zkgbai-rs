@@ -206,6 +206,8 @@ pub struct Missiles {
     struck: BTreeMap<i32, i32>,
     /// When a silo was last planned (a plan dropped is not remade at once).
     pub planned: Option<i32>,
+    /// The begun silo whose guards that do not fit were last reported.
+    pub guards_noted: Option<i32>,
     lost_sites: Vec<(Vec3, i32)>,
     /// Eos to follow those that drained shields: at whom, where, how many,
     /// from when.
