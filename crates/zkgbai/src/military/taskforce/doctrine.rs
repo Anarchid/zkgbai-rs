@@ -226,6 +226,10 @@ pub struct Role {
     /// Spotters: they see for the core's guns instead of fighting (see
     /// `spotter`), each in its way.
     pub spot: Option<Spot>,
+    /// They take a place in the force's arrowhead (see [`Arrowhead`])
+    /// while it holds one: behind the leader, out of the skirmishers'
+    /// reach, in role order from the tip back.
+    pub arrow: bool,
 }
 
 impl Role {
@@ -244,6 +248,7 @@ impl Role {
             fire_at_radar: None,
             release: false,
             spot: None,
+            arrow: false,
         }
     }
 
@@ -297,6 +302,7 @@ impl Role {
             "fire_at_radar": self.fire_at_radar,
             "release": self.release,
             "spot": self.spot.map(Spot::name),
+            "arrow": self.arrow,
         })
     }
 
@@ -333,6 +339,7 @@ impl Role {
                 "gauge" => self.gauge = flag(k, v)?,
                 "switch_on" => self.switch_on = flag(k, v)?,
                 "produce" => self.produce = num(k, v, 0.0, 1.0)?,
+                "arrow" => self.arrow = flag(k, v)?,
                 _ => return Err(format!("roles have no field '{k}' (see doctrines)")),
             }
         }
@@ -460,6 +467,92 @@ impl Perch {
                     }
                 }
                 _ => return Err(format!("a perch has no field '{k}' (see doctrines)")),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A force's arrowhead (user, 2026-11-04): against skirmishers of about the
+/// leader's reach, the `arrow` roles leave their orbits for a wedge behind
+/// it, pressed close (their shields linked with its) and in its shadow.
+/// Circling at 125, a Thug on the near side stands 125 nearer than its
+/// Felon (435): a Dominatrix (450, its capture ray passes shields) takes
+/// the Thugs off the orbit one by one without coming into the Felon's
+/// reach. Behind the Felon, nothing of the ball is nearer to them than it
+/// is: they must come into its reach to get at anything.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arrowhead {
+    /// An enemy whose reach is at least the leader's less `below` and at
+    /// most the leader's plus `above` is a skirmisher of about its reach
+    /// (the Felon's 435: Moderator 420 to Scorpion 490 and Placeholder;
+    /// Rogue 530 and Recluse 570 outrange it by far, the wedge would
+    /// not keep them off).
+    pub below: f32,
+    pub above: f32,
+    /// They count from this far beyond their reach of the leader.
+    pub watch: f32,
+    /// The wedge forms when they are worth `min_value` metal and at least
+    /// `share` of the armed enemies about, and holds `hold` seconds after.
+    pub min_value: f32,
+    pub share: f32,
+    pub hold: f32,
+    /// The wedge's places, `step` apart.
+    pub step: f32,
+    /// What their weapons that shields do not stop (the capture ray) weigh
+    /// in where the wedge points, over others' 1.
+    pub pierce: f32,
+    /// No wedge against more than this much metal of them with such
+    /// weapons (0: no cap). In the wedge every capture ray goes to the
+    /// leader: three Dominatrices kiting at 445 took the Felon in all four
+    /// lab runs (2026-11-04), where the orbit gave them a Thug each.
+    pub max_pierce: f32,
+}
+
+impl Default for Arrowhead {
+    fn default() -> Self {
+        Arrowhead {
+            below: 40.0,
+            above: 80.0,
+            watch: 400.0,
+            min_value: 300.0,
+            share: 0.3,
+            hold: 6.0,
+            step: 36.0,
+            pierce: 3.0,
+            max_pierce: 0.0,
+        }
+    }
+}
+
+impl Arrowhead {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "below": self.below,
+            "above": self.above,
+            "watch": self.watch,
+            "min_value": self.min_value,
+            "share": self.share,
+            "hold": self.hold,
+            "step": self.step,
+            "pierce": self.pierce,
+            "max_pierce": self.max_pierce,
+        })
+    }
+
+    pub fn apply(&mut self, patch: &Map<String, Value>) -> Result<(), String> {
+        for (k, v) in patch {
+            match k.as_str() {
+                "below" => self.below = num(k, v, 0.0, 1000.0)?,
+                "above" => self.above = num(k, v, 0.0, 1000.0)?,
+                "watch" => self.watch = num(k, v, 0.0, 3000.0)?,
+                "min_value" => self.min_value = num(k, v, 0.0, 1e6)?,
+                "share" => self.share = num(k, v, 0.0, 1.0)?,
+                "hold" => self.hold = num(k, v, 0.0, 120.0)?,
+                "step" => self.step = num(k, v, 16.0, 200.0)?,
+                "pierce" => self.pierce = num(k, v, 0.0, 100.0)?,
+                "max_pierce" => self.max_pierce = num(k, v, 0.0, 1e6)?,
+                _ => return Err(format!("an arrowhead has no field '{k}' (see doctrines)")),
             }
         }
         Ok(())
@@ -623,6 +716,9 @@ pub struct Doctrine {
     /// site is known for it (else it fights as the army would have it, a
     /// loner, until one is); false: every core is claimed.
     pub claim_with_site: bool,
+    /// Its `arrow` roles form a wedge behind the leader against skirmishers
+    /// of about its reach (see [`Arrowhead`]); none: they keep as always.
+    pub arrowhead: Option<Arrowhead>,
 }
 
 impl Doctrine {
@@ -685,6 +781,7 @@ impl Doctrine {
             engage_screen: false,
             perch: None,
             claim_with_site: false,
+            arrowhead: None,
         }
     }
 
@@ -764,6 +861,7 @@ impl Doctrine {
             "engage_screen": self.engage_screen,
             "perch": self.perch.as_ref().map(Perch::to_json),
             "claim_with_site": self.claim_with_site,
+            "arrowhead": self.arrowhead.as_ref().map(Arrowhead::to_json),
             "core_keep": self.core_keep.name(),
             "core_orbit": self.core_orbit,
             "cores_to_go": self.cores_to_go,
@@ -884,6 +982,17 @@ impl Doctrine {
                         _ => return Err("'perch' must be an object or null".into()),
                     }
                 }
+                "arrowhead" => {
+                    self.arrowhead = match v {
+                        Value::Null => None,
+                        Value::Object(a) => {
+                            let mut arrow = self.arrowhead.clone().unwrap_or_default();
+                            arrow.apply(a)?;
+                            Some(arrow)
+                        }
+                        _ => return Err("'arrowhead' must be an object or null".into()),
+                    }
+                }
                 _ => return Err(format!("doctrines have no field '{k}' (see doctrines)")),
             }
         }
@@ -897,6 +1006,14 @@ impl Doctrine {
     pub fn check(&self, defs: &Defs, classes: &Classes) -> Result<(), String> {
         if self.core.is_empty() {
             return Err(format!("doctrine {}: no core", self.name));
+        }
+        if self.arrowhead.is_some() && self.aim == Aim::Pack {
+            return Err(format!("doctrine {}: packs keep formations, not arrowheads", self.name));
+        }
+        if let Some(a) = &self.arrowhead
+            && a.below + a.above <= 0.0
+        {
+            return Err(format!("doctrine {}: an arrowhead needs a band (below + above above 0)", self.name));
         }
         // Only packs' conduct moves formations and screens.
         let moved = |k: Keep| matches!(k, Keep::Formation | Keep::Trail);
@@ -1009,6 +1126,7 @@ impl Doctrine {
                     fire_state: r.fire_state,
                     fire_at_radar: r.fire_at_radar,
                     spot: r.spot,
+                    arrow: r.arrow,
                 })
                 .collect(),
             by_def,
@@ -1061,6 +1179,7 @@ impl Doctrine {
             judge_margin: self.judge_margin,
             fate_secs: self.fate_secs,
             lasting: self.lasting,
+            arrowhead: self.arrowhead.clone(),
         }
     }
 }
@@ -1075,6 +1194,7 @@ pub struct RoleShape {
     pub fire_state: Option<i32>,
     pub fire_at_radar: Option<bool>,
     pub spot: Option<Spot>,
+    pub arrow: bool,
 }
 
 /// A doctrine compiled for the squad wrapper: by unit def id.
@@ -1144,6 +1264,7 @@ pub struct Shape {
     pub judge_margin: f32,
     pub fate_secs: f32,
     pub lasting: f32,
+    pub arrowhead: Option<Arrowhead>,
 }
 
 /// Orbit radius of members that are in no role (extra cores), unless the
@@ -1207,6 +1328,7 @@ impl Default for Shape {
             judge_margin: 0.0,
             fate_secs: 5.0,
             lasting: 1.0,
+            arrowhead: None,
         }
     }
 }
@@ -1227,6 +1349,15 @@ impl Shape {
 
     pub fn orbit(&self, def: Option<i32>) -> f32 {
         self.role(def).map_or(self.core_orbit, |r| r.orbit)
+    }
+
+    /// Members of this type take a place in the arrowhead while the force
+    /// holds one (its role's rank: their place from the tip back), unless
+    /// they spot or cloak, who keep their own ways.
+    pub fn arrow_rank(&self, def: Option<i32>) -> Option<usize> {
+        let i = *def.and_then(|d| self.by_def.get(&d))?;
+        let r = self.roles.get(i)?;
+        (self.arrowhead.is_some() && r.arrow && r.spot.is_none() && !self.cloaks(def)).then_some(i)
     }
 
     /// How members of this type keep with the leader: their role's way,
@@ -1265,16 +1396,22 @@ impl Shape {
 pub fn seeds() -> Vec<Doctrine> {
     let mut felon = Doctrine::new("felon");
     felon.note = "The shield ball: Felons lead, shieldbots orbit them, Aspis go where they do most good. \
-                  Engages once worth 1300 and rallied; falls back on low shields or below 85% health."
+                  Engages once worth 1300 and rallied; falls back on low shields or below 85% health. \
+                  Against skirmishers of about the Felon's reach (a Dominatrix) the shieldbots and \
+                  Racketeers leave their orbits for an arrowhead behind it."
         .into();
     felon.core = vec!["shieldfelon".into()];
     felon.roles = vec![
-        Role { to_strongest: true, gauge: false, ..Role::fill("aspis", &["shieldshield"], 40.0) },
-        Role::fill("thugs", &["shieldassault"], 125.0),
-        Role { switch_on: true, ..Role::fill("outlaws", &["shieldriot"], ORBIT) },
-        Role::fill("rackets", &["shieldarty"], ORBIT),
+        Role { to_strongest: true, gauge: false, arrow: true, ..Role::fill("aspis", &["shieldshield"], 40.0) },
+        Role { arrow: true, ..Role::fill("thugs", &["shieldassault"], 125.0) },
+        Role { switch_on: true, arrow: true, ..Role::fill("outlaws", &["shieldriot"], ORBIT) },
+        Role { arrow: true, ..Role::fill("rackets", &["shieldarty"], ORBIT) },
         Role::fill("dominatrices", &["vehcapture"], 250.0),
     ];
+    // Against skirmishers of about the Felon's reach (the Dominatrix above
+    // all), the shieldbots and Racketeers leave their orbits for a wedge
+    // behind it (see `Arrowhead`; switch `arrowhead`).
+    felon.arrowhead = Some(Arrowhead::default());
     felon.pool_with_allies = true;
     felon.pace = 45.0;
     felon.aim = Aim::Assault;
@@ -1599,6 +1736,29 @@ mod tests {
         assert_eq!(felon.role_of("shieldarty", &classes), Some(3));
         assert!(felon.is_core("shieldfelon", &classes) && felon.role_of("shieldfelon", &classes).is_none());
         assert!(felon.enabled);
+    }
+
+    #[test]
+    fn the_shield_ball_forms_an_arrowhead_without_its_dominatrices() {
+        let mut felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        assert_eq!(felon.arrowhead, Some(Arrowhead::default()));
+        let arrows: Vec<&str> = felon.roles.iter().filter(|r| r.arrow).map(|r| r.name.as_str()).collect();
+        assert_eq!(arrows, ["aspis", "thugs", "outlaws", "rackets"]);
+        // A patch changes only what it names; null takes it away.
+        let Value::Object(p) = json!({"arrowhead": {"hold": 3, "step": 40}}) else { panic!() };
+        felon.apply(&p).unwrap();
+        let a = felon.arrowhead.clone().unwrap();
+        assert_eq!((a.hold, a.step, a.below, a.above), (3.0, 40.0, 40.0, 80.0));
+        let Value::Object(bad) = json!({"arrowhead": {"width": 3}}) else { panic!() };
+        assert!(felon.apply(&bad).is_err());
+        let Value::Object(p) = json!({"arrowhead": null}) else { panic!() };
+        felon.apply(&p).unwrap();
+        assert_eq!(felon.arrowhead, None);
+        // Packs keep formations of their own.
+        let mut ravager = seeds().into_iter().find(|d| d.name == "ravager").unwrap();
+        ravager.arrowhead = Some(Arrowhead::default());
+        let defs = Defs::new(crate::military::wrappers::squad::fake_engine::callback());
+        assert!(ravager.check(&defs, &Classes::default()).is_err_and(|e| e.contains("arrowhead")));
     }
 
     #[test]

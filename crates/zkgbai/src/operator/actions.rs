@@ -249,6 +249,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "fight predictions use observed weapon cooldowns for allies and enemies in LOS, including bomb charge timing (default on)",
     ),
+    (
+        "arrowhead",
+        "Army",
+        "against skirmishers of about the Felon's reach (a Dominatrix, Ronins, Scalpels), a shield ball's Thugs, Outlaws, Aspis and Racketeers leave their orbits for a wedge behind it, out of their reach (default on)",
+    ),
     ("drops", "Army", "Charon drops"),
     ("teleport", "Army", "Djinn teleports"),
     ("recovery", "Army", "factory jams and trapped units: clear owned blockers, Lobster, Djinn and airlift rescue"),

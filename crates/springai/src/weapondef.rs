@@ -36,6 +36,8 @@ getters!(WeaponDef.def_id {
     fn is_no_auto_target() -> bool = WeaponDef_isNoAutoTarget;
     fn is_manual_fire() -> bool = WeaponDef_isManualFire;
     fn interceptor() -> i32 = WeaponDef_getInterceptor;
+    /// Shield types that stop it (a bit mask; 0: no shield does).
+    fn intercepted_by_shield_type() -> i32 = WeaponDef_getInterceptedByShieldType;
     fn targetable() -> i32 = WeaponDef_getTargetable;
     fn is_stockpileable() -> bool = WeaponDef_isStockpileable;
     fn coverage_range() -> f32 = WeaponDef_getCoverageRange;

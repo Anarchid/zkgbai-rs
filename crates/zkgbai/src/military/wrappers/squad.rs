@@ -16,7 +16,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3, Weapon};
 
 use crate::defs::cmd;
 use crate::kgbutil::{Nav, kgb_move_to};
-use crate::military::taskforce::{Keep, Shape};
+use crate::military::taskforce::{Keep, Shape, arrowhead};
 use crate::military::wrappers::fighter::{fight_clear, next_waypoint};
 use crate::military::{FighterStore, ScoutTasks};
 use crate::util::{
@@ -93,6 +93,25 @@ pub struct Squad {
     formation: BTreeMap<i32, (f32, f32)>,
     formation_leader: Option<i32>,
     formation_speed: BTreeMap<i32, f32>,
+    /// Taskforces: the arrowhead it holds (see `taskforce::arrowhead`).
+    pub arrow: Option<Arrow>,
+}
+
+/// A taskforce's arrowhead (see `taskforce::arrowhead`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Arrow {
+    /// Where it points (a unit vector on the map's x, z): at the
+    /// skirmishers.
+    pub axis: (f32, f32),
+    /// The frame it formed, and the last it saw skirmishers.
+    pub since: i32,
+    pub last: i32,
+    /// Each member's place (depth behind the leader, side), placed round
+    /// which leader.
+    pub places: BTreeMap<i32, (f32, f32)>,
+    pub placed_for: Option<i32>,
+    /// The goal last given each member, and when.
+    pub goals: BTreeMap<i32, (Vec3, i32)>,
 }
 
 /// Remaining health fraction, counting paralysis and capture as damage.
@@ -183,6 +202,7 @@ impl Squad {
             formation: BTreeMap::new(),
             formation_leader: None,
             formation_speed: BTreeMap::new(),
+            arrow: None,
         }
     }
 
@@ -428,17 +448,30 @@ impl Squad {
 
     // ── Taskforces ──────────────────────────────────────────────────────
 
+    /// The force's health: the leader's, or the force's mean if lower.
+    /// Holding an arrowhead, capture does not count: a force facing a
+    /// capturer that outruns it (a Dominatrix 58.5, a Felon 43.5) only
+    /// lets the capture finish by walking off (a Felon was taken 25
+    /// frames after its ball broke off "hurt" in the lab); it presses in.
     pub fn get_health(&self, fighters: &FighterStore) -> f32 {
         let Some(leader) = self.leader_fighter(fighters) else { return 0.0 };
         if leader.is_dead() {
             return 0.0;
         }
+        let pressing = self.arrow.is_some();
+        let health = |u: Unit| {
+            if pressing {
+                ((u.health() - u.paralyze_damage()) / u.max_health().max(1.0)).max(0.0)
+            } else {
+                health_fraction(u)
+            }
+        };
         // Spotters and trailing screens go for repairs on their own.
         let members: Vec<f32> = (self.fighters.iter().filter_map(|id| fighters.get(id)))
             .filter(|f| !self.shape.own_way(def_id(f.unit)))
-            .map(|f| health_fraction(f.unit))
+            .map(|f| health(f.unit))
             .collect();
-        let leader_health = health_fraction(leader.unit);
+        let leader_health = health(leader.unit);
         let health = leader_health + members.iter().sum::<f32>();
         leader_health.min(health / (members.len() + 1) as f32)
     }
@@ -1052,6 +1085,100 @@ impl Squad {
         members.iter().filter_map(|m| self.formation.get(&m.0).map(|&o| (m.0, o))).collect()
     }
 
+    /// Taskforces: raise an arrowhead pointing along `axis` (see
+    /// `taskforce::arrowhead`); its members are placed at the next drive.
+    pub fn arrow_raise(&mut self, axis: (f32, f32), frame: i32) {
+        self.arrow = Some(Arrow {
+            axis,
+            since: frame,
+            last: frame,
+            places: BTreeMap::new(),
+            placed_for: None,
+            goals: BTreeMap::new(),
+        });
+    }
+
+    /// Taskforces: the members that take a place in an arrowhead (id, rank,
+    /// where it stands).
+    fn arrow_members(&self, fighters: &FighterStore) -> Vec<(i32, usize, Vec3)> {
+        (self.fighters.iter().filter_map(|id| fighters.get(id)))
+            .filter(|f| f.unit.health() > 0.0)
+            .filter_map(|f| self.shape.arrow_rank(def_id(f.unit)).map(|r| (f.id, r, f.get_pos())))
+            .collect()
+    }
+
+    pub fn arrow_count(&self, fighters: &FighterStore) -> usize {
+        self.arrow_members(fighters).len()
+    }
+
+    /// Taskforces: seconds it has held its arrowhead (0: none).
+    pub fn arrow_held(&self, frame: i32) -> f32 {
+        self.arrow.as_ref().map_or(0.0, |a| (frame - a.since) as f32 / 30.0)
+    }
+
+    /// Taskforces: whether member `id` has a place in the arrowhead held.
+    pub fn arrow_places(&self, id: i32) -> bool {
+        self.arrow.as_ref().is_some_and(|a| a.places.contains_key(&id))
+    }
+
+    /// Taskforces: drop the arrowhead; its members keep with the leader
+    /// again (all of them with the leader now, orbiters too).
+    pub fn arrow_release(&mut self, fighters: &FighterStore) {
+        let Some(arrow) = self.arrow.take() else { return };
+        let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        for id in arrow.places.keys().filter(|id| self.fighters.contains(id)) {
+            if let Some(f) = fighters.get(id).filter(|f| f.unit.health() > 0.0) {
+                self.keep_order(f.unit, leader, 0);
+            }
+        }
+    }
+
+    /// Taskforces: send the arrowhead's members to their places round the
+    /// leader at `lead`, moving at `vel` (elmos a frame): placed anew
+    /// whenever who is in it, or who leads, changed; each goal
+    /// `arrowhead::LEAD` frames of the leader's motion ahead, given again
+    /// when it moved `REGOAL` or after `REGIVE` frames. A member farther
+    /// than `FAR` from its place is given its keep order back instead.
+    pub fn arrow_drive(&mut self, fighters: &FighterStore, lead: Vec3, vel: Vec3, step: f32, frame: i32) {
+        let members = self.arrow_members(fighters);
+        let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
+        let leader_id = self.leader;
+        let Some(arrow) = self.arrow.as_mut() else { return };
+        let same = arrow.placed_for == leader_id
+            && members.len() == arrow.places.len()
+            && members.iter().all(|m| arrow.places.contains_key(&m.0));
+        if !same {
+            let here: Vec<(i32, usize, (f32, f32))> =
+                members.iter().map(|&(id, rank, pos)| (id, rank, arrowhead::local(lead, arrow.axis, pos))).collect();
+            arrow.places = arrowhead::assign(&here, step);
+            arrow.placed_for = leader_id;
+            let places = &arrow.places;
+            arrow.goals.retain(|id, _| places.contains_key(id));
+        }
+        let ahead = (vel.x * arrowhead::LEAD, vel.z * arrowhead::LEAD);
+        let mut back = Vec::new();
+        for &(id, _, pos) in &members {
+            let (Some(&place), Some(f)) = (arrow.places.get(&id), fighters.get(&id)) else { continue };
+            let at = arrowhead::world(lead, arrow.axis, place);
+            if distance(pos, at) > arrowhead::FAR {
+                if arrow.goals.remove(&id).is_some() {
+                    back.push(f.unit);
+                }
+                continue;
+            }
+            let goal = Vec3::xz(at.x + ahead.0, at.z + ahead.1);
+            let fresh = |&(g, t): &(Vec3, i32)| distance(g, goal) < arrowhead::REGOAL && frame - t < arrowhead::REGIVE;
+            if arrow.goals.get(&id).is_some_and(fresh) {
+                continue;
+            }
+            kgb_move_to(f.unit, goal, 0, frame);
+            arrow.goals.insert(id, (goal, frame));
+        }
+        for unit in back {
+            self.keep_order(unit, leader, 0);
+        }
+    }
+
     /// Taskforces: members of a trailing screen (see `Keep::Trail`).
     pub fn trailers(&self, fighters: &FighterStore) -> Vec<i32> {
         (self.fighters.iter().copied())
@@ -1356,6 +1483,8 @@ pub(crate) mod fake_engine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::fake_engine::{self, TEAM, spawn, take_orders};
     use super::*;
     use crate::defs::Defs;
@@ -1621,6 +1750,61 @@ mod tests {
         assert!(near(1, 60.0, 0.0));
         assert!(near(2, 60.0 * (TAU / 6.0).cos(), 60.0 * (TAU / 6.0).sin()));
         assert!(near(3, 60.0 * (TAU / 3.0).cos(), 60.0 * (TAU / 3.0).sin()));
+    }
+
+    #[test]
+    fn an_arrowhead_puts_shieldbots_behind_the_felon_and_gives_orbits_back() {
+        let (cb, defs, mut fighters) = setup();
+        let classes = crate::military::taskforce::Classes::default();
+        let felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        s.shape = Arc::new(felon.shape(&defs, &classes));
+        const DOM: i32 = 2;
+        for (id, def) in [(50, FELON), (51, THUG), (52, THUG), (53, OUTLAW), (54, ASPIS), (55, DOM)] {
+            add(cb, &mut fighters, id, def, 300.0);
+            s.add_unit(id, &mut fighters, 0);
+        }
+        assert_eq!(s.leader, Some(50));
+        // The ball at (1000, 1000), its members round it; skirmishers east.
+        let at = |id: i32, x: f32, z: f32| {
+            fake_engine::UNITS.with_borrow_mut(|u| u.get_mut(&id).unwrap().pos = Vec3::xz(x, z))
+        };
+        at(50, 1000.0, 1000.0);
+        for (id, x, z) in [(51, 1125.0, 1000.0), (52, 875.0, 1000.0), (53, 1000.0, 1090.0), (54, 1040.0, 1000.0)] {
+            at(id, x, z);
+        }
+        at(55, 1000.0, 750.0);
+        take_orders();
+        s.arrow_raise((1.0, 0.0), 0);
+        let lead = Vec3::xz(1000.0, 1000.0);
+        s.arrow_drive(&fighters, lead, Vec3::ZERO, 36.0, 6);
+        let moved: Vec<i32> = take_orders().iter().filter(|o| o.2 == cmd::RAW_MOVE).map(|o| o.0).collect();
+        // Shieldbots and the Aspis move; the Dominatrix keeps its orbit.
+        assert_eq!(moved.iter().copied().collect::<BTreeSet<i32>>(), BTreeSet::from([51, 52, 53, 54]));
+        let arrow = s.arrow.clone().unwrap();
+        assert_eq!(arrow.places.len(), 4);
+        // Every place is west of the Felon (behind it from the east), and
+        // the Aspis (first role) is in the first row.
+        for (id, &place) in &arrow.places {
+            let p = arrowhead::world(lead, arrow.axis, place);
+            assert!(p.x < 1000.0, "{id} at {p:?}");
+        }
+        assert!(arrow.places[&54].0 < 36.0);
+        assert!(s.arrow_places(51) && !s.arrow_places(55));
+        // A drive soon after with nothing moved gives no new orders.
+        s.arrow_drive(&fighters, lead, Vec3::ZERO, 36.0, 12);
+        assert!(take_orders().iter().all(|o| o.2 != cmd::RAW_MOVE));
+        // A member far from its place is given its orbit back.
+        at(52, 3000.0, 1000.0);
+        s.arrow_drive(&fighters, lead, Vec3::ZERO, 36.0, 60);
+        let orders = take_orders();
+        assert!(orders.contains(&(52, CommandTopic::COMMAND_UNIT_CUSTOM, cmd::ORBIT)));
+        assert!(!orders.iter().any(|o| o.0 == 52 && o.2 == cmd::RAW_MOVE));
+        // Dropped, the places' members orbit again.
+        s.arrow_release(&fighters);
+        assert!(s.arrow.is_none());
+        let orbits: BTreeSet<i32> = take_orders().iter().filter(|o| o.2 == cmd::ORBIT).map(|o| o.0).collect();
+        assert_eq!(orbits, BTreeSet::from([51, 52, 53, 54]));
     }
 
     #[test]

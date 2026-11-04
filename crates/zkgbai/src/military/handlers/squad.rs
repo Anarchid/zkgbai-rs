@@ -12,7 +12,7 @@ use zk_terrain::Tier;
 
 use crate::Ai;
 use crate::military::fire_squad::{self, Mode as FireMode};
-use crate::military::taskforce::{self, Aim};
+use crate::military::taskforce::{self, Aim, arrowhead};
 use crate::military::{Fighter, SquadId, SquadKind};
 use crate::nav;
 use crate::terrain::tier_of;
@@ -30,6 +30,9 @@ pub struct SquadHandler {
     pub taskforces: VecDeque<SquadId>,
     pub squads: VecDeque<SquadId>,
     pub air_squads: VecDeque<SquadId>,
+    /// Arrowheads: whether an enemy unit type pierces shields at about
+    /// its full reach, by def id (see `taskforce::arrowhead::pierces`).
+    pub arrow_pierce: BTreeMap<i32, bool>,
 }
 
 /// Which forming squad an assault unit joins.
@@ -183,6 +186,9 @@ impl Ai {
         }
         if frame % 7 == (self.offset + 4) % 7 {
             self.squad_assign_taskforces();
+        }
+        if frame % arrowhead::PERIOD == (self.offset + 3) % arrowhead::PERIOD {
+            self.taskforce_arrowheads(frame);
         }
         self.taskforce_watch_volleys();
         if frame % 300 == (self.offset + 13) % 300 {

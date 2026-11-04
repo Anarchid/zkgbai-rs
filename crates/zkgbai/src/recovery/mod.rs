@@ -168,6 +168,7 @@ impl Ai {
             && !reserved::owner(self.cb, id).is_some_and(|o| matches!(o.module, "coalesce" | "strikes" | "airstrikes"))
             && !self.coalesce_owns(id)
             && !self.squad_strike_owns(id)
+            && !self.squad_in_arrowhead(id)
             && !self.limpet_controls(id)
             && !self.fire_controls(id)
             && !self.qrf_claims(id)
