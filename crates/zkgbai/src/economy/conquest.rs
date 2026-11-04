@@ -1150,6 +1150,21 @@ impl Ai {
         (banked && distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS)
     }
 
+    /// Reserve opening mexes for ordinary constructors while the trip's
+    /// objective search, factory plop and home guard are still pending.
+    pub(super) fn conquest_skips_opening_mexes(&self, wid: i32) -> bool {
+        !self.dev_off("conquest")
+            && !self.conquest_push()
+            && !self.eco.conquest.done
+            && self.eco.commanders.contains(&wid)
+            && self
+                .eco
+                .conquest
+                .op
+                .as_ref()
+                .is_none_or(|op| op.crew == wid && matches!(op.stage, Stage::Prepare | Stage::Walk))
+    }
+
     /// Own the commander's travel until arrival. Keep emergency retreats and
     /// commander defense in control, but never substitute an economy job for
     /// the move just because a mex happens to be nearby.
@@ -1166,7 +1181,7 @@ impl Ai {
         let at = self.conquest_v3(self.conquest_anchor(o));
         if w.task.is_none()
             && w.unit.num_current_commands() > 0
-            && op.walk_order.is_some_and(|sent| self.frame - sent < 90)
+            && op.walk_order.is_some_and(|sent| self.frame - sent < 30 * 10)
         {
             return true;
         }
@@ -2157,6 +2172,26 @@ mod tests {
             .with_borrow(|o| assert_eq!(o.as_slice(), &[(crate::defs::cmd::RAW_MOVE, vec![3000.0, 0.0, 3000.0])]));
         ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Watch;
         assert!(!ai.conquest_walk_worker(10), "economy jobs resume at the objective");
+    }
+
+    #[test]
+    fn opening_mexes_wait_for_arrival_even_while_objectives_are_being_searched() {
+        let mut ai = energy_ai();
+        trip(&mut ai);
+        ai.eco.build_ids.mex_id = 1;
+        let mex = WorkerTask::construction(UnitDef::from_id(ai.cb, 1).unwrap(), Vec3::default(), 0);
+        assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], &mex));
+        assert!(!ai.conquest_skips_opening_mexes(11), "ordinary constructors keep expanding");
+        ai.eco.conquest.op = Some(walking());
+        assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], &mex));
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Fortify;
+        assert!(!ai.conquest_skips_opening_mexes(10), "take the objective's mexes on arrival");
+        ai.eco.conquest.op = None;
+        ai.eco.conquest.done = true;
+        assert!(!ai.conquest_skips_opening_mexes(10), "a failed trip releases the commander");
+        ai.eco.conquest.done = false;
+        push(&mut ai);
+        assert!(!ai.conquest_skips_opening_mexes(10), "compush retains its expansion opening");
     }
 
     #[test]

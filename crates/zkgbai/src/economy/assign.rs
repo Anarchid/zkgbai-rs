@@ -357,7 +357,9 @@ impl Ai {
         // Cancel the old engine order even if no safe replacement exists.
         let blocked_construction = self.eco.workers.get(&wid).is_some_and(|w| {
             w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
-                !self.eco.silo_work_allowed(t)
+                (self.conquest_skips_opening_mexes(wid)
+                    && t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id))
+                    || !self.eco.silo_work_allowed(t)
                     || !self.eco_prerequisites_ready(t)
                     || (!self.op_priority(t.id) && !self.logistics_allows(wid, t.id))
                     || (t.as_construction().is_some_and(|c| c.fortification)
@@ -561,6 +563,11 @@ impl Ai {
 
     /// Shared admission rule for the project planner and the executor.
     pub(super) fn eco_worker_can_take(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if self.conquest_skips_opening_mexes(w.id)
+            && t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id)
+        {
+            return false;
+        }
         let def = w.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let jumps_cliffs = w.is_com
