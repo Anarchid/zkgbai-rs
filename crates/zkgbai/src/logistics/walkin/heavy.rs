@@ -154,6 +154,9 @@ const RAISE_SEEN: i32 = 90;
 /// one after another as they are called away; frames before their orders
 /// tell.
 const RAISERS: usize = 2;
+/// Raisers within this many seconds of the site, at most (stage3/s1 sent
+/// one from 8900 elmos off); none that near: the Lucifer goes on the ground.
+const RAISER_TRAVEL: f32 = 20.0;
 const RAISE_FRAMES: i32 = 30 * 60;
 const RAISE_TRIES: u32 = 3;
 const RAISE_GRACE: i32 = 90;
@@ -405,16 +408,17 @@ impl Ai {
         let (metal, income) = (self.eco.metal, self.eco.effective_income);
         let raise = perch.as_ref().map_or(0.0, |p| p.raise);
         let side = def.x_size().max(def.z_size()) as f32 * 8.0 + 2.0 * RING;
-        let raise_s = if raise > UP_SLACK {
+        // No platform where an enemy stands by already (see `RAISE_CLEAR`)
+        // or with nobody near to raise it: the Lucifer goes on the ground.
+        let raisers = if raise > UP_SLACK { self.walkin_heavy_raiser_hands(site) } else { Vec::new() };
+        let clear = self.walkin_heavy_enemy_near(site) > RAISE_CLEAR;
+        let raising = raise > UP_SLACK && clear && !raisers.is_empty();
+        let raise_s = if raising {
             let m = platform_metal(side, raise);
-            finish_time(&hands[..k.min(RAISERS)], m, m, metal, income) * STRETCH
+            finish_time(&raisers, m, m, metal, income) * STRETCH
         } else {
             0.0
         };
-        // No platform where an enemy stands by already (see `RAISE_CLEAR`):
-        // the Lucifer goes on the ground there.
-        let clear = self.walkin_heavy_enemy_near(site) > RAISE_CLEAR;
-        let raising = raise > UP_SLACK && clear;
         let eta = if raising { raise_s } else { 0.0 }
             + finish_time(&hands[..k], def.build_time(), def.cost(self.metal), metal, income) * STRETCH;
         if eta > ETA {
@@ -434,7 +438,8 @@ impl Ai {
             porc_power(def),
             match &perch {
                 Some(p) if raising => format!(", on a platform raised {:.0}", p.raise),
-                Some(p) if p.raise > UP_SLACK => format!(" on the ground (an enemy within {RAISE_CLEAR:.0})"),
+                Some(p) if p.raise > UP_SLACK && !clear => format!(" on the ground (an enemy within {RAISE_CLEAR:.0})"),
+                Some(p) if p.raise > UP_SLACK => " on the ground (nobody near to raise it)".to_owned(),
                 Some(_) => " on a spire".to_owned(),
                 None => String::new(),
             }
@@ -447,7 +452,8 @@ impl Ai {
         });
         if raising {
             let Some(p) = perch else { return Err("nosite") };
-            let workers = self.walkin_heavy_raisers(site);
+            let ids: Vec<i32> = raisers.iter().map(|h| h.0).collect();
+            let workers = self.walkin_heavy_take(&ids);
             if workers.is_empty() {
                 return Err("noraisers");
             }
@@ -572,13 +578,24 @@ impl Ai {
     /// The nearest free constructors for a platform at `site`, taken off
     /// their jobs.
     fn walkin_heavy_raisers(&mut self, site: Vec3) -> Vec<Unit> {
-        let hands = self.logistics_hands(site, &[], None);
-        let ids: Vec<i32> = (hands.iter().map(|h| h.0))
-            .filter(|id| self.eco.workers.get(id).is_some_and(|w| !w.assigned_plop && !w.unit.is_being_built()))
+        let ids: Vec<i32> = self.walkin_heavy_raiser_hands(site).iter().map(|h| h.0).collect();
+        self.walkin_heavy_take(&ids)
+    }
+
+    /// The constructors that would raise a platform at `site`: the nearest
+    /// [`RAISERS`] free ones within [`RAISER_TRAVEL`] of it.
+    fn walkin_heavy_raiser_hands(&self, site: Vec3) -> Vec<crate::logistics::Hand> {
+        (self.logistics_hands(site, &[], None).into_iter())
+            .filter(|h| h.1 <= RAISER_TRAVEL)
+            .filter(|h| self.eco.workers.get(&h.0).is_some_and(|w| !w.assigned_plop && !w.unit.is_being_built()))
             .take(RAISERS)
-            .collect();
+            .collect()
+    }
+
+    /// Workers `ids`, taken off their jobs.
+    fn walkin_heavy_take(&mut self, ids: &[i32]) -> Vec<Unit> {
         let mut units = Vec::new();
-        for id in ids {
+        for &id in ids {
             if let Some(w) = self.eco.workers.get_mut(&id) {
                 w.clear_task(&mut self.eco.tasks);
                 units.push(w.unit);
@@ -708,7 +725,10 @@ impl Ai {
         } else {
             self.logistics.walkin.stats.heavy.short += 1;
         }
-        let task = self.eco_logistics_porc_at(r.def, site, SITE_SLACK);
+        // On top; else (the half-raised top refused) the nearest legal site.
+        let task = self
+            .eco_logistics_porc_at(r.def, site, SITE_SLACK)
+            .or_else(|| self.eco_logistics_porc(r.def, site, 0.0).map(|(t, _)| t));
         // Who raised it, and whether an enemy stood by (the 20x penalty).
         let raisers: Vec<String> = (r.workers.iter())
             .map(|&u| {
@@ -729,7 +749,7 @@ impl Ai {
             site.z,
             (frame - since) as f32 / 30.0,
             raisers.join(", "),
-            if task.is_some() { "the Lucifer goes on top" } else { "no site for the Lucifer on it" }
+            if task.is_some() { "the Lucifer goes on top (or nearest)" } else { "no site for the Lucifer about it" }
         ));
         let Some(task) = task else { return };
         let hands = self.walkin_hands(site, &[], None, false);
