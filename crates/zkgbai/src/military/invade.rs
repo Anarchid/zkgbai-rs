@@ -37,6 +37,10 @@
 //! expansion; an existing attack yields after its minimum commitment when
 //! free expansion pays `SWITCH` times more. Constructor travel uses the
 //! constructor's own movement tier (or flight), independently of the army.
+//! If no available constructor reaches the spots, existing factories and
+//! plates offer a new one; its cost and queued production time enter the
+//! forecast. A chosen job requests that constructor at the factory's next
+//! idle decision, with accepted orders and unfinished builders counted once.
 //! The defended piece with the best net > 0 is the target: its squad is
 //! sent at the defenders (in place of the squad's own target, as an
 //! operator would send it), kept on it at least [`MIN_COMMIT`] and until
@@ -59,6 +63,9 @@ use crate::Ai;
 use crate::military::wrappers::{SquadId, SquadKind};
 use crate::terrain::{pos, tier_of};
 use crate::util::{NULLPOS, distance};
+
+mod builders;
+use builders::{BuilderPlan, BuilderRequest};
 
 /// How often the pieces are weighed (frames), and from when.
 const PERIOD: i32 = 30 * 10;
@@ -219,6 +226,8 @@ pub struct Invade {
     pub picks: u32,
     pub clears: u32,
     pub captured: u32,
+    builder: Option<BuilderRequest>,
+    builder_orders: BTreeMap<i32, (springai::UnitDef, i32)>,
 }
 
 /// One piece as weighed this pass.
@@ -232,6 +241,7 @@ struct Piece {
     weigh: Weigh,
     /// Best source: squad (or none: a constructor alone), metal, net, P.
     best: Option<(Option<SquadId>, f32, f32, f32)>,
+    builder: Option<BuilderPlan>,
 }
 
 impl Ai {
@@ -245,6 +255,7 @@ impl Ai {
             .and_then(tier_of)
             .or(self.invade.tier)
             .or_else(|| self.invade_constructors().find_map(|w| w.unit.def().and_then(tier_of)))
+            .or_else(|| self.invade_builder_tier())
     }
 
     fn invade_constructors(&self) -> impl Iterator<Item = &crate::economy::Worker> {
@@ -367,6 +378,7 @@ impl Ai {
         if self.dev_off("invade") {
             self.invade_end("switched off", false);
             self.invade.captures.clear();
+            self.invade.builder = None;
             return;
         }
         if frame < FROM {
@@ -451,6 +463,7 @@ impl Ai {
             }
         }
         self.invade_choose(&pieces);
+        self.invade_request_builder(&pieces);
     }
 
     /// Rank expansion against conquest, also while an earlier capture is
@@ -642,21 +655,7 @@ impl Ai {
         // Constructors do not inherit the army's movement capabilities:
         // a bot constructor cannot follow a hover squad across a lake.
         // Aircraft use direct flight; ground builders use their own map.
-        let cons: Vec<(f32, Vec3, Option<Paths>)> = self
-            .invade_constructors()
-            .filter_map(|w| {
-                let def = w.unit.def()?;
-                let at = w.get_pos();
-                let paths = if def.is_able_to_fly() {
-                    None
-                } else {
-                    let own_map = self.terrain()?.tier(tier_of(def)?)?;
-                    Some(Paths::new(own_map, pos(at), |_| false))
-                };
-                Some((def.speed(), at, paths))
-            })
-            .take(MAX_CONS)
-            .collect();
+        let cons = self.invade_builder_sources();
         let mut out = Vec::new();
         for (r, ks) in regions {
             let spots: Vec<&crate::graph::MetalSpot> =
@@ -710,25 +709,18 @@ impl Ai {
                 .map(|fd| fd.contained_resource(self.metal))
                 .sum();
             let turret = if kind == Kind::Open { 0.0 } else { TURRET_COST };
-            let build_metal = MEX_COST * spots.len() as f32 + turret;
-            let t_con = cons
-                .iter()
-                .map(|(sp, at, paths)| {
-                    // All of the valued spots must be accessible to the builder.
-                    spots
-                        .iter()
-                        .map(|s| {
-                            paths.as_ref().map_or_else(
-                                || distance(*at, s.position),
-                                |paths| paths.distance_to(pos(s.position)).unwrap_or(f32::INFINITY),
-                            ) / sp
-                        })
-                        .fold(0.0f32, f32::max)
+            let structures = MEX_COST * spots.len() as f32 + turret;
+            let Some((con, t_con)) =
+                cons.iter().filter_map(|con| con.arrival(&spots).map(|eta| (con, eta))).min_by(|(a, ta), (b, tb)| {
+                    a.plan
+                        .is_some()
+                        .cmp(&b.plan.is_some())
+                        .then_with(|| (a.cost + gain * ta).total_cmp(&(b.cost + gain * tb)))
                 })
-                .fold(f32::INFINITY, f32::min);
-            if !t_con.is_finite() {
+            else {
                 continue;
-            }
+            };
+            let build_metal = structures + con.cost;
             let threats: Vec<(f32, f32)> = (army_paths.iter())
                 .filter(|(at, _, _, _)| !near(*at))
                 .filter_map(|(_, m, sp, paths)| {
@@ -743,7 +735,7 @@ impl Ai {
                 d_metal,
                 reclaim,
                 build_metal,
-                build_secs: build_metal / CON_BUILD_POWER,
+                build_secs: structures / CON_BUILD_POWER,
                 t_con,
                 turret,
                 threats,
@@ -764,7 +756,7 @@ impl Ai {
                     best = Some((Some(*sid), *m, net, pc));
                 }
             }
-            out.push(Piece { region: r, kind, center, radius, spots: ks.clone(), aim, weigh, best });
+            out.push(Piece { region: r, kind, center, radius, spots: ks.clone(), aim, weigh, best, builder: con.plan });
         }
         out
     }
@@ -783,7 +775,9 @@ impl Ai {
             })
             .collect();
         json!({"enabled": !self.dev_off("invade"), "cur": cur, "captures": captures, "top": v.top, "picks": v.picks,
-               "clears": v.clears, "captured": v.captured})
+               "clears": v.clears, "captured": v.captured,
+               "builder": v.builder.as_ref().map(|b| json!({"region": b.region, "factory": b.plan.factory,
+                   "unit": self.defs.name(b.plan.def)}))})
     }
 }
 
@@ -851,6 +845,7 @@ mod tests {
             aim: Vec3::xz(1000.0 * region as f32, 1000.0),
             weigh: weigh(if defended { 200.0 } else { 0.0 }, vec![]),
             best: Some((defended.then_some(7), if defended { 1200.0 } else { 0.0 }, net, 1.0)),
+            builder: None,
         }
     }
 
@@ -928,7 +923,11 @@ mod tests {
     }
 
     /// Bot (1), hover (2), or flying (3) constructor on the west shore.
-    fn coastal_ai(builder: i32) -> Ai {
+    pub(super) fn coastal_ai(builder: i32) -> Ai {
+        coastal_ai_with(builder, |_| {})
+    }
+
+    pub(super) fn coastal_ai_with(builder: i32, customize: impl FnOnce(&mut springai::ffi::SSkirmishAICallback)) -> Ai {
         unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
             id
         }
@@ -965,6 +964,9 @@ mod tests {
         unsafe extern "C" fn features(_: i32, _: *mut f32, _: f32, _: bool, _: *mut i32, _: i32) -> i32 {
             0
         }
+        unsafe extern "C" fn units(_: i32, _: *mut i32, _: i32) -> i32 {
+            0
+        }
         let mut ai = crate::economy::test_ai_with(|t| {
             t.Unit_getDef = Some(def);
             t.Unit_getHealth = Some(health);
@@ -973,6 +975,7 @@ mod tests {
             t.UnitDef_getBuildSpeed = Some(bp);
             t.UnitDef_getWeaponMounts = Some(zero);
             t.Unit_getWeapons = Some(zero);
+            t.Unit_getCurrentCommands = Some(zero);
             t.UnitDef_getMinWaterDepth = Some(depth);
             t.UnitDef_getMaxWaterDepth = Some(depth);
             t.UnitDef_MoveData_getMaxSlope = Some(slope);
@@ -980,6 +983,8 @@ mod tests {
             t.UnitDef_isAbleToFly = Some(flies);
             t.UnitDef_isMoveDataAvailable = Some(moves);
             t.getFeaturesIn = Some(features);
+            t.getTeamUnits = Some(units);
+            customize(t);
         });
         let data = zk_terrain::SpringMapData {
             map_width: 128,

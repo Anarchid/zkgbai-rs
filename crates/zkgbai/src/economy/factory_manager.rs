@@ -680,6 +680,10 @@ impl Ai {
             Some(super::rush::RushOrder::Hold) => return,
             None => {}
         }
+        if let Some(def) = self.invade_constructor_order(fac_id) {
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let mut fac = f.clone();
 
@@ -843,6 +847,7 @@ impl Ai {
             unit.build(def, site, 0, 0);
         } else if unit.build(def, pos, 0, 0) {
             self.army_support_ordered(fac_id, def);
+            self.invade_constructor_ordered(fac_id, def);
         }
     }
 
@@ -877,6 +882,7 @@ impl Ai {
             unit.build(def, site, 0, 0);
         } else if unit.build(def, pos, 0, 0) {
             self.army_support_ordered(fac_id, def);
+            self.invade_constructor_ordered(fac_id, def);
         }
     }
 

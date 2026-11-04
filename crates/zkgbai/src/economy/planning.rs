@@ -589,7 +589,9 @@ impl Ai {
             && (built as f32) < want
             && let Some(target) = self.eco_get_caretaker_target()
         {
-            self.eco_create_nano_turret_task(wid, target);
+            if !self.eco_first_production_plate(wid, target) {
+                self.eco_create_nano_turret_task(wid, target);
+            }
         }
 
         //do we need storages?

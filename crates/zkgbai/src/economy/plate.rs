@@ -1,4 +1,4 @@
-//! Factory plates on allied factories. A plate (150 metal, against 700 for a
+//! Factory plates for parallel production and allied tech. A plate (150 metal, against 700 for a
 //! factory, with a factory's build power) builds what a factory of its type
 //! within [`PLATE_RANGE`] builds, and an ally's factory will do: Zero-K's
 //! `unit_factory_plate.lua` compares ally teams, not teams. So when we want
@@ -19,6 +19,11 @@
 //! in range again, which the gadget finds by itself. With no factory of its
 //! type standing or rising in range for [`ORPHANED`], it is blown up, so
 //! the type can be had again (a plate of ours counts as having it).
+//!
+//! The first production build-power upgrade prefers a plate on our own
+//! factory over a caretaker: the second queue can build a constructor while
+//! the parent builds an army. It uses the same income threshold and exit
+//! checks as existing upgrades. Later upgrades remain caretakers.
 
 use springai::{Unit, UnitDef, Vec3};
 
@@ -40,6 +45,58 @@ const PLATE_SLACK: f32 = 40.0;
 const ORPHANED: i32 = 900;
 
 impl Ai {
+    /// One extra production queue before the first production caretaker.
+    /// Queued and standing plates both satisfy this, so plates do not cause
+    /// a new plate to be added on each planning pass.
+    fn eco_wants_first_plate(&self, parent: Unit) -> bool {
+        !self.dev_off("plates")
+            && parent.health() > 0.0
+            && parent.team() == self.team_id
+            && !parent.is_being_built()
+            && self.defs.name_of(parent).starts_with("factory")
+            && !self.eco.plates.iter().any(|p| p.health() > 0.0)
+            && !self
+                .eco
+                .factory_tasks
+                .iter()
+                .filter_map(|&id| self.eco.tasks.get(id))
+                .filter_map(|t| t.as_construction())
+                .any(|c| self.defs.name(c.build_type).starts_with("plate"))
+            && !self.eco.nanos.values().any(|n| self.defs.name_of(n.target) != super::AIRPAD)
+            && !self
+                .eco
+                .nano_tasks
+                .iter()
+                .filter_map(|&id| self.eco.tasks.get(id))
+                .filter_map(|t| t.as_construction())
+                .any(|c| c.ct_target.is_none_or(|u| self.defs.name_of(u) != super::AIRPAD))
+    }
+
+    /// True only when a plate was queued; otherwise the ordinary caretaker
+    /// remains available (Strider hubs, blocked yards, disabled plates).
+    pub(super) fn eco_first_production_plate(&mut self, wid: i32, parent: Unit) -> bool {
+        if !self.eco_wants_first_plate(parent) {
+            return false;
+        }
+        let Some(plate) = self.eco_plate_of(self.defs.name_of(parent)) else { return false };
+        let Some((pos, facing)) = self.eco_plate_site(plate, parent) else { return false };
+        let task = WorkerTask::construction(plate, pos, facing);
+        if self.eco.tasks.contains(&self.eco.factory_tasks, &task) || !self.eco_can_reach(wid, pos) {
+            return false;
+        }
+        let id = self.eco.tasks.insert(task);
+        self.eco.construction_tasks.push(id);
+        self.eco.factory_tasks.push(id);
+        self.log(&format!(
+            "economy: {} before the first production caretaker, on factory {} at ({:.0}, {:.0})",
+            self.defs.name(plate),
+            parent.id(),
+            pos.x,
+            pos.z
+        ));
+        true
+    }
+
     /// The factory type whose units `def` builds: a plate's factory, else
     /// its own name.
     pub(crate) fn fac_tech(&self, def: UnitDef) -> String {
@@ -259,7 +316,161 @@ impl Ai {
 
 #[cfg(test)]
 mod tests {
-    use super::keeps_exit;
+    use super::*;
+    use std::{cell::Cell, ffi::c_char};
+
+    thread_local! { static BLOCKED: Cell<bool> = const { Cell::new(false) }; }
+
+    fn plate_ai() -> Ai {
+        unsafe extern "C" fn size(_: i32) -> i32 {
+            512
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            1000.0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn footprint(_: i32, _: i32) -> i32 {
+            8
+        }
+        unsafe extern "C" fn bp(_: i32, _: i32) -> f32 {
+            5.0
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
+            id
+        }
+        unsafe extern "C" fn pos(_: i32, _: i32, out: *mut f32) {
+            unsafe { std::ptr::copy_nonoverlapping([1000.0, 20.0, 1000.0].as_ptr(), out, 3) };
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const c_char {
+            match id {
+                1 => c"factorygunship",
+                2 => c"plategunship",
+                3 => c"gunshipcon",
+                4 => c"staticcon",
+                5 => c"staticrearm",
+                _ => c"striderhub",
+            }
+            .as_ptr()
+        }
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, max: i32) -> i32 {
+            if !out.is_null() {
+                unsafe { std::ptr::copy_nonoverlapping([1, 2, 3, 4, 5, 6].as_ptr(), out, 6.min(max.max(0) as usize)) };
+            }
+            6
+        }
+        unsafe extern "C" fn params(_: i32, id: i32, keys: *mut *const c_char, vals: *mut *const c_char) -> i32 {
+            if id != 2 {
+                return 0;
+            }
+            if !keys.is_null() {
+                unsafe {
+                    *keys = c"child_of_factory".as_ptr();
+                    *vals = c"factorygunship".as_ptr();
+                }
+            }
+            1
+        }
+        unsafe extern "C" fn possible(_: i32, _: i32, _: *mut f32, _: i32) -> bool {
+            !BLOCKED.with(Cell::get)
+        }
+        unsafe extern "C" fn site(_: i32, _: i32, _: *mut f32, _: f32, _: i32, _: i32, out: *mut f32) {
+            unsafe { std::ptr::copy_nonoverlapping([-1.0, 0.0, -1.0].as_ptr(), out, 3) };
+        }
+        unsafe extern "C" fn elevation(_: i32, _: f32, _: f32) -> f32 {
+            20.0
+        }
+        BLOCKED.with(|b| b.set(false));
+        let mut table = None;
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Map_getWidth = Some(size);
+            t.Map_getHeight = Some(size);
+            t.Unit_getHealth = Some(health);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getDef = Some(def);
+            t.Unit_getPos = Some(pos);
+            t.Unit_getBuildingFacing = Some(zero);
+            t.UnitDef_getName = Some(name);
+            t.UnitDef_getXSize = Some(footprint);
+            t.UnitDef_getZSize = Some(footprint);
+            t.UnitDef_getBuildSpeed = Some(bp);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.Unit_getWeapons = Some(zero);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_getCustomParams = Some(params);
+            t.Map_isPossibleToBuildAt = Some(possible);
+            t.Map_findClosestBuildSite = Some(site);
+            t.Map_getElevationAt = Some(elevation);
+            table = Some(*t);
+        });
+        // Populate the small definition cache after creating the bare AI.
+        let mut table = table.unwrap();
+        table.getUnitDefs = Some(defs);
+        ai.cb = unsafe { springai::Callback::from_raw(0, Box::leak(Box::new(table))) };
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        let parent = Unit::from_id(ai.cb, 1).unwrap();
+        ai.fac.factories.insert(1, super::super::Factory::new(parent, "factorygunship", true, 1000.0));
+        ai.eco.insert_worker(super::super::Worker::new(Unit::from_id(ai.cb, 3).unwrap(), ai.team_id));
+        ai.set_feature_off("plates", false);
+        ai
+    }
+
+    #[test]
+    fn first_upgrade_queues_one_plate_on_our_own_factory_with_no_allies() {
+        let mut ai = plate_ai();
+        let parent = Unit::from_id(ai.cb, 1).unwrap();
+        assert!(ai.allies.is_empty());
+        assert!(ai.eco_first_production_plate(3, parent));
+        assert_eq!(ai.eco.factory_tasks.len(), 1);
+        assert!(ai.eco.nano_tasks.is_empty());
+        let task = ai.eco.tasks.get(ai.eco.factory_tasks[0]).unwrap();
+        assert_eq!(task.as_construction().unwrap().build_type.id(), 2);
+        assert!(distance(parent.pos(), task.position) <= PLATE_RANGE - PLATE_SLACK);
+        assert!(!ai.eco_first_production_plate(3, parent));
+        assert_eq!(ai.eco.factory_tasks.len(), 1);
+        ai.eco.factory_tasks.clear();
+        ai.eco.plates.push(Unit::from_id(ai.cb, 2).unwrap());
+        assert!(!ai.eco_wants_first_plate(parent));
+    }
+
+    #[test]
+    fn unavailable_plate_falls_back_without_queuing_a_factory() {
+        let mut ai = plate_ai();
+        let parent = Unit::from_id(ai.cb, 1).unwrap();
+        BLOCKED.with(|b| b.set(true));
+        assert!(!ai.eco_first_production_plate(3, parent));
+        assert!(ai.eco.factory_tasks.is_empty());
+        BLOCKED.with(|b| b.set(false));
+        ai.set_feature_off("plates", true);
+        assert!(!ai.eco_first_production_plate(3, parent));
+        ai.set_feature_off("plates", false);
+        assert!(!ai.eco_first_production_plate(3, Unit::from_id(ai.cb, 6).unwrap()));
+        assert!(!ai.eco_first_production_plate(999, parent), "no reachable builder");
+        assert!(ai.eco.factory_tasks.is_empty());
+    }
+
+    #[test]
+    fn airpad_caretakers_do_not_consume_the_first_production_upgrade() {
+        let mut ai = plate_ai();
+        let parent = Unit::from_id(ai.cb, 1).unwrap();
+        ai.eco.nanos.insert(
+            4,
+            super::super::Nanotower {
+                unit: Unit::from_id(ai.cb, 4).unwrap(),
+                target: Unit::from_id(ai.cb, 5).unwrap(),
+            },
+        );
+        assert!(ai.eco_wants_first_plate(parent));
+        ai.eco.nanos.get_mut(&4).unwrap().target = parent;
+        assert!(!ai.eco_wants_first_plate(parent));
+    }
 
     #[test]
     fn plates_keep_their_exits_as_their_factories_do() {
