@@ -253,6 +253,30 @@ const FLEE_FOR: i32 = 30 * 8;
 /// unit (0.5), it runs home for repairs below 95% health.
 const PICKET_COURAGE: f32 = 0.5;
 
+/// `picketstrike`: the pickets near a contact fight it together when the
+/// fight predictor (the veto's kiting judge over its horizon) has them
+/// killing this share of the contact party's armed metal ...
+const STRIKE_WIN: f32 = 0.5;
+/// ... while losing at most this share of their own.
+const STRIKE_LOSS: f32 = 0.2;
+/// A strike under way goes on while the forecast stays this good (a
+/// margin below the entry, so it does not flicker)...
+const STRIKE_HOLD_WIN: f32 = 0.3;
+const STRIKE_HOLD_LOSS: f32 = 0.4;
+/// Armed enemies this near the contact fight beside it.
+const STRIKE_GROUP: f32 = 600.0;
+/// Pickets this near the contact join the strike.
+const STRIKE_REACH: f32 = 900.0;
+/// A picket asks the predictor at most this often (frames), striking or
+/// not.
+const STRIKE_REVIEW: i32 = 60;
+/// A strike is given up after this long whatever the forecast.
+const STRIKE_MAX: i32 = 30 * 60;
+/// The attack order is repeated this often (the target moves).
+const STRIKE_REISSUE: i32 = 45;
+/// One refused strike in this many is journaled (to tune the thresholds).
+const STRIKE_NO_SAMPLE: u32 = 10;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Duty {
     Look,
@@ -286,6 +310,10 @@ struct Stakeout {
     look: Option<usize>,
     /// A soft target under attack.
     sortie: Option<i32>,
+    /// A contact we fight on the predictor's word (`picketstrike`).
+    strike: Option<Strike>,
+    /// Frame of the last predictor query (strike or not).
+    strike_asked: i32,
     last_tick: i32,
     /// Frame of the last move order.
     moved: i32,
@@ -362,6 +390,26 @@ struct Stats {
     sorties: u32,
     kills: u32,
     spooks: u32,
+    /// Strikes called (one per party), targets killed under a strike,
+    /// pickets lost while striking, strikes given up (forecast turned,
+    /// target gone or time).
+    strikes: u32,
+    strike_kills: u32,
+    strike_losses: u32,
+    strike_breaks: u32,
+    /// Predictor queries that could have started a strike, and pickets
+    /// that joined one under way.
+    strike_asks: u32,
+    strike_joins: u32,
+}
+
+/// A strike on a contact (`picketstrike`).
+#[derive(Clone, Copy, Debug)]
+struct Strike {
+    target: i32,
+    since: i32,
+    /// Frame of the last attack order.
+    ordered: i32,
 }
 
 #[derive(Default)]
@@ -383,6 +431,8 @@ pub struct Stakeouts {
     loaned: BTreeSet<i32>,
     /// Metal spots lookers fled from, until a frame.
     shunned: BTreeMap<usize, i32>,
+    /// Strike targets credited as kills (once each).
+    strike_credited: BTreeSet<i32>,
     stats: Stats,
 }
 
@@ -562,6 +612,8 @@ impl Ai {
                 standing: false,
                 look: None,
                 sortie: None,
+                strike: None,
+                strike_asked: 0,
                 last_tick: frame - PERIOD,
                 moved: 0,
                 cloaks: def.custom_param("idle_cloak").is_some() || (def.is_able_to_cloak() && def.cloak_cost() <= 0.0),
@@ -603,6 +655,9 @@ impl Ai {
         let frame = self.frame;
         let s = &mut self.stakeouts;
         s.stats.lost += 1;
+        if m.strike.is_some() {
+            s.stats.strike_losses += 1;
+        }
         s.losses.push_back(frame);
         while s.losses.front().is_some_and(|f| frame - f > LOSS_RECALL) {
             s.losses.pop_front();
@@ -616,7 +671,8 @@ impl Ai {
         self.op_emit(
             "stakeout",
             json!({"event": "lost", "t": frame / 30, "unit": id, "def": self.defs.name(m.def), "duty": m.duty.name(),
-                   "post": m.post, "x": pos.x.round(), "z": pos.z.round(), "attacker": attacker, "recent_losses": recent}),
+                   "post": m.post, "x": pos.x.round(), "z": pos.z.round(), "attacker": attacker, "recent_losses": recent,
+                   "striking": m.strike.map(|s| s.target)}),
         );
     }
 
@@ -640,6 +696,10 @@ impl Ai {
     pub(crate) fn stakeouts_borrowable(&self, frame: i32) -> Vec<(i32, Unit)> {
         (self.stakeouts.members.iter())
             .filter(|(_, m)| m.armed && frame >= m.fleeing_until && !m.f.is_dead())
+            // A picket striking a contact (`picketstrike`) is busy: since
+            // gangs can order what they borrow (coalown), lending it would end
+            // its strike.
+            .filter(|(_, m)| m.strike.is_none())
             .filter(|(_, m)| !self.retreat_handler.is_retreating(m.f.id))
             .map(|(&id, m)| (id, m.f.unit))
             .collect()
@@ -652,6 +712,7 @@ impl Ai {
             m.standing = false;
             m.bogey = None;
             m.sortie = None;
+            m.strike = None;
             m.step_to = None;
             m.last_tick = 0;
         }
@@ -853,6 +914,7 @@ impl Ai {
         let displaced = m.displacement.from.is_some_and(|from| distance(from, p) > ARRIVE);
         // Running, or pulled home for repairs (see `retreat`).
         if self.retreat_is_retreating(unit) {
+            self.stakeouts_strike_end(id, "retreat", frame);
             self.stakeouts_displaced(id);
             return;
         }
@@ -948,6 +1010,10 @@ impl Ai {
             }
             m.standing = true;
             m.step_to = None;
+            return;
+        }
+        // A fight we win: the pickets about take it on together.
+        if self.stakeouts_strike(id, near.map(|(eid, _)| eid), frame) {
             return;
         }
         if let Some((eid, _)) = danger.or(near) {
@@ -1158,6 +1224,171 @@ impl Ai {
     }
 
     /// Note an enemy a stakeout sees (once per enemy in a row).
+    /// `picketstrike`: fight the contact `anchor` when the predictor has
+    /// the pickets about winning, and keep a strike under way going while
+    /// its target lives and the forecast holds. True while this picket
+    /// strikes (it is then neither shadowing nor fleeing).
+    fn stakeouts_strike(&mut self, id: i32, anchor: Option<i32>, frame: i32) -> bool {
+        if self.dev_off("picketstrike") || !self.fightsim_runs() {
+            return false;
+        }
+        let Some(m) = self.stakeouts.members.get(&id) else { return false };
+        if !m.armed {
+            return false;
+        }
+        let (unit, asked) = (m.f.unit, m.strike_asked);
+        if let Some(s) = m.strike {
+            let target = self.war.targets.get(&s.target);
+            let dead = target.is_none_or(|e| e.is_dead);
+            if dead {
+                if self.stakeouts.strike_credited.insert(s.target) {
+                    self.stakeouts.stats.strike_kills += 1;
+                }
+                self.stakeouts_strike_end(id, "kill", frame);
+                return false;
+            }
+            let (eunit, seen) = target.map(|e| (e.unit, frame - e.last_seen <= BOGEY_RECENT)).unwrap_or((unit, false));
+            if !seen {
+                self.stakeouts_strike_end(id, "gone", frame);
+                return false;
+            }
+            if frame - s.since > STRIKE_MAX {
+                self.stakeouts_strike_end(id, "time", frame);
+                return false;
+            }
+            if frame - asked >= STRIKE_REVIEW {
+                if let Some(m) = self.stakeouts.members.get_mut(&id) {
+                    m.strike_asked = frame;
+                }
+                let holds = self
+                    .stakeouts_strike_judge(s.target, frame)
+                    .is_some_and(|(loss, _)| loss[1] >= STRIKE_HOLD_WIN && loss[0] <= STRIKE_HOLD_LOSS);
+                if !holds {
+                    self.stakeouts_strike_end(id, "forecast", frame);
+                    return false;
+                }
+            }
+            if frame - s.ordered >= STRIKE_REISSUE
+                && let Some(m) = self.stakeouts.members.get_mut(&id)
+                && let Some(s) = m.strike.as_mut()
+            {
+                s.ordered = frame;
+                m.standing = false;
+                m.moved = frame;
+                unit.attack(eunit, 0);
+            }
+            return true;
+        }
+        let Some(eid) = anchor else { return false };
+        if frame - asked < STRIKE_REVIEW {
+            return false;
+        }
+        if let Some(m) = self.stakeouts.members.get_mut(&id) {
+            m.strike_asked = frame;
+        }
+        let Some((loss, party)) = self.stakeouts_strike_judge(eid, frame) else { return false };
+        let Some(e) = self.war.targets.get(&eid) else { return false };
+        let (eunit, ename, epos, ehp) = (e.unit, e.def_name.clone(), e.position, e.get_health());
+        let loss2 = [(loss[0] * 100.0).round() / 100.0, (loss[1] * 100.0).round() / 100.0];
+        self.stakeouts.stats.strike_asks += 1;
+        if loss[1] < STRIKE_WIN || loss[0] > STRIKE_LOSS {
+            if self.stakeouts.stats.strike_asks.is_multiple_of(STRIKE_NO_SAMPLE) {
+                self.op_emit(
+                    "stakeout",
+                    json!({"event": "strike_no", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
+                           "party": party.len(), "loss": loss2, "hp": (ehp * 100.0).round() / 100.0}),
+                );
+            }
+            return false;
+        }
+        // Joining a strike under way on this contact is not a new one.
+        let joins = party
+            .iter()
+            .any(|pid| self.stakeouts.members.get(pid).is_some_and(|m| m.strike.is_some_and(|s| s.target == eid)));
+        let units: Vec<Unit> =
+            party.iter().filter_map(|pid| self.stakeouts.members.get(pid)).map(|m| m.f.unit).collect();
+        let theirs: Vec<i32> = (self.war.targets.values())
+            .filter(|f| f.identified && armed(f) && frame - f.last_seen <= BOGEY_RECENT)
+            .filter(|f| distance(f.position, epos) <= STRIKE_GROUP)
+            .map(|f| f.unit_id)
+            .collect();
+        let amove = self.fight_predict_units(&units, &theirs);
+        if joins {
+            self.stakeouts.stats.strike_joins += 1;
+        } else {
+            self.stakeouts.stats.strikes += 1;
+        }
+        self.op_emit(
+            "stakeout",
+            json!({"event": "strike", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
+                   "x": epos.x.round(), "z": epos.z.round(), "party": party.len(), "foes": theirs.len(),
+                   "join": joins, "loss": loss2, "hp": (ehp * 100.0).round() / 100.0,
+                   "p_win": amove.map(|o| (o.p_a_wins * 100.0).round() / 100.0),
+                   "amove": amove.map(|o| [(o.mean_a * 100.0).round() / 100.0, (o.mean_b * 100.0).round() / 100.0])}),
+        );
+        for pid in party {
+            let Some(m) = self.stakeouts.members.get_mut(&pid) else { continue };
+            if m.strike.is_some_and(|s| s.target == eid) {
+                continue;
+            }
+            m.strike = Some(Strike { target: eid, since: frame, ordered: frame });
+            m.strike_asked = frame;
+            m.standing = false;
+            m.moved = frame;
+            m.sortie = None;
+            m.step_to = None;
+            m.f.unit.attack(eunit, 0);
+        }
+        true
+    }
+
+    /// The fight the pickets about contact `eid` would have against it and
+    /// the armed enemies beside it, as the veto judges fights: each side's
+    /// killed share of its armed metal by the horizon, and the pickets'
+    /// ids. None for a contact not worth asking about (unidentified,
+    /// static, flying, long unseen, or under a turret's guns).
+    fn stakeouts_strike_judge(&mut self, eid: i32, frame: i32) -> Option<([f32; 2], Vec<i32>)> {
+        let e = self.war.targets.get(&eid)?;
+        if !e.identified || !mobile_armed(e) || frame - e.last_seen > BOGEY_RECENT {
+            return None;
+        }
+        let epos = e.position;
+        if self.war.get_porc_threat(epos) > 0.0 {
+            return None;
+        }
+        let theirs: Vec<i32> = (self.war.targets.values())
+            .filter(|f| f.identified && armed(f) && frame - f.last_seen <= BOGEY_RECENT)
+            .filter(|f| distance(f.position, epos) <= STRIKE_GROUP)
+            .map(|f| f.unit_id)
+            .collect();
+        let party: Vec<(i32, Unit)> = (self.stakeouts.members.iter())
+            .filter(|(_, m)| m.armed && !m.f.is_dead())
+            .filter(|(_, m)| m.strike.is_none_or(|s| s.target == eid))
+            .filter(|(_, m)| distance(m.f.get_pos(), epos) <= STRIKE_REACH)
+            .filter(|(id, m)| !self.coalesce_owns(**id) && !self.retreat_is_retreating(m.f.unit))
+            .map(|(&id, m)| (id, m.f.unit))
+            .collect();
+        let units: Vec<Unit> = party.iter().map(|&(_, u)| u).collect();
+        let loss = self.fight_judge_units(&units, &theirs)?;
+        Some((loss, party.into_iter().map(|(id, _)| id).collect()))
+    }
+
+    /// A strike is over for this picket.
+    fn stakeouts_strike_end(&mut self, id: i32, why: &str, frame: i32) {
+        let Some(m) = self.stakeouts.members.get_mut(&id) else { return };
+        let Some(s) = m.strike.take() else { return };
+        m.standing = false;
+        m.step_to = None;
+        if why != "kill" {
+            self.stakeouts.stats.strike_breaks += 1;
+        }
+        self.op_emit(
+            "stakeout",
+            json!({"event": "strike_end", "t": frame / 30, "unit": id, "enemy": s.target, "why": why,
+                   "held_s": (frame - s.since) / 30}),
+        );
+    }
+
     fn stakeouts_sighted(&mut self, id: i32, eid: i32, frame: i32, follows: bool) {
         let Some(e) = self.war.targets.get(&eid) else { return };
         let (epos, ename) = (e.position, e.def_name.clone());
@@ -1429,7 +1660,8 @@ impl Ai {
         let st = &s.stats;
         self.log(&format!(
             "stakeouts: t={} members={} (look {look}, post {post}, shadow {shadow}) posts={} manned={manned} wanted={} \
-             claimed={} lost={} sightings={} flights={} follows={} sorties={} kills={} spooks={}",
+             claimed={} lost={} sightings={} flights={} follows={} sorties={} kills={} spooks={} \
+             strikes={} strike_kills={} strike_losses={} strike_breaks={} strike_asks={} strike_joins={}",
             frame / 30,
             s.count(),
             s.posts.len(),
@@ -1441,7 +1673,13 @@ impl Ai {
             st.follows,
             st.sorties,
             st.kills,
-            st.spooks
+            st.spooks,
+            st.strikes,
+            st.strike_kills,
+            st.strike_losses,
+            st.strike_breaks,
+            st.strike_asks,
+            st.strike_joins
         ));
         let posts: Vec<_> = (s.posts.iter())
             .map(|p| {
@@ -1457,7 +1695,7 @@ impl Ai {
                     .and_then(|i| self.graph.metal_spots.get(i))
                     .map(|sp| json!({"spot": m.look, "x": sp.position.x.round(), "z": sp.position.z.round()}));
                 json!({"unit": id, "def": self.defs.name(m.def), "duty": m.duty.name(), "post": m.post, "look": look,
-                       "bogey": m.bogey, "sortie": m.sortie, "standing": m.standing, "cloaked": m.f.unit.is_cloaked(), "spooked": frame < m.spooked_until,
+                       "bogey": m.bogey, "sortie": m.sortie, "strike": m.strike.map(|s| s.target), "standing": m.standing, "cloaked": m.f.unit.is_cloaked(), "spooked": frame < m.spooked_until,
                        "x": p.x.round(), "z": p.z.round()})
             })
             .collect();
@@ -1466,7 +1704,9 @@ impl Ai {
             json!({"event": "summary", "t": frame / 30, "members": s.count(), "look": look, "post": post, "shadow": shadow,
                    "posts": posts, "manned": manned, "wanted": s.wanted(self.phase_frame()), "pickets": members,
                    "claimed": st.claimed, "lost": st.lost, "sightings": st.sightings, "flights": st.flights,
-                   "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks}),
+                   "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks,
+                   "strikes": st.strikes, "strike_kills": st.strike_kills, "strike_losses": st.strike_losses,
+                   "strike_breaks": st.strike_breaks, "strike_asks": st.strike_asks, "strike_joins": st.strike_joins}),
         );
     }
 }

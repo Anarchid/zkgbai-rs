@@ -30,6 +30,7 @@ mod watchtower;
 mod wind;
 pub mod worker;
 
+pub(crate) use assign::repair_loses_to_mex;
 pub use build_ids::BuildIds;
 pub use factory::Factory;
 pub use factory_manager::FactoryManager;
@@ -50,6 +51,19 @@ use crate::util::distance;
 /// A building within this of a construction job's site is that job's
 /// (build sites snap to the build grid), elmos.
 pub(super) const SITE_SLACK: f32 = 25.0;
+
+/// Airpads repair at 2.5 buildpower (`unit_refuel_pad_handler`: HP/s =
+/// 2.5 x max HP / (0.5 x cost), a Likho 5.9, an Odin 17, a Raptor 18; the
+/// staged fixture measured 18.8 for a Raptor). A caretaker repairs at 15
+/// buildpower (HP/s = 15 x max HP / cost: a Raptor 55, measured 55), three
+/// times the pad, one aircraft at a time, so
+/// once the air fleet is worth this much metal each airpad gets one
+/// (`padnano`), within `PAD_NANO_SITE` of it, repairing within
+/// `PAD_NANO_REACH` of the pad's center (caretaker build range 500).
+pub(super) const AIRPAD: &str = "staticrearm";
+pub(super) const PAD_NANO_FLEET_METAL: f32 = 1000.0;
+pub(super) const PAD_NANO_SITE: f32 = 200.0;
+pub(super) const PAD_NANO_REACH: f32 = 160.0;
 
 pub struct EconomyManager {
     cb: Callback,
@@ -139,6 +153,8 @@ pub struct EconomyManager {
     potential_fac_list: BTreeSet<String>,
     new_workers: BTreeSet<i32>,
     new_mexes: Vec<Unit>,
+    /// Where our finished mexes died, and when (see [`REMEX_MEMORY`]).
+    lost_mexes: Vec<(Vec3, i32)>,
     new_energy: Vec<Unit>,
     reclaim_record: VecDeque<f32>,
 
@@ -383,6 +399,7 @@ impl EconomyManager {
             potential_fac_list: BTreeSet::new(),
             new_workers: BTreeSet::new(),
             new_mexes: Vec::new(),
+            lost_mexes: Vec::new(),
             new_energy: Vec::new(),
             reclaim_record: VecDeque::new(),
             effective_income_energy: 0.0,
@@ -641,8 +658,48 @@ const OD_PHASE_ENERGY: f32 = 100.0;
 const OD_FREE_SHARE: f32 = 0.15;
 const OD_FREE_INCOME: f32 = 20.0;
 
+/// `energyneed` (on; `disable=energyneed` restores the stall flag's
+/// prices): energy jobs pull workers by how far energy income falls short
+/// of what construction spends, not by the stall flag. The flag is on while
+/// energy income is under the wanted target (`eramp`: about 1.8x metal
+/// income at 1-5 min), which was 99% of the opening (battery b1, 36 games),
+/// and while on, every energy job got the full pull whatever the shortfall:
+/// the commander walked a median 237 elmos to energy against 520 to a mex
+/// and built energy 48% of its first five minutes; lowering the target
+/// (`eramp` A/B, 122 pairs) changed neither the energy built nor the
+/// commander's share. No pull at [`NEED_ENOUGH`] x metal income or more, the
+/// full [`NEED_PULL`] at [`NEED_SHORT`] x or less, linear between.
+const NEED_ENOUGH: f32 = 1.2;
+const NEED_SHORT: f32 = 0.6;
+pub(crate) const NEED_PULL: f32 = 300.0;
+
+/// Remexes at high build priority (`remexfirst`): a mex frame within
+/// REMEX_SPOT of where a finished mex of ours died in the last REMEX_MEMORY
+/// frames, unless energy hard-stalls. In the staged smoke (11-04) a base
+/// raid took 56 -> 22 metal income and emptied storage in 18 s; at normal
+/// priority the remex frames then shared that with factory production
+/// and turrets at the front, sitting unbuilt for 40 s.
+const REMEX_MEMORY: i32 = 30 * 300;
+const REMEX_SPOT: f32 = 64.0;
+
+/// How short energy income falls of construction's need, 0 (enough) to 1
+/// (see [`NEED_ENOUGH`]).
+pub(crate) fn energy_shortfall(energy_income: f32, metal_income: f32) -> f32 {
+    if metal_income <= 0.0 {
+        return 0.0;
+    }
+    let ratio = energy_income.max(0.0) / metal_income;
+    ((NEED_ENOUGH - ratio) / (NEED_ENOUGH - NEED_SHORT)).clamp(0.0, 1.0)
+}
+
 /// Cross-module economy logic and module events.
 impl Ai {
+    /// `energyneed`: the economy's energy shortfall now (see
+    /// [`energy_shortfall`]).
+    pub(crate) fn eco_energy_shortfall(&self) -> f32 {
+        energy_shortfall(self.eco.effective_income_energy, self.eco.static_income)
+    }
+
     /// `energycrew` (`disable=energycrew` stops it): metal floats for want of
     /// energy, so greedy constructors build energy too. Energy jobs are made only by
     /// non-greedy workers and greedy ones pay 10000 for them; early on
@@ -1309,8 +1366,12 @@ impl Ai {
                     Some(target) => {
                         let nt = Nanotower { unit, target };
                         self.eco.nanos.insert(unit.id(), nt);
-                        unit.set_repeat(true, 0);
-                        unit.guard(nt.target, 0);
+                        if self.defs.name_of(target) == AIRPAD {
+                            self.eco_adopt_pad_nano(unit, target);
+                        } else {
+                            unit.set_repeat(true, 0);
+                            unit.guard(nt.target, 0);
+                        }
                         self.eco_defend_nano(nt);
                     }
                     // port: a caretaker without a target would be self-destructed
@@ -1399,7 +1460,14 @@ impl Ai {
             self.eco_silo_lost(unit);
         }
         if def.is_some_and(|d| d.speed() == 0.0) {
+            let frame = self.frame;
             let eco = &mut self.eco;
+            // A finished mex of ours lost: its replacement is a remex
+            // (see `eco_set_eco_priorities`).
+            if eco.mexes.contains(&unit) {
+                eco.lost_mexes.retain(|&(_, f)| frame - f <= REMEX_MEMORY);
+                eco.lost_mexes.push((unit.pos(), frame));
+            }
             for list in [
                 &mut eco.radars,
                 &mut eco.porcs,
@@ -1678,8 +1746,41 @@ impl Ai {
         for n in self.eco.nanos.values() {
             if n.target.health() <= 0.0 {
                 n.unit.self_destruct(0);
+            } else if n.unit.num_current_commands() == 0 && self.defs.name_of(n.target) == AIRPAD {
+                Self::eco_pad_nano_order(*n);
             }
         }
+    }
+
+    /// Adopt a finished caretaker as this airpad's (`padnano`), as the
+    /// economy does when it builds one; the staged fixtures spawn theirs.
+    pub(crate) fn eco_adopt_pad_nano(&mut self, unit: Unit, pad: Unit) {
+        let nt = Nanotower { unit, target: pad };
+        self.eco.nanos.insert(unit.id(), nt);
+        Self::eco_pad_nano_order(nt);
+        let (p, q) = (unit.pos(), pad.pos());
+        self.log(&format!(
+            "economy: airpad caretaker {} at ({:.0}, {:.0}) repairs over pad {} at ({:.0}, {:.0})",
+            unit.id(),
+            p.x,
+            p.z,
+            pad.id(),
+            q.x,
+            q.z
+        ));
+    }
+
+    /// A caretaker by an airpad keeps a standing area repair over it: the
+    /// engine repairs whatever is damaged there, landed aircraft first (they
+    /// sit still). ALT keeps the order when nothing needs repair.
+    fn eco_pad_nano_order(n: Nanotower) {
+        let p = n.target.pos();
+        n.unit.execute_custom_command(
+            cmd::REPAIR,
+            &[p.x, p.y, p.z, PAD_NANO_REACH],
+            springai::opt::ALT_KEY,
+            NO_TIMEOUT,
+        );
     }
 
     fn eco_set_eco_priorities(&mut self) {
@@ -1689,7 +1790,15 @@ impl Ai {
 
         let prio =
             if !eco.hard_estalled && !self.graph.eminent_territory && eco.adjusted_income < 20.0 { 2.0 } else { 1.0 };
+        // A remex goes first too (`remexfirst`): its metal was income a
+        // moment ago, and the raid that took it left storage empty, so at
+        // normal priority it waited behind factory production and turrets.
+        let remex = !eco.hard_estalled && !self.dev_off("remexfirst");
+        let frame = self.frame;
+        let lost =
+            |p: Vec3| eco.lost_mexes.iter().any(|&(q, f)| frame - f <= REMEX_MEMORY && distance(p, q) < REMEX_SPOT);
         for u in eco.new_mexes.iter().filter(|u| building(u)) {
+            let prio = if remex && lost(u.pos()) { 2.0 } else { prio };
             u.execute_custom_command(cmd::PRIORITY, &[prio], 0, NO_TIMEOUT);
         }
 
@@ -1708,6 +1817,23 @@ impl EconomyManager {
             let id = self.tasks.insert(t);
             self.combat_reclaim_tasks.push(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod energyneed_tests {
+    use super::energy_shortfall;
+
+    #[test]
+    fn the_shortfall_runs_from_enough_at_1_2x_to_full_at_0_6x_metal_income() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert_eq!(energy_shortfall(30.0, 20.0), 0.0, "1.5x: enough");
+        assert_eq!(energy_shortfall(24.0, 20.0), 0.0, "1.2x: enough");
+        assert!(close(energy_shortfall(20.0, 20.0), 1.0 / 3.0), "1:1: a third");
+        assert!(close(energy_shortfall(18.0, 20.0), 0.5), "0.9x: half");
+        assert_eq!(energy_shortfall(12.0, 20.0), 1.0, "0.6x: full");
+        assert_eq!(energy_shortfall(0.0, 20.0), 1.0);
+        assert_eq!(energy_shortfall(5.0, 0.0), 0.0, "no metal income: nothing to match");
     }
 }
 

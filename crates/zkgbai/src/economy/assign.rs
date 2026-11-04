@@ -5,7 +5,7 @@ use springai::{UnitDef, Vec3};
 
 use super::planning::{exit_lane, keeps_exit};
 use super::worker::Approach;
-use super::{SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
+use super::{NEED_PULL, SITE_SLACK, TaskId, TaskKind, Worker, WorkerTask, erase_one, erase_one_dq};
 use crate::Ai;
 use crate::military::DefenseTarget;
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
@@ -85,6 +85,16 @@ fn repair_worth(cost: f32, health: f32, max_health: f32) -> f32 {
     (missing / REPAIR_FULL_METAL).min(1.0)
 }
 
+/// A lone mex's pull on a worker beside it, no free spots near.
+const LONE_MEX_PULL: f32 = 100.0;
+
+/// Whether a lone worker beside a mobile combat unit would rather build a
+/// lone mex there than repair it (`lightrepair`). A retreated unit like that
+/// does not wait at home for a repair (see `retreat`).
+pub(crate) fn repair_loses_to_mex(cost: f32, health: f32, max_health: f32) -> bool {
+    repair_worth(cost, health, max_health) * (250.0 + (max_health + health) / 10.0) < LONE_MEX_PULL
+}
+
 /// Spring's repair and reclaim command ids (a build's is minus the def id).
 const CMD_REPAIR: i32 = 40;
 const CMD_RECLAIM: i32 = 90;
@@ -106,6 +116,31 @@ fn cluster_bonus(p: Vec3, free: impl Iterator<Item = Vec3>) -> f32 {
     };
     (CLUSTER_BONUS * free.map(near).sum::<f32>()).min(CLUSTER_CAP)
 }
+
+/// Mexes before a new factory (`remexfirst`, default on): a worker whose
+/// cheapest job is a factory, strider hub or plate (not a commander's plop,
+/// nor a factory while we have none) builds a free metal spot within
+/// REMEX_RADIUS of it first, if that mex, its crowd and danger counted,
+/// costs under REMEX_CEILING (an unshared, unraided mex out to the radius
+/// does; a third worker on one, or raiders still near it, do not). A
+/// factory pulls by its metal cost (~750 against a mex's 100, plus up to
+/// 100 for free spots near), and raids that cost us mexes ask for an air
+/// factory (`airfire`) whose crew bonus comes on top: the constructors
+/// built the air factory in a base whose mexes had just died (user, 11-04).
+/// Zero-K has no construction decay, so a frame left for a mex waits.
+/// A worker's own mex is priced REMEX_KEEP lower: a commander joining it
+/// (+600 to the others' price) flipped a constructor between the mex and
+/// the factory 1360 elmos away every second while the commander's raid
+/// defense took it off and gave it back (Altair smoke, 11-04); raiders near
+/// it (RAID_COST) still send it off.
+const REMEX_RADIUS: f32 = 1200.0;
+const REMEX_CEILING: f32 = 300.0;
+const REMEX_KEEP: f32 = 700.0;
+/// The missile silo is rushed (SQUAD_PULL), and half the time it is for
+/// offense, so only a mex the worker stands at, within its build range or
+/// REMEX_STEP past it, goes before it (user, 11-04: "if the constructor is
+/// literally sitting on the mex, it just is worth it to build").
+const REMEX_STEP: f32 = 64.0;
 
 /// An order for a worker, decided while the task store is borrowed.
 enum Order {
@@ -243,6 +278,29 @@ impl Ai {
         self.eco.assigned.push_back(wid);
     }
 
+    /// Journal worker `wid` leaving the job `old` (a tracked issue's) for
+    /// `new`: each job's price as the ladder has it, the crew bonus, the
+    /// threat paint at each.
+    fn eco_journal_leave(&self, wid: i32, old: TaskId, new: TaskId) {
+        let Some(w) = self.eco.workers.get(&wid) else { return };
+        let wpos = w.get_pos();
+        let view = self.war.view(w.unit.def());
+        let one = |id: TaskId| {
+            let Some(t) = self.eco.tasks.get(id) else { return serde_json::Value::Null };
+            let what = t.as_construction().map_or("other", |c| self.defs.name(c.build_type));
+            serde_json::json!({"what": what, "dist": distance(wpos, t.get_pos()).round(),
+                               "cost": self.eco_cost_of_job(w, wpos, t).round(),
+                               "bonus": self.logistics_bonus(wid, id).map(f32::round),
+                               "threat": (view.get_effective_threat(t.get_pos()) * 100.0).round() / 100.0,
+                               "raiders": self.eco_raiders_near(t.get_pos()).round()})
+        };
+        self.op_emit(
+            "leave",
+            serde_json::json!({"worker": wid, "def": self.defs.name_of(w.unit), "greedy": w.is_greedy,
+                               "chicken": w.is_chicken, "from": one(old), "to": one(new)}),
+        );
+    }
+
     fn eco_stop_chickening(&mut self, wid: i32) {
         if let Some(w) = self.eco.workers.get_mut(&wid) {
             w.is_chicken = false;
@@ -298,6 +356,11 @@ impl Ai {
             return;
         }
 
+        // A worker leaving a tracked issue's job: journaled with both
+        // prices, to see what pulls workers off a geothermal plant.
+        if let Some(old) = wtask.filter(|&t| t != task_id && self.logistics_tracks(t)) {
+            self.eco_journal_leave(wid, old, task_id);
+        }
         // remove it from its old assignment if it had one
         if wtask != Some(task_id)
             && let Some(w) = self.eco.workers.get_mut(&wid)
@@ -447,6 +510,19 @@ impl Ai {
         w.shunned.iter().any(|&(s, until)| until > frame && distance(s, p) < APPROACH_SHUN_RADIUS)
     }
 
+    /// Whether a worker on the job of repairing `unit` is about at it (in
+    /// build range, give or take a step).
+    pub(crate) fn eco_repair_crew_near(&self, unit: springai::Unit) -> bool {
+        let eco = &self.eco;
+        let p = unit.pos();
+        eco.repair_tasks
+            .iter()
+            .filter_map(|&id| eco.tasks.get(id))
+            .filter(|t| matches!(&t.kind, TaskKind::Repair(r) if r.target == unit))
+            .flat_map(|t| t.assigned_workers.iter().filter_map(|id| eco.workers.get(id)))
+            .any(|w| distance(w.get_pos(), p) <= w.unit.def().map_or(0.0, |d| d.build_distance()) + 100.0)
+    }
+
     fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
@@ -549,7 +625,55 @@ impl Ai {
         let own = |t: &WorkerTask| matches!(&t.kind, TaskKind::Repair(r) if r.target.id() == wid);
         consider(&eco.repair_tasks, true, &own);
 
+        // A free mex near the worker before a new factory, or one it stands
+        // at before the missile silo (`remexfirst`).
+        if let Some((fac, radius)) =
+            task.and_then(|id| eco.tasks.get(id)).and_then(|t| Some((t, self.eco_remex_radius(t, range)?)))
+            && !self.dev_off("remexfirst")
+        {
+            let mex = eco.build_ids.mex_id;
+            let best = (eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)))
+                .filter(|t| t.as_construction().is_some_and(|c| c.build_type.id() == mex))
+                .filter(|t| distance(wpos, t.get_pos()) <= radius && reaches(t))
+                .map(|t| {
+                    let keep = if worker.task == Some(t.id) { REMEX_KEEP } else { 0.0 };
+                    (t, self.eco_cost_of_job(worker, wpos, t) - stranded(t) + threat_cost(t) - keep)
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .filter(|&(_, c)| c < REMEX_CEILING);
+            if let Some((m, c)) = best {
+                if worker.task != Some(m.id) {
+                    let (p, f) = (m.get_pos(), fac.get_pos());
+                    let name = fac.as_construction().map_or("", |c| self.defs.name(c.build_type));
+                    self.log(&format!(
+                        "economy: remexfirst: worker {wid} takes the mex at ({:.0}, {:.0}) (cost {c:.0}) before the {name} at ({:.0}, {:.0})",
+                        p.x, p.z, f.x, f.z
+                    ));
+                }
+                return Some(m.id);
+            }
+        }
+
         task
+    }
+
+    /// How far a free mex may be from a worker whose cheapest job is `t`
+    /// to go first (`remexfirst`), the worker's reach being `range`:
+    /// [`REMEX_RADIUS`] for a new factory, strider hub or plate (not a
+    /// commander's plop, nor a factory while we have none); a step past its
+    /// reach for the missile silo (see [`REMEX_STEP`]); none for anything
+    /// else, or a job the operator asked for.
+    fn eco_remex_radius(&self, t: &WorkerTask, range: f32) -> Option<f32> {
+        let c = t.as_construction()?;
+        if self.op_priority(t.id) {
+            return None;
+        }
+        let id = c.build_type.id();
+        if id == self.eco.build_ids.missile_silo_id {
+            return Some(range + REMEX_STEP);
+        }
+        let factory = self.eco.build_ids.fac_ids.contains(&id) || self.defs.name(c.build_type).starts_with("plate");
+        (factory && !c.fac_plop && !self.fac.factories.is_empty()).then_some(REMEX_RADIUS)
     }
 
     /// The types of our constructors other than `def` (commanders aside:
@@ -720,6 +844,18 @@ impl Ai {
                     // (Greedy workers build it while metal floats for want
                     // of it: `energycrew`.)
                     let greedy = worker.is_greedy && !self.eco_floating_on_energy();
+                    // With `compush` the commander leaves the energy behind
+                    // it to the energy worker.
+                    let back = self.compush_back_cost(worker, wpos, task_pos);
+                    // With `energyneed` the pull follows the shortfall
+                    // against construction, a walk costing as for a mex.
+                    if !self.dev_off("energyneed") {
+                        if greedy {
+                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
+                        }
+                        let crowd = (1000.0 * (cost_mod - if worker.is_com { 2.0 } else { 1.0 })).max(0.0);
+                        return (dist / 4.0) - NEED_PULL * self.eco_energy_shortfall() + crowd + back;
+                    }
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
                         if greedy {
@@ -727,9 +863,9 @@ impl Ai {
                         }
                         if worker.is_com {
                             if eco.hard_estalled {
-                                return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                                return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                             }
-                            return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                            return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                         }
                         return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     } else {
@@ -737,7 +873,7 @@ impl Ai {
                             return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
                         }
                         if worker.is_com {
-                            return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
+                            return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                         }
                         return (dist / 4.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     }
@@ -1202,6 +1338,36 @@ mod tests {
         assert!(mex < dart, "mex {mex} vs dart {dart}");
         // the flat pull it had picked the Dart
         assert!(repair_cost(50.0, 1.0, 60.0, 120.0) < mex);
+    }
+
+    #[test]
+    fn scouts_and_small_raiders_do_not_wait_for_repair() {
+        // at half health: Dart, Flea, Glaive, Bandit, Dagger lose to a mex
+        for (cost, hp) in [(40.0, 120.0), (25.0, 40.0), (65.0, 230.0), (75.0, 350.0), (80.0, 300.0)] {
+            assert!(repair_loses_to_mex(cost, hp / 2.0, hp), "{cost} m, {hp} HP");
+        }
+        // Scorcher, Rogue, Hermit do not
+        for (cost, hp) in [(130.0, 480.0), (125.0, 520.0), (145.0, 1550.0)] {
+            assert!(!repair_loses_to_mex(cost, hp / 2.0, hp), "{cost} m, {hp} HP");
+        }
+    }
+
+    #[test]
+    fn remex_ceiling_takes_free_mexes_not_crowded_or_raided_ones() {
+        // A non-greedy worker's mex price (see `eco_cost_of_job_alone`):
+        // (dist / 4) - 100 - cluster + 600 (cost_mod - 2), cost_mod being 1
+        // plus the workers already on it nearer than this one.
+        let mex = |dist: f32, cluster: f32, on_it: f32| dist / 4.0 - 100.0 - cluster + (600.0 * (on_it - 1.0)).max(0.0);
+        // A lone mex at the edge of the radius, and one shared with one other.
+        assert!(mex(REMEX_RADIUS, 0.0, 0.0) < REMEX_CEILING);
+        assert!(mex(REMEX_RADIUS, 0.0, 1.0) < REMEX_CEILING);
+        // A third worker on it, or raiders near it (RAID_COST and up), not.
+        assert!(mex(0.0, CLUSTER_CAP, 2.0) >= REMEX_CEILING);
+        assert!(mex(0.0, CLUSTER_CAP, 0.0) + RAID_COST >= REMEX_CEILING);
+        // Its own mex: a commander joining it (counts 2) does not send the
+        // worker off; raiders near it do.
+        assert!(mex(REMEX_RADIUS, 0.0, 2.0) - REMEX_KEEP < REMEX_CEILING);
+        assert!(mex(0.0, CLUSTER_CAP, 0.0) + RAID_COST - REMEX_KEEP >= REMEX_CEILING);
     }
 
     #[test]

@@ -86,17 +86,20 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// (zkgbai-runs/conquest/compush b1, 36 pairs against Wires 0.1.2) the trip
 /// was -0.15 +- 0.12 and compush -0.12 +- 0.12 against it off, and the
 /// 317 sweep had the trip -0.14 +- 0.04 over 116 maps (enable=conquest to
-/// opt in: compush, below, unless disable=compush). `conquestsym` (both
+/// opt in: the trip, or compush, below, with enable=compush). `conquestsym` (both
 /// sides' walks to an objective measured alike) stays on for it
 /// (2026-11-02; sym - on +0.07). `conquestleash`
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
 /// sym) stay off, as does `conquestescort` (a QRF team sized by the fight
 /// predictor stands on the objective, 2026-11-03; battery e1 -0.14).
-/// `compush` (on in the wip line, 2026-11-03; acts with `conquest` on): no
-/// conquest trip; the commander's mex jobs lean toward the enemy, and
-/// objectives whose spots become ours by any hands get their turrets
-/// (disable=compush for the trip). `conquestroute` (the trip's start and opening mexes planned
+/// `compush` (with or without `conquest`): no conquest trip; the
+/// commander's mex jobs lean toward the enemy, a constructor builds the
+/// home energy, and objectives whose spots become ours by any hands get
+/// their turrets. Off in the wip line since 2026-11-03 evening (user: "a bit
+/// less certain" than energyneed; its 344 form never had a battery):
+/// enable=compush to opt in (with or without enable=conquest, compush wins
+/// over the trip). `conquestroute` (the trip's start and opening mexes planned
 /// with it, one on one) is off (enable=conquestroute, with compush off).
 /// `eramp` (energy wanted ramps with the alliance's share of the metal
 /// spots and the clock, see economy/mod.rs ERAMP_*) is on in the wip line
@@ -105,7 +108,7 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// snapshots, military/ammo.rs) is off: its A/B (zkgbai-runs/ammo/ab,
 /// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
 /// ledger that is 99.5% right; the ledger still counts and journals.
-pub(crate) const OFF_BY_DEFAULT: [&str; 24] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 25] = [
     "pairs",
     "currency",
     "permanence",
@@ -125,6 +128,7 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 24] = [
     "densgate",
     "fight2d",
     "conquest",
+    "compush",
     "conquestleash",
     "conquestseq",
     "conquestescort",

@@ -42,7 +42,25 @@ Primary missions:
 - Aircraft on LOS/radar inbound to our territory: at least two Raptors, with a
   Magpie to assist (its EMG slows the quarry) when one is ready; it is never
   bought or waited for. Unidentified radar contacts can count when clearly
-  above terrain.
+  above terrain. An identified armed aircraft whose weapon reaches our or
+  allied ground units or buildings (its range plus 200 elmos) is intercepted
+  wherever it is, at the front or over an expansion (`disable=airmenace`:
+  only in our territory or inbound to home).
+  The package is a one-pass kill, one Raptor per 700 HP (six for a
+  Revenant), and procurement buys toward it. When it cannot be filled and the
+  quarry carries no anti-air we count (no AA or flex-AA weapon, not a
+  fighter) with no AA or fighter within 1000 elmos of it, and little ground AA
+  is on the way (risk <= 0.15), the Raptors that are ready go anyway, even
+  one: they keep firing until it dies or flees, for up to 300 s instead of the
+  usual 150 (`disable=raptorwear`). A ready Magpie joins them as in the full
+  package: its EMG slows the quarry. Staged (`airstrike-raptors` vs
+  `airstrike-revenants`, smoke runs in zkgbai-runs/gunships): two Raptors do
+  ~28 damage/s to a hovering Revenant (strafing passes) and kill one in about
+  three minutes. A Revenant is not harmless: its rocket salvos hit strafing
+  Raptors 10 times in 142 shots (210 each) and killed one hurt Raptor, against
+  ~19.8k damage dealt to Revenants. Before this, the 2-3 ready
+  Raptors never went at a Revenant pair working over our ground for four
+  minutes (Agalta, 2026-11-03: six asked for), and flew at Gnats instead.
 - Statics worth at least 1000 metal, and every identified factory or strider
   hub: Odin thermite. Singularities get a bonus; a factory counts three times
   its cost (it is where the army comes from, and the rebuild costs time), four
@@ -67,8 +85,27 @@ Primary missions:
   in the air; launch takes the cheapest package it can fill, so a Phoenix
   goes at a light raider only when no Magpie is ready. Raiders the
   firefighters are already on are left to them.
-- Heavy aircraft in sight (Nimbus, Krow, Odin): Likhos, as many as each adds
-  250 metal of damage value, when the target can be reached within 25 seconds.
+- Airpads (`unit_refuel_pad_handler`): a landed aircraft rearms (Likho 25 s,
+  Odin 30 s), then sits until fully repaired at the pad's 2.5 buildpower, HP/s
+  = 2.5 x max HP / (0.5 x cost): a Likho 5.9 (30% takes ~120 s), an Odin 17
+  (one back at 43% sat 250 s on Agalta, 2026-11-03, flight and rearm
+  included), a Raptor 18 (measured 18.8). Zero-K's `noammo` reads
+  3 for that repair phase; the aircraft is armed again and any order lifts it
+  off. A primary mission may take it at 70% health or more when its own
+  survival check at current health passes (`disable=padlaunch`); secondary
+  ones wait for 95%. The economy puts a caretaker (15 repair buildpower, three
+  times the pad; HP/s = 15 x max HP / cost, a Raptor 55 as measured) beside
+  each airpad with a standing area repair over it once combat aircraft are
+  worth 1000 metal (`disable=padnano`), outside the one-per-10-income
+  caretaker budget. Staged with the `zk-padlab.sdd` mutator
+  (zkgbai-runs/padrepair, wounds team 0 Raptors to 35% every 120 s;
+  `airstrike-raptors-pad` vs `airstrike-revenants`): 40 s on the pad with
+  both off, 4-11 s with both on (`from_pad=1` launches at >= 70%).
+- Heavy aircraft in sight (Nimbus, Krow, Odin, Revenant): Likhos, as many as
+  each adds 250 metal of damage value, when the target can be reached within
+  25 seconds. ZK aims the bomb at the quarry's straight-line lead point, so
+  speed alone does not save it (combat logs: 57/64 hits on aircraft, Revenant
+  4/4; `disable=likhorevenant` leaves Revenants to Raptors).
   The quarry and the heavy aircraft within 600 elmos of it (its flock: Nimbus
   fly in clumps and cover each other) are the target, not interceptors; other
   fighters and AA still gate the route (`disable=heavyflock` makes every flock
@@ -312,8 +349,28 @@ requirements; `optional_escort` identifies optional Sparrow support for deep
 thermite candidates. Active packages list only escorts actually assigned. `fleet` distinguishes ready, in-progress, rearming, repairing,
 returning and operator-held aircraft; `utilization` accumulates aircraft-seconds
 per state, aircraft launches, observed spent payloads and abort reasons. Spent
-payloads indicate releases, not confirmed hits or kills. Aircraft still gather
-within 450 elmos of home and require 95% health before launch. The operator HUD and map board expose the same distinction. `disable=airstrikes` disables the policy.
+payloads indicate releases, not confirmed hits or kills. Home is the ally
+center (the middle of our metal spots), from which every plan's route, risk
+and length are reckoned. Without `airhome` (`disable=airhome`) an aircraft is
+ready only within 450 elmos of it, which flapped idle planes between ready and
+returning: circling drifts them past the circle, and the center moves when a
+metal spot changes hands (a Likho on Agalta, 2026-11-03, flipped every 5-10 s;
+51 flips in 8 staged minutes). With `airhome` a plane back from a sortie, a pad
+or the factory is home once within the circle or over our territory, and stays
+home, ready, until it flies a sortie, needs a pad or is taken by the operator.
+Neither the circle nor the territory alone holds a circling plane: the center
+can lie outside our territory, between two holdings (staged, a second run still
+flipped 21 times on territory alone). Idle planes outside the circle are routed
+back toward the center every 10 s, and dispatch checks each plane's own way
+out from where it is. A package takes
+planes whose distances to its route's first waypoint differ by at most 900
+elmos, the old circle's diameter, so it still arrives together: of the sets
+that fill it, the one nearest that waypoint, idle planes before those on a
+pad. When only a more spread-out set would fill it the launch is held and
+counted in `spread_holds`. A Raptor wear-down sortie takes whoever is ready,
+nearest first. The Assassinate and HeavyAir arrival windows are timed from each
+member's own position. Launch requires 95% health except off a pad
+(`padlaunch`). The operator HUD and map board expose the same distinction. `disable=airstrikes` disables the policy.
 
 ## Verification
 

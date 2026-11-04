@@ -4,8 +4,12 @@ use std::collections::HashMap;
 
 use springai::{Callback, Unit, UnitDef};
 
-/// Zero-K LuaRules custom command ids.
+/// Zero-K LuaRules custom command ids (and engine ones the AI interface
+/// has no typed command for).
 pub mod cmd {
+    /// The engine's CMD_REPAIR. With four parameters (x, y, z, radius) it is
+    /// an area repair; with ALT it stays when nothing there needs repair.
+    pub const REPAIR: i32 = 40;
     pub const ORBIT: i32 = 13923;
     pub const ORBIT_DRAW: i32 = 13924;
     pub const RAW_MOVE: i32 = 31109;

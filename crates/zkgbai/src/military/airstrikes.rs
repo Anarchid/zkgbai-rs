@@ -53,6 +53,23 @@ fn strafe_magpies(hp: f32, fast: bool) -> usize {
 /// to single-target strikes), at least two worth this much together. A pair
 /// of Grizzlies is one target: five Likhos at one of them burn both (about
 /// 2800 metal of damage value), where each alone would need six to kill.
+/// Anti-air flying this close to an aircraft covers it (a Trident reaches 750,
+/// a Raptor 800): fighters going at it would meet that escort.
+const ESCORT_REACH: f32 = 1000.0;
+/// A Raptor's laser does 100 damage per second to aircraft (about 14 in
+/// practice against a hovering gunship: strafing passes). Against a quarry
+/// without counted anti-air or escort, whatever Raptors are ready go (see
+/// `Mission::wearable`) where this little ground anti-air is on the way.
+pub(super) const WEAR_MAX_AA: f32 = 0.15;
+/// Aircraft that hunt ours: anti-air whatever their tooltip says.
+pub(super) const FIGHTERS: [&str; 3] = ["planefighter", "planeheavyfighter", "planesupport"];
+
+/// Whether a plan whose full package cannot be filled may go with the
+/// Raptors that are ready (see `Mission::wearable`).
+fn wears_down(kind: MissionKind, wearable: bool, risk: Risk) -> bool {
+    kind == MissionKind::Intercept && wearable && risk.aa <= WEAR_MAX_AA && !risk.intercepted
+}
+
 const GROUP_MIN_UNIT_METAL: f32 = 150.0;
 const GROUP_MAX_UNIT_METAL: f32 = 2500.0;
 const GROUP_MIN_SIZE: usize = 2;
@@ -208,8 +225,11 @@ struct Contact {
     armed: bool,
     /// Top speed (elmos/s), 0 while unidentified.
     speed: f32,
-    /// It can shoot at aircraft.
+    /// It can shoot at aircraft (fighters included).
     aa: bool,
+    /// An armed aircraft over our or allied ground units or buildings, in
+    /// reach of them: an interception wherever it is (`airmenace`).
+    menacing: bool,
 }
 
 impl Contact {
@@ -304,6 +324,15 @@ struct Mission {
     shields: Vec<Shield>,
     /// Too fast for a Raven's guided bomb (`RAVEN_MAX_TARGET_SPEED`).
     fast: bool,
+    /// An identified aircraft carrying no anti-air we count (no AA or flex-AA
+    /// weapon, not a fighter), with none flying within `ESCORT_REACH` of it (a
+    /// Revenant, a Gnat): Raptors keep firing at it until it dies or flees,
+    /// so they need not kill it in one pass, and fewer than the full package
+    /// may go (`raptorwear`). Not harmless: a Revenant's rocket salvo (210 a
+    /// rocket) hit strafing Raptors with 10 of 142 shots in the staged runs
+    /// and killed one already hurt Raptor, while Raptors did ~19.8k damage
+    /// to Revenants; the 50%-health abort sends hurt ones home.
+    wearable: bool,
 }
 impl Mission {
     fn key(&self) -> (MissionKind, i32) {
@@ -339,6 +368,17 @@ impl Mission {
         let reward = reward.clamp(0.0, 9000.0);
         if self.kind == MissionKind::Intercept { 100000.0 + reward } else { self.kind.priority() * reward }
     }
+}
+
+/// See `Mission::wearable`. Unidentified contacts never are: what they
+/// carry is unknown.
+fn wearable(e: &Contact, contacts: &[Contact], frame: i32) -> bool {
+    e.air
+        && e.known
+        && !e.aa
+        && !contacts
+            .iter()
+            .any(|c| c.id != e.id && c.air && c.aa && frame - c.seen <= FRESH && distance(c.pos, e.pos) < ESCORT_REACH)
 }
 
 fn inbound(pos: Vec3, vel: Vec3, home: Vec3, home_territory: bool) -> bool {
@@ -388,6 +428,7 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
             continue;
         }
         let here = shields::over(&carriers, &[e.pos]);
+        let wearable = wearable(e, contacts, frame);
         let mut add = |kind, targets: Vec<i32>, hp, value| {
             jobs.push(Mission {
                 kind,
@@ -403,13 +444,14 @@ fn missions(contacts: &[Contact], home: Vec3, frame: i32) -> Vec<Mission> {
                 deep: e.singu || distance(e.pos, home) >= 3000.0,
                 shields: here.clone(),
                 fast: !e.static_ && e.speed >= RAVEN_MAX_TARGET_SPEED,
+                wearable,
             })
         };
         if e.air {
             if fresh && e.known && e.heavy_air {
                 add(MissionKind::HeavyAir, vec![e.id], e.hp, e.value);
             }
-            if fresh && inbound(e.pos, e.vel, home, e.home) {
+            if fresh && (e.menacing || inbound(e.pos, e.vel, home, e.home)) {
                 add(MissionKind::Intercept, vec![e.id], e.hp.max(1000.0), e.value);
             }
             continue;
@@ -537,6 +579,7 @@ fn outposts(contacts: &[Contact], carriers: &[Shield], home: Vec3, frame: i32) -
             deep: distance(seed.pos, home) >= 3000.0,
             shields,
             fast: false,
+            wearable: false,
         };
         job.aim_group(Arms::default());
         jobs.push(job);

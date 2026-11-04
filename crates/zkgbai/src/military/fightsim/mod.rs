@@ -116,6 +116,10 @@ pub struct SnapUnit {
     pub tubes: Vec<i32>,
 }
 
+/// Switch: coalesce gangs are judged with their units firing for certain
+/// ([`SimFlags::ordered`]; `disable=ordered`).
+pub const ORDERED: &str = "ordered";
+
 /// Which mechanics fight a consumer asks for (the AI's switches; both off
 /// = the frozen fight). `fight2d` (`twod`): units keep their places in the
 /// plane and move there, do not overlap, and splash weapons hit the units
@@ -138,12 +142,22 @@ pub struct SimFlags {
     /// Imp's radius and a Rogue's add up to 22), so there no bomb went off
     /// on contact. Set by the bomb-charge judgement ([`Model::bomb_charge`]).
     pub bombs: bool,
+    /// Side 0 is under our order and commits (a coalesce gang: borrowed,
+    /// committed, ordered): its units fire for certain, in place of the
+    /// engage prior (P(a unit fires at all), fitted on game logs where many
+    /// units never commit); side 1 keeps the prior (mech.py `ordered`). The
+    /// fight lab (zkgbai-runs/lab, 2026-11-03) found the prior made one or two
+    /// raiders ordered at a Picket look harmless: P(Picket dead in 10 s)
+    /// Brier 0.296 -> 0.183 with it off for the ordered side; on 20,522 live
+    /// coalesce forms the 10-s member-loss correlation rose +0.016 [+0.011,
+    /// +0.021] and the MAE fell 4.4 metal.
+    pub ordered: bool,
 }
 
 impl SimFlags {
     /// The flags as the AI's switches set them.
     pub fn from_switches(fight2d: bool, focus: bool, sreload: bool) -> SimFlags {
-        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false }
+        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false, ordered: false }
     }
 
     /// Whether shots go to the least-health target (always in the plane).
@@ -587,6 +601,7 @@ impl Model {
     fn sim_unit(&self, u: &SnapUnit, x: f64, weapons: Vec<SimWeapon>) -> SimUnit {
         SimUnit {
             side: u.side,
+            spent: SPENT_ON_FIRING.contains(&u.spec.def.as_str()),
             target: self.hits.target(&u.spec.def),
             hp: u.hp as f64,
             cost: u.spec.cost as f64,
@@ -673,6 +688,8 @@ impl SimWeapon {
 #[derive(Clone, Debug)]
 struct SimUnit {
     side: u8,
+    /// Spent by its first shot ([`SPENT_ON_FIRING`]).
+    spent: bool,
     target: (Option<u32>, Cls),
     hp: f64,
     cost: f64,
@@ -685,6 +702,14 @@ struct SimUnit {
     alive: bool,
     moving: bool,
 }
+
+/// Unit defs whose weapon is the unit itself: the first shot spends it.
+/// The Puppy's missile is the Puppy (ZK's unit_puppy_handler hides the
+/// unit as it fires), not a launcher that reloads in 1.5 s; the force
+/// planner had picked it 201 times on 782 recorded assaults as 410 damage
+/// every 1.5 s for 45 metal (zkgbai-runs/forceplan/post). Kamikazes that go
+/// off by their death blast are `mech::KAMIKAZE`.
+pub(super) const SPENT_ON_FIRING: [&str; 1] = ["jumpscout"];
 
 /// Positions along the axis from A's centroid to B's (A's centroid at 0).
 fn project(snap: &FightSnapshot) -> Vec<f64> {
@@ -855,6 +880,11 @@ fn simulate(template: &[SimUnit], hits: &HitTables, hazard: Option<&Hazard>, wit
                         target = nearest(&us);
                     }
                 }
+                if us[i].spent {
+                    us[i].alive = false;
+                    killed[side as usize] += us[i].cost;
+                    break;
+                }
             }
         }
         quiet = if shot_fired || (moved && !withdraw) { 0 } else { quiet + DT };
@@ -958,6 +988,59 @@ mod tests {
         assert_eq!(speed_band(2.0), 2);
         assert_eq!(speed_band(4.0), 3);
         assert_eq!(speed_band(9.0), 3);
+    }
+
+    fn unit(
+        side: u8,
+        def: &str,
+        cost: f32,
+        health: f32,
+        speed: f32,
+        w: Option<(&str, &str, f32, f32, f32)>,
+        x: f32,
+    ) -> SnapUnit {
+        let weapons = w.map_or_else(Vec::new, |(name, kind, range, reload, damage)| {
+            vec![WeaponSpec { name: name.into(), weapon_type: kind.into(), range, reload, salvo: 1, damage }]
+        });
+        let spec = UnitSpec {
+            def: def.into(),
+            cost,
+            health,
+            speed,
+            mobile: speed > 0.0,
+            weapons,
+            radius: 12.0,
+            ..UnitSpec::default()
+        };
+        SnapUnit { side, hp: health, x, z: 0.0, spec: Arc::new(spec), tubes: Vec::new() }
+    }
+
+    /// The Puppy is its own missile: one shot, then it is gone, in both
+    /// fights (it had refired every 1.5 s).
+    #[test]
+    fn a_puppy_is_spent_by_its_one_missile() {
+        let m = Model::load().unwrap();
+        let puppy = || {
+            unit(
+                0,
+                "jumpscout",
+                45.0,
+                80.0,
+                3.5,
+                Some(("jumpscout_missile", "MissileLauncher", 168.0, 1.5, 410.1)),
+                0.0,
+            )
+        };
+        let wall = unit(1, "staticstorage", 100.0, 5000.0, 0.0, None, 400.0);
+        let snap = FightSnapshot { units: vec![puppy(), wall], flags: SimFlags::from_switches(false, true, true) };
+        let fates = m.fates(&snap, 30 * 20, FateMode::AMove);
+        assert!(fates[0].dead, "the Puppy is gone once it fires: {:?}", fates[0]);
+        assert!(fates[1].hp_left >= 5000.0 - 420.0, "one missile at most in 20 s: {:?}", fates[1]);
+        // A short-ranged tough turret outlasts one missile in the plain
+        // fight (refiring, eight would have killed it).
+        let stub = unit(1, "turretstub", 100.0, 3000.0, 0.0, Some(("turretstub_gun", "Cannon", 50.0, 1.0, 1.0)), 400.0);
+        let out = m.predict(&FightSnapshot { units: vec![puppy(), stub], flags: SimFlags::default() });
+        assert!(out.killed_b == 0.0, "one Puppy, one missile: {out:?}");
     }
 
     /// The hand-built snapshots against the Python model's numbers

@@ -47,6 +47,18 @@ use crate::util::distance;
 const FACE_COST: f32 = 0.125;
 /// Toward the enemy only on our side: spots at most this share of the way.
 const FACE_SHARE: f32 = 0.55;
+/// Commander energy jobs: cost per elmo farther from the enemy than the
+/// commander stands, past `BACK_FREE` (energy by the mexes it takes is its
+/// own; home energy is the energy worker's). A Solar 900 elmos behind costs
+/// it 700 more: a mex that far out costs about 125.
+const BACK_COST: f32 = 1.0;
+const BACK_FREE: f32 = 200.0;
+/// Home, once a constructor holds the energy role, is the constructors':
+/// the commander's mex and energy jobs this near home cost `HOME_COST` more
+/// wherever it stands (the smokes of 2026-11-03 had it on Solars and mexes
+/// by home for most of its first two minutes, before it moved out).
+const HOME_NEAR: f32 = 600.0;
+const HOME_COST: f32 = 600.0;
 /// A failed seizure (lost spots, no turret up in time) waits this long.
 const SEIZE_COOLDOWN: i32 = 30 * 120;
 /// The opening route: this many mexes, among the spots this near the start.
@@ -124,19 +136,48 @@ fn face(wpos: Vec3, p: Vec3, home: Vec3, enemy: Vec3) -> f32 {
     FACE_COST * (distance(wpos, enemy) - de).max(0.0)
 }
 
+/// An energy job at `p`'s extra cost for a commander at `wpos`: `BACK_COST`
+/// per elmo it lies farther from `enemy`, past `BACK_FREE`.
+fn back(wpos: Vec3, p: Vec3, enemy: Vec3) -> f32 {
+    BACK_COST * (distance(p, enemy) - distance(wpos, enemy) - BACK_FREE).max(0.0)
+}
+
 impl Ai {
     /// With `compush`, the commander's mex job at `p` costs this much less
-    /// for being nearer the enemy than it stands (see the module notes).
+    /// for being nearer the enemy than it stands (see the module notes), and
+    /// `HOME_COST` more at home once a constructor holds the energy role.
     pub(crate) fn compush_face_bonus(&self, worker: &Worker, wpos: Vec3, p: Vec3) -> f32 {
-        if !worker.is_com || self.dev_off("conquest") || self.dev_off("compush") {
+        if !worker.is_com || !self.conquest_push() {
             return 0.0;
         }
-        let Some(enemy) = self.graph.get_enemy_base() else { return 0.0 };
+        let at_home = self.compush_home_cost(worker, p);
+        let Some(enemy) = self.graph.get_enemy_base() else { return -at_home };
         let home = self.graph.get_ally_base();
         if home.is_zero() {
+            return -at_home;
+        }
+        face(wpos, p, home, enemy) - at_home
+    }
+
+    /// With `compush`, once a constructor holds the energy role (see
+    /// `conquest_energy`), the commander's jobs at home cost it
+    /// `HOME_COST` more (see `HOME_NEAR`).
+    fn compush_home_cost(&self, worker: &Worker, p: Vec3) -> f32 {
+        let on = worker.is_com && self.conquest_push() && self.eco.conquest.energy.is_some();
+        if on && distance(p, self.conquest_home()) <= HOME_NEAR { HOME_COST } else { 0.0 }
+    }
+
+    /// With `compush`, the commander's energy job at `p` costs this much
+    /// more for lying behind it, once a constructor holds the energy role
+    /// (see `conquest_energy`; before that, or with none left, the commander
+    /// builds it as usual).
+    pub(crate) fn compush_back_cost(&self, worker: &Worker, wpos: Vec3, p: Vec3) -> f32 {
+        if !worker.is_com || !self.conquest_push() || self.eco.conquest.energy.is_none() {
             return 0.0;
         }
-        face(wpos, p, home, enemy)
+        let home = self.compush_home_cost(worker, p);
+        let Some(enemy) = self.graph.get_enemy_base() else { return home };
+        back(wpos, p, enemy) + home
     }
 
     /// Objectives whose spots became ours are seized; the seized get their
@@ -557,6 +598,16 @@ mod tests {
         assert_eq!(face(at, v(6000.0), home, enemy), 0.0);
         // At the share's edge (55% of 8000 from home): still on.
         assert!(face(at, v(5300.0), home, enemy) > 0.0);
+    }
+
+    #[test]
+    fn the_commander_leaves_energy_behind_it_to_the_energy_worker() {
+        let v = |x: f32| Vec3::new(x, 0.0, 1000.0);
+        let (enemy, at) = (v(9000.0), v(2000.0));
+        // 900 elmos behind: 700 more; within 200 behind, or ahead: nothing.
+        assert!((back(at, v(1100.0), enemy) - 700.0).abs() < 1e-3);
+        assert_eq!(back(at, v(1850.0), enemy), 0.0);
+        assert_eq!(back(at, v(3000.0), enemy), 0.0);
     }
 
     #[test]

@@ -138,6 +138,18 @@ impl Ai {
             self.strikes_scenario_guard(Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 4.0 + 300.0));
             return;
         }
+        if test == "assassin-lance-runner" && frame > 60 && frame % 30 == 0 {
+            // `strikechain` fixture: the Lance stands until it is hurt, then
+            // drives off to the far edge, so a dive may end on a wounded,
+            // fleeing target.
+            let map = self.cb.map();
+            let far = Vec3::xz(map.width() as f32 * 4.0, map.height() as f32 * 8.0 - 80.0);
+            for u in self.cb.friendly_units() {
+                if self.defs.name_of(u) == "hoverarty" && u.health() > 0.0 && u.health() < 0.7 * u.max_health() {
+                    u.move_to(far, 0);
+                }
+            }
+        }
         if !test.starts_with("assassin-") || frame != 60 {
             return;
         }
@@ -251,6 +263,22 @@ impl Ai {
             self.log(&format!("assassin-test: 20 ordinary {scout} await a strike opportunity"));
             return;
         }
+        if matches!(test, "assassin-lances" | "assassin-lance-runner") {
+            // `strikechain` fixtures: three Lances side by side (a wave that
+            // kills one looks at the next), or one that runs once hurt.
+            let n = if test == "assassin-lances" { 3 } else { 1 };
+            let Some(def) = self.defs.get("hoverarty") else { return };
+            for i in 0..n {
+                let at = Vec3::xz(pos.x + (i as f32 - (n - 1) as f32 * 0.5) * 220.0, pos.z);
+                if let Some(u) = self.cb.cheat_new_unit(def, at) {
+                    springai::reserved::reserve(self.cb, u.id());
+                    u.set_move_state(0, 0);
+                    u.set_fire_state(2, 0);
+                    self.log(&format!("assassin-test: hoverarty {} at {:.0},{:.0}", u.id(), at.x, at.z));
+                }
+            }
+            return;
+        }
         if matches!(test, "assassin-target" | "assassin-target2" | "assassin-lance") {
             let name = if test == "assassin-lance" { "hoverarty" } else { "cloaksnipe" };
             if let Some(def) = self.defs.get(name)
@@ -293,17 +321,19 @@ impl Ai {
         let tactic = match test {
             "assassin-halberd" => Tactic::Halberd,
             "assassin-scythe" | "assassin-scythe-lance" => Tactic::Scythe,
-            "assassin-dirtbag" => Tactic::Dirtbag,
+            "assassin-dirtbag" | "assassin-dirtbag-lance" => Tactic::Dirtbag,
             "assassin-flea" => Tactic::Flea,
             "assassin-dart" => Tactic::Dart,
             _ => return,
         };
         let Some(def) = self.defs.get(tactic.name()) else { return };
-        // Start the Dart muster outside sniper reach; entering that range is
-        // the committed dive, not part of assembling the test force.
-        let back = if tactic == Tactic::Dart { 1500.0 } else { 700.0 };
+        let target_name =
+            if matches!(test, "assassin-scythe-lance" | "assassin-dirtbag-lance") { "hoverarty" } else { "cloaksnipe" };
+        // Start the Dart muster outside sniper reach, and a visible wave's
+        // outside a Lance's; entering that range is the committed dive, not
+        // part of assembling the test force.
+        let back = if tactic == Tactic::Dart || test == "assassin-dirtbag-lance" { 1500.0 } else { 700.0 };
         let home = Vec3::xz(center.x, center.z - back);
-        let target_name = if test == "assassin-scythe-lance" { "hoverarty" } else { "cloaksnipe" };
         let cost = self.defs.get(target_name).map_or(750.0, |d| d.cost(self.metal));
         let count = tactic.size(1, cost, def.cost(self.metal));
         self.strikes.wave = Some(Wave {
@@ -323,6 +353,7 @@ impl Ai {
             since: frame,
             home,
             query: None,
+            chain: Default::default(),
         });
         for i in 0..count {
             let at = Vec3::xz(home.x + (i % 5) as f32 * 80.0 - 160.0, home.z + (i / 5) as f32 * 80.0);
@@ -458,6 +489,7 @@ impl Ai {
                 since: frame,
                 home,
                 query: None,
+                chain: Default::default(),
             });
             for u in self
                 .cb

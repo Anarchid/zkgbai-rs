@@ -27,11 +27,25 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("logistics", "Economy", "the project tracker: construction valued by when it finishes, crews forecast"),
     ("clients", "Economy", "pylons, requisitioned factories and anti-nukes tracked as valued issues"),
     ("pause", "Economy", "an urgent issue holds back the metal of other construction"),
+    (
+        "walkin",
+        "Defense",
+        "a turret at whatever we value that a known enemy force worth 800+ metal gets to with nothing of ours to meet it there, on its way or in time (default on)",
+    ),
     ("currency", "Economy", "a job's raid danger priced in metal against its crew's bonus"),
     ("pairs", "Economy", "Constables pair up on builds"),
     ("earlycons", "Economy", "an early second Constable in the opening"),
     ("raidmem", "Economy", "workers avoid jobs near raiders seen lately, not only now"),
-    ("lightrepair", "Economy", "a combat unit's repair pulls workers by the metal its missing health is worth"),
+    (
+        "remexfirst",
+        "Economy",
+        "a worker builds a free mex within 1200 elmos before a new factory, strider hub or plate, so a raided base is remexed before the air factory, and a mex in reach before the missile silo; remexes at high build priority",
+    ),
+    (
+        "lightrepair",
+        "Economy",
+        "a combat unit's repair pulls workers by the metal its missing health is worth; one whose repair loses to a mex does not wait at home for it",
+    ),
     ("greedcap", "Economy", "greed held at x1 while energy stalls"),
     ("requisition", "Economy", "modules ask for the factories they need"),
     (
@@ -39,11 +53,16 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Economy",
         "the last factory's replacement goes where our build power gets soonest and we hold the ground now, away from frames killed lately",
     ),
+    (
+        "facpit",
+        "Economy",
+        "factories and plates are not sited where their units come out on ground cut off from most of the metal (a walled trench beside the start)",
+    ),
     ("colonize", "Economy", "colonists sent to far free metal"),
     (
         "conquest",
         "Economy",
-        "the commander walks to forward ground a few turrets can hold, takes its metal and fortifies it when the denial pays",
+        "the early trip (with compush off): the commander walks to forward ground a few turrets can hold, takes its metal and fortifies it when the denial pays",
     ),
     (
         "conquestsym",
@@ -58,7 +77,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "compush",
         "Economy",
-        "no conquest trip: the commander expands toward the enemy, and objectives whose spots become ours get their turrets",
+        "no conquest trip: the commander expands toward the enemy, a constructor builds the home energy, and objectives whose spots become ours get their turrets",
     ),
     (
         "conquestroute",
@@ -72,6 +91,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("grid", "Energy", "the overdrive grid planner: pylons link buildings that need power"),
     ("gridmex", "Energy", "late pylons link the mexes by overdrive gained per pylon (off: pylons near the plants)"),
     ("odreserve", "Energy", "energy kept above mex income for overdrive"),
+    (
+        "energyneed",
+        "Energy",
+        "energy jobs pull workers by how short energy income falls of construction (none at 1.2x metal income, full at 0.6x), not by the stall flag",
+    ),
     ("odphase", "Energy", "the overdrive phase by energy, free spots and fusions (off: two fusions)"),
     ("ecoladder", "Energy", "fusions and singularities opened by income or the map's density"),
     ("densgate", "Economy", "phase gates on the map's density clock, not time and income"),
@@ -125,6 +149,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Defense",
         "a 1v1 jump, tank or ship opening builds a 200-metal wave of scouts first, then one per 8 raiders",
     ),
+    (
+        "picketstrike",
+        "Defense",
+        "pickets near a contact fight it together when the fight predictor has them winning, instead of shadowing (default on)",
+    ),
     ("airstrikes", "Military", "mission-driven aircraft production, strikes and interception"),
     (
         "airspeculate",
@@ -158,6 +187,36 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "spare Magpies strafe anything that cannot shoot back, away from AA, while three stay home for raids (default on)",
     ),
     (
+        "raptorwear",
+        "Military",
+        "ready Raptors go at an unescorted aircraft without counted anti-air, such as a Revenant, without waiting for the full one-pass package, and stay on it up to 300 s (default on)",
+    ),
+    (
+        "likhorevenant",
+        "Military",
+        "Likhos strike Revenants like other heavy aircraft (Nimbus, Krow, Odin): the bomb leads a straight-flying gunship (default on)",
+    ),
+    (
+        "padlaunch",
+        "Military",
+        "a rearmed aircraft sitting on an airpad for repair may leave at 70% health for primary missions whose survival check passes (default on)",
+    ),
+    (
+        "padnano",
+        "Economy",
+        "a caretaker beside each airpad, repairing what lands there at three times the pad's rate, once the air fleet is worth 1000 metal (default on)",
+    ),
+    (
+        "airmenace",
+        "Military",
+        "gunships over our or allied ground units and buildings are intercepted wherever they are, not only in our territory or inbound (default on)",
+    ),
+    (
+        "airhome",
+        "Military",
+        "an aircraft back from a sortie is home once within 450 elmos of the ally center or over our territory, and stays ready there until its next sortie however its circling drifts, instead of flipping to returning each time it leaves the circle; idle ones are routed back toward the center, and a package takes the planes nearest its route whose starts differ by at most 900 elmos, so they arrive together (default on)",
+    ),
+    (
         "shieldworth",
         "Military",
         "a clump under bubbles is worth up to 3x its metal to bombers, for the shields our ground fire must chew through first (default on)",
@@ -176,7 +235,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     (
         "heavyflock",
         "Military",
-        "a Likho strike on a Nimbus/Krow/Odin counts the heavy aircraft flying with it as part of the target, not as AA (default on)",
+        "a Likho strike on a Nimbus/Krow/Odin/Revenant counts the heavy aircraft flying with it as part of the target, not as AA (default on)",
     ),
     (
         "odinfactories",
@@ -203,6 +262,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "raiding Venoms shoot from inside their range, not from on top of their target (their stun blast hits our own)",
     ),
+    ("venomphase", "Army", "spiders raid with Venoms until the enemy fields a line or the map fills up"),
     ("jumps", "Army", "jumpjets jump"),
     (
         "lobsters",
@@ -257,6 +317,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "strike non-riots worth at least 600 metal at half a healthy Lance HP/metal or less; default on",
     ),
+    (
+        "strikechain",
+        "Army",
+        "a strike whose dive ends looks round its wave first: another target near it, or its own hurt by a fifth of its health or more, put to the predictor with the wave as it stands (default on)",
+    ),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
     (
         "coalesce",
@@ -291,6 +356,21 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "sreload",
         "Army",
         "the fight predictor fires Picket, Ogre, Trident, Hacksaw and Angler missiles from tubes that each reload on their own clock (default on)",
+    ),
+    (
+        "coalsize",
+        "Army",
+        "a gang is sized to its fight: the raiders nearest its target until twice their armed metal (a raider squad whole); a clean gang whose target outruns it breaks off and leaves it be a while (default on)",
+    ),
+    (
+        "staygang",
+        "Army",
+        "a stayveto stand is a declared fight: the healthy units near the group join it, ordered at the same enemy, until the stand ends (default on)",
+    ),
+    (
+        "ordered",
+        "Army",
+        "coalesce gangs are judged with their units firing for certain, not with the logs' odds that a unit fires at all (default on)",
     ),
     (
         "ammo",

@@ -64,6 +64,9 @@ const VENOM_RAIDERS_FROM: i32 = 30 * 120;
 /// Glaive-sized raiders a Venom counts as in a factory's raider budget
 /// (about its cost over a Glaive's).
 const VENOM_RAIDER_SLOTS: f32 = 3.0;
+/// Enemy line metal (see `Intel::line_value`) at which the spider factory
+/// leaves the raider phase whatever the map's density: five Venoms' worth.
+const VENOM_PHASE_LINE: f32 = 1000.0;
 
 pub struct FactoryManager {
     cb: Callback,
@@ -889,6 +892,11 @@ impl Ai {
                 && eco.max_storage > 0.5
                 && worker_deficit > -1)
             || (self.fac_early_worker() && fm.num_workers < 2 * (1 + merged))
+            // With `compush` the first constructor builds the home energy
+            // while the commander expands (see `conquest_energy`): it comes
+            // first, as on big maps (Cloakbots and Hovercraft otherwise
+            // opened with ten raiders, the constructor at 1:50).
+            || (self.conquest_push() && fm.num_workers < 2 * (1 + merged))
         {
             return true;
         }
@@ -1536,6 +1544,19 @@ impl Ai {
             return "spidercrabe";
         }
 
+        // The raider phase (feature `venomphase`): past the opening the
+        // Venoms raid on, while the enemy fields only raiders and its
+        // commander and the map is open; its line and the map's density
+        // take orders over to our own line (see `fac_spider_line_share`).
+        if venom_raid
+            && !self.dev_off("venomphase")
+            && self.phase_frame() >= VENOM_RAIDERS_FROM
+            && kgb_rand() >= f64::from(self.fac_spider_line_share())
+        {
+            fac.add_scout_allowance(3);
+            return self.fac_spider_raider(fac);
+        }
+
         // Now and then a wave of raiders, as the cloak factory sends Glaives.
         if venom_raid && !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
             fac.raider_spam -= (((self.phase_income() / 5.0).floor() as i32).clamp(6, 12) - 1) as f32;
@@ -1565,6 +1586,16 @@ impl Ai {
         } else {
             "spiderassault"
         }
+    }
+
+    /// The share of the spider factory's orders past the opening that go
+    /// to its line rather than to raiding Venoms: the enemy's line seen
+    /// alive over [`VENOM_PHASE_LINE`], plus the map's density over its
+    /// reference (the `density_ref` dial), at most all of them.
+    pub(crate) fn fac_spider_line_share(&self) -> f32 {
+        let line = self.intel.line_value() / VENOM_PHASE_LINE;
+        let dense = self.posture.density / self.posture_levers().density_ref.max(1.0);
+        (line + dense).min(1.0)
     }
 
     /// A spider raider: a Flea in the opening, a Venom after it. The

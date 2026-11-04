@@ -311,7 +311,7 @@ impl Ai {
                             matches!(w.phase, Phase::Forming | Phase::Screening) && same_job(&w.job, &m.job)
                         }) {
                             let w = self.strikes.wave.take().unwrap();
-                            self.strikes_release(w);
+                            self.strikes_release(w, "a squad strike took the job");
                         }
                         for id in m.members.iter().chain(std::iter::once(&m.launcher)) {
                             if self.retreat_handler.is_coward(*id) {
@@ -415,7 +415,11 @@ impl Ai {
                 matches!(j.prey, Prey::GlassCannon | Prey::Fragile)
                     && !self.strike_cooling(j.pos)
                     && !self.squad_strike_job_taken(j)
-                    && !self.strikes.wave.as_ref().is_some_and(|w| w.phase == Phase::Diving && same_job(&w.job, j))
+                    && !self
+                        .strikes
+                        .wave
+                        .as_ref()
+                        .is_some_and(|w| matches!(w.phase, Phase::Diving | Phase::Chaining) && same_job(&w.job, j))
             })
             .collect();
         for job in jobs {
