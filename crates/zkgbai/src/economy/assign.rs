@@ -19,6 +19,10 @@ use zk_terrain::paths::SNAP;
 // another commander's factory plop; the Java's Float.MAX_VALUE with strict
 // comparisons is restored.
 const NEVER: f32 = f32::MAX;
+/// Finish the last few seconds of active construction before rebidding its
+/// builder elsewhere. Use actual spending, so a stalled repair cannot pin it.
+const FINISH_SECONDS: f32 = 10.0;
+const FINISH_PROGRESS: f32 = 0.80;
 
 /// Constables pair up on builds: a Constable within PAIR_RANGE already on a
 /// job makes it PAIR_BONUS cheaper to join (and is no crowd).
@@ -558,17 +562,52 @@ impl Ai {
             && !(w.is_com && self.comguard_avoids(w.id, t.get_pos()))
     }
 
+    fn eco_finishing_task(&self, w: &Worker) -> Option<TaskId> {
+        let t = self.eco.tasks.get(w.task?)?;
+        let c = t.as_construction()?;
+        let u = c.target?;
+        let built = u.build_progress();
+        let range = w.unit.def()?.build_distance();
+        if !u.is_being_built()
+            || u.health() <= 0.0
+            || (u.team() != self.team_id && !self.allies.contains(&u.team()))
+            || !(FINISH_PROGRESS..1.0).contains(&built)
+            || w.bp <= 0.0
+            || w.is_chicken
+            || self.eco.hard_estalled
+            || distance(w.get_pos(), u.pos()) > range
+            || !self.eco_worker_can_take(w, t)
+            || !self.logistics_allows(w.id, t.id)
+        {
+            return None;
+        }
+        let spending = w.unit.resource_use(self.metal);
+        if spending <= 0.0 {
+            return None;
+        }
+        let left = 1.0 - built;
+        let seconds = (c.build_type.build_time() * left / w.bp).max(c.build_type.cost(self.metal) * left / spending);
+        let view = self.war.view(w.unit.def());
+        let p = u.pos();
+        let safe = view.get_effective_threat(p) <= view.get_total_friendly_threat(p)
+            && (self.eco_raiders_near(p) <= RAID_HOLD * self.war.get_total_friendly_power(p)
+                || self.conquest_ground_safe(p));
+        (seconds <= FINISH_SECONDS && safe).then_some(t.id)
+    }
+
     /// A project may lease only a usable, safe worker, never a commander
     /// already carrying an explicit mission or a worker held by another controller.
     pub(crate) fn eco_project_hand(&self, wid: i32, task: TaskId) -> bool {
         let Some(w) = self.eco.workers.get(&wid) else { return false };
         let Some(t) = self.eco.tasks.get(task) else { return false };
-        let dedicated = w.task.is_some_and(|id| {
-            id != task
-                && (self.op_priority(id)
-                    || self.conquest_bonus(wid, id).is_some()
-                    || self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.fac_plop))
-        });
+        let finishing = !self.op_priority(task) && self.eco_finishing_task(w).is_some_and(|id| id != task);
+        let dedicated = finishing
+            || w.task.is_some_and(|id| {
+                id != task
+                    && (self.op_priority(id)
+                        || self.conquest_bonus(wid, id).is_some()
+                        || self.eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.fac_plop))
+            });
         let pos = t.get_pos();
         let raiders = self.eco_raiders_near(pos);
         let recent_danger = raiders > 0.0
@@ -680,6 +719,18 @@ impl Ai {
         let own = |t: &WorkerTask| matches!(&t.kind, TaskKind::Repair(r) if r.target.id() == wid);
         consider(&eco.repair_tasks, true, &own);
 
+        // A new project must not leave an ordinary turret at 99% while a
+        // replacement builder walks across the map. Explicit missions still
+        // win; actual spending and remaining work bound this commitment.
+        let preempt = task.is_some_and(|id| {
+            self.op_priority(id)
+                || self.conquest_bonus(wid, id).is_some()
+                || eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.fac_plop)
+        });
+        if !preempt && let Some(finishing) = self.eco_finishing_task(worker) {
+            return Some(finishing);
+        }
+
         // A free mex near the worker before a new factory, or one it stands
         // at before the missile silo (`remexfirst`).
         if let Some((fac, radius)) =
@@ -712,11 +763,6 @@ impl Ai {
         // Explicit missions and the energy emergency still preempt a lease.
         // Otherwise execute the project crew we actually forecast, including
         // its travel, instead of silently bidding the same worker elsewhere.
-        let preempt = task.is_some_and(|id| {
-            self.op_priority(id)
-                || self.conquest_bonus(wid, id).is_some()
-                || eco.tasks.get(id).and_then(|t| t.as_construction()).is_some_and(|c| c.fac_plop)
-        });
         if !preempt
             && let Some(project) = self.logistics_assignment(wid)
             && self.eco_project_hand(wid, project)
@@ -1404,10 +1450,7 @@ impl Ai {
 mod tests {
     use super::*;
 
-    #[test]
-    fn project_crews_reach_the_scheduler_and_yield_to_new_safety_evidence() {
-        use crate::logistics::{Kind, Worth};
-        use springai::{Unit, UnitDef};
+    fn assignment_ai(customize: impl FnOnce(&mut springai::ffi::SSkirmishAICallback)) -> Ai {
         use std::ffi::{c_char, c_void};
         unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
             100.0
@@ -1433,7 +1476,7 @@ mod tests {
         unsafe extern "C" fn command(_: i32, _: i32, _: i32, _: i32, _: *mut c_void) -> i32 {
             0
         }
-        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+        super::super::commander::tests::test_ai_with(|t| {
             t.Unit_getTeam = Some(team);
             t.Unit_getHealth = Some(scalar);
             t.Unit_getWeapons = Some(zero);
@@ -1450,7 +1493,15 @@ mod tests {
             t.UnitDef_isAbleToFly = Some(no);
             t.UnitDef_getMaxWaterDepth = Some(scalar);
             t.Engine_handleCommand = Some(command);
-        });
+            customize(t);
+        })
+    }
+
+    #[test]
+    fn project_crews_reach_the_scheduler_and_yield_to_new_safety_evidence() {
+        use crate::logistics::{Kind, Worth};
+        use springai::{Unit, UnitDef};
+        let mut ai = assignment_ai(|_| {});
         ai.frame = 17;
         ai.offset = 0;
         ai.eco.metal = 1000.0;
@@ -1489,6 +1540,75 @@ mod tests {
         ai.logistics_update(47);
         assert!(!ai.logistics.issues.contains_key(&jobs[1]));
         assert!(ai.eco.tasks.get(jobs[1]).is_some(), "return the task for fresh valuation, do not strand it");
+    }
+
+    #[test]
+    fn active_last_seconds_keep_the_builder_from_routine_jobs_and_new_project_crews() {
+        use crate::logistics::{Kind, Worth};
+        use springai::Unit;
+        use std::cell::Cell;
+        thread_local! {
+            static BUILT: Cell<f32> = const { Cell::new(0.99) };
+            static SPENDING: Cell<f32> = const { Cell::new(1.0) };
+        }
+        unsafe extern "C" fn progress(_: i32, _: i32) -> f32 {
+            BUILT.get()
+        }
+        unsafe extern "C" fn spending(_: i32, _: i32, _: i32) -> f32 {
+            SPENDING.get()
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            id == 12 && BUILT.get() < 1.0
+        }
+        let mut ai = assignment_ai(|t| {
+            t.Unit_getBuildProgress = Some(progress);
+            t.Unit_getResourceUse = Some(spending);
+            t.Unit_isBeingBuilt = Some(building);
+        });
+        let worker = Unit::from_id(ai.cb, 10).unwrap();
+        let target = Unit::from_id(ai.cb, 12).unwrap();
+        let def = UnitDef::from_id(ai.cb, 1).unwrap();
+        let mut t = WorkerTask::construction(def, target.pos(), 0);
+        t.as_construction_mut().unwrap().target = Some(target);
+        let finish = ai.eco.tasks.insert(t);
+        let next = ai.eco.tasks.insert(WorkerTask::construction(def, worker.pos(), 0));
+        ai.eco.construction_tasks.extend([finish, next]);
+        let mut w = Worker::new(worker, ai.team_id);
+        w.set_task(&mut ai.eco.tasks, finish, 0);
+        ai.eco.workers.insert(w.id, w);
+        ai.logistics_open(next, Kind::Energy, Worth::Flat(5000.0), "new project", 0.0);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), Some(finish));
+        assert!(!ai.eco_project_hand(10, next), "do not forecast the finishing builder on another crew");
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(finish));
+        ai.op.over.priority_tasks.insert(next);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "an explicit priority can preempt");
+        assert!(ai.eco_project_hand(10, next));
+        ai.op.over.priority_tasks.clear();
+        SPENDING.set(0.0);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None, "a stalled build does not pin a worker");
+        SPENDING.set(0.01);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None, "resource-limited work must fit the time budget");
+        SPENDING.set(5.0);
+        BUILT.set(0.80);
+        assert_eq!(
+            ai.eco_finishing_task(&ai.eco.workers[&10]),
+            Some(finish),
+            "80% paid work can be cheap to finish too"
+        );
+        BUILT.set(0.79);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None);
+        BUILT.set(1.0);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None);
+        BUILT.set(0.99);
+        ai.eco.hard_estalled = true;
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None);
+        ai.eco.hard_estalled = false;
+        ai.eco.workers.get_mut(&10).unwrap().shunned.push((target.pos(), 1000));
+        assert_eq!(
+            ai.eco_finishing_task(&ai.eco.workers[&10]),
+            None,
+            "unsafe or unreachable sites still lose their crew"
+        );
     }
 
     #[test]
