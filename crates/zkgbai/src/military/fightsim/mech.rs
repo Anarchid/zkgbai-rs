@@ -554,6 +554,26 @@ pub struct Defense {
     pub raid_aim: RaidAim,
 }
 
+/// A vulnerable nanoframe and the builders actually working on it. Rates
+/// are observed progress per second, already limited by resource spending.
+#[derive(Clone, Debug)]
+pub struct Construction {
+    pub target: usize,
+    pub progress: f32,
+    pub builders: Vec<BuildHand>,
+    /// In the alternative branch, this builder withdraws instead of working.
+    pub retreat: Option<usize>,
+    /// This builder withdraws once the job finishes or the frame is lost.
+    pub release: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BuildHand {
+    pub index: usize,
+    pub rate: f32,
+    pub range: f32,
+}
+
 /// Whom the raiders of a raid-defense rollout shoot and walk to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RaidAim {
@@ -572,6 +592,8 @@ pub enum RaidAim {
 }
 
 struct Run<'a> {
+    construction: Option<&'a Construction>,
+    progress: f32,
     defense: Option<&'a Defense>,
     defense_engagement: Option<(&'a FightSnapshot, &'a [f64; 13])>,
     hazard: Option<&'a Hazard>,
@@ -732,7 +754,34 @@ impl Model {
         defense: Option<&Defense>,
         kiting: bool,
     ) -> Vec<UnitFate> {
-        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false).0
+        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false, None).0
+    }
+
+    /// Hold the working builders at their posts, add construction HP while
+    /// they live and can work, and enable the turret only once it finishes.
+    /// The retreat branch keeps the unfinished frame exposed and lets the
+    /// other builders continue. Returns fates and achieved build progress.
+    pub fn construction_fates(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        construction: &Construction,
+        paralysis: &[(usize, f32)],
+    ) -> (Vec<UnitFate>, f32) {
+        let (fates, _, progress) = self.fates_run(
+            snap,
+            horizon,
+            FateMode::AMove,
+            paralysis,
+            None,
+            None,
+            true,
+            &[],
+            None,
+            false,
+            Some(construction),
+        );
+        (fates, progress)
     }
 
     /// An a-move's fates for [`Model::bomb_charge`]: each unit's weapons
@@ -747,7 +796,9 @@ impl Model {
         bomb: Option<BombRun>,
         ordered: bool,
     ) -> (Vec<UnitFate>, f64) {
-        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered)
+        let (fates, survive, _) =
+            self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered, None);
+        (fates, survive)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -763,7 +814,8 @@ impl Model {
         phase: &[f64],
         bomb: Option<BombRun>,
         ordered: bool,
-    ) -> (Vec<UnitFate>, f64) {
+        construction: Option<&Construction>,
+    ) -> (Vec<UnitFate>, f64, f32) {
         let mut units = self.mech_units(snap);
         if ordered {
             for m in units.iter_mut().filter(|m| m.u.side == 0) {
@@ -827,6 +879,8 @@ impl Model {
         let flags =
             if pass { SimFlags { twod: false, focus: snap.flags.least_health(), ..snap.flags } } else { snap.flags };
         let mut run = Run {
+            construction,
+            progress: construction.map_or(1.0, |c| c.progress.clamp(0.0, 1.0)),
             defense,
             defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
             hazard: None,
@@ -844,7 +898,7 @@ impl Model {
         };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let ln_survive = run.bomb_ln_survive;
-        let Some(tr) = run.track else { return (Vec::new(), ln_survive) };
+        let Some(tr) = run.track else { return (Vec::new(), ln_survive, run.progress) };
         let cal = self.mech.calibration(flags);
         let c = &cal.fate;
         let ln_h = (horizon.max(1) as f64 / 150.0).ln();
@@ -868,7 +922,7 @@ impl Model {
                 }
             })
             .collect();
-        (fates, ln_survive)
+        (fates, ln_survive, run.progress)
     }
 
     /// The tactical AI of the snapshot's units, `units` being its
@@ -1168,6 +1222,8 @@ pub(super) fn simulate_mech_kiting(
     kiting: Option<&Kiting>,
 ) -> (f64, f64) {
     let mut run = Run {
+        construction: None,
+        progress: 1.0,
         defense: None,
         defense_engagement: None,
         hazard,
@@ -1271,6 +1327,13 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut engagement_members = Vec::new();
     // A unit has changed sides (capture): look for capturers that died.
     let mut captures = false;
+    if let Some(c) = run.construction
+        && let Some(target) = us.get_mut(c.target)
+        && run.progress < 1.0
+    {
+        // Nanoframes do not explode with the finished unit's weapon blast.
+        target.death = None;
+    }
     if let Some(b) = run.bomb
         && b.mode == BombMode::Down
         && us.get(b.index).is_some_and(|u| u.u.alive)
@@ -1338,7 +1401,16 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         } else {
             armed(0) && armed(1)
         };
-        if !goes_on {
+        let building = run.construction.is_some_and(|c| {
+            run.progress < 1.0
+                && us.get(c.target).is_some_and(|t| t.u.alive && t.u.side == t.orig_side)
+                && c.builders.iter().any(|h| {
+                    Some(h.index) != c.retreat
+                        && h.rate > 0.0
+                        && us.get(h.index).is_some_and(|b| b.u.alive && b.u.side == b.orig_side)
+                })
+        });
+        if !goes_on && !building {
             if run.defense.is_some_and(|d| {
                 d.arrivals
                     .iter()
@@ -1400,6 +1472,31 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
         }
         alive.retain(|&i| us[i].u.alive);
+        if let Some(c) = run.construction
+            && run.progress < 1.0
+            && us.get(c.target).is_some_and(|t| t.u.alive && t.u.side == t.orig_side)
+        {
+            let rate: f32 = c
+                .builders
+                .iter()
+                .filter_map(|h| {
+                    let b = us.get(h.index)?;
+                    (Some(h.index) != c.retreat
+                        && b.u.alive
+                        && b.u.side == b.orig_side
+                        && !b.stunned()
+                        && apart(b, &us[c.target]) <= h.range as f64)
+                        .then_some(h.rate.max(0.0))
+                })
+                .sum();
+            let step = (rate * DT as f32 / 30.0).min(1.0 - run.progress);
+            run.progress = (run.progress + step).min(1.0);
+            let target = &mut us[c.target];
+            target.u.hp = (target.u.hp + target.maxhp * step as f64).min(target.maxhp);
+            if run.progress >= 1.0 {
+                target.death = template[c.target].death;
+            }
+        }
         // Movement towards the nearest enemy alive at the top of the step
         // (mech.py reads the step's opening sides here).
         let mut moved = false;
@@ -1415,6 +1512,15 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 }
             }
             if !us[i].u.mobile || us[i].u.speed <= 0.0 || us[i].stunned() {
+                continue;
+            }
+            let builder_leaves = run.construction.is_some_and(|c| {
+                c.retreat == Some(i)
+                    || c.release == Some(i)
+                        && (run.progress >= 1.0
+                            || us.get(c.target).is_none_or(|t| !t.u.alive || t.u.side != t.orig_side))
+            });
+            if !builder_leaves && run.construction.is_some_and(|c| c.builders.iter().any(|h| h.index == i)) {
                 continue;
             }
             let side = us[i].u.side as usize;
@@ -1442,7 +1548,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 moved = true;
                 continue;
             }
-            if withdraw && side == 0 {
+            if withdraw && side == 0 || builder_leaves {
                 step_to(&mut us[i], nx, nz, speed * dt, -1.0, run.twod);
                 us[i].u.moving = true;
                 moved = true;
@@ -1515,6 +1621,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 || !us[i].u.alive
                 || us[i].stunned()
                 || run.insertion.is_some_and(|p| i < p.count && f < p.end)
+                || run.construction.is_some_and(|c| c.target == i && run.progress < 1.0)
             {
                 continue;
             }
@@ -1803,6 +1910,72 @@ mod tests {
                 (f[0].to_owned(), snapshot(f[1], &specs), want)
             })
             .collect()
+    }
+
+    fn construction_case() -> (FightSnapshot, Construction) {
+        let defs = specs();
+        let snap = snapshot("0:cloakcon:600:-100:0;0:turretlaser:628:0:0;1:cloakcon:600:250:0", &defs);
+        let plan = Construction {
+            target: 1,
+            progress: 0.8,
+            builders: vec![BuildHand { index: 0, rate: 0.02, range: 150.0 }],
+            retreat: None,
+            release: Some(0),
+        };
+        (snap, plan)
+    }
+
+    #[test]
+    fn construction_has_no_weapon_until_finished_and_retreat_stops_work() {
+        let model = Model::load().unwrap();
+        let (snap, plan) = construction_case();
+        let (early, progress) = model.construction_fates(&snap, 90, &plan, &[]);
+        assert!(progress > 0.8 && progress < 1.0);
+        assert!(early[1].hp_left > 628.0);
+        assert_eq!(early[2].hp_left, 600.0, "unfinished turret cannot fire");
+        let (done, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert_eq!(progress, 1.0);
+        assert!(done[2].hp_left < 600.0, "finished turret contributes to the fight");
+        let (left, progress) = model.construction_fates(&snap, 450, &Construction { retreat: Some(0), ..plan }, &[]);
+        assert_eq!(progress, 0.8);
+        assert_eq!(left[2].hp_left, 600.0);
+    }
+
+    #[test]
+    fn construction_counts_other_builders_when_one_withdraws_and_emp_stops_work() {
+        let model = Model::load().unwrap();
+        let (mut snap, mut plan) = construction_case();
+        let (stunned, progress) = model.construction_fates(&snap, 450, &plan, &[(0, 2.0)]);
+        assert_eq!(progress, 0.8);
+        assert_eq!(stunned[2].hp_left, 600.0);
+        let mut helper = snap.units[0].clone();
+        helper.z = 50.0;
+        snap.units.push(helper);
+        plan.builders.push(BuildHand { index: 3, rate: 0.02, range: 150.0 });
+        plan.retreat = Some(0);
+        let (done, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert_eq!(progress, 1.0, "another builder can complete after our retreat");
+        assert!(done[2].hp_left < 600.0);
+    }
+
+    #[test]
+    fn construction_does_not_resurrect_a_destroyed_frame_or_finish_without_its_builder() {
+        let model = Model::load().unwrap();
+        let (mut snap, plan) = construction_case();
+        let defs = specs();
+        snap.units[2].spec = defs["turretlaser"].clone();
+        Arc::make_mut(&mut snap.units[2].spec).weapons[0].damage = 100_000.0;
+        // The nanoframe is nearest, and gets destroyed before completion.
+        let (dead, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert!(dead[1].dead);
+        assert!(progress < 1.0);
+        snap.units[0].x = 50.0;
+        snap.units[0].hp = 1.0;
+        snap.units[1].hp = 1_000_000.0;
+        Arc::make_mut(&mut snap.units[1].spec).health = 1_000_000.0;
+        let (dead, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert!(dead[0].dead);
+        assert!(progress < 1.0, "a dead constructor contributes no later build power");
     }
 
     #[test]
@@ -2546,6 +2719,8 @@ mod tests {
         us[1].cap_hit = 0;
         us[0].u.weapons[0].next = 10_000;
         let mut run = Run {
+            construction: None,
+            progress: 1.0,
             defense: None,
             defense_engagement: None,
             hazard: None,

@@ -207,8 +207,8 @@ impl Ai {
         let greed = self.op_greed();
         // The predictor speaks for a commander in a fight it judged (see
         // `comguard`): no flinch from the threat paint.
-        let answered = w.is_com && self.comguard_answers(wid);
-        if !w.is_chicken
+        let answered = w.is_com && self.comguard_answers(wid) || self.eco_build_guard_task(wid).is_some();
+        let should_flee = !w.is_chicken
             && !answered
             && !self.logistics_holds(wid)
             && (view.get_effective_threat(pos) / greed > view.get_total_friendly_threat(pos)
@@ -216,8 +216,8 @@ impl Ai {
                     && view.get_threat(pos) / greed > 0.0
                     && !w.is_working_on_porc(&self.eco.tasks)
                     && !self.crab_escort(wid)
-                    && !self.rush_push_escort(wid)))
-        {
+                    && !self.rush_push_escort(wid)));
+        if should_flee && !self.eco_refresh_build_guard(wid) {
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.is_chicken = true;
                 w.chicken_frame = frame;
@@ -543,7 +543,7 @@ impl Ai {
     }
 
     /// Shared admission rule for the project planner and the executor.
-    fn eco_worker_can_take(&self, w: &Worker, t: &WorkerTask) -> bool {
+    pub(super) fn eco_worker_can_take(&self, w: &Worker, t: &WorkerTask) -> bool {
         let def = w.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let jumps_cliffs = w.is_com
@@ -563,6 +563,9 @@ impl Ai {
     }
 
     fn eco_finishing_task(&self, w: &Worker) -> Option<TaskId> {
+        if let Some(task) = self.eco_build_guard_task(w.id) {
+            return Some(task);
+        }
         let t = self.eco.tasks.get(w.task?)?;
         let c = t.as_construction()?;
         let u = c.target?;
@@ -617,6 +620,12 @@ impl Ai {
             && raiders > RAID_HOLD * self.war.get_total_friendly_power(pos)
             && !self.conquest_ground_safe(pos);
         let view = self.war.view(w.unit.def());
+        let predicted = self.eco_build_guard_task(wid) == Some(task);
+        // Planning must not commit a worker to a site the executor flees.
+        // A construction rollout can answer the same question more precisely.
+        let safe = predicted
+            || !recent_danger
+                && view.get_effective_threat(pos) / self.op_greed() <= view.get_total_friendly_threat(pos);
         !dedicated
             && !w.is_chicken
             && w.raid_defense.is_none()
@@ -627,10 +636,7 @@ impl Ai {
             && !self.jump_in_progress(w.unit)
             && !super::terraform::is_terraforming(w.unit)
             && self.eco_worker_can_take(w, t)
-            && !recent_danger
-            // Match the worker's arrival retreat threshold: planning must
-            // not commit it to a site the executor immediately flees.
-            && view.get_effective_threat(pos) / self.op_greed() <= view.get_total_friendly_threat(pos)
+            && safe
     }
 
     fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
@@ -1450,10 +1456,10 @@ impl Ai {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn assignment_ai(customize: impl FnOnce(&mut springai::ffi::SSkirmishAICallback)) -> Ai {
+    pub(in crate::economy) fn assignment_ai(customize: impl FnOnce(&mut springai::ffi::SSkirmishAICallback)) -> Ai {
         use std::ffi::{c_char, c_void};
         unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
             100.0

@@ -191,6 +191,16 @@ An on-site builder actively spending on construction at least 80% complete keeps
 at most ten seconds remain at its current spending/build rate. Ordinary job bidding and new
 project crews both respect this final work; explicit priorities, danger, and energy emergencies
 can still preempt it. A stalled build receives no indefinite hold.
+For a threatened turret that can finish within 15 seconds at observed spending, `buildguard`
+compares staying to build with that constructor withdrawing. Both fights include nearby allies
+and the exposed nanoframe; surviving builders add health and progress, and the turret fires
+only after completion. The builder withdraws once the frame finishes or is destroyed.
+The decision prices combat losses, remaining construction spending, and the value of a completed
+surviving turret. Other builders can finish in the retreat branch.
+A favorable fresh prediction overrides threat-map retreat and routine reassignment, but retains
+the commander's existing survival limits. Unknown fire, changed tasks, stalls, and new damage
+invalidate the answer. `disable=buildguard` turns this comparison off; `buildguard` journal
+events record the two alternatives.
 Resource forecasts cover tracked projects; factories and untracked jobs can still compete for
 the actual economy, so these remain forecasts rather than guaranteed completion times.
 
