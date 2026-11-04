@@ -5,8 +5,15 @@
 //! an anti-nuke we struck that may be gone (see `missiles`), and cloaked
 //! snipers shooting at us unseen (they are where the shots come from; the
 //! army is called there to kill what the sweep shows).
+//! Strategic dives (`recon`) refresh stale deep economy and anti-nuke fixes,
+//! and check an uncovered nuclear aim before launch. Swifts take over when
+//! the contested ingress is deeper than a Sparrow can fly before detonating.
 
 pub(crate) mod counterbattery;
+mod recon;
+pub(crate) use recon::{dive_budget, recon_ready};
+
+use std::collections::BTreeSet;
 
 use springai::{NO_TIMEOUT, Unit, Vec3, WeaponDef};
 
@@ -37,8 +44,19 @@ pub struct Sweeps {
     /// Where unseen snipers shot from lately, when last, and how often.
     snipers: Vec<Snipers>,
     counterbattery: counterbattery::Counterbattery,
-    /// The Sparrow sprinting to its sweep.
-    pub detonating: Option<i32>,
+    /// Sparrows sprinting to their sweeps, protected from ordinary orders.
+    pub detonating: BTreeSet<i32>,
+    recon: recon::Recon,
+}
+
+fn burst_order(unit: Unit, target: Vec3, frame: i32) -> bool {
+    // The unshifted ability replaces the old route; the following move must
+    // be queued so it does not cancel the ability before its fallback.
+    if !unit.execute_custom_command(CMD_ONECLICK_WEAPON, &[1.0], 0, NO_TIMEOUT) {
+        return false;
+    }
+    kgb_move_to(unit, target, OPTION_SHIFT_KEY, frame);
+    true
 }
 
 impl Ai {
@@ -130,15 +148,22 @@ impl Ai {
     /// Sprint Sparrow `sparrow` at `target` and sweep there; with `fight`,
     /// call the army to kill what it shows.
     pub fn sweeps_detonate(&mut self, sparrow: Unit, target: Vec3, fight: bool) {
-        sparrow.execute_custom_command(CMD_ONECLICK_WEAPON, &[1.0], 0, NO_TIMEOUT);
-        kgb_move_to(sparrow, target, OPTION_SHIFT_KEY, self.frame);
-        self.sweeps.detonating = Some(sparrow.id());
+        self.sweeps_start_burst(sparrow, target);
         if fight {
             // A scan is not evidence that the snipers died; retain their cadence.
             self.war.add_defense_target(DefenseTarget::new(target, 3000.0, self.frame));
         }
         let why = if fight { "unseen snipers" } else { "a struck anti-nuke" };
         self.log(&format!("sweeps: Sparrow sweeps ({:.0}, {:.0}) for {why}", target.x, target.z));
+    }
+
+    fn sweeps_start_burst(&mut self, sparrow: Unit, target: Vec3) -> bool {
+        self.retreat_remove_unit(sparrow);
+        if !burst_order(sparrow, target, self.frame) {
+            return false;
+        }
+        self.sweeps.detonating.insert(sparrow.id());
+        true
     }
 }
 
@@ -184,6 +209,47 @@ fn impact_count(shots: &[i32], reload: i32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn burst_replaces_old_orders_then_queues_its_destination() {
+        use springai::{Callback, ffi};
+        thread_local! {
+            static ORDERS: std::cell::RefCell<Vec<(i32, i16, Vec<f32>)>> = const { std::cell::RefCell::new(Vec::new()) };
+            static FAIL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, data: *mut std::ffi::c_void) -> i32 {
+            assert_eq!(topic as u32, ffi::CommandTopic::COMMAND_UNIT_CUSTOM);
+            let c = unsafe { &*(data as *const ffi::SCustomUnitCommand) };
+            let params = unsafe { std::slice::from_raw_parts(c.params, c.params_size as usize) }.to_vec();
+            ORDERS.with(|o| o.borrow_mut().push((c.cmdId, c.options, params)));
+            if FAIL.get() { -1 } else { 0 }
+        }
+        let cb = unsafe {
+            Callback::from_raw(
+                0,
+                Box::leak(Box::new(ffi::SSkirmishAICallback {
+                    Engine_handleCommand: Some(command),
+                    ..Default::default()
+                })),
+            )
+        };
+        let unit = Unit::from_id(cb, 42).unwrap();
+        let target = Vec3::xz(3000.0, 4000.0);
+        assert!(burst_order(unit, target, 100));
+        ORDERS.with(|o| {
+            let o = o.borrow();
+            assert_eq!(o.len(), 2);
+            assert_eq!(o[0], (CMD_ONECLICK_WEAPON, 0, vec![1.0]));
+            assert_eq!(o[1].0, crate::defs::cmd::RAW_MOVE);
+            assert_ne!(o[1].1 & OPTION_SHIFT_KEY, 0);
+            assert_eq!(o[1].2, vec![3000.0, 0.0, 4000.0]);
+        });
+        ORDERS.with(|o| o.borrow_mut().clear());
+        FAIL.set(true);
+        assert!(!burst_order(unit, target, 101));
+        ORDERS.with(|o| assert_eq!(o.borrow().len(), 1));
+    }
+
     #[test]
     fn confirmed_kills_exhaust_estimate_until_another_shot() {
         let mut fix = Snipers { pos: Vec3::xz(0.0, 0.0), last: 10, shots: vec![0, 10], reload: 510, residual: 1 };
