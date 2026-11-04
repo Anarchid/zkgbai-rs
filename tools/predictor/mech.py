@@ -338,7 +338,7 @@ def goes_off(x, xn, dist):
 
 class X:
     """Per-unit mechanics state riding on a SimUnit."""
-    __slots__ = ("maxhp", "air", "kamikaze", "kreach", "kcontact", "death", "engage", "blockers", "para", "slowdmg", "slow_last", "ovs",
+    __slots__ = ("maxhp", "air", "kamikaze", "kreach", "kcontact", "death", "limpet", "engage", "blockers", "para", "slowdmg", "slow_last", "ovs",
                  "burns", "range_", "speed_", "sh", "shmax", "shregen", "shr", "drain", "lat", "rad")
 
 
@@ -356,6 +356,7 @@ def _setup(fight, opts):
         x.kreach = KAMIKAZE_DIST.get(r["def"], KAMIKAZE_REACH) if opts.get("bombs") else KAMIKAZE_REACH
         x.kcontact = bool(opts.get("bombs"))
         x.death = M.get("death", {}).get(r["def"]) if opts.get("death") else None
+        x.limpet = r["def"] == "amphbomb"
         x.engage = 1.0
         x.lat = 0.0  # lateral coordinate (fates' pass mode; 2-D: offset across the fight axis)
         x.rad = d.radius if d is not None else 12.0
@@ -554,6 +555,8 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 for w in u.weapons:
                     w.next = int(round(S * k / (len(side) - 1)))
     death_on = bool(opts.get("death"))
+    # Limpet slow is part of its death blast, even in a death-only ablation.
+    limpet_death = death_on and any(x.limpet for x in xs)
     cost0 = [sum(u.cost for u in us if u.side == s and u.armed) for s in (0, 1)]
     killed = [0.0, 0.0]
     quiet = 0
@@ -573,7 +576,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
         if x.death is not None:
             dmg, aoe, edge, para = x.death
             for o in us:
-                if o.alive:
+                if o.alive and not (x.limpet and o.side == t.side):
                     dd = apart(o, t)
                     if dd < aoe:
                         v = dmg * (1.0 - edge * dd / aoe)
@@ -581,7 +584,16 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                             if opts.get("emp"):
                                 xof[id(o)].para += v
                         else:
+                            ox = xof[id(o)]
+                            if x.limpet and opts.get("limpet_slow", 10.0) > 0:
+                                # limpet_slow=0 is an offline ablation retaining nofriendlyfire.
+                                # amphbomb.lua: 10x slow, 60 overslow frames, nofriendlyfire.
+                                ox.slowdmg += opts.get("limpet_slow", 10.0) * v
+                                ox.slow_last = f
+                                ox.ovs = max(ox.ovs, 0.08)
                             hurt(o, v)
+                            if x.limpet:
+                                ox.slowdmg = min(ox.slowdmg, (SLOW_MAX + ox.ovs) * max(o.hp, 1.0))
 
     def hurt(t, dmg):
         if not t.alive:
@@ -626,7 +638,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
         moved = False
         approached = False
         # status: burn ticks, EMP decay, slow decay
-        if opts.get("burn") or opts.get("emp") or opts.get("slow"):  # (shield regen below)
+        if opts.get("burn") or opts.get("emp") or opts.get("slow") or limpet_death:  # (shield regen below)
             for u in alive:
                 x = xof[id(u)]
                 if x.burns:
@@ -638,7 +650,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                     x.para = max(0.0, x.para - x.maxhp / STUN_DECAY_S * DT / 30.0)
                 if x.slowdmg > 0 and f - x.slow_last > SLOW_GRACE:
                     x.slowdmg = max(0.0, x.slowdmg - SLOW_DECAY * max(u.hp, 1.0) * DT / 30.0)
-                if slow2 is not None:
+                if slow2 is not None or limpet_death:
                     # ZK: overslow allowance decays at the slow rate; slow damage capped at (0.5 + it) x health
                     if x.ovs > 0:
                         x.ovs = max(0.0, x.ovs - SLOW_DECAY * DT / 30.0)
@@ -664,7 +676,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
                 continue
             nearest = min(foes, key=lambda e: apart(e, u))
             dist = apart(nearest, u)
-            speed = u.speed * (1.0 - slowf(u)) if opts.get("slow") else u.speed
+            speed = u.speed * (1.0 - slowf(u)) if opts.get("slow") or limpet_death else u.speed
             x = xof[id(u)]
             if passing is not None and u.side == 0:
                 if death_on and x.kamikaze and goes_off(x, xof[id(nearest)], dist):
@@ -797,7 +809,7 @@ def simulate_mech(fight, opts, hazard=None, trace=None, withdraw=False, posture=
             if not foes:
                 continue
             ux = xof[id(u)]
-            sf = slowf(u) if opts.get("slow") else 0.0
+            sf = slowf(u) if opts.get("slow") or limpet_death else 0.0
             for w in u.weapons:
                 if f < w.next:
                     continue
