@@ -61,8 +61,10 @@ fn replace_route(age: i32, reached: bool, old_score: f32, fresh_score: f32, unsa
     reached || unsafe_old || (age >= COMMIT_FOR && fresh_score > old_score + old_score.abs().max(400.0) * 0.25)
 }
 
+// Equal forecasts do not justify continuing a lethal advance: the pass
+// predictor can include the same nearby guns on both routes. Prefer repairs.
 fn repair_needed(health: f32, danger: f32, home_danger: f32, worth: f32, cost: f32) -> bool {
-    health < 0.3 || ((danger > 0.45 || (health < 0.8 && worth < -0.15 * cost)) && home_danger + 0.05 < danger)
+    health < 0.3 || ((danger > 0.45 || (health < 0.8 && worth < -0.15 * cost)) && home_danger <= danger + 0.05)
 }
 
 fn repaired(health: f32, elapsed: i32) -> bool {
@@ -379,7 +381,9 @@ mod tests {
     #[test]
     fn repairs_use_survival_and_have_recovery_hysteresis() {
         assert!(repair_needed(0.9, 0.9, 0.1, 100.0, 2000.0));
-        assert!(!repair_needed(0.9, 0.9, 0.95, 100.0, 2000.0));
+        assert!(!repair_needed(0.9, 0.9, 1.0, 100.0, 2000.0));
+        assert!(repair_needed(0.6, 1.0, 1.0, -1200.0, 4200.0));
+        assert!(repair_needed(0.6, 0.08, 0.08, -300.0, 1600.0));
         assert!(repair_needed(0.2, 0.0, 0.0, 100.0, 2000.0));
         assert!(!repaired(0.7, 900));
         assert!(!repaired(1.0, 30));

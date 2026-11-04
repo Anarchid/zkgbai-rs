@@ -165,7 +165,7 @@ impl Ai {
             .values()
             .filter(|f| rush_riot(self.defs.name_of(f.unit)))
             .filter(|f| f.unit.health() > f.unit.max_health() * 0.5 && !self.retreat_is_retreating(f.unit))
-            .filter(|f| !self.coalesce_owns(f.id))
+            .filter(|f| !self.coalesce_owns(f.id) && !self.limpet_controls(f.id))
             .filter(|f| {
                 f.squad.is_none_or(|sid| {
                     self.squads.get(sid).is_some_and(|s| {
@@ -173,7 +173,7 @@ impl Ai {
                     })
                 })
             })
-            .filter(|f| distance(f.get_pos(), heavy.pos()) < 2000.0)
+            .filter(|f| distance(f.get_pos(), heavy.pos()) < 4000.0)
             .filter(|f| f.unit.def().is_some_and(|d| self.terrain_reaches(d, f.get_pos(), heavy.pos(), 300.0)))
             .min_by(|a, b| distance(a.get_pos(), heavy.pos()).total_cmp(&distance(b.get_pos(), heavy.pos())))
             .map(|f| f.unit);
@@ -231,13 +231,21 @@ impl Ai {
     }
 
     pub(crate) fn rush_support_produce(&self, options: &[UnitDef]) -> Option<UnitDef> {
-        let heavy = self.rush_push_unit()?;
+        if self.rush_push_unit().is_none()
+            && !matches!(
+                self.eco.rush.state,
+                crate::economy::rush::State::Planned { .. } | crate::economy::rush::State::On(_)
+            )
+        {
+            return None;
+        }
         let units = self.cb.team_units();
         let con = options.iter().copied().find(|d| d.is_builder() && d.speed() > 0.0 && d.is_able_to_repair());
         let cons = con.map_or(0, |d| units.iter().filter(|u| u.def() == Some(d) && u.health() > 0.0).count());
-        // Keep an economy first, then request one riot before filling the
-        // repair complement. Unfinished units count so requests cannot pile up.
-        if cons < 2 && con.is_some() {
+        // Keep an economic constructor, then get a riot on the way early,
+        // including nonparticipants while the heavy is still building.
+        // Unfinished units count so requests cannot pile up.
+        if cons < 1 && con.is_some() {
             return con;
         }
         if !units.iter().any(|u| u.health() > 0.0 && rush_riot(self.defs.name_of(*u)))
@@ -249,7 +257,6 @@ impl Ai {
         {
             return Some(riot);
         }
-        let _ = heavy;
         if cons < 4 { con } else { None }
     }
 
