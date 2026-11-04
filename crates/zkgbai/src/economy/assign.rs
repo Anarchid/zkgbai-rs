@@ -741,7 +741,14 @@ impl Ai {
         if id == self.eco.build_ids.missile_silo_id {
             return Some(range + REMEX_STEP);
         }
-        let factory = self.eco.build_ids.fac_ids.contains(&id) || self.defs.name(c.build_type).starts_with("plate");
+        let plate = self.defs.name(c.build_type).starts_with("plate");
+        // (`airstall`: metal piles up while air stalls, so its plate waits for
+        // no remex; on 2026-11-04 four constructors took a remex first 19
+        // times over 8 minutes, mostly the same mex, and the plate never rose.)
+        if plate && self.air_stalled() {
+            return None;
+        }
+        let factory = self.eco.build_ids.fac_ids.contains(&id) || plate;
         (factory && !c.fac_plop && !self.fac.factories.is_empty()).then_some(REMEX_RADIUS)
     }
 

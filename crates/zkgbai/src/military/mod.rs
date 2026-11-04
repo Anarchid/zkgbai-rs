@@ -3,6 +3,7 @@
 
 pub(crate) mod air_demand;
 pub mod air_intel;
+pub mod airstall;
 pub mod airstrikes;
 pub mod ammo;
 pub mod arsenal;
@@ -211,6 +212,8 @@ pub struct MilitaryManager {
     pub fightsim: fightsim::live::FightSim,
     /// The density of our fights (see [`front`]).
     pub front: front::Front,
+    /// What our aircraft killed and cost lately (see [`airstall`]).
+    pub air: airstall::AirLedger,
     /// The Jugglenaut's def while they walk past enemy buildings rather
     /// than attack-move (`sumostatic`, see `jumps::SUMO_LOCK`).
     pub sumo_walks: Option<i32>,
@@ -281,6 +284,7 @@ impl MilitaryManager {
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
             front: front::Front::default(),
+            air: airstall::AirLedger::default(),
             sumo_walks: None,
         }
     }
@@ -604,6 +608,7 @@ impl Ai {
         self.guard("stomp_test.update", |ai| ai.stomp_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
         self.guard("front.update", |ai| ai.front_update(frame));
+        self.guard("airstall.update", |ai| ai.airstall_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -1114,6 +1119,7 @@ impl Ai {
         let id = unit.id();
 
         self.war.new_units.remove(&id);
+        self.airstall_unit_destroyed(unit);
         self.raid_test_unit_destroyed(unit);
         self.stomp_test_unit_destroyed(unit);
         self.firefighters_unit_destroyed(unit, attacker);
@@ -1320,6 +1326,7 @@ impl Ai {
             self.missiles_note_death(pos, cost.unwrap_or(0.0));
         }
         self.intel_enemy_destroyed(id, cost);
+        self.airstall_enemy_destroyed(cost, attacker);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
         self.coalesce_enemy_destroyed(id);
