@@ -485,6 +485,7 @@ impl Ai {
     /// Produce from `unit`, a factory or a plate, as one of type `tech`.
     pub(crate) fn fac_register(&mut self, unit: Unit, tech: &str) {
         let Some(def) = unit.def() else { return };
+        self.eco.factory_opened_at.get_or_insert(self.frame);
         let first_fac = (self.fac.factories.len() as i32) < 1 + self.merged_allies;
         let mut fac = Factory::new(unit, tech, first_fac, self.phase_map_diag());
         if !tech.contains("hub") {

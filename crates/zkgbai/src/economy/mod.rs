@@ -199,6 +199,8 @@ pub struct EconomyManager {
     dev_pick: Option<usize>,
     /// The first factory, rolled at the start (see `eco_roll_opening`).
     opening: Option<String>,
+    /// Actual simulation frame when our first factory became usable.
+    pub factory_opened_at: Option<i32>,
     /// Where the opening factory goes and its facing, as announced to
     /// allies in the pregame (see `crate::iq`).
     pub(crate) opening_site: Option<(UnitDef, Vec3, i32)>,
@@ -436,6 +438,7 @@ impl EconomyManager {
             dev_facs: Vec::new(),
             dev_pick: None,
             opening: None,
+            factory_opened_at: None,
             opening_site: None,
             requisition: None,
             requisition_value: 0.0,

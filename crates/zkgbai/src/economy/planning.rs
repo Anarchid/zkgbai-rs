@@ -128,6 +128,9 @@ pub(super) const NEW_FAC_INCOME: f32 = 50.0;
 const NEW_FAC_EVERY: i32 = 30 * 300;
 const NEW_FAC_JITTER: i32 = 30 * 60;
 const NEW_FAC_PER: f32 = 25.0;
+/// Let the opening produce for two actual minutes before autonomous tech
+/// expansion. Density-scaled phase time must not skip this commitment.
+const FACTORY_OPENING_TIME: i32 = 30 * 120;
 
 /// Income before investing in a gunship factory for a viable riot drop.
 const DROP_INCOME: f32 = 30.0;
@@ -977,9 +980,20 @@ impl Ai {
         best.or(best_on_plop).map(|(pos, face, _)| (pos, face))
     }
 
+    fn eco_factory_expansion_waits(&self, is_plop: bool) -> bool {
+        !is_plop
+            && !self.fac.factories.is_empty()
+            && self.eco.dev_facs.is_empty()
+            && self.op.over.requisition.is_none()
+            && self.frame - self.eco.factory_opened_at.unwrap_or(0) < FACTORY_OPENING_TIME
+    }
+
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
         let nfac = self.fac.factories.len();
         let merged = self.merged_allies;
+        if self.eco_factory_expansion_waits(is_plop) {
+            return;
+        }
         if is_plop && self.eco_wait_for_allied_plop() {
             return;
         }
@@ -3390,6 +3404,28 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn factory_expansion_keeps_two_real_minutes_for_the_opening() {
+        let mut ai = super::super::commander::tests::test_ai_with(|_| {});
+        let u = springai::Unit::from_id(ai.cb, 42).unwrap();
+        ai.fac.factories.insert(u.id(), super::super::Factory::new(u, "factoryamph", true, 1000.0));
+        ai.eco.factory_opened_at = Some(300);
+        ai.eco.static_income = 1000.0;
+        ai.eco.new_fac_due = true;
+        ai.eco.requisition = Some(("factoryplane".into(), "density calls for air".into()));
+        ai.frame = 300 + FACTORY_OPENING_TIME - 1;
+        assert!(ai.eco_factory_expansion_waits(false));
+        assert!(!ai.eco_factory_expansion_waits(true), "another commander's free opening can proceed");
+        ai.frame += 1;
+        assert!(!ai.eco_factory_expansion_waits(false));
+        ai.frame = 301;
+        ai.op.over.requisition = Some("factoryplane".into());
+        assert!(!ai.eco_factory_expansion_waits(false), "explicit operator orders take precedence");
+        ai.op.over.requisition = None;
+        ai.fac.factories.clear();
+        assert!(!ai.eco_factory_expansion_waits(false), "losing the opening must allow rebuilding");
+    }
 
     fn list(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
