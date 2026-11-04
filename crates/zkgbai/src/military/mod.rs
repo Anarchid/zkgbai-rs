@@ -72,6 +72,18 @@ use radar::RadarIdentifier;
 /// Starting cost for target searches ("nothing found yet").
 const NO_COST: f32 = 65535.0;
 
+/// Ground enemies can advance this long while we choose and follow a path.
+/// Paint that reach as a slope in cost, so escaping farther gets cheaper
+/// before the unit leaves the entire movement buffer.
+const MOBILE_THREAT_LOOKAHEAD: f32 = 2.0;
+
+fn paint_ground_threat(grid: &mut ArrayGraphics, x: i32, y: i32, range: f32, speed: f32, power: i32) {
+    // Retain at least the old two-cell allowance for slow movers. Speed is
+    // the known unit-type speed in elmos/s: a stopped pursuer can accelerate.
+    let buffer = (speed * MOBILE_THREAT_LOOKAHEAD).max(128.0);
+    grid.paint_soft_circle(x, y, range / 64.0, buffer / 64.0, power);
+}
+
 /// Java's `Float.MIN_VALUE` (the smallest positive float), which the original
 /// used as the starting "best" score of maximizing searches.
 const JAVA_FLOAT_MIN_VALUE: f32 = f32::from_bits(1);
@@ -1641,9 +1653,31 @@ impl Ai {
                             if t.is_riot {
                                 war.riot_graphics.paint_circle(x, y, r + 2, 1);
                             }
-                            war.threat_graphics.paint_circle(x, y, r + 2, effective_power);
+                            if t.can_fly() {
+                                war.threat_graphics.paint_circle(x, y, r + 2, effective_power);
+                            } else {
+                                paint_ground_threat(
+                                    &mut war.threat_graphics,
+                                    x,
+                                    y,
+                                    t.threat_radius,
+                                    t.def_speed(),
+                                    effective_power,
+                                );
+                            }
                         }
-                        war.sub_threat_graphics.paint_circle(x, y, rd + 2, deep_power as i32);
+                        if t.can_fly() {
+                            war.sub_threat_graphics.paint_circle(x, y, rd + 2, deep_power as i32);
+                        } else {
+                            paint_ground_threat(
+                                &mut war.sub_threat_graphics,
+                                x,
+                                y,
+                                t.deep_range(),
+                                t.def_speed(),
+                                deep_power as i32,
+                            );
+                        }
                     } else if !t.is_aa {
                         // for statics
                         if surface {
@@ -2810,6 +2844,43 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dagger_escape_cost_falls_before_leaving_the_movement_buffer() {
+        let mut g = ArrayGraphics::new(32, 32);
+        paint_ground_threat(&mut g, 12, 12, 212.0, 144.0, 100);
+        // Full weapon threat, including the cardinal cells at 192 elmos.
+        for (x, y) in [(12, 12), (15, 12), (9, 12), (12, 15), (12, 9)] {
+            assert_eq!(g.get_value(x, y), 100.0);
+        }
+        // The old flat disk offered no reward for opening the gap from
+        // 256 to ~286. Both RaiderPath and AvoidEnemies use this cost.
+        let cost = |x, y| 1.0 + 40.0 * g.get_value(x, y) / 500.0;
+        assert!(cost(16, 12) > cost(16, 14));
+        assert!(cost(16, 14) > cost(17, 12));
+        assert!(cost(17, 12) > cost(18, 12));
+        assert!(cost(18, 12) > cost(19, 12));
+        assert!(cost(19, 12) > cost(20, 12));
+        assert_eq!(g.get_value(20, 12), 0.0); // 512 > 212 + 144 * 2
+    }
+
+    #[test]
+    fn ground_threat_accounts_for_speed_and_overlapping_pursuers() {
+        let mut fast = ArrayGraphics::new(32, 32);
+        let mut slow = ArrayGraphics::new(32, 32);
+        paint_ground_threat(&mut fast, 12, 12, 212.0, 144.0, 100);
+        paint_ground_threat(&mut slow, 12, 12, 212.0, 30.0, 100);
+        assert!(slow.get_value(17, 12) > 0.0); // minimum 128-elmo allowance
+        assert_eq!(slow.get_value(18, 12), 0.0);
+        assert!(fast.get_value(18, 12) > 0.0);
+        let first = fast.get_value(18, 12);
+        paint_ground_threat(&mut fast, 24, 12, 212.0, 144.0, 100);
+        assert_eq!(fast.get_value(18, 12), 2.0 * first);
+        // A clipped circle still paints the same inward-facing profile.
+        let mut edge = ArrayGraphics::new(16, 16);
+        paint_ground_threat(&mut edge, 0, 0, 212.0, 144.0, 100);
+        assert_eq!(edge.get_value(6, 0), first);
+    }
 
     #[test]
     fn ascii_value_is_logarithmic_and_bounded() {
