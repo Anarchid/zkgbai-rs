@@ -1383,7 +1383,32 @@ impl Ai {
                 && distance(u.pos(), site) <= 300.0
                 && u.def().is_some_and(|d| self.defs.name(d) == GUARD_TURRET)
         });
-        (!guarded).then_some(site)
+        if guarded {
+            return None;
+        }
+        // With no opening mexes, `home` is the factory itself. The nearest
+        // engine-legal site can still be in the economy's reserved exit lane.
+        // Search around it instead of retrying that same rejected site until
+        // the guard is abandoned. Keep the home within the Lotus's range.
+        if let Some(def) = self.defs.get(GUARD_TURRET) {
+            let map = self.cb.map();
+            let heading = (enemy.z - home.z).atan2(enemy.x - home.x);
+            for radius in [0.0, 96.0, 192.0, 288.0, 384.0] {
+                let steps = if radius == 0.0 { 1 } else { 12 };
+                for k in 0..steps {
+                    let angle = heading + k as f32 * std::f32::consts::TAU / steps as f32;
+                    let near = Vec3::xz(site.x + radius * angle.cos(), site.z + radius * angle.sin());
+                    let at = map.find_closest_build_site(def, near, 48.0, 3, 0);
+                    if at.x >= 0.0
+                        && distance(at, home) <= 0.9 * def.max_weapon_range()
+                        && self.eco_build_check(def, at, 0)
+                    {
+                        return Some(at);
+                    }
+                }
+            }
+        }
+        Some(site)
     }
 
     /// Where the objective's guard goes: among its spots (else its center).
