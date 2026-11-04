@@ -6,6 +6,7 @@ mod army_support;
 mod artemis;
 mod assign;
 pub mod build_ids;
+mod buildguard;
 mod colonize;
 pub mod comguard;
 mod commander;
@@ -117,6 +118,7 @@ pub struct EconomyManager {
     pub conquest: conquest::Conquest,
     /// Commanders out of fights the predictor says they lose (see `comguard`).
     pub(super) guard: comguard::ComGuard,
+    build_guard: buildguard::BuildGuard,
     /// Workers waiting for a new assignment (worker ids).
     pub idlers: VecDeque<i32>,
     /// Workers with an assignment, re-evaluated round-robin (worker ids).
@@ -372,6 +374,7 @@ impl EconomyManager {
             commanders: Vec::new(),
             conquest: conquest::Conquest::default(),
             guard: comguard::ComGuard::default(),
+            build_guard: buildguard::BuildGuard::default(),
             idlers: VecDeque::new(),
             assigned: VecDeque::new(),
             seeders: VecDeque::new(),
@@ -944,6 +947,7 @@ impl Ai {
 
         self.eco_coordinate_plops();
         self.rush_update(frame);
+        self.eco_guard_construction(frame);
         self.eco_guard_commanders(frame);
         self.eco_assign_workers();
         self.iq_tick();
@@ -1406,6 +1410,7 @@ impl Ai {
     ) {
         let _ = (damage, dir, paralyzer);
         self.comguard_hit(unit, attacker);
+        self.eco_build_guard_hit(unit, attacker);
         let h = unit;
         let Some(hdef) = h.def() else {
             return;

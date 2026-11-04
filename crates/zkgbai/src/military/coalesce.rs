@@ -499,14 +499,16 @@ impl Ai {
             if budget.spent() && hold.is_none() && best.is_some() {
                 break;
             }
-            let (mode, prize_index) = match plan {
-                Plan::Clean => (FateMode::AMove, None),
+            let (fates, prize_index) = match plan {
+                // Clean gangs receive Fight orders with UnitAI still active.
+                Plan::Clean => (self.local_kiting_fates(&local, budget), None),
                 Plan::Prize(id) => {
                     let Some(i) = local.theirs.iter().position(|t| t.id == id) else { continue };
-                    (FateMode::Assassinate { target: their_index(&local, i) }, Some(i))
+                    let mode = FateMode::Assassinate { target: their_index(&local, i) };
+                    (self.local_fates(&local, mode, budget), Some(i))
                 }
             };
-            let Some(fates) = self.local_fates(&local, mode, budget) else { return Judged::NoFight };
+            let Some(fates) = fates else { return Judged::NoFight };
             let t = tally(&local, &fates, true);
             let p_prize = prize_index.map_or(0.0, |i| fates[their_index(&local, i)].p_raw);
             last = Some((t, p_prize));
