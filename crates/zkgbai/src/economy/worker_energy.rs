@@ -40,7 +40,7 @@ impl Ai {
             .values()
             .filter(|w| {
                 !w.is_chicken
-                    && !w.assigned_plop
+                    && !(w.assigned_plop && w.has_plop())
                     && !self.eco_worker_held(w.id)
                     && !springai::reserved::is_reserved(self.cb, w.id)
                     && w.unit.health() > 0.0
@@ -117,7 +117,9 @@ impl Ai {
             return None;
         }
         let w = self.eco.workers.get(&wid)?;
-        if w.is_chicken || w.assigned_plop || w.unit.is_being_built() {
+        // assigned_plop records the opening assignment even after the free
+        // factory is finished. Only an unspent plop excludes local energy.
+        if w.is_chicken || (w.assigned_plop && w.has_plop()) || w.unit.is_being_built() {
             return None;
         }
         let from = w.get_pos();
@@ -189,6 +191,12 @@ mod tests {
     #[test]
     fn hard_stall_uses_energy_in_actual_build_range_without_a_grid_walk() {
         use springai::{Unit, UnitDef};
+        thread_local! {
+            static PLOP: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, name: *const std::ffi::c_char, default: f32) -> f32 {
+            if unsafe { std::ffi::CStr::from_ptr(name) } == c"facplop" { PLOP.get() } else { default }
+        }
         unsafe extern "C" fn pos(_: i32, _: i32, p: *mut f32) {
             unsafe {
                 std::ptr::copy_nonoverlapping([100.0, 0.0, 100.0].as_ptr(), p, 3);
@@ -216,6 +224,7 @@ mod tests {
         }
         let mut ai = super::super::commander::tests::test_ai_with(|t| {
             t.Unit_getPos = Some(pos);
+            t.Unit_getRulesParamFloat = Some(rules);
             t.UnitDef_getBuildDistance = Some(reach);
             t.Unit_getWeapons = Some(zero);
             t.UnitDef_getWeaponMounts = Some(zero);
@@ -240,6 +249,12 @@ mod tests {
         ai.eco.solar_tasks.push(near);
         ai.eco.workers.get_mut(&10).unwrap().assigned_plop = true;
         assert_eq!(ai.eco_local_energy_task(10), None, "do not interrupt the free initial factory plop");
+        PLOP.set(0.0);
+        assert_eq!(
+            ai.eco_local_energy_task(10),
+            Some(near),
+            "a spent plop must not send the commander away for energy"
+        );
     }
 
     #[test]

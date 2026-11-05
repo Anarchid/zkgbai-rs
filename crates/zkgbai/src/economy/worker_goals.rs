@@ -187,7 +187,10 @@ impl Ai {
 
     pub(super) fn eco_expansion_goal_cost(&self, w: &Worker, t: &WorkerTask) -> f32 {
         let Some(goal) = w.expansion else { return 0.0 };
-        if self.eco.hard_estalled || self.eco_directed_job(w, t.id) {
+        // Emergency energy is selected locally before this auction. Do not
+        // erase the direction of unrelated jobs when wind output fluctuates:
+        // that sent commanders to rear mexes, then back when energy recovered.
+        if self.eco_directed_job(w, t.id) {
             return 0.0;
         }
         let Some(def) = w.unit.def() else { return 0.0 };
@@ -327,6 +330,37 @@ mod tests {
         assert!(cost(ahead) > 0.0);
         assert!(cost(ahead) < cost(back));
         assert!(cost(Vec3::xz(2200.0, 1000.0)) > cost(ahead));
+    }
+
+    #[test]
+    fn energy_shortfall_does_not_reverse_expansion_job_preferences() {
+        use springai::{Unit, UnitDef};
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            60.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Unit_getWeapons = Some(zero);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(scalar);
+            t.UnitDef_getSpeed = Some(scalar);
+            t.UnitDef_getBuildDistance = Some(scalar);
+        });
+        let mut w = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        w.is_com = true;
+        w.expansion = Some(ExpansionGoal { target: Vec3::xz(2400.0, 0.0), best: 1400.0, gained: 0 });
+        let mex = UnitDef::from_id(ai.cb, 2).unwrap();
+        let ahead = WorkerTask::construction(mex, Vec3::xz(1300.0, 0.0), 0);
+        let behind = WorkerTask::construction(mex, Vec3::xz(700.0, 0.0), 0);
+        let local = WorkerTask::construction(mex, Vec3::xz(980.0, 0.0), 0);
+        let normal = ai.eco_expansion_goal_cost(&w, &behind);
+        assert!(normal > 0.0);
+        ai.eco.hard_estalled = true;
+        assert_eq!(ai.eco_expansion_goal_cost(&w, &behind), normal);
+        assert!(ai.eco_expansion_goal_cost(&w, &ahead) < 0.0);
+        assert_eq!(ai.eco_expansion_goal_cost(&w, &local), 0.0, "work in reach needs no detour");
     }
 
     #[test]
