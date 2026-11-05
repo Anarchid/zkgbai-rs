@@ -323,6 +323,7 @@ impl Ai {
             // Income for factory timing, on the phase clock (`densgate`).
             let phase_static = self.phase_static_income();
             let nfac = self.fac.factories.len() as i32;
+            let ntech = self.eco_tech_factory_count() as i32;
             let merged = self.merged_allies;
             let tf = self.graph.territory_fraction;
             let eminent = self.graph.eminent_territory;
@@ -335,12 +336,12 @@ impl Ai {
                 || (eco.requisition.as_ref().is_some_and(|(f, _)| !self.eco_has_factory(f))
                     && phase_static > REQUISITION_INCOME
                     && nfac >= 1
-                    && nfac < 3 + merged
+                    && ntech < 3 + merged
                     && no_fac_tasks)
-                || (phase_static > 50.0 && nfac == 1 && nnanos > 3 && no_fac_tasks)
+                || (phase_static > 50.0 && ntech == 1 && nnanos > 3 && no_fac_tasks)
                 // a factory of a new type, now and then
                 || (eco.new_fac_due && nfac >= 1 && no_fac_tasks)
-                || (phase_static > 90.0 && nfac == 2 && nnanos > 6 && eminent && no_fac_tasks)
+                || (phase_static > 90.0 && ntech == 2 && nnanos > 6 && eminent && no_fac_tasks)
                 || (merged > 0 && phase_static > 65.0 && !eco.has_striders && eminent && no_fac_tasks)
                 || (merged > 0
                     && phase_static > 65.0
@@ -796,7 +797,7 @@ impl Ai {
         let asked_value = self.eco.requisition_value;
         let reach_fac = asked.as_ref().filter(|(f, _)| !self.eco_has_factory(f)).map(|(f, _)| f.clone());
         let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
-        let fac_due = self.eco.new_fac_due;
+        let mut timed_expansion = false;
 
         if self.eco.potential_fac_list.is_empty() && reach_fac.is_none() && new_type.is_none() {
             self.eco.added_facs = false;
@@ -840,10 +841,9 @@ impl Ai {
             self.eco.potential_fac_list.remove(&reach_fac);
             fac_name = reach_fac;
         } else if let Some(new_type) = new_type {
-            self.log(&format!("economy: a factory of a new type: {new_type}"));
             factory = self.defs.get(&new_type);
             self.eco.potential_fac_list.remove(&new_type);
-            self.eco.new_fac_due = false;
+            timed_expansion = true;
             fac_name = new_type;
         } else if !opening_due && choices.contains("factoryship") && kgb_rand() < 0.5 {
             fac_name = "factoryship".to_owned();
@@ -900,6 +900,10 @@ impl Ai {
         // energy is what we lack.
         if !is_plop && nfac > 0 && !self.eco_energy_starved() {
             if let Some(id) = self.eco_plate_instead(wid, factory) {
+                if timed_expansion {
+                    self.log(&format!("economy: a factory of a new type: {fac_name}"));
+                    self.eco.new_fac_due = false;
+                }
                 if let Some((f, why)) = &asked
                     && *f == fac_name
                 {
@@ -911,7 +915,6 @@ impl Ai {
             if !self.eco_factory_turn(&fac_name) {
                 // (A requisition stays asked for.)
                 restore(self, &fac_name);
-                self.eco.new_fac_due = fac_due;
                 return;
             }
         }
@@ -1049,6 +1052,12 @@ impl Ai {
             let id = self.eco.tasks.insert(ct);
             self.eco.construction_tasks.push(id);
             self.eco.factory_tasks.push(id);
+            // Selecting a type is only an attempt. Failed siting, reachability
+            // or energy checks must leave the timed request pending.
+            if timed_expansion {
+                self.log(&format!("economy: a factory of a new type: {fac_name}"));
+                self.eco.new_fac_due = false;
+            }
             if is_plop {
                 // A late replan may follow an announcement with no factory.
                 self.iq.sent = false;
@@ -1324,6 +1333,12 @@ impl Ai {
                 .any(|c| self.fac_tech(c.build_type) == name)
     }
 
+    /// Full factories consume tech expansion slots. Plates still provide
+    /// production and access to their type, but do not spend these slots.
+    fn eco_tech_factory_count(&self) -> usize {
+        self.fac.factories.values().filter(|f| !self.eco.plates.contains(&f.unit)).count()
+    }
+
     /// Now and then past some income, have a factory of a new type built
     /// (see [`NEW_FAC_INCOME`]).
     pub(super) fn eco_update_new_factory(&mut self, frame: i32) {
@@ -1338,7 +1353,7 @@ impl Ai {
             }
             return;
         };
-        let room = (self.fac.factories.len() as f32) < 1.0 + income / NEW_FAC_PER;
+        let room = (self.eco_tech_factory_count() as f32) < 1.0 + income / NEW_FAC_PER;
         let attacked = self.war.defense_targets().any(|(_, predicted)| !predicted);
         if frame < at || income <= NEW_FAC_INCOME || !room || self.eco.estalled || attacked {
             return;
@@ -2536,3 +2551,7 @@ mod tests {
         assert_eq!(weighted_pick(&list(&[]), |_| 1.0, 0.5), None);
     }
 }
+
+#[cfg(test)]
+#[path = "factory_expansion_tests.rs"]
+mod factory_expansion_tests;
