@@ -35,6 +35,7 @@ mod watchtower;
 mod wind;
 pub mod worker;
 mod worker_energy;
+mod worker_lanes;
 
 pub(crate) use assign::repair_loses_to_mex;
 pub use build_ids::BuildIds;

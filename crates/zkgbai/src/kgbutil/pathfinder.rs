@@ -634,7 +634,7 @@ impl Pathfinder {
         let terrain = &self.terrain;
         let extra = &self.keepout;
         let kind = if ground { PathCost::AvoidEnemies } else { PathCost::AirRaiderPath };
-        let costs = self.astar.costs(
+        let (costs, parents) = self.astar.cost_routes(
             start,
             &mut |c| {
                 let base = terrain.cost(kind, war, c);
@@ -642,7 +642,7 @@ impl Pathfinder {
             },
             links.map(|(i, wait)| (&self.jump_links[i].1, wait)),
         );
-        Some(WorkerRoutes { origin, frame, width: self.terrain.smwidth as usize, costs })
+        Some(WorkerRoutes { origin, frame, width: self.terrain.smwidth as usize, costs, parents })
     }
 
     pub fn is_reachable(&mut self, war: &MilitaryManager, u: Unit, target: Vec3, cost: PathCost) -> bool {
@@ -991,6 +991,7 @@ pub(crate) struct WorkerRoutes {
     pub frame: i32,
     width: usize,
     costs: Vec<f32>,
+    parents: Vec<u32>,
 }
 
 impl WorkerRoutes {
@@ -1001,30 +1002,57 @@ impl WorkerRoutes {
         if straight <= range {
             return Some(straight);
         }
+        let cell = self.arrival_cell(target, range)?;
+        Some((self.costs[cell] * MAP_RES as f32 + range).max(straight))
+    }
+
+    /// Reuse the cost search's predecessors; no extra A* per candidate job.
+    /// Includes jump edges and stops where the builder can reach the site.
+    pub fn path(&self, target: Vec3, range: f32) -> Option<Vec<Vec3>> {
+        let mut cell = self.arrival_cell(target, range)?;
+        let mut path = Vec::new();
+        for _ in 0..self.parents.len() {
+            path.push(Vec3::xz(
+                (cell % self.width) as f32 * MAP_RES as f32 + MAP_RES as f32 * 0.5,
+                (cell / self.width) as f32 * MAP_RES as f32 + MAP_RES as f32 * 0.5,
+            ));
+            let parent = *self.parents.get(cell)? as usize;
+            if parent == cell {
+                path.reverse();
+                return Some(path);
+            }
+            if parent >= self.parents.len() {
+                return None;
+            }
+            cell = parent;
+        }
+        None
+    }
+
+    fn arrival_cell(&self, target: Vec3, range: f32) -> Option<usize> {
         if self.width == 0 || self.costs.is_empty() {
             return None;
         }
         let res = MAP_RES as f32;
         let rows = self.costs.len() / self.width;
-        // Half a cell of slack covers the difference between a passable
-        // sample and a build position at its edge.
         let radius = range + res * 0.5;
         let x0 = ((target.x - radius) / res).floor().max(0.0) as usize;
         let z0 = ((target.z - radius) / res).floor().max(0.0) as usize;
         let x1 = ((target.x + radius) / res).floor().max(0.0) as usize;
         let z1 = ((target.z + radius) / res).floor().max(0.0) as usize;
-        let mut best = f32::INFINITY;
+        let mut best = None;
+        let mut cost = f32::INFINITY;
         for z in z0..=z1.min(rows.saturating_sub(1)) {
             for x in x0..=x1.min(self.width - 1) {
                 let p = Vec3::xz((x as f32 + 0.5) * res, (z as f32 + 0.5) * res);
-                if distance(p, target) <= radius {
-                    best = best.min(self.costs[z * self.width + x] * res);
+                let cell = z * self.width + x;
+                if distance(p, target) <= radius && self.costs[cell] < cost {
+                    best = Some(cell);
+                    cost = self.costs[cell];
                 }
             }
         }
-        // Keep the ladder's existing distance scale on open ground; add
-        // only route overhead. Build range must not erase a long detour.
-        best.is_finite().then_some((best + range).max(straight))
+        best
     }
 }
 
@@ -1121,8 +1149,9 @@ mod tests {
         let mut a = AStar::new(10, 100);
         let origin = Vec3::xz(96.0, 96.0);
         // Wall down column 4, with the only opening at its far end.
-        let costs = a.costs(11, &mut |c| if c % 10 == 4 && c / 10 < 8 { IMPASSABLE } else { 1.0 }, None);
-        let routes = WorkerRoutes { origin, frame: 0, width: 10, costs };
+        let (costs, parents) =
+            a.cost_routes(11, &mut |c| if c % 10 == 4 && c / 10 < 8 { IMPASSABLE } else { 1.0 }, None);
+        let routes = WorkerRoutes { origin, frame: 0, width: 10, costs, parents };
         let across = Vec3::xz(352.0, 96.0);
         let along = Vec3::xz(96.0, 416.0);
         assert!(distance(origin, across) < distance(origin, along));
@@ -1132,8 +1161,11 @@ mod tests {
         assert!(routes.distance(Vec3::xz(288.0, 96.0), 128.0).unwrap() < 250.0);
         assert!(routes.distance(across, 192.0).unwrap() < 400.0);
         assert_eq!(routes.distance(origin, 128.0), Some(0.0));
-        let sealed = a.costs(11, &mut |c| if c % 10 == 4 { IMPASSABLE } else { 1.0 }, None);
-        let sealed = WorkerRoutes { origin, frame: 0, width: 10, costs: sealed };
+        let path = routes.path(across, 32.0).unwrap();
+        assert!(path.iter().any(|p| p.z >= 8.0 * 64.0), "the lane must follow the opening, not cross the wall");
+        assert!(distance(*path.last().unwrap(), across) <= 64.0);
+        let (sealed, parents) = a.cost_routes(11, &mut |c| if c % 10 == 4 { IMPASSABLE } else { 1.0 }, None);
+        let sealed = WorkerRoutes { origin, frame: 0, width: 10, costs: sealed, parents };
         assert_eq!(sealed.distance(across, 32.0), None);
     }
 

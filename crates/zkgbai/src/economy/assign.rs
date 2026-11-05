@@ -839,6 +839,32 @@ impl Ai {
         {
             return Some(project);
         }
+        // Choose whether to expand with the normal economy priorities.
+        // Only then spread new mex assignments between lanes; charging the
+        // general auction for crowding would divert builders into energy
+        // and defence instead of sending them down a different branch.
+        if let Some(chosen) = task.and_then(|id| eco.tasks.get(id))
+            && worker.task != Some(chosen.id)
+            && self.eco_lane_mex(worker, chosen)
+        {
+            let lanes = self.eco_expansion_lanes(worker);
+            if !lanes.is_empty() {
+                let lane_price = |t: &WorkerTask| {
+                    price(t) - stranded(t) + threat_cost(t) + self.eco_expansion_lane_cost(worker, t, &lanes)
+                };
+                let mut best = lane_price(chosen);
+                for t in eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)) {
+                    if !reaches(t) || !self.eco_lane_mex(worker, t) {
+                        continue;
+                    }
+                    let score = lane_price(t);
+                    if score < best {
+                        best = score;
+                        task = Some(t.id);
+                    }
+                }
+            }
+        }
         task
     }
 
