@@ -14,7 +14,7 @@ set -e
 version=${1:-wip}
 data=${2:-$HOME/.spring}
 here="$(cd "$(dirname "$0")/.." && pwd)"
-lib="$here/target/release/libzkgbai.so"
+lib="${CARGO_TARGET_DIR:-$here/target}/release/libzkgbai.so"
 src="$here/crates/zkgbai/data"
 dst="$data/AI/Skirmish/ZKGBAI/$version"
 [ -f "$lib" ] || { echo "no $lib: cargo build --release first" >&2; exit 1; }

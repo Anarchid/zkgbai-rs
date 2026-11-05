@@ -940,6 +940,24 @@ impl Ai {
         self.eco_cost_of_job_at_distance(worker, wpos, task, distance(wpos, task.get_pos()))
     }
 
+    /// A mex already receiving build power does not need a replacement hand.
+    /// Check actual work, not merely an assignment or a partially paid frame:
+    /// abandoned, retreating and stalled crews must remain replaceable.
+    fn eco_working_mex_hand(&self, worker: &Worker, task: &WorkerTask) -> bool {
+        let Some(c) = task.as_construction() else { return false };
+        if c.build_type.id() != self.eco.build_ids.mex_id || worker.task != Some(task.id) || worker.is_chicken {
+            return false;
+        }
+        let Some(target) = c.target else { return false };
+        target.health() > 0.0
+            && target.is_being_built()
+            && (target.team() == self.team_id || self.allies.contains(&target.team()))
+            && worker.unit.health() > 0.0
+            && worker.unit.team() == self.team_id
+            && worker.unit.resource_use(self.metal) > 0.0
+            && worker.unit.def().is_some_and(|d| distance(worker.get_pos(), target.pos()) <= d.build_distance())
+    }
+
     fn eco_cost_of_job_at_distance(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask, route: f32) -> f32 {
         if self.eco_repair_paused(task) {
             return NEVER;
@@ -949,8 +967,20 @@ impl Ai {
             return cost;
         }
         // A commander holding conquered ground stays near it (`conquestleash`).
-        let progress =
-            task.as_construction().and_then(|c| c.target).map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0));
+        // Paid work attracts a rescuer when idle, or rewards its current
+        // crew. It must not lure a second builder into replacing a working
+        // mex constructor (the commander/con swap seen on Alphabet Siege).
+        let staffed_mex = worker.task != Some(task.id)
+            && task
+                .assigned_workers
+                .iter()
+                .filter_map(|id| self.eco.workers.get(id))
+                .any(|w| self.eco_working_mex_hand(w, task));
+        let progress = if staffed_mex {
+            0.0
+        } else {
+            task.as_construction().and_then(|c| c.target).map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0))
+        };
         let cost = cost + self.conquest_leash(worker.id, task.get_pos()) - 1000.0 * progress * progress;
         if self.dev_off("pairs") || self.defs.name_of(worker.unit) != PAIRED_CON {
             return cost;
@@ -983,7 +1013,11 @@ impl Ai {
         // on the job, if near, is a partner, not a crowd.
         let pairs = !self.dev_off("pairs") && self.defs.name_of(worker.unit) == PAIRED_CON;
         let mut partner = false;
-        for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)) {
+        // Another assigned hand cannot make the builder already spending
+        // on this mex leave. Entrants still pay the ordinary crowding cost;
+        // this changes its price, not its eligibility for urgent reassignment.
+        let working_mex = self.eco_working_mex_hand(worker, task);
+        for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)).filter(|_| !working_mex) {
             // increment cost mod for every other worker unassigned to the given task that isn't the worker we're assigning
             // as long as they're closer or equaldist to the target.
             let idist = distance(w.get_pos(), task_pos);
@@ -1666,6 +1700,84 @@ pub(super) mod tests {
             t.Engine_handleCommand = Some(command);
             customize(t);
         })
+    }
+
+    #[test]
+    fn working_mexes_do_not_swap_their_constructor_and_commander() {
+        use springai::{Unit, UnitDef};
+        use std::cell::Cell;
+        thread_local! {
+            static SPENDING: Cell<f32> = const { Cell::new(5.0) };
+            static PROGRESS: Cell<f32> = const { Cell::new(0.34) };
+        }
+        unsafe extern "C" fn spending(_: i32, id: i32, _: i32) -> f32 {
+            if id == 10 { SPENDING.get() } else { 0.0 }
+        }
+        unsafe extern "C" fn progress(_: i32, id: i32) -> f32 {
+            if id == 12 { PROGRESS.get() } else { 0.0 }
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            matches!(id, 12 | 13)
+        }
+        unsafe extern "C" fn pos(_: i32, id: i32, out: *mut f32) {
+            let x = if matches!(id, 10 | 12) { 1000.0 } else { 700.0 };
+            unsafe { std::ptr::copy_nonoverlapping([x, 0.0, 1000.0].as_ptr(), out, 3) };
+        }
+        let mut ai = assignment_ai(|t| {
+            t.Unit_getPos = Some(pos);
+            t.Unit_getBuildProgress = Some(progress);
+            t.Unit_getResourceUse = Some(spending);
+            t.Unit_isBeingBuilt = Some(building);
+        });
+        ai.eco.build_ids.mex_id = 2;
+        let mut jobs = Vec::new();
+        for id in [12, 13] {
+            let target = Unit::from_id(ai.cb, id).unwrap();
+            let mut task = WorkerTask::construction(UnitDef::from_id(ai.cb, 2).unwrap(), target.pos(), 0);
+            task.as_construction_mut().unwrap().target = Some(target);
+            let task = ai.eco.tasks.insert(task);
+            ai.eco.construction_tasks.push(task);
+            jobs.push(task);
+        }
+        let [a, b] = [jobs[0], jobs[1]];
+        for (id, task) in [(10, a), (11, b)] {
+            let mut w = Worker::new(Unit::from_id(ai.cb, id).unwrap(), ai.team_id);
+            w.is_com = id == 11;
+            w.is_greedy = id == 10;
+            w.set_task(&mut ai.eco.tasks, task, 0);
+            ai.eco.workers.insert(id, w);
+        }
+        // Below the 80% finishing guard: progress alone formerly lured the
+        // commander to A, whose crowding penalty then evicted its builder.
+        for built in [0.34, 0.37, 0.6, 0.79] {
+            PROGRESS.set(built);
+            for id in [11, 10, 10, 11] {
+                ai.eco_assign_worker(id);
+                assert_eq!(ai.eco.workers[&10].task, Some(a));
+                assert_eq!(ai.eco.workers[&11].task, Some(b));
+            }
+        }
+        // Even an incoming helper explicitly assigned to A must not evict
+        // the hand already doing useful work there.
+        ai.eco.workers.get_mut(&11).unwrap().clear_task(&mut ai.eco.tasks);
+        ai.eco.workers.get_mut(&11).unwrap().set_task(&mut ai.eco.tasks, a, 0);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(a));
+        ai.eco.workers.get_mut(&11).unwrap().clear_task(&mut ai.eco.tasks);
+        ai.eco.workers.get_mut(&11).unwrap().set_task(&mut ai.eco.tasks, b, 0);
+
+        // No timer or reservation: a stalled or retreating hand immediately
+        // restores the paid-work incentive for a rescuer.
+        SPENDING.set(0.0);
+        assert_eq!(ai.eco_get_cheapest_job(11), Some(a));
+        SPENDING.set(5.0);
+        ai.eco.workers.get_mut(&10).unwrap().is_chicken = true;
+        assert_eq!(ai.eco_get_cheapest_job(11), Some(a));
+        ai.eco.workers.get_mut(&10).unwrap().is_chicken = false;
+        ai.eco.workers.get_mut(&10).unwrap().clear_task(&mut ai.eco.tasks);
+        assert_eq!(ai.eco_get_cheapest_job(11), Some(a));
+        ai.eco.workers.get_mut(&10).unwrap().set_task(&mut ai.eco.tasks, a, 0);
+        ai.op.over.priority_tasks.insert(b);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(b), "explicit priority can still preempt");
     }
 
     #[test]
