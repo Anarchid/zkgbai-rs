@@ -33,6 +33,7 @@ mod watchtower;
 mod wind;
 pub mod worker;
 mod worker_energy;
+mod worker_lanes;
 
 pub use build_ids::BuildIds;
 pub use factory::Factory;

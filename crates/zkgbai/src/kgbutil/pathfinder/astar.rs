@@ -369,19 +369,31 @@ impl AStar {
 
     /// Dijkstra costs from one origin to every cell. One field prices all
     /// builder jobs, using the same directed cell costs and jump links as A*.
+    #[cfg(test)]
     pub fn costs<F: FnMut(usize) -> f32>(
         &mut self,
         origin: usize,
         cost: &mut F,
         links: Option<(&Links, f32)>,
     ) -> Vec<f32> {
+        self.cost_routes(origin, cost, links).0
+    }
+
+    pub fn cost_routes<F: FnMut(usize) -> f32>(
+        &mut self,
+        origin: usize,
+        cost: &mut F,
+        links: Option<(&Links, f32)>,
+    ) -> (Vec<f32>, Vec<u32>) {
         self.new_query();
         self.next_search();
         let mut distances = vec![f32::INFINITY; self.cells.len()];
+        let mut parents = vec![u32::MAX; self.cells.len()];
         if origin >= distances.len() {
-            return distances;
+            return (distances, parents);
         }
         distances[origin] = 0.0;
+        parents[origin] = origin as u32;
         self.heap.push(OpenNode { total_cost: 0.0, path_length: 0.0, pos: origin as u32, index: 0 });
         while let Some(current) = self.heap.pop() {
             let pos = current.pos as usize;
@@ -404,12 +416,13 @@ impl AStar {
                 let d = current.path_length + step * cell.cost;
                 if d < distances[next] {
                     distances[next] = d;
+                    parents[next] = pos as u32;
                     self.pq_index = self.pq_index.wrapping_add(1);
                     self.heap.push(OpenNode { total_cost: d, path_length: d, pos: next as u32, index: self.pq_index });
                 }
             }
         }
-        distances
+        (distances, parents)
     }
 
     /// Reachability of every cell towards `origin`, for many targets at once.
