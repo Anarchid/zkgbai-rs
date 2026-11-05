@@ -242,7 +242,7 @@ mod tests {
             assert_eq!(*cmd, crate::defs::cmd::RAW_MOVE);
             assert_ne!(*opts & springai::opt::RIGHT_MOUSE_KEY, 0);
             assert_eq!(*opts & OPTION_SHIFT_KEY != 0, i > 0);
-            assert_eq!(params, &route[i].to_array());
+            assert_eq!(params, &[route[i].x, route[i].y, route[i].z]);
         }
     }
 
