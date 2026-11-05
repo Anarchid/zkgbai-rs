@@ -23,6 +23,14 @@ const NEVER: f32 = f32::MAX;
 /// builder elsewhere. Use actual spending, so a stalled repair cannot pin it.
 const FINISH_SECONDS: f32 = 10.0;
 const FINISH_PROGRESS: f32 = 0.80;
+/// Ordinary switches pay for time lost walking instead of working. Twenty
+/// seconds costs as much as the largest paid-construction progress bonus.
+/// This is a job-score conversion, not a forecast of metal income.
+const SWITCH_COST_PER_SECOND: f32 = 50.0;
+
+fn switch_travel_cost(route: f32, range: f32, speed: f32) -> f32 {
+    (route - range).max(0.0) / speed.max(1.0) * SWITCH_COST_PER_SECOND
+}
 
 /// Constables pair up on builds: a Constable within PAIR_RANGE already on a
 /// job makes it PAIR_BONUS cheaper to join (and is no crowd).
@@ -591,6 +599,53 @@ impl Ai {
             && !(w.is_com && self.comguard_avoids(w.id, t.get_pos()))
     }
 
+    /// Useful current work, rather than merely a retained assignment. The
+    /// caller also checks admission and danger before pricing a switch.
+    fn eco_switch_leaves_work(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if w.is_chicken || self.eco.hard_estalled || w.unit.health() <= 0.0 || w.unit.team() != self.team_id {
+            return false;
+        }
+        let friendly = |u: springai::Unit| u.team() == self.team_id || self.allies.contains(&u.team());
+        let (valid, reclaim) = match &t.kind {
+            TaskKind::Construction(c) => {
+                (c.target.is_none_or(|u| u.health() > 0.0 && u.is_being_built() && friendly(u)), false)
+            }
+            TaskKind::Repair(r) => (
+                r.target.health() > 0.0
+                    && (r.target.is_being_built() || r.target.health() < r.target.max_health())
+                    && friendly(r.target),
+                false,
+            ),
+            TaskKind::Reclaim(r) => (r.target.def().is_some() && r.target.reclaim_left() > 0.0, true),
+            TaskKind::CombatReclaim(r) => {
+                (r.target.health() > 0.0 && (r.target.is_being_built() || r.target.team() == self.team_id), true)
+            }
+        };
+        if !valid {
+            return false;
+        }
+        let range = w.unit.def().map_or(0.0, |d| d.build_distance());
+        if distance(w.get_pos(), t.get_pos()) <= range {
+            return if reclaim {
+                w.unit.current_commands().first().is_some_and(|c| c.id() == CMD_RECLAIM)
+            } else {
+                w.unit.resource_use(self.metal) > 0.0 || w.unit.resource_use(self.energy) > 0.0
+            };
+        }
+        // A lost order or a stalled approach is not productive commitment.
+        w.unit.num_current_commands() > 0
+            && w.approach.is_some_and(|a| a.task == t.id && self.frame - a.gained < APPROACH_SLOW)
+    }
+
+    fn eco_switch_is_urgent(&self, w: &Worker, t: &WorkerTask) -> bool {
+        self.op_priority(t.id)
+            || self.conquest_bonus(w.id, t.id).is_some()
+            || self.logistics_bonus(w.id, t.id).is_some()
+            || t.as_construction().is_some_and(|c| {
+                c.fac_plop || (self.fac.factories.is_empty() && self.eco.build_ids.fac_ids.contains(&c.build_type.id()))
+            })
+    }
+
     fn eco_finishing_task(&self, w: &Worker) -> Option<TaskId> {
         if let Some(task) = self.eco_build_guard_task(w.id) {
             return Some(task);
@@ -727,14 +782,38 @@ impl Ai {
         };
 
         let energy_bidders = self.eco_energy_bidders();
+        let switching = worker
+            .task
+            .and_then(|id| eco.tasks.get(id))
+            .is_some_and(|t| reaches(t) && threat_cost(t) <= 0.0 && self.eco_switch_leaves_work(worker, t));
         // One field serves every candidate. The grid cannot represent
         // every narrow passage; retain the existing reachability decision
         // and direct-distance fallback when it has no route.
         let price = |t: &WorkerTask| {
             let direct = distance(wpos, t.get_pos());
             let routed = worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct);
-            self.eco_cost_of_job_at_distance(worker, wpos, t, routed)
-                + self.eco_energy_opportunity(worker, t, &energy_bidders)
+            let base = self.eco_cost_of_job_at_distance(worker, wpos, t, routed);
+            if base >= NEVER {
+                return base;
+            }
+            let switching_cost = if switching && worker.task != Some(t.id) && !self.eco_switch_is_urgent(worker, t) {
+                // Use actual build reach, without the admission slack. The
+                // route field includes terrain detours and falls back to
+                // straight distance when its coarse grid has no route.
+                let reach = def.map_or(0.0, |d| d.build_distance());
+                if direct <= reach {
+                    0.0
+                } else {
+                    switch_travel_cost(
+                        self.eco_worker_route(worker, t.get_pos()),
+                        reach,
+                        def.map_or(1.0, |d| d.speed()),
+                    )
+                }
+            } else {
+                0.0
+            };
+            base + self.eco_energy_opportunity(worker, t, &energy_bidders) + switching_cost
         };
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
@@ -743,14 +822,6 @@ impl Ai {
             task = Some(t.id);
             cost = price(t) - stranded(t);
             cost += threat_cost(t);
-            if !eco.hard_estalled
-                && threat_cost(t) <= 0.0
-                && worker.approach.is_some_and(|a| a.task == t.id && self.frame - a.gained < APPROACH_SLOW)
-                && distance(wpos, t.get_pos()) > range
-            {
-                // Six seconds of travel in the usual distance/4 currency.
-                cost -= def.map_or(0.0, |d| d.speed()) * 6.0 / 4.0;
-            }
         }
 
         let mut consider = |ids: &[TaskId], with_threat: bool, skip: &dyn Fn(&WorkerTask) -> bool| {
@@ -1624,6 +1695,9 @@ pub(super) mod tests {
         unsafe extern "C" fn queued(_: i32, _: i32) -> i32 {
             QUEUED.get()
         }
+        unsafe extern "C" fn spending(_: i32, _: i32, _: i32) -> f32 {
+            0.0
+        }
         unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, _: *mut c_void) -> i32 {
             if topic == ffi::CommandTopic::COMMAND_UNIT_BUILD as i32 {
                 BUILDS.set(BUILDS.get() + 1);
@@ -1636,6 +1710,7 @@ pub(super) mod tests {
             t.Unit_getHealth = Some(scalar);
             t.Unit_getWeapons = Some(zero);
             t.Unit_getCurrentCommands = Some(queued);
+            t.Unit_getResourceUse = Some(spending);
             t.Unit_getRulesParamFloat = Some(rules);
             t.UnitDef_getWeaponMounts = Some(zero);
             t.UnitDef_getBuildSpeed = Some(scalar);
@@ -1803,6 +1878,123 @@ pub(super) mod tests {
             t.Engine_handleCommand = Some(command);
             customize(t);
         })
+    }
+
+    #[test]
+    fn ordinary_switches_pay_for_travel_but_idle_and_urgent_work_do_not() {
+        use springai::Unit;
+        use std::cell::Cell;
+        thread_local! {
+            static SPENDING: Cell<f32> = const { Cell::new(5.0) };
+            static SPEED: Cell<f32> = const { Cell::new(100.0) };
+            static NEXT_X: Cell<f32> = const { Cell::new(1600.0) };
+            static NEXT_PROGRESS: Cell<f32> = const { Cell::new(0.70) };
+            static CURRENT_BUILT: Cell<bool> = const { Cell::new(false) };
+            static QUEUED: Cell<i32> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn spending(_: i32, _: i32, _: i32) -> f32 {
+            SPENDING.get()
+        }
+        unsafe extern "C" fn speed(_: i32, _: i32) -> f32 {
+            SPEED.get()
+        }
+        unsafe extern "C" fn reach(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn queued(_: i32, _: i32) -> i32 {
+            QUEUED.get()
+        }
+        unsafe extern "C" fn progress(_: i32, id: i32) -> f32 {
+            if id == 13 { NEXT_PROGRESS.get() } else { 0.2 }
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            id == 13 || (id == 12 && !CURRENT_BUILT.get())
+        }
+        unsafe extern "C" fn pos(_: i32, id: i32, out: *mut f32) {
+            let x = if id == 13 { NEXT_X.get() } else { 1000.0 };
+            unsafe { std::ptr::copy_nonoverlapping([x, 0.0, 1000.0].as_ptr(), out, 3) };
+        }
+        let mut ai = assignment_ai(|t| {
+            t.Unit_getPos = Some(pos);
+            t.Unit_getBuildProgress = Some(progress);
+            t.Unit_getResourceUse = Some(spending);
+            t.Unit_isBeingBuilt = Some(building);
+            t.UnitDef_getSpeed = Some(speed);
+            t.UnitDef_getBuildDistance = Some(reach);
+            t.Unit_getCurrentCommands = Some(queued);
+        });
+        ai.eco.build_ids.mex_id = 2;
+        let mut jobs = Vec::new();
+        for (id, def) in [(12, 1), (13, 2)] {
+            let target = Unit::from_id(ai.cb, id).unwrap();
+            let mut task = WorkerTask::construction(UnitDef::from_id(ai.cb, def).unwrap(), target.pos(), 0);
+            task.as_construction_mut().unwrap().target = Some(target);
+            let task = ai.eco.tasks.insert(task);
+            ai.eco.construction_tasks.push(task);
+            jobs.push(task);
+        }
+        let [current, next] = [jobs[0], jobs[1]];
+        let mut worker = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        worker.set_task(&mut ai.eco.tasks, current, 0);
+        ai.eco.workers.insert(10, worker);
+        let worker = &ai.eco.workers[&10];
+        assert!(
+            ai.eco_cost_of_job(worker, worker.get_pos(), ai.eco.tasks.get(next).unwrap())
+                < ai.eco_cost_of_job(worker, worker.get_pos(), ai.eco.tasks.get(current).unwrap()),
+            "without switching cost, the new job would win"
+        );
+        assert_eq!(
+            ai.eco_get_cheapest_job(10),
+            Some(current),
+            "keep working instead of a modest improvement five seconds away"
+        );
+        // Lost working time depends on speed, not just distance.
+        SPEED.set(300.0);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
+        SPEED.set(100.0);
+        NEXT_PROGRESS.set(0.99);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "a sufficiently better ordinary job can still win");
+        NEXT_PROGRESS.set(0.70);
+        NEXT_X.set(1080.0);
+        ai.eco.tasks.get_mut(next).unwrap().position.x = NEXT_X.get();
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "no walking cost inside actual build range");
+        NEXT_X.set(1600.0);
+        ai.eco.tasks.get_mut(next).unwrap().position.x = NEXT_X.get();
+        SPENDING.set(0.0);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "stalled worker can change jobs freely");
+        SPENDING.set(5.0);
+        ai.op.over.priority_tasks.insert(next);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
+        ai.op.over.priority_tasks.clear();
+        ai.eco.hard_estalled = true;
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
+        ai.eco.hard_estalled = false;
+        ai.eco.workers.get_mut(&10).unwrap().shunned.push((Vec3::xz(1000.0, 1000.0), 1000));
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "invalid current admission must not penalize leaving");
+        ai.eco.workers.get_mut(&10).unwrap().shunned.clear();
+        CURRENT_BUILT.set(true);
+        assert!(!ai.eco_switch_leaves_work(&ai.eco.workers[&10], ai.eco.tasks.get(current).unwrap()));
+        CURRENT_BUILT.set(false);
+        ai.eco.workers.get_mut(&10).unwrap().is_chicken = true;
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
+        ai.eco.workers.get_mut(&10).unwrap().is_chicken = false;
+        ai.eco.workers.get_mut(&10).unwrap().clear_task(&mut ai.eco.tasks);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next), "idle choice is unchanged");
+
+        // Protect an approach that is making headway, but release a stale
+        // approach or a disappeared engine order immediately.
+        NEXT_PROGRESS.set(0.40);
+        ai.eco.tasks.get_mut(current).unwrap().position.x = 1400.0;
+        let w = ai.eco.workers.get_mut(&10).unwrap();
+        w.set_task(&mut ai.eco.tasks, current, 0);
+        w.approach = Some(Approach { task: current, cmd: -1, sent: 0, best: 400.0, gained: 0, anchor: w.get_pos() });
+        QUEUED.set(1);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(current));
+        ai.frame = APPROACH_SLOW;
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
+        ai.frame = 0;
+        QUEUED.set(0);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
     }
 
     #[test]

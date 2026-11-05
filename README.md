@@ -197,6 +197,15 @@ current crew or a rescuer for idle work, not a replacement for a constructor alr
 build range. An arriving helper does not crowd that working constructor off its mex. Stalled or
 retreating workers release this preference immediately; urgent jobs can still win the normal bid.
 
+Ordinary worker job switches pay 50 job-score points per estimated second of walking to the
+new site, using the terrain route, movement speed and actual build range. This replaces the
+small fixed preference for an existing approach. The cost applies only while the old job is
+valid, safe and making progress: spending on a build or repair, reclaiming in range, or walking
+with recent headway. Idle workers and stalled approaches choose freely. Explicit priorities,
+commander missions, forecast project crews, replacement factories and hard energy shortages
+bypass the charge. The same price is used when choosing between mex expansion lanes; nearby
+work within build range costs nothing to switch to, and sufficiently valuable work can still win.
+
 An on-site builder actively spending on construction at least 80% complete keeps the job when
 at most ten seconds remain at its current spending/build rate. Ordinary job bidding and new
 project crews both respect this final work; explicit priorities, danger, and energy emergencies
