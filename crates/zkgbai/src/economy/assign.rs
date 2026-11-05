@@ -383,7 +383,10 @@ impl Ai {
         let build_dist = unit.def().map_or(0.0, |d| d.build_distance());
         let task_pos = self.eco.task_pos(task_id);
 
-        if wtask == Some(task_id) && distance(wpos, task_pos) <= build_dist * 1.5 {
+        if wtask == Some(task_id) && distance(wpos, task_pos) <= build_dist * 1.5 && unit.num_current_commands() > 0 {
+            // A nearby worker can still have lost/rejected its build order.
+            // Alphabet Siege's opening commander stood idle beside its
+            // planned factory for the whole game after its order disappeared.
             // (In range is headway: see `eco_approach_holds`.)
             if let Some(a) = self.eco.workers.get_mut(&wid).and_then(|w| w.approach.as_mut()) {
                 (a.best, a.gained, a.anchor) = (distance(wpos, task_pos), frame, wpos);
@@ -1565,6 +1568,80 @@ impl Ai {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn nearby_plop_retries_when_engine_drops_its_order() {
+        use springai::{Unit, ffi};
+        use std::ffi::{c_char, c_void};
+        thread_local! {
+            static QUEUED: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+            static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn params(_: i32, _: i32, _: *mut *const c_char, _: *mut *const c_char) -> i32 {
+            0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const c_char, default: f32) -> f32 {
+            default
+        }
+        unsafe extern "C" fn queued(_: i32, _: i32) -> i32 {
+            QUEUED.get()
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, _: *mut c_void) -> i32 {
+            if topic == ffi::CommandTopic::COMMAND_UNIT_BUILD as i32 {
+                BUILDS.set(BUILDS.get() + 1);
+                QUEUED.set(1);
+            }
+            0
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(scalar);
+            t.Unit_getWeapons = Some(zero);
+            t.Unit_getCurrentCommands = Some(queued);
+            t.Unit_getRulesParamFloat = Some(rules);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(scalar);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_isAbleToAttack = Some(no);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_getMaxWaterDepth = Some(scalar);
+            t.Engine_handleCommand = Some(command);
+        });
+        let mut w = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        w.is_com = true;
+        w.assigned_plop = true;
+        let mut task =
+            WorkerTask::construction_plop(UnitDef::from_id(ai.cb, 1).unwrap(), Vec3::xz(1090.0, 0.0), 1, true);
+        task.as_construction_mut().unwrap().assigned_plop = w.id;
+        let id = ai.eco.tasks.insert(task);
+        ai.eco.construction_tasks.push(id);
+        ai.eco.factory_tasks.push(id);
+        ai.eco.workers.insert(w.id, w);
+        ai.eco_assign_worker(10);
+        assert_eq!(BUILDS.get(), 1);
+        ai.eco_assign_worker(10);
+        assert_eq!(BUILDS.get(), 1, "leave a queued build alone");
+        // Alphabet Siege: the factory job remains, but the commander is
+        // idle next to its site. Proximity alone must not suppress retries.
+        QUEUED.set(0);
+        ai.eco_assign_worker(10);
+        assert_eq!(BUILDS.get(), 2, "retry the missing build order");
+        assert_eq!(ai.eco.workers[&10].task, Some(id));
+        assert_eq!(ai.eco.tasks.get(id).unwrap().assigned_workers, vec![10]);
+    }
 
     #[test]
     fn energy_stall_releases_repairs_and_recovery_allows_them_again() {
