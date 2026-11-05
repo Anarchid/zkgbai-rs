@@ -213,8 +213,7 @@ impl Ai {
             || (self.eco.hard_estalled && self.eco_energy_job(t))
             || t.as_construction().is_some_and(|c| {
                 c.fac_plop
-                    || (c.fac_def
-                        && self.eco_get_nearest_fac(t.get_pos()).is_some_and(|f| f.unit.health() < f.unit.max_health()))
+                    || self.eco_factory_defense_hand(w, t)
                     || (self.fac.factories.is_empty() && self.eco.build_ids.fac_ids.contains(&c.build_type.id()))
             })
         {
