@@ -164,6 +164,7 @@ impl Ai {
             .filter_map(|m| {
                 let u = m.f.unit;
                 (u.team() == self.team_id
+                    && self.qrf_can_borrow_stakeout(u.id())
                     && !m.f.is_dead()
                     && !u.is_being_built()
                     && !u.is_paralyzed()
@@ -195,9 +196,9 @@ impl Ai {
             units.push(u);
             estimates.push(json!({"unit": u.id(), "travel_s": travel, "kill_s": kill}));
         }
-        let Some(team) = self.qrf_draft_units(&units) else { return };
+        let Some(team) = self.qrf_borrow_stakeouts(&units) else { return };
         let ids: Vec<_> = units.iter().map(|u| u.id()).filter(|id| self.qrf.members.contains_key(id)).collect();
-        self.qrf_order_team(&ids, target, true);
+        springai::reserved::as_module("qrf.rescue", || self.qrf_order_team(&ids, target, true));
         self.op_emit(
             "stakeout",
             json!({
