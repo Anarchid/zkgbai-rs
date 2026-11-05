@@ -27,6 +27,9 @@ pub mod field;
 pub mod floor;
 pub mod intent;
 pub mod live;
+mod loans;
+#[cfg(test)]
+pub(crate) use loans::tests::loan_test_ai;
 pub mod mark;
 pub mod ops;
 mod predict;
@@ -169,6 +172,8 @@ pub struct Qrf {
     /// Members per team.
     pub team_size: usize,
     pub members: BTreeMap<i32, Member>,
+    /// Temporary stakeout command authority; their role and assignment stay intact.
+    stakeout_loans: BTreeMap<i32, reserved::CommandLease>,
     pub tracks: BTreeMap<i32, Track>,
     pub groups: Vec<RaidGroup>,
     /// Raids too strong for the force to take on: no targets, but a loss
@@ -290,6 +295,9 @@ impl Ai {
     }
 
     pub fn qrf_remove_unit(&mut self, id: i32) {
+        if let Some(lease) = self.qrf.stakeout_loans.remove(&id) {
+            lease.release();
+        }
         self.qrf.members.remove(&id);
     }
 
@@ -301,6 +309,7 @@ impl Ai {
         if frame % PERIOD != self.offset % PERIOD {
             return;
         }
+        self.qrf_prune_stakeout_loans();
         if !self.qrf.on {
             if !self.qrf_live_wanted(frame) {
                 return;
@@ -573,6 +582,9 @@ impl Ai {
     /// ours coming (only as far as its rim), and only moving while in one
     /// (see `blasts`).
     pub fn qrf_order(&mut self, id: i32, to: Vec3, fight: bool) {
+        if self.qrf.stakeout_loans.get(&id).is_some_and(|lease| !lease.active()) {
+            return;
+        }
         let frame = self.frame;
         let Some(m) = self.qrf.members.get_mut(&id) else { return };
         let pos = m.unit.pos();
@@ -613,6 +625,7 @@ impl Ai {
 
     /// Order a whole team.
     pub fn qrf_order_team(&mut self, ids: &[i32], to: Vec3, fight: bool) {
+        self.qrf_prune_stakeout_loans();
         if self.raidcommit_on() {
             // Specialized submerged/cloaked/air defenders keep their controller.
             let special: Vec<_> = ids

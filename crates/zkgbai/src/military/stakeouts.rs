@@ -703,11 +703,17 @@ impl Ai {
             // its strike.
             .filter(|(_, m)| m.strike.is_none())
             .filter(|(_, m)| !self.retreat_handler.is_retreating(m.f.id))
+            .filter(|(id, _)| !self.qrf.members.contains_key(id))
             .map(|(&id, m)| (id, m.f.unit))
             .collect()
     }
 
-    /// A picket a gang borrowed comes back: it forgets what it was
+    /// Existing strike commitments finish before emergency borrowing.
+    pub(crate) fn stakeouts_qrf_available(&self, id: i32) -> bool {
+        self.stakeouts.members.get(&id).is_some_and(|m| m.strike.is_none())
+    }
+
+    /// A picket a gang or the QRF borrowed comes back: it forgets what it was
     /// standing for and is ticked at once, so it walks back to its duty.
     pub(crate) fn stakeouts_release(&mut self, id: i32) {
         if let Some(m) = self.stakeouts.members.get_mut(&id) {
@@ -963,8 +969,8 @@ impl Ai {
             self.stakeouts_remove_unit(m.f.unit, None);
             return;
         }
-        // Borrowed by a raider gang (see `coalesce`).
-        if self.coalesce_owns(id) {
+        // Temporary controllers keep the picket's assignment for its return.
+        if self.coalesce_owns(id) || self.qrf_claims(id) {
             return;
         }
         let (unit, p, sight, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.duty);
@@ -993,7 +999,7 @@ impl Ai {
                 && self.qrf.on
                 && self.qrf.live
                 && !self.dev_off("qrf")
-                && let Some(team) = self.qrf_draft_units(&[unit])
+                && let Some(team) = self.qrf_borrow_stakeouts(&[unit])
             {
                 self.op_emit("stakeout", json!({"event": "qrf", "t": frame / 30, "unit": id, "team": team}));
                 return;
@@ -1424,7 +1430,9 @@ impl Ai {
             .filter(|(_, m)| m.armed && !m.f.is_dead())
             .filter(|(_, m)| m.strike.is_none_or(|s| s.target == eid))
             .filter(|(_, m)| distance(m.f.get_pos(), epos) <= STRIKE_REACH)
-            .filter(|(id, m)| !self.coalesce_owns(**id) && !self.retreat_is_retreating(m.f.unit))
+            .filter(|(id, m)| {
+                !self.coalesce_owns(**id) && !self.qrf_claims(**id) && !self.retreat_is_retreating(m.f.unit)
+            })
             .map(|(&id, m)| (id, m.f.unit))
             .collect();
         let units: Vec<Unit> = party.iter().map(|&(_, u)| u).collect();
@@ -1773,6 +1781,42 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qrf_loan_preserves_post_and_resumes_it_on_return() {
+        let mut ai = crate::military::qrf::loan_test_ai();
+        let unit = Unit::from_id(ai.cb, 1).unwrap();
+        ai.stakeouts.posts.push(Post {
+            choke: 12,
+            pos: Vec3::xz(3000.0, 1800.0),
+            covers: 3,
+            width: 300.0,
+            manned: Some(1),
+        });
+        let m = ai.stakeouts.members.get_mut(&1).unwrap();
+        m.duty = Duty::Post;
+        m.post = Some(0);
+        m.standing = true;
+        m.armed = true;
+        m.last_tick = 4500;
+        assert!(ai.stakeouts_borrowable(ai.frame).iter().any(|(id, _)| *id == 1));
+        let team = ai.qrf_borrow_stakeouts(&[unit]).unwrap();
+        ai.stakeouts_tick(1, 4590);
+        let m = &ai.stakeouts.members[&1];
+        assert_eq!(m.last_tick, 4500, "borrowed pickets must not tick");
+        assert!(m.standing);
+        assert_eq!(m.post, Some(0));
+        assert!(!ai.stakeouts_borrowable(ai.frame).iter().any(|(id, _)| *id == 1));
+        ai.qrf_release_team(team, "over budget");
+        let m = &ai.stakeouts.members[&1];
+        assert_eq!(m.post, Some(0));
+        assert_eq!(m.duty.name(), "post");
+        assert!(!m.standing);
+        assert_eq!(m.last_tick, 0);
+        assert_eq!(ai.stakeouts.posts[0].manned, Some(1));
+        assert!(ai.stakeouts.loaned.is_empty(), "retained membership must not be counted twice");
+        springai::reserved::clear(ai.cb);
+    }
 
     #[test]
     fn retired_scouts_release_all_kodachis_to_their_controller() {
