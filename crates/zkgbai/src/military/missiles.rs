@@ -37,6 +37,7 @@
 mod flight;
 mod seismic;
 mod shieldball;
+mod site;
 #[cfg(test)]
 mod tests;
 
@@ -214,6 +215,7 @@ const REPORT_FRAMES: i32 = 30 * 300;
 
 #[derive(Default)]
 pub struct Missiles {
+    pub(crate) site: site::Planner,
     silo: Option<Unit>,
     /// Missiles launched (by any silo of ours), and the Infernos' fires
     /// with what died in them, for banter.
@@ -655,64 +657,6 @@ impl Ai {
             }
         }
         chosen
-    }
-
-    /// Where a silo would do most: a safe place on our ground within reach
-    /// of enough to pay for it and its missiles (three Fusions, one
-    /// Singularity or anti-nuke; an anti-nuke a Shockley would stun counts
-    /// for what it keeps from our nukes), or covering most static value at
-    /// sufficient density. Held-territory coverage supplies the same siege
-    /// trigger without needing the enemy's buildings located first.
-    /// Returns the actual buildable site and its value.
-    pub fn missiles_site(&self) -> Option<SiloSite> {
-        let eos = self.missiles_eos_targets();
-        let stun = self.missiles_stun_targets();
-        let allies = self.missiles_allied_silos(None);
-        let statics = self.missiles_static_value();
-        let territory: Vec<_> = self.graph.enemy_territory_cells().collect();
-        if eos.is_empty() && stun.is_empty() && statics.is_empty() && territory.is_empty() {
-            return None;
-        }
-        let enemy = self.graph.get_enemy_center();
-        let mut sites: Vec<Vec3> = self.graph.get_owned_spots().iter().map(|m| m.get_pos()).collect();
-        sites.push(self.graph.get_ally_center());
-        // And ahead of our metal, towards the enemy.
-        let ahead: Vec<Vec3> =
-            (sites.iter()).flat_map(|&p| SITE_STEPS.iter().map(move |&d| get_directional_point(p, enemy, d))).collect();
-        sites.extend(ahead);
-        let silo = self.defs.get(SILO)?;
-        // Resolve the engine's footprint/grid adjustment BEFORE scoring range
-        // and safety. The economy must queue this exact position unchanged.
-        let sites = sites.into_iter().map(|p| self.cb.map().find_closest_build_site(silo, p, 600.0, 3, 0));
-        let sites = sites.filter(|&p| {
-            p.x >= 0.0
-                && !self.missiles_shuns_site(p)
-                && self.eco_build_check(silo, p, 0)
-                && self.graph.is_ally_territory(p)
-                && (self.war.get_threat(p) <= 0.0
-                    || (self.war.get_effective_threat(p) <= 0.0 && self.war.get_friendly_porc_threat(p) >= HELD_POWER))
-        });
-        let mut targets: Vec<_> = eos.iter().map(|t| (t.pos, t.value - MISSILE_COST * t.needed as f32)).collect();
-        targets.extend(stun.iter().filter(|a| !eos.iter().any(|t| t.id == a.0)).map(|a| (a.1, a.2 - MISSILE_COST)));
-        let eos_flight = flight::Flight::for_kind(self, EOS);
-        let shock_flight = flight::Flight::for_kind(self, SHOCKLEY);
-        let ground = self.cb.map();
-        choose_silo_site_checked(
-            &allies,
-            sites,
-            &targets,
-            &statics,
-            &territory,
-            self.missiles_siege_readiness(),
-            enemy,
-            |from, mut at| {
-                let flight = if stun.iter().any(|a| distance(a.1, at) < 1.0) { shock_flight } else { eos_flight };
-                at.y = ground.elevation_at(at.x, at.z);
-                flight
-                    .and_then(|f| f.predict(from, at, |x, z| ground.elevation_at(x, z)))
-                    .is_some_and(|p| p.blocked.is_none())
-            },
-        )
     }
 
     /// Remembered live statics plus spatially inferred mexes. A shadowed
@@ -1180,7 +1124,7 @@ fn choose_silo_site_checked(
     territory: &[Vec3],
     siege: SiegeReadiness,
     enemy: Vec3,
-    reaches: impl Fn(Vec3, Vec3) -> bool,
+    mut reaches: impl FnMut(Vec3, Vec3) -> bool,
 ) -> Option<SiloSite> {
     // Score only work not already claimed by an ally, for every trigger.
     // The coverage share stays a share of all the enemy's static value,

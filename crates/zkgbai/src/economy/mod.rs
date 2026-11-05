@@ -809,6 +809,9 @@ impl Ai {
         self.eco_dig_ditches(frame);
         self.eco_plan_grid(frame);
         self.eco_update_requisition(frame);
+        if self.missiles.site.active() {
+            self.guard("eco.siloPlanner", |ai| ai.eco_plan_missile_silo());
+        }
         self.eco_update_new_factory(frame);
         self.eco_conquest_update(frame);
 

@@ -1,5 +1,55 @@
 # Density and simulation-thread stalls
 
+## Tactical silo placement, 2026-11-05
+
+Silo placement now resolves at most two candidate build sites per frame and
+scores missile trajectories on one background worker. It snapshots the live
+corner heightmap and uses Recoil's triangular interpolation. Repeated trajectories
+within a site share a cache; duplicate final sites are scored once. Only the
+winning site's cache is retained for result validation. Worker jobs contain no
+engine callbacks, and the worker joins before the AI library unloads.
+
+Before construction, the simulation thread checks the site's current
+buildability, ownership, threats and loss history, verifies unchanged terrain
+and an age of at most 30 game seconds, and rescores current demand using cached
+trajectories. New positions or missile kinds without a cached trajectory cannot
+contribute value. Disabled planning, an existing silo, or lost affordability
+cancels the search. Unsuccessful searches wait one game minute before retrying;
+the existing cooldown after a successfully queued silo is unchanged.
+
+`eco.siloPlanner` profiles the simulation-thread work. `missiles: site worker`
+logs background duration, prediction/cache counts and result age separately.
+The synthetic diagnostic below scores 88 sites against 8,200 territory cells:
+
+```sh
+mountpoint /run/media/annarhiid/disk2
+export CARGO_TARGET_DIR=/home/annarhiid/disk2/cargo-target/zkgbai-rs/silo-planner
+cargo test --offline -p zkgbai --lib \
+  military::missiles::site::tests::late_game_worker_and_validation_cost \
+  -- --ignored --nocapture
+```
+
+On this workstation with the optimized development test profile, background
+computation took 4,675 ms and cached validation took 0.407 ms. This is a
+synthetic flat-terrain workload, not a replay or an end-to-end engine frame-time
+measurement; build-site resolution and snapshot extraction are not included.
+
+Validation: 832 workspace library tests passed; the final missile regression
+run passed 35 tests. The release library completed an 18,000-frame headless
+Comet Catcher Remake 1.8 smoke with `missile_silo_density=0` and no AI panics
+or arena-reported errors. Its two economy update maxima were 8.44 and 72.28 ms;
+two background searches took 151 and 301 ms. Neither selected a silo, so this
+run exercises dispatch/completion, not successful construction. Successful
+selection, changed terrain, changed demand and allied coverage have unit tests.
+A preceding integration run reached 50,493 frames before its wall-clock limit,
+with no AI panics; late searches took 1,600 and 1,499 ms on the worker while
+the simulation advanced 154 and 114 frames respectively. This is not a
+controlled before/after benchmark or a claim that all late-game stalls are gone.
+Strict Clippy remains blocked by unrelated warnings in `economy/assign.rs`,
+`military/limpets.rs`, `military/raidcommit.rs` and `military/strikes/captors.rs`.
+
+## Density workers, 2026-10-29
+
 This pass caches the shared AA fallback within each handler batch, moves live
 Mark QRF travel fields to a worker, and moves precision shadow casting to a
 worker. Assignment, orders, callbacks, and immediate threat checks stay on the
