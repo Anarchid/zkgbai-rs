@@ -706,3 +706,47 @@ without the game-age bonus, so geothermal and shared-energy economies need not b
 extra reactors first. Energy starvation and merged-team strider prerequisites still
 apply. A profitable uncovered nuke target retains its separate early trigger. These gates
 live in `crates/zkgbai/src/economy/planning.rs` and `crates/zkgbai/src/military/nukes.rs`.
+
+Fortified reclaim Caretakers (WIP observation)
+--------------------------------------------
+
+`reclaimpost` is default-on; `disable=reclaimpost` prevents new earthwork and
+cancels its current constructor project. Completed posts stay useful. They
+reclaim visible wrecks first, then repair damaged friendly units or assist
+unfinished construction in reach; new wrecks take priority again. Operator
+reservations take precedence. Caretakers are never automatically self-destructed
+when their assist target is missing, lost or finished, or when they are gifted.
+
+The detector surveys at most 128 grid sites every ten seconds and requires
+seven consecutive qualifying observations at the same site and half-disc
+orientation. Admission needs at least 360 visible remaining metal, 25% under
+known enemy nominal range, two completed direct-damage turrets with 100 nominal
+DPS, terrain-clear range coverage at 22 of 24 approach samples, no enemy reach
+within an 80-elmo margin, and no nearby unidentified contact. These conservative
+thresholds are starting assumptions, not validated optimal cutoffs. Threat
+knowledge is the bot's own; unobserved artillery remains a risk.
+
+A nearby non-commander constructor must have no higher-priority assignment,
+remain outside the earthwork, and reach the eventual building in three
+dimensions. Deep ground gets a flat pit 112 elmos below the lowest footprint
+sample; shallow positive ground gets a surrounding wall 56 elmos above its
+highest footprint sample. These use the Caretaker's 56-elmo collision height.
+Water sites request a Conch from an existing Amphibious factory rather than
+placing a Caretaker. No new Amphibious factory is bought by this policy.
+
+Only one earthwork/construction job runs at a time, with at most two retained
+posts per bot. Earthwork quotes are read from the gadget and capped at the
+lesser of 400 metal or half the wreck stock remaining after buying the
+Caretaker. Actual progress, stock, danger and energy stalls are checked during
+construction. Interrupted, overpriced or unsafe jobs release the constructor
+and wait ten minutes before retrying that site. Partially altered ground is
+not undone. Terraform spending and unit yields are sampled estimates, not
+an exact event-level economic ledger.
+
+`reclaim_post` journal records include bounded survey denominators, rejection
+reasons, candidate coordinates and shelter geometry, half-disc stock, coverage,
+known threat, start/build/abort/ready events, observed terraform spending and
+quote, and surviving-post yield/repair activity. These are observational games;
+they do not estimate a causal advantage over the unplayed alternative.
+`test=reclaimpost` is a mechanics fixture mode that runs this policy without
+ordinary economic/military assignments; it is not used in normal games.

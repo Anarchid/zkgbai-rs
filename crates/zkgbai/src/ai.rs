@@ -685,6 +685,10 @@ impl Ai {
 
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
+        if self.test.as_deref() == Some("reclaimpost") {
+            self.guard("eco.reclaimPostFixture", |ai| ai.reclaim_post_fixture(frame));
+            return;
+        }
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),

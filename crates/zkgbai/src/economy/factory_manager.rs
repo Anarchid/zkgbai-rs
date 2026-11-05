@@ -1286,7 +1286,7 @@ impl Ai {
         let tf = self.graph.territory_fraction;
         let income = self.phase_income();
 
-        if self.fac_need_workers(fac) {
+        if self.reclaim_wants_conch() || self.fac_need_workers(fac) {
             return "amphcon";
         }
 

@@ -27,6 +27,7 @@ mod porc_policy;
 pub mod porcmix;
 mod raid_mex;
 mod rebuild;
+mod reclaim_post;
 pub mod rush;
 mod safespot;
 mod silo;
@@ -85,6 +86,7 @@ pub(super) const PAD_NANO_SITE: f32 = 200.0;
 pub(super) const PAD_NANO_REACH: f32 = 160.0;
 
 pub struct EconomyManager {
+    reclaim_posts: reclaim_post::ReclaimPosts,
     cb: Callback,
     /// Scouting Sparrows, including radars currently morphing into them.
     pub sparrows: Vec<Unit>,
@@ -366,6 +368,7 @@ impl EconomyManager {
         let (w, h) = (map.width() as f32, map.height() as f32);
         let map_diag = (w * w + h * h).sqrt();
         EconomyManager {
+            reclaim_posts: reclaim_post::ReclaimPosts::default(),
             cb,
             sparrows: Vec::new(),
             sparrow_radar_task: None,
@@ -886,6 +889,7 @@ impl Ai {
     }
 
     pub fn eco_update(&mut self, frame: i32) {
+        self.eco_reclaim_post_update(frame);
         if frame % 300 == self.offset % 300 {
             self.eco_check_nanos();
         }
