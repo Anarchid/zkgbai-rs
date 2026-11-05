@@ -371,6 +371,16 @@ what it costs. A plan that passes forms a gang; its members skip their own
 controllers and do not retreat to repair until the gang breaks up (prize dead,
 no armed enemy left, the forecast turned, or its time up).
 
+`finishmargin` (on by default, `disable=finishmargin`) adds a finishing reserve
+when admitting a new coalesce or raidcommit/QRF attack on an armed mobile prize
+(heavy or commander). The forecast increases the enemy's current and maximum HP by 5%, preserving
+its health fraction and metal value. The reserve shrinks with remaining HP, so
+an already wounded target stays easier to finish.
+This is a conservative tuning margin, not a retreat-at-health assumption. Existing
+gangs recheck actual HP. The judgement journal records `finish_margin` and each
+adjusted enemy's actual/forecast HP in `finish_hp`. It uses the ordinary single
+forecast, so there is no additional rollout.
+
 `stayveto` (off by default, `enable=stayveto`) keeps units about to run home for
 repairs in their fight when the predictor says staying wins far more than it
 risks. It is off since the 2026-11-01 batteries: it lost its mirror 3-15 and

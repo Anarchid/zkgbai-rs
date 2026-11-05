@@ -46,6 +46,7 @@
 //! seen dying, whether the prize died), `cost` per minute.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use springai::{Unit, Vec3};
@@ -60,6 +61,10 @@ use crate::util::distance;
 
 pub const FEATURE: &str = "coalesce";
 pub const SHADOW: &str = "coalesceshadow";
+pub const FINISH_MARGIN: &str = "finishmargin";
+/// Admission-only reserve against a mobile prize surviving on a sliver of HP.
+/// A tuning value, not an enemy retreat policy or a fitted damage coefficient.
+const FINISH_HP_SHARE: f32 = 0.05;
 
 /// Frames between scans (2 Hz).
 const PERIOD: i32 = 15;
@@ -239,6 +244,45 @@ fn commit_passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool) -> bool {
     }
     let (loss_share, return_ratio) = if holding { (0.75, 1.0) } else { (0.6, 1.2) };
     t.kill_value > 1.0 && t.own_loss <= loss_share * t.own_cost && t.kill_value >= return_ratio * t.own_loss
+}
+
+/// Stress new commitments with one extra twentieth of each armed mobile
+/// prize's remaining health. Preserve its health fraction and metal value.
+/// Existing gangs recheck real HP, so the reserve cannot make them abandon
+/// the last few hit points after paying the approach cost. Copy-on-write
+/// keeps cached/live specs untouched; this replaces, rather than doubles,
+/// the ordinary forecast.
+fn finishing_forecast(local: &Local, holding: bool, enabled: bool) -> Option<Local> {
+    if holding || !enabled {
+        return None;
+    }
+    let mut padded: Option<Local> = None;
+    for (i, enemy) in local.theirs.iter().enumerate() {
+        let index = their_index(local, i);
+        let Some(u) = local.snap.units.get(index) else { continue };
+        if !enemy.prize
+            || !enemy.armed
+            || !u.spec.mobile
+            || u.spec.air
+            || !u.hp.is_finite()
+            || u.hp <= 0.0
+            || !u.spec.health.is_finite()
+            || u.spec.health <= 0.0
+        {
+            continue;
+        }
+        let factor = 1.0 + FINISH_HP_SHARE;
+        let copy = padded.get_or_insert_with(|| Local {
+            snap: local.snap.clone(),
+            ours: local.ours.clone(),
+            theirs: local.theirs.clone(),
+            unknown: local.unknown,
+        });
+        let target = &mut copy.snap.units[index];
+        target.hp *= factor;
+        Arc::make_mut(&mut target.spec).health *= factor;
+    }
+    padded
 }
 
 /// A successful fight releases its units to press onward, not to retreat.
@@ -427,7 +471,8 @@ impl Ai {
                 self.op_emit(
                     "raidcommit",
                     json!({"event":"defense_commit",
-                    "units":units.iter().map(|u|u.id()).collect::<Vec<_>>(), "tally":tally_json(&v.tally)}),
+                    "units":units.iter().map(|u|u.id()).collect::<Vec<_>>(), "tally":tally_json(&v.tally),
+                    "finish_margin":v.record["finish_margin"], "finish_hp":v.record["finish_hp"]}),
                 );
                 v.focus.and_then(|id| self.war.targets.get(&id).map(|e| e.position))
             }
@@ -534,6 +579,18 @@ impl Ai {
         {
             return Judged::NoFight;
         }
+        let padded = finishing_forecast(&local, hold.is_some(), !self.dev_off(FINISH_MARGIN));
+        let forecast = padded.as_ref().unwrap_or(&local);
+        let finish_hp: Vec<Value> = local
+            .theirs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, enemy)| {
+                let index = their_index(&local, i);
+                let (actual, judged) = (local.snap.units[index].hp, forecast.snap.units[index].hp);
+                (judged > actual).then(|| json!({"id":enemy.id,"actual":actual,"forecast":judged}))
+            })
+            .collect();
         let mut best: Option<Verdict> = None;
         let mut last = None;
         for plan in plans.drain(..) {
@@ -542,11 +599,11 @@ impl Ai {
             }
             let (fates, prize_index) = match plan {
                 // Clean gangs receive Fight orders with UnitAI still active.
-                Plan::Clean => (self.local_ordered_kiting_fates(&local, budget), None),
+                Plan::Clean => (self.local_ordered_kiting_fates(forecast, budget), None),
                 Plan::Prize(id) => {
                     let Some(i) = local.theirs.iter().position(|t| t.id == id) else { continue };
                     let mode = FateMode::Assassinate { target: their_index(&local, i) };
-                    (self.local_fates(&local, mode, budget), Some(i))
+                    (self.local_fates(forecast, mode, budget), Some(i))
                 }
             };
             let Some(fates) = fates else {
@@ -563,7 +620,9 @@ impl Ai {
             if !admitted || best.as_ref().is_some_and(|b| b.tally.net() >= t.net()) {
                 continue;
             }
-            let record = coalesce_record(&local, &fates, plan, &t, p_prize);
+            let mut record = coalesce_record(&local, &fates, plan, &t, p_prize);
+            record["finish_margin"] = json!(if padded.is_some() { FINISH_HP_SHARE } else { 0.0 });
+            record["finish_hp"] = json!(finish_hp);
             best = Some(Verdict { plan, tally: t, p_prize, focus, record });
         }
         match (best, last) {
@@ -917,6 +976,98 @@ fn coalesce_record(local: &Local, fates: &[UnitFate], plan: Plan, t: &Tally, p_p
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finishing_fixture() -> Local {
+        use crate::military::fightsim::local::{Ours, Theirs};
+        use crate::military::fightsim::{FightSnapshot, SnapUnit, UnitSpec, WeaponSpec};
+        let weapon = |name: &str, damage| WeaponSpec {
+            name: name.into(),
+            weapon_type: "BeamLaser".into(),
+            range: 500.0,
+            reload: 60.0,
+            salvo: 1,
+            damage,
+            leading: None,
+        };
+        let ours = Arc::new(UnitSpec {
+            def: "test_finisher".into(),
+            cost: 65.0,
+            health: 230.0,
+            mobile: true,
+            weapons: vec![weapon("test_finish_beam", 12.0)],
+            ..Default::default()
+        });
+        let theirs = Arc::new(UnitSpec {
+            def: "test_heavy".into(),
+            cost: 850.0,
+            health: 100.0,
+            mobile: true,
+            weapons: vec![weapon("test_heavy_beam", 1.0)],
+            ..Default::default()
+        });
+        Local {
+            snap: FightSnapshot {
+                units: vec![
+                    SnapUnit { side: 0, spec: ours, hp: 230.0, ..Default::default() },
+                    SnapUnit {
+                        side: 1,
+                        spec: theirs,
+                        hp: 8.25,
+                        x: 100.0,
+                        reloads: vec![("test_heavy_beam".into(), 1000)],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            ours: vec![Ours { id: 1, cost: 65.0 }],
+            theirs: vec![Theirs {
+                id: 2,
+                def: "test_heavy".into(),
+                cost: 850.0,
+                value: 850.0,
+                armed: true,
+                prize: true,
+                pos: Vec3::xz(100.0, 0.0),
+            }],
+            unknown: false,
+        }
+    }
+
+    #[test]
+    fn finishing_reserve_prices_a_marginal_kill_without_mutating_live_specs() {
+        use crate::military::fightsim::Model;
+        let local = finishing_fixture();
+        let cached = local.snap.units[1].spec.clone();
+        let padded = finishing_forecast(&local, false, true).unwrap();
+        assert_eq!(local.snap.units[1].hp, 8.25);
+        assert_eq!(cached.health, 100.0);
+        assert!((padded.snap.units[1].hp - 8.6625).abs() < 0.0001);
+        assert!((padded.snap.units[1].spec.health - 105.0).abs() < 0.0001);
+        assert_eq!(padded.theirs[0].value, 850.0);
+        assert!(Arc::ptr_eq(&local.snap.units[0].spec, &padded.snap.units[0].spec));
+        let model = Model::load().unwrap();
+        assert!(model.ordered_kiting_fates(&local.snap, 3)[1].dead);
+        assert!(!model.ordered_kiting_fates(&padded.snap, 3)[1].dead);
+    }
+
+    #[test]
+    fn finishing_reserve_is_only_for_new_attacks_on_armed_mobile_prizes() {
+        let mut local = finishing_fixture();
+        assert!(finishing_forecast(&local, true, true).is_none());
+        assert!(finishing_forecast(&local, false, false).is_none());
+        local.theirs[0].prize = false;
+        assert!(finishing_forecast(&local, false, true).is_none());
+        local.theirs[0].prize = true;
+        local.theirs[0].armed = false;
+        assert!(finishing_forecast(&local, false, true).is_none());
+        local.theirs[0].armed = true;
+        Arc::make_mut(&mut local.snap.units[1].spec).mobile = false;
+        assert!(finishing_forecast(&local, false, true).is_none());
+        Arc::make_mut(&mut local.snap.units[1].spec).mobile = true;
+        Arc::make_mut(&mut local.snap.units[1].spec).air = true;
+        assert!(finishing_forecast(&local, false, true).is_none());
+    }
 
     fn t(own_cost: f32, own_loss: f32, kill_value: f32, armed_share: f32, min_armed_p: f32) -> Tally {
         Tally { own_cost, own_loss, kill_value, armed_cost: 100.0, armed_share, min_armed_p }
