@@ -144,6 +144,11 @@ const FACTORY_OPENING_TIME: i32 = 30 * 120;
 /// Income before investing in a gunship factory for a viable riot drop.
 const DROP_INCOME: f32 = 30.0;
 
+/// A dense front can justify siege before the fifth reactor. Use actual
+/// metal income, not the age-adjusted composition budget: geos and shared
+/// energy planning can keep the reactor count low in a mature economy.
+const SUPER_WEAPON_INCOME: f32 = 50.0;
+
 /// Air tempo: as a game runs on, and more so on larger maps, the speed of
 /// aircraft converts more of the enemy's value (raids across the map,
 /// strikes on whatever moves out). A dose (see [`air_tempo_dose`]) is
@@ -695,13 +700,15 @@ impl Ai {
         // (`airstall`: nothing but air factories, air stalled and no ally's
         // ground factory to plate: a superweapon whatever the reactors.)
         let air_super = reactors <= 4 && self.eco_air_stall_super();
-        if !self.eco.chose_sup_wep
-            && !self.eco_energy_starved()
-            && (self.merged_allies == 0 || (self.eco.has_striders && self.fac.num_striders > 1))
-            && (reactors > 4 || air_super)
-        {
+        if self.eco_super_weapon_due(reactors, air_super) {
             if air_super {
                 self.log("airstall: nothing but air factories and no allied ground factory to plate: a superweapon");
+            } else if reactors <= 4 {
+                self.log(&format!(
+                    "economy: dense front ({:.0}), alliance income {:.0}; choosing a superweapon before five reactors",
+                    self.war.front.ratchet,
+                    self.eco.static_income * self.intel_alliance_scale()
+                ));
             }
             self.eco_choose_super_weapon();
         }
@@ -1426,6 +1433,20 @@ impl Ai {
         }
 
         self.eco_add_simple(aa, position, List::Porc, Some(List::Aa));
+    }
+
+    fn eco_super_weapon_due(&self, reactors: usize, air_super: bool) -> bool {
+        if self.eco.chose_sup_wep
+            || self.eco_energy_starved()
+            || (self.merged_allies > 0 && !(self.eco.has_striders && self.fac.num_striders > 1))
+        {
+            return false;
+        }
+        if reactors > 4 || air_super {
+            return true;
+        }
+        let income = self.eco.static_income * self.intel_alliance_scale();
+        self.front_escalation() >= 1.0 && income >= SUPER_WEAPON_INCOME && income >= 0.8 * self.intel.income
     }
 
     fn eco_choose_super_weapon(&mut self) {
@@ -3447,6 +3468,59 @@ impl Ai {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dense_front_unlocks_siege_without_five_reactors_but_needs_a_sound_economy() {
+        let mut ai = crate::economy::commander::tests::test_ai_with(|_| {});
+        ai.eco.static_income = 50.0;
+        ai.intel.income = 60.0;
+        ai.war.front.ratchet = crate::military::front::HI;
+        assert!(ai.eco_super_weapon_due(2, false));
+
+        ai.war.front.ratchet = crate::military::front::LO;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        // The original reactor route still works on sparse maps.
+        assert!(ai.eco_super_weapon_due(5, false));
+        ai.war.front.ratchet = crate::military::front::HI;
+        ai.eco.static_income = 49.0;
+        ai.eco.adjusted_income = 100.0;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.eco.static_income = 50.0;
+        ai.intel.income = 70.0;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.intel.income = 60.0;
+
+        ai.set_feature_off("frontgate", true);
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(ai.eco_super_weapon_due(5, false));
+        // Air-only stalls retain their independent early route.
+        assert!(ai.eco_super_weapon_due(2, true));
+        ai.set_feature_off("frontgate", false);
+
+        // The early route follows the same alliance scale as nuke value
+        // planning, without letting one poor solo economy use game age.
+        ai.eco.static_income = 25.0;
+        ai.allies.push(3);
+        assert!(ai.eco_super_weapon_due(2, false));
+        ai.allies.clear();
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.eco.static_income = 50.0;
+
+        ai.eco.estalled = true;
+        ai.eco.metal = 300.0;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(!ai.eco_super_weapon_due(5, false));
+        assert!(!ai.eco_super_weapon_due(2, true));
+        ai.eco.estalled = false;
+        ai.merged_allies = 1;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.eco.has_striders = true;
+        ai.fac.num_striders = 2;
+        assert!(ai.eco_super_weapon_due(2, false));
+        ai.eco.chose_sup_wep = true;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(!ai.eco_super_weapon_due(5, false));
+    }
+
     #[test]
     fn factory_exit_clearance_rotates_with_all_four_facings() {
         use super::{EXIT_LANE, FACTORY_CLEARANCE, exit_rect};

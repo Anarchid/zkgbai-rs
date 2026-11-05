@@ -2,7 +2,7 @@
 <img width="1911" height="966" alt="image" src="https://github.com/user-attachments/assets/76a7c004-719b-4891-914e-47e182f98be1" />
 
 zkgbai-rs
-=========
+==
 
 The "Zero-K Graph-Based AI": a skirmish AI for the [Zero-K](https://zero-k.info) RTS on the
 [Recoil](https://github.com/beyond-all-reason/RecoilEngine) engine. It reasons over a graph of the
@@ -636,3 +636,14 @@ Unified conquest takes precedence when both switches are enabled.
 Runtime changes release old direction/energy roles on the next five-second
 planning pass. An already accepted ferry retains control until delivery.
 The journal records `expansionpolicy` and `expansionmission` events.
+
+Superweapon timing
+-----------------
+
+Superweapon selection normally opens at five reactors. With `frontgate`, full front
+escalation (`front_hi`, default 2000) also opens it once estimated alliance metal income
+reaches 50/s and at least 80% of estimated enemy income. This uses actual metal income,
+without the game-age bonus, so geothermal and shared-energy economies need not build
+extra reactors first. Energy starvation and merged-team strider prerequisites still
+apply. A profitable uncovered nuke target retains its separate early trigger. These gates
+live in `crates/zkgbai/src/economy/planning.rs` and `crates/zkgbai/src/military/nukes.rs`.
