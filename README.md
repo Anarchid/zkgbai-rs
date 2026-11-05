@@ -255,6 +255,14 @@ Combat gangs (`coalesce`) temporarily lease command authority as well as borrowi
 their regular handlers. Returning a lease restores the underlying role; a role change invalidates
 the lease, and operator reservations and module mutes continue to apply.
 
+Automatic QRF reinforcements from stakeouts temporarily lease command authority. Their
+scouting assignments and budget membership survive the loan; release cancels the
+old QRF order and resumes scouting. Disabling QRF returns these loans, including
+reserved or retreating scouts without cancelling their operator/retreat orders.
+Disabling `stakeoutqrf` prevents new damage-triggered loans; existing loans finish
+normally. Changing a scout's role invalidates its lease instead of restoring an
+obsolete assignment.
+
 Testing against other AIs
 -------------------------
 

@@ -281,6 +281,13 @@ pub(crate) mod retirement_tests {
     }
 
     pub(crate) fn raider_test_ai(name: &'static CStr) -> Ai {
+        raider_test_ai_with(name, |_| {})
+    }
+
+    pub(crate) fn raider_test_ai_with(
+        name: &'static CStr,
+        customize: impl FnOnce(&mut springai::ffi::SSkirmishAICallback),
+    ) -> Ai {
         NAME.with(|n| n.set(name));
         DEFS_READY.with(|r| r.set(false));
         unsafe extern "C" fn defs(_: i32, out: *mut i32, _: i32) -> i32 {
@@ -349,6 +356,7 @@ pub(crate) mod retirement_tests {
             t.Unit_getMaxSpeed = Some(float);
             t.Unit_getSpeed = Some(float);
             t.Unit_getRulesParamFloat = Some(rules);
+            customize(t);
         });
         DEFS_READY.with(|r| r.set(true));
         ai.defs = crate::defs::Defs::new(ai.cb);
