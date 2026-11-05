@@ -60,7 +60,30 @@ fn line(center: Vec3, side: Vec3, span: f32, count: usize, size: Vec3) -> Vec<Ve
     }
     let width = span.min(hi - lo);
     let start = (-width * 0.5).clamp(lo, hi - width);
-    (0..count).map(|i| center + side * (start + width * i as f32 / (count - 1) as f32)).collect()
+    (0..count)
+        .map(|i| {
+            let p = center + side * (start + width * i as f32 / (count - 1) as f32);
+            // The line was clipped as a whole; only absorb floating-point edge error.
+            Vec3::xz(p.x.clamp(128.0, size.x - 128.0), p.z.clamp(128.0, size.z - 128.0))
+        })
+        .collect()
+}
+
+/// End each outward lane at its own map edge. Clipping a destination line
+/// through a corner startbox would funnel the entire wave back together.
+fn clip_lane(from: Vec3, target: Vec3, size: Vec3) -> Vec3 {
+    let delta = target - from;
+    let mut t = 1.0_f32;
+    for (p, d, limit) in [(from.x, delta.x, size.x), (from.z, delta.z, size.z)] {
+        if d > 0.0 {
+            t = t.min((limit - 128.0 - p) / d);
+        }
+        if d < 0.0 {
+            t = t.min((128.0 - p) / d);
+        }
+    }
+    let p = from + delta * t.clamp(0.0, 1.0);
+    Vec3::xz(p.x.clamp(128.0, size.x - 128.0), p.z.clamp(128.0, size.z - 128.0))
 }
 
 fn may_depart(count: usize, wanted: usize, ready: bool, age: i32) -> bool {
@@ -94,11 +117,11 @@ impl Ai {
         let map = self.cb.map();
         let size = Vec3::xz(map.width() as f32 * 8.0, map.height() as f32 * 8.0);
         let muster = line(origin, side, (count - 1) as f32 * 600.0, count, size);
-        let goals = line(target, side, (count - 1) as f32 * 800.0, count, size);
         muster
             .into_iter()
-            .zip(goals)
-            .filter_map(|(mut muster, target)| {
+            .filter_map(|mut muster| {
+                let offset = (muster.x - origin.x) * side.x + (muster.z - origin.z) * side.z;
+                let target = clip_lane(muster, target + side * (offset * 4.0 / 3.0), size);
                 // Pull exposed wings back too. Leave a clear initial run-up, not
                 // merely a safe point on the very edge of an AA circle.
                 for _ in 0..32 {
@@ -110,7 +133,7 @@ impl Ai {
                     if (0..=16).all(|i| !self.sweeps_dangerous(muster + direction * (i as f32 * 128.0))) {
                         return Some(Lane { muster, target });
                     }
-                    muster = muster - forward * STEP;
+                    muster -= forward * STEP;
                 }
                 None
             })
@@ -280,7 +303,7 @@ impl Ai {
                     u.vel().x.hypot(u.vel().z) * 30.0,
                     u.rules_param_float("specialReloadRemaining", 0.0),
                     self.sweeps_claims(u.id()),
-                    self.sweeps_dangerous(p)
+                    self.sweeps_in_aa_range(p)
                 ));
             }
         }
@@ -302,6 +325,28 @@ mod tests {
         assert!(!may_depart(6, 6, false, 0));
         assert!(may_depart(6, 6, true, 0));
         assert!(may_depart(5, 6, true, ASSEMBLY));
+    }
+
+    #[test]
+    fn corner_startboxes_do_not_funnel_a_broad_fan_back_together() {
+        let size = Vec3::xz(8192.0, 6144.0);
+        let origin = Vec3::xz(2847.0, 2072.0);
+        let target = Vec3::xz(7288.0, 5555.0);
+        let side = Vec3::xz(-0.6, 0.8);
+        let stages = line(origin, side, 5400.0, 10, size);
+        let goals: Vec<_> = stages
+            .iter()
+            .map(|&p| {
+                let offset = (p.x - origin.x) * side.x + (p.z - origin.z) * side.z;
+                clip_lane(p, target + side * (offset * 4.0 / 3.0), size)
+            })
+            .collect();
+        assert_eq!(goals.len(), 10);
+        assert!(distance(goals[0], goals[9]) > 5000.0);
+        for (stage, goal) in stages.iter().zip(&goals) {
+            assert!(distance(*stage, *goal) > RUN_UP);
+            assert!(goal.x >= 128.0 && goal.x <= size.x - 128.0 && goal.z >= 128.0 && goal.z <= size.z - 128.0);
+        }
     }
 
     #[test]
