@@ -187,13 +187,12 @@ pub static LEVERS: &[Lever] = &[
         name: "buildpower",
         group: "Economy",
         label: "Build power",
-        help: "Mobile build power the factories keep, as a multiple of metal income (the AI's own rule is one to \
-               one; a strong human runs 1.3-1.7).",
+        help: "Mobile build power the factories keep, as a multiple of metal income (default 1.2).",
         kind: Kind::Range { min: 0.5, max: 3.0, step: 0.05, log: false, format: Format::Times },
         ends: ("lean", "builders"),
         read: |ai| {
             let b = ai.op_buildpower();
-            Reading { value: r2(b), auto: (b - 1.0).abs() < 1e-3, note: None }
+            Reading { value: r2(b), auto: (b - super::DEFAULT_BUILDPOWER).abs() < 1e-3, note: None }
         },
         set: |ai, v| match v {
             None => {

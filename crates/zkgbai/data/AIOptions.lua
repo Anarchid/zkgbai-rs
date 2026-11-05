@@ -119,7 +119,7 @@ local options = {
 	{
 		key    = 'buildpower',
 		name   = 'Build power',
-		desc   = 'Mobile build power the factories keep, as a multiple of metal income, 0.5-3. Empty: 1 (the AI\'s own rule: constructors follow income one to one; a strong human runs 1.3-1.7 plus caretakers).',
+		desc   = 'Mobile build power the factories keep, as a multiple of metal income, 0.5-3. Empty: 1.2 (constructors target 20% more build power than metal income).',
 		type   = 'string',
 		def    = '',
 		maxlen = 8,
