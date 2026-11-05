@@ -17,11 +17,13 @@ pub mod factory_manager;
 mod fortify;
 mod geo;
 pub mod grid;
+mod grid_support;
 mod lotus;
 mod phase;
 pub(crate) mod planning;
 mod plate;
 mod plop;
+mod porc_policy;
 mod rebuild;
 mod safespot;
 mod silo;
@@ -159,6 +161,8 @@ pub struct EconomyManager {
     raw_mex_income: f32,
     /// The energy income the economy wants (stalled below it).
     energy_target: f32,
+    /// Persistent power restoration projects and protected pylon sites.
+    pub(crate) grid_support: grid_support::Support,
     /// Workers just ordered to terraform, until when they are left to it
     /// (the order reaches the engine a frame later; meanwhile they look
     /// free).
@@ -400,6 +404,7 @@ impl EconomyManager {
             effective_income_energy: 0.0,
             raw_mex_income: 0.0,
             energy_target: 0.0,
+            grid_support: grid_support::Support::default(),
             terraform_hold: BTreeMap::new(),
             effective_expenditure: 0.0,
             reclaim_value: Cell::new(0.0),
@@ -810,6 +815,9 @@ impl Ai {
         self.eco_plan_lotus_upgrades(frame);
         self.eco_dig_ditches(frame);
         self.eco_plan_grid(frame);
+        if frame % 30 == self.offset % 30 {
+            self.eco_bury_support_pylons(frame);
+        }
         self.eco_update_requisition(frame);
         if self.missiles.site.active() {
             self.guard("eco.siloPlanner", |ai| ai.eco_plan_missile_silo());
@@ -1319,6 +1327,9 @@ impl Ai {
             }
 
             self.eco.drop_construction_task(id);
+        }
+        if def_name == "energypylon" {
+            self.eco_bury_support_pylons(self.frame);
         }
     }
 

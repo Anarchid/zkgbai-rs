@@ -212,6 +212,9 @@ impl Ai {
         crowding: bool,
     ) -> Option<TaskId> {
         let c = task.as_construction()?;
+        if c.target.is_none() && !self.eco_porc_admissible(c.build_type, task.position, c.emergency_porc) {
+            return None;
+        }
         if self.eco_super_project_exposed(c.build_type, task.position) {
             return None;
         }
@@ -260,7 +263,7 @@ impl Ai {
         let armed = !def.weapon_mounts().is_empty();
         let id = self
             .eco_add_construction(task, Some(List::Construction), armed.then_some(List::Porc))
-            .ok_or("the economy refused the site (too close to a factory's yard or a planned building)")?;
+            .ok_or("the economy refused the site (porc policy, factory yard, or planned building)")?;
         Ok((id, site))
     }
 
@@ -270,6 +273,9 @@ impl Ai {
     /// it was adopted.
     pub(crate) fn eco_logistics_porc(&mut self, def: UnitDef, pos: Vec3, near: f32) -> Option<(TaskId, bool)> {
         let site = self.eco_build_site(def, pos, 0);
+        if !self.eco_factory_emergency_at(site) {
+            return None;
+        }
         // What `eco_clean_orders` would drop at once: a blocked site, or one
         // enemy defenses cover; and where a worker would not go.
         if site.x < 0.0
@@ -282,13 +288,16 @@ impl Ai {
         let planned = (self.eco.porc_tasks.iter().copied())
             .filter(|&id| self.eco.tasks.get(id).is_some_and(|t| t.as_construction().is_some()))
             .min_by(|&a, &b| distance(self.eco.task_pos(a), site).total_cmp(&distance(self.eco.task_pos(b), site)))
-            .filter(|&id| distance(self.eco.task_pos(id), site) < near);
+            .filter(|&id| distance(self.eco.task_pos(id), site) < near)
+            .filter(|&id| self.eco_factory_emergency_at(self.eco.task_pos(id)));
         if let Some(id) = planned {
+            self.eco.tasks.get_mut(id)?.as_construction_mut()?.emergency_porc = true;
             return Some((id, true));
         }
         let mut ct = WorkerTask::construction(def, site, 0);
         if let Some(c) = ct.as_construction_mut() {
             c.frame_issued = self.frame;
+            c.emergency_porc = true;
         }
         self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc)).map(|id| (id, false))
     }
@@ -434,14 +443,11 @@ impl Ai {
             self.eco_create_radar_task(wid);
         }
 
-        // porc push against nearby enemy porc and defend the front line
+        // Spend only at terrain gates and the fixed start-position bisector.
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
             // The terrain analysis's chokepoints.
             self.eco_defend_chokes();
-            self.eco_porc_push(position);
-            if self.graph.eminent_territory {
-                self.eco_defend_front(position);
-            }
+            self.eco_defend_midline(position);
         }
 
         // Pylons in the overdrive phase: the grid planner links the mexes
@@ -1678,6 +1684,9 @@ impl Ai {
         let Some(def) = def else {
             return;
         };
+        if !self.eco_porc_admissible(def, position, false) {
+            return;
+        }
         if extra == Some(List::Porc)
             && self.eco_share_point_defense(
                 def,
@@ -1982,93 +1991,6 @@ impl Ai {
     fn eco_porc_count(&self, pos: Vec3, radius: f32) -> usize {
         self.eco.porcs.iter().filter(|u| distance(pos, u.pos()) < radius).count()
             + self.eco.porc_tasks.iter().filter(|&&c| distance(pos, self.eco.task_pos(c)) < radius).count()
-    }
-
-    /// Whether existing porc (built or queued) is within `porcdist` of `pos`.
-    fn eco_porc_near(&self, pos: Vec3, porcdist: f32) -> bool {
-        self.eco.porcs.iter().any(|u| distance(pos, u.pos()) < porcdist)
-            || self.eco.porc_tasks.iter().any(|&c| distance(pos, self.eco.task_pos(c)) < porcdist)
-    }
-
-    fn eco_porc_push(&mut self, position: Vec3) {
-        let tf2 = (self.graph.territory_fraction * 2.0).min(1.0);
-        let mut rnd = kgb_rand();
-        let mut porc = if rnd > 0.15 * tf2 as f64 {
-            self.defs.get("turretmissile")
-        } else {
-            rnd = kgb_rand();
-            if rnd > 0.35 { self.defs.get("turretheavylaser") } else { self.defs.get("turretemp") }
-        };
-
-        if self.eco.enemy_has_air && kgb_rand() > 0.95 {
-            porc = self.defs.get("turretaalaser");
-        }
-        let Some(enemy) = self.war.get_closest_enemy_porc(position).and_then(|id| self.war.targets.get(&id)) else {
-            return;
-        };
-        // port: an unidentified porc (no def) is skipped (the C++ dereferenced it).
-        let (Some(ud), Some(porc)) = (enemy.ud, porc) else {
-            return;
-        };
-
-        let pos = get_angular_point(enemy.position, position, ud.max_weapon_range() + 100.0);
-        let pos = self.eco_build_site(porc, pos, 0);
-
-        let porcdist = 150.0 + (150.0 * (1.0 - tf2));
-        if self.eco_porc_near(pos, porcdist) {
-            return;
-        }
-
-        let mut ct = WorkerTask::construction(porc, pos, 0);
-        if let Some(c) = ct.as_construction_mut() {
-            c.frame_issued = self.frame;
-        }
-        self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc));
-    }
-
-    fn eco_defend_front(&mut self, position: Vec3) {
-        let tf2 = (self.graph.territory_fraction * 2.0).min(1.0);
-        let mut rnd = kgb_rand();
-        let porc = if rnd > 0.6 {
-            self.defs.get("turretmissile")
-        } else if rnd > 0.25 * tf2 as f64 {
-            self.defs.get("turretlaser")
-        } else {
-            rnd = kgb_rand();
-            self.defs.get(if rnd > 0.75 {
-                "turretheavylaser"
-            } else if rnd > 0.5 {
-                "turretgauss"
-            } else if rnd > 0.25 {
-                "turretriot"
-            } else {
-                "turretemp"
-            })
-        };
-
-        let Some(ms_pos) = self.graph.get_closest_front_line_spot(position).map(|ms| ms.get_pos()) else {
-            return;
-        };
-
-        let fpos = self.graph.get_closest_battle_front(ms_pos);
-
-        let radius = 150.0 + (kgb_rand() as f32 * 350.0);
-        let pos = get_angular_point(ms_pos, fpos, radius);
-        let Some(porc) = porc else {
-            return;
-        };
-        let pos = self.eco_build_site(porc, pos, 0);
-
-        let porcdist = 200.0 + (150.0 * (1.0 - tf2));
-        if self.eco_porc_near(pos, porcdist) {
-            return;
-        }
-
-        let mut ct = WorkerTask::construction(porc, pos, 0);
-        if let Some(c) = ct.as_construction_mut() {
-            c.frame_issued = self.frame;
-        }
-        self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc));
     }
 
     fn eco_create_radar_task(&mut self, wid: i32) {

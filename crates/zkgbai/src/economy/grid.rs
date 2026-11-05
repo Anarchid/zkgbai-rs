@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use springai::{UnitDef, Vec3};
 
 use super::List;
+use super::grid_support::{Connection, PowerNeed};
 use super::tasks::WorkerTask;
 use crate::Ai;
 use crate::util::distance;
@@ -114,6 +115,8 @@ impl GridDefs {
 /// One of our grid members (or a building's site waiting for power).
 struct Member {
     what: String,
+    def: UnitDef,
+    conducts: bool,
     pos: Vec3,
     range: f32,
     energy: f32,
@@ -190,7 +193,11 @@ impl Ai {
 
     /// Link starved buildings to power, and (late) the grids to each other.
     pub fn eco_plan_grid(&mut self, frame: i32) {
-        if (frame + self.offset + 13) % GRID_PERIOD != 0 || self.dev_off("grid") {
+        if self.dev_off("grid") {
+            self.eco.grid_support.jobs.clear();
+            return;
+        }
+        if (frame + self.offset + 13) % GRID_PERIOD != 0 {
             return;
         }
         if self.eco.pending_power.as_ref().is_some_and(|p| self.eco_super_project_exposed(p.def, p.pos)) {
@@ -209,7 +216,8 @@ impl Ai {
             .into_iter()
             .filter(|u| u.health() > 0.0)
             .filter_map(|u| {
-                let id = u.def()?.id();
+                let def = u.def()?;
+                let id = def.id();
                 let &(range, needs) = gd.by_def.get(&id)?;
                 // Unfinished buildings are no grid members yet, but those
                 // that will need power are planned for already.
@@ -223,14 +231,46 @@ impl Ai {
                 } else {
                     0.0
                 };
-                Some(Member { what: self.defs.name_of(u).to_owned(), pos, range, energy, needs, metal })
+                Some(Member {
+                    what: self.defs.name_of(u).to_owned(),
+                    def,
+                    conducts: !u.is_being_built(),
+                    pos,
+                    range,
+                    energy,
+                    needs,
+                    metal,
+                })
             })
             .collect();
+        // Accepted construction jobs still need a connection before their
+        // nanoframe exists, including a site released by POWER_WAIT above.
+        for task in self.eco.construction_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)) {
+            let Some(c) = task.as_construction() else { continue };
+            let Some(&(range, needs)) = gd.by_def.get(&c.build_type.id()).filter(|(_, needs)| *needs > 0.0) else {
+                continue;
+            };
+            if members.iter().any(|m| m.def.id() == c.build_type.id() && distance(m.pos, task.position) < 25.0) {
+                continue;
+            }
+            members.push(Member {
+                what: format!("{} construction", self.defs.name(c.build_type)),
+                def: c.build_type,
+                conducts: false,
+                pos: task.position,
+                range,
+                energy: 0.0,
+                needs,
+                metal: 0.0,
+            });
+        }
         // The site of a building waiting for power, as if it stood there.
         let pending = self.eco.pending_power.as_ref().and_then(|p| {
             let &(range, needs) = gd.by_def.get(&p.def.id())?;
             members.push(Member {
                 what: format!("{} site", self.defs.name(p.def)),
+                def: p.def,
+                conducts: false,
                 pos: p.pos,
                 range,
                 energy: 0.0,
@@ -242,20 +282,16 @@ impl Ai {
 
         // The grids, and what each makes.
         let n = members.len();
-        let mut parent: Vec<usize> = (0..n).collect();
-        for i in 0..n {
-            for j in i + 1..n {
-                if distance(members[i].pos, members[j].pos) < members[i].range + members[j].range {
-                    let (a, b) = (find(&mut parent, i), find(&mut parent, j));
-                    parent[a] = b;
-                }
-            }
-        }
-        let grid: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
-        let mut capacity = vec![0.0f32; n];
-        for (i, m) in members.iter().enumerate() {
-            capacity[grid[i]] += m.energy;
-        }
+        let (grid, capacity) = components(&members);
+        let needs: Vec<PowerNeed> = (0..n)
+            .filter(|&i| members[i].needs > capacity[grid[i]])
+            .map(|i| self.eco_power_need(members[i].def, members[i].pos))
+            .collect();
+        let powered: Vec<_> = (0..n)
+            .filter(|&i| members[i].conducts && capacity[grid[i]] >= MIN_GRID_ENERGY)
+            .map(|i| (members[i].pos, members[i].range))
+            .collect();
+        self.eco_refresh_grid_support(needs, &powered);
         // Once a minute, what overdrive makes (the gadget's own figures)
         // and how many mexes stand on a grid making energy.
         if (frame + self.offset + 13) % (6 * GRID_PERIOD) == 0 && frame > 0 {
@@ -295,10 +331,6 @@ impl Ai {
         } else if self.eco.pending_power.is_some() {
             self.eco.pending_power = None;
         }
-        if self.eco.pylon_tasks.len() >= self.eco_max_pylon_tasks() {
-            return;
-        }
-
         // Grids worth linking: those making energy, and those needing it.
         let mut all: HashMap<usize, Vec<usize>> = HashMap::new();
         for (i, &g) in grid.iter().enumerate() {
@@ -310,16 +342,14 @@ impl Ai {
         nodes.sort_unstable();
         let link = |a: usize, b: usize| shortest_link(&members, &of[&a], &of[&b], pr);
 
-        // First the starved: the building needing the most power, linked to
-        // the grid that makes up its shortfall the cheapest (or else the
-        // strongest).
-        // A building waiting for power goes first.
-        let starved = pending.filter(|&i| members[i].needs > capacity[grid[i]]).or_else(|| {
-            (0..n)
-                .filter(|&i| members[i].needs > capacity[grid[i]])
-                .max_by(|&a, &b| members[a].needs.total_cmp(&members[b].needs))
+        // Restore useful capital before overdrive or speculative new weapons.
+        // Value includes the nearby enemy force the weapon keeps out.
+        let mut starved: Vec<usize> = (0..n).filter(|&i| members[i].needs > capacity[grid[i]]).collect();
+        starved.sort_by(|&a, &b| {
+            let value = |i: usize| self.eco_power_need(members[i].def, members[i].pos).value;
+            value(b).total_cmp(&value(a)).then_with(|| a.cmp(&b))
         });
-        let plan = if let Some(s) = starved {
+        for s in starved.iter().copied() {
             let (g, needs) = (grid[s], members[s].needs);
             let options: Vec<(usize, f32, (usize, usize))> = nodes
                 .iter()
@@ -332,18 +362,72 @@ impl Ai {
             let enough =
                 options.iter().filter(|o| capacity[g] + capacity[o.0] >= needs).min_by(|a, b| a.1.total_cmp(&b.1));
             let strongest = options.iter().max_by(|a, b| capacity[a.0].total_cmp(&capacity[b.0]));
-            enough
-                .or(strongest)
-                .map(|o| (o.2, format!("{} needing {needs:.0} energy (has {:.0})", members[s].what, capacity[g])))
-        } else if self.eco_overdrive_phase() {
-            self.eco_overdrive_link(&members, &all, &capacity, pr)
-        } else {
-            None
-        };
-        let Some(((i, j), why)) = plan else { return };
-        drop(of);
-        let (a, b) = (&members[i], &members[j]);
-        self.eco_lay_pylons(a.pos, a.range, b.pos, b.range, &why);
+            let Some(o) = enough.or(strongest) else { continue };
+            let (a, b) = (&members[o.2.0], &members[o.2.1]);
+            let beneficiaries = starved.iter().filter(|&&i| grid[i] == g).map(|&i| members[i].pos).collect();
+            let job = self.eco_power_connection(beneficiaries);
+            self.eco_reconnect_power(a.pos, a.range, b.pos, b.range, job);
+        }
+        // Revalue existing overdrive links from today's separated components.
+        // A completed bridge, a lost endpoint, or lost generation retires the bid.
+        let spare = self.eco_grid_spare(&all, &capacity);
+        let updates: Vec<_> = self
+            .eco
+            .grid_support
+            .jobs
+            .iter()
+            .filter_map(|(&id, job)| {
+                let (a, b) = job.overdrive?;
+                let component =
+                    |p| (0..n).find(|&i| members[i].conducts && distance(members[i].pos, p) < 16.0).map(|i| grid[i]);
+                let gain = match (component(a), component(b)) {
+                    (Some(a), Some(b)) if a != b => overdrive_gain(
+                        capacity[a],
+                        grid_metal_sq(&members, &all[&a]),
+                        capacity[b],
+                        grid_metal_sq(&members, &all[&b]),
+                        spare,
+                    ),
+                    _ => 0.0,
+                };
+                Some((id, gain))
+            })
+            .collect();
+        for (id, gain) in updates {
+            if gain > 0.0 {
+                if let Some(job) = self.eco.grid_support.jobs.get_mut(&id) {
+                    job.value = gain * MEX_PAYBACK;
+                    job.rate = gain;
+                    job.why = format!("restore +{gain:.2} metal/s of overdrive");
+                }
+            } else {
+                self.eco.grid_support.jobs.remove(&id);
+            }
+        }
+        if self.eco_overdrive_phase() {
+            if let Some(((i, j), why, gain)) = self.eco_overdrive_link(&members, &all, &capacity, pr) {
+                let (a, b) = (&members[i], &members[j]);
+                // The endpoint on the higher-capacity component supplies power.
+                let (goal, source) = if capacity[grid[i]] > capacity[grid[j]] { (b, a) } else { (a, b) };
+                let job = Connection {
+                    assets: Vec::new(),
+                    overdrive: Some((goal.pos, source.pos)),
+                    value: gain * MEX_PAYBACK,
+                    rate: gain,
+                    threat: 0.0,
+                    why,
+                };
+                self.eco_reconnect_power(goal.pos, goal.range, source.pos, source.range, job);
+            }
+        }
+    }
+
+    fn eco_grid_spare(&self, grids: &HashMap<usize, Vec<usize>>, capacity: &[f32]) -> f32 {
+        let made: f32 = grids.keys().map(|&g| capacity[g]).sum();
+        if made <= 0.0 {
+            return MIN_SPARE;
+        }
+        ((made - self.cb.economy().usage(self.energy)) / made).clamp(MIN_SPARE, 1.0)
     }
 
     /// The overdrive link: of the links between a grid making
@@ -356,17 +440,15 @@ impl Ai {
         grids: &HashMap<usize, Vec<usize>>,
         capacity: &[f32],
         pr: f32,
-    ) -> Option<((usize, usize), String)> {
+    ) -> Option<((usize, usize), String, f32)> {
         let pylon_cost = self.defs.get("energypylon")?.cost(self.metal);
         // What overdrive gets: the energy made less what is spent.
         let made: f32 = grids.keys().map(|&g| capacity[g]).sum();
         if made <= 0.0 {
             return None;
         }
-        let spent = self.cb.economy().usage(self.energy);
-        let spare = ((made - spent) / made).clamp(MIN_SPARE, 1.0);
-        let od = |c: f32, s: f32| 0.25 * (spare * c * s).max(0.0).sqrt();
-        let metal_sq = |g: usize| grids[&g].iter().map(|&i| members[i].metal * members[i].metal).sum::<f32>();
+        let spare = self.eco_grid_spare(grids, capacity);
+        let metal_sq = |g: usize| grid_metal_sq(members, &grids[&g]);
 
         let mut keys: Vec<usize> = grids.keys().copied().collect();
         keys.sort_unstable();
@@ -382,7 +464,7 @@ impl Ai {
                 if b == a || (cb >= MIN_GRID_ENERGY && b < a) || sa + sb <= 0.0 {
                     continue;
                 }
-                let gain = od(ca + cb, sa + sb) - od(ca, sa) - od(cb, sb);
+                let gain = overdrive_gain(ca, sa, cb, sb, spare);
                 if gain <= 0.0 {
                     continue;
                 }
@@ -412,6 +494,7 @@ impl Ai {
                 mexes(a),
                 mexes(b)
             ),
+            gain,
         ))
     }
 
@@ -483,12 +566,62 @@ impl Ai {
     }
 }
 
+/// Pending buildings can receive a grid but cannot conduct between live grids.
+fn components(members: &[Member]) -> (Vec<usize>, Vec<f32>) {
+    let n = members.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    for i in 0..n {
+        for j in i + 1..n {
+            if members[i].conducts
+                && members[j].conducts
+                && distance(members[i].pos, members[j].pos) < members[i].range + members[j].range
+            {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+    }
+    let mut grid: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
+    let mut capacity = vec![0.0f32; n];
+    for (i, m) in members.iter().enumerate() {
+        capacity[grid[i]] += m.energy;
+    }
+    // A nanoframe can receive power at its site, but cannot bridge two
+    // live grids before completion. Pick a real adjacent component.
+    for i in 0..n {
+        if !members[i].conducts {
+            if let Some(j) = (0..n)
+                .filter(|&j| {
+                    members[j].conducts
+                        && distance(members[i].pos, members[j].pos) < members[i].range + members[j].range
+                })
+                .max_by(|&a, &b| capacity[grid[a]].total_cmp(&capacity[grid[b]]))
+            {
+                grid[i] = grid[j];
+            }
+        }
+    }
+    (grid, capacity)
+}
+
+fn grid_metal_sq(members: &[Member], grid: &[usize]) -> f32 {
+    grid.iter().map(|&i| members[i].metal * members[i].metal).sum()
+}
+
+fn overdrive_gain(ca: f32, sa: f32, cb: f32, sb: f32, spare: f32) -> f32 {
+    let od = |c: f32, s: f32| 0.25 * (spare * c * s).max(0.0).sqrt();
+    (od(ca + cb, sa + sb) - od(ca, sa) - od(cb, sb)).max(0.0)
+}
+
 /// The shortest link between two grids (lists of members): pylons needed,
 /// and the members it joins.
 fn shortest_link(members: &[Member], a: &[usize], b: &[usize], pr: f32) -> (f32, (usize, usize)) {
     let (mut best, mut ends) = (f32::INFINITY, (0, 0));
     for &i in a {
         for &j in b {
+            if !members[j].conducts {
+                continue;
+            }
             let gap = distance(members[i].pos, members[j].pos)
                 - CHAIN_SLACK * (members[i].range + members[j].range + 2.0 * pr);
             if gap < best {
@@ -523,6 +656,39 @@ pub(super) fn chain(a: Vec3, ra: f32, b: Vec3, rb: f32, pr: f32) -> Vec<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn high_voltage_disconnection_can_cost_a_hundred_metal_per_second() {
+        assert_eq!(overdrive_gain(1600.0, 0.0, 0.0, 100.0, 1.0), 100.0);
+        assert_eq!(overdrive_gain(1600.0, 0.0, 0.0, 100.0, 0.25), 50.0);
+        // Equal energy per squared base income offers no gain from joining.
+        assert_eq!(overdrive_gain(100.0, 4.0, 100.0, 4.0, 1.0), 0.0);
+        assert_eq!(overdrive_gain(0.0, 100.0, 0.0, 100.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn unfinished_weapons_do_not_create_phantom_connections() {
+        let ai = crate::economy::test_ai_with(|_| {});
+        let def = UnitDef::from_id(ai.cb, 1).unwrap();
+        let member = |x, energy, conducts| Member {
+            what: String::new(),
+            def,
+            conducts,
+            pos: Vec3::xz(x, 1000.0),
+            range: 100.0,
+            energy,
+            needs: 0.0,
+            metal: 0.0,
+        };
+        let mut members = vec![member(1000.0, 100.0, true), member(1150.0, 0.0, false), member(1300.0, 200.0, true)];
+        let (grid, capacity) = components(&members);
+        assert_ne!(grid[0], grid[2]);
+        assert_eq!(capacity[grid[1]], 200.0);
+        members[1].conducts = true;
+        let (grid, capacity) = components(&members);
+        assert_eq!(grid[0], grid[2]);
+        assert_eq!(capacity[grid[1]], 300.0);
+    }
 
     #[test]
     fn chains_reach_end_to_end() {

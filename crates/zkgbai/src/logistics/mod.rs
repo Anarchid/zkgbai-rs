@@ -15,8 +15,8 @@
 //! The first client is defense against incursions the terrain model
 //! forecasts (`incursions`): at the first of our assets an enemy group can
 //! reach, a turret sized to the group, if one can stand in time and the
-//! value at risk pays for it. The others are capital that waits: pylons while a building waits for its site to have power
-//! (`grid`), a factory a module requisitioned, an anti-nuke; each worth
+//! value at risk pays for it. The others are capital that waits: grid links restoring
+//! powered buildings or overdrive income, a factory a module requisitioned, an anti-nuke; each worth
 //! what it unlocks or saves, less a share of it for every second it is
 //! late. The operator can open issues of its own (tool `issue`).
 
@@ -584,7 +584,7 @@ impl Ai {
         let income = self.eco.effective_income;
         for p in predicted {
             // Already there: too late to plan for.
-            if p.seconds <= MARGIN {
+            if p.seconds <= MARGIN || !self.eco_factory_emergency_at(p.pos) {
                 continue;
             }
             let same = |i: &Issue| i.kind == Kind::Defense && distance(i.pos, p.pos) < SAME_RADIUS;
@@ -608,9 +608,13 @@ impl Ai {
             if hands.is_empty() {
                 continue;
             }
+            let site = if distance(p.pos, p.from) > 1.0 { get_directional_point(p.pos, p.from, OFFSET) } else { p.pos };
             let mut best: Option<(UnitDef, f32, f32, f32, f32)> = None;
             for name in TURRETS {
                 let Some(def) = self.defs.get(name) else { continue };
+                if !self.eco_porc_admissible(def, self.cb.map().find_closest_build_site(def, site, 600.0, 3, 0), true) {
+                    continue;
+                }
                 let cost = def.cost(self.metal);
                 let after = loss_chance(p.power, ours + porc_power(def));
                 let saved = var * (before - after) * VAR_UTILITY;
@@ -625,7 +629,6 @@ impl Ai {
                 self.logistics.stats.unpaid += 1;
                 continue;
             };
-            let site = if distance(p.pos, p.from) > 1.0 { get_directional_point(p.pos, p.from, OFFSET) } else { p.pos };
             let Some((task, adopted)) = self.eco_logistics_porc(def, site, ADOPT_RADIUS) else {
                 self.logistics.stats.nosite += 1;
                 continue;
@@ -653,24 +656,17 @@ impl Ai {
         }
     }
 
-    /// Pylons while a building waits for its site to have power (`grid`):
-    /// what waits is capital idle, worth its cost less a [`PAYBACK`] share
-    /// of it for every second late.
+    /// Only pylons belonging to an actual useful connection get this bid.
+    /// Renew while disconnected: existing capital and recurring overdrive
+    /// income do not become worthless after an arbitrary waiting period.
     fn logistics_grid(&mut self, now: f32) {
-        let Some((def, pos)) = self.eco_awaiting() else {
-            let powered: Vec<TaskId> =
-                self.logistics.issues.values().filter(|i| i.kind == Kind::Grid).map(|i| i.task).collect();
-            for task in powered {
-                self.logistics_close(task, "powered");
-            }
-            return;
-        };
-        let value = def.cost(self.metal);
-        let why = format!("a {} at ({:.0}, {:.0}) waits for power", self.defs.name(def), pos.x, pos.z);
-        let worth = Worth::Stream { value, from: now, rate: value / PAYBACK };
+        let stale: Vec<_> = self.logistics.issues.values()
+            .filter(|i| i.kind == Kind::Grid && self.eco_grid_issue(i.task).is_none())
+            .map(|i| i.task).collect();
+        for task in stale { self.logistics_close(task, "connection_resolved"); }
         for task in self.eco.pylon_tasks().to_vec() {
-            if !self.logistics.issues.contains_key(&task) {
-                self.logistics_open(task, Kind::Grid, worth, &why, 0.0);
+            if let Some((value, rate, threat, why)) = self.eco_grid_issue(task) {
+                self.logistics_open(task, Kind::Grid, Worth::Stream { value, from: now, rate }, &why, threat);
             }
         }
     }
@@ -784,7 +780,8 @@ impl Ai {
                 },
             );
             if reason.is_empty() {
-                requests.push(projects::Request { task, worth, work, cost, incumbent: !crew.is_empty(), hands });
+                requests.push(projects::Request { task, worth, work, cost, incumbent: !crew.is_empty(),
+                    urgent: self.eco_grid_issue(task).is_some(), hands });
             }
         }
         let mut allocations = projects::allocate(requests, self.eco.metal, self.eco.effective_income, now);
@@ -834,11 +831,11 @@ impl Ai {
         }
     }
 
-    /// Zero-K build priority: an urgent defense under way gets high, the
+    /// Zero-K build priority: an urgent defense or grid repair gets high, the
     /// other construction and the factories low, until it is done.
     fn logistics_pause(&mut self, now: f32) {
         let urgent: Vec<Unit> = (self.logistics.issues.values())
-            .filter(|i| i.kind == Kind::Defense && i.started && i.value >= MIN_NET)
+            .filter(|i| matches!(i.kind, Kind::Defense | Kind::Grid) && i.started && i.value >= MIN_NET)
             .filter(|i| i.worth.deadline().is_none_or(|by| now <= by + DECAY))
             .filter_map(|i| self.eco.tasks.get(i.task)?.as_construction()?.target)
             .collect();

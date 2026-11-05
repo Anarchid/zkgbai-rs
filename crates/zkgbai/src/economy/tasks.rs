@@ -46,6 +46,8 @@ pub struct ConstructionTask {
     /// Unit id of the commander that owns the factory plop.
     pub assigned_plop: i32,
     pub fac_def: bool,
+    /// Forecast-driven defense; only allowed close to a threatened factory.
+    pub emergency_porc: bool,
     /// Opportunistic gate defense: requires support and a safe approach.
     pub fortification: bool,
     /// A shared site fulfilling an asset guard request; keep it on live disable.
@@ -99,6 +101,7 @@ impl WorkerTask {
                 fac_plop: false,
                 assigned_plop: 0,
                 fac_def: false,
+                emergency_porc: false,
                 fortification: false,
                 point_defense: false,
                 prerequisites: Vec::new(),

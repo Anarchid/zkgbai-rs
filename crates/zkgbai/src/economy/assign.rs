@@ -1219,6 +1219,11 @@ impl Ai {
             };
             let (bt, pos, facing) = (c.build_type, t.position, c.facing);
             let mut target = c.target;
+            // Recheck unstarted defenses: an emergency or gate may have gone away.
+            if target.is_none() && !self.eco_porc_site_allowed(bt, pos, c.emergency_porc) {
+                invalid.push(id);
+                continue;
+            }
             // Do not start an old plan after enemy territory has advanced
             // into missile range. Existing frames retain the threat policy.
             if target.is_none() && self.eco_super_project_exposed(bt, pos) {
