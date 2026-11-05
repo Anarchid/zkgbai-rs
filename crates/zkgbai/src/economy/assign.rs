@@ -279,7 +279,7 @@ impl Ai {
         if blocked_task && let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }
-        let Some(task_id) = self.eco_get_cheapest_job(wid) else {
+        let Some(task_id) = self.eco_local_energy_task(wid).or_else(|| self.eco_get_cheapest_job(wid)) else {
             return;
         };
         let Some(w) = self.eco.workers.get(&wid) else {
@@ -458,7 +458,15 @@ impl Ai {
         self.eco.hard_estalled && matches!(&task.kind, TaskKind::Repair(r) if !r.target.is_being_built())
     }
 
-    fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
+    fn eco_get_cheapest_job(&mut self, wid: i32) -> Option<TaskId> {
+        let w = self.eco.workers.get(&wid)?;
+        let unit = w.unit;
+        let refresh =
+            w.routes.as_ref().is_none_or(|r| self.frame - r.frame >= 30 || distance(r.origin, unit.pos()) >= 64.0);
+        if refresh {
+            let routes = self.pathfinder.worker_routes(&self.war, unit, self.frame);
+            self.eco.workers.get_mut(&wid)?.routes = routes;
+        }
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
         let wpos = worker.get_pos();
@@ -506,17 +514,35 @@ impl Ai {
             bonus + self.eco_colony_bonus(wid, t.get_pos(), mex)
         };
 
+        let energy_bidders = self.eco_energy_bidders();
+        // One field serves every candidate. The grid cannot represent
+        // every narrow passage; retain the existing reachability decision
+        // and direct-distance fallback when it has no route.
+        let price = |t: &WorkerTask| {
+            let direct = distance(wpos, t.get_pos());
+            let routed = worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct);
+            self.eco_cost_of_job_at_distance(worker, wpos, t, routed)
+                + self.eco_energy_opportunity(worker, t, &energy_bidders)
+        };
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
 
         if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)).filter(|&t| reaches(t)) {
             task = Some(t.id);
-            cost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
+            cost = price(t) - stranded(t);
             if let Some(target) = t.as_construction().and_then(|c| c.target) {
                 let p = target.build_progress();
                 cost -= 1000.0 * (p * p);
             }
             cost += threat_cost(t);
+            if !eco.hard_estalled
+                && threat_cost(t) <= 0.0
+                && worker.approach.is_some_and(|a| a.task == t.id && self.frame - a.gained < APPROACH_SLOW)
+                && distance(wpos, t.get_pos()) > range
+            {
+                // Six seconds of travel in the usual distance/4 currency.
+                cost -= def.map_or(0.0, |d| d.speed()) * 6.0 / 4.0;
+            }
         }
 
         let mut consider = |ids: &[TaskId], with_threat: bool, skip: &dyn Fn(&WorkerTask) -> bool| {
@@ -524,7 +550,7 @@ impl Ai {
                 if skip(t) || !reaches(t) {
                     continue;
                 }
-                let mut tmpcost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
+                let mut tmpcost = price(t) - stranded(t);
                 if with_threat {
                     tmpcost += threat_cost(t);
                 }
@@ -628,10 +654,14 @@ impl Ai {
     /// with a commander holding conquered ground kept near it
     /// (`conquestleash`).
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+        self.eco_cost_of_job_at_distance(worker, wpos, task, distance(wpos, task.get_pos()))
+    }
+
+    fn eco_cost_of_job_at_distance(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask, route: f32) -> f32 {
         if self.eco_repair_paused(task) {
             return NEVER;
         }
-        let cost = self.eco_cost_of_job_alone(worker, wpos, task);
+        let cost = self.eco_cost_of_job_alone(worker, wpos, task, route);
         if cost >= NEVER {
             return cost;
         }
@@ -653,22 +683,23 @@ impl Ai {
 
     /// What worker `worker` at `wpos` doing `task` costs on its own (lower
     /// is better).
-    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask, route: f32) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
         let task_pos = task.get_pos();
-        let dist = distance(wpos, task_pos);
+        let dist = route;
+        let direct = distance(wpos, task_pos);
 
         for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)) {
             // increment cost mod for every other worker unassigned to the given task that isn't the worker we're assigning
             // as long as they're closer or equaldist to the target.
             let idist = distance(w.get_pos(), task_pos);
             let rdist = idist.max(200.0);
-            let deltadist = (idist - dist).abs();
+            let deltadist = (idist - direct).abs();
             if w.id != worker.id {
                 if w.is_com {
                     cost_mod += 2.0;
-                } else if rdist < dist || deltadist < 100.0 {
+                } else if rdist < direct || deltadist < 100.0 {
                     cost_mod += 1.0;
                 }
             }
@@ -704,14 +735,8 @@ impl Ai {
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
-                    // (Greedy workers build it while metal floats for want
-                    // of it, see `eco_floating_on_energy`.)
-                    let greedy = worker.is_greedy && !self.eco_floating_on_energy();
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
-                        if greedy {
-                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
-                        }
                         if worker.is_com {
                             if eco.hard_estalled {
                                 return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
@@ -720,9 +745,6 @@ impl Ai {
                         }
                         return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     } else {
-                        if greedy {
-                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
-                        }
                         if worker.is_com {
                             return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0);
                         }

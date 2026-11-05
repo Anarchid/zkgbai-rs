@@ -37,6 +37,7 @@ pub struct Worker {
     pub task: Option<TaskId>,
     pub(super) raid_defense: Option<super::commander::Defense>,
     pub approach: Option<Approach>,
+    pub(super) routes: Option<crate::kgbutil::pathfinder::WorkerRoutes>,
     /// Sites this worker could not get to, shunned until a frame.
     pub shunned: Vec<(Vec3, i32)>,
     shield: Option<Weapon>,
@@ -109,6 +110,7 @@ impl Worker {
             task: None,
             raid_defense: None,
             approach: None,
+            routes: None,
             shunned: Vec::new(),
             shield,
             team,

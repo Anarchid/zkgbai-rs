@@ -611,6 +611,40 @@ impl Pathfinder {
         }
     }
 
+    /// Price every worker destination with its actual movement profile.
+    /// Unlike `find_path`, this does not replace the unit's pending jump plan.
+    pub(crate) fn worker_routes(&mut self, war: &MilitaryManager, u: Unit, frame: i32) -> Option<WorkerRoutes> {
+        let origin = u.pos();
+        if origin == NULLPOS || !self.terrain.in_map(origin) {
+            return None;
+        }
+        let def = u.def()?;
+        self.terrain.max_slope = 1.0;
+        self.terrain.dive = war.dive(Some(def));
+        let ground = if let Some(md) = def.move_data() {
+            self.terrain.set_movement(def, md);
+            true
+        } else {
+            false
+        };
+        let start = self.terrain.cell_of(origin)?;
+        let jumps = if ground && self.jumps_on { self.jumper(def) } else { None };
+        let links = jumps.map(|jd| (self.jump_links_for(jd, def), jump_wait(u, jd, def)));
+        paint_keepout(self.terrain.smwidth, self.terrain.slope_map.len(), &self.no_go, &mut self.keepout);
+        let terrain = &self.terrain;
+        let extra = &self.keepout;
+        let kind = if ground { PathCost::AvoidEnemies } else { PathCost::AirRaiderPath };
+        let costs = self.astar.costs(
+            start,
+            &mut |c| {
+                let base = terrain.cost(kind, war, c);
+                if base == IMPASSABLE { base } else { base + extra.get(c).copied().unwrap_or(0.0) }
+            },
+            links.map(|(i, wait)| (&self.jump_links[i].1, wait)),
+        );
+        Some(WorkerRoutes { origin, frame, width: self.terrain.smwidth as usize, costs })
+    }
+
     pub fn is_reachable(&mut self, war: &MilitaryManager, u: Unit, target: Vec3, cost: PathCost) -> bool {
         let start = u.pos();
         if start == NULLPOS {
@@ -950,6 +984,50 @@ fn jump_links(width: usize, passable: &[bool], ground: impl Fn(f32, f32) -> f32,
     Links::new(len, list)
 }
 
+/// A short-lived cost field shared by all jobs considered for one worker.
+/// Costs are weighted elmos, including slopes, threats and jump reload.
+pub(crate) struct WorkerRoutes {
+    pub origin: Vec3,
+    pub frame: i32,
+    width: usize,
+    costs: Vec<f32>,
+}
+
+impl WorkerRoutes {
+    /// Price arrival within build range, not reaching the building's centre.
+    /// A target on unwalkable ground can still be built from its near bank.
+    pub fn distance(&self, target: Vec3, range: f32) -> Option<f32> {
+        let straight = distance(self.origin, target);
+        if straight <= range {
+            return Some(straight);
+        }
+        if self.width == 0 || self.costs.is_empty() {
+            return None;
+        }
+        let res = MAP_RES as f32;
+        let rows = self.costs.len() / self.width;
+        // Half a cell of slack covers the difference between a passable
+        // sample and a build position at its edge.
+        let radius = range + res * 0.5;
+        let x0 = ((target.x - radius) / res).floor().max(0.0) as usize;
+        let z0 = ((target.z - radius) / res).floor().max(0.0) as usize;
+        let x1 = ((target.x + radius) / res).floor().max(0.0) as usize;
+        let z1 = ((target.z + radius) / res).floor().max(0.0) as usize;
+        let mut best = f32::INFINITY;
+        for z in z0..=z1.min(rows.saturating_sub(1)) {
+            for x in x0..=x1.min(self.width - 1) {
+                let p = Vec3::xz((x as f32 + 0.5) * res, (z as f32 + 0.5) * res);
+                if distance(p, target) <= radius {
+                    best = best.min(self.costs[z * self.width + x] * res);
+                }
+            }
+        }
+        // Keep the ladder's existing distance scale on open ground; add
+        // only route overhead. Build range must not erase a long detour.
+        best.is_finite().then_some((best + range).max(straight))
+    }
+}
+
 /// Precomputed answers to reachability checks from one unit's position;
 /// see [`Pathfinder::reachability`].
 pub struct Reachability {
@@ -1037,6 +1115,42 @@ fn cell_corner(width: i32, cell: usize) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_routes_price_detours_and_build_from_the_near_bank() {
+        let mut a = AStar::new(10, 100);
+        let origin = Vec3::xz(96.0, 96.0);
+        // Wall down column 4, with the only opening at its far end.
+        let costs = a.costs(11, &mut |c| if c % 10 == 4 && c / 10 < 8 { IMPASSABLE } else { 1.0 }, None);
+        let routes = WorkerRoutes { origin, frame: 0, width: 10, costs };
+        let across = Vec3::xz(352.0, 96.0);
+        let along = Vec3::xz(96.0, 416.0);
+        assert!(distance(origin, across) < distance(origin, along));
+        assert!(routes.distance(across, 32.0).unwrap() > routes.distance(along, 32.0).unwrap() * 2.0);
+        // A building in the wall is workable from this side, even though
+        // no route reaches its centre. Large build range also avoids the detour.
+        assert!(routes.distance(Vec3::xz(288.0, 96.0), 128.0).unwrap() < 250.0);
+        assert!(routes.distance(across, 192.0).unwrap() < 400.0);
+        assert_eq!(routes.distance(origin, 128.0), Some(0.0));
+        let sealed = a.costs(11, &mut |c| if c % 10 == 4 { IMPASSABLE } else { 1.0 }, None);
+        let sealed = WorkerRoutes { origin, frame: 0, width: 10, costs: sealed };
+        assert_eq!(sealed.distance(across, 32.0), None);
+    }
+
+    #[test]
+    fn worker_routes_include_jump_reload_and_avoid_expensive_cells() {
+        let mut a = AStar::new(10, 100);
+        let wall = |c: usize| if c % 10 == 4 { IMPASSABLE } else { 1.0 };
+        let links = Links::new(100, vec![(13, 15, 5.0)]);
+        let ready = a.costs(11, &mut { wall }, Some((&links, 0.0)));
+        let reloading = a.costs(11, &mut { wall }, Some((&links, 20.0)));
+        assert!(ready[18].is_finite());
+        assert!((reloading[18] - ready[18] - 20.0).abs() < 0.001);
+        // Directed jump: the other bank cannot jump back over this link.
+        assert!(a.costs(18, &mut { wall }, Some((&links, 0.0)))[11].is_infinite());
+        let risky = a.costs(11, &mut |c| if c / 10 == 1 && c % 10 > 2 && c % 10 < 8 { 100.0 } else { 1.0 }, None);
+        assert!(risky[18] > 7.0 && risky[18] < 15.0);
+    }
 
     #[test]
     fn cell_mapping() {

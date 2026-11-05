@@ -371,10 +371,8 @@ impl Ai {
             self.eco_create_aa_task(position);
         }
 
-        // is there sufficient energy to cover metal income? (Greedy workers
-        // too while metal floats for want of it.)
-        if (!is_greedy || self.eco_floating_on_energy())
-            && self.eco_team_energy_needed()
+        // Energy work is shared by expansion opportunity, not worker caste.
+        if self.eco_team_energy_needed()
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {
             self.eco_create_energy_task(wid, position);
@@ -2143,6 +2141,10 @@ impl Ai {
     }
 
     fn eco_create_energy_task(&mut self, wid: i32, worker_pos: Vec3) {
+        if self.eco.hard_estalled {
+            self.eco_local_energy_task(wid);
+            return;
+        }
         let mut position = worker_pos;
         if position == NULLPOS {
             return;
