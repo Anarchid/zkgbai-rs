@@ -139,6 +139,18 @@ impl Ai {
     /// Give `unit` `role`: out of its previous role's handler, into the new
     /// one's (as that module), and owned by it.
     pub fn assign_role(&mut self, unit: Unit, role: Role) {
+        let Some(def) = unit.def() else { return };
+        let name = self.defs.name(def);
+        // These scouts have no squad formation slot. In particular, a
+        // retired Kodachi must return to its dedicated solo controller.
+        let role = if role == Role::SquadRaider
+            && (matches!(name, "tankraid" | "shipscout") || self.unit_classes.solo_raiders.contains(name))
+        {
+            Role::SoloRaider
+        } else {
+            role
+        };
+        let small = self.unit_classes.small_raiders.contains(name);
         let id = unit.id();
         let old = self.role_of(id);
         if old == Some(role) {
@@ -155,7 +167,6 @@ impl Ai {
             Some(o) => reserved::own(self.cb, id, o),
             None => reserved::disown(self.cb, id),
         };
-        let Some(def) = unit.def() else { return };
         let (cost, team) = (def.cost(self.metal), self.team_id);
         match role {
             Role::Stakeout => reserved::as_module("stakeouts.add", || self.stakeouts_add(unit)),
@@ -165,7 +176,12 @@ impl Ai {
             }),
             Role::SquadRaider => reserved::as_module("raider.add", || {
                 unit.set_move_state(1, 0);
-                self.raider_add_medium_raider(Fighter::new_raider(unit, cost, team));
+                let fighter = Fighter::new_raider(unit, cost, team);
+                if small {
+                    self.raider_add_small_raider(fighter);
+                } else {
+                    self.raider_add_medium_raider(fighter);
+                }
             }),
         }
     }
@@ -249,6 +265,124 @@ mod tests {
             assert!(o.admits("coalesce.update"), "{}", role.name());
             assert!(o.admits("retreat.update"), "{}", role.name());
             assert!(!o.admits("squad.update"), "{}", role.name());
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod retirement_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::ffi::{CStr, c_char};
+
+    thread_local! {
+        static NAME: Cell<&'static CStr> = const { Cell::new(c"tankraid") };
+        static DEFS_READY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(crate) fn raider_test_ai(name: &'static CStr) -> Ai {
+        NAME.with(|n| n.set(name));
+        DEFS_READY.with(|r| r.set(false));
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, _: i32) -> i32 {
+            if !DEFS_READY.with(Cell::get) {
+                return 0;
+            }
+            if !out.is_null() {
+                unsafe { *out = 1 };
+            }
+            1
+        }
+        unsafe extern "C" fn features(_: i32, _: *mut i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn def_name(_: i32, _: i32) -> *const c_char {
+            NAME.with(|n| n.get().as_ptr())
+        }
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            660.0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn cost(_: i32, _: i32, _: i32) -> f32 {
+            170.0
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn float(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn empty(_: i32, _: i32, _: *mut i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn params(_: i32, _: i32, _: *mut *const c_char, _: *mut *const c_char) -> i32 {
+            0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const c_char, default: f32) -> f32 {
+            default
+        }
+        let mut ai = crate::economy::test_ai_with(|t| {
+            t.getUnitDefs = Some(defs);
+            t.getFeatures = Some(features);
+            t.UnitDef_getName = Some(def_name);
+            t.UnitDef_getCost = Some(cost);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(health);
+            t.Unit_getMaxHealth = Some(health);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildOptions = Some(empty);
+            t.UnitDef_isAbleToCloak = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_getLosRadius = Some(float);
+            t.UnitDef_getDecloakDistance = Some(float);
+            t.UnitDef_getTooltip = Some(def_name);
+            t.UnitDef_getMaxWeaponRange = Some(float);
+            t.Unit_getWeapons = Some(zero);
+            t.Unit_getCurrentCommands = Some(zero);
+            t.Unit_getMaxRange = Some(float);
+            t.Unit_getMaxSpeed = Some(float);
+            t.Unit_getSpeed = Some(float);
+            t.Unit_getRulesParamFloat = Some(rules);
+        });
+        DEFS_READY.with(|r| r.set(true));
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai
+    }
+
+    #[test]
+    fn retired_scouts_join_a_controller_that_can_order_them() {
+        for name in [c"tankraid", c"shipscout", c"spiderscout", c"vehscout", c"shieldscout"] {
+            let mut ai = raider_test_ai(name);
+            let unit = Unit::from_id(ai.cb, 1).unwrap();
+            ai.assign_role(unit, Role::Stakeout);
+            ai.assign_role(unit, Role::SquadRaider);
+            assert_eq!(ai.role_of(1), Some(Role::SoloRaider), "{name:?}");
+            assert_eq!(ai.stakeouts.count(), 0);
+            assert!(!ai.raider_handler.medium_raiders.contains(&1));
+            if name == c"tankraid" {
+                assert_eq!(ai.raider_handler.kodachis, vec![1]);
+            } else {
+                assert!(ai.raider_handler.solo_raiders.contains(&1), "{name:?}");
+            }
+            ai.assign_role(unit, Role::SquadRaider);
+            assert_eq!(ai.roles.count(Role::SoloRaider), 1);
+        }
+        for name in
+            [c"cloakraid", c"shieldraid", c"amphraid", c"hoverraid", c"shiptorpraider", c"spideremp", c"tankheavyraid"]
+        {
+            let mut ai = raider_test_ai(name);
+            let unit = Unit::from_id(ai.cb, 1).unwrap();
+            ai.assign_role(unit, Role::Stakeout);
+            ai.assign_role(unit, Role::SquadRaider);
+            assert_eq!(ai.role_of(1), Some(Role::SquadRaider), "{name:?}");
+            assert_eq!(ai.stakeouts.count(), 0);
+            assert!(ai.fighters[&1].squad.is_some(), "{name:?} must actually join a squad");
         }
     }
 }

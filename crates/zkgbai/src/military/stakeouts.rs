@@ -796,8 +796,8 @@ impl Ai {
     }
 
     /// `frontretire`: the free pickets and lookers leave, Puppies to their
-    /// herd (see `puppies`), the rest to the raider squads (which the QRF
-    /// can still draft). None is built again (`stakeouts_short`).
+    /// herd (see `puppies`), the rest to their solo or squad raider handler
+    /// according to unit type. Neither scout production path refills them.
     fn stakeouts_stand_down(&mut self, frame: i32) {
         let free: Vec<Unit> = (self.stakeouts.members.iter())
             .filter(|&(&id, m)| {
@@ -812,7 +812,7 @@ impl Ai {
         if free.is_empty() {
             return;
         }
-        let (mut herd, mut squads) = (0, 0);
+        let (mut herd, mut squads, mut solo) = (0, 0, 0);
         for unit in free {
             if self.defs.name_of(unit) == puppies::PUPPY {
                 self.role_end_stakeout(unit);
@@ -821,19 +821,23 @@ impl Ai {
             } else {
                 unit.stop(0);
                 self.assign_role(unit, Role::SquadRaider);
-                squads += 1;
+                if self.role_of(unit.id()) == Some(Role::SoloRaider) {
+                    solo += 1;
+                } else {
+                    squads += 1;
+                }
             }
         }
         // Loans need not come back.
         self.stakeouts.loaned.clear();
         let left = self.stakeouts.members.len();
-        self.stakeouts.stats.retired += (herd + squads) as u32;
+        self.stakeouts.stats.retired += (herd + squads + solo) as u32;
         self.op_emit(
             "stakeout",
-            json!({"event": "retire", "t": frame / 30, "herd": herd, "squads": squads, "left": left}),
+            json!({"event": "retire", "t": frame / 30, "herd": herd, "squads": squads, "solo": solo, "left": left}),
         );
         self.log(&format!(
-            "stakeouts: dense fights, {herd} pickets to the Puppy herd, {squads} to raider squads, {left} busy"
+            "stakeouts: dense fights, {herd} pickets to the Puppy herd, {squads} to raider squads, {solo} to solo raiders, {left} busy"
         ));
     }
 
@@ -1769,6 +1773,24 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_scouts_release_all_kodachis_to_their_controller() {
+        let mut ai = crate::military::roles::retirement_tests::raider_test_ai(c"tankraid");
+        for id in 1..=49 {
+            ai.assign_role(Unit::from_id(ai.cb, id).unwrap(), Role::Stakeout);
+        }
+        ai.stakeouts_stand_down(30 * 963);
+        assert_eq!(ai.stakeouts.count(), 0);
+        assert_eq!(ai.stakeouts.stats.retired, 49);
+        assert_eq!(ai.raider_handler.kodachis.len(), 49);
+        assert!(ai.raider_handler.medium_raiders.is_empty());
+        for id in 1..=49 {
+            assert_eq!(ai.role_of(id), Some(Role::SoloRaider));
+        }
+        ai.stakeouts_stand_down(30 * 964);
+        assert_eq!(ai.raider_handler.kodachis.len(), 49);
+    }
 
     #[test]
     fn raid_damage_response_covers_economy_not_turrets_or_fighters() {

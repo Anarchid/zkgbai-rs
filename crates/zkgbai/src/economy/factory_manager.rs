@@ -1839,7 +1839,11 @@ impl Ai {
     /// (`stakeouts_capped`; not the delay after each loss: with a pick per
     /// Pyro, 40-60 s apart, it kept one Puppy to six Pyros on Comet).
     fn fac_opening_scout(&self, fac: &mut Factory) -> Option<&'static str> {
-        if !fac.opener
+        // Retirement uses the contact-density ratchet, while the opening
+        // gate below uses map-wide density. A retired picket must never
+        // create a replacement opening wave, even on a still-sparse map.
+        if self.front_retired()
+            || !fac.opener
             || !opens_with_scouts(fac.kind())
             || !self.is_1v1()
             || self.dev_off("openscouts")
@@ -2246,6 +2250,26 @@ mod tests {
         ] {
             assert!(!lobster_cargo(name, armed, &classes), "{name}");
         }
+    }
+
+    #[test]
+    fn retired_scouts_do_not_restart_the_opening_wave() {
+        let mut ai = crate::military::roles::retirement_tests::raider_test_ai(c"tankraid");
+        ai.enemy_teams.insert(0);
+        ai.fac.num_workers = 3;
+        ai.posture.density = 0.0;
+        let unit = springai::Unit::from_id(ai.cb, 1).unwrap();
+        let mut fac = Factory::new(unit, "factorytank", true, 0.0);
+        // Reproduce the two density measures disagreeing in Comet Catcher.
+        assert_eq!(ai.fac_opening_scout(&mut fac), Some("tankraid"));
+        ai.war.front.ratchet = crate::military::front::HI + 2.0;
+        assert!(ai.front_retired());
+        fac.building_for = None;
+        assert_eq!(ai.fac_opening_scout(&mut fac), None);
+        assert_eq!(fac.building_for, None);
+        // Respect the existing opt-out of retirement.
+        ai.set_feature_off("frontretire", true);
+        assert_eq!(ai.fac_opening_scout(&mut fac), Some("tankraid"));
     }
 
     /// Scouts of `cost` built from none, with `raiders` raiders.

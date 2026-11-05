@@ -13,6 +13,11 @@ This is the Rust rewrite. It is a native engine AI (a plain `cdylib` speaking th
 interface), so unlike the original Java AI it needs no JVM and ships the same way CircuitAI does:
 a folder with `libSkirmishAI.so`, `SkirmishAI.dll`, `AIInfo.lua` and `AIOptions.lua`.
 
+Scout retirement stops both ordinary scout refills and opening scout waves, even when
+map-wide density remains below the opening threshold. Retired Kodachis return to their
+solo controller; other scouts use a supported solo, small-raider or medium-raider handler.
+Retirement journal records report solo raiders separately from squads.
+
 Stakeout damage response
 ------------------------
 
