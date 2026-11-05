@@ -547,12 +547,14 @@ These bounded approximations should be checked against game outcomes.
 `raidcommit` replaces ordinary ground-raider threat-map convergence with explicit combat
 permission (default **off on both main and wip**; `enable=raidcommit` / `disable=raidcommit`,
 or the operator `feature` tool). It keeps coalesce running even if `coalesce` itself is disabled:
-solo raiders, Kodachis and raider squads travel/scout using short threat-aware MOVE orders;
+solo raiders, Kodachis and raider squads travel/scout using continuous threat-aware MOVE queues;
 coalesce alone commits them to local armed fights, including singletons. A rejected encounter
 assembles its participants outside known weapon coverage; missing predictions, unknown contacts
-and exhausted query budgets never authorize an attack. Breaking a gang cancels its old pursuit.
+and exhausted query budgets never authorize an attack. Breaking a gang cancels its old pursuit; a successful fight releases units to press onward.
+Normal fights need a favorable expected trade, not a clean sweep of every supporting enemy;
+three consecutive failed rechecks break an existing commitment.
 QRF retains its roles and assignment planner, but defenders assigned to one raid share the same
-clean-fight admission policy, evaluated at their actual positions. Repositioning stays MOVE.
+favorable-trade admission policy, evaluated at their actual positions. Repositioning stays MOVE.
 Friendly threat paint still serves other controllers and routing; it grants no engagement
 permission in these paths. Explicit operator/strike orders and specialized cloaked, submerged
 and air controllers retain their existing behavior. The switch is experimental: its shared

@@ -1,18 +1,19 @@
 //! Explicit combat permission (`raidcommit`): threat maps choose a route;
 //! only coalesce's judged, named participants may deliberately enter combat.
-//! Ordinary travel uses short MOVE orders and stays outside observed weapons.
+//! Ordinary travel queues a continuous safe route outside observed weapons.
 
 use springai::{Unit, Vec3, reserved};
 
 use crate::Ai;
 use crate::kgbutil::pathfinder::PathCost;
 use crate::military::wrappers::fighter::next_waypoint;
-use crate::util::{NULLPOS, distance};
+use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
 
 pub const FEATURE: &str = "raidcommit";
-const STEP: f32 = 192.0;
-const MARGIN: f32 = 96.0;
+const ESCAPE_STEP: f32 = 192.0;
+const MARGIN: f32 = 32.0;
 const SAMPLE: f32 = 16.0;
+const CMD_MOVE: i32 = 10;
 
 #[derive(Clone, Copy)]
 struct Gun {
@@ -29,7 +30,7 @@ fn clearance(pos: Vec3, guns: &[Gun]) -> f32 {
 /// whose endpoint happens to be safe on the other side.
 fn clip(pos: Vec3, target: Vec3, guns: &[Gun]) -> Vec3 {
     let delta = target - pos;
-    let len = delta.length_2d().min(STEP);
+    let len = delta.length_2d();
     if len < 1.0 {
         return pos;
     }
@@ -60,7 +61,7 @@ fn steer(pos: Vec3, goal: Vec3, guns: &[Gun]) -> Vec3 {
     let mut score = clearance(best, guns);
     for i in 0..16 {
         let angle = i as f32 * std::f32::consts::TAU / 16.0;
-        let candidate = clip(pos, pos + Vec3::xz(angle.cos() * STEP, angle.sin() * STEP), guns);
+        let candidate = clip(pos, pos + Vec3::xz(angle.cos() * ESCAPE_STEP, angle.sin() * ESCAPE_STEP), guns);
         let c = clearance(candidate, guns);
         if c > score || (c == score && distance(candidate, goal) < distance(best, goal)) {
             best = candidate;
@@ -68,6 +69,41 @@ fn steer(pos: Vec3, goal: Vec3, guns: &[Gun]) -> Vec3 {
         }
     }
     best
+}
+
+/// Keep the path's bends, stopping at the first unsafe segment. The queue
+/// reaches the objective in open ground instead of stopping every 192 elmos.
+fn checked_route(pos: Vec3, path: impl IntoIterator<Item = Vec3>, guns: &[Gun]) -> Vec<Vec3> {
+    let mut route = Vec::new();
+    let mut at = pos;
+    for waypoint in path {
+        let to = clip(at, waypoint, guns);
+        if distance(at, to) >= 1.0 {
+            route.push(to);
+        }
+        if distance(to, waypoint) >= 1.0 {
+            break;
+        }
+        at = to;
+    }
+    if route.is_empty() {
+        route.push(pos);
+    }
+    route
+}
+
+fn route_still_safe(pos: Vec3, queued: &[Vec3], desired: &[Vec3], guns: &[Gun]) -> bool {
+    if queued.is_empty() || desired.is_empty() || distance(*queued.last().unwrap(), *desired.last().unwrap()) > 32.0 {
+        return false;
+    }
+    let mut at = pos;
+    for &to in queued {
+        if distance(clip(at, to, guns), to) >= 1.0 {
+            return false;
+        }
+        at = to;
+    }
+    true
 }
 
 impl Ai {
@@ -115,25 +151,51 @@ impl Ai {
                 radius: if e.identified { e.def_max_weapon_range() + MARGIN } else { 400.0 },
             })
             .collect();
-        let mut path = self.pathfinder.find_path(&self.war, unit, goal, PathCost::AvoidEnemies);
-        let waypoint = next_waypoint(&mut path, 1).unwrap_or(pos);
-        let mut to = steer(pos, waypoint, &guns);
-        // The escape direction must also be traversable. A blocked escape
-        // cancels pursuit in place rather than restoring the rejected FIGHT.
-        if clearance(pos, &guns) < 0.0 && distance(to, waypoint) > SAMPLE {
-            let mut escape = self.pathfinder.find_path(&self.war, unit, to, PathCost::AvoidEnemies);
-            to = clip(pos, next_waypoint(&mut escape, 0).unwrap_or(pos), &guns);
+        let keepout: Vec<_> = guns.iter().map(|g| (g.pos, g.radius)).collect();
+        self.pathfinder.walk_only = true;
+        let path = self.pathfinder.find_path_keepout(&self.war, unit, goal, PathCost::AvoidEnemies, &keepout);
+        let mut route = checked_route(pos, path, &guns);
+        if clearance(pos, &guns) < 0.0 {
+            // An enemy closing on us still calls for a short, checked escape.
+            let escape_goal = steer(pos, route[0], &guns);
+            self.pathfinder.walk_only = true;
+            let mut escape = self.pathfinder.find_path(&self.war, unit, escape_goal, PathCost::AvoidEnemies);
+            route = vec![clip(pos, next_waypoint(&mut escape, 0).unwrap_or(pos), &guns)];
         }
-        if let Some(rim) = self.pathfinder.no_go_exit(to, pos) {
-            to = rim;
+        let mut checked = Vec::new();
+        let mut at = pos;
+        for mut to in route {
+            let rim = self.pathfinder.no_go_exit(to, at);
+            if let Some(rim) = rim {
+                to = rim;
+            }
+            to.y = self.cb.map().elevation_at(to.x, to.z);
+            checked.push(to);
+            at = to;
+            if rim.is_some() {
+                break;
+            }
         }
-        to.y = self.cb.map().elevation_at(to.x, to.z);
-        // No SHIFT and no kgb_move_to jump/dash: the checked short segment is
-        // the entire movement order. Even a failed route removes old attacks.
-        if self.qrf.members.contains_key(&unit.id()) {
-            self.qrf_order(unit.id(), to, false);
-        } else {
-            unit.move_to(to, 0);
+        // Replacing the same MOVE queue twice a second resets engine pathing
+        // and braking. Keep it while its destination and every segment remain
+        // safe; new threats and old FIGHT orders invalidate it immediately.
+        let queued: Option<Vec<Vec3>> = unit
+            .current_commands()
+            .iter()
+            .map(|c| {
+                let p = c.params();
+                (matches!(c.id(), CMD_MOVE | crate::defs::cmd::RAW_MOVE) && p.len() >= 3)
+                    .then(|| Vec3::new(p[0], p[1], p[2]))
+            })
+            .collect();
+        let keep = queued.as_ref().is_some_and(|q| {
+            route_still_safe(pos, q, &checked, &guns) && q.iter().all(|p| self.pathfinder.no_go_at(*p).is_none())
+        });
+        if !keep {
+            for (i, to) in checked.iter().enumerate() {
+                unit.move_to(*to, if i == 0 { 0 } else { OPTION_SHIFT_KEY });
+            }
+            self.qrf_commit_moved(unit.id(), *checked.last().unwrap());
         }
         if let Some(f) = self.fighters.get_mut(&unit.id()) {
             f.target = goal;
@@ -176,9 +238,28 @@ mod tests {
     }
 
     #[test]
-    fn clear_travel_is_bounded_and_zero_length_stops() {
+    fn clear_travel_reaches_the_objective_without_short_stops() {
         let pos = Vec3::xz(100.0, 100.0);
+        let goal = Vec3::xz(2000.0, 100.0);
         assert_eq!(clip(pos, pos, &[]), pos);
-        assert!((distance(clip(pos, Vec3::xz(1000.0, 100.0), &[]), pos) - STEP).abs() < 0.01);
+        let route = checked_route(pos, [goal], &[]);
+        assert_eq!(route.len(), 1);
+        assert!(distance(route[0], goal) < 0.01);
+    }
+
+    #[test]
+    fn continuous_route_keeps_bends_and_clips_only_at_danger() {
+        let pos = Vec3::xz(100.0, 100.0);
+        let bend = Vec3::xz(100.0, 800.0);
+        let goal = Vec3::xz(2000.0, 800.0);
+        let gun = Gun { pos: Vec3::xz(1600.0, 800.0), radius: 300.0 };
+        let route = checked_route(pos, [bend, goal], &[gun]);
+        assert_eq!(route[0], bend);
+        assert!(route[1].x > 1200.0 && route[1].x <= 1300.0);
+        assert!(clearance(route[1], &[gun]) >= 0.0);
+        assert!(route_still_safe(pos, &route, &route, &[gun]));
+        let moved = Gun { pos: Vec3::xz(1000.0, 800.0), radius: 300.0 };
+        assert!(!route_still_safe(pos, &route, &route, &[moved]));
+        assert!(!route_still_safe(pos, &route, &[Vec3::xz(500.0, 100.0)], &[gun]));
     }
 }
