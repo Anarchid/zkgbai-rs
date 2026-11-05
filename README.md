@@ -275,6 +275,14 @@ allied frames, queued plans that have not started, and sites waiting for grid po
 The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
 and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
 
+Superweapon selection normally opens at five reactors. With `frontgate`, full front
+escalation (`front_hi`, default 2000) also opens it once estimated alliance metal income
+reaches 50/s and at least 80% of estimated enemy income. This uses actual metal income,
+without the game-age bonus, so geothermal and shared-energy economies need not build
+extra reactors first. Energy starvation and merged-team strider prerequisites still
+apply. A profitable uncovered nuke target retains its separate early trigger. These gates
+live in `crates/zkgbai/src/economy/planning.rs` and `crates/zkgbai/src/military/nukes.rs`.
+
 ### Colonization
 
 Colonization discounts a candidate's metal value by its distance from the enemy
