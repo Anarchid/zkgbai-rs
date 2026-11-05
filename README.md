@@ -94,6 +94,14 @@ Started frames are preserved. Replacement workers value partial construction too
 Resource forecasts cover tracked projects; factories and untracked jobs can still compete for
 the actual economy, so these remain forecasts rather than guaranteed completion times.
 
+Automatic QRF reinforcements from stakeouts temporarily lease command authority. Their
+scouting assignments and budget membership survive the loan; release cancels the
+old QRF order and resumes scouting. Disabling QRF returns these loans, including
+reserved or retreating scouts without cancelling their operator/retreat orders.
+Disabling `stakeoutqrf` prevents new damage-triggered loans; existing loans finish
+normally. Changing a scout's role invalidates its lease instead of restoring an
+obsolete assignment.
+
 Testing against other AIs
 -------------------------
 

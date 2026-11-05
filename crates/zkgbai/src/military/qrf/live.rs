@@ -939,6 +939,9 @@ impl Ai {
         self.qrf.releasing = true;
         for &id in &ids {
             let Some(m) = self.qrf.members.remove(&id) else { continue };
+            if self.qrf_return_stakeout(m.unit) {
+                continue;
+            }
             if m.unit.health() <= 0.0 {
                 continue;
             }
@@ -1134,7 +1137,9 @@ impl Ai {
     /// Stop in normal play (the feature switched off): teams given back.
     pub(super) fn qrf_live_stop(&mut self) {
         self.eco_release_commander_defense();
-        let teams: Vec<usize> = self.qrf_teams().keys().copied().filter(|t| *t < MOON).collect();
+        // Include retreating/reserved members, which qrf_teams deliberately hides.
+        let teams: std::collections::BTreeSet<usize> =
+            self.qrf.members.values().filter(|m| m.squad.is_none()).map(|m| m.team).collect();
         for t in teams {
             self.qrf_release_team(t, "qrf switched off");
         }
