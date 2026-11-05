@@ -308,6 +308,18 @@ use mode `veto` and report `veto`, `armed_metal`, predicted casualties and the
 baseline threat decision, so actual refusals can be compared against losses.
 
 
+### Finishing reserve
+
+`finishmargin` (on by default, `disable=finishmargin`) adds a finishing reserve
+when admitting a new coalesce or raidcommit/QRF attack on an armed mobile prize
+(heavy or commander). The forecast increases the enemy's current and maximum HP by 5%, preserving
+its health fraction and metal value. The reserve shrinks with remaining HP, so
+an already wounded target stays easier to finish.
+This is a conservative tuning margin, not a retreat-at-health assumption. Existing
+gangs recheck actual HP. The judgement journal records `finish_margin` and each
+adjusted enemy's actual/forecast HP in `finish_hp`. It uses the ordinary single
+forecast, so there is no additional rollout.
+
 Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
 on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.
 Setting the option's `def` to `'on'` in the installed AIOptions.lua does the same for every instance of that
