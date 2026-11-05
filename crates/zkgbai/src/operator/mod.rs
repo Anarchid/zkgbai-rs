@@ -63,6 +63,7 @@ use server::{Call, Server, Shared, unix_ms};
 use tools::Args;
 
 const DEFAULT_PORT: u16 = 7460;
+const DEFAULT_BUILDPOWER: f32 = 1.2;
 /// Frames between ticks (resources and values) in the stream.
 const TICK: i32 = 30;
 /// Frames between snapshots in the stream (and journal).
@@ -96,7 +97,7 @@ pub struct Overrides {
     /// AI's own choice, 0.2 home, 0.5 the middle).
     pub line: f32,
     /// Mobile build power the factories keep, as a multiple of metal
-    /// income (0 = the AI's own rule, one to one).
+    /// income (0 = the default target, 1.2 times income).
     pub buildpower: f32,
     /// Standing metal per square kilo-elmo at which the map counts as
     /// dense (see `regime`; `None`: the AI's own).
@@ -917,7 +918,7 @@ impl Ai {
     /// The constructor rule's target: mobile build power as a multiple of
     /// metal income.
     pub(crate) fn op_buildpower(&self) -> f32 {
-        if self.op.over.buildpower > 0.0 { self.op.over.buildpower } else { 1.0 }
+        if self.op.over.buildpower > 0.0 { self.op.over.buildpower } else { DEFAULT_BUILDPOWER }
     }
 
     /// Whether the operator prioritized construction task `id`.

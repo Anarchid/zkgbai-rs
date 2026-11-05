@@ -545,9 +545,9 @@ pub static TOOLS: &[Tool] = &[
                        is divided by it, so far or contested metal spots are priced cheaper for workers and \
                        workers flee later (the expansion horizon). line (0-0.9, default 0 = the AI's own \
                        choice): where the army stands when nothing calls it, as a fraction of the way from our \
-                       base to the enemy's center (0.2 home, 0.5 the middle). buildpower (0.5-3, default 1): \
-                       mobile build power the factories keep, as a multiple of metal income (the AI's own rule \
-                       follows income one to one; a strong human runs 1.3-1.7). Without a value, shows the dials.",
+                       base to the enemy's center (0.2 home, 0.5 the middle). buildpower (0.5-3, default 1.2): \
+                       mobile build power the factories keep, as a multiple of metal income. \
+                       Without a value, shows the dials.",
         params: &[P("name", Str, true, "greed, line or buildpower"), P("value", Num, false, "the new value")],
         writes: true,
         needs_modules: false,
