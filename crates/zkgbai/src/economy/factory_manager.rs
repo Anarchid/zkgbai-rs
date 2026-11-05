@@ -1024,7 +1024,7 @@ impl Ai {
             return "cloakcon";
         }
 
-        // Shared standing mine reserve, or conquest's larger demand.
+        // Shared mine demand, scaled by recently observed enemy clumps.
         if self.sapper_wants_mines() {
             return "cloakbomb";
         }
@@ -1190,7 +1190,7 @@ impl Ai {
             return "shieldcon";
         }
 
-        // Shared standing mine reserve, or conquest's larger demand.
+        // Shared mine demand, scaled by recently observed enemy clumps.
         if self.sapper_wants_mines() {
             return "shieldbomb";
         }
