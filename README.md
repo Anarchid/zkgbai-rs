@@ -427,6 +427,20 @@ them. A replacement starter waits two seconds for old unstarted orders to be cle
 still bridge an immediate energy shortage while a reactor builds. The `team energy:` log lines report
 the goal, production, committed output, deficit and starter. Solo reactor progression is unchanged.
 
+Expansion constructors and commanders keep a waypoint across ordinary job changes. Reaching it,
+losing the safe route or nearby expansion opportunities, or making no progress for two minutes
+releases it. Commander waypoints favor the enemy-facing direction; constructors prefer corridors
+not already claimed by another waypoint. Economic jobs receive a bounded preference for progress
+along that route. Hard energy stalls still build locally and explicit assignments take precedence.
+
+Each greedy expander requests an industrious constructor as its energy partner; pending constructors
+count toward that request. Industrious workers prioritize safe energy construction until actual
+production meets the existing energy target, then return to other jobs. Early expansion workers place
+small energy near their route, anywhere on a nearby Delaunay link, without walking to its connection
+head. Industrious workers retain the grid-completion planner; after the overdrive phase begins,
+other workers use it too. Journals record `workerrole` and `expansiongoal` changes.
+
+
 Operator API and run journal
 ----------------------------
 

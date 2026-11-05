@@ -93,6 +93,9 @@ impl Ai {
         // assigned_plop records that the commander was assigned the opening
         // factory; it can remain set after completion. The current job tells
         // whether this worker occupies an expansion lane, including commanders.
+        if let Some(goal) = w.expansion {
+            return Some(goal.target);
+        }
         lane_site(self.eco.tasks.get(w.task?)?, &self.eco.build_ids)
     }
 

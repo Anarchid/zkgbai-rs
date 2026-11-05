@@ -466,6 +466,7 @@ impl Ai {
         if refresh {
             let routes = self.pathfinder.worker_routes(&self.war, unit, self.frame);
             self.eco.workers.get_mut(&wid)?.routes = routes;
+            self.eco_refresh_expansion_goal(wid);
         }
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
@@ -521,8 +522,11 @@ impl Ai {
         let price = |t: &WorkerTask| {
             let direct = distance(wpos, t.get_pos());
             let routed = worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct);
-            self.eco_cost_of_job_at_distance(worker, wpos, t, routed)
-                + self.eco_energy_opportunity(worker, t, &energy_bidders)
+            let base = self.eco_cost_of_job_at_distance(worker, wpos, t, routed);
+            if base >= NEVER {
+                return base;
+            }
+            base + self.eco_energy_opportunity(worker, t, &energy_bidders) + self.eco_expansion_goal_cost(worker, t)
         };
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
@@ -580,6 +584,27 @@ impl Ai {
         // don't assign workers to repair themselves
         let own = |t: &WorkerTask| matches!(&t.kind, TaskKind::Repair(r) if r.target.id() == wid);
         consider(&eco.repair_tasks, true, &own);
+
+        // An industrious worker supplies the existing energy goal, then
+        // returns to the ordinary auction. Explicit assignments retain priority.
+        if worker.is_industrious
+            && self.eco_energy_goal_unmet()
+            && !task.is_some_and(|id| self.eco_directed_job(worker, id))
+        {
+            let energy = eco
+                .construction_tasks
+                .iter()
+                .chain(&eco.repair_tasks)
+                .filter_map(|&id| eco.tasks.get(id))
+                .filter(|t| self.eco_energy_job(t) && reaches(t) && threat_cost(t) <= 0.0 && price(t) < NEVER)
+                .min_by(|a, b| {
+                    let score = |t: &WorkerTask| price(t) - if worker.task == Some(t.id) { 80.0 } else { 0.0 };
+                    score(a).total_cmp(&score(b))
+                });
+            if let Some(t) = energy {
+                return Some(t.id);
+            }
+        }
 
         // Choose whether to expand with the normal economy priorities.
         // Only then spread new mex assignments between lanes; charging the
