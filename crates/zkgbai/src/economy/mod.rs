@@ -1171,7 +1171,7 @@ impl Ai {
         }
 
         if def_name == "staticmex" {
-            self.eco.new_mexes.push(unit);
+            self.eco_track_mex_construction(unit);
             self.eco_observe_raiders();
         }
 
@@ -1649,7 +1649,13 @@ impl Ai {
             "staticcon" => {
                 unit.self_destruct(0);
             }
-            "staticmex" => self.eco.mexes.push(unit),
+            "staticmex" => {
+                if unit.is_being_built() {
+                    self.eco_track_mex_construction(unit);
+                } else {
+                    self.eco.mexes.push(unit);
+                }
+            }
             "planelightscout" if !self.airstrike_claims(unit.id()) && !self.eco.sparrows.contains(&unit) => {
                 self.eco.sparrows.push(unit);
             }
@@ -1862,6 +1868,20 @@ impl Ai {
         );
     }
 
+    /// Fund mexes as soon as construction starts, including gifted nanoframes.
+    /// Target priority applies to all helpers without changing the builders'
+    /// priority on their next job. Walking builders make no construction pull.
+    fn eco_track_mex_construction(&mut self, unit: Unit) {
+        if !unit.is_being_built() {
+            return;
+        }
+        if !self.eco.new_mexes.contains(&unit) {
+            self.eco.new_mexes.push(unit);
+        }
+        let prio = if self.eco.hard_estalled { 1.0 } else { 2.0 };
+        unit.execute_custom_command(cmd::PRIORITY, &[prio], 0, NO_TIMEOUT);
+    }
+
     /// Track every unfinished power plant, including gifted nanoframes.
     /// Set the target's game priority so all assisting builders inherit it.
     fn eco_track_energy_construction(&mut self, unit: Unit, name: &str) {
@@ -1880,8 +1900,9 @@ impl Ai {
         let team = self.team_id;
         let building = |u: &Unit| u.health() > 0.0 && u.team() == team && u.is_being_built();
 
-        let prio =
-            if !eco.hard_estalled && !self.graph.eminent_territory && eco.adjusted_income < 20.0 { 2.0 } else { 1.0 };
+        // Expansion keeps its fast payback at higher incomes and in secure
+        // territory too. Only a hard energy stall puts power plants first.
+        let prio = if eco.hard_estalled { 1.0 } else { 2.0 };
         // A remex goes first too (`remexfirst`): its metal was income a
         // moment ago, and the raid that took it left storage empty, so at
         // normal priority it waited behind factory production and turrets.
@@ -1946,6 +1967,68 @@ mod priority_tests {
     use super::*;
     use springai::ffi;
     use std::ffi::c_void;
+
+    #[test]
+    fn mex_construction_keeps_priority_and_yields_only_to_hard_energy_stalls() {
+        thread_local! {
+            static ORDERS: std::cell::RefCell<Vec<(i32, f32)>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
+            if id == 17 { 0.0 } else { 100.0 }
+        }
+        unsafe extern "C" fn team(_: i32, id: i32) -> i32 {
+            if id == 18 { 3 } else { 2 }
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            id != 16
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, data: *mut c_void) -> i32 {
+            assert_eq!(topic as u32, ffi::CommandTopic::COMMAND_UNIT_CUSTOM);
+            let c = unsafe { &*data.cast::<ffi::SCustomUnitCommand>() };
+            assert_eq!(c.cmdId, cmd::PRIORITY);
+            assert_eq!(c.params_size, 1);
+            ORDERS.with_borrow_mut(|orders| orders.push((c.unitId, unsafe { *c.params })));
+            0
+        }
+        let mut ai = test_ai_with(|t| {
+            t.Unit_getHealth = Some(health);
+            t.Unit_getTeam = Some(team);
+            t.Unit_isBeingBuilt = Some(building);
+            t.Engine_handleCommand = Some(command);
+        });
+        let mex = Unit::from_id(ai.cb, 10).unwrap();
+        ai.eco_track_mex_construction(mex);
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, [(10, 2.0)]));
+        ai.eco_track_mex_construction(mex);
+        ai.eco_track_mex_construction(Unit::from_id(ai.cb, 16).unwrap());
+        assert_eq!(ai.eco.new_mexes, [mex]);
+
+        // Completed, dead and transferred frames must not receive orders.
+        ai.eco.new_mexes.extend((16..19).map(|id| Unit::from_id(ai.cb, id).unwrap()));
+        ai.eco.new_energy.push(Unit::from_id(ai.cb, 20).unwrap());
+        for (income, secure) in [(10.0, false), (100.0, false), (10.0, true), (100.0, true)] {
+            ai.eco.adjusted_income = income;
+            ai.graph.eminent_territory = secure;
+            ai.eco.estalled = true; // Growth demand alone must not demote mexes.
+            ORDERS.with_borrow_mut(Vec::clear);
+            ai.eco_set_eco_priorities();
+            ORDERS.with_borrow(|orders| assert_eq!(*orders, [(10, 2.0), (20, 1.0)]));
+        }
+
+        ai.eco.hard_estalled = true;
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_set_eco_priorities();
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, [(10, 1.0), (20, 2.0)]));
+        // A mex started during the stall follows the same policy immediately.
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_track_mex_construction(Unit::from_id(ai.cb, 11).unwrap());
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, [(11, 1.0)]));
+
+        ai.eco.hard_estalled = false;
+        ORDERS.with_borrow_mut(Vec::clear);
+        ai.eco_set_eco_priorities();
+        ORDERS.with_borrow(|orders| assert_eq!(*orders, [(10, 2.0), (11, 2.0), (20, 1.0)]));
+    }
 
     #[test]
     fn power_plants_use_game_high_priority_only_during_hard_stalls() {
