@@ -1,7 +1,7 @@
 //! Soft reservations for expansion corridors. A new mex assignment should
 //! prefer another branch over following a constructor already expanding.
 
-use super::{Ai, Worker, WorkerTask};
+use super::{Ai, BuildIds, Worker, WorkerTask};
 use crate::util::distance;
 use springai::Vec3;
 use std::collections::HashSet;
@@ -18,6 +18,16 @@ pub(super) struct LaneRoute {
 }
 
 impl LaneRoute {
+    /// The building defines the occupied lane even when the worker can
+    /// stop short of it. Otherwise an opening solar 268 elmos from the
+    /// first con disappears inside the 256-elmo common-exit allowance.
+    fn to_site(mut path: Vec<Vec3>, site: Vec3) -> Self {
+        if path.last().is_none_or(|&p| distance(p, site) > 1.0) {
+            path.push(site);
+        }
+        Self::new(&path)
+    }
+
     fn new(path: &[Vec3]) -> Self {
         let cell = |p: Vec3| ((p.x / CELL).floor() as i32, (p.z / CELL).floor() as i32);
         let length = path.windows(2).map(|p| distance(p[0], p[1])).sum();
@@ -57,7 +67,35 @@ impl LaneRoute {
     }
 }
 
+/// Small energy is part of an expansion route too. In Comet's opening
+/// the commander walked to a solar beside the first constructor's mex;
+/// ignoring non-mex work made that occupied corridor appear free.
+fn lane_site(task: &WorkerTask, ids: &BuildIds) -> Option<Vec3> {
+    let c = task.as_construction()?;
+    let id = c.build_type.id();
+    let expanding = id == ids.mex_id || id == ids.solar_id || id == ids.wind_id;
+    (expanding && !c.target.is_some_and(|u| !u.is_being_built())).then(|| task.get_pos())
+}
+
 impl Ai {
+    fn eco_worker_lane_site(&self, w: &Worker) -> Option<Vec3> {
+        if w.is_chicken
+            || w.raid_defense.is_some()
+            || w.unit.health() <= 0.0
+            || w.unit.team() != self.team_id
+            || w.unit.is_being_built()
+            || self.recovery_owns(w.id)
+            || self.eco_worker_held(w.id)
+            || springai::reserved::is_reserved(self.cb, w.id)
+        {
+            return None;
+        }
+        // assigned_plop records that the commander was assigned the opening
+        // factory; it can remain set after completion. The current job tells
+        // whether this worker occupies an expansion lane, including commanders.
+        lane_site(self.eco.tasks.get(w.task?)?, &self.eco.build_ids)
+    }
+
     pub(super) fn eco_expansion_lanes(&self, worker: &Worker) -> Vec<LaneRoute> {
         if self.eco.hard_estalled {
             return Vec::new();
@@ -68,27 +106,13 @@ impl Ai {
             .workers
             .values()
             .filter_map(|w| {
-                if w.id == worker.id
-                    || w.is_chicken
-                    || w.assigned_plop
-                    || w.raid_defense.is_some()
-                    || w.unit.health() <= 0.0
-                    || w.unit.team() != self.team_id
-                    || w.unit.is_being_built()
-                    || self.recovery_owns(w.id)
-                    || self.eco_worker_held(w.id)
-                    || springai::reserved::is_reserved(self.cb, w.id)
-                {
+                if w.id == worker.id {
                     return None;
                 }
-                let task = self.eco.tasks.get(w.task?)?;
-                let c = task.as_construction()?;
-                if c.build_type.id() != self.eco.build_ids.mex_id || c.target.is_some_and(|u| !u.is_being_built()) {
-                    return None;
-                }
+                let site = self.eco_worker_lane_site(w)?;
                 // Price both routes from this worker's position and with its
                 // movement profile: a cliff detour must not look like a new lane.
-                routes.path(task.get_pos(), range).map(|p| LaneRoute::new(&p))
+                routes.path(site, range).map(|p| LaneRoute::to_site(p, site))
             })
             .collect()
     }
@@ -117,7 +141,7 @@ impl Ai {
         let Some(path) = worker.routes.as_ref().and_then(|r| r.path(task.get_pos(), def.build_distance())) else {
             return 0.0;
         };
-        let route = LaneRoute::new(&path);
+        let route = LaneRoute::to_site(path, task.get_pos());
         let overlap = lanes.iter().map(|lane| route.overlap(lane)).fold(0.0f32, f32::max);
         // Bounded and non-stacking: still take the crowded route if the
         // alternatives are much farther away. Existing threat/reachability
@@ -143,6 +167,87 @@ mod tests {
         let &(x, z) = points.last().unwrap();
         path.push(Vec3::xz(x, z));
         LaneRoute::new(&path)
+    }
+
+    #[test]
+    fn commander_keeps_a_lane_after_its_factory_plop() {
+        use springai::{Unit, UnitDef};
+        unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const std::ffi::c_char, default: f32) -> f32 {
+            default
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Unit_getHealth = Some(health);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getWeapons = Some(zero);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(health);
+            t.Unit_getRulesParamFloat = Some(rules);
+        });
+        ai.eco.build_ids.solar_id = 2;
+        let site = Vec3::xz(5624.0, 920.0);
+        let task = WorkerTask::construction(UnitDef::from_id(ai.cb, 2).unwrap(), site, 0);
+        let id = ai.eco.tasks.insert(task);
+        let mut commander = Worker::new(Unit::from_id(ai.cb, 99).unwrap(), ai.team_id);
+        commander.is_com = true;
+        commander.assigned_plop = true;
+        commander.task = Some(id);
+        assert_eq!(ai.eco_worker_lane_site(&commander), Some(site));
+        commander.is_chicken = true;
+        assert_eq!(ai.eco_worker_lane_site(&commander), None);
+    }
+
+    #[test]
+    fn opening_solar_reserves_the_commanders_corridor_for_the_first_constructor() {
+        use springai::{Unit, UnitDef};
+        unsafe extern "C" fn finished(_: i32, _: i32) -> bool {
+            false
+        }
+        let ai = super::super::commander::tests::test_ai_with(|t| t.Unit_isBeingBuilt = Some(finished));
+        let ids = BuildIds { mex_id: 1, solar_id: 2, wind_id: 3, ..BuildIds::default() };
+        // Actual destinations at 17 seconds in the Comet opening: the
+        // commander was walking to solar, while the con chose the next mex
+        // beside it. Another expansion branch was available to the south.
+        let from = (5727.0, 1431.0);
+        let site = Vec3::xz(5624.0, 920.0);
+        for id in [ids.mex_id, ids.solar_id, ids.wind_id] {
+            let mut task = WorkerTask::construction(UnitDef::from_id(ai.cb, id).unwrap(), site, 0);
+            let p = lane_site(&task, &ids).expect("small energy must occupy a lane just like a mex");
+            let occupied = route(&[from, (p.x, p.z)]);
+            let following = route(&[from, (5560.0, 904.0)]);
+            let separate = route(&[from, (5432.0, 1992.0)]);
+            assert!(occupied.overlap(&following) > 0.8);
+            assert_eq!(occupied.overlap(&separate), 0.0);
+            if let super::super::tasks::TaskKind::Construction(c) = &mut task.kind {
+                c.target = Unit::from_id(ai.cb, 99);
+            }
+            assert_eq!(lane_site(&task, &ids), None, "a finished building does not keep a lane reserved");
+        }
+        let project = WorkerTask::construction(UnitDef::from_id(ai.cb, 4).unwrap(), site, 0);
+        assert_eq!(lane_site(&project, &ids), None, "arbitrary projects do not claim expansion lanes");
+    }
+
+    #[test]
+    fn build_reach_does_not_hide_the_commanders_opening_lane() {
+        // Before the factory rally, the con is at (5736, 1300). The
+        // commander's first solar is only 268 elmos away. Its walk-to-build
+        // path is shorter than LOCAL, but the site is beyond the exit.
+        let from = Vec3::xz(5736.0, 1300.0);
+        let path = vec![from, Vec3::xz(5728.0, 1184.0)];
+        let following = route(&[(from.x, from.z), (5560.0, 904.0)]);
+        assert_eq!(LaneRoute::new(&path).overlap(&following), 0.0, "old clipped route missed this lane");
+        let occupied = LaneRoute::to_site(path, Vec3::xz(5720.0, 1032.0));
+        assert!(occupied.overlap(&following) > 0.9);
+        let separate = route(&[(from.x, from.z), (5432.0, 1992.0)]);
+        assert_eq!(occupied.overlap(&separate), 0.0);
     }
 
     #[test]
