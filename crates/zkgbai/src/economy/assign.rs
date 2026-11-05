@@ -624,13 +624,17 @@ impl Ai {
         if !valid {
             return false;
         }
-        let range = w.unit.def().map_or(0.0, |d| d.build_distance());
-        if distance(w.get_pos(), t.get_pos()) <= range {
-            return if reclaim {
-                w.unit.current_commands().first().is_some_and(|c| c.id() == CMD_RECLAIM)
-            } else {
-                w.unit.resource_use(self.metal) > 0.0 || w.unit.resource_use(self.energy) > 0.0
-            };
+        if !reclaim {
+            if (w.unit.resource_use(self.metal) > 0.0 || w.unit.resource_use(self.energy) > 0.0)
+                && t.build_command_matches(w.unit)
+            {
+                return true;
+            }
+        } else {
+            let range = w.unit.def().map_or(0.0, |d| d.build_distance());
+            if distance(w.get_pos(), t.get_pos()) <= range {
+                return w.unit.current_commands().first().is_some_and(|c| c.id() == CMD_RECLAIM);
+            }
         }
         // A lost order or a stalled approach is not productive commitment.
         w.unit.num_current_commands() > 0
@@ -654,7 +658,6 @@ impl Ai {
         let c = t.as_construction()?;
         let u = c.target?;
         let built = u.build_progress();
-        let range = w.unit.def()?.build_distance();
         if !u.is_being_built()
             || u.health() <= 0.0
             || (u.team() != self.team_id && !self.allies.contains(&u.team()))
@@ -662,14 +665,13 @@ impl Ai {
             || w.bp <= 0.0
             || w.is_chicken
             || self.eco.hard_estalled
-            || distance(w.get_pos(), u.pos()) > range
             || !self.eco_worker_can_take(w, t)
             || !self.logistics_allows(w.id, t.id)
         {
             return None;
         }
         let spending = w.unit.resource_use(self.metal);
-        if spending <= 0.0 {
+        if spending <= 0.0 || !t.build_command_matches(w.unit) {
             return None;
         }
         let left = 1.0 - built;
@@ -1055,7 +1057,7 @@ impl Ai {
             && worker.unit.health() > 0.0
             && worker.unit.team() == self.team_id
             && worker.unit.resource_use(self.metal) > 0.0
-            && worker.unit.def().is_some_and(|d| distance(worker.get_pos(), target.pos()) <= d.build_distance())
+            && task.build_command_matches(worker.unit)
     }
 
     fn eco_cost_of_job_at_distance(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask, route: f32) -> f32 {
@@ -1113,11 +1115,11 @@ impl Ai {
         // on the job, if near, is a partner, not a crowd.
         let pairs = !self.dev_off("pairs") && self.defs.name_of(worker.unit) == PAIRED_CON;
         let mut partner = false;
-        // Another assigned hand cannot make the builder already spending
-        // on this mex leave. Entrants still pay the ordinary crowding cost;
-        // this changes its price, not its eligibility for urgent reassignment.
-        let working_mex = self.eco_working_mex_hand(worker, task);
-        for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)).filter(|_| !working_mex) {
+        // Joining hands must not evict an incumbent. Crowding guides new
+        // assignments only; existing crews can finish together. Safety and
+        // job value still decide whether an incumbent should switch.
+        let incumbent = worker.task == Some(task.id);
+        for w in task.assigned_workers.iter().filter_map(|id| eco.workers.get(id)).filter(|_| !incumbent) {
             // increment cost mod for every other worker unassigned to the given task that isn't the worker we're assigning
             // as long as they're closer or equaldist to the target.
             let idist = distance(w.get_pos(), task_pos);
@@ -1666,6 +1668,30 @@ impl Ai {
 pub(super) mod tests {
     use super::*;
 
+    thread_local! {
+        static BUILD_COMMANDS: std::cell::RefCell<std::collections::BTreeMap<i32, (i32, Vec<f32>)>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    }
+    pub(in crate::economy) fn build_command(worker: i32, id: i32, params: Vec<f32>) {
+        BUILD_COMMANDS.with_borrow_mut(|commands| {
+            commands.insert(worker, (id, params));
+        });
+    }
+    unsafe extern "C" fn command_count(_: i32, unit: i32) -> i32 {
+        BUILD_COMMANDS.with_borrow(|commands| i32::from(commands.contains_key(&unit)))
+    }
+    unsafe extern "C" fn command_id(_: i32, unit: i32, _: i32) -> i32 {
+        BUILD_COMMANDS.with_borrow(|commands| commands.get(&unit).map_or(0, |c| c.0))
+    }
+    unsafe extern "C" fn command_params(_: i32, unit: i32, _: i32, out: *mut f32, size: i32) -> i32 {
+        BUILD_COMMANDS.with_borrow(|commands| {
+            let Some((_, params)) = commands.get(&unit) else { return 0 };
+            if !out.is_null() && size > 0 {
+                unsafe { std::ptr::copy_nonoverlapping(params.as_ptr(), out, params.len().min(size as usize)) };
+            }
+            params.len() as i32
+        })
+    }
+
     #[test]
     fn nearby_plop_retries_when_engine_drops_its_order() {
         use springai::{Unit, ffi};
@@ -1835,6 +1861,11 @@ pub(super) mod tests {
 
     pub(in crate::economy) fn assignment_ai(customize: impl FnOnce(&mut springai::ffi::SSkirmishAICallback)) -> Ai {
         use std::ffi::{c_char, c_void};
+        BUILD_COMMANDS.with_borrow_mut(|commands| commands.clear());
+        unsafe extern "C" fn no_spending(_: i32, _: i32, _: i32) -> f32 {
+            0.0
+        }
+
         unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
             100.0
         }
@@ -1863,7 +1894,10 @@ pub(super) mod tests {
             t.Unit_getTeam = Some(team);
             t.Unit_getHealth = Some(scalar);
             t.Unit_getWeapons = Some(zero);
-            t.Unit_getCurrentCommands = Some(zero);
+            t.Unit_getCurrentCommands = Some(command_count);
+            t.Unit_CurrentCommand_getId = Some(command_id);
+            t.Unit_CurrentCommand_getParams = Some(command_params);
+            t.Unit_getResourceUse = Some(no_spending);
             t.Unit_getRulesParamFloat = Some(rules);
             t.UnitDef_getWeaponMounts = Some(zero);
             t.UnitDef_getBuildSpeed = Some(scalar);
@@ -1890,7 +1924,7 @@ pub(super) mod tests {
             static NEXT_X: Cell<f32> = const { Cell::new(1600.0) };
             static NEXT_PROGRESS: Cell<f32> = const { Cell::new(0.70) };
             static CURRENT_BUILT: Cell<bool> = const { Cell::new(false) };
-            static QUEUED: Cell<i32> = const { Cell::new(0) };
+            static QUEUED: Cell<i32> = const { Cell::new(1) };
         }
         unsafe extern "C" fn spending(_: i32, _: i32, _: i32) -> f32 {
             SPENDING.get()
@@ -1923,6 +1957,7 @@ pub(super) mod tests {
             t.UnitDef_getBuildDistance = Some(reach);
             t.Unit_getCurrentCommands = Some(queued);
         });
+        build_command(10, CMD_REPAIR, vec![12.0]);
         ai.eco.build_ids.mex_id = 2;
         let mut jobs = Vec::new();
         for (id, def) in [(12, 1), (13, 2)] {
@@ -1983,6 +2018,7 @@ pub(super) mod tests {
 
         // Protect an approach that is making headway, but release a stale
         // approach or a disappeared engine order immediately.
+        SPENDING.set(0.0);
         NEXT_PROGRESS.set(0.40);
         ai.eco.tasks.get_mut(current).unwrap().position.x = 1400.0;
         let w = ai.eco.workers.get_mut(&10).unwrap();
@@ -1995,6 +2031,97 @@ pub(super) mod tests {
         ai.frame = 0;
         QUEUED.set(0);
         assert_eq!(ai.eco_get_cheapest_job(10), Some(next));
+    }
+
+    #[test]
+    fn productive_edge_builder_keeps_work_and_helpers_do_not_displace_it() {
+        use springai::Unit;
+        use std::cell::Cell;
+        thread_local! {
+            static PROGRESS: Cell<f32> = const { Cell::new(0.52) };
+            static SPENDING: Cell<f32> = const { Cell::new(5.0) };
+        }
+        unsafe extern "C" fn pos(_: i32, id: i32, out: *mut f32) {
+            let x = match id {
+                10 => 1137.0,
+                13 => 1600.0,
+                _ => 1000.0,
+            };
+            unsafe { std::ptr::copy_nonoverlapping([x, 0.0, 1000.0].as_ptr(), out, 3) };
+        }
+        unsafe extern "C" fn reach(_: i32, _: i32) -> f32 {
+            128.0
+        }
+        unsafe extern "C" fn spending(_: i32, id: i32, _: i32) -> f32 {
+            if id == 10 { SPENDING.get() } else { 0.0 }
+        }
+        unsafe extern "C" fn progress(_: i32, id: i32) -> f32 {
+            if id == 12 { PROGRESS.get() } else { 0.60 }
+        }
+        unsafe extern "C" fn building(_: i32, id: i32) -> bool {
+            matches!(id, 12 | 13)
+        }
+        let mut ai = assignment_ai(|t| {
+            t.Unit_getPos = Some(pos);
+            t.UnitDef_getBuildDistance = Some(reach);
+            t.Unit_getResourceUse = Some(spending);
+            t.Unit_getBuildProgress = Some(progress);
+            t.Unit_isBeingBuilt = Some(building);
+        });
+        ai.eco.build_ids.mex_id = 1;
+        let mut jobs = Vec::new();
+        for id in [12, 13] {
+            let target = Unit::from_id(ai.cb, id).unwrap();
+            let mut t = WorkerTask::construction(UnitDef::from_id(ai.cb, 1).unwrap(), target.pos(), 0);
+            t.as_construction_mut().unwrap().target = Some(target);
+            let job = ai.eco.tasks.insert(t);
+            ai.eco.construction_tasks.push(job);
+            jobs.push(job);
+        }
+        let [a, b] = [jobs[0], jobs[1]];
+        let mut w = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        w.is_greedy = true;
+        w.set_task(&mut ai.eco.tasks, a, 0);
+        ai.eco.workers.insert(10, w);
+        build_command(10, CMD_REPAIR, vec![12.0]);
+        assert!(ai.eco_working_mex_hand(&ai.eco.workers[&10], ai.eco.tasks.get(a).unwrap()));
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(a), "52% mex at 137 distance with nominal range 128");
+        PROGRESS.set(0.94);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), Some(a), "finish the 94% mex at the same reach");
+        // A build command at the site is also valid, not just REPAIR.
+        build_command(10, -1, vec![1000.0, 0.0, 1000.0, 0.0]);
+        assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), Some(a));
+        // Spending elsewhere, a different site/type, or a lost queue is no
+        // evidence that this task is receiving build power.
+        for (cmd, params) in
+            [(CMD_REPAIR, vec![13.0]), (-1, vec![1600.0, 0.0, 1000.0]), (-2, vec![1000.0, 0.0, 1000.0])]
+        {
+            build_command(10, cmd, params);
+            assert!(!ai.eco_working_mex_hand(&ai.eco.workers[&10], ai.eco.tasks.get(a).unwrap()));
+            assert_eq!(ai.eco_finishing_task(&ai.eco.workers[&10]), None);
+        }
+        BUILD_COMMANDS.with_borrow_mut(|c| c.clear());
+        assert!(!ai.eco_switch_leaves_work(&ai.eco.workers[&10], ai.eco.tasks.get(a).unwrap()));
+        build_command(10, CMD_REPAIR, vec![12.0]);
+        // The commander joining must not worsen the incumbent's price,
+        // even during a resource pause, and for other construction too.
+        SPENDING.set(0.0);
+        let before = ai.eco_current_job_cost(&ai.eco.workers[&10]);
+        let mut com = Worker::new(Unit::from_id(ai.cb, 11).unwrap(), ai.team_id);
+        com.is_com = true;
+        com.set_task(&mut ai.eco.tasks, a, 0);
+        ai.eco.workers.insert(11, com);
+        assert_eq!(ai.eco_current_job_cost(&ai.eco.workers[&10]), before);
+        ai.eco.build_ids.mex_id = 2;
+        let together = ai.eco_current_job_cost(&ai.eco.workers[&10]);
+        ai.eco.workers.get_mut(&11).unwrap().clear_task(&mut ai.eco.tasks);
+        assert_eq!(
+            ai.eco_current_job_cost(&ai.eco.workers[&10]),
+            together,
+            "non-mex work also cannot evict its incumbent"
+        );
+        ai.op.over.priority_tasks.insert(b);
+        assert_eq!(ai.eco_get_cheapest_job(10), Some(b), "explicit priorities still preempt");
     }
 
     #[test]
@@ -2024,6 +2151,8 @@ pub(super) mod tests {
             t.Unit_getResourceUse = Some(spending);
             t.Unit_isBeingBuilt = Some(building);
         });
+        build_command(10, CMD_REPAIR, vec![12.0]);
+        build_command(11, CMD_REPAIR, vec![13.0]);
         ai.eco.build_ids.mex_id = 2;
         let mut jobs = Vec::new();
         for id in [12, 13] {
@@ -2171,6 +2300,7 @@ pub(super) mod tests {
             t.Unit_getResourceUse = Some(spending);
             t.Unit_isBeingBuilt = Some(building);
         });
+        build_command(10, CMD_REPAIR, vec![12.0]);
         let worker = Unit::from_id(ai.cb, 10).unwrap();
         let target = Unit::from_id(ai.cb, 12).unwrap();
         let def = UnitDef::from_id(ai.cb, 1).unwrap();

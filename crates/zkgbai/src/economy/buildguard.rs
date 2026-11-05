@@ -75,7 +75,8 @@ impl Ai {
         }
         let v = self.eco.build_guard.verdicts.get(&wid)?;
         let w = self.eco.workers.get(&wid)?;
-        let target = build_target(self.eco.tasks.get(v.task)?)?;
+        let task = self.eco.tasks.get(v.task)?;
+        let target = build_target(task)?;
         let hit_covered = self
             .eco
             .build_guard
@@ -93,9 +94,9 @@ impl Ai {
             && (v.target.team() == self.team_id || self.allies.contains(&v.target.team()))
             && hit_covered
             && !reserved::is_reserved(self.cb, wid)
-            && distance(w.get_pos(), v.target.pos()) <= w.unit.def()?.build_distance()
-            && w.unit.resource_use(self.metal) > 0.0)
-            .then_some(v.task)
+            && w.unit.resource_use(self.metal) > 0.0
+            && task.build_command_matches(w.unit))
+        .then_some(v.task)
     }
 
     pub(super) fn eco_guard_construction(&mut self, frame: i32) {
@@ -184,12 +185,14 @@ impl Ai {
         let work = def.build_time().max(1.0);
         let rate = |u: Unit| -> Option<(f32, f32)> {
             let d = u.def()?;
-            let range = d.build_distance();
+            // Actual spending on this target proves the current position is
+            // workable. Preserve that observed reach in the rollout too.
+            let range = d.build_distance().max(distance(u.pos(), pos) + 1.0);
             let rate = (d.build_speed() / work).min(u.resource_use(self.metal) / cost);
             (u.health() > 0.0
                 && !u.is_being_built()
                 && !u.is_paralyzed()
-                && distance(u.pos(), pos) <= range
+                && t.build_command_matches(u)
                 && rate.is_finite()
                 && rate > 0.0)
                 .then_some((rate, range))
@@ -313,6 +316,7 @@ mod tests {
             t.Unit_isBeingBuilt = Some(building);
             t.Unit_getBuildProgress = Some(progress);
         });
+        super::super::assign::tests::build_command(10, 40, vec![12.0]);
         let worker = Unit::from_id(ai.cb, 10).unwrap();
         let target = Unit::from_id(ai.cb, 12).unwrap();
         let def = UnitDef::from_id(ai.cb, 1).unwrap();

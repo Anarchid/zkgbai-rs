@@ -193,15 +193,18 @@ projects remain visible and are reassessed every second. Expired, unstarted dead
 cancelled; other exhausted valuations return their tasks to the ordinary economy for reassessment.
 Started frames are preserved. Replacement workers value partial construction too.
 Mex assignment values an active crew before recruiting replacements: paid progress attracts the
-current crew or a rescuer for idle work, not a replacement for a constructor already spending in
-build range. An arriving helper does not crowd that working constructor off its mex. Stalled or
-retreating workers release this preference immediately; urgent jobs can still win the normal bid.
+current crew or a rescuer for idle work, not a replacement for a constructor already spending on
+the current engine build/repair command. Actual spending on that command counts even when the
+builder is outside nominal build distance: the engine also includes the target's radius.
+Crowding affects new assignments only, across all worker jobs. An arriving helper never raises
+an incumbent's job cost; two workers can finish together, including through resource pauses.
+Stalled or retreating workers release the active-mex preference; urgent jobs can still win.
 
 Ordinary worker job switches pay 50 job-score points per estimated second of walking to the
 new site, using the terrain route, movement speed and actual build range. This replaces the
 small fixed preference for an existing approach. The cost applies only while the old job is
-valid, safe and making progress: spending on a build or repair, reclaiming in range, or walking
-with recent headway. Idle workers and stalled approaches choose freely. Explicit priorities,
+valid, safe and making progress: spending on its current build/repair command, reclaiming in
+range, or walking with recent headway. Idle workers and stalled approaches choose freely. Explicit priorities,
 commander missions, forecast project crews, replacement factories and hard energy shortages
 bypass the charge. The same price is used when choosing between mex expansion lanes; nearby
 work within build range costs nothing to switch to, and sufficiently valuable work can still win.
