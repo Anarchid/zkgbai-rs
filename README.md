@@ -75,6 +75,25 @@ operator and journal on. For the `wip` version it refuses anything but a clean c
 whose library carries that commit's build stamp. It writes `INSTALLED` (stamp, commit, sha256)
 next to the library.
 
+Tracked project execution
+-------------------------
+
+Logistics assigns exclusive crews to tracked construction projects. Deadline work can preempt
+capital; otherwise existing projects keep precedence over new ones. Forecasts share available
+metal and income across projects, and the economy executes the chosen crew assignments. Operator
+priorities, commander missions, retreat, transport, terraforming, and unsafe or shunned sites
+still take precedence. An energy emergency releases non-energy project crews.
+
+The `issues` operator tool and journal `issue` records expose each project's `state`, `reason`,
+assigned worker count, last observed progress frame, and retry frame. Approach and construction
+count as progress; resending commands does not. A crew with no progress for 30 seconds despite
+available metal and energy is released, with the project reconsidered after 10 seconds. Paused
+projects remain visible and are reassessed every second. Expired, unstarted deadline jobs are
+cancelled; other exhausted valuations return their tasks to the ordinary economy for reassessment.
+Started frames are preserved. Replacement workers value partial construction too.
+Resource forecasts cover tracked projects; factories and untracked jobs can still compete for
+the actual economy, so these remain forecasts rather than guaranteed completion times.
+
 Testing against other AIs
 -------------------------
 
