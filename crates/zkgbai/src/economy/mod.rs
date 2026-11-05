@@ -118,7 +118,7 @@ pub struct EconomyManager {
     /// `densgate`'s map diagonal, once known (see `phase_map_diag`).
     phase_diag: Cell<Option<f32>>,
     pub mexes: Vec<Unit>,
-    /// Mexes built by workers that have seen a raider, including unfinished ones.
+    /// Mexes that had a scout or raider within Lotus range, including unfinished ones.
     raid_mexes: BTreeMap<i32, Vec3>,
 
     /// All worker tasks; the lists below hold ids into it.
@@ -1173,9 +1173,6 @@ impl Ai {
         if def_name == "staticmex" {
             self.eco.new_mexes.push(unit);
             self.eco_observe_raiders();
-            if let Some(builder) = builder {
-                self.eco_remember_raid_mex(builder.id(), unit);
-            }
         }
 
         self.eco_track_energy_construction(unit, def_name);

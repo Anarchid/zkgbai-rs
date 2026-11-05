@@ -1,5 +1,5 @@
-//! A worker remembers seeing a raider and requests normal sparse mexporc
-//! for mexes it subsequently builds. No team-wide inference or decay.
+//! A mex remembers a scout or raider coming within Lotus weapon range and
+//! requests normal sparse mexporc for the rest of its life.
 
 use springai::{Unit, UnitDef, Vec3};
 
@@ -11,62 +11,42 @@ impl Ai {
         // Same scout/raider classification as Enemy::update_from_unit_def.
         let tooltip = def.tooltip();
         if tooltip.contains("aider") || tooltip.contains("cout") {
-            self.eco_workers_see_raider(enemy.pos(), def.is_able_to_fly());
+            self.eco_mexes_near_raider(enemy.pos());
         }
     }
 
-    fn eco_workers_see_raider(&mut self, at: Vec3, flying: bool) {
-        for w in self.eco.workers.values_mut().filter(|w| !w.seen_raider) {
-            let Some(def) = w.unit.def() else { continue };
-            let sight = if flying { def.air_los_radius() } else { def.los_radius() };
-            // The engine exposes allied LOS, not which unit supplied it.
-            // A visible contact inside this worker's sight is its encounter.
-            if sight > 0.0 && distance(w.get_pos(), at) <= sight {
-                w.seen_raider = true;
-            }
+    fn eco_mexes_near_raider(&mut self, at: Vec3) {
+        let Some(lotus) = self.defs.get("turretlaser") else { return };
+        let range = lotus.max_weapon_range();
+        let exposed: Vec<_> = self
+            .eco
+            .mexes
+            .iter()
+            .chain(&self.eco.new_mexes)
+            .filter(|m| !self.eco.raid_mexes.contains_key(&m.id()))
+            .filter_map(|m| {
+                let p = m.pos();
+                (range > 0.0 && distance(p, at) <= range).then_some((m.id(), p))
+            })
+            .collect();
+        for (id, p) in exposed {
+            self.eco.raid_mexes.insert(id, p);
+            self.eco_defend_mex(p);
         }
     }
 
     pub(super) fn eco_observe_raiders(&mut self) {
-        // A raider may enter a worker's sight while already in allied LOS.
+        // Poll too: an already observed raider can move near a mex. An
+        // identified radar contact counts, but a remembered fog position does not.
         let contacts: Vec<_> = self
             .war
             .targets
             .values()
-            .filter(|e| e.visible && e.identified && e.is_raider && !e.is_dead)
-            .map(|e| (e.unit.pos(), e.can_fly()))
+            .filter(|e| (e.visible || e.is_radar_visible) && e.identified && e.is_raider && !e.is_dead)
+            .map(|e| e.unit.pos())
             .collect();
-        for (at, flying) in contacts {
-            self.eco_workers_see_raider(at, flying);
-        }
-
-        // Also cover a mex already under construction when the worker first
-        // sees a raider, or one it takes over/assists after that encounter.
-        let mexes: Vec<_> = self
-            .eco
-            .workers
-            .values()
-            .filter(|w| w.seen_raider)
-            .filter_map(|w| {
-                let c = self.eco.tasks.get(w.task?)?.as_construction()?;
-                let mex = c.target?;
-                (self.defs.name(c.build_type) == "staticmex"
-                    && mex.is_being_built()
-                    && w.unit.def().is_some_and(|d| distance(w.get_pos(), mex.pos()) <= d.build_distance()))
-                .then_some((w.id, mex))
-            })
-            .collect();
-        for (worker, mex) in mexes {
-            self.eco_remember_raid_mex(worker, mex);
-        }
-    }
-
-    pub(super) fn eco_remember_raid_mex(&mut self, worker: i32, mex: Unit) {
-        if self.eco.workers.get(&worker).is_some_and(|w| w.seen_raider) {
-            let at = mex.pos();
-            if self.eco.raid_mexes.insert(mex.id(), at).is_none() {
-                self.eco_defend_mex(at);
-            }
+        for at in contacts {
+            self.eco_mexes_near_raider(at);
         }
     }
 
@@ -78,24 +58,26 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::economy::{Worker, test_ai_with};
-    use std::ffi::c_char;
+    use crate::economy::test_ai_with;
+    use std::{cell::Cell, ffi::c_char};
+
+    thread_local! { static DEFS_READY: Cell<bool> = const { Cell::new(false) }; }
 
     fn ai() -> Ai {
-        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
-            0
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, max: i32) -> i32 {
+            if !DEFS_READY.get() {
+                return 0;
+            }
+            if !out.is_null() && max > 0 {
+                unsafe { out.write(1) }
+            }
+            1
         }
-        unsafe extern "C" fn bp(_: i32, _: i32) -> f32 {
-            10.0
+        unsafe extern "C" fn name(_: i32, _: i32) -> *const c_char {
+            c"turretlaser".as_ptr()
         }
-        unsafe extern "C" fn sight(_: i32, _: i32) -> f32 {
+        unsafe extern "C" fn range(_: i32, _: i32) -> f32 {
             300.0
-        }
-        unsafe extern "C" fn air_sight(_: i32, _: i32) -> f32 {
-            600.0
-        }
-        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
-            false
         }
         unsafe extern "C" fn unit_def(_: i32, id: i32) -> i32 {
             if id == 12 { -1 } else { 1 }
@@ -107,81 +89,87 @@ mod tests {
                 _ => c"Assault".as_ptr(),
             }
         }
+        DEFS_READY.set(false);
         let mut ai = test_ai_with(|t| {
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.UnitDef_getMaxWeaponRange = Some(range);
             t.Unit_getDef = Some(unit_def);
-            t.Unit_getWeapons = Some(zero);
-            t.UnitDef_getWeaponMounts = Some(zero);
-            t.UnitDef_getBuildSpeed = Some(bp);
-            t.UnitDef_getLosRadius = Some(sight);
-            t.UnitDef_getAirLosRadius = Some(air_sight);
             t.UnitDef_getTooltip = Some(tooltip);
-            t.UnitDef_isAbleToFly = Some(no);
         });
-        // Stub positions are (id * 100, 0): workers at 1000 and 2000.
-        for id in [10, 20] {
-            let worker = Worker::new(Unit::from_id(ai.cb, id).unwrap(), ai.team_id);
-            ai.eco.workers.insert(id, worker);
-        }
+        DEFS_READY.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        // Stub positions are (id * 100, 0): finished mex at 1000, frame at 2000.
+        let finished = Unit::from_id(ai.cb, 10).unwrap();
+        let frame = Unit::from_id(ai.cb, 20).unwrap();
+        ai.eco.mexes.push(finished);
+        ai.eco.new_mexes.push(frame);
+        // Already covered: test eligibility without mocking turret placement.
+        ai.eco.porcs.extend([finished, frame]);
         ai
     }
 
     #[test]
-    fn encounter_is_local_and_lasts_after_contact_leaves() {
+    fn scout_or_raider_marks_only_the_nearby_mex_and_memory_persists() {
         for def in [1, 2] {
             let mut ai = ai();
             let enemy = Unit::from_id(ai.cb, 12).unwrap();
             ai.eco_observe_raider(enemy, UnitDef::from_id(ai.cb, 3).unwrap());
-            assert!(!ai.eco.workers[&10].seen_raider, "assault is not a raider");
+            assert!(ai.eco.raid_mexes.is_empty(), "assault is not a raider");
             ai.eco_observe_raider(enemy, UnitDef::from_id(ai.cb, def).unwrap());
-            assert!(ai.eco.workers[&10].seen_raider);
-            assert!(!ai.eco.workers[&20].seen_raider);
+            assert!(ai.eco.raid_mexes.contains_key(&10));
+            assert!(!ai.eco.raid_mexes.contains_key(&20));
             ai.eco_observe_raiders(); // No current contacts; memory survives.
-            assert!(ai.eco.workers[&10].seen_raider);
-            let replacement = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
-            assert!(!replacement.seen_raider, "a new worker has its own history");
+            assert!(ai.eco_mex_porc_allowed(Vec3::xz(1000.0, 0.0)));
+            assert!(!ai.eco_mex_porc_allowed(Vec3::xz(2000.0, 0.0)));
+            assert!(!ai.op_porc_allowed(Vec3::xz(1000.0, 0.0)), "links still use the global setting");
+            assert!(ai.eco.workers.is_empty(), "no constructor is needed");
         }
     }
 
     #[test]
-    fn ground_and_air_contacts_use_the_workers_respective_sight() {
+    fn lotus_range_boundary_applies_to_finished_and_unfinished_mexes() {
         let mut ai = ai();
-        ai.eco_workers_see_raider(Vec3::xz(1500.0, 0.0), false);
-        assert!(ai.eco.workers.values().all(|w| !w.seen_raider));
-        ai.eco_workers_see_raider(Vec3::xz(1500.0, 0.0), true);
-        assert!(ai.eco.workers.values().all(|w| w.seen_raider));
+        ai.eco_mexes_near_raider(Vec3::xz(1500.0, 0.0));
+        assert!(ai.eco.raid_mexes.is_empty());
+        ai.eco_mexes_near_raider(Vec3::xz(1300.0, 0.0));
+        assert!(ai.eco.raid_mexes.contains_key(&10));
+        assert!(!ai.eco.raid_mexes.contains_key(&20));
+        ai.eco_mexes_near_raider(Vec3::xz(1700.0, 0.0));
+        assert!(ai.eco.raid_mexes.contains_key(&20));
     }
 
     #[test]
-    fn polling_notices_existing_visible_contacts_but_not_radar_memory() {
+    fn current_identified_radar_contacts_count_but_fog_unknowns_and_dead_do_not() {
         let mut ai = ai();
         let mut enemy = crate::military::Enemy::new(Unit::from_id(ai.cb, 12).unwrap(), 50.0);
         enemy.identified = true;
         enemy.is_raider = true;
-        enemy.is_radar_visible = true;
         ai.war.targets.insert(12, enemy);
         ai.eco_observe_raiders();
-        assert!(!ai.eco.workers[&10].seen_raider);
-        ai.war.targets.get_mut(&12).unwrap().visible = true;
+        assert!(ai.eco.raid_mexes.is_empty(), "fog memory is not a new encounter");
+        ai.war.targets.get_mut(&12).unwrap().is_radar_visible = true;
+        ai.war.targets.get_mut(&12).unwrap().identified = false;
         ai.eco_observe_raiders();
-        assert!(ai.eco.workers[&10].seen_raider);
-        assert!(!ai.eco.workers[&20].seen_raider);
+        assert!(ai.eco.raid_mexes.is_empty(), "unknown radar contact is not a raider");
+        ai.war.targets.get_mut(&12).unwrap().identified = true;
+        ai.war.targets.get_mut(&12).unwrap().is_dead = true;
+        ai.eco_observe_raiders();
+        assert!(ai.eco.raid_mexes.is_empty());
+        ai.war.targets.get_mut(&12).unwrap().is_dead = false;
+        ai.eco_observe_raiders();
+        assert!(ai.eco.raid_mexes.contains_key(&10));
+        assert!(!ai.eco.raid_mexes.contains_key(&20));
     }
 
     #[test]
-    fn only_experienced_workers_mexes_gain_permission() {
+    fn a_rebuilt_mex_does_not_inherit_the_previous_mexs_history() {
         let mut ai = ai();
-        let mex = Unit::from_id(ai.cb, 30).unwrap();
-        assert!(!ai.op_porc_allowed(mex.pos()));
-        ai.eco_remember_raid_mex(20, mex);
-        assert!(!ai.eco_mex_porc_allowed(mex.pos()));
-        ai.eco_workers_see_raider(Vec3::xz(1200.0, 0.0), false);
-        ai.eco_remember_raid_mex(10, mex);
-        assert!(ai.eco_mex_porc_allowed(mex.pos()));
-        assert!(!ai.op_porc_allowed(mex.pos()), "links still use the global setting");
-        assert!(!ai.eco_mex_porc_allowed(Vec3::xz(4000.0, 0.0)));
-        ai.eco.workers.remove(&10);
-        assert!(ai.eco_mex_porc_allowed(mex.pos()), "the built mex retains its defense request");
+        ai.eco_mexes_near_raider(Vec3::xz(1200.0, 0.0));
+        let mex = Unit::from_id(ai.cb, 10).unwrap();
         ai.eco_unit_destroyed(mex, None);
-        assert!(!ai.eco_mex_porc_allowed(mex.pos()), "a dead mex leaves no defense zone");
+        ai.eco.new_mexes.push(mex);
+        ai.eco_observe_raiders();
+        assert!(!ai.eco_mex_porc_allowed(mex.pos()));
     }
 }
