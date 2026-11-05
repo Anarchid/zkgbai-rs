@@ -595,6 +595,13 @@ impl Ai {
         self.qrf.stats.orders += 1;
     }
 
+    /// Keep QRF's deduplication aware of a route issued by raidcommit.
+    pub(crate) fn qrf_commit_moved(&mut self, id: i32, to: Vec3) {
+        if let Some(member) = self.qrf.members.get_mut(&id) {
+            member.order = Some((to, false, self.frame));
+        }
+    }
+
     pub(crate) fn qrf_reset_commit_orders(&mut self) {
         for m in self.qrf.members.values_mut() {
             m.order = None;

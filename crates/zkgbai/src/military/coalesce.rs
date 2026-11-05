@@ -230,6 +230,22 @@ fn passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool, minimum_value: f32
     }
 }
 
+/// With explicit combat ownership, a normal fight only has to be a good
+/// trade. Requiring every supporting enemy to die was appropriate for a
+/// clean-sweep bonus, but vetoed profitable skirmishes as the sole gate.
+fn commit_passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool) -> bool {
+    if plan != Plan::Clean {
+        return passes(plan, t, p_prize, holding, 0.0);
+    }
+    let (loss_share, return_ratio) = if holding { (0.75, 1.0) } else { (0.6, 1.2) };
+    t.kill_value > 1.0 && t.own_loss <= loss_share * t.own_cost && t.kill_value >= return_ratio * t.own_loss
+}
+
+/// A successful fight releases its units to press onward, not to retreat.
+fn needs_regroup(reason: &str) -> bool {
+    matches!(reason, "forecast" | "unknown")
+}
+
 /// Single-linkage clusters of `points` (indices), where `same` also links.
 fn clusters(points: &[Vec3], same: impl Fn(usize, usize) -> bool) -> Vec<Vec<usize>> {
     let n = points.len();
@@ -379,6 +395,9 @@ impl Ai {
     }
 
     fn raidcommit_hold(&mut self, units: &[Unit], meeting: Vec3) {
+        if units.iter().all(|u| distance(u.pos(), meeting) <= 96.0) {
+            return;
+        }
         let fresh: Vec<_> = units
             .iter()
             .copied()
@@ -398,7 +417,7 @@ impl Ai {
         }
     }
 
-    /// QRF retains ownership but uses exactly the clean-gang admission policy.
+    /// QRF retains ownership but uses the same favorable-trade admission policy.
     /// No forecast, unknown contacts, or an unprofitable fight grant no attack.
     pub(crate) fn raidcommit_defense(&mut self, units: &[Unit]) -> Option<Vec3> {
         let mut budget = Budget::new(BUDGET_US);
@@ -536,9 +555,12 @@ impl Ai {
             let t = tally(&local, &fates, true);
             let p_prize = prize_index.map_or(0.0, |i| fates[their_index(&local, i)].p_raw);
             last = Some((t, p_prize));
-            if !passes(plan, &t, p_prize, hold.is_some(), if self.raidcommit_on() { 0.0 } else { MIN_PRIZE_METAL })
-                || best.as_ref().is_some_and(|b| b.tally.net() >= t.net())
-            {
+            let admitted = if self.raidcommit_on() {
+                commit_passes(plan, &t, p_prize, hold.is_some())
+            } else {
+                passes(plan, &t, p_prize, hold.is_some(), MIN_PRIZE_METAL)
+            };
+            if !admitted || best.as_ref().is_some_and(|b| b.tally.net() >= t.net()) {
                 continue;
             }
             let record = coalesce_record(&local, &fates, plan, &t, p_prize);
@@ -611,7 +633,7 @@ impl Ai {
                     g.last = last.or(g.last);
                     g.fails
                 });
-                if ai.raidcommit_on() || fails >= FAILS {
+                if fails >= FAILS {
                     ai.coalesce_end(gid, reason);
                 }
             };
@@ -801,9 +823,14 @@ impl Ai {
                 .filter(|u| self.raidcommit_available(*u) && !self.qrf.members.contains_key(&u.id()))
                 .collect();
             for unit in &units {
-                let haven = self.graph_get_closest_raider_haven(unit.pos());
-                self.raidcommit_move(*unit, haven);
-                self.raidcommit_hold(&[*unit], haven);
+                // Cancel the old combat order in every case. Only a losing
+                // or unjudgeable fight warrants a retreat and assembly hold.
+                unit.move_to(unit.pos(), 0);
+                if needs_regroup(reason) {
+                    let haven = self.graph_get_closest_raider_haven(unit.pos());
+                    self.raidcommit_move(*unit, haven);
+                    self.raidcommit_hold(&[*unit], haven);
+                }
             }
         }
         let alive = g.members.iter().filter(|m| m.2.health() > 0.0 && m.2.team() == self.team_id).count();
@@ -918,6 +945,26 @@ mod tests {
         assert!(passes(Plan::Prize(1), &t(600.0, 500.0, 900.0, 0.3, 0.1), 0.5, true, MIN_PRIZE_METAL));
     }
 
+    #[test]
+    fn explicit_commit_accepts_profitable_partial_fights() {
+        let trade = t(400.0, 150.0, 240.0, 0.35, 0.0);
+        assert!(!passes(Plan::Clean, &trade, 0.0, false, MIN_PRIZE_METAL));
+        assert!(commit_passes(Plan::Clean, &trade, 0.0, false));
+        assert!(!commit_passes(Plan::Clean, &t(400.0, 250.0, 500.0, 0.5, 0.0), 0.0, false));
+        assert!(!commit_passes(Plan::Clean, &t(400.0, 150.0, 160.0, 0.5, 0.0), 0.0, false));
+        assert!(!commit_passes(Plan::Clean, &t(400.0, 0.0, 0.0, 0.0, 0.0), 0.0, false));
+        assert!(commit_passes(Plan::Clean, &t(400.0, 250.0, 300.0, 0.4, 0.0), 0.0, true));
+    }
+
+    #[test]
+    fn successful_and_finished_fights_do_not_send_raiders_home() {
+        for reason in ["clear", "prize_dead", "chase", "timeout", "policy_changed"] {
+            assert!(!needs_regroup(reason), "{reason}");
+        }
+        assert!(needs_regroup("forecast"));
+        assert!(needs_regroup("unknown"));
+    }
+
     fn fixture_spec(name: &str) -> std::sync::Arc<crate::military::fightsim::UnitSpec> {
         use crate::military::fightsim::{UnitSpec, WeaponSpec};
         let line = include_str!("fightsim/testdata/mech_parity_units.tsv")
@@ -995,23 +1042,23 @@ mod tests {
     fn raidcommit_rejects_lone_glaive_against_blitz_and_kodachi() {
         for foe in ["tankheavyraid", "tankraid"] {
             let t = glaive_encounter(&[(350.0, 0.0)], foe);
-            assert!(!passes(Plan::Clean, &t, 0.0, false, 0.0), "{foe}: {t:?}");
+            assert!(!commit_passes(Plan::Clean, &t, 0.0, false), "{foe}: {t:?}");
         }
     }
 
     #[test]
     fn raidcommit_distant_support_cannot_license_the_first_glaive() {
         let t = glaive_encounter(&[(300.0, 0.0), (1200.0, 0.0)], "tankheavyraid");
-        assert!(!passes(Plan::Clean, &t, 0.0, false, 0.0), "{t:?}");
+        assert!(!commit_passes(Plan::Clean, &t, 0.0, false), "{t:?}");
     }
 
     #[test]
     fn raidcommit_can_commit_a_real_pack_and_a_winning_singleton() {
         let positions: Vec<_> = (0..12).map(|i| (300.0 + (i / 4) as f32 * 24.0, (i % 4) as f32 * 24.0)).collect();
         let t = glaive_encounter(&positions, "tankheavyraid");
-        assert!(passes(Plan::Clean, &t, 0.0, false, 0.0), "pack: {t:?}");
+        assert!(commit_passes(Plan::Clean, &t, 0.0, false), "pack: {t:?}");
         let t = glaive_encounter(&[(160.0, 0.0)], "spiderscout");
-        assert!(passes(Plan::Clean, &t, 0.0, false, 0.0), "singleton: {t:?}");
+        assert!(commit_passes(Plan::Clean, &t, 0.0, false), "singleton: {t:?}");
     }
 
     #[test]
