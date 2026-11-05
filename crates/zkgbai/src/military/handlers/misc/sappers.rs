@@ -7,6 +7,11 @@
 //! what the blast stuns. A placed mine the enemy can see and shoot stays
 //! where it is.
 //!
+//! Once a compact group of enemy ground combat units has been seen, Cloak
+//! and Shield factories maintain four mines between them, including builds
+//! in flight. Conquest can ask for more. The existing field allocator spreads
+//! them across approaches, with independent fire support required for Imps.
+//!
 //! `bombcharge` (on by default): an Imp or Snitch with enemies near asks
 //! the fight predictor whether running at them beats sitting tight
 //! ([`crate::military::fightsim::Model::bomb_charge`]): busy, inaccurate
@@ -14,6 +19,7 @@
 
 use serde_json::json;
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
+use std::collections::BTreeMap;
 use zk_terrain::paths::Paths;
 
 use crate::Ai;
@@ -46,6 +52,28 @@ const GATE_LOOKBACK: f32 = 200.0;
 const SIGHT_MEMORY: i32 = 300;
 /// Sight assumed for a contact not yet identified.
 const UNKNOWN_SIGHT: f32 = 450.0;
+const RESERVE_MINES: usize = 4;
+const CLUMP_UNITS: usize = 3;
+const CLUMP_RADIUS: f32 = 300.0;
+const CLUMP_MEMORY: i32 = 30 * 10;
+
+#[derive(Default)]
+pub(super) struct MineReserve {
+    /// Once armies form, keep replacing spent mines even through fog of war.
+    active: bool,
+    /// Factory -> (unit def, order frame), until its nanoframe is created.
+    orders: BTreeMap<i32, (i32, i32)>,
+}
+
+fn mine_type(name: &str) -> bool {
+    matches!(name, "cloakbomb" | "shieldbomb")
+}
+
+fn ground_clump(points: &[Vec3]) -> bool {
+    points
+        .iter()
+        .any(|&p| points.iter().filter(|&&q| distance(p, q) <= CLUMP_RADIUS).take(CLUMP_UNITS).count() >= CLUMP_UNITS)
+}
 
 /// `bombcharge`: an Imp or Snitch judges a charge once an enemy on the
 /// ground comes this near (a run of 3-4 s)...
@@ -303,9 +331,64 @@ fn rows(center: Vec3, forward: Vec3, width: f32, spacing: f32) -> Vec<(Vec3, usi
 }
 
 impl Ai {
-    /// Our mines in play.
-    pub(crate) fn sapper_count(&self) -> usize {
-        self.misc_handler.sappers.len()
+    /// One shared reserve, counting completed mines and nanoframes exactly
+    /// once, plus accepted orders that have not created a unit yet.
+    pub(crate) fn sapper_wants_mines(&self) -> bool {
+        if !self.misc_handler.mines.active && !self.conquest_wants_mines(0) {
+            return false;
+        }
+        let have = self
+            .cb
+            .team_units()
+            .into_iter()
+            .filter(|u| u.team() == self.team_id && u.health() > 0.0 && mine_type(self.defs.name_of(*u)))
+            .count()
+            + self.misc_handler.mines.orders.len();
+        (self.misc_handler.mines.active && have < RESERVE_MINES) || self.conquest_wants_mines(have)
+    }
+
+    pub(crate) fn sapper_factory_idle(&mut self, factory: i32) {
+        self.misc_handler.mines.orders.remove(&factory);
+    }
+
+    pub(crate) fn sapper_ordered(&mut self, factory: i32, def: UnitDef) {
+        if mine_type(self.defs.name(def)) {
+            self.misc_handler.mines.orders.insert(factory, (def.id(), self.frame));
+        }
+    }
+
+    pub(crate) fn sapper_created(&mut self, unit: Unit, builder: Option<Unit>) {
+        if let (Some(builder), Some(def)) = (builder, unit.def())
+            && self.misc_handler.mines.orders.get(&builder.id()).is_some_and(|&(id, _)| id == def.id())
+        {
+            self.misc_handler.mines.orders.remove(&builder.id());
+        }
+    }
+
+    fn sapper_update_reserve(&mut self, frame: i32) {
+        if !self.misc_handler.mines.active {
+            let points: Vec<_> = self
+                .war
+                .targets
+                .values()
+                .filter(|e| {
+                    !e.is_dead && e.identified && !e.is_static && !e.can_fly() && !e.is_worker && e.can_attack()
+                })
+                .filter(|e| e.position.y >= 0.0 && (e.visible || frame - e.last_seen <= CLUMP_MEMORY))
+                .map(|e| e.position)
+                .collect();
+            if ground_clump(&points) {
+                self.misc_handler.mines.active = true;
+                self.log("sappers: enemy ground clump seen; maintaining four mine positions");
+            }
+        }
+        self.misc_handler.mines.orders.retain(|id, (def, issued)| {
+            self.fac.factories.get(id).is_some_and(|f| {
+                f.unit.health() > 0.0
+                    && f.unit.team() == self.team_id
+                    && (frame - *issued < 90 || f.unit.current_commands().iter().any(|c| c.id() == -*def))
+            })
+        });
     }
 
     pub fn misc_prepare_sapper(&self, unit: Unit) {
@@ -442,7 +525,11 @@ impl Ai {
     }
 
     pub(super) fn misc_update_sappers(&mut self, frame: i32) {
-        if frame % PERIOD != (self.offset + 10) % PERIOD || self.misc_handler.sappers.is_empty() {
+        if frame % PERIOD != (self.offset + 10) % PERIOD {
+            return;
+        }
+        self.sapper_update_reserve(frame);
+        if self.misc_handler.sappers.is_empty() {
             return;
         }
         let sappers: Vec<_> = self.misc_handler.sappers.values().copied().collect();
@@ -741,6 +828,103 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static MINE_ROSTER: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+        static MINE_DEFS_READY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn reserve_ai() -> Ai {
+        unsafe extern "C" fn roster(_: i32, out: *mut i32, _: i32) -> i32 {
+            MINE_ROSTER.with_borrow(|ids| {
+                if !out.is_null() {
+                    unsafe { std::ptr::copy_nonoverlapping(ids.as_ptr(), out, ids.len()) };
+                }
+                ids.len() as i32
+            })
+        }
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, _: i32) -> i32 {
+            if !MINE_DEFS_READY.get() {
+                return 0;
+            }
+            if !out.is_null() {
+                unsafe { std::ptr::copy_nonoverlapping([1, 2, 3].as_ptr(), out, 3) };
+            }
+            3
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const std::ffi::c_char {
+            match id {
+                1 => c"cloakbomb".as_ptr(),
+                2 => c"shieldbomb".as_ptr(),
+                _ => c"jumpscout".as_ptr(),
+            }
+        }
+        unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
+            match id {
+                41 | 51 => 1,
+                _ => id / 10,
+            }
+        }
+        unsafe extern "C" fn team(_: i32, id: i32) -> i32 {
+            if id == 41 { 3 } else { 2 }
+        }
+        unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
+            if id == 51 { 0.0 } else { 100.0 }
+        }
+        MINE_ROSTER.with_borrow_mut(Vec::clear);
+        MINE_DEFS_READY.set(false);
+        let mut ai = crate::economy::test_ai_with(|t| {
+            t.getTeamUnits = Some(roster);
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.Unit_getDef = Some(def);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getHealth = Some(health);
+        });
+        MINE_DEFS_READY.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai
+    }
+
+    #[test]
+    fn mine_reserve_needs_a_compact_group_not_isolated_raiders() {
+        assert!(!ground_clump(&[]));
+        let group = [Vec3::xz(1000.0, 1000.0), Vec3::xz(1200.0, 1000.0), Vec3::xz(1400.0, 1000.0)];
+        assert!(!ground_clump(&group[..2]));
+        assert!(ground_clump(&group));
+        let spread = [group[0], Vec3::xz(2000.0, 1000.0), Vec3::xz(3000.0, 1000.0)];
+        assert!(!ground_clump(&spread));
+    }
+
+    #[test]
+    fn mine_reserve_counts_mixed_builds_and_replaces_losses_without_conquest() {
+        let mut ai = reserve_ai();
+        ai.set_feature_off("conquest", true);
+        assert!(ai.dev_off("conquest"));
+        assert!(!ai.sapper_wants_mines());
+        ai.misc_handler.mines.active = true;
+        assert!(ai.sapper_wants_mines());
+        // Two Imps and a Snitch; other bomb types, allies and dead units
+        // cannot satisfy this reserve. None need be in the finished handler.
+        MINE_ROSTER.with_borrow_mut(|ids| *ids = vec![11, 12, 21, 31, 41, 51]);
+        assert!(ai.sapper_wants_mines());
+        let factory = Unit::from_id(ai.cb, 100).unwrap();
+        let snitch = ai.defs.get("shieldbomb").unwrap();
+        ai.sapper_ordered(factory.id(), snitch);
+        assert!(!ai.sapper_wants_mines(), "accepted order fills the fourth slot");
+        MINE_ROSTER.with_borrow_mut(|ids| ids.push(22));
+        ai.sapper_created(Unit::from_id(ai.cb, 22).unwrap(), Some(factory));
+        assert!(ai.misc_handler.mines.orders.is_empty());
+        assert!(!ai.sapper_wants_mines(), "nanoframe replaces its reservation");
+        MINE_ROSTER.with_borrow_mut(|ids| ids.retain(|&id| id != 11));
+        assert!(ai.sapper_wants_mines(), "spent mine gets replaced");
+        ai.sapper_ordered(factory.id(), snitch);
+        ai.sapper_factory_idle(factory.id());
+        assert!(ai.sapper_wants_mines(), "canceled order releases its slot");
+        ai.sapper_update_reserve(1000);
+        assert!(ai.sapper_wants_mines(), "losing sight of the enemy does not disable the reserve");
+    }
 
     fn site(x: f32, gate: f32, value: f32) -> Site {
         Site { position: Vec3::xz(x, 100.0), gate: Vec3::xz(gate, 100.0), value, depth: 0 }
