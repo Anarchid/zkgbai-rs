@@ -336,6 +336,7 @@ impl Ai {
         for seed in seeds(&points, range) {
             let site = self.cb.map().find_closest_build_site(def, Vec3::xz(seed.x, seed.z), 160.0, 3, 0);
             if site.x < 0.0
+                || !self.eco_porc_admissible(def, site, false)
                 || !self.eco_build_check(def, site, 0)
                 || (def.name() == "turretlaser" && self.eco_lotus_crowded(site))
                 || !self.eco_fire_coverage(def, site, &guard).iter().all(|&hit| hit)
@@ -465,7 +466,10 @@ impl Ai {
                     continue;
                 }
                 visited.push(site);
-                if !self.eco_build_check(def, site, 0) || (posture && self.posture_shuns(site)) {
+                if !self.eco_porc_admissible(def, site, false)
+                    || !self.eco_build_check(def, site, 0)
+                    || (posture && self.posture_shuns(site))
+                {
                     continue;
                 }
                 let Some(region) = map.region_at(pos(site)) else { continue };

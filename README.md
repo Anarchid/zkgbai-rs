@@ -76,10 +76,24 @@ posture is enabled, sufficient posture budget. Lower standing-metal density and 
 of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
 pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
 so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
-reuse a matching existing or queued turret when it covers the asset's nearby approaches. Otherwise
-they prefer a safe shared gate site that retains that coverage, falling back to ordinary local
-placement when no such site is available. Other requested weapon types are retained; AA, shields
-and the opening factory defense keep their existing placement, subject to the Lotus overlap cap.
+reuse a matching existing or queued turret when it covers the asset's nearby approaches. New
+orders, including conquest guards and pooled upgrades, pass one shared porc policy: within
+300 elmos of a selected unblocked chokepoint, or a 160-elmo band around the perpendicular
+bisector of our start and the enemy start-box estimate. This line stays fixed as the front
+moves; a turret there must reach at least 160 elmos into their half. Nearby supported builders
+can seed sparse Lotus coverage on that line; generic frontline and counter-porc pushes are removed.
+
+Routine economy porc is limited to 20 seconds of adjusted metal income, clamped to 300–1200
+metal. Factory emergencies can use up to 1800 total, and require a current threat or a stronger
+enemy forecast within 60 seconds. Their final build site must be within 400 elmos of a live
+factory. No new order may bring ground-turret commitments within 800 elmos of its site above
+600 metal. Live turrets and queued construction count together, with nanoframes counted once;
+these limits do not reclaim existing defenses. Off-policy unstarted orders are cancelled,
+including emergency orders whose threat has passed. AA and strategic weapons are outside this
+budget. Tactical siege-support turrets retain their existing behavior; the admission limits
+apply to economy orders. Neither `mexporc` requests nor a `fortify` fallback bypasses the policy.
+Thresholds live in `crates/zkgbai/src/economy/porc_policy.rs`.
+
 Forward construction and ditches require local support, reachable approaches, and checks against
 current threats and recent raids; workers reconsider fortification jobs when support changes.
 The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds
@@ -416,6 +430,27 @@ production meets the existing energy target, then return to other jobs. Early ex
 small energy near their route, anywhere on a nearby Delaunay link, without walking to its connection
 head. Industrious workers retain the grid-completion planner; after the overdrive phase begins,
 other workers use it too. Journals record `workerrole` and `expansiongoal` changes.
+
+
+Grid reconnection is a persistent project, including completed weapons, their unfinished frames,
+and accepted construction jobs. Pylon jobs are attached to the pieces they restore rather than
+all inheriting a pending superweapon's priority. Their value includes the piece's metal cost plus
+half the nearby hostile value it holds off (the threat contribution is capped at twice the piece's
+cost). Profitable overdrive links are valued at their predicted additional metal per second times
+the existing ten-minute payback window. This bid is renewed while disconnected; it retires when
+power is restored or the source or beneficiary disappears. Forecast crew sizes account for the
+income lost each second, and urgent grid projects precede ordinary capital work. Their started
+pylons get high build priority. Six reserved connection slots keep ordinary pylon queues from
+blocking repairs; a more valuable connection can replace an unstarted lower-value one.
+
+Connection pylons advance from a live powered component, checking the final engine-snapped
+site against both link ranges. Placement favors distance from the nearest known enemy, subject
+to worker reachability, threat and room for protection. Once the pylon is finished, a nearby
+constructor lowers its footprint by approximately its model height. The level is fixed when
+planned, so interrupted jobs retry the same hole. Digging stops above water, avoids nearby
+foundations and factory exits, and yields on danger or loss. Power restoration proceeds even
+where burial must wait for safe clearance. These thresholds and execution rules live in
+`crates/zkgbai/src/economy/grid_support.rs`.
 
 
 Operator API and run journal

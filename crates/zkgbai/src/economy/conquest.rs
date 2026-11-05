@@ -1292,6 +1292,9 @@ impl Ai {
                 (Turret { light: false, site, task: None, retries: 0, built: false }, frame)
             }
         };
+        if !self.eco_porc_site_allowed(def, t.site, false) {
+            return true;
+        }
         let fresh = slot.is_none();
         // Covered: a Lotus standing within its reach of the site. A queued
         // one there (or its frame) becomes the guard, seen up before the

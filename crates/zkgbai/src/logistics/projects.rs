@@ -9,6 +9,7 @@ pub(super) struct Request {
     pub work: f32,
     pub cost: f32,
     pub incumbent: bool,
+    pub urgent: bool,
     pub hands: Vec<Hand>,
     pub stretch: f32,
     pub support: BTreeSet<i32>,
@@ -21,8 +22,9 @@ pub(super) struct Allocation {
     pub value: f32,
 }
 
-/// Deadlines may preempt capital. Otherwise keep existing projects ahead of
-/// new ones; within each class task ids provide a stable oldest-first order.
+/// Deadlines preempt capital, then valued grid repairs precede ordinary work.
+/// Among grid repairs restore the most value first; otherwise retain crews
+/// and use task ids for a stable oldest-first order.
 /// A worker, stored metal, and each share of income are spent only once.
 pub(super) fn allocate(
     mut requests: Vec<Request>,
@@ -35,6 +37,14 @@ pub(super) fn allocate(
             .deadline()
             .unwrap_or(f32::INFINITY)
             .total_cmp(&b.worth.deadline().unwrap_or(f32::INFINITY))
+            .then_with(|| b.urgent.cmp(&a.urgent))
+            .then_with(|| {
+                if a.urgent && b.urgent {
+                    b.worth.at(now).total_cmp(&a.worth.at(now))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
             .then_with(|| b.incumbent.cmp(&a.incumbent))
             .then_with(|| a.task.cmp(&b.task))
     });
@@ -118,6 +128,7 @@ mod tests {
         Request {
             task,
             incumbent,
+            urgent: false,
             hands,
             work: 100.0,
             cost: 0.0,
@@ -126,6 +137,21 @@ mod tests {
             support: BTreeSet::new(),
             start_required: true,
         }
+    }
+
+    #[test]
+    fn restoring_high_voltage_grid_income_preempts_ordinary_capital() {
+        let hands = vec![(1, 0.0, 10.0)];
+        let mut grid = job(3, false, hands.clone());
+        grid.urgent = true;
+        grid.worth = Worth::Flat(60_000.0); // 100 metal/s over ten minutes.
+        let mut turret = job(2, true, hands.clone());
+        turret.urgent = true;
+        turret.worth = Worth::Flat(4000.0);
+        let plan = allocate(vec![job(1, true, hands), turret, grid], 0.0, 10.0, 10000.0);
+        assert_eq!(plan[&3].crew, vec![1]);
+        assert!(plan[&1].crew.is_empty());
+        assert!(plan[&2].crew.is_empty());
     }
 
     #[test]

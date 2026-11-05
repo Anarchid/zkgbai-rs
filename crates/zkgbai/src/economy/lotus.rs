@@ -78,6 +78,9 @@ impl Ai {
 
     pub(super) fn eco_defer_lotus(&mut self, key: DemandKey, at: Vec3, targets: Vec<Pos>) {
         let Some(lotus) = self.defs.get("turretlaser") else { return };
+        if !self.eco_porc_site_allowed(lotus, at, false) {
+            return;
+        }
         let until = match key {
             DemandKey::Gate(..) => self.frame + 2 * self.eco_fortify_plan_period(),
             DemandKey::Area(..) => self.frame + 30 * 600,
@@ -184,7 +187,11 @@ impl Ai {
             let points: Vec<_> = active.iter().map(|&i| pos(self.eco.lotus_demand[i].at)).collect();
             for seed in super::fortify::seeds(&points, def.max_weapon_range()) {
                 let site = self.cb.map().find_closest_build_site(def, Vec3::xz(seed.x, seed.z), 160.0, 3, 0);
-                if site.x < 0.0 || !self.eco_build_check(def, site, 0) || (posture && self.posture_shuns(site)) {
+                if site.x < 0.0
+                    || !self.eco_porc_admissible(def, site, false)
+                    || !self.eco_build_check(def, site, 0)
+                    || (posture && self.posture_shuns(site))
+                {
                     continue;
                 }
                 let requests: Vec<_> = active
