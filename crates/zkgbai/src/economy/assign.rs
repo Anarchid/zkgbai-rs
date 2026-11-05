@@ -549,6 +549,15 @@ impl Ai {
             }
         }
 
+        // Keep a separate bid for useful work in the persistent direction.
+        // It uses the same task admission and economy prices as the auction.
+        let onward_ok = |t: &WorkerTask, cost: f32| {
+            self.eco_expansion_onward(worker, t, cost)
+                && threat_cost(t) <= 0.0
+                && self.war.get_porc_threat(t.get_pos()) <= 0.0
+        };
+        let mut onward = task.and_then(|id| eco.tasks.get(id)).filter(|t| onward_ok(t, cost)).map(|t| (t.id, cost));
+
         let mut consider = |ids: &[TaskId], with_threat: bool, skip: &dyn Fn(&WorkerTask) -> bool| {
             for t in ids.iter().filter_map(|&id| eco.tasks.get(id)) {
                 if skip(t) || !reaches(t) {
@@ -557,6 +566,9 @@ impl Ai {
                 let mut tmpcost = price(t) - stranded(t);
                 if with_threat {
                     tmpcost += threat_cost(t);
+                }
+                if onward_ok(t, tmpcost) && onward.is_none_or(|(_, best)| tmpcost < best) {
+                    onward = Some((t.id, tmpcost));
                 }
                 if tmpcost < cost {
                     cost = tmpcost;
@@ -606,6 +618,16 @@ impl Ai {
             }
         }
 
+        // An attractive rear mex or unfinished frame must not undo the
+        // waypoint while a safe, reasonably priced job along it is available.
+        // Local emergency energy and explicit/finishing assignments above
+        // retain their priority. No onward bid means ordinary fallback.
+        if let Some((next, _)) = onward
+            && task.and_then(|id| eco.tasks.get(id)).is_some_and(|t| self.eco_expansion_backtracks(worker, t))
+        {
+            task = Some(next);
+        }
+
         // Choose whether to expand with the normal economy priorities.
         // Only then spread new mex assignments between lanes; charging the
         // general auction for crowding would divert builders into energy
@@ -621,7 +643,10 @@ impl Ai {
                 };
                 let mut best = lane_price(chosen);
                 for t in eco.construction_tasks.iter().filter_map(|&id| eco.tasks.get(id)) {
-                    if !reaches(t) || !self.eco_lane_mex(worker, t) {
+                    if !reaches(t)
+                        || !self.eco_lane_mex(worker, t)
+                        || (onward.is_some() && self.eco_expansion_backtracks(worker, t))
+                    {
                         continue;
                     }
                     let score = lane_price(t);

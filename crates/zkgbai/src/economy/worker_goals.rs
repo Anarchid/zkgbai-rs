@@ -202,6 +202,36 @@ impl Ai {
         direction_cost(w.get_pos(), t.get_pos(), goal.target, def.speed())
     }
 
+    /// A waypoint owns the next trip while useful work along it exists.
+    /// Allow local work and a little sideways placement slack; emergencies
+    /// and explicit missions may still pull the worker away.
+    pub(super) fn eco_expansion_backtracks(&self, w: &Worker, t: &WorkerTask) -> bool {
+        let Some(goal) = w.expansion else { return false };
+        let Some(def) = w.unit.def() else { return false };
+        if self.eco_directed_job(w, t.id)
+            || distance(w.get_pos(), t.get_pos()) <= def.build_distance()
+            || (self.eco.hard_estalled && self.eco_energy_job(t))
+            || t.as_construction().is_some_and(|c| {
+                c.fac_plop
+                    || (c.fac_def
+                        && self.eco_get_nearest_fac(t.get_pos()).is_some_and(|f| f.unit.health() < f.unit.max_health()))
+                    || (self.fac.factories.is_empty() && self.eco.build_ids.fac_ids.contains(&c.build_type.id()))
+            })
+        {
+            return false;
+        }
+        distance(t.get_pos(), goal.target) > distance(w.get_pos(), goal.target) + 64.0
+    }
+
+    pub(super) fn eco_expansion_onward(&self, w: &Worker, t: &WorkerTask, cost: f32) -> bool {
+        // Do not keep a worker in a lane whose only jobs are far away or
+        // already overstaffed. Fall back to the ordinary auction instead.
+        w.expansion.is_some()
+            && cost < MAX_ROUTE / 4.0
+            && self.eco_worker_route(w, t.get_pos()) <= MAX_ROUTE
+            && !self.eco_expansion_backtracks(w, t)
+    }
+
     pub(super) fn eco_careful_energy(&self, wid: i32) -> bool {
         self.eco.workers.get(&wid).is_some_and(|w| w.is_industrious) || self.eco_overdrive_phase()
     }
@@ -355,10 +385,20 @@ mod tests {
         let ahead = WorkerTask::construction(mex, Vec3::xz(1300.0, 0.0), 0);
         let behind = WorkerTask::construction(mex, Vec3::xz(700.0, 0.0), 0);
         let local = WorkerTask::construction(mex, Vec3::xz(980.0, 0.0), 0);
+        assert!(!ai.eco_expansion_onward(&w, &behind, -1000.0), "a discounted rear job still leaves the lane");
+        assert!(ai.eco_expansion_onward(&w, &ahead, 100.0));
+        assert!(ai.eco_expansion_onward(&w, &local, 100.0));
+        assert!(!ai.eco_expansion_onward(&w, &ahead, 1000.0), "overstaffed work is not a reason to stay");
+        let far = WorkerTask::construction(mex, Vec3::xz(3700.0, 0.0), 0);
+        assert!(!ai.eco_expansion_onward(&w, &far, -1000.0), "a cheap distant job is not a useful local alternative");
         let normal = ai.eco_expansion_goal_cost(&w, &behind);
         assert!(normal > 0.0);
         ai.eco.hard_estalled = true;
         assert_eq!(ai.eco_expansion_goal_cost(&w, &behind), normal);
+        assert!(ai.eco_expansion_backtracks(&w, &behind));
+        let mut emergency = WorkerTask::construction(mex, Vec3::xz(700.0, 0.0), 0);
+        emergency.as_construction_mut().unwrap().fac_plop = true;
+        assert!(!ai.eco_expansion_backtracks(&w, &emergency));
         assert!(ai.eco_expansion_goal_cost(&w, &ahead) < 0.0);
         assert_eq!(ai.eco_expansion_goal_cost(&w, &local), 0.0, "work in reach needs no detour");
     }
