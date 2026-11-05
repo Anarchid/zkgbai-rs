@@ -625,9 +625,12 @@ impl Ai {
             return false;
         }
         if !reclaim {
-            if (w.unit.resource_use(self.metal) > 0.0 || w.unit.resource_use(self.energy) > 0.0)
-                && t.build_command_matches(w.unit)
-            {
+            // Construction spends metal. Energy alone can be cloak upkeep
+            // while a Conjurer is walking or stalled, not build activity.
+            let spending = w.unit.resource_use(self.metal) > 0.0
+                || (matches!(&t.kind, TaskKind::Repair(r) if !r.target.is_being_built())
+                    && w.unit.resource_use(self.energy) > 0.0);
+            if spending && t.build_command_matches(w.unit) {
                 return true;
             }
         } else {
@@ -2076,8 +2079,14 @@ pub(super) mod tests {
         unsafe extern "C" fn reach(_: i32, _: i32) -> f32 {
             128.0
         }
-        unsafe extern "C" fn spending(_: i32, id: i32, _: i32) -> f32 {
-            if id == 10 { SPENDING.get() } else { 0.0 }
+        unsafe extern "C" fn spending(_: i32, id: i32, resource: i32) -> f32 {
+            if resource == 1 {
+                1.0
+            } else if id == 10 {
+                SPENDING.get()
+            } else {
+                0.0
+            }
         }
         unsafe extern "C" fn progress(_: i32, id: i32) -> f32 {
             if id == 12 { PROGRESS.get() } else { 0.60 }
@@ -2085,7 +2094,11 @@ pub(super) mod tests {
         unsafe extern "C" fn building(_: i32, id: i32) -> bool {
             matches!(id, 12 | 13)
         }
+        unsafe extern "C" fn resource(_: i32, name: *const std::ffi::c_char) -> i32 {
+            i32::from(unsafe { std::ffi::CStr::from_ptr(name) } == c"Energy")
+        }
         let mut ai = assignment_ai(|t| {
+            t.getResourceByName = Some(resource);
             t.Unit_getPos = Some(pos);
             t.UnitDef_getBuildDistance = Some(reach);
             t.Unit_getResourceUse = Some(spending);
@@ -2130,6 +2143,10 @@ pub(super) mod tests {
         // The commander joining must not worsen the incumbent's price,
         // even during a resource pause, and for other construction too.
         SPENDING.set(0.0);
+        assert!(
+            !ai.eco_switch_leaves_work(&ai.eco.workers[&10], ai.eco.tasks.get(a).unwrap()),
+            "cloak energy alone is not construction"
+        );
         let before = ai.eco_current_job_cost(&ai.eco.workers[&10]);
         let mut com = Worker::new(Unit::from_id(ai.cb, 11).unwrap(), ai.team_id);
         com.is_com = true;
