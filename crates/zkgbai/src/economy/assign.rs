@@ -808,6 +808,11 @@ impl Ai {
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let reaches = |t: &WorkerTask| {
+            // Filter before ranking: an unsafe cheapest candidate must not
+            // hide another admissible project from an available worker.
+            if self.eco_dispatch_on() {
+                return self.dispatch_valid(worker, t) && self.dispatch_safe(worker, t);
+            }
             self.eco_unified_allows(worker, t)
                 && self.eco_worker_can_take(worker, t)
                 && (self.op_priority(t.id) || self.logistics_allows(wid, t.id))
@@ -2117,6 +2122,7 @@ pub(super) mod tests {
             t.Unit_getPos = Some(pos);
             t.Unit_isBeingBuilt = Some(building);
             t.Unit_getWeapons = Some(zero);
+            t.Unit_getCurrentCommands = Some(zero);
             t.Unit_getRulesParamFloat = Some(rules);
             t.UnitDef_getWeaponMounts = Some(zero);
             t.UnitDef_getBuildSpeed = Some(scalar);

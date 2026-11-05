@@ -1188,6 +1188,7 @@ impl Ai {
         {
             return true;
         }
+        self.eco_suspend_assignment(wid, "conquest travel");
         let w = self.eco.workers.get_mut(&wid).unwrap();
         if w.task.is_some() {
             w.clear_task(&mut self.eco.tasks);

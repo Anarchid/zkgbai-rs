@@ -227,6 +227,7 @@ impl Ai {
             (self.eco.colony_wants_air, self.eco.colony_after) = (Some(frame), frame + RETRY);
             return;
         };
+        self.eco_suspend_assignment(wid, "colonization mission");
         if let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }

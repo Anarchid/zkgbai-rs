@@ -53,7 +53,7 @@ impl Ai {
         !self.dev_off("economydispatch")
     }
 
-    fn dispatch_valid(&self, w: &Worker, t: &WorkerTask) -> bool {
+    pub(super) fn dispatch_valid(&self, w: &Worker, t: &WorkerTask) -> bool {
         let friendly = |u: springai::Unit| u.team() == self.team_id || self.allies.contains(&u.team());
         let alive = match &t.kind {
             TaskKind::Construction(c) => c.target.is_none_or(|u| u.health() > 0.0 && u.is_being_built() && friendly(u)),
@@ -73,8 +73,8 @@ impl Ai {
             && (self.op_priority(t.id) || self.logistics_allows(w.id, t.id))
     }
 
-    fn dispatch_safe(&self, w: &Worker, t: &WorkerTask) -> bool {
-        if self.eco_build_guard_task(w.id) == Some(t.id) || self.logistics_holds(w.id) {
+    pub(super) fn dispatch_safe(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if self.eco_build_guard_task(w.id) == Some(t.id) || (w.task == Some(t.id) && self.logistics_holds(w.id)) {
             return true;
         }
         let v = self.war.view(w.unit.def());
@@ -244,7 +244,7 @@ impl Ai {
             .min_by(|a, b| a.1.cmp(&b.1).then((old != Some(a.0)).cmp(&(old != Some(b.0)))).then(a.3.total_cmp(&b.3)));
         let energy = self.dispatch_energy_hand() == Some(wid);
         if old.is_some() && (!valid || !safe) {
-            self.dispatch_release(wid, if !valid { "invalid or unavailable" } else { "danger" }, valid);
+            self.dispatch_release(wid, if !valid { "invalid or unavailable" } else { "danger" }, true);
         } else if let Some(current) = old {
             if !self.dispatch_observe(wid, current) {
                 let pos = self.eco.task_pos(current);
@@ -324,6 +324,7 @@ mod tests {
         static SPEND: Cell<f32> = const { Cell::new(5.0) };
         static PROGRESS: Cell<f32> = const { Cell::new(0.3) };
         static DONE: Cell<bool> = const { Cell::new(false) };
+        static ORDERS: Cell<usize> = const { Cell::new(0) };
         static DEFS: Cell<bool> = const { Cell::new(false) };
     }
     unsafe extern "C" fn spending(_: i32, _: i32, _: i32) -> f32 {
@@ -373,6 +374,10 @@ mod tests {
         }
         1
     }
+    unsafe extern "C" fn command(_: i32, _: i32, _: i32, _: i32, _: *mut std::ffi::c_void) -> i32 {
+        ORDERS.set(ORDERS.get() + 1);
+        0
+    }
     fn setup() -> (Ai, TaskId, TaskId) {
         SPEND.set(5.0);
         PROGRESS.set(0.3);
@@ -380,6 +385,7 @@ mod tests {
         DEFS.set(false);
         let mut ai = assignment_ai(|t| {
             t.Unit_getResourceUse = Some(spending);
+            t.Engine_handleCommand = Some(command);
             t.Unit_getBuildProgress = Some(progress);
             t.Unit_isBeingBuilt = Some(building);
             t.Unit_getPos = Some(pos);
@@ -441,6 +447,22 @@ mod tests {
         ai.op.over.priority_tasks.clear();
         ai.eco.workers.get_mut(&10).unwrap().end_task();
         assert_eq!(ai.eco_dispatch_job(10), Some(a), "resume before a new auction");
+    }
+
+    #[test]
+    fn retained_assignment_keeps_its_out_of_range_build_order() {
+        let (mut ai, a, _) = setup();
+        let t = ai.eco.tasks.get_mut(a).unwrap();
+        t.position = Vec3::xz(2000.0, 100.0);
+        t.as_construction_mut().unwrap().target = None;
+        build_command(10, -1, vec![2000.0, 0.0, 100.0]);
+        ORDERS.set(0);
+        for frame in (0..300).step_by(10) {
+            ai.frame = frame;
+            ai.eco_assign_worker(10);
+            assert_eq!(ai.eco.workers[&10].task, Some(a));
+        }
+        assert_eq!(ORDERS.get(), 0, "do not restart travel while the accepted build is queued");
     }
 
     #[test]

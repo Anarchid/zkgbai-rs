@@ -462,6 +462,7 @@ impl Ai {
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut units = Vec::new();
         for (_, wid) in near.into_iter().take(RAISERS) {
+            self.eco_suspend_assignment(wid, "geothermal terraform");
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.clear_task(&mut self.eco.tasks);
                 units.push(w.unit);

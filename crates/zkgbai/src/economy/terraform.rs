@@ -294,6 +294,7 @@ impl Ai {
         };
         let (choke, mid, line) = sites.swap_remove(i);
         let worth = worth[i];
+        self.eco_suspend_assignment(wid, "defensive terraform");
         let Some(w) = self.eco.workers.get_mut(&wid) else { return };
         let was = (w.task.and_then(|t| self.eco.tasks.get(t)).and_then(|t| t.as_construction()))
             .map_or_else(|| "none".to_owned(), |c| self.defs.name(c.build_type).to_owned());

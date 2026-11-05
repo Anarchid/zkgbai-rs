@@ -603,10 +603,12 @@ impl Ai {
         }
         // Our commanders guard the factory (and so assist the heavy).
         for wid in self.eco.rush.commander.into_iter() {
-            let Some(w) = self.eco.workers.get_mut(&wid) else { continue };
+            let Some(w) = self.eco.workers.get(&wid) else { continue };
             if w.is_chicken || w.raid_defense.is_some() || w.has_plop() {
                 continue;
             }
+            self.eco_suspend_assignment(wid, "heavy rush assistance");
+            let w = self.eco.workers.get_mut(&wid).unwrap();
             if w.task.is_some() {
                 w.clear_task(&mut self.eco.tasks);
             }
