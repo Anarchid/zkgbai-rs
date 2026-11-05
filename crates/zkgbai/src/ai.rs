@@ -84,7 +84,8 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `bombcharge` (placed Imps and Snitches charge when the fight predictor
 /// says it beats sitting tight) is on for eyeballing (user, 2026-11-03;
 /// disable=bombcharge).
-pub(crate) const OFF_BY_DEFAULT: [&str; 12] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 13] = [
+    "raidcommit",
     "limpet",
     "limpetshadow",
     "mexporc",
@@ -1248,6 +1249,9 @@ impl Ai {
             self.disabled.insert(feature.to_owned());
         } else {
             self.disabled.remove(feature);
+        }
+        if feature == crate::military::raidcommit::FEATURE && changed {
+            self.raidcommit_switch_changed();
         }
         if feature == "commander" && off {
             self.eco_release_commander_defense();

@@ -840,6 +840,9 @@ impl Ai {
             self.stakeouts_displaced(id);
             return;
         }
+        if self.raidcommit_wait(&[unit]) {
+            return;
+        }
         if standing && self.stakeouts.near_home(p) {
             let raid = self.war.targets.values().any(|e| {
                 !e.is_dead
