@@ -1,16 +1,7 @@
-//! Patient minefields: spread across front gates, then across each gate,
-//! each a line across the enemy's approach (their route from their centre,
-//! bent by the terrain). Both destinations and live positions reserve blast
-//! clearance. An Imp's EMP stuns friend and foe alike, so its blast stops
-//! short of our armed buildings: by a turret it waits on the enemy's way
-//! in, just out of the turret's footprint, where the turret still reaches
-//! what the blast stuns. A placed mine the enemy can see and shoot stays
-//! where it is.
-//!
-//! Once a compact group of enemy ground combat units has been seen, Cloak
-//! and Shield factories maintain four mines between them, including builds
-//! in flight. Conquest can ask for more. The existing field allocator spreads
-//! them across approaches, with independent fire support required for Imps.
+//! Asset ambushes: mines follow expansion and intercept enemy approaches on
+//! the victim's movement tier. Gate fields remain fallback opportunities.
+//! Production scales with distinct observed clumps, including orders in flight.
+//! Assignments, observation memory and deployment deadlines survive checkpoints.
 //!
 //! `bombcharge` (on by default): an Imp or Snitch with enemies near asks
 //! the fight predictor whether running at them beats sitting tight
@@ -20,6 +11,9 @@
 use serde_json::json;
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 use std::collections::BTreeMap;
+
+mod ambush;
+use ambush::*;
 use zk_terrain::paths::Paths;
 
 use crate::Ai;
@@ -30,7 +24,7 @@ use crate::military::fightsim::{FightSnapshot, SimFlags, SnapUnit};
 use crate::terrain::{pos, tier_of};
 use crate::util::{distance, get_directional_point};
 
-const PERIOD: i32 = 150;
+const PERIOD: i32 = 90;
 const ARRIVED: f32 = 16.0;
 // Covers arrival tolerance at both ends and the receiving unit's footprint.
 const CLEARANCE: f32 = 64.0;
@@ -52,27 +46,21 @@ const GATE_LOOKBACK: f32 = 200.0;
 const SIGHT_MEMORY: i32 = 300;
 /// Sight assumed for a contact not yet identified.
 const UNKNOWN_SIGHT: f32 = 450.0;
-const RESERVE_MINES: usize = 4;
-const CLUMP_UNITS: usize = 3;
+const RESERVE_MINES: usize = 8;
+const CLUMP_UNITS: usize = 5;
 const CLUMP_RADIUS: f32 = 300.0;
 const CLUMP_MEMORY: i32 = 30 * 10;
 
 #[derive(Default)]
 pub(super) struct MineReserve {
-    /// Once armies form, keep replacing spent mines even through fog of war.
-    active: bool,
+    /// Distinct recent squads; repeated sightings replace their members.
+    clumps: Vec<Clump>,
     /// Factory -> (unit def, order frame), until its nanoframe is created.
     orders: BTreeMap<i32, (i32, i32)>,
 }
 
 fn mine_type(name: &str) -> bool {
     matches!(name, "cloakbomb" | "shieldbomb")
-}
-
-fn ground_clump(points: &[Vec3]) -> bool {
-    points
-        .iter()
-        .any(|&p| points.iter().filter(|&&q| distance(p, q) <= CLUMP_RADIUS).take(CLUMP_UNITS).count() >= CLUMP_UNITS)
 }
 
 /// `bombcharge`: an Imp or Snitch judges a charge once an enemy on the
@@ -106,6 +94,8 @@ struct Site {
     gate: Vec3,
     value: f32,
     depth: usize,
+    /// A route to a real friendly asset, rather than a fallback gate.
+    ambush: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +115,7 @@ pub(super) struct Sapper {
     logged: i32,
     /// When it may be judged again.
     next_judge: i32,
+    deployment: Deployment,
 }
 
 #[derive(Clone, Copy)]
@@ -220,7 +211,6 @@ struct Building {
     center: Vec3,
     /// Half its footprint's diagonal.
     footprint: f32,
-    armed: bool,
 }
 
 /// Half a footprint's diagonal (footprint sizes are in 8-elmo squares).
@@ -264,13 +254,9 @@ fn spaced(id: i32, p: Vec3, radius: f32, reservations: &[Reservation]) -> bool {
 }
 
 /// Keep a blast off friendly buildings' footprints, with arrival tolerance:
-/// a Snitch's off every building, an Imp's off armed ones (its stun would
-/// silence the turrets meant to finish its prey).
+/// both damage and EMP spare economy, allied buildings and nanoframes.
 fn clear_of_statics(snitch: bool, imp: bool, p: Vec3, radius: f32, statics: &[Building]) -> bool {
-    statics
-        .iter()
-        .filter(|b| snitch || (imp && b.armed))
-        .all(|b| distance(p, b.center) >= radius + b.footprint + CLEARANCE)
+    statics.iter().filter(|_| snitch || imp).all(|b| distance(p, b.center) >= radius + b.footprint + CLEARANCE)
 }
 
 /// Rows across every field and, for an Imp, the place before each turret
@@ -279,37 +265,26 @@ fn candidate_sites(imp: bool, radius: f32, fields: &[Field], finishers: &[Finish
     let mut sites = Vec::new();
     for f in fields {
         for (p, depth) in rows(f.center, f.toward, f.width, radius + CLEARANCE) {
-            sites.push(Site { position: p, gate: f.gate, value: f.value, depth });
+            sites.push(Site { position: p, gate: f.gate, value: f.value * 0.2, depth, ambush: false });
         }
     }
     if imp {
         for t in finishers {
             if let Some(p) = t.site(radius) {
-                sites.push(Site { position: p, gate: t.position, value: 1.0, depth: 0 });
+                sites.push(Site { position: p, gate: t.position, value: 0.2, depth: 0, ambush: false });
             }
         }
     }
     sites
 }
 
-/// First occupy other gates, then add depth at already occupied gates.
-/// Travel and strategic value break ties, without letting one valuable
-/// gate take every mine. Existing valid sites are kept by the caller.
+/// Value and travel time, discounted for overlap with existing assignments.
+/// A valuable exposed expansion can outweigh an unused low-traffic gate.
 fn choose_site(id: i32, from: Vec3, radius: f32, sites: &[Site], reservations: &[Reservation]) -> Option<Site> {
     sites
         .iter()
         .filter(|s| spaced(id, s.position, radius, reservations))
-        .min_by(|a, b| {
-            let load = |s: &Site| {
-                reservations
-                    .iter()
-                    .filter(|r| r.id != id)
-                    .filter(|r| r.site.is_some_and(|other| distance(other.gate, s.gate) < 64.0))
-                    .count()
-            };
-            let cost = |s: &Site| (1.0 + distance(from, s.position) / 1200.0) / s.value.max(0.01);
-            load(a).cmp(&load(b)).then(a.depth.cmp(&b.depth)).then_with(|| cost(a).total_cmp(&cost(b)))
-        })
+        .max_by(|a, b| site_score(id, from, a, reservations).total_cmp(&site_score(id, from, b, reservations)))
         .copied()
 }
 
@@ -334,7 +309,8 @@ impl Ai {
     /// One shared reserve, counting completed mines and nanoframes exactly
     /// once, plus accepted orders that have not created a unit yet.
     pub(crate) fn sapper_wants_mines(&self) -> bool {
-        if !self.misc_handler.mines.active && !self.conquest_wants_mines(0) {
+        let wanted = mine_quota(&self.misc_handler.mines.clumps);
+        if wanted == 0 {
             return false;
         }
         let have = self
@@ -344,7 +320,7 @@ impl Ai {
             .filter(|u| u.team() == self.team_id && u.health() > 0.0 && mine_type(self.defs.name_of(*u)))
             .count()
             + self.misc_handler.mines.orders.len();
-        (self.misc_handler.mines.active && have < RESERVE_MINES) || self.conquest_wants_mines(have)
+        have < wanted
     }
 
     pub(crate) fn sapper_factory_idle(&mut self, factory: i32) {
@@ -366,22 +342,7 @@ impl Ai {
     }
 
     fn sapper_update_reserve(&mut self, frame: i32) {
-        if !self.misc_handler.mines.active {
-            let points: Vec<_> = self
-                .war
-                .targets
-                .values()
-                .filter(|e| {
-                    !e.is_dead && e.identified && !e.is_static && !e.can_fly() && !e.is_worker && e.can_attack()
-                })
-                .filter(|e| e.position.y >= 0.0 && (e.visible || frame - e.last_seen <= CLUMP_MEMORY))
-                .map(|e| e.position)
-                .collect();
-            if ground_clump(&points) {
-                self.misc_handler.mines.active = true;
-                self.log("sappers: enemy ground clump seen; maintaining four mine positions");
-            }
-        }
+        self.sapper_observe_clumps(frame);
         self.misc_handler.mines.orders.retain(|id, (def, issued)| {
             self.fac.factories.get(id).is_some_and(|f| {
                 f.unit.health() > 0.0
@@ -391,12 +352,11 @@ impl Ai {
         });
     }
 
-    pub fn misc_prepare_sapper(&self, unit: Unit) {
-        configure(unit);
-    }
-
     pub fn misc_add_sapper(&mut self, unit: Unit) {
         let Some(def) = unit.def() else { return };
+        if self.misc_handler.sappers.contains_key(&unit.id()) {
+            return;
+        }
         configure(unit);
         self.misc_handler.sappers.insert(
             unit.id(),
@@ -411,6 +371,7 @@ impl Ai {
                 charging: None,
                 logged: i32::MIN / 2,
                 next_judge: 0,
+                deployment: Deployment::new(self.frame, unit.pos()),
             },
         );
     }
@@ -428,6 +389,7 @@ impl Ai {
         // Sappers never paint these maps, so mines cannot count one another
         // (or themselves) as the firepower that finishes stunned enemies.
         supported(imp, finishers.iter().any(|t| t.covers(p, radius)), self.war.get_friendly_threat(p))
+            || (imp && self.sapper_response(p, radius))
     }
 
     /// Whether the enemy's ground army walks at `p` (anywhere, before the
@@ -492,7 +454,7 @@ impl Ai {
         }
         // Open maps and the period before terrain analysis still get a
         // distributed minefield, using owned front spots as sectors.
-        if fields.is_empty() {
+        {
             for spot in self.graph.get_front_line_spots().into_iter().filter(|s| s.owned) {
                 let gate = spot.get_pos();
                 // On the last stretch of the enemy's way to the spot.
@@ -533,28 +495,23 @@ impl Ai {
             return;
         }
         let sappers: Vec<_> = self.misc_handler.sappers.values().copied().collect();
-        // Snapshot all friendly buildings, including allies and nanoframes,
-        // once per planning pass. New construction also invalidates old sites.
-        let statics: Vec<_> = if sappers.iter().any(|s| s.snitch || s.imp) {
-            (self.cb.friendly_units().into_iter())
-                .filter_map(|u| {
-                    let def = u.def()?;
-                    if u.health() <= 0.0 || def.speed() > 0.0 {
-                        return None;
-                    }
-                    let armed = !def.weapon_mounts().is_empty();
-                    Some(Building { center: u.pos(), footprint: footprint(def), armed })
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Snapshot friendly buildings, nanoframes and builders once per pass.
+        // New construction also invalidates old sites.
+        let statics = self.sapper_bystanders();
         let imp_radius = sappers.iter().filter(|s| s.imp).map(|s| s.radius).fold(0.0, f32::max);
         let (fields, finishers) = {
             let approach = self.sapper_approach();
             let finishers = if imp_radius > 0.0 { self.sapper_finishers(&approach, imp_radius) } else { Vec::new() };
             (self.sapper_fields(&approach), finishers)
         };
+        // The two bomb types share generated jobs; do not rebuild attacker
+        // paths and query every friendly asset once per individual mine.
+        let mut ambushes: Vec<(f32, Vec<Site>)> = Vec::new();
+        for sapper in &sappers {
+            if (sapper.imp || sapper.snitch) && !ambushes.iter().any(|(r, _)| *r == sapper.radius) {
+                ambushes.push((sapper.radius, self.sapper_ambush_sites(sapper.radius)));
+            }
+        }
         let mut reservations: Vec<_> = sappers
             .iter()
             .map(|s| Reservation { id: s.unit.id(), position: s.unit.pos(), radius: s.radius, site: s.site })
@@ -562,93 +519,141 @@ impl Ai {
         for (i, sapper) in sappers.iter().enumerate() {
             let unit = sapper.unit;
             let from = reservations[i].position;
-            // A charge runs its course, then the bomb is planned afresh.
+            let mut deployment = sapper.deployment;
+            if deployment.exiting(frame, unit.num_current_commands()) {
+                continue;
+            }
             if let Some(f0) = sapper.charging {
                 if frame - f0 < CHARGE_HOLD {
                     continue;
                 }
                 self.misc_handler.sappers.get_mut(&unit.id()).unwrap().charging = None;
             }
-            // Do not uncover an ambush just as the enemy walks into it, nor
-            // walk a placed mine off under the eyes and guns of the enemy.
-            // Fire-at-will handles contact; never give ATTACK or FIGHT here.
             let near = !self.cb.enemy_units_in(from, sapper.radius + 128.0).is_empty();
             let watched = !near && sapper.placed && self.sapper_watched(from, frame);
-            if watched != sapper.held {
-                self.misc_handler.sappers.get_mut(&unit.id()).unwrap().held = watched;
-                if watched {
-                    let moving = unit.num_current_commands() > 0;
-                    self.log(&format!(
-                        "sappers: {} holds at ({:.0}, {:.0}) in enemy sight and reach (moving {moving})",
-                        unit.id(),
-                        from.x,
-                        from.z
-                    ));
-                }
-            }
             if near || watched {
                 if unit.num_current_commands() > 0 {
                     unit.stop(0);
                 }
+                deployment.stalled(from, frame, false);
+                let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
+                entry.held = watched;
+                entry.deployment = deployment;
                 continue;
             }
-            let kept = sapper.site.filter(|s| {
-                (self.sapper_front(s.position) || self.conquest_mine_ground(s.position))
-                    && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
-                    && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
-                    && spaced(unit.id(), s.position, sapper.radius, &reservations)
-            });
-            let selected = kept.or_else(|| {
-                let reachable = self.pathfinder.raider_reachability(&self.war, unit, 0.0);
-                let map = unit.def().and_then(tier_of).and_then(|tier| self.terrain()?.tier(tier))?;
-                let sites: Vec<_> = candidate_sites(sapper.imp, sapper.radius, &fields, &finishers)
-                    .into_iter()
-                    .filter(|s| {
-                        (self.sapper_front(s.position) || self.conquest_mine_ground(s.position))
-                            && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
-                            && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
-                            && self.war.get_porc_threat(s.position) <= 0.0
-                            && self.sapper_enemy_ground(s.position)
-                            && map.region_at(pos(s.position)).is_some()
-                            && reachable.reaches(s.position)
-                    })
-                    .collect();
-                choose_site(unit.id(), from, sapper.radius, &sites, &reservations)
-            });
-            reservations[i].site = selected;
-            if kept.is_none()
-                && let Some(s) = selected
-            {
-                let p = s.position;
-                let armed = statics.iter().filter(|b| b.armed).map(|b| distance(p, b.center) - b.footprint);
-                let gate = (s.gate.x - p.x).hypot(s.gate.z - p.z);
-                self.log(&format!(
-                    "sappers: {} {} -> ({:.0}, {:.0}), {:.0} from its field's gate, nearest armed building edge {:.0}, \
-                     turret cover {}",
-                    unit.def().map_or("?", |d| self.defs.name(d)),
-                    unit.id(),
-                    p.x,
-                    p.z,
-                    gate,
-                    armed.fold(f32::INFINITY, f32::min),
-                    finishers.iter().any(|t| t.covers(p, sapper.radius)),
-                ));
+            let destination = sapper.site.map(|s| s.position).or(deployment.staging);
+            let moving = destination.is_some_and(|p| distance(from, p) > ARRIVED);
+            let stalled = deployment.stalled(from, frame, moving)
+                || (moving && sapper.site.is_some() && frame - deployment.assigned > 30 * 120);
+            if stalled {
+                deployment.block(destination.unwrap(), frame);
+                self.log(&format!("sappers: {} deployment stalled; retrying another site", unit.id()));
             }
-            let placed = sapper.placed || selected.is_some_and(|s| distance(from, s.position) <= ARRIVED);
-            let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
-            (entry.site, entry.placed) = (selected, placed);
-            match selected {
-                Some(mut s) if distance(from, s.position) > ARRIVED => {
-                    if kept.is_none() || unit.num_current_commands() == 0 {
-                        s.position.y = self.cb.map().elevation_at(s.position.x, s.position.z);
-                        kgb_move_to_exact(unit, s.position, 4.0, 0, frame);
-                    }
+            let reachable = self.pathfinder.raider_reachability(&self.war, unit, 0.0);
+            let mut candidates =
+                ambushes.iter().find(|(r, _)| *r == sapper.radius).map_or_else(Vec::new, |(_, sites)| sites.clone());
+            candidates.extend(candidate_sites(sapper.imp, sapper.radius, &fields, &finishers));
+            // Small shifts in the observed approach update the old job's value,
+            // not its exact destination. It still passes every safety filter.
+            if let Some(old) = sapper.site
+                && let Some(live) = candidates
+                    .iter()
+                    .find(|s| {
+                        s.ambush == old.ambush
+                            && distance(s.gate, old.gate) < 64.0
+                            && distance(s.position, old.position) <= 64.0
+                    })
+                    .copied()
+            {
+                candidates.push(Site { value: live.value, ..old });
+            }
+            let own_map = unit.def().and_then(tier_of).and_then(|tier| self.terrain()?.tier(tier));
+            let candidates: Vec<_> = candidates
+                .into_iter()
+                .filter(|s| {
+                    (s.ambush || self.sapper_front(s.position) || self.conquest_mine_ground(s.position))
+                        && self.sapper_supported(sapper.imp, s.position, sapper.radius, &finishers)
+                        && clear_of_statics(sapper.snitch, sapper.imp, s.position, sapper.radius, &statics)
+                        && self.war.get_porc_threat(s.position) <= 0.0
+                        && (s.ambush || self.sapper_enemy_ground(s.position))
+                        && own_map.is_some_and(|map| map.region_at(pos(s.position)).is_some())
+                        && reachable.reaches(s.position)
+                        && deployment.allows(s.position, frame)
+                        && spaced(unit.id(), s.position, sapper.radius, &reservations)
+                })
+                .collect();
+            let selected = select_assignment(sapper, from, &candidates, &reservations, frame);
+            if selected.is_none() && (sapper.deployment.phase == Phase::Exit || frame - sapper.logged >= 30 * 30) {
+                self.log(&format!(
+                    "sappers: {} no eligible site: {} fields, {} valid candidates, {} clumps; staging",
+                    unit.id(),
+                    fields.len(),
+                    candidates.len(),
+                    self.misc_handler.mines.clumps.len()
+                ));
+                self.misc_handler.sappers.get_mut(&unit.id()).unwrap().logged = frame;
+            }
+            let changed = match (sapper.site, selected) {
+                (Some(a), Some(b)) => distance(a.position, b.position) > ARRIVED,
+                (None, None) => false,
+                _ => true,
+            };
+            reservations[i].site = selected;
+            if changed || stalled {
+                deployment.assign(from, frame);
+            }
+            let placed = selected.is_some_and(|s| distance(from, s.position) <= ARRIVED);
+            if changed {
+                if let Some(s) = selected {
+                    self.log(&format!(
+                        "sappers: {} {} -> ({:.0}, {:.0}), bait ({:.0}, {:.0}), score {:.2}, age {}s",
+                        unit.id(),
+                        if s.ambush { "ambush" } else { "gate" },
+                        s.position.x,
+                        s.position.z,
+                        s.gate.x,
+                        s.gate.z,
+                        s.value,
+                        (frame - deployment.born) / 30
+                    ));
+                } else {
+                    self.log(&format!("sappers: {} no safe supported reachable ambush; staging", unit.id()));
                 }
-                _ if unit.num_current_commands() > 0 => {
+            }
+            if placed {
+                deployment.phase = Phase::Ready;
+                if !sapper.placed {
+                    self.log(&format!("sappers: {} ready after {}s", unit.id(), (frame - deployment.born) / 30));
+                }
+                if unit.num_current_commands() > 0 {
                     unit.stop(0);
                 }
-                _ => {}
+            } else if let Some(s) = selected {
+                deployment.phase = Phase::Travel;
+                if changed || stalled || unit.num_current_commands() == 0 {
+                    self.sapper_move(unit, s.position);
+                }
+            } else {
+                let was_staging = deployment.phase == Phase::Staging;
+                deployment.phase = Phase::Staging;
+                if let Some(p) = self.sapper_stage(unit, sapper.radius, &statics, frame, &deployment) {
+                    let new_stage = deployment.staging.is_none_or(|q| distance(p, q) > ARRIVED);
+                    deployment.staging = Some(p);
+                    if new_stage {
+                        deployment.progress = frame;
+                        deployment.at = from;
+                    }
+                    if distance(from, p) > ARRIVED
+                        && (new_stage || stalled || !was_staging || unit.num_current_commands() == 0)
+                    {
+                        self.sapper_move(unit, p);
+                    }
+                } else if unit.num_current_commands() > 0 {
+                    unit.stop(0);
+                }
             }
+            let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
+            (entry.site, entry.placed, entry.held, entry.deployment) = (selected, placed, false, deployment);
         }
     }
 }
@@ -678,6 +683,7 @@ impl Ai {
             .filter(|s| (s.imp || s.snitch) && s.charging.is_none())
             .copied()
             .collect();
+        let bystanders = self.sapper_bystanders();
         let mut judged = 0;
         for s in bombs {
             if judged >= CHARGE_PER_TICK {
@@ -696,7 +702,10 @@ impl Ai {
                 .filter(|(d, _)| *d <= CHARGE_LOOK)
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(d, e)| (d, e.unit, e.position, e.visible, e.ud.map_or("?", |u| self.defs.name(u)).to_owned()));
-            let Some((dist, target, at, visible, target_name)) = nearest else { continue };
+            let Some((dist, _target, at, _visible, target_name)) = nearest else { continue };
+            if !charge_clear(p, at, s.radius, &bystanders) {
+                continue;
+            }
             let Some(model) = self.local_model() else { return };
             let Some((snap, bomb)) = self.bomb_fight(unit, p) else { continue };
             judged += 1;
@@ -743,11 +752,9 @@ impl Ai {
                 }
                 continue;
             }
-            if visible {
-                unit.attack(target, 0);
-            } else {
-                kgb_move_to_exact(unit, at, 4.0, 0, frame);
-            }
+            // A bounded charge to the judged position cannot chase its target
+            // back into the bait's safety envelope. Fire-at-will still triggers.
+            kgb_move_to_exact(unit, at, 4.0, 0, frame);
             let entry = self.misc_handler.sappers.get_mut(&unit.id()).unwrap();
             (entry.charging, entry.site, entry.placed, entry.held) = (Some(frame), None, false, false);
             self.log(&format!(
@@ -835,7 +842,7 @@ mod tests {
         static MINE_DEFS_READY: Cell<bool> = const { Cell::new(false) };
     }
 
-    fn reserve_ai() -> Ai {
+    pub(super) fn reserve_ai() -> Ai {
         unsafe extern "C" fn roster(_: i32, out: *mut i32, _: i32) -> i32 {
             MINE_ROSTER.with_borrow(|ids| {
                 if !out.is_null() {
@@ -888,22 +895,12 @@ mod tests {
     }
 
     #[test]
-    fn mine_reserve_needs_a_compact_group_not_isolated_raiders() {
-        assert!(!ground_clump(&[]));
-        let group = [Vec3::xz(1000.0, 1000.0), Vec3::xz(1200.0, 1000.0), Vec3::xz(1400.0, 1000.0)];
-        assert!(!ground_clump(&group[..2]));
-        assert!(ground_clump(&group));
-        let spread = [group[0], Vec3::xz(2000.0, 1000.0), Vec3::xz(3000.0, 1000.0)];
-        assert!(!ground_clump(&spread));
-    }
-
-    #[test]
     fn mine_reserve_counts_mixed_builds_and_replaces_losses_without_conquest() {
         let mut ai = reserve_ai();
         ai.set_feature_off("conquest", true);
         assert!(ai.dev_off("conquest"));
         assert!(!ai.sapper_wants_mines());
-        ai.misc_handler.mines.active = true;
+        ai.misc_handler.mines.clumps = test_clumps(20);
         assert!(ai.sapper_wants_mines());
         // Two Imps and a Snitch; other bomb types, allies and dead units
         // cannot satisfy this reserve. None need be in the finished handler.
@@ -923,11 +920,13 @@ mod tests {
         ai.sapper_factory_idle(factory.id());
         assert!(ai.sapper_wants_mines(), "canceled order releases its slot");
         ai.sapper_update_reserve(1000);
-        assert!(ai.sapper_wants_mines(), "losing sight of the enemy does not disable the reserve");
+        assert!(ai.sapper_wants_mines(), "short fog gaps preserve observed demand");
+        ai.sapper_update_reserve(30 * 91);
+        assert!(!ai.sapper_wants_mines(), "old sightings expire");
     }
 
     fn site(x: f32, gate: f32, value: f32) -> Site {
-        Site { position: Vec3::xz(x, 100.0), gate: Vec3::xz(gate, 100.0), value, depth: 0 }
+        Site { position: Vec3::xz(x, 100.0), gate: Vec3::xz(gate, 100.0), value, depth: 0, ambush: false }
     }
 
     /// A Lotus-like turret at (1000, 1000), facing the enemy along `toward`.
@@ -950,22 +949,22 @@ mod tests {
     }
 
     #[test]
-    fn snitches_spare_every_building_and_imps_every_armed_one() {
-        let building = |armed| [Building { center: Vec3::xz(1000.0, 1000.0), footprint: 100.0, armed }];
+    fn snitches_and_imps_spare_every_building() {
+        let building = |_armed| [Building { center: Vec3::xz(1000.0, 1000.0), footprint: 100.0 }];
         // Outside the centre's blast radius is insufficient for a large building.
         let near = Vec3::xz(1400.0, 1000.0);
         assert!(!clear_of_statics(true, false, near, 384.0, &building(false)));
         assert!(!clear_of_statics(true, false, Vec3::xz(1547.0, 1000.0), 384.0, &building(false)));
         assert!(clear_of_statics(true, false, Vec3::xz(1548.0, 1000.0), 384.0, &building(false)));
         assert!(clear_of_statics(true, false, near, 384.0, &[]));
-        // An Imp's stun may wash over a mex, never over a turret.
-        assert!(clear_of_statics(false, true, near, 384.0, &building(false)));
+        // An Imp also spares unarmed economy.
+        assert!(!clear_of_statics(false, true, near, 384.0, &building(false)));
         assert!(!clear_of_statics(false, true, near, 384.0, &building(true)));
         assert!(clear_of_statics(false, true, Vec3::xz(1548.0, 1000.0), 384.0, &building(true)));
         // Other bombs (Skuttles) keep none.
         assert!(clear_of_statics(false, false, near, 384.0, &building(true)));
         // A previously valid placement becomes invalid when a building appears.
-        let new = [Building { center: near, footprint: 16.0, armed: true }];
+        let new = [Building { center: near, footprint: 16.0 }];
         assert!(!clear_of_statics(true, false, near, 384.0, &new));
         assert!(!clear_of_statics(false, true, near, 384.0, &new));
     }
@@ -992,7 +991,7 @@ mod tests {
         let t = lotus(Vec3::xz(0.0, -1.0));
         let p = t.site(176.0).unwrap();
         assert!((p.x - 1000.0).abs() < 0.01 && (1000.0 - p.z - 264.0).abs() < 0.01, "{p:?}");
-        let turret = [Building { center: t.position, footprint: t.footprint, armed: true }];
+        let turret = [Building { center: t.position, footprint: t.footprint }];
         assert!(clear_of_statics(false, true, p, 176.0, &turret));
         // Too short-ranged to reach what any blast it survives stuns.
         assert!(Finisher { range: 300.0, ..t }.site(176.0).is_none());
@@ -1038,11 +1037,11 @@ mod tests {
     }
 
     #[test]
-    fn another_gate_wins_over_packing_the_nearest_high_value_gate() {
+    fn coverage_penalty_does_not_outweigh_a_much_more_valuable_approach() {
         let first = site(1000.0, 1000.0, 100.0);
         let reservations = [Reservation { id: 1, position: first.position, radius: 200.0, site: Some(first) }];
         let candidates = [site(1400.0, 1000.0, 100.0), site(4000.0, 4000.0, 1.0)];
-        assert_eq!(choose_site(2, Vec3::ZERO, 200.0, &candidates, &reservations).unwrap().gate.x, 4000.0);
+        assert_eq!(choose_site(2, Vec3::ZERO, 200.0, &candidates, &reservations).unwrap().gate.x, 1000.0);
         assert!(choose_site(2, Vec3::ZERO, 200.0, &[first], &reservations).is_none());
     }
 
