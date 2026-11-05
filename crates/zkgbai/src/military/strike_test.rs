@@ -219,6 +219,7 @@ impl Ai {
     }
 
     pub fn strike_test_update(&mut self, frame: i32) {
+        self.sweeps_fan_scenario(frame);
         self.airstrike_scenario(frame);
         self.strikes_scenario(frame);
         self.veto_scenario(frame);

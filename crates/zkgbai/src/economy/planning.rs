@@ -1511,6 +1511,13 @@ impl Ai {
                 value,
             ));
         }
+        if !owned("factoryplane") && self.sweeps_wants_swift() {
+            return Some((
+                "factoryplane".to_owned(),
+                "Swift reconnaissance fan for enemy territory beyond Sparrow reach".to_owned(),
+                self.intel.unaccounted().max(0.0),
+            ));
+        }
         let scouts = self.scouts_policy();
         if !self.dev_off("scouts") && scouts.owls > 0 && !owned("factoryplane") {
             return Some((

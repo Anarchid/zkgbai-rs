@@ -1833,6 +1833,10 @@ impl Ai {
     }
 
     fn fac_get_planes(&self, fac: &mut Factory) -> &'static str {
+        // Reconnaissance is needed precisely when ordinary sorties are grounded.
+        if self.sweeps_wants_swift() {
+            return "planefighter";
+        }
         if self.bomber_handler.grounded {
             return "";
         }
@@ -1844,9 +1848,6 @@ impl Ai {
         }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
             return scouts::OWL;
-        }
-        if self.sweeps_wants_swift() {
-            return "planefighter";
         }
         // Primary missions buy aircraft; secondary missions only use the fleet.
         self.airstrike_production().unwrap_or("")

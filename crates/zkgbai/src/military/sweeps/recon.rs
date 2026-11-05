@@ -4,6 +4,8 @@
 //! the remaining depth before its fuse expires, including acceleration and a
 //! flight margin. Swift can continue at cruise speed after its shorter boost.
 
+mod fan;
+
 use std::collections::BTreeMap;
 
 use springai::{Unit, UnitDef, Vec3};
@@ -50,7 +52,8 @@ struct Dive {
 pub(super) struct Recon {
     active: BTreeMap<i32, Dive>,
     attempts: Vec<Attempt>,
-    swift_wanted_until: Option<i32>,
+    wave: Option<fan::Wave>,
+    last_fan: Option<i32>,
 }
 
 pub(crate) fn dive_budget(density: f32, income: f32) -> usize {
@@ -83,10 +86,6 @@ fn burst_range(def: UnitDef) -> f32 {
     0.8 * burst_distance(def.speed(), mult, acceleration, param("boost_duration", 0.0) / 30.0)
 }
 
-fn continuing_range(burst: f32, boost_seconds: f32, cruise: f32, deadline: f32) -> f32 {
-    burst + cruise.max(0.0) * (deadline - boost_seconds).max(0.0)
-}
-
 /// Distance from the first dangerous sample (with a one-cell lead) to the aim.
 fn penetration_depth(from: Vec3, target: Vec3, dangerous: impl Fn(Vec3) -> bool) -> f32 {
     let length = distance(from, target);
@@ -117,8 +116,12 @@ fn nuke_wait(attempts: &[Attempt], target: Vec3, seen: i32, frame: i32) -> bool 
             .any(|a| distance(a.target, target) < 640.0 && frame - a.started < NUKE_WAIT && seen < a.started)
 }
 
-fn stale_economy(frame: i32, observations: impl Iterator<Item = i32>) -> bool {
-    observations.max().is_some_and(|seen| frame - seen >= STALE)
+fn stale_economy(frame: i32, seen: i32) -> bool {
+    frame - seen >= STALE
+}
+
+fn boost_due(swift: bool, length: f32, range: f32, in_aa: bool, ahead_aa: bool) -> bool {
+    if swift { in_aa } else { length <= range || ahead_aa }
 }
 
 fn burst_aligned(from: Vec3, target: Vec3, velocity: Vec3, cruise: f32) -> bool {
@@ -131,18 +134,19 @@ fn burst_aligned(from: Vec3, target: Vec3, velocity: Vec3, cruise: f32) -> bool 
 
 impl Ai {
     pub(crate) fn sweeps_claims(&self, id: i32) -> bool {
-        self.sweeps.detonating.contains(&id) || self.sweeps.recon.active.contains_key(&id)
+        self.sweeps.detonating.contains(&id)
+            || self.sweeps.recon.active.contains_key(&id)
+            || self.sweeps.recon.wave.as_ref().is_some_and(|w| w.claims(id))
     }
 
     pub(crate) fn sweeps_forget(&mut self, id: i32) {
         self.sweeps.detonating.remove(&id);
-        self.sweeps.recon.active.remove(&id);
-    }
-
-    pub(crate) fn sweeps_wants_swift(&self) -> bool {
-        !self.dev_off("scouts")
-            && self.sweeps.recon.swift_wanted_until.is_some_and(|until| self.frame < until)
-            && self.scouts_air_needed(SWIFT, 1)
+        if let Some(d) = self.sweeps.recon.active.remove(&id) {
+            self.log(&format!("sweeps: {:?} dive {} ended; boosted={}", d.attempt.purpose, id, d.boosted));
+        }
+        if let Some(wave) = &mut self.sweeps.recon.wave {
+            wave.forget(id);
+        }
     }
 
     fn sweeps_dangerous(&self, p: Vec3) -> bool {
@@ -217,28 +221,7 @@ impl Ai {
             // requisitioning a Swift. Do not substitute Swifts for cheap dives.
             too_deep |= penetration_depth(self.graph.get_ally_center(), target, |p| self.sweeps_dangerous(p)) > range;
             if too_deep {
-                self.sweeps.recon.swift_wanted_until = Some(self.frame + STALE);
-                let mut swifts: Vec<_> = self
-                    .misc_recon_swifts()
-                    .into_iter()
-                    .filter(|&u| {
-                        self.sweeps_available(u, purpose) && u.rules_param_float("specialReloadRemaining", 0.0) <= 0.0
-                    })
-                    .collect();
-                swifts.sort_by(|a, b| distance(a.pos(), target).total_cmp(&distance(b.pos(), target)));
-                for u in swifts {
-                    let Some(def) = u.def() else { continue };
-                    let depth = penetration_depth(u.pos(), target, |p| self.sweeps_dangerous(p));
-                    let burst = burst_range(def);
-                    let seconds =
-                        def.custom_param("boost_duration").and_then(|v| v.parse::<f32>().ok()).unwrap_or(30.0) / 30.0;
-                    // Swift has no fuse: it can continue at cruise after boosting.
-                    // Bound the mission so it still arrives before a nuke hold expires.
-                    if distance(u.pos(), target) <= continuing_range(burst, seconds, def.speed(), 40.0) {
-                        chosen = Some((u, true, burst, depth));
-                        break;
-                    }
-                }
+                self.sweeps_request_fan(target, purpose);
             }
         }
         let Some((unit, swift, burst_range, depth)) = chosen else { return };
@@ -266,10 +249,12 @@ impl Ai {
             return false;
         }
         self.sweeps_request(target, Purpose::Nuke);
-        nuke_wait(&self.sweeps.recon.attempts, target, self.sweeps_area_seen(target), self.frame)
+        self.sweeps.recon.wave.as_ref().is_some_and(|w| w.holding_nuke(target, self.frame))
+            || nuke_wait(&self.sweeps.recon.attempts, target, self.sweeps_area_seen(target), self.frame)
     }
 
     pub(crate) fn sweeps_recon_update(&mut self) {
+        self.sweeps_update_fan();
         self.sweeps.recon.attempts.retain(|a| self.frame - a.started < STALE);
         self.sweeps
             .detonating
@@ -293,7 +278,21 @@ impl Ai {
                 || self.frame - d.attempt.started >= TIMEOUT
                 || self.sweeps_area_seen(d.attempt.target) >= d.attempt.started
             {
+                self.log(&format!(
+                    "sweeps: {:?} dive {} {}; boosted={}",
+                    d.attempt.purpose,
+                    id,
+                    if self.sweeps_area_seen(d.attempt.target) >= d.attempt.started {
+                        "observed target"
+                    } else {
+                        "recalled"
+                    },
+                    d.boosted
+                ));
                 self.sweeps.recon.active.remove(&id);
+                if d.swift {
+                    unit.set_fire_state(2, 0);
+                }
                 kgb_move_to(unit, self.graph.get_ally_center(), 0, self.frame);
                 self.retreat_add_coward(unit);
                 continue;
@@ -307,7 +306,7 @@ impl Ai {
                 } else {
                     from
                 };
-                if (length <= d.burst_range || self.sweeps_dangerous(ahead))
+                if boost_due(d.swift, length, d.burst_range, self.sweeps_dangerous(from), self.sweeps_dangerous(ahead))
                     && unit
                         .def()
                         .is_some_and(|def| burst_aligned(from, d.attempt.target, unit.vel() * 30.0, def.speed()))
@@ -318,6 +317,16 @@ impl Ai {
                         self.sweeps_start_burst(unit, d.attempt.target)
                     };
                     self.sweeps.recon.active.get_mut(&id).unwrap().boosted = boosted;
+                    if boosted {
+                        self.log(&format!(
+                            "sweeps: {} {} boosted at ({:.0}, {:.0}), {:.0} from aim",
+                            if d.swift { "Swift" } else { "Sparrow" },
+                            id,
+                            from.x,
+                            from.z,
+                            length
+                        ));
+                    }
                 }
             }
         }
@@ -372,10 +381,9 @@ impl Ai {
         // says nothing about whether deep strategic scouting has succeeded.
         let ours = self.graph.get_ally_center();
         targets.retain(|&(p, _)| !self.graph.is_ally_territory(p) && distance(p, base) < distance(p, ours) * 0.65);
-        // A successful strategic scout suppresses the fallback for five minutes.
-        if !stale_economy(self.frame, targets.iter().map(|&(p, _)| self.scouts_last_seen(p))) {
-            return;
-        }
+        // Freshness is local: a scout seeing one exposed building must not
+        // suppress dives over still-unseen parts of the enemy economy.
+        targets.retain(|&(p, _)| stale_economy(self.frame, self.sweeps_area_seen(p)));
         targets.sort_by(|a, b| {
             let score = |&(p, value): &(Vec3, f32)| value / (1.0 + distance(p, base) / 2000.0);
             score(b).total_cmp(&score(a))
@@ -431,10 +439,6 @@ mod tests {
         let deep = penetration_depth(Vec3::ZERO, target, |p| p.x >= 2000.0);
         assert!(shallow < range);
         assert!(deep > range);
-        let swift_burst = 0.8 * burst_distance(390.0, 5.0, 2250.0, 1.0);
-        assert!(swift_burst < deep);
-        assert!(continuing_range(swift_burst, 1.0, 390.0, 11.0) > deep);
-        assert_eq!(continuing_range(swift_burst, 1.0, 390.0, 1.0), swift_burst);
         assert_eq!(penetration_depth(Vec3::ZERO, target, |_| false), 0.0);
     }
 
@@ -453,11 +457,12 @@ mod tests {
     }
 
     #[test]
-    fn any_successful_deep_scout_delays_economy_dives_for_five_minutes() {
-        assert!(!stale_economy(STALE - 1, [0, -STALE].into_iter()));
-        assert!(stale_economy(STALE, [0, -STALE].into_iter()));
-        assert!(!stale_economy(STALE * 2, [0, STALE + 1].into_iter()));
-        assert!(!stale_economy(STALE, std::iter::empty()));
+    fn freshness_does_not_hide_unseen_neighbouring_economy() {
+        assert!(!stale_economy(STALE - 1, 0));
+        assert!(stale_economy(STALE, 0));
+        let candidates = [0, STALE + 1];
+        let stale: Vec<_> = candidates.into_iter().filter(|&seen| stale_economy(STALE * 2, seen)).collect();
+        assert_eq!(stale, [0]);
     }
 
     #[test]
@@ -472,6 +477,15 @@ mod tests {
         // No scout, or a different target, does not incur a phantom hold.
         assert!(!nuke_wait(&[], target, 0, 10001));
         assert!(!nuke_wait(&attempts, Vec3::xz(7000.0, 5000.0), 0, 10001));
+    }
+
+    #[test]
+    fn swift_displaces_only_at_aa_entry() {
+        assert!(!boost_due(true, 100.0, 2000.0, false, false));
+        assert!(!boost_due(true, 4000.0, 2000.0, false, true));
+        assert!(boost_due(true, 4000.0, 2000.0, true, true));
+        assert!(boost_due(false, 1500.0, 2000.0, false, false));
+        assert!(boost_due(false, 4000.0, 2000.0, false, true));
     }
 
     #[test]
