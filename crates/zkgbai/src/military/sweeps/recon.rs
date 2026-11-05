@@ -46,6 +46,7 @@ struct Dive {
     swift: bool,
     boosted: bool,
     burst_range: f32,
+    initial_health: f32,
 }
 
 #[derive(Default)]
@@ -160,6 +161,17 @@ impl Ai {
             })
     }
 
+    /// The planning map includes mobile-AA approach buffers. Displace lasts
+    /// only one second: spend it inside estimated weapon range, not that buffer.
+    fn sweeps_in_aa_range(&self, p: Vec3) -> bool {
+        self.war.targets.values().any(|e| {
+            !e.is_dead
+                && (e.is_aa || e.is_flex_aa)
+                && (e.is_static || self.frame - e.last_seen < 30 * 20)
+                && distance(e.position, p) <= e.threat_radius
+        })
+    }
+
     /// Actual LOS, including allied and cloaked scouts, supplies freshness.
     /// Several points prevent one visible building from clearing the whole area.
     fn sweeps_area_seen(&self, p: Vec3) -> i32 {
@@ -227,7 +239,10 @@ impl Ai {
         let Some((unit, swift, burst_range, depth)) = chosen else { return };
         let attempt = Attempt { target, purpose, started: self.frame };
         self.sweeps.recon.attempts.push(attempt);
-        self.sweeps.recon.active.insert(unit.id(), Dive { unit, attempt, swift, boosted: false, burst_range });
+        self.sweeps.recon.active.insert(
+            unit.id(),
+            Dive { unit, attempt, swift, boosted: false, burst_range, initial_health: unit.health() },
+        );
         self.retreat_remove_unit(unit);
         kgb_move_to(unit, target, 0, self.frame);
         self.log(&format!(
@@ -306,10 +321,15 @@ impl Ai {
                 } else {
                     from
                 };
-                if boost_due(d.swift, length, d.burst_range, self.sweeps_dangerous(from), self.sweeps_dangerous(ahead))
-                    && unit
-                        .def()
-                        .is_some_and(|def| burst_aligned(from, d.attempt.target, unit.vel() * 30.0, def.speed()))
+                if boost_due(
+                    d.swift,
+                    length,
+                    d.burst_range,
+                    self.sweeps_in_aa_range(from) || unit.health() < d.initial_health,
+                    self.sweeps_dangerous(ahead),
+                ) && unit
+                    .def()
+                    .is_some_and(|def| burst_aligned(from, d.attempt.target, unit.vel() * 30.0, def.speed()))
                 {
                     let boosted = if d.swift {
                         burst_order(unit, d.attempt.target, self.frame)
