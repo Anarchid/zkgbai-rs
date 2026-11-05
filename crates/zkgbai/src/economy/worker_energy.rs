@@ -76,6 +76,7 @@ impl Ai {
     /// a rear builder across the map must not reserve everyone else's jobs.
     pub(super) fn eco_energy_opportunity(&self, worker: &Worker, task: &WorkerTask, bidders: &[(i32, f32)]) -> f32 {
         if self.eco.hard_estalled
+            || worker.is_industrious
             || !task.as_construction().is_some_and(|c| {
                 c.build_type.id() == self.eco.build_ids.solar_id || c.build_type.id() == self.eco.build_ids.wind_id
             })

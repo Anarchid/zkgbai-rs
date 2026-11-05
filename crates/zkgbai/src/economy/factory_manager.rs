@@ -955,6 +955,12 @@ impl Ai {
             return false;
         }
 
+        // Each greedy expander gets an energy partner. Workers already
+        // under construction or leaving a factory satisfy the pending demand.
+        if self.eco_needs_industrious() {
+            return true;
+        }
+
         let reclaim_value = self.eco_get_reclaim_value();
 
         // port: guarded against a zero cost-per-bp (no constructor found).
@@ -1984,6 +1990,9 @@ impl Ai {
             return "planecon";
         }
         if let Some(name) = self.firefighters_order(FacKind::Plane) {
+            return name;
+        }
+        if let Some(name) = self.airstrike_lance_production() {
             return name;
         }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {

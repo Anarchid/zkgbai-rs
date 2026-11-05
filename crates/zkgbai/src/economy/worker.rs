@@ -27,6 +27,9 @@ pub struct Worker {
     pub is_com: bool,
     pub assigned_plop: bool,
     pub is_greedy: bool,
+    /// Paired with an expander; supplies energy until production meets its goal.
+    pub is_industrious: bool,
+    pub(super) expansion: Option<super::worker_goals::ExpansionGoal>,
     pub power: f32,
     pub bp: f32,
     pub build_range: i32,
@@ -100,6 +103,8 @@ impl Worker {
             is_com: false,
             assigned_plop: false,
             is_greedy: false,
+            is_industrious: false,
+            expansion: None,
             power,
             bp,
             build_range,

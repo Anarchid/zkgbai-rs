@@ -118,6 +118,18 @@ impl TeamEnergy {
 }
 
 impl Ai {
+    /// A dedicated energy hand stops prioritizing plants only when their
+    /// output exists. Unfinished capacity needs hands even if it covers the plan.
+    pub(super) fn eco_energy_goal_unmet(&self) -> bool {
+        self.eco.hard_estalled
+            || self
+                .eco
+                .team_energy
+                .budget
+                .filter(|_| !self.allies.is_empty())
+                .map_or(self.eco.effective_income_energy < self.eco.energy_target, |b| b.made < b.target)
+    }
+
     /// Small plants can bridge an actual alliance-wide stall while a reactor
     /// builds. Otherwise don't fill a deficit already covered by projects.
     pub(super) fn eco_team_energy_needed(&self) -> bool {
@@ -331,6 +343,23 @@ mod tests {
 
     fn rich() -> Budget {
         Budget { raw_metal: 90.0, metal: 100.0, made: 150.0, target: 300.0, reactors: 3, ..Budget::default() }
+    }
+
+    #[test]
+    fn industrious_workers_resume_other_jobs_at_actual_energy_goal() {
+        let mut ai = super::super::commander::tests::test_ai_with(|_| {});
+        ai.eco.energy_target = 100.0;
+        ai.eco.effective_income_energy = 90.0;
+        assert!(ai.eco_energy_goal_unmet());
+        ai.eco.effective_income_energy = 100.0;
+        assert!(!ai.eco_energy_goal_unmet());
+        ai.allies.push(3);
+        ai.eco.team_energy.budget = Some(Budget { made: 90.0, target: 100.0, pending: 200.0, ..Budget::default() });
+        assert!(ai.eco_energy_goal_unmet(), "finish the pending plants before returning to other work");
+        ai.eco.team_energy.budget.as_mut().unwrap().made = 100.0;
+        assert!(!ai.eco_energy_goal_unmet());
+        ai.eco.hard_estalled = true;
+        assert!(ai.eco_energy_goal_unmet());
     }
 
     #[test]
