@@ -416,7 +416,11 @@ impl Ai {
                 matches!(j.prey, Prey::GlassCannon | Prey::Fragile)
                     && !self.strike_cooling(j.pos)
                     && !self.squad_strike_job_taken(j)
-                    && !self.strikes.wave.as_ref().is_some_and(|w| w.phase == Phase::Diving && same_job(&w.job, j))
+                    && !self
+                        .strikes
+                        .wave
+                        .as_ref()
+                        .is_some_and(|w| matches!(w.phase, Phase::Diving | Phase::Chaining) && same_job(&w.job, j))
             })
             .collect();
         for job in jobs {

@@ -7,7 +7,6 @@ use super::{
 use crate::military::wrappers::{SquadId, SquadKind};
 
 const SIGHT_MEMORY: i32 = 30 * 10;
-const SEARCH_RADIUS: f32 = 1800.0;
 
 pub(super) struct Mission {
     job: Job,
@@ -15,6 +14,7 @@ pub(super) struct Mission {
     key: u64,
     since: i32,
     diving: bool,
+    chaining: bool,
     answer: Option<Answer>,
     retreat: Vec<i32>,
     commanded: i32,
@@ -55,12 +55,16 @@ impl Ai {
         self.strikes
             .missions
             .values()
-            .find(|m| m.halberds && !m.diving && m.members.contains(&id))
+            .find(|m| m.halberds && !m.diving && !m.chaining && m.members.contains(&id))
             .map(|_| Tactic::Halberd.fire_state())
     }
 
     pub(super) fn squad_strike_evade(&mut self, id: i32, goal: Vec3) {
-        if let Some(m) = self.strikes.missions.values_mut().find(|m| m.halberds && !m.diving && m.members.contains(&id))
+        if let Some(m) = self
+            .strikes
+            .missions
+            .values_mut()
+            .find(|m| m.halberds && !m.diving && !m.chaining && m.members.contains(&id))
         {
             m.home = goal;
             m.key = 0;
@@ -237,7 +241,9 @@ impl Ai {
             })
             .collect();
         for sid in cancel {
-            self.squad_strike_cancel(sid);
+            // Let an available force reassess locally before releasing it.
+            // Pre-emption still takes the normal cancellation path.
+            self.squad_strike(sid);
         }
         self.strikes.squad_retry.retain(|sid, at| *at > self.frame && self.squads.get(*sid).is_some());
     }
@@ -266,6 +272,11 @@ impl Ai {
                 || self.frame - m.since >= DIVE_TIMEOUT
                 || job.as_ref().is_none_or(|j| !self.squad_strike_clear_for(j, &m.members, m.halberds))
             {
+                if m.diving && self.squad_strike_chain(sid, &mut m) {
+                    let goal = m.job.pos;
+                    self.strikes.missions.insert(sid, m);
+                    return Some(goal);
+                }
                 self.squad_strike_release(sid, m);
                 return None;
             }
@@ -280,7 +291,7 @@ impl Ai {
                             && self.strike_evasion_goal(*id).is_none()
                     })
                 });
-                if ready && let Some(key) = self.squad_strike_predict(&m.job, &m.members, m.home, m.halberds) {
+                if ready && let Some(key) = self.squad_strike_predict(&m.job, &m.members, m.home, m.halberds, false) {
                     m.key = key;
                     m.since = self.frame;
                 }
@@ -298,6 +309,7 @@ impl Ai {
                         return None;
                     }
                     m.diving = true;
+                    m.chaining = false;
                     m.since = self.frame;
                     if self.strikes.wave.as_ref().is_some_and(|w| {
                         matches!(w.phase, Phase::Forming | Phase::Screening) && same_job(&w.job, &m.job)
@@ -325,7 +337,7 @@ impl Ai {
                     return None;
                 }
             }
-            if m.diving && self.frame - m.commanded >= 15 {
+            if (m.diving || m.chaining) && self.frame - m.commanded >= 15 {
                 self.squad_strike_command(sid, &m);
                 m.commanded = self.frame;
             }
@@ -345,33 +357,8 @@ impl Ai {
         let members: Vec<_> =
             s.fighters.iter().copied().filter(|id| self.fighters.get(id).is_some_and(|f| !f.is_dead())).collect();
         let halberds = self.squad_strike_halberds(sid);
-        let candidates = if halberds {
-            self.strike_jobs(SNIPER_MEMORY)
-                .into_iter()
-                .filter(|j| self.strike_target_allowed(Tactic::Halberd, j))
-                .collect()
-        } else {
-            self.war
-                .targets
-                .values()
-                .filter(|e| e.visible)
-                .filter_map(|e| self.squad_strike_job(e.unit_id))
-                .collect::<Vec<_>>()
-        };
-        let mut jobs: Vec<_> = candidates
-            .into_iter()
-            .filter(|j| {
-                distance(from, j.pos) < SEARCH_RADIUS
-                    && !self.strike_cooling(j.pos)
-                    && !self.squad_strike_job_taken(j)
-                    && !self.strikes.wave.as_ref().is_some_and(|w| w.phase == Phase::Diving && same_job(&w.job, j))
-            })
-            .collect();
-        jobs.sort_by(|a, b| {
-            (distance(from, a.pos) / a.value.max(1.0)).total_cmp(&(distance(from, b.pos) / b.value.max(1.0)))
-        });
-        let job = jobs.into_iter().find(|j| self.squad_strike_clear_for(j, &members, halberds))?;
-        let key = if halberds { 0 } else { self.squad_strike_predict(&job, &members, from, false)? };
+        let job = self.squad_strike_next_job(from, &members, halberds)?;
+        let key = if halberds { 0 } else { self.squad_strike_predict(&job, &members, from, false, false)? };
         for id in &members {
             if let Some(f) = self.fighters.get_mut(id) {
                 f.clear_task(&mut self.raider_handler.scout_tasks);
@@ -390,6 +377,7 @@ impl Ai {
                 key,
                 since: self.frame,
                 diving: false,
+                chaining: false,
                 answer: None,
                 retreat: Vec::new(),
                 commanded: -30,
@@ -400,7 +388,62 @@ impl Ai {
         Some(goal)
     }
 
-    fn squad_strike_predict(&mut self, job: &Job, members: &[i32], from: Vec3, halberds: bool) -> Option<u64> {
+    fn squad_strike_next_job(&self, from: Vec3, members: &[i32], halberds: bool) -> Option<Job> {
+        let candidates = if halberds {
+            self.strike_jobs(SNIPER_MEMORY)
+                .into_iter()
+                .filter(|j| self.strike_target_allowed(Tactic::Halberd, j))
+                .collect()
+        } else {
+            self.war
+                .targets
+                .values()
+                .filter(|e| e.visible)
+                .filter_map(|e| self.squad_strike_job(e.unit_id))
+                .collect::<Vec<_>>()
+        };
+        let jobs: Vec<_> = candidates
+            .into_iter()
+            .filter(|j| {
+                !self.strike_cooling(j.pos)
+                    && !self.squad_strike_job_taken(j)
+                    && !self
+                        .strikes
+                        .wave
+                        .as_ref()
+                        .is_some_and(|w| matches!(w.phase, Phase::Diving | Phase::Chaining) && same_job(&w.job, j))
+            })
+            .collect();
+        chain::nearby_jobs(jobs, from).into_iter().find(|j| self.squad_strike_clear_for(j, members, halberds))
+    }
+
+    fn squad_strike_chain(&mut self, sid: SquadId, m: &mut Mission) -> bool {
+        let Some(from) = self.strike_members_center(&m.members) else { return false };
+        let Some(job) = self.squad_strike_next_job(from, &m.members, m.halberds) else { return false };
+        let Some(key) = self.squad_strike_predict(&job, &m.members, from, m.halberds, true) else { return false };
+        self.log(&format!("strikes: squad {sid} reassesses {} {} for chain strike", job.name, job.id.unwrap_or(-1)));
+        m.job = job;
+        m.home = from;
+        m.key = key;
+        m.since = self.frame;
+        m.diving = false;
+        m.chaining = true;
+        m.answer = None;
+        m.commanded = self.frame;
+        // Retain the retreat exemptions and actual membership until either the
+        // new prediction commits the survivors or normal release restores them.
+        self.squad_strike_command(sid, m);
+        true
+    }
+
+    fn squad_strike_predict(
+        &mut self,
+        job: &Job,
+        members: &[i32],
+        from: Vec3,
+        halberds: bool,
+        chaining: bool,
+    ) -> Option<u64> {
         if self.strikes.squad_predictor.is_none() {
             match Predictor::start() {
                 Ok(p) => self.strikes.squad_predictor = Some(p),
@@ -415,11 +458,19 @@ impl Ai {
         let key = self.strikes.serial;
         let ground = if halberds { self.defs.get(Tactic::Halberd.name()) } else { None };
         let request = self.strike_prediction_request(key, job, members, from, ground, false)?;
+        let request = if chaining { request.for_chain(self.reload_stamp(&[])) } else { request };
         self.strikes.squad_predictor.as_ref()?.tx.try_send(request).ok()?;
         Some(key)
     }
 
     fn squad_strike_command(&mut self, sid: SquadId, m: &Mission) {
+        if m.chaining {
+            self.strike_chain_hold(&m.members, &m.job);
+            if let Some(s) = self.squads.get_mut(sid) {
+                s.target = m.job.pos;
+            }
+            return;
+        }
         if m.halberds {
             self.strike_command(&Wave {
                 tactic: Tactic::Halberd,
@@ -470,7 +521,7 @@ impl Ai {
                 .iter()
                 .map(|(sid, m)| serde_json::json!({
                     "squad": sid, "target": m.job.id, "def": m.job.name, "members": m.members,
-                    "phase": if m.diving { "diving" } else if m.key == 0 { "gathering" } else { "assessing" },
+                    "phase": if m.diving { "diving" } else if m.chaining { "chaining" } else if m.key == 0 { "gathering" } else { "assessing" },
                     "tactic": if m.halberds { "hoverassault" } else { "raiders" },
                 }))
                 .collect::<Vec<_>>()
@@ -517,6 +568,7 @@ mod tests {
             key: 7,
             since: 100,
             diving: false,
+            chaining: false,
             answer: None,
             retreat: Vec::new(),
             commanded: 0,

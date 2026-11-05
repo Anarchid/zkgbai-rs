@@ -36,7 +36,18 @@ that expense. Darts borrow ordinary raiders or requisition from an existing Rove
 factory, fire at will, and return to solo-raider duty after a job.
 There is one active wave, bounded to 128 members. Larger jobs are skipped rather
 than sent with an undersized wave. Fleas and Darts require at most one known riot/unknown
-screen within 600 elmos. A completed attempt gives the area a 90-second cooldown.
+screen within 600 elmos. When a dive ends, its survivors immediately reassess nearby
+jobs from their current position, including the same target after a timeout.
+Chain strikes use the surviving force and a fresh kill prediction, without
+returning home or replenishing the original wave size. Reachability, eligibility,
+defense and existing mission claims still apply. Only when no local chain is
+available does the ended attempt give the area a 90-second cooldown.
+
+During the bounded chain assessment, units in weapon reach keep attacking; others
+stop the old pursuit. To avoid invalidating every answer as those units fire,
+chain predictions assume a full friendly reload and ready enemy weapons instead
+of relying on a temporary reload opening. A rejected assessment returns the wave
+with the normal rejection cooldown.
 
 `Sweeps` estimates count from the maximum number of impacts within a reload,
 allowing one second of flight-time variation. This is an approximate lower bound:
@@ -189,7 +200,8 @@ Fresh inferred Phantom/artillery fixes qualify as well as seen targets. Escorts
 are included in the prediction; Halberds do not inherit the raiders' hard riot veto.
 These squad missions never requisition units and retain their normal squad identity.
 QRF and operator orders take priority. Target death, expired evidence or a search
-timeout releases the survivors to ordinary assault behavior. `squad_missions`
+timeout first offers the survivors a local chain strike, including the original
+target if still eligible. Without one, they return to ordinary assault behavior. `squad_missions`
 reports gathering, assessing and diving (also exposed through the legacy
 `raider_missions` status key).
 

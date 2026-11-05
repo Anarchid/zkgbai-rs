@@ -24,6 +24,22 @@ pub(super) struct Request {
     insertion: Option<crate::military::fightsim::mech::Insertion>,
 }
 impl Request {
+    /// A chain can be assessed while both sides keep shooting. Price a full
+    /// friendly reload and ready enemy guns, so the answer does not depend on
+    /// a cooldown opening that will change before the next controller tick.
+    pub(super) fn for_chain(mut self, reload_stamp: u64) -> Self {
+        for unit in &mut self.snapshot.units {
+            unit.reloads = if unit.side == 0 {
+                unit.spec.weapons.iter().map(|w| (w.name.clone(), (w.reload * 30.0).ceil() as i32)).collect()
+            } else {
+                unit.spec.weapons.iter().map(|w| (w.name.clone(), 0)).collect()
+            };
+        }
+        self.reload_units.clear();
+        self.reload_stamp = reload_stamp;
+        self
+    }
+
     pub(super) fn with_throw(mut self, dx: f32, dz: f32, wait: i32, flight: i32) -> Self {
         self.insertion =
             Some(crate::military::fightsim::mech::Insertion { count: self.members.len(), dx, dz, wait, flight });
@@ -203,12 +219,13 @@ impl Ai {
             key,
             &w.job,
             &w.members,
-            w.home,
+            if w.phase == Phase::Chaining { self.strike_members_center(&w.members).unwrap_or(w.home) } else { w.home },
             self.defs.get(w.tactic.name()),
             w.job.prey.needs_stun(w.tactic),
         ) else {
             return;
         };
+        let request = if w.phase == Phase::Chaining { request.for_chain(self.reload_stamp(&[])) } else { request };
         if self.strikes.predictor.as_ref().unwrap().tx.try_send(request).is_ok() {
             w.query = Some((key, self.frame));
         }
@@ -336,6 +353,52 @@ fn stun_window_fits(remaining: i32, kill_frames: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn chain_prediction_does_not_depend_on_reload_windows_while_units_fire() {
+        let spec = Arc::new(UnitSpec {
+            weapons: vec![WeaponSpec {
+                name: "gun".into(),
+                reload: 2.0,
+                range: 200.0,
+                salvo: 1,
+                damage: 10.0,
+                weapon_type: "BeamLaser".into(),
+                leading: None,
+            }],
+            ..Default::default()
+        });
+        let request = Request {
+            key: 9,
+            reload_units: vec![1, 2],
+            reload_stamp: 10,
+            snapshot: FightSnapshot {
+                units: vec![
+                    SnapUnit {
+                        side: 0,
+                        spec: spec.clone(),
+                        hp: 80.0,
+                        reloads: vec![("gun".into(), 0)],
+                        ..Default::default()
+                    },
+                    SnapUnit { side: 1, spec, hp: 100.0, reloads: vec![("gun".into(), 59)], ..Default::default() },
+                ],
+                ..Default::default()
+            },
+            target: 1,
+            pos: springai::Vec3::xz(100.0, 100.0),
+            members: vec![1],
+            paralysis: None,
+            stun_required: false,
+            insertion: None,
+        }
+        .for_chain(20);
+        assert_eq!(request.snapshot.units[0].reloads, vec![("gun".into(), 60)]);
+        assert_eq!(request.snapshot.units[1].reloads, vec![("gun".into(), 0)]);
+        assert_eq!(request.snapshot.units[1].hp, 100.0);
+        assert!(request.reload_units.is_empty());
+        assert_eq!(request.reload_stamp, 20);
+    }
+
     #[test]
     fn stale_prediction_cannot_spend_an_expired_stun() {
         assert!(stun_window_fits(600, Some(300)));

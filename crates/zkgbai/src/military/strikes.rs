@@ -13,6 +13,7 @@ use springai::{NO_TIMEOUT, Unit, Vec3};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod captors;
+mod chain;
 mod evasion;
 mod fragile;
 mod lobsters;
@@ -137,6 +138,7 @@ enum Phase {
     Screening,
     Forming,
     Diving,
+    Chaining,
     Returning,
 }
 struct Wave {
@@ -771,7 +773,7 @@ impl Ai {
                     w.query = None;
                 }
             }
-            if w.tactic.light_swarm() && w.phase != Phase::Diving {
+            if w.tactic.light_swarm() && matches!(w.phase, Phase::Forming | Phase::Screening | Phase::Returning) {
                 let positions: Vec<_> = w
                     .members
                     .iter()
@@ -956,9 +958,13 @@ impl Ai {
                         "search expired or wave lost"
                     }
                 ));
-                w.phase = Phase::Returning;
-                w.since = frame;
-                self.strikes.cooldowns.push((w.job.pos, frame));
+                // Reassess with the survivors before cooling the area or
+                // issuing return orders. The expired target is still a job.
+                if !self.strike_chain(&mut w) {
+                    w.phase = Phase::Returning;
+                    w.since = frame;
+                    self.strikes.cooldowns.push((w.job.pos, frame));
+                }
             } else if let Some(e) = target.filter(|e| e.visible || e.is_radar_visible) {
                 w.job.pos = e.position;
                 w.job.last = frame;
@@ -974,6 +980,9 @@ impl Ai {
                 w.job.pos = e.position;
                 w.job.last = frame;
             }
+        }
+        if w.phase == Phase::Chaining {
+            self.strike_chain_update(&mut w);
         }
         if w.phase == Phase::Returning
             && (w.members.iter().all(|id| self.fighters.get(id).is_none_or(|f| distance(f.get_pos(), w.home) < 450.0))
@@ -1006,6 +1015,10 @@ impl Ai {
     }
 
     fn strike_command(&mut self, w: &Wave) {
+        if w.phase == Phase::Chaining {
+            self.strike_chain_hold(&w.members, &w.job);
+            return;
+        }
         let visible =
             w.job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible && !e.is_dead).map(|e| e.unit);
         let center = if w.phase == Phase::Diving { w.job.pos } else { w.home };
