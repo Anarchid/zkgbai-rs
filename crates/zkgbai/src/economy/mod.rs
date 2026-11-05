@@ -5,6 +5,7 @@ mod allied;
 mod army_support;
 mod artemis;
 mod assign;
+mod dispatch;
 pub mod build_ids;
 mod buildguard;
 mod colonize;

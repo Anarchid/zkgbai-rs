@@ -38,6 +38,8 @@ pub struct Worker {
     pub chicken_frame: i32,
     pub last_retreat_frame: i32,
     pub task: Option<TaskId>,
+    pub(super) lease: Option<super::dispatch::Lease>,
+    pub(super) suspended: Vec<TaskId>,
     pub(super) raid_defense: Option<super::commander::Defense>,
     pub approach: Option<Approach>,
     pub(super) routes: Option<crate::kgbutil::pathfinder::WorkerRoutes>,
@@ -113,6 +115,8 @@ impl Worker {
             chicken_frame: 0,
             last_retreat_frame: 0,
             task: None,
+            lease: None,
+            suspended: Vec::new(),
             raid_defense: None,
             approach: None,
             routes: None,
@@ -132,6 +136,8 @@ impl Worker {
 
     /// Assign this worker to task `id` (and the task to this worker).
     pub fn set_task(&mut self, tasks: &mut TaskStore, id: TaskId, _frame: i32) {
+        self.lease = None;
+        self.suspended.retain(|&t| t != id);
         self.task = Some(id);
         if let Some(t) = tasks.get_mut(id) {
             t.add_worker(self.id);
@@ -140,6 +146,7 @@ impl Worker {
 
     /// Leave the current task and stop.
     pub fn clear_task(&mut self, tasks: &mut TaskStore) {
+        self.lease = None;
         if let Some(t) = self.task.take().and_then(|id| tasks.get_mut(id)) {
             t.remove_worker(self.id);
         }
@@ -150,6 +157,7 @@ impl Worker {
 
     /// The task ended (it clears its own worker list): forget it and stop.
     pub fn end_task(&mut self) {
+        self.lease = None;
         self.task = None;
         if self.unit.health() > 0.0 {
             self.unit.stop(0);

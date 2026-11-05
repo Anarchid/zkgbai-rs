@@ -482,6 +482,7 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ("scouts", "Intel", "deep scouting with cloaked Widows"),
     ("radar", "Intel", "watchtowers: advanced radar on raised ground"),
     ("reanalysis", "Intel", "the terrain re-analysed now and then (walls, ditches)"),
+    ("economydispatch", "Economy", "persistent assignments with explicit interruptions and bounded energy recruitment"),
     (
         "regionsplit",
         "Intel",

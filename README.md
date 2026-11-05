@@ -636,3 +636,27 @@ Unified conquest takes precedence when both switches are enabled.
 Runtime changes release old direction/energy roles on the next five-second
 planning pass. An already accepted ferry retains control until delivery.
 The journal records `expansionpolicy` and `expansionmission` events.
+
+### Persistent economic dispatch (wip first cut)
+
+`economydispatch` is on by default (`disable=economydispatch` restores the
+continuous worker auction). The existing task store is the project ledger:
+unfinished structures, allied assists and prerequisites retain their identity.
+The auction allocates available workers; normal price changes no longer reopen
+an admitted assignment. Operator requests, factory defense, explicit conquest
+and logistics crews can interrupt it, with interrupted tasks considered before
+fresh work when the worker becomes available again. Helpers do not displace
+incumbents. Conquest travel and tactical controllers retain their existing
+execution authority; this first cut does not replace their military policy.
+
+Observed progress or construction spending renews execution evidence. A resource
+pause is distinct from failed execution; twenty seconds without headway when
+resources are available releases that worker and temporarily shuns the site,
+without deleting its project. Missing build commands are repaired, while queued
+travel/build commands persist. Emergency energy recruits available hands using
+remaining-work cost and counts staffed, near-term output before recruiting more.
+Tracked logistics projects retain their shared metal/crew allocator; ordinary
+projects still use the existing spending priorities, not a new global budget
+optimizer. `dispatch` journal events record assignment, suspension, release and
+project closure with reasons. This is the execution foundation, not Gosplan's
+long-horizon search.

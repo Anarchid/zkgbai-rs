@@ -363,22 +363,28 @@ impl Ai {
             return;
         }
         // Cancel the old engine order even if no safe replacement exists.
-        let blocked_task = self.eco.workers.get(&wid).is_some_and(|w| {
-            w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
-                (self.conquest_skips_opening_mexes(wid)
-                    && t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id))
-                    || self.eco_repair_paused(t)
-                    || !self.eco.silo_work_allowed(t)
-                    || !self.eco_prerequisites_ready(t)
-                    || (!self.op_priority(t.id) && !self.logistics_allows(wid, t.id))
-                    || (t.as_construction().is_some_and(|c| c.fortification)
-                        && self.eco_fortify_travel(w, t.get_pos()).is_none())
-            })
-        });
+        let blocked_task = !self.eco_dispatch_on()
+            && self.eco.workers.get(&wid).is_some_and(|w| {
+                w.task.and_then(|id| self.eco.tasks.get(id)).is_some_and(|t| {
+                    (self.conquest_skips_opening_mexes(wid)
+                        && t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id))
+                        || self.eco_repair_paused(t)
+                        || !self.eco.silo_work_allowed(t)
+                        || !self.eco_prerequisites_ready(t)
+                        || (!self.op_priority(t.id) && !self.logistics_allows(wid, t.id))
+                        || (t.as_construction().is_some_and(|c| c.fortification)
+                            && self.eco_fortify_travel(w, t.get_pos()).is_none())
+                })
+            });
         if blocked_task && let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }
-        let Some(task_id) = self.eco_local_energy_task(wid).or_else(|| self.eco_get_cheapest_job(wid)) else {
+        let chosen = if self.eco_dispatch_on() {
+            self.eco_dispatch_job(wid)
+        } else {
+            self.eco_local_energy_task(wid).or_else(|| self.eco_get_cheapest_job(wid))
+        };
+        let Some(task_id) = chosen else {
             return;
         };
         let Some(w) = self.eco.workers.get(&wid) else {
@@ -391,7 +397,31 @@ impl Ai {
         let build_dist = unit.def().map_or(0.0, |d| d.build_distance());
         let task_pos = self.eco.task_pos(task_id);
 
-        if wtask == Some(task_id) && distance(wpos, task_pos) <= build_dist * 1.5 && unit.num_current_commands() > 0 {
+        if self.eco_dispatch_on()
+            && wtask == Some(task_id)
+            && self.eco.tasks.get(task_id).is_some_and(|t| t.queued_build_matches(unit))
+        {
+            return;
+        }
+        if self.eco_dispatch_on()
+            && wtask == Some(task_id)
+            && w.approach.is_some_and(|a| {
+                a.task == task_id
+                    && a.sent > w.last_retreat_frame
+                    && unit.current_commands().last().is_some_and(|c| c.id() == a.cmd)
+            })
+        {
+            return;
+        }
+        let matching = !self.eco_dispatch_on()
+            || self.eco.tasks.get(task_id).is_some_and(|t| {
+                t.build_command_matches(unit) || matches!(t.kind, TaskKind::Reclaim(_) | TaskKind::CombatReclaim(_))
+            });
+        if wtask == Some(task_id)
+            && matching
+            && distance(wpos, task_pos) <= build_dist * 1.5
+            && unit.num_current_commands() > 0
+        {
             // A nearby worker can still have lost/rejected its build order.
             // Alphabet Siege's opening commander stood idle beside its
             // planned factory for the whole game after its order disappeared.
@@ -402,7 +432,11 @@ impl Ai {
             return;
         }
         let approach = !self.dev_off("approach");
-        if approach && wtask == Some(task_id) && self.eco_approach_holds(wid, task_id, task_pos) {
+        if approach
+            && !self.eco_dispatch_on()
+            && wtask == Some(task_id)
+            && self.eco_approach_holds(wid, task_id, task_pos)
+        {
             return;
         }
 
@@ -735,7 +769,7 @@ impl Ai {
         self.eco.hard_estalled && matches!(&task.kind, TaskKind::Repair(r) if !r.target.is_being_built())
     }
 
-    fn eco_get_cheapest_job(&mut self, wid: i32) -> Option<TaskId> {
+    pub(super) fn eco_get_cheapest_job(&mut self, wid: i32) -> Option<TaskId> {
         let w = self.eco.workers.get(&wid)?;
         let unit = w.unit;
         let refresh =
@@ -1151,7 +1185,7 @@ impl Ai {
             .is_some_and(|(id, _, _)| id == worker.id)
     }
 
-    fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+    pub(super) fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
         self.eco_cost_of_job_at_distance(worker, wpos, task, distance(wpos, task.get_pos()))
     }
 
@@ -1771,6 +1805,12 @@ impl Ai {
 
     /// Stop a task, send its workers to be reassigned and delete it.
     fn eco_cancel_task(&mut self, id: TaskId) {
+        if self.eco_dispatch_on() {
+            self.op_emit(
+                "dispatch",
+                serde_json::json!({"event":"project closed","task":id,"reason":"completed or invalid"}),
+            );
+        }
         let idle = self.eco.stop_workers(id);
         self.eco.idle_workers(&idle);
         self.eco.delete_task(id);
@@ -1965,6 +2005,17 @@ pub(super) mod tests {
         unsafe extern "C" fn queued(_: i32, _: i32) -> i32 {
             QUEUED.get()
         }
+        unsafe extern "C" fn cmd_id(_: i32, _: i32, _: i32) -> i32 {
+            -1
+        }
+        unsafe extern "C" fn cmd_params(_: i32, _: i32, _: i32, out: *mut f32, size: i32) -> i32 {
+            if !out.is_null() && size >= 3 {
+                unsafe {
+                    std::ptr::copy_nonoverlapping([1090.0, 0.0, 0.0].as_ptr(), out, 3);
+                }
+            }
+            3
+        }
         unsafe extern "C" fn spending(_: i32, _: i32, _: i32) -> f32 {
             0.0
         }
@@ -1980,6 +2031,8 @@ pub(super) mod tests {
             t.Unit_getHealth = Some(scalar);
             t.Unit_getWeapons = Some(zero);
             t.Unit_getCurrentCommands = Some(queued);
+            t.Unit_CurrentCommand_getId = Some(cmd_id);
+            t.Unit_CurrentCommand_getParams = Some(cmd_params);
             t.Unit_getResourceUse = Some(spending);
             t.Unit_getRulesParamFloat = Some(rules);
             t.UnitDef_getWeaponMounts = Some(zero);
@@ -2024,6 +2077,9 @@ pub(super) mod tests {
         unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
             100.0
         }
+        unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
+            if id == 11 { 80.0 } else { 100.0 }
+        }
         unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
             0
         }
@@ -2051,7 +2107,7 @@ pub(super) mod tests {
         }
         let mut ai = super::super::commander::tests::test_ai_with(|t| {
             t.Unit_getTeam = Some(team);
-            t.Unit_getHealth = Some(scalar);
+            t.Unit_getHealth = Some(health);
             t.Unit_getMaxHealth = Some(scalar);
             t.Unit_getPos = Some(pos);
             t.Unit_isBeingBuilt = Some(building);

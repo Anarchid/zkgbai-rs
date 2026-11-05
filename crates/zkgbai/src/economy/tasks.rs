@@ -142,8 +142,15 @@ impl WorkerTask {
     /// build distance (the engine also counts the target's radius).
     pub(super) fn build_command_matches(&self, unit: Unit) -> bool {
         let Some(cmd) = unit.current_commands().first().copied() else { return false };
-        let id = cmd.id();
-        let params = cmd.params();
+        self.matches_build(cmd.id(), &cmd.params())
+    }
+
+    /// The approach may have move commands ahead of its build command.
+    pub(super) fn queued_build_matches(&self, unit: Unit) -> bool {
+        unit.current_commands().iter().any(|cmd| self.matches_build(cmd.id(), &cmd.params()))
+    }
+
+    fn matches_build(&self, id: i32, params: &[f32]) -> bool {
         let (target, build) = match &self.kind {
             TaskKind::Construction(c) => (c.target, Some((c.build_type, self.position))),
             TaskKind::Repair(r) => (Some(r.target), r.target.def().map(|d| (d, r.target.pos()))),

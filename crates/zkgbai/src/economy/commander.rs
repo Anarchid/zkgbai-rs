@@ -119,6 +119,7 @@ impl Ai {
             return;
         }
         if old.is_none() {
+            self.eco_suspend_assignment(id, "commander defense");
             let w = self.eco.workers.get_mut(&id).unwrap();
             w.clear_task(&mut self.eco.tasks);
             unit.set_move_state(0, 0);
