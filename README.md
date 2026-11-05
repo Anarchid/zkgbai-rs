@@ -544,7 +544,7 @@ These bounded approximations should be checked against game outcomes.
 ### Explicit raider engagements
 
 `raidcommit` replaces ordinary ground-raider threat-map convergence with explicit combat
-permission (default **off on main**, **on on wip**; `enable=raidcommit` / `disable=raidcommit`,
+permission (default **off on both main and wip**; `enable=raidcommit` / `disable=raidcommit`,
 or the operator `feature` tool). It keeps coalesce running even if `coalesce` itself is disabled:
 solo raiders, Kodachis and raider squads travel/scout using short threat-aware MOVE orders;
 coalesce alone commits them to local armed fights, including singletons. A rejected encounter
