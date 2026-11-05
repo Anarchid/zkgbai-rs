@@ -5,6 +5,7 @@
 use springai::{Unit, Vec3, reserved};
 
 use crate::Ai;
+use crate::kgbutil::kgb_move_to;
 use crate::kgbutil::pathfinder::PathCost;
 use crate::military::wrappers::fighter::next_waypoint;
 use crate::util::{NULLPOS, OPTION_SHIFT_KEY, distance};
@@ -106,6 +107,14 @@ fn route_still_safe(pos: Vec3, queued: &[Vec3], desired: &[Vec3], guns: &[Gun]) 
     true
 }
 
+/// ZK's raw move owns movement around units and structures. Queuing engine
+/// MOVE commands makes its gadget repeatedly translate/restart the queue.
+fn send_route(unit: Unit, route: &[Vec3], frame: i32) {
+    for (i, to) in route.iter().enumerate() {
+        kgb_move_to(unit, *to, if i == 0 { 0 } else { OPTION_SHIFT_KEY }, frame);
+    }
+}
+
 impl Ai {
     pub(crate) fn raidcommit_on(&self) -> bool {
         !self.dev_off(FEATURE)
@@ -192,9 +201,7 @@ impl Ai {
             route_still_safe(pos, q, &checked, &guns) && q.iter().all(|p| self.pathfinder.no_go_at(*p).is_none())
         });
         if !keep {
-            for (i, to) in checked.iter().enumerate() {
-                unit.move_to(*to, if i == 0 { 0 } else { OPTION_SHIFT_KEY });
-            }
+            send_route(unit, &checked, self.frame);
             self.qrf_commit_moved(unit.id(), *checked.last().unwrap());
         }
         if let Some(f) = self.fighters.get_mut(&unit.id()) {
@@ -206,6 +213,38 @@ impl Ai {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routes_issue_raw_move_and_replace_then_queue() {
+        use springai::ffi;
+        use std::{cell::RefCell, ffi::c_void};
+        thread_local! {
+            static SENT: RefCell<Vec<(i32, i32, i16, Vec<f32>)>> = const { RefCell::new(Vec::new()) };
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, data: *mut c_void) -> i32 {
+            if topic == ffi::CommandTopic::COMMAND_UNIT_CUSTOM as i32 {
+                let c = unsafe { &*data.cast::<ffi::SCustomUnitCommand>() };
+                let params = unsafe { std::slice::from_raw_parts(c.params, c.params_size as usize) }.to_vec();
+                SENT.with_borrow_mut(|s| s.push((topic, c.cmdId, c.options, params)));
+            } else {
+                SENT.with_borrow_mut(|s| s.push((topic, -1, 0, Vec::new())));
+            }
+            0
+        }
+        let ai = crate::economy::test_ai_with(|t| t.Engine_handleCommand = Some(command));
+        let unit = Unit::from_id(ai.cb, 42).unwrap();
+        let route = [Vec3::xz(100.0, 200.0), Vec3::xz(900.0, 200.0)];
+        SENT.with_borrow_mut(Vec::clear);
+        send_route(unit, &route, 300);
+        let sent = SENT.with_borrow(Clone::clone);
+        assert_eq!(sent.len(), 2);
+        for (i, (_, cmd, opts, params)) in sent.iter().enumerate() {
+            assert_eq!(*cmd, crate::defs::cmd::RAW_MOVE);
+            assert_ne!(*opts & springai::opt::RIGHT_MOUSE_KEY, 0);
+            assert_eq!(*opts & OPTION_SHIFT_KEY != 0, i > 0);
+            assert_eq!(params, &[route[i].x, route[i].y, route[i].z]);
+        }
+    }
 
     #[test]
     fn travel_cannot_cross_coverage_to_a_safe_endpoint() {
