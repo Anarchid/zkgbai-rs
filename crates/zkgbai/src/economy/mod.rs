@@ -31,6 +31,7 @@ mod sparrow;
 pub mod tasks;
 mod team_energy;
 pub mod terraform;
+mod unified_conquest;
 mod watchtower;
 mod wind;
 pub mod worker;
@@ -130,6 +131,7 @@ pub struct EconomyManager {
     pub commanders: Vec<i32>,
     /// Forward objectives the commander takes and fortifies (see `conquest`).
     pub conquest: conquest::Conquest,
+    unified: unified_conquest::Unified,
     /// Commanders out of fights the predictor says they lose (see `comguard`).
     pub(super) guard: comguard::ComGuard,
     build_guard: buildguard::BuildGuard,
@@ -392,6 +394,7 @@ impl EconomyManager {
             tasks: TaskStore::default(),
             commanders: Vec::new(),
             conquest: conquest::Conquest::default(),
+            unified: Default::default(),
             guard: comguard::ComGuard::default(),
             build_guard: buildguard::BuildGuard::default(),
             idlers: VecDeque::new(),
@@ -899,6 +902,7 @@ impl Ai {
         }
         self.eco_update_new_factory(frame);
         self.eco_conquest_update(frame);
+        self.eco_unified_update(frame);
 
         if frame % 30 == self.offset % 30 {
             self.eco_update_silo_preparation();
@@ -1600,7 +1604,7 @@ impl Ai {
         if def.speed() > 0.0 && !def.build_options().is_empty() {
             let mut w = Worker::new(unit, self.team_id);
             w.is_com = self.defs.is_commander(def);
-            if !w.is_com {
+            if !w.is_com && self.eco_path_policy() {
                 self.eco_assign_worker_role(&mut w);
             }
             let greedy = w.is_greedy;

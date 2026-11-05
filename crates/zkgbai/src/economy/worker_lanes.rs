@@ -100,7 +100,7 @@ impl Ai {
     }
 
     pub(super) fn eco_expansion_lanes(&self, worker: &Worker) -> Vec<LaneRoute> {
-        if self.eco.hard_estalled {
+        if !self.eco_lanes() || self.eco.hard_estalled {
             return Vec::new();
         }
         let Some(routes) = worker.routes.as_ref() else { return Vec::new() };
@@ -130,7 +130,8 @@ impl Ai {
     }
 
     pub(super) fn eco_expansion_lane_cost(&self, worker: &Worker, task: &WorkerTask, lanes: &[LaneRoute]) -> f32 {
-        if lanes.is_empty()
+        if !self.eco_lanes()
+            || lanes.is_empty()
             || worker.task == Some(task.id)
             || self.eco.hard_estalled
             || !self.eco_lane_mex(worker, task)

@@ -464,6 +464,9 @@ impl Ai {
         if frame % PERIOD != (self.offset + 7) % PERIOD {
             return;
         }
+        if self.eco_unified() {
+            self.conquest_plan(frame);
+        }
         if !self.conquest_active() {
             if self.eco.conquest.op.is_some() {
                 self.conquest_end("switched off", false);

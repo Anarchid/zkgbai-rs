@@ -740,7 +740,7 @@ impl Ai {
         let unit = w.unit;
         let refresh =
             w.routes.as_ref().is_none_or(|r| self.frame - r.frame >= 30 || distance(r.origin, unit.pos()) >= 64.0);
-        if refresh {
+        if self.eco_path_policy() && refresh {
             let routes = self.pathfinder.worker_routes(&self.war, unit, self.frame);
             self.eco.workers.get_mut(&wid)?.routes = routes;
             self.eco_refresh_expansion_goal(wid);
@@ -774,7 +774,9 @@ impl Ai {
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let reaches = |t: &WorkerTask| {
-            self.eco_worker_can_take(worker, t) && (self.op_priority(t.id) || self.logistics_allows(wid, t.id))
+            self.eco_unified_allows(worker, t)
+                && self.eco_worker_can_take(worker, t)
+                && (self.op_priority(t.id) || self.logistics_allows(wid, t.id))
         };
         // Metal only this type of constructor gets to goes first.
         let others = match def {
@@ -798,12 +800,20 @@ impl Ai {
         // and direct-distance fallback when it has no route.
         let price = |t: &WorkerTask| {
             let direct = distance(wpos, t.get_pos());
-            let routed = worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct);
+            let routed = if self.eco_path_policy() {
+                worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct)
+            } else {
+                direct
+            };
             let base = self.eco_cost_of_job_at_distance(worker, wpos, t, routed);
             if base >= NEVER {
                 return base;
             }
-            let switching_cost = if switching && worker.task != Some(t.id) && !self.eco_switch_is_urgent(worker, t) {
+            let switching_cost = if self.eco_path_policy()
+                && switching
+                && worker.task != Some(t.id)
+                && !self.eco_switch_is_urgent(worker, t)
+            {
                 // Use actual build reach, without the admission slack. The
                 // route field includes terrain detours and falls back to
                 // straight distance when its coarse grid has no route.
@@ -1274,6 +1284,9 @@ impl Ai {
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
+                    if !self.eco_path_policy() && worker.is_greedy && !self.eco_legacy_energy() {
+                        return dist + 10000.0 * cost_mod;
+                    }
                     // With `compush` the commander leaves the energy behind
                     // it to the energy worker.
                     let back = self.compush_back_cost(worker, wpos, task_pos);
@@ -1305,7 +1318,7 @@ impl Ai {
                     // and with `compush` the commander's toward the enemy.
                     let cluster = self.eco_mex_cluster_bonus(task_pos)
                         + self.conquest_ground_bonus(task_pos)
-                        + self.invade_spot_bonus(task_pos)
+                        + if self.eco_unified() { 0.0 } else { self.invade_spot_bonus(task_pos) }
                         + self.compush_face_bonus(worker, wpos, task_pos)
                         + self.conquest_route_pull(worker.id, task.id, dist);
                     if worker.is_greedy {

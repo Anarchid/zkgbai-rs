@@ -114,7 +114,11 @@ const START_ROOM: f32 = 450.0;
 /// snapshots, military/ammo.rs) is off: its A/B (zkgbai-runs/ammo/ab,
 /// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
 /// ledger that is 99.5% right; the ledger still counts and journals.
-pub(crate) const OFF_BY_DEFAULT: [&str; 27] = [
+/// `lanes` is opt-in. `unifiedconquest` supersedes colonize and lanes;
+/// it is on by default in wip, opt-in on main. Both off restores the
+/// worker policy from before the path experiment. Explicit conquest stays separate.
+pub(crate) const OFF_BY_DEFAULT: [&str; 28] = [
+    "lanes",
     "raidcommit",
     "limpetshadow",
     "pairs",

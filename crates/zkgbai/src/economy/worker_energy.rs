@@ -20,6 +20,9 @@ fn energy_bid(energy_seconds: f32, mex_seconds: f32) -> f32 {
 impl Ai {
     pub(super) fn eco_worker_route(&self, w: &Worker, target: Vec3) -> f32 {
         let from = w.get_pos();
+        if !self.eco_path_policy() {
+            return distance(from, target);
+        }
         w.routes
             .as_ref()
             .filter(|r| self.frame - r.frame <= 30 && distance(r.origin, from) < 64.0)
@@ -31,7 +34,10 @@ impl Ai {
     /// Existing reservations count: an opening already taken by another
     /// builder is not a reason to keep this one away from energy work.
     pub(super) fn eco_energy_bidders(&self) -> Vec<(i32, f32)> {
-        if self.eco.hard_estalled || (self.eco.solar_tasks.is_empty() && self.eco.wind_tasks.is_empty()) {
+        if !self.eco_path_policy()
+            || self.eco.hard_estalled
+            || (self.eco.solar_tasks.is_empty() && self.eco.wind_tasks.is_empty())
+        {
             return Vec::new();
         }
         let spots = self.graph.get_neutral_spots();
@@ -75,7 +81,8 @@ impl Ai {
     /// for this particular energy site. Distance to energy still matters:
     /// a rear builder across the map must not reserve everyone else's jobs.
     pub(super) fn eco_energy_opportunity(&self, worker: &Worker, task: &WorkerTask, bidders: &[(i32, f32)]) -> f32 {
-        if self.eco.hard_estalled
+        if !self.eco_path_policy()
+            || self.eco.hard_estalled
             || worker.is_industrious
             || !task.as_construction().is_some_and(|c| {
                 c.build_type.id() == self.eco.build_ids.solar_id || c.build_type.id() == self.eco.build_ids.wind_id
@@ -113,7 +120,7 @@ impl Ai {
     /// a small generator inside the builder's current range. The normal
     /// build checks still protect factory exits and reserved footprints.
     pub(super) fn eco_local_energy_task(&mut self, wid: i32) -> Option<TaskId> {
-        if !self.eco.hard_estalled {
+        if !self.eco_path_policy() || !self.eco.hard_estalled {
             return None;
         }
         let w = self.eco.workers.get(&wid)?;
