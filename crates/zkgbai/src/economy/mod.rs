@@ -22,6 +22,7 @@ pub(crate) mod planning;
 mod plate;
 mod plop;
 pub mod porcmix;
+mod raid_mex;
 mod rebuild;
 pub mod rush;
 mod safespot;
@@ -117,6 +118,8 @@ pub struct EconomyManager {
     /// `densgate`'s map diagonal, once known (see `phase_map_diag`).
     phase_diag: Cell<Option<f32>>,
     pub mexes: Vec<Unit>,
+    /// Mexes built by workers that have seen a raider, including unfinished ones.
+    raid_mexes: BTreeMap<i32, Vec3>,
 
     /// All worker tasks; the lists below hold ids into it.
     pub tasks: TaskStore,
@@ -380,6 +383,7 @@ impl EconomyManager {
             phase_cache: Cell::new((-1, 0.0, 1.0)),
             phase_diag: Cell::new(None),
             mexes: Vec::new(),
+            raid_mexes: BTreeMap::new(),
             tasks: TaskStore::default(),
             commanders: Vec::new(),
             conquest: conquest::Conquest::default(),
@@ -883,6 +887,7 @@ impl Ai {
         }
 
         if frame % 15 == self.offset % 15 {
+            self.eco_observe_raiders();
             self.eco_update_income(frame);
         }
         self.eco_energy_survey(frame);
@@ -1157,6 +1162,10 @@ impl Ai {
 
         if def_name == "staticmex" {
             self.eco.new_mexes.push(unit);
+            self.eco_observe_raiders();
+            if let Some(builder) = builder {
+                self.eco_remember_raid_mex(builder.id(), unit);
+            }
         }
 
         self.eco_track_energy_construction(unit, def_name);
@@ -1479,6 +1488,7 @@ impl Ai {
         let _ = attacker;
         let def = unit.def();
         let uid = unit.id();
+        self.eco.raid_mexes.remove(&uid);
         if def.is_some_and(|d| self.defs.name(d) == crate::military::missiles::SILO) {
             self.eco_silo_lost(unit);
         }
@@ -1676,6 +1686,7 @@ impl Ai {
             return;
         };
         let pos = enemy.pos();
+        self.eco_observe_raider(enemy, def);
         // capture combat reclaim for enemy building nanoframes that enter los
         if enemy.is_being_built() && def.speed() == 0.0 && self.war.get_porc_threat(pos) == 0.0 {
             self.eco.add_combat_reclaim_if_new(enemy);
@@ -1697,6 +1708,7 @@ impl Ai {
             return;
         };
         let pos = enemy.pos();
+        self.eco_observe_raider(enemy, def);
         // capture combat reclaim for undefended enemy buildings that are started within los
         if def.speed() == 0.0 && self.war.get_threat(pos) == 0.0 {
             self.eco.add_combat_reclaim_if_new(enemy);

@@ -2244,7 +2244,7 @@ impl Ai {
     }
 
     pub(super) fn eco_defend_mex(&mut self, position: Vec3) {
-        if !self.op_porc_allowed(position) {
+        if !self.eco_mex_porc_allowed(position) {
             return;
         }
         let turret = self.eco_light_turret();
@@ -2270,7 +2270,7 @@ impl Ai {
     }
 
     pub(super) fn eco_fortify_mex(&mut self, position: Vec3, wd: Option<WeaponDef>) {
-        if !self.op_porc_allowed(position) {
+        if !self.eco_mex_porc_allowed(position) {
             return;
         }
         let porc;

@@ -27,6 +27,8 @@ pub struct Worker {
     pub is_com: bool,
     pub assigned_plop: bool,
     pub is_greedy: bool,
+    /// Has personally seen a scout or raider; never cleared during this worker's life.
+    pub seen_raider: bool,
     pub power: f32,
     pub bp: f32,
     pub build_range: i32,
@@ -99,6 +101,7 @@ impl Worker {
             is_com: false,
             assigned_plop: false,
             is_greedy: false,
+            seen_raider: false,
             power,
             bp,
             build_range,
