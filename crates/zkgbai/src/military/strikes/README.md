@@ -36,7 +36,18 @@ that expense. Darts borrow ordinary raiders or requisition from an existing Rove
 factory, fire at will, and return to solo-raider duty after a job.
 There is one active wave, bounded to 128 members. Larger jobs are skipped rather
 than sent with an undersized wave. Fleas and Darts require at most one known riot/unknown
-screen within 600 elmos. A completed attempt gives the area a 90-second cooldown.
+screen within 600 elmos. When a dive ends, its survivors immediately reassess nearby
+jobs from their current position, including the same target after a timeout.
+Chain strikes use the surviving force and a fresh kill prediction, without
+returning home or replenishing the original wave size. Reachability, eligibility,
+defense and existing mission claims still apply. Only when no local chain is
+available does the ended attempt give the area a 90-second cooldown.
+
+During the bounded chain assessment, units in weapon reach keep attacking; others
+stop the old pursuit. To avoid invalidating every answer as those units fire,
+chain predictions assume a full friendly reload and ready enemy weapons instead
+of relying on a temporary reload opening. A rejected assessment returns the wave
+with the normal rejection cooldown.
 
 `Sweeps` estimates count from the maximum number of impacts within a reload,
 allowing one second of flight-time variation. This is an approximate lower bound:
@@ -186,12 +197,11 @@ target out of reach, a stun window closed) first looks within 1000 elmos of the
 wave for another fresh job it may take as it stands: reachable by every member,
 allowed for its tactic now (a light swarm needs the stun on the heavy already),
 not cooling down and not taken by a squad strike. The target the dive was on
-may be taken up again only if the dive took a fifth of its health or more, so a
-Lance left at 4% when the clock ran out is finished, while a chase that never
-caught its target still ends. Candidates rank by metal per hit point left, then
+is eligible for reassessment without a minimum HP-drop threshold: current
+reachability, defenses and the fresh kill prediction decide whether to continue. Candidates rank by metal per hit point left, then
 distance. Up to three are put in turn to the predictor, from the members'
-places, with up to four seconds for each answer; members keep their last
-orders meanwhile. A launchable answer starts a new dive with its own clock
+places, with up to four seconds for each answer. Members in weapon reach
+keep firing while others stop the cancelled pursuit. A launchable answer starts a new dive with its own clock
 (logged `chain link N`); a wave chains at most six dives. When none is taken
 the wave goes home as before, and every place it struck along the chain cools
 down then (clustered Lances sit inside one another's 500-elmo cooldown).
@@ -218,7 +228,8 @@ Fresh inferred Phantom/artillery fixes qualify as well as seen targets. Escorts
 are included in the prediction; Halberds do not inherit the raiders' hard riot veto.
 These squad missions never requisition units and retain their normal squad identity.
 QRF and operator orders take priority. Target death, expired evidence or a search
-timeout releases the survivors to ordinary assault behavior. `squad_missions`
+timeout first offers the survivors a local chain strike, including the original
+target if still eligible. Without one, they return to ordinary assault behavior. `squad_missions`
 reports gathering, assessing and diving (also exposed through the legacy
 `raider_missions` status key).
 

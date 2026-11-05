@@ -1,9 +1,21 @@
 //! `strikechain`: a dive that ends, for whatever reason, looks round the
 //! wave before it goes home. Another target near it (the second of three
-//! Lances), or the one it was on if the dive took a good part of its health
-//! (a Lance left at 4% when the dive timed out), is put to the predictor
+//! Lances), or the same still-eligible target after a timeout, is put to the predictor
 //! with the wave as it stands; a yes is a new dive with its own clock.
 use super::*;
+
+#[cfg(test)]
+mod regression;
+
+pub(super) const SEARCH_RADIUS: f32 = 1800.0;
+
+pub(super) fn nearby_jobs(jobs: Vec<Job>, from: Vec3) -> Vec<Job> {
+    let mut jobs: Vec<_> = jobs.into_iter().filter(|j| distance(from, j.pos) < SEARCH_RADIUS).collect();
+    jobs.sort_by(|a, b| {
+        (distance(from, a.pos) / a.value.max(1.0)).total_cmp(&(distance(from, b.pos) / b.value.max(1.0)))
+    });
+    jobs
+}
 
 /// The same quarry: one unit, or one inferred fix by name and place.
 pub(super) fn same_target(a: &Job, b: &Job) -> bool {
@@ -12,12 +24,6 @@ pub(super) fn same_target(a: &Job, b: &Job) -> bool {
         (None, None) => a.name == b.name && distance(a.pos, b.pos) < 500.0,
         _ => false,
     }
-}
-
-/// The dive took enough of the target's health that going on is no lost
-/// chase (health shares of max health, at the dive's start and now).
-fn made_progress(at_dive: f32, now: f32) -> bool {
-    at_dive.is_finite() && now.is_finite() && at_dive - now >= CHAIN_PROGRESS
 }
 
 /// Candidates best first: the most metal per hit point left to take, then
@@ -63,17 +69,16 @@ impl Ai {
         }
         let Some(from) = self.strike_wave_center(&w.members) else { return false };
         let old = w.job.clone();
-        let now = old.id.and_then(|id| self.war.targets.get(&id)).filter(|e| !e.is_dead).map(|e| e.get_health());
-        let hurt = w.chain.dive_hp.zip(now).is_some_and(|(at, now)| made_progress(at, now));
         let mut asks: Vec<((f32, f32), Job)> = (self.strike_jobs(SNIPER_MEMORY).into_iter())
             .filter(|j| {
                 let same = same_target(j, &old);
                 distance(j.pos, from) <= CHAIN_REACH
-                    && if same { !dead && hurt } else { !self.strike_cooling(j.pos) }
+                    && if same { !dead } else { !self.strike_cooling(j.pos) }
                     && !self.squad_strike_job_taken(j)
                     && self.strike_target_allowed(w.tactic, j)
                     && self.strike_suitable(w.tactic, j, from)
                     && self.strike_members_reach(&w.members, j.pos)
+                    && (j.prey != Prey::Defenseless || self.strike_opportunity_wave_clear(w, j.pos))
             })
             .map(|j| (rank(j.value, self.strike_job_hp(&j), distance(j.pos, from)), j))
             .collect();
@@ -101,6 +106,7 @@ impl Ai {
         w.chain.asks = asks;
         w.chain.ended = Some(old);
         w.job = first;
+        w.needed = w.members.len();
         w.phase = Phase::Chaining;
         w.since = frame;
         w.query = None;
@@ -121,7 +127,15 @@ impl Ai {
             self.strike_chain_fail(w, frame);
             return;
         }
-        if !gone && frame - w.since <= CHAIN_WAIT && !self.strikes.model_failed {
+        let valid = self.strike_wave_center(&w.members).is_some_and(|from| {
+            self.strike_target_allowed(w.tactic, &w.job)
+                && self.strike_suitable(w.tactic, &w.job, from)
+                && self.strike_members_reach(&w.members, w.job.pos)
+                && !self.squad_strike_job_taken(&w.job)
+                && (w.job.prey != Prey::Defenseless || self.strike_opportunity_wave_clear(w, w.job.pos))
+                && frame - w.job.last < SNIPER_MEMORY
+        });
+        if !gone && valid && frame - w.since <= CHAIN_WAIT && !self.strikes.model_failed {
             self.strike_predict(w);
             match w.phase {
                 Phase::Diving => {
@@ -171,6 +185,20 @@ impl Ai {
         w.since = frame;
         w.query = None;
     }
+    /// Do not retreat from a target already in weapon reach while the worker
+    /// reassesses it, or advance farther on the old, now cancelled mission.
+    pub(super) fn strike_chain_hold(&self, members: &[i32], job: &Job) {
+        let target = job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible && !e.is_dead);
+        for id in members {
+            let Some(f) = self.fighters.get(id) else { continue };
+            let u = f.unit;
+            if let Some(e) = target.filter(|e| distance(u.pos(), e.position) <= u.max_range().max(80.0) * 0.9) {
+                u.attack(e.unit, 0);
+            } else {
+                u.stop(0);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -188,17 +216,6 @@ mod tests {
         assert!(same_target(&job(None, "cloaksnipe", 0.0), &job(None, "cloaksnipe", 300.0)));
         assert!(!same_target(&job(None, "cloaksnipe", 0.0), &job(None, "cloaksnipe", 600.0)));
         assert!(!same_target(&job(Some(7), "cloaksnipe", 0.0), &job(None, "cloaksnipe", 0.0)));
-    }
-
-    #[test]
-    fn a_timed_out_dive_goes_on_only_after_real_damage() {
-        // The 11-03 Agalta Lance: full health at the dive, 4% at the timeout.
-        assert!(made_progress(1.0, 0.04));
-        assert!(made_progress(0.5, 0.25));
-        // A lost chase: never caught, or barely scratched.
-        assert!(!made_progress(1.0, 1.0));
-        assert!(!made_progress(1.0, 0.85));
-        assert!(!made_progress(f32::NAN, 0.1));
     }
 
     #[test]

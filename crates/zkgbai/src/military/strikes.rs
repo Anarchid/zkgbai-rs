@@ -34,9 +34,6 @@ const SPREAD: f32 = 105.0;
 /// `strikechain`: a dive that ends, for whatever reason, first looks this
 /// far round the wave for another target it can take on as it stands...
 const CHAIN_REACH: f32 = 1000.0;
-/// ... and takes up the target it was on again only if the dive took this
-/// share of its health (a lost chase ends; a Lance left at 4% does not).
-const CHAIN_PROGRESS: f32 = 0.2;
 /// Candidates put to the predictor before the wave goes home, and how long
 /// (frames) each may wait for its answer.
 const CHAIN_ASKS: usize = 3;
@@ -176,8 +173,6 @@ enum Phase {
 /// `strikechain` state of a wave.
 #[derive(Clone, Debug, Default)]
 struct Chain {
-    /// Target health share when the current dive began.
-    dive_hp: Option<f32>,
     /// Chained dives so far.
     links: u32,
     /// Candidates not yet asked about.
@@ -1043,7 +1038,6 @@ impl Ai {
                 ));
                 w.job = next;
                 w.since = frame;
-                w.chain.dive_hp = w.job.id.and_then(|id| self.war.targets.get(&id)).map(|e| e.get_health());
             } else if dead && w.job.phantom() && w.job.count > 0 {
                 w.job.id = None; // Sweep for the next Phantom with the surviving wave.
             } else if dead
@@ -1123,13 +1117,15 @@ impl Ai {
                 return;
             }
         }
-        if w.phase != Phase::Chaining {
-            self.strike_command(&w);
-        }
+        self.strike_command(&w);
         self.strikes.wave = Some(w);
     }
 
     fn strike_command(&mut self, w: &Wave) {
+        if w.phase == Phase::Chaining {
+            self.strike_chain_hold(&w.members, &w.job);
+            return;
+        }
         let visible =
             w.job.id.and_then(|id| self.war.targets.get(&id)).filter(|e| e.visible && !e.is_dead).map(|e| e.unit);
         let center = if w.phase == Phase::Diving { w.job.pos } else { w.home };
