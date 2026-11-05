@@ -1330,11 +1330,6 @@ impl Ai {
 
         if matches!(def_name, "energysingu" | "staticnuke" | "zenith" | "raveparty") {
             self.eco_defend_singu(unit.pos());
-            for n in self.eco.nanos.values() {
-                if n.target == unit {
-                    n.unit.self_destruct(0);
-                }
-            }
             let unneeded: Vec<TaskId> = self
                 .eco
                 .nano_tasks
@@ -1400,22 +1395,15 @@ impl Ai {
             }
             if def_name == "staticcon" {
                 let ct_target = self.eco.tasks.get(id).and_then(|t| t.as_construction()).and_then(|c| c.ct_target);
-                match ct_target {
-                    Some(target) => {
-                        let nt = Nanotower { unit, target };
-                        self.eco.nanos.insert(unit.id(), nt);
-                        if self.defs.name_of(target) == AIRPAD {
-                            self.eco_adopt_pad_nano(unit, target);
-                        } else {
-                            self.eco_nano_post(nt);
-                        }
-                        self.eco_defend_nano(nt);
+                if let Some(target) = ct_target {
+                    let nt = Nanotower { unit, target };
+                    self.eco.nanos.insert(unit.id(), nt);
+                    if self.defs.name_of(target) == AIRPAD {
+                        self.eco_adopt_pad_nano(unit, target);
+                    } else {
+                        self.eco_nano_post(nt);
                     }
-                    // port: a caretaker without a target would be self-destructed
-                    // by checkNanos anyway (the C++ stored a null target).
-                    None => {
-                        unit.self_destruct(0);
-                    }
+                    self.eco_defend_nano(nt);
                 }
             }
 
@@ -1652,9 +1640,6 @@ impl Ai {
         }
 
         match def_name {
-            "staticcon" => {
-                unit.self_destruct(0);
-            }
             "staticmex" => {
                 if unit.is_being_built() {
                     self.eco_track_mex_construction(unit);
@@ -1798,9 +1783,8 @@ impl Ai {
         // the pad would repair the pad and nothing on it.
         let mut off_post = Vec::new();
         for n in self.eco.nanos.values() {
-            if n.target.health() <= 0.0 {
-                n.unit.self_destruct(0);
-            } else if self.defs.name_of(n.target) == AIRPAD
+            if n.target.health() > 0.0
+                && self.defs.name_of(n.target) == AIRPAD
                 && !self.walkin_lends(n.unit.id())
                 && !Self::eco_on_pad_post(n.unit)
             {
