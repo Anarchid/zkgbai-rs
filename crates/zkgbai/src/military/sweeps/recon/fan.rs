@@ -199,10 +199,17 @@ impl Ai {
                 unit.set_idle_mode(0, 0);
                 let target = wave.lanes[slot].target;
                 let attempt = Attempt { target, started: self.frame, purpose: wave.purpose };
-                self.sweeps
-                    .recon
-                    .active
-                    .insert(id, Dive { unit, attempt, swift: true, boosted: false, burst_range: 0.0 });
+                self.sweeps.recon.active.insert(
+                    id,
+                    Dive {
+                        unit,
+                        attempt,
+                        swift: true,
+                        boosted: false,
+                        burst_range: 0.0,
+                        initial_health: unit.health(),
+                    },
+                );
                 kgb_move_to(unit, target, 0, self.frame);
             }
         } else if self.dev_off("scouts") || exposed || age >= ASSEMBLY * 2 {
