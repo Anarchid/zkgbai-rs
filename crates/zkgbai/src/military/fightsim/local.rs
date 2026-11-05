@@ -245,17 +245,24 @@ impl Ai {
         let mut unknown = false;
         let mut theirs: Vec<(i32, UnitDef, f32, Vec3, bool, String)> = Vec::new();
         for (&eid, e) in &self.war.targets {
-            if e.is_dead || e.position.y < -5.0 || (!e.is_static && frame - e.last_seen > SEEN_WITHIN) {
+            if e.is_dead
+                || e.position.y < -5.0
+                || (!e.is_static && frame - e.last_seen > if self.raidcommit_on() { 300 } else { SEEN_WITHIN })
+            {
                 continue;
             }
             let contact = near(e.position);
             let armed = e.can_attack() && !e.is_aa;
-            let joins = armed && !e.can_fly() && distance(e.position, mid) <= SUPPORT;
+            let joins = armed
+                && !e.can_fly()
+                && (distance(e.position, mid) <= SUPPORT
+                    || (self.raidcommit_on()
+                        && positions.iter().any(|p| distance(e.position, *p) <= e.def_max_weapon_range() + CONTACT)));
             if !contact && !joins {
                 continue;
             }
             let Some(def) = e.ud.filter(|_| e.identified) else {
-                unknown |= contact && !e.is_static;
+                unknown |= if self.raidcommit_on() { contact || joins } else { contact && !e.is_static };
                 continue;
             };
             // Aircraft only over the fight itself.

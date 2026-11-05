@@ -536,3 +536,20 @@ delays, not engine path simulation. Raiders keep their last observed asset
 target and then select nearby surviving assets. Up to four threatened assets
 are considered per raid; overlapping asset values are divided among threats.
 These bounded approximations should be checked against game outcomes.
+
+### Explicit raider engagements
+
+`raidcommit` replaces ordinary ground-raider threat-map convergence with explicit combat
+permission (default **off on main**, **on on wip**; `enable=raidcommit` / `disable=raidcommit`,
+or the operator `feature` tool). It keeps coalesce running even if `coalesce` itself is disabled:
+solo raiders, Kodachis and raider squads travel/scout using short threat-aware MOVE orders;
+coalesce alone commits them to local armed fights, including singletons. A rejected encounter
+assembles its participants outside known weapon coverage; missing predictions, unknown contacts
+and exhausted query budgets never authorize an attack. Breaking a gang cancels its old pursuit.
+QRF retains its roles and assignment planner, but defenders assigned to one raid share the same
+clean-fight admission policy, evaluated at their actual positions. Repositioning stays MOVE.
+Friendly threat paint still serves other controllers and routing; it grants no engagement
+permission in these paths. Explicit operator/strike orders and specialized cloaked, submerged
+and air controllers retain their existing behavior. The switch is experimental: its shared
+predictor and conservative assembly policy still need game-outcome validation. `raidcommit`
+journal events record assembly and QRF commitments; coalesce retains its outcome windows.

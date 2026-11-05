@@ -32,6 +32,7 @@ pub mod puppies;
 pub mod qrf;
 pub mod radar;
 pub mod raid_test;
+pub mod raidcommit;
 pub mod roles;
 pub(crate) mod rush_push;
 pub mod scouts;

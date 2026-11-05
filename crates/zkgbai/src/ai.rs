@@ -1387,6 +1387,9 @@ impl Ai {
         } else {
             self.disabled.remove(feature);
         }
+        if feature == crate::military::raidcommit::FEATURE && changed {
+            self.raidcommit_switch_changed();
+        }
         if feature == "commander" && off {
             self.eco_release_commander_defense();
         }

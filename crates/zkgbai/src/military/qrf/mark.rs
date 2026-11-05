@@ -565,7 +565,7 @@ impl Ai {
         // rest split off, free for the next raid or the screen (user,
         // 2026-10-26: four Pyros chased one Flea, and the next Flea found
         // the whole force deciding where to go).
-        if !predicted && !self.dev_off("justenough") {
+        if !predicted && !self.raidcommit_on() && !self.dev_off("justenough") {
             for &(team, ti) in &plan {
                 if team >= MOON || self.qrf.roles.contains_key(&team) {
                     continue;
@@ -619,6 +619,18 @@ impl Ai {
                 self.log(&line);
             }
             marks.insert(team, tracks_of(t, self));
+            if self.raidcommit_on() {
+                // One explicit roster and one admission decision for defenders
+                // assigned to the same raid, with their actual positions.
+                let first = plan.iter().find(|p| p.1 == ti).map(|p| p.0);
+                if first == Some(team) {
+                    let ids: Vec<_> =
+                        plan.iter().filter(|p| p.1 == ti).flat_map(|p| teams[&p.0].iter().copied()).collect();
+                    self.qrf_order_team(&ids, t.center, true);
+                }
+                self.qrf_mark_doing(team, "engage", t.center, t.power);
+                continue;
+            }
             let ids = &teams[&team];
             let (pos, _) = self.qrf_team_pos(ids);
             let power: f32 = plan.iter().filter(|p| p.1 == ti).map(|p| self.qrf_team_power(&teams[&p.0])).sum();

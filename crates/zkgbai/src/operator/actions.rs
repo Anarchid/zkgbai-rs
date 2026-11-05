@@ -394,6 +394,11 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
         "Army",
         "raiders near one another, whoever drives them, take a local fight together when the predictor says it pays",
     ),
+    (
+        "raidcommit",
+        "Army",
+        "explicit raider combat groups, singleton fight checks, safe assembly and shared QRF engagement policy; on in wip, off in main",
+    ),
     ("coalesceshadow", "Army", "with coalesce off, journal the raider gangs it would form"),
     (
         "stayveto",

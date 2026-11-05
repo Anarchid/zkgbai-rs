@@ -598,8 +598,43 @@ impl Ai {
         self.qrf.stats.orders += 1;
     }
 
+    pub(crate) fn qrf_reset_commit_orders(&mut self) {
+        for m in self.qrf.members.values_mut() {
+            m.order = None;
+        }
+    }
+
     /// Order a whole team.
     pub fn qrf_order_team(&mut self, ids: &[i32], to: Vec3, fight: bool) {
+        if self.raidcommit_on() {
+            // Specialized submerged/cloaked/air defenders keep their controller.
+            let special: Vec<_> = ids
+                .iter()
+                .copied()
+                .filter(|id| self.qrf.members.get(id).is_some_and(|m| !self.raidcommit_ground(m.unit)))
+                .collect();
+            for id in special {
+                self.qrf_order(id, to, fight);
+            }
+            let units: Vec<_> = ids
+                .iter()
+                .filter_map(|id| self.qrf.members.get(id).map(|m| m.unit))
+                .filter(|u| self.raidcommit_available(*u))
+                .collect();
+            if fight
+                && !units.is_empty()
+                && let Some(aim) = self.raidcommit_defense(&units)
+            {
+                for u in units {
+                    self.qrf_order(u.id(), aim, true);
+                }
+                return;
+            }
+            for u in units {
+                self.raidcommit_move(u, to);
+            }
+            return;
+        }
         for &id in ids {
             self.qrf_order(id, to, fight);
         }

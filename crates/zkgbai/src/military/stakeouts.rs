@@ -973,7 +973,7 @@ impl Ai {
             self.stakeouts_displaced(id);
             return;
         }
-        if frame < m.fleeing_until {
+        if frame < m.fleeing_until || self.raidcommit_wait(&[unit]) {
             return;
         }
         if standing && self.stakeouts.near_home(p) {

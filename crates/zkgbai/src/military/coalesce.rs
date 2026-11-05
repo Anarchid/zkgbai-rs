@@ -87,7 +87,7 @@ pub const SIZE: &str = "coalsize";
 const PERIOD: i32 = 15;
 /// Raiders this close are one cluster (single linkage).
 const LINK: f32 = 450.0;
-/// The smallest cluster judged: one raider alone is philosoraider's...
+/// Legacy minimum. `raidcommit` also judges singletons.
 const MIN_MEMBERS: usize = 2;
 /// ...unless an enemy in its fight has fired every tube, for at least this
 /// many more frames (`ammo`): a Kodachi that has taken a Picket's three
@@ -238,6 +238,11 @@ pub struct Coalesce {
     windows: Vec<Window>,
     /// Shadow records: unit id -> frame until which it is not recorded.
     quiet: BTreeMap<i32, i32>,
+    /// Rejected encounters assemble here until the next scan; old handlers
+    /// may not turn a rejection back into an attack.
+    holds: BTreeMap<i32, (i32, Vec3)>,
+    /// Bound assembly; repeated rejected scans must not pin a scout forever.
+    assembly_retry: BTreeMap<i32, i32>,
     /// Round-robin start among clusters when the budget runs out.
     rotate: usize,
     micros: u64,
@@ -277,8 +282,8 @@ fn take_blocks(blocks: &mut [(f32, f32, Vec<usize>)], need: f32, min_units: usiz
     taken
 }
 
-fn passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool) -> bool {
-    if t.kill_value < MIN_PRIZE_METAL {
+fn passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool, minimum_value: f32) -> bool {
+    if t.kill_value < minimum_value {
         return false;
     }
     match plan {
@@ -334,7 +339,7 @@ fn tally_json(t: &Tally) -> Value {
 
 impl Ai {
     pub fn coalesce_on(&self) -> bool {
-        !self.dev_off(FEATURE)
+        !self.dev_off(FEATURE) || self.raidcommit_on()
     }
 
     fn coalesce_runs(&self) -> bool {
@@ -372,6 +377,12 @@ impl Ai {
         if frame % PERIOD != (self.offset + 9) % PERIOD {
             return;
         }
+        self.coalesce.holds.retain(|_, (until, _)| *until > frame);
+        self.coalesce.assembly_retry.retain(|_, until| *until > frame);
+        if !self.raidcommit_on() {
+            self.coalesce.holds.clear();
+            self.coalesce.assembly_retry.clear();
+        }
         self.coalesce_close_windows(frame);
         if frame - self.coalesce.last_report >= REPORT_PERIOD {
             self.coalesce_report(frame);
@@ -393,6 +404,92 @@ impl Ai {
         c.scans += 1;
         c.micros += budget.micros();
         c.queries += budget.queries as u64;
+    }
+
+    /// Changing policy cancels the old automatic orders before handing units
+    /// back. Reservations and stronger controllers retain their authority.
+    pub(crate) fn raidcommit_switch_changed(&mut self) {
+        let units: Vec<_> = self.coalesce.gangs.iter().flat_map(|g| g.members.iter().map(|m| m.2)).collect();
+        let gangs: Vec<_> = self.coalesce.gangs.iter().map(|g| g.id).collect();
+        for gid in gangs {
+            self.coalesce_end(gid, "policy_changed");
+        }
+        self.coalesce.holds.clear();
+        self.coalesce.assembly_retry.clear();
+        for u in units {
+            if u.health() > 0.0
+                && u.team() == self.team_id
+                && !springai::reserved::is_reserved(self.cb, u.id())
+                && !self.recovery_owns(u.id())
+                && !self.retreat_is_retreating(u)
+                && !self.qrf.members.contains_key(&u.id())
+                && !self.squad_strike_owns(u.id())
+            {
+                u.stop(0);
+            }
+        }
+        self.qrf_reset_commit_orders();
+    }
+
+    /// A denial remains binding while the regular controller chooses its next job.
+    pub(crate) fn raidcommit_wait(&mut self, units: &[Unit]) -> bool {
+        if !self.raidcommit_on() {
+            return false;
+        }
+        let holds: Vec<_> = units
+            .iter()
+            .filter_map(|u| {
+                self.coalesce.holds.get(&u.id()).filter(|(until, _)| *until > self.frame).map(|(_, p)| (*u, *p))
+            })
+            .collect();
+        if holds.is_empty() {
+            return false;
+        }
+        // A squad may have lost a borrowed member; don't resume its attack
+        // around that member while the rejected encounter is regrouping.
+        let meeting = holds[0].1;
+        for &u in units {
+            self.raidcommit_move(u, meeting);
+        }
+        true
+    }
+
+    fn raidcommit_hold(&mut self, units: &[Unit], meeting: Vec3) {
+        let fresh: Vec<_> = units
+            .iter()
+            .copied()
+            .filter(|u| self.coalesce.assembly_retry.get(&u.id()).is_none_or(|until| *until <= self.frame))
+            .collect();
+        if !fresh.is_empty() {
+            self.op_emit(
+                "raidcommit",
+                json!({"event":"assemble",
+                "units":fresh.iter().map(|u|u.id()).collect::<Vec<_>>(), "at":[meeting.x, meeting.z]}),
+            );
+        }
+        for unit in fresh {
+            self.coalesce.holds.insert(unit.id(), (self.frame + 90, meeting));
+            self.coalesce.assembly_retry.insert(unit.id(), self.frame + 300);
+            self.raidcommit_move(unit, meeting);
+        }
+    }
+
+    /// QRF retains ownership but uses exactly the clean-gang admission policy.
+    /// No forecast, unknown contacts, or an unprofitable fight grant no attack.
+    pub(crate) fn raidcommit_defense(&mut self, units: &[Unit]) -> Option<Vec3> {
+        let mut budget = Budget::new(BUDGET_US);
+        let verdict = self.coalesce_judge(units, None, true, &mut budget);
+        match verdict {
+            Judged::Pass(v) => {
+                self.op_emit(
+                    "raidcommit",
+                    json!({"event":"defense_commit",
+                    "units":units.iter().map(|u|u.id()).collect::<Vec<_>>(), "tally":tally_json(&v.tally)}),
+                );
+                v.focus.and_then(|id| self.war.targets.get(&id).map(|e| e.position))
+            }
+            _ => None,
+        }
     }
 
     /// The raiders free to join a gang, and where each comes from.
@@ -433,9 +530,12 @@ impl Ai {
         }
         out.retain(|&(id, _, u)| {
             let Some(def) = u.def() else { return false };
+            if self.raidcommit_on() && self.qrf.members.contains_key(&id) {
+                return false;
+            }
             u.health() > 0.0
                 && u.team() == self.team_id
-                && !reserved::is_reserved(self.cb, id)
+                && !springai::reserved::is_reserved(self.cb, id)
                 && !self.recovery_owns(id)
                 && !u.is_being_built()
                 && !def.is_able_to_fly()
@@ -454,10 +554,16 @@ impl Ai {
 
     /// Judge `units` (with their origins) as one gang: the best plan that
     /// passes, holding `hold` (the plan to keep) with the looser thresholds.
-    fn coalesce_judge(&mut self, units: &[Unit], hold: Option<Plan>, budget: &mut Budget) -> Judged {
-        let Some(mut local) = self.local_fight(units) else { return Judged::NoFight };
-        // A gang is borrowed, committed and ordered: it fires for certain
-        // (`ordered`, SimFlags::ordered).
+    fn coalesce_judge(&mut self, units: &[Unit], hold: Option<Plan>, clean_only: bool, budget: &mut Budget) -> Judged {
+        if self.raidcommit_on() && budget.spent() {
+            return Judged::Unknown;
+        }
+        let Some(mut local) = self.local_fight(units) else {
+            return if self.raidcommit_on() { Judged::Unknown } else { Judged::NoFight };
+        };
+        if self.raidcommit_on() && (local.unknown || local.ours.len() != units.len()) {
+            return Judged::Unknown;
+        }
         local.snap.flags.ordered = !self.dev_off(crate::military::fightsim::ORDERED);
         if !local.armed_theirs() {
             return Judged::NoFight;
@@ -481,6 +587,7 @@ impl Ai {
             .map(|t| t.id);
         let mut plans: Vec<Plan> = match hold {
             Some(p) => vec![p],
+            None if clean_only => vec![Plan::Clean],
             None => {
                 let mut prizes: Vec<_> = local.theirs.iter().filter(|t| t.prize).collect();
                 prizes.sort_by(|a, b| b.value.total_cmp(&a.value));
@@ -508,11 +615,15 @@ impl Ai {
                     (self.local_fates(&local, mode, budget), Some(i))
                 }
             };
-            let Some(fates) = fates else { return Judged::NoFight };
+            let Some(fates) = fates else {
+                return if self.raidcommit_on() { Judged::Unknown } else { Judged::NoFight };
+            };
             let t = tally(&local, &fates, true);
             let p_prize = prize_index.map_or(0.0, |i| fates[their_index(&local, i)].p_raw);
             last = Some((t, p_prize));
-            if !passes(plan, &t, p_prize, hold.is_some()) || best.as_ref().is_some_and(|b| b.tally.net() >= t.net()) {
+            if !passes(plan, &t, p_prize, hold.is_some(), if self.raidcommit_on() { 0.0 } else { MIN_PRIZE_METAL })
+                || best.as_ref().is_some_and(|b| b.tally.net() >= t.net())
+            {
                 continue;
             }
             let record = coalesce_record(&local, &fates, plan, &t, p_prize);
@@ -590,11 +701,11 @@ impl Ai {
                     g.last = last.or(g.last);
                     g.fails
                 });
-                if fails >= FAILS {
+                if ai.raidcommit_on() || fails >= FAILS {
                     ai.coalesce_end(gid, reason);
                 }
             };
-            match self.coalesce_judge(&units, Some(plan), budget) {
+            match self.coalesce_judge(&units, Some(plan), false, budget) {
                 Judged::Pass(v) => {
                     if let Some(g) = self.coalesce.gangs.iter_mut().find(|g| g.id == gid) {
                         g.fails = 0;
@@ -632,7 +743,9 @@ impl Ai {
             _ => false,
         })
         .into_iter()
-        .filter(|g| g.len() >= MIN_MEMBERS || self.ammo_open_near(points[g[0]], CONTACT, LONE_OPEN))
+        .filter(|g| {
+            self.raidcommit_on() || g.len() >= MIN_MEMBERS || self.ammo_open_near(points[g[0]], CONTACT, LONE_OPEN)
+        })
         .filter(|g| !shadow || g.iter().all(|&i| !self.coalesce.quiet.contains_key(&free[i].0)))
         .collect();
         if groups.is_empty() {
@@ -662,7 +775,7 @@ impl Ai {
                     }
                     last = prefix.len();
                     let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
-                    let judged = self.coalesce_judge(&units, None, budget);
+                    let judged = self.coalesce_judge(&units, None, false, budget);
                     if let Judged::Pass(v) = judged {
                         self.coalesce.sized += 1;
                         self.coalesce_form(prefix, v, shadow, cluster);
@@ -694,9 +807,36 @@ impl Ai {
             let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
             let lone = members.len() == 1;
             self.coalesce.lone_judged += u64::from(lone);
-            let Judged::Pass(v) = self.coalesce_judge(&units, None, budget) else { continue };
-            self.coalesce.lone_formed += u64::from(lone);
-            self.coalesce_form(members, v, shadow, cluster);
+            match self.coalesce_judge(&units, None, false, budget) {
+                Judged::Pass(v) => {
+                    for u in &units {
+                        self.coalesce.holds.remove(&u.id());
+                        self.coalesce.assembly_retry.remove(&u.id());
+                    }
+                    self.coalesce.lone_formed += u64::from(lone);
+                    self.coalesce_form(members, v, shadow, cluster);
+                }
+                Judged::Fail(..) | Judged::Unknown if self.raidcommit_on() => {
+                    // An explicit rendezvous, outside weapon coverage after routing.
+                    // A singleton can meet a nearby candidate not yet within LINK.
+                    let mut points: Vec<_> = units.iter().map(|u| u.pos()).collect();
+                    if units.len() == 1
+                        && let Some(other) = free
+                            .iter()
+                            .filter(|m| m.0 != units[0].id() && !self.coalesce_owns(m.0))
+                            .filter(|m| distance(m.2.pos(), points[0]) <= 2.0 * LINK)
+                            .min_by(|a, b| distance(a.2.pos(), points[0]).total_cmp(&distance(b.2.pos(), points[0])))
+                    {
+                        points.push(other.2.pos());
+                    }
+                    let meeting = Vec3::xz(
+                        points.iter().map(|p| p.x).sum::<f32>() / points.len() as f32,
+                        points.iter().map(|p| p.z).sum::<f32>() / points.len() as f32,
+                    );
+                    self.raidcommit_hold(&units, meeting);
+                }
+                _ => {}
+            }
         }
         self.coalesce.rotate = start + 1;
     }
@@ -774,6 +914,10 @@ impl Ai {
 
     fn coalesce_form(&mut self, members: Vec<(i32, Origin, Unit)>, v: Verdict, shadow: bool, cluster: usize) {
         let frame = self.frame;
+        for (id, _, _) in &members {
+            self.coalesce.holds.remove(id);
+            self.coalesce.assembly_retry.remove(id);
+        }
         let c = &mut self.coalesce;
         let gid = c.next_id;
         c.next_id += 1;
@@ -895,6 +1039,19 @@ impl Ai {
                 }
             }
         }
+        if self.raidcommit_on() {
+            let units: Vec<_> = g
+                .members
+                .iter()
+                .map(|m| m.2)
+                .filter(|u| self.raidcommit_available(*u) && !self.qrf.members.contains_key(&u.id()))
+                .collect();
+            for unit in &units {
+                let haven = self.graph_get_closest_raider_haven(unit.pos());
+                self.raidcommit_move(*unit, haven);
+                self.raidcommit_hold(&[*unit], haven);
+            }
+        }
         let alive = g.members.iter().filter(|m| m.2.health() > 0.0 && m.2.team() == self.team_id).count();
         self.op_emit(
             "coalesce",
@@ -1005,25 +1162,131 @@ mod tests {
 
     #[test]
     fn clean_needs_every_armed_enemy_likely_dead_for_little() {
-        assert!(passes(Plan::Clean, &t(400.0, 60.0, 300.0, 0.9, 0.9), 0.0, false));
+        assert!(passes(Plan::Clean, &t(400.0, 60.0, 300.0, 0.9, 0.9), 0.0, false, MIN_PRIZE_METAL));
         // One armed enemy likely to live.
-        assert!(!passes(Plan::Clean, &t(400.0, 60.0, 300.0, 0.9, 0.4), 0.0, false));
+        assert!(!passes(Plan::Clean, &t(400.0, 60.0, 300.0, 0.9, 0.4), 0.0, false, MIN_PRIZE_METAL));
         // Too dear.
-        assert!(!passes(Plan::Clean, &t(400.0, 150.0, 300.0, 0.9, 0.7), 0.0, false));
+        assert!(!passes(Plan::Clean, &t(400.0, 150.0, 300.0, 0.9, 0.7), 0.0, false, MIN_PRIZE_METAL));
         // Not worth it.
-        assert!(!passes(Plan::Clean, &t(400.0, 30.0, 40.0, 0.9, 0.7), 0.0, false));
+        assert!(!passes(Plan::Clean, &t(400.0, 30.0, 40.0, 0.9, 0.7), 0.0, false, MIN_PRIZE_METAL));
         // Holding is looser.
-        assert!(passes(Plan::Clean, &t(400.0, 150.0, 300.0, 0.6, 0.2), 0.0, true));
-        assert!(!passes(Plan::Clean, &t(400.0, 250.0, 300.0, 0.6, 0.2), 0.0, true));
+        assert!(passes(Plan::Clean, &t(400.0, 150.0, 300.0, 0.6, 0.2), 0.0, true, MIN_PRIZE_METAL));
+        assert!(!passes(Plan::Clean, &t(400.0, 250.0, 300.0, 0.6, 0.2), 0.0, true, MIN_PRIZE_METAL));
     }
 
     #[test]
     fn a_prize_is_worth_half_its_value_in_raiders() {
         let heavy = t(600.0, 400.0, 900.0, 0.3, 0.1);
-        assert!(passes(Plan::Prize(1), &heavy, 0.8, false));
-        assert!(!passes(Plan::Prize(1), &heavy, 0.6, false));
-        assert!(!passes(Plan::Prize(1), &t(600.0, 500.0, 900.0, 0.3, 0.1), 0.8, false));
-        assert!(passes(Plan::Prize(1), &t(600.0, 500.0, 900.0, 0.3, 0.1), 0.5, true));
+        assert!(passes(Plan::Prize(1), &heavy, 0.8, false, MIN_PRIZE_METAL));
+        assert!(!passes(Plan::Prize(1), &heavy, 0.6, false, MIN_PRIZE_METAL));
+        assert!(!passes(Plan::Prize(1), &t(600.0, 500.0, 900.0, 0.3, 0.1), 0.8, false, MIN_PRIZE_METAL));
+        assert!(passes(Plan::Prize(1), &t(600.0, 500.0, 900.0, 0.3, 0.1), 0.5, true, MIN_PRIZE_METAL));
+    }
+
+    fn fixture_spec(name: &str) -> std::sync::Arc<crate::military::fightsim::UnitSpec> {
+        use crate::military::fightsim::{UnitSpec, WeaponSpec};
+        let line = include_str!("fightsim/testdata/mech_parity_units.tsv")
+            .lines()
+            .chain(include_str!("fightsim/testdata/mech_tacai_units.tsv").lines())
+            .find(|l| l.split('\t').next() == Some(name))
+            .unwrap();
+        let f: Vec<_> = line.split('\t').collect();
+        std::sync::Arc::new(UnitSpec {
+            def: name.into(),
+            cost: f[1].parse().unwrap(),
+            health: f[2].parse().unwrap(),
+            speed: f[3].parse().unwrap(),
+            mobile: f[4] == "1",
+            air: f[5] == "1",
+            builder: f[6] == "1",
+            com: f[7] == "1",
+            radius: f[8].parse().unwrap(),
+            weapons: f[9]
+                .split('|')
+                .filter(|w| !w.is_empty())
+                .map(|w| {
+                    let p: Vec<_> = w.split(':').collect();
+                    WeaponSpec {
+                        name: p[0].into(),
+                        weapon_type: p[1].into(),
+                        leading: None,
+                        range: p[2].parse().unwrap(),
+                        reload: p[3].parse().unwrap(),
+                        salvo: p[4].parse().unwrap(),
+                        damage: p[5].parse().unwrap(),
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    fn glaive_encounter(positions: &[(f32, f32)], enemy: &str) -> Tally {
+        use crate::military::fightsim::local::{HORIZON, Ours, Theirs};
+        use crate::military::fightsim::{FightSnapshot, Model, SimFlags, SnapUnit};
+        let glaive = fixture_spec("cloakraid");
+        let foe = fixture_spec(enemy);
+        let mut local = Local {
+            snap: FightSnapshot { flags: SimFlags::from_switches(false, true, true), ..Default::default() },
+            ours: Vec::new(),
+            theirs: Vec::new(),
+            unknown: false,
+        };
+        for (id, &(x, z)) in positions.iter().enumerate() {
+            local.ours.push(Ours { id: id as i32, cost: glaive.cost });
+            local.snap.units.push(SnapUnit {
+                side: 0,
+                spec: glaive.clone(),
+                hp: glaive.health,
+                x,
+                z,
+                reloads: Vec::new(),
+                tubes: Vec::new(),
+            });
+        }
+        local.theirs.push(Theirs {
+            id: 100,
+            def: enemy.into(),
+            cost: foe.cost,
+            value: foe.cost,
+            armed: true,
+            prize: false,
+            pos: Vec3::xz(0.0, 0.0),
+        });
+        local.snap.units.push(SnapUnit {
+            side: 1,
+            hp: foe.health,
+            spec: foe,
+            x: 0.0,
+            z: 0.0,
+            reloads: Vec::new(),
+            tubes: Vec::new(),
+        });
+        local.snap.flags.ordered = true;
+        let fates = Model::load().unwrap().kiting_fates(&local.snap, HORIZON);
+        tally(&local, &fates, true)
+    }
+
+    #[test]
+    fn raidcommit_rejects_lone_glaive_against_blitz_and_kodachi() {
+        for foe in ["tankheavyraid", "tankraid"] {
+            let t = glaive_encounter(&[(350.0, 0.0)], foe);
+            assert!(!passes(Plan::Clean, &t, 0.0, false, 0.0), "{foe}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn raidcommit_distant_support_cannot_license_the_first_glaive() {
+        let t = glaive_encounter(&[(300.0, 0.0), (1200.0, 0.0)], "tankheavyraid");
+        assert!(!passes(Plan::Clean, &t, 0.0, false, 0.0), "{t:?}");
+    }
+
+    #[test]
+    fn raidcommit_can_commit_a_real_pack_and_a_winning_singleton() {
+        let positions: Vec<_> = (0..12).map(|i| (300.0 + (i / 4) as f32 * 24.0, (i % 4) as f32 * 24.0)).collect();
+        let t = glaive_encounter(&positions, "tankheavyraid");
+        assert!(passes(Plan::Clean, &t, 0.0, false, 0.0), "pack: {t:?}");
+        let t = glaive_encounter(&[(160.0, 0.0)], "spiderscout");
+        assert!(passes(Plan::Clean, &t, 0.0, false, 0.0), "singleton: {t:?}");
     }
 
     #[test]

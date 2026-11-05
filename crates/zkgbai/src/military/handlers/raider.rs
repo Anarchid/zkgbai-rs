@@ -861,6 +861,68 @@ impl Ai {
         handled
     }
 
+    /// Objective selection for explicitly committed raiders. Nearby friendly
+    /// paint never licenses combat; the coalesce scan owns armed engagements.
+    /// Uncommitted units scout, approach value, or meet at a safe rally point.
+    fn raider_commit_destination(&self, unit: Unit) -> (Vec3, Option<ScoutTaskId>) {
+        let pos = unit.pos();
+        let war = &self.war;
+        let view = war.view(unit.def());
+        let handled = self.raider_handled(unit.id());
+        let terrain = if self.dev_off("reach") { None } else { self.terrain.get() };
+        let engage = crate::terrain::engage_test(terrain, unit);
+        let mut best = None;
+        for &tid in &self.raider_handler.solo_scout_task_ids {
+            let Some(task) = self.raider_handler.scout_tasks.get(&tid) else { continue };
+            if !engage(task.target) {
+                continue;
+            }
+            let cost = scout_cost(task, &self.graph.metal_spots, self.frame, unit.id(), pos)
+                + 2500.0 * view.get_threat(task.target);
+            if best.is_none_or(|(c, _, _)| cost < c) {
+                best = Some((cost, task.target, Some(tid)));
+            }
+        }
+        let hits = war.reach(unit.def());
+        for e in war.targets.values() {
+            if e.is_dead
+                || !e.identified
+                || (!e.is_static && self.frame - e.last_seen > IN_RANGE_SEEN)
+                || !engage(e.position)
+                || !war.can_hit(hits, e)
+                || handled.iter().any(|p| distance(*p, e.position) < CLAIM_RADIUS)
+            {
+                continue;
+            }
+            let threat = view.get_threat(e.position);
+            let cost = raid_cost(war, &self.defs, e, pos, threat) + 2500.0 * threat;
+            if best.is_none_or(|(c, _, _)| cost < c) {
+                best = Some((cost, e.position, None));
+            }
+        }
+        best.map_or((NULLPOS, None), |(_, p, task)| (p, task))
+    }
+
+    fn raider_commit_travel(&mut self, units: &[Unit], target: Option<Vec3>) -> Vec3 {
+        let Some(&leader) = units.first() else { return NULLPOS };
+        if self.raidcommit_wait(units) {
+            return self.fighters.get(&leader.id()).map_or(leader.pos(), |f| f.target);
+        }
+        let (mut goal, task) = target.map_or_else(|| self.raider_commit_destination(leader), |p| (p, None));
+        if let Some(task) = task {
+            self.raider_take_task(leader.id(), task);
+        } else if self.fighters.get(&leader.id()).is_some_and(|f| f.task.is_some()) {
+            self.raider_clear_task(leader.id());
+        }
+        if goal == NULLPOS {
+            goal = self.graph_get_closest_raider_haven(leader.pos());
+        }
+        for &unit in units {
+            self.raidcommit_move(unit, goal);
+        }
+        goal
+    }
+
     fn raider_assign_solo_raider(&mut self, id: i32) {
         if self.precision_step(id) {
             return;
@@ -869,6 +931,13 @@ impl Ai {
             return;
         };
         let (unit, pos, rtarget) = (r.unit, r.get_pos(), r.target);
+        if self.raidcommit_ground(unit) {
+            if !self.raidcommit_available(unit) {
+                return;
+            }
+            self.raider_commit_travel(&[unit], None);
+            return;
+        }
         let war = &self.war;
         // The threat maps as the raider sees them, under water too (see `water`).
         let view = war.view(unit.def());
@@ -1118,6 +1187,13 @@ impl Ai {
             let Some(r) = self.fighters.get(&id) else {
                 continue;
             };
+            if self.raidcommit_ground(u) {
+                if !self.raidcommit_available(u) {
+                    continue;
+                }
+                self.raider_commit_travel(&[u], None);
+                continue;
+            }
             let reloading = r.is_reloading(self.frame);
             let (pos, rtarget) = (r.get_pos(), r.target);
             let max_threat = if reloading { 0.0 } else { 0.4 };
@@ -1253,6 +1329,40 @@ impl Ai {
         }
         // Its raiders fight with others in a gang for now (see `coalesce`).
         if self.coalesce_owns_squad(sid) {
+            return;
+        }
+        let units: Vec<_> = self
+            .squads
+            .get(sid)
+            .into_iter()
+            .flat_map(|s| s.fighters.iter())
+            .filter_map(|id| self.fighters.get(id).map(|f| f.unit))
+            .filter(|u| self.raidcommit_ground(*u))
+            .collect();
+        if !units.is_empty() && self.squads.get(sid).is_some_and(|s| s.fighters.len() == units.len()) {
+            let units: Vec<_> = units.into_iter().filter(|u| self.raidcommit_available(*u)).collect();
+            if units.is_empty() {
+                return;
+            }
+            let status = self.squads.get(sid).unwrap().status;
+            let target = if status != 'a' { Some(self.war_get_raider_rally(here)) } else { None };
+            let goal = self.raider_commit_travel(&units, target);
+            for unit in &units {
+                if let Some(f) = self.fighters.get_mut(&unit.id()) {
+                    f.out_of_range = distance(unit.pos(), units[0].pos()) > 150.0;
+                }
+            }
+            if let Some(s) = self.squads.get_mut(sid) {
+                s.target = goal;
+            }
+            if status == 'r' {
+                let mut nav = nav!(self);
+                if let Some(s) = self.squads.get_mut(sid)
+                    && s.is_rallied(&mut self.fighters, &mut nav)
+                {
+                    s.status = 'a';
+                }
+            }
             return;
         }
         let Some(rs) = self.squads.get(sid) else {
