@@ -646,6 +646,7 @@ impl Ai {
 
     fn eco_switch_is_urgent(&self, w: &Worker, t: &WorkerTask) -> bool {
         self.op_priority(t.id)
+            || self.eco_factory_defense_hand(w, t)
             || self.conquest_bonus(w.id, t.id).is_some()
             || self.logistics_bonus(w.id, t.id).is_some()
             || t.as_construction().is_some_and(|c| {
@@ -934,7 +935,10 @@ impl Ai {
         // returns to the ordinary auction. Explicit assignments retain priority.
         if worker.is_industrious
             && self.eco_energy_goal_unmet()
-            && !task.is_some_and(|id| self.eco_directed_job(worker, id))
+            && !task.is_some_and(|id| {
+                self.eco_directed_job(worker, id)
+                    || eco.tasks.get(id).is_some_and(|t| self.eco_factory_defense_hand(worker, t))
+            })
         {
             let energy = eco
                 .construction_tasks
@@ -1088,6 +1092,53 @@ impl Ai {
             .filter(|e| frame - e.last_seen <= RAID_MEMORY && e.position != NULLPOS)
             .map(|e| (e.position, e.get_danger()))
             .collect()
+    }
+
+    /// Factory damage summons the builder that can get to its defense
+    /// first, not every commander regardless of distance. Explicit crews,
+    /// retreating workers and unavailable builders are not substitutes.
+    pub(super) fn eco_factory_defense_hand(&self, worker: &Worker, task: &WorkerTask) -> bool {
+        if self.eco.hard_estalled
+            || !task.as_construction().is_some_and(|c| c.fac_def)
+            || !self
+                .eco_get_nearest_fac(task.get_pos())
+                .is_some_and(|f| f.unit.health() > 0.0 && f.unit.health() < f.unit.max_health())
+            || !self.eco_prerequisites_ready(task)
+        {
+            return false;
+        }
+        let arrival = |w: &Worker| {
+            let def = w.unit.def()?;
+            if w.is_chicken
+                || w.unit.health() <= 0.0
+                || w.unit.team() != self.team_id
+                || w.unit.is_being_built()
+                || w.bp <= 0.0
+                || self.eco_worker_held(w.id)
+                || self.recovery_owns(w.id)
+                || self.jump_in_progress(w.unit)
+                || springai::reserved::is_reserved(self.cb, w.id)
+                || (w.assigned_plop && w.has_plop())
+                || self.eco_worker_shuns(w, task.get_pos())
+                || (w.is_com && self.comguard_avoids(w.id, task.get_pos()))
+                || !self.logistics_allows(w.id, task.id)
+                || w.task.is_some_and(|id| id != task.id && self.eco_directed_job(w, id))
+                || !self.terrain_reaches(def, w.get_pos(), task.get_pos(), def.build_distance() + 32.0)
+            {
+                return None;
+            }
+            let travel = (self.eco_worker_route(w, task.get_pos()) - def.build_distance()).max(0.0);
+            if travel > 0.0 && def.speed() <= 0.0 {
+                return None;
+            }
+            Some((w.id, travel / def.speed().max(1.0), w.task != Some(task.id)))
+        };
+        self.eco
+            .workers
+            .values()
+            .filter_map(arrival)
+            .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)))
+            .is_some_and(|(id, _, _)| id == worker.id)
     }
 
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
@@ -1272,6 +1323,10 @@ impl Ai {
                     return dist - 1000.0 + (500.0 * (cost_mod - 2.0));
                 }
 
+                if self.eco_factory_defense_hand(worker, task) {
+                    return dist / 4.0 - 1000.0;
+                }
+
                 let cost = ctask.build_type.cost(self.metal);
                 if worker.is_greedy
                     && !self.fac.factories.is_empty()
@@ -1290,13 +1345,6 @@ impl Ai {
                         return -1000.0;
                     }
                     return ((dist / 2.0) - cost) + (500.0 * (cost_mod - 1.0));
-                }
-
-                if ctask.fac_def
-                    && worker.is_com
-                    && self.eco_get_nearest_fac(task_pos).is_some_and(|f| f.unit.health() < f.unit.max_health())
-                {
-                    return -1000.0;
                 }
 
                 // A chokepoint's turret, with `detour`, is priced as light
@@ -1719,6 +1767,137 @@ impl Ai {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_factory_uses_nearby_energy_builder_instead_of_distant_commander() {
+        use super::super::factory::Factory;
+        use springai::{Unit, UnitDef};
+        thread_local! {
+            static DEFS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            static HURT: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+        }
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, len: i32) -> i32 {
+            if !DEFS.get() {
+                return 0;
+            }
+            if len > 0 && !out.is_null() {
+                unsafe { *out = 3 };
+            }
+            1
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const std::ffi::c_char {
+            if id == 3 { c"energysolar".as_ptr() } else { c"jumpcon".as_ptr() }
+        }
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
+            if id == 90 && HURT.get() { 94.0 } else { 100.0 }
+        }
+        unsafe extern "C" fn zero(_: i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
+            2
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn attack(_: i32, id: i32) -> bool {
+            id == 5
+        }
+        unsafe extern "C" fn cost(_: i32, _: i32, _: i32) -> f32 {
+            90.0
+        }
+        unsafe extern "C" fn params(
+            _: i32,
+            _: i32,
+            _: *mut *const std::ffi::c_char,
+            _: *mut *const std::ffi::c_char,
+        ) -> i32 {
+            0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const std::ffi::c_char, default: f32) -> f32 {
+            default
+        }
+        unsafe extern "C" fn pos(_: i32, id: i32, out: *mut f32) {
+            let p = match id {
+                10 => [4063.0, 0.0, 3279.0],
+                20 => [1987.0, 0.0, 2705.0],
+                _ => [1882.0, 0.0, 2920.0],
+            };
+            unsafe { std::ptr::copy_nonoverlapping(p.as_ptr(), out, 3) };
+        }
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.Unit_getPos = Some(pos);
+            t.Unit_getHealth = Some(health);
+            t.Unit_getMaxHealth = Some(scalar);
+            t.Unit_getTeam = Some(team);
+            t.Unit_getWeapons = Some(zero);
+            t.Unit_getCurrentCommands = Some(zero);
+            t.UnitDef_getWeaponMounts = Some(zero);
+            t.UnitDef_getBuildSpeed = Some(scalar);
+            t.UnitDef_getBuildDistance = Some(scalar);
+            t.UnitDef_getSpeed = Some(scalar);
+            t.UnitDef_getCost = Some(cost);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_isAbleToAttack = Some(attack);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_getMaxWaterDepth = Some(scalar);
+            t.Unit_getRulesParamFloat = Some(rules);
+        });
+        DEFS.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai.eco.build_ids.solar_id = 3;
+        let mut commander = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        commander.is_com = true;
+        let mut builder = Worker::new(Unit::from_id(ai.cb, 20).unwrap(), ai.team_id);
+        builder.is_industrious = true;
+        ai.eco.workers.insert(10, commander);
+        ai.eco.workers.insert(20, builder);
+        ai.fac.factories.insert(90, Factory::new(Unit::from_id(ai.cb, 90).unwrap(), "factoryjump", true, 1000.0));
+        let mut lotus = WorkerTask::construction(UnitDef::from_id(ai.cb, 5).unwrap(), Vec3::xz(2096.0, 3072.0), 0);
+        lotus.as_construction_mut().unwrap().fac_def = true;
+        let lotus = ai.eco.tasks.insert(lotus);
+        let solar = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 3).unwrap(),
+            Vec3::xz(2200.0, 1880.0),
+            0,
+        ));
+        ai.eco.construction_tasks.extend([lotus, solar]);
+        ai.eco.solar_tasks.push(solar);
+        ai.eco.estalled = true;
+        ai.eco.energy_target = 100.0;
+        let t = ai.eco.tasks.get(lotus).unwrap();
+        assert!(!ai.eco_factory_defense_hand(&ai.eco.workers[&10], t), "do not summon the distant commander");
+        assert!(ai.eco_factory_defense_hand(&ai.eco.workers[&20], t));
+        assert!(ai.eco_cost_of_job(&ai.eco.workers[&10], ai.eco.workers[&10].get_pos(), t) >= 0.0);
+        assert!(ai.eco_cost_of_job(&ai.eco.workers[&20], ai.eco.workers[&20].get_pos(), t) < -800.0);
+        assert_eq!(
+            ai.eco_get_cheapest_job(20),
+            Some(lotus),
+            "an industrious worker must answer the local emergency before routine energy"
+        );
+        ai.eco.workers.get_mut(&20).unwrap().is_chicken = true;
+        assert!(
+            ai.eco_factory_defense_hand(&ai.eco.workers[&10], ai.eco.tasks.get(lotus).unwrap()),
+            "an unavailable nearby worker is not a substitute"
+        );
+        ai.eco.hard_estalled = true;
+        assert!(
+            !ai.eco_factory_defense_hand(&ai.eco.workers[&10], ai.eco.tasks.get(lotus).unwrap()),
+            "hard energy recovery retains priority"
+        );
+        ai.eco.hard_estalled = false;
+        HURT.set(false);
+        assert!(
+            !ai.eco_factory_defense_hand(&ai.eco.workers[&10], ai.eco.tasks.get(lotus).unwrap()),
+            "a healthy factory is ordinary work"
+        );
+    }
 
     thread_local! {
         static BUILD_COMMANDS: std::cell::RefCell<std::collections::BTreeMap<i32, (i32, Vec<f32>)>> = const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
