@@ -241,8 +241,11 @@ impl Ai {
             self.cb.cheats_set_enabled(true);
             if let Some(def) = self.defs.get(SWIFT) {
                 for i in 0..count {
-                    self.cb
-                        .cheat_new_unit(def, Vec3::xz(home.x + (i % 5) as f32 * 80.0, home.z + (i / 5) as f32 * 80.0));
+                    let at = Vec3::xz(home.x + (i % 5) as f32 * 80.0, home.z + (i / 5) as f32 * 80.0);
+                    if let Some(u) = self.cb.cheat_new_unit(def, at) {
+                        // Cheated planes need a move/idle cycle to join their handler.
+                        u.move_to(Vec3::xz(at.x + 40.0, at.z + 40.0), 0);
+                    }
                 }
             }
             self.cb.cheats_set_enabled(false);

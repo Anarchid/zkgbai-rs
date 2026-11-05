@@ -220,6 +220,9 @@ impl Ai {
 
     pub fn strike_test_update(&mut self, frame: i32) {
         self.sweeps_fan_scenario(frame);
+        if self.test.as_deref().is_some_and(|s| s.starts_with("recon-fan")) {
+            return;
+        }
         self.airstrike_scenario(frame);
         self.strikes_scenario(frame);
         self.veto_scenario(frame);
