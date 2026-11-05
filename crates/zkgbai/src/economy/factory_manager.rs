@@ -955,6 +955,12 @@ impl Ai {
             return false;
         }
 
+        // Each greedy expander gets an energy partner. Workers already
+        // under construction or leaving a factory satisfy the pending demand.
+        if self.eco_needs_industrious() {
+            return true;
+        }
+
         let reclaim_value = self.eco_get_reclaim_value();
 
         // port: guarded against a zero cost-per-bp (no constructor found).

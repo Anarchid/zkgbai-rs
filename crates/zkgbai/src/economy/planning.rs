@@ -563,7 +563,8 @@ impl Ai {
             self.eco_create_aa_task(position);
         }
 
-        // Energy work is shared by expansion opportunity, not worker caste.
+        // Any builder may seed needed energy. Industrious partners prioritize
+        // it; expanders compare the work with their route and mex opportunities.
         if self.eco_team_energy_needed()
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {
@@ -3034,8 +3035,13 @@ impl Ai {
         // Turbines: a batch up a hill of ours, if the better wind pays for
         // the walk; by the grid instead of solars, where the ground is high
         // enough (see `wind`).
-        let wind_spot = self.graph.get_overdrive_sweet_spot(position, "energywind");
-        if wind_spot != NULLPOS && self.eco_wind_hill(wid, wind_spot) {
+        let careful = self.eco_careful_energy(wid);
+        let wind_spot = if careful {
+            self.graph.get_overdrive_sweet_spot(position, "energywind")
+        } else {
+            self.eco_energy_lane_anchor(wid, position)
+        };
+        if careful && wind_spot != NULLPOS && self.eco_wind_hill(wid, wind_spot) {
             return;
         }
         let windy = wind_spot != NULLPOS && self.eco_wind_beats_solar(wind_spot);
@@ -3047,12 +3053,10 @@ impl Ai {
             let Some(solar) = self.defs.get("energysolar") else {
                 return;
             };
-            position = self.graph.get_overdrive_sweet_spot(position, "energysolar");
-            // in case all metal spots are connected
+            position = self.eco_small_energy_site(wid, solar, position);
             if position == NULLPOS {
                 return;
             }
-            position = self.eco_build_site(solar, position, 0);
 
             if spammed(self, position) {
                 return;
@@ -3064,12 +3068,10 @@ impl Ai {
             let Some(windgen) = self.defs.get("energywind") else {
                 return;
             };
-            position = self.graph.get_overdrive_sweet_spot(position, "energywind");
-            // in case all metal spots are connected
+            position = self.eco_small_energy_site(wid, windgen, position);
             if position == NULLPOS {
                 return;
             }
-            position = self.eco_build_site(windgen, position, 0);
 
             if spammed(self, position) {
                 return;

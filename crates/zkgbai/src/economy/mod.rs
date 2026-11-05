@@ -35,6 +35,7 @@ mod watchtower;
 mod wind;
 pub mod worker;
 mod worker_energy;
+mod worker_goals;
 mod worker_lanes;
 
 pub(crate) use assign::repair_loses_to_mex;
@@ -932,7 +933,7 @@ impl Ai {
             }
 
             // if greedy workers make up too much of the workforce, convert them.
-            let n = self.eco.workers.len() as f32;
+            let n = self.eco.workers.values().filter(|w| !w.is_industrious).count() as f32;
             let tf = self.graph.territory_fraction;
             for w in self.eco.workers.values_mut() {
                 let greed = self.eco.greed;
@@ -1599,8 +1600,15 @@ impl Ai {
         if def.speed() > 0.0 && !def.build_options().is_empty() {
             let mut w = Worker::new(unit, self.team_id);
             w.is_com = self.defs.is_commander(def);
+            if !w.is_com {
+                self.eco_assign_worker_role(&mut w);
+            }
+            let greedy = w.is_greedy;
             let id = w.id;
             self.eco.insert_worker(w);
+            if greedy {
+                self.eco.greed += 1.0;
+            }
             self.eco.new_workers.remove(&id);
             self.eco_generate_tasks(id);
             self.eco_assign_worker(id);
@@ -1666,13 +1674,7 @@ impl Ai {
         let uid = unit.id();
         if self.eco.new_workers.contains(&uid) && unit.num_current_commands() == 0 {
             let mut w = Worker::new(unit, self.team_id);
-            let n = self.eco.workers.len() + usize::from(!self.eco.workers.contains_key(&uid));
-            let greed = self.eco.greed;
-            let tf = self.graph.territory_fraction;
-            let non_coms = n as f32 - self.eco.commanders.len() as f32;
-            if n as i32 > 1 + self.merged_allies && (greed < 2.0 || greed < non_coms * (1.0 - tf).min(1.0)) {
-                w.is_greedy = true;
-            }
+            self.eco_assign_worker_role(&mut w);
             let greedy = w.is_greedy;
             self.eco.insert_worker(w);
             if greedy {

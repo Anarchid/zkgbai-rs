@@ -737,6 +737,7 @@ impl Ai {
         if refresh {
             let routes = self.pathfinder.worker_routes(&self.war, unit, self.frame);
             self.eco.workers.get_mut(&wid)?.routes = routes;
+            self.eco_refresh_expansion_goal(wid);
         }
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
@@ -813,7 +814,9 @@ impl Ai {
             } else {
                 0.0
             };
-            base + self.eco_energy_opportunity(worker, t, &energy_bidders) + switching_cost
+            base + self.eco_energy_opportunity(worker, t, &energy_bidders)
+                + switching_cost
+                + self.eco_expansion_goal_cost(worker, t)
         };
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
@@ -910,6 +913,27 @@ impl Ai {
         {
             return Some(project);
         }
+        // An industrious worker supplies the existing energy goal, then
+        // returns to the ordinary auction. Explicit assignments retain priority.
+        if worker.is_industrious
+            && self.eco_energy_goal_unmet()
+            && !task.is_some_and(|id| self.eco_directed_job(worker, id))
+        {
+            let energy = eco
+                .construction_tasks
+                .iter()
+                .chain(&eco.repair_tasks)
+                .filter_map(|&id| eco.tasks.get(id))
+                .filter(|t| self.eco_energy_job(t) && reaches(t) && threat_cost(t) <= 0.0 && price(t) < NEVER)
+                .min_by(|a, b| {
+                    let score = |t: &WorkerTask| price(t) - if worker.task == Some(t.id) { 80.0 } else { 0.0 };
+                    score(a).total_cmp(&score(b))
+                });
+            if let Some(t) = energy {
+                return Some(t.id);
+            }
+        }
+
         // Choose whether to expand with the normal economy priorities.
         // Only then spread new mex assignments between lanes; charging the
         // general auction for crowding would divert builders into energy
