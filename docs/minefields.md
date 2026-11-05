@@ -12,8 +12,8 @@ Squad membership is remembered for 90 seconds after the last qualifying sighting
 Repeated sightings replace overlapping membership; confirmed deaths remove it.
 This is observation memory, not a permanent high-water mark.
 
-Every three seconds, deployment considers actual friendly buildings and builders
-executing jobs. It follows each observed squad's terrain route to those assets,
+Every three seconds, deployment considers actual friendly buildings and committed
+construction destinations. It follows each observed squad's terrain route to those assets,
 using the attacker's movement tier, and samples ambushes before the attacker's
 firing position and outside the asset's blast clearance. Incursion predictions
 and frontline exposure increase an asset's priority. These are heuristic approach
@@ -26,7 +26,9 @@ ground unit close enough by its terrain route to respond within four seconds.
 Assignments discount overlapping protection and travel. A still-valid assignment
 gets a 15-second commitment and requires a 40% score improvement to move; vanished
 or unsafe jobs can be replaced immediately. Small approach shifts refresh a job's
-value without moving its exact destination. Mines hold when enemies are near.
+value without moving its exact destination. Resampling or a lost clump sighting
+does not erase a safe commitment; afterward a surviving frontier asset keeps
+a modest guard value. Mines hold when enemies are near.
 
 New mines are adopted immediately, with up to three seconds for a queued factory
 exit. Travel uses avoid-enemy waypoints. A mine that moves less than 48 elmos over

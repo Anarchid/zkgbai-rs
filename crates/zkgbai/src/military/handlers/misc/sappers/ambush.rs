@@ -118,6 +118,9 @@ impl Deployment {
     pub(super) fn new(frame: i32, at: Vec3) -> Self {
         Self { born: frame, assigned: frame, progress: frame, at, blocked: None, staging: None, phase: Phase::Exit }
     }
+    pub(super) fn committed(&self, frame: i32) -> bool {
+        frame - self.assigned < COMMIT
+    }
     pub(super) fn exiting(&self, frame: i32, commands: i32) -> bool {
         self.phase == Phase::Exit && commands > 0 && frame - self.born < EXIT_GRACE
     }
@@ -156,6 +159,20 @@ pub(super) fn site_score(id: i32, from: Vec3, site: &Site, reservations: &[Reser
 /// Refresh the old score from this pass's live opportunities. A vanished job
 /// cannot keep its historical score forever. Require a substantial improvement
 /// and a minimum commitment before moving between still useful sites.
+pub(super) fn refresh_site(old: Site, sites: &[Site], radius: f32, committed: bool, anchor_live: bool) -> Option<Site> {
+    if let Some(live) = sites.iter().find(|s| {
+        s.ambush == old.ambush
+            && distance(s.gate, old.gate) < 32.0
+            && distance(s.position, old.position) <= (radius * 0.5).max(64.0)
+    }) {
+        return Some(Site { value: live.value, ..old });
+    }
+    // A route sample disappearing is not an unsafe or destroyed asset. Keep
+    // a live commitment through its dwell time; then retain only modest value
+    // as a frontier guard, allowing a materially better expansion to win.
+    anchor_live.then_some(Site { value: if committed { old.value } else { old.value.min(0.25) }, ..old })
+}
+
 pub(super) fn select_assignment(
     sapper: &Sapper,
     from: Vec3,
@@ -267,8 +284,7 @@ impl Ai {
         }
     }
 
-    pub(super) fn sapper_ambush_sites(&self, radius: f32) -> Vec<Site> {
-        let Some(terrain) = self.terrain() else { return Vec::new() };
+    fn sapper_baits(&self) -> Vec<Bait> {
         let mut assets: Vec<_> = self
             .cb
             .friendly_units()
@@ -281,13 +297,30 @@ impl Ai {
                 Some(Bait { position: u.pos(), footprint: footprint(def), value: def.cost(self.metal).max(50.0) })
             })
             .collect();
-        // A builder already executing an expansion job is also real, visible
-        // bait. Unfunded hypothetical construction sites do not create jobs.
-        assets.extend(self.eco.workers.values().filter(|w| w.task.is_some()).map(|w| Bait {
-            position: w.unit.pos(),
-            footprint: 32.0,
-            value: 150.0,
+        // Protect the builder's committed construction destination, not its
+        // changing position on the way there. Once started, its nanoframe is
+        // already in the actual-asset list above.
+        assets.extend(self.eco.tasks.iter().filter_map(|task| {
+            let build = task.as_construction()?;
+            if task.assigned_workers.is_empty() || build.target.is_some() {
+                return None;
+            }
+            Some(Bait {
+                position: task.position,
+                footprint: footprint(build.build_type),
+                value: build.build_type.cost(self.metal).max(50.0),
+            })
         }));
+        assets
+    }
+
+    pub(super) fn sapper_live_anchor(&self, p: Vec3) -> bool {
+        self.sapper_baits().iter().any(|a| distance(a.position, p) < 32.0)
+    }
+
+    pub(super) fn sapper_ambush_sites(&self, radius: f32) -> Vec<Site> {
+        let Some(terrain) = self.terrain() else { return Vec::new() };
+        let assets = self.sapper_baits();
         let mut sites = Vec::new();
         for group in &self.misc_handler.mines.clumps {
             let Some(map) = terrain.tier(group.tier) else { continue };
@@ -541,6 +574,23 @@ mod tests {
         assert!(!d.allows(p, 501));
         assert!(d.allows(p, 500 + BLOCKED_FOR));
         assert!(!d.stalled(Vec3::xz(1200.0, 1000.0), 900, true));
+    }
+
+    #[test]
+    fn live_commitments_survive_resampling_but_dead_assets_do_not() {
+        let old = Site {
+            position: Vec3::xz(1000.0, 1000.0),
+            gate: Vec3::xz(500.0, 1000.0),
+            value: 10.0,
+            depth: 0,
+            ambush: true,
+        };
+        let drift = Site { position: Vec3::xz(1100.0, 1000.0), value: 12.0, ..old };
+        let held = refresh_site(old, &[drift], 288.0, false, true).unwrap();
+        assert_eq!((held.position.x, held.value), (1000.0, 12.0));
+        assert_eq!(refresh_site(old, &[], 288.0, true, true).unwrap().value, 10.0);
+        assert_eq!(refresh_site(old, &[], 288.0, false, true).unwrap().value, 0.25);
+        assert!(refresh_site(old, &[], 288.0, true, false).is_none());
     }
 
     #[test]
