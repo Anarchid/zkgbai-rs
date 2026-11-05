@@ -1973,6 +1973,10 @@ impl Ai {
         if self.airstall_wants_con() {
             return "planecon";
         }
+        // Reconnaissance is needed precisely when ordinary sorties are grounded.
+        if self.sweeps_wants_swift() {
+            return "planefighter";
+        }
         if self.bomber_handler.grounded {
             return "";
         }
@@ -1984,9 +1988,6 @@ impl Ai {
         }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
             return scouts::OWL;
-        }
-        if self.sweeps_wants_swift() {
-            return "planefighter";
         }
         // `airstall`: no bombers while ours do not pay (see
         // `military::airstall`), whatever the missions say.

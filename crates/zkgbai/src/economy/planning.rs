@@ -1915,6 +1915,13 @@ impl Ai {
                 value,
             ));
         }
+        if !owned("factoryplane") && self.sweeps_wants_swift() {
+            return Some((
+                "factoryplane".to_owned(),
+                "Swift reconnaissance fan for enemy territory beyond Sparrow reach".to_owned(),
+                self.intel.unaccounted().max(0.0),
+            ));
+        }
         // (Ahead of the Widow scout, which otherwise takes the second
         // factory in nearly every game.)
         if let Some(r) = self.eco_air_fire() {
