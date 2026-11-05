@@ -563,8 +563,8 @@ impl Ai {
         }
 
         // is there sufficient energy to cover metal income? (Greedy workers
-        // too while metal floats for want of it: `energycrew`.)
-        if (!is_greedy || self.eco_floating_on_energy())
+        // too during hard stalls or while metal piles up: `energycrew`.)
+        if (!is_greedy || self.eco_energy_crew_needed())
             && self.eco_team_energy_needed()
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {

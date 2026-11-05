@@ -176,6 +176,8 @@ pub struct EconomyManager {
     reclaim_record: VecDeque<f32>,
 
     pub effective_income_energy: f32,
+    /// Live unit energy use beyond construction metal spending; excludes overdrive.
+    energy_upkeep: f32,
     raw_mex_income: f32,
     /// The energy income the economy wants (stalled below it).
     energy_target: f32,
@@ -427,6 +429,7 @@ impl EconomyManager {
             new_energy: Vec::new(),
             reclaim_record: VecDeque::new(),
             effective_income_energy: 0.0,
+            energy_upkeep: 0.0,
             raw_mex_income: 0.0,
             energy_target: 0.0,
             terraform_hold: BTreeMap::new(),
@@ -648,8 +651,8 @@ const OD_STORAGE_FROM: i32 = 30 * 60 * 5;
 const OD_STORAGE_FILL: f32 = 0.5;
 
 /// `eramp` (`disable=eramp` turns it off): the energy wanted ramps with
-/// the share of the metal spots the alliance holds, from this many times
-/// our metal income with none held to the overdrive target above at
+/// the share of the metal spots the alliance holds, from metal income
+/// plus a small energy margin with none held to the overdrive target above at
 /// [`ERAMP_FULL_SHARE`], and on past it as the share grows (user,
 /// 2026-11-03: a lower early target leaves the metal for expansion). At
 /// 6:00 against Wires v2 we made 2.4 energy per mex metal to its 1.9, the
@@ -659,18 +662,22 @@ const OD_STORAGE_FILL: f32 = 0.5;
 /// game still reaches the overdrive target in the end. The storage rule
 /// (from 5:00) is scaled by the same ramp, up to its full
 /// [`OD_STORAGE_FILL`].
-const ERAMP_FLOOR: f32 = 1.1;
+const ENERGY_MARGIN: f32 = 5.0;
+
+fn construction_energy_floor(metal_income: f32) -> f32 {
+    metal_income.max(0.0) + ENERGY_MARGIN
+}
 const ERAMP_FULL_SHARE: f32 = 0.35;
 const ERAMP_ESCALATE: f32 = 30.0 * 60.0 * 30.0;
 
-/// The energy wanted under `eramp`: `metal_income` x [`ERAMP_FLOOR`] with
+/// The energy wanted under `eramp`: metal income plus [`ENERGY_MARGIN`] with
 /// no spots held at frame 0, `full` (the overdrive target) at
 /// [`ERAMP_FULL_SHARE`] of them, linear in `share` plus `frame` /
 /// [`ERAMP_ESCALATE`] and on past `full` beyond one; never below the floor.
 /// Also the ramp, for the storage rule.
 fn eramp_wanted(full: f32, metal_income: f32, share: f32, frame: i32) -> (f32, f32) {
     let ramp = share.max(0.0) / ERAMP_FULL_SHARE + frame.max(0) as f32 / ERAMP_ESCALATE;
-    let floor = ERAMP_FLOOR * metal_income.max(0.0);
+    let floor = construction_energy_floor(metal_income);
     (floor + (full - floor).max(0.0) * ramp, ramp)
 }
 
@@ -693,9 +700,8 @@ const OD_FREE_INCOME: f32 = 20.0;
 /// the commander walked a median 237 elmos to energy against 520 to a mex
 /// and built energy 48% of its first five minutes; lowering the target
 /// (`eramp` A/B, 122 pairs) changed neither the energy built nor the
-/// commander's share. No pull at [`NEED_ENOUGH`] x metal income or more, the
-/// full [`NEED_PULL`] at [`NEED_SHORT`] x or less, linear between.
-const NEED_ENOUGH: f32 = 1.2;
+/// commander's share. No pull once metal income plus [`ENERGY_MARGIN`] is
+/// covered, full [`NEED_PULL`] at [`NEED_SHORT`] x metal or less, linear between.
 const NEED_SHORT: f32 = 0.6;
 pub(crate) const NEED_PULL: f32 = 300.0;
 
@@ -709,13 +715,11 @@ const REMEX_MEMORY: i32 = 30 * 300;
 const REMEX_SPOT: f32 = 64.0;
 
 /// How short energy income falls of construction's need, 0 (enough) to 1
-/// (see [`NEED_ENOUGH`]).
+/// (see [`construction_energy_floor`]).
 pub(crate) fn energy_shortfall(energy_income: f32, metal_income: f32) -> f32 {
-    if metal_income <= 0.0 {
-        return 0.0;
-    }
-    let ratio = energy_income.max(0.0) / metal_income;
-    ((NEED_ENOUGH - ratio) / (NEED_ENOUGH - NEED_SHORT)).clamp(0.0, 1.0)
+    let enough = construction_energy_floor(metal_income);
+    let urgent = NEED_SHORT * metal_income.max(0.0);
+    ((enough - energy_income.max(0.0)) / (enough - urgent)).clamp(0.0, 1.0)
 }
 
 /// Cross-module economy logic and module events.
@@ -723,19 +727,18 @@ impl Ai {
     /// `energyneed`: the economy's energy shortfall now (see
     /// [`energy_shortfall`]).
     pub(crate) fn eco_energy_shortfall(&self) -> f32 {
-        energy_shortfall(self.eco.effective_income_energy, self.eco.static_income)
+        energy_shortfall(self.eco.effective_income_energy - self.eco.energy_upkeep, self.eco.static_income)
     }
 
-    /// `energycrew` (`disable=energycrew` stops it): metal floats for want of
-    /// energy, so greedy constructors build energy too. Energy jobs are made only by
-    /// non-greedy workers and greedy ones pay 10000 for them; early on
-    /// nearly every constructor is greedy, so the commander alone builds
-    /// energy, and on Horus a commander on a Fusion at 17 energy (horus/fix
-    /// ab1, jump m1: metal at its 510 storage 3-7 min, 81% of 2-10 min
-    /// floating) stalled the whole economy.
-    pub(crate) fn eco_floating_on_energy(&self) -> bool {
+    /// Let expansion-biased constructors build energy during a hard stall,
+    /// before storage fills. The first two constructors are usually greedy:
+    /// waiting for 80% metal storage left both off energy for a minute after
+    /// the plate finished on Mecharavaged (2026-11-05). A soft overdrive
+    /// target alone still leaves them expanding, unless metal is piling up.
+    pub(crate) fn eco_energy_crew_needed(&self) -> bool {
         let eco = &self.eco;
-        !self.dev_off("energycrew") && eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage
+        !self.dev_off("energycrew")
+            && (eco.hard_estalled || (eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage))
     }
 
     /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
@@ -982,6 +985,13 @@ impl Ai {
         let (m, e) = (self.metal, self.energy);
         let team = self.team_id;
         let eco = &mut self.eco;
+        eco.energy_upkeep = eco
+            .cb
+            .friendly_units()
+            .into_iter()
+            .filter(|u| u.team() == team && u.health() > 0.0)
+            .map(|u| (u.resource_use(e) - u.resource_use(m).max(0.0)).max(0.0))
+            .sum();
         eco.raw_mex_income = 0.0;
         eco.effective_income_metal = 2.0 * (1.0 + merged);
         eco.effective_income_energy = 2.0 * (1.0 + merged);
@@ -1067,10 +1077,10 @@ impl Ai {
         } else {
             (eco.raw_mex_income * eratio, 1.0)
         };
-        eco.energy_target = target;
+        eco.energy_target = target + eco.energy_upkeep;
         eco.hard_estalled = (eco.max_storage > 1.0
             && eco.energy < (eco.effective_income_energy * (1.0 + tf)).min(eco.max_storage / 2.0))
-            || eco.static_income > eco.effective_income_energy;
+            || eco.static_income + eco.energy_upkeep > eco.effective_income_energy;
         eco.estalled = eco.hard_estalled
             || eco.energy_target > eco.effective_income_energy
             || (odreserve
@@ -1910,15 +1920,27 @@ mod energyneed_tests {
     use super::energy_shortfall;
 
     #[test]
-    fn the_shortfall_runs_from_enough_at_1_2x_to_full_at_0_6x_metal_income() {
+    fn upkeep_does_not_consume_the_construction_cushion() {
+        let mut ai = super::assign::tests::assignment_ai(|_| {});
+        ai.eco.static_income = 20.0;
+        ai.eco.effective_income_energy = 25.0;
+        assert_eq!(ai.eco_energy_shortfall(), 0.0);
+        ai.eco.energy_upkeep = 5.0;
+        assert!(ai.eco_energy_shortfall() > 0.0);
+        ai.eco.effective_income_energy = 30.0;
+        assert_eq!(ai.eco_energy_shortfall(), 0.0);
+    }
+
+    #[test]
+    fn fixed_energy_margin_does_not_grow_as_a_fraction_of_metal() {
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        assert_eq!(energy_shortfall(30.0, 20.0), 0.0, "1.5x: enough");
-        assert_eq!(energy_shortfall(24.0, 20.0), 0.0, "1.2x: enough");
-        assert!(close(energy_shortfall(20.0, 20.0), 1.0 / 3.0), "1:1: a third");
-        assert!(close(energy_shortfall(18.0, 20.0), 0.5), "0.9x: half");
-        assert_eq!(energy_shortfall(12.0, 20.0), 1.0, "0.6x: full");
-        assert_eq!(energy_shortfall(0.0, 20.0), 1.0);
-        assert_eq!(energy_shortfall(5.0, 0.0), 0.0, "no metal income: nothing to match");
+        for metal in [0.0, 5.0, 10.0, 20.0, 40.0, 100.0] {
+            assert_eq!(energy_shortfall(metal + 5.0, metal), 0.0);
+            assert!(energy_shortfall(metal + 4.0, metal) > 0.0);
+            assert_eq!(energy_shortfall(0.6 * metal, metal), 1.0);
+        }
+        assert!(close(energy_shortfall(20.0, 20.0), 5.0 / 13.0));
+        assert_eq!(energy_shortfall(45.0, 40.0), 0.0, "no 1.5x expansion tax");
     }
 }
 
@@ -1991,32 +2013,32 @@ mod priority_tests {
 
 #[cfg(test)]
 mod eramp_tests {
-    use super::{ERAMP_ESCALATE, ERAMP_FLOOR, ERAMP_FULL_SHARE, eramp_wanted};
+    use super::{ERAMP_ESCALATE, ERAMP_FULL_SHARE, construction_energy_floor, eramp_wanted};
 
     #[test]
     fn eramp_runs_from_the_floor_to_the_target_and_past_it() {
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
         let full_at = ERAMP_FULL_SHARE;
-        // No spots at the start: 1.1x metal income, the storage rule off.
+        // No spots at the start: metal + 5, the storage rule off.
         let (want, ramp) = eramp_wanted(44.5, 27.0, 0.0, 0);
-        assert!(close(want, ERAMP_FLOOR * 27.0) && close(ramp, 0.0));
+        assert!(close(want, construction_energy_floor(27.0)) && close(ramp, 0.0));
         // The full share: the overdrive target itself.
         let (want, ramp) = eramp_wanted(44.5, 27.0, full_at, 0);
         assert!(close(want, 44.5) && close(ramp, 1.0));
         // Half of it: halfway between.
         let (want, _) = eramp_wanted(44.5, 27.0, full_at / 2.0, 0);
-        assert!(close(want, (29.7 + 44.5) / 2.0));
+        assert!(close(want, (32.0 + 44.5) / 2.0));
         // Past it: on past the target.
         let (want, ramp) = eramp_wanted(44.5, 27.0, 1.5 * full_at, 0);
         assert!(want > 44.5 && close(ramp, 1.5));
         // A target under the floor (early, little mex income): the floor.
         let (want, _) = eramp_wanted(10.0, 11.0, 0.8, 0);
-        assert!(close(want, ERAMP_FLOOR * 11.0));
+        assert!(close(want, construction_energy_floor(11.0)));
         // The clock alone: halfway at half the escalation time, the target
         // at all of it, with no spots held.
         let half = (ERAMP_ESCALATE / 2.0) as i32;
         let (want, ramp) = eramp_wanted(44.5, 27.0, 0.0, half);
-        assert!(close(want, (29.7 + 44.5) / 2.0) && close(ramp, 0.5));
+        assert!(close(want, (32.0 + 44.5) / 2.0) && close(ramp, 0.5));
         let (want, _) = eramp_wanted(44.5, 27.0, 0.0, 2 * half);
         assert!(close(want, 44.5));
         // Both add up.

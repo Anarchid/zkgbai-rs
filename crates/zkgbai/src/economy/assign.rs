@@ -1004,9 +1004,9 @@ impl Ai {
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
-                    // (Greedy workers build it while metal floats for want
-                    // of it: `energycrew`.)
-                    let greedy = worker.is_greedy && !self.eco_floating_on_energy();
+                    // Greedy workers can cover a hard shortage before metal
+                    // storage fills (`energycrew`).
+                    let greedy = worker.is_greedy && !self.eco_energy_crew_needed();
                     // With `compush` the commander leaves the energy behind
                     // it to the energy worker.
                     let back = self.compush_back_cost(worker, wpos, task_pos);
@@ -1647,6 +1647,39 @@ pub(super) mod tests {
             t.Engine_handleCommand = Some(command);
             customize(t);
         })
+    }
+
+    #[test]
+    fn greedy_constructors_cover_hard_stalls_before_storage_fills() {
+        use springai::{Unit, UnitDef};
+        let mut ai = assignment_ai(|_| {});
+        ai.eco.build_ids.solar_id = 1;
+        ai.eco.build_ids.mex_id = 2;
+        ai.eco.build_ids.wind_id = 3;
+        ai.eco.max_storage = 500.0;
+        ai.eco.metal = 100.0;
+        ai.eco.static_income = 20.0;
+        ai.eco.effective_income_energy = 18.0;
+        ai.eco.estalled = true;
+        let mut worker = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
+        worker.is_greedy = true;
+        let pos = worker.get_pos();
+        let mex = WorkerTask::construction(UnitDef::from_id(ai.cb, 2).unwrap(), pos, 0);
+        for def in [1, 3] {
+            let energy = WorkerTask::construction(UnitDef::from_id(ai.cb, def).unwrap(), pos, 0);
+            ai.eco.hard_estalled = false;
+            assert!(!ai.eco_energy_crew_needed(), "a soft overdrive target leaves expansion workers alone");
+            assert!(ai.eco_cost_of_job_alone(&worker, pos, &energy) >= 10000.0);
+            ai.eco.hard_estalled = true;
+            assert!(ai.eco_energy_crew_needed());
+            assert!(ai.eco_cost_of_job_alone(&worker, pos, &energy) < ai.eco_cost_of_job_alone(&worker, pos, &mex));
+        }
+        ai.eco.hard_estalled = false;
+        ai.eco.metal = 400.0;
+        assert!(ai.eco_energy_crew_needed(), "retain the existing floating-metal response");
+        ai.set_feature_off("energycrew", true);
+        ai.eco.hard_estalled = true;
+        assert!(!ai.eco_energy_crew_needed());
     }
 
     #[test]
