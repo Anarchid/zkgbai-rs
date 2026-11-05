@@ -83,6 +83,9 @@ impl Ai {
     }
 
     pub(super) fn eco_needs_industrious(&self) -> bool {
+        if !self.eco_path_policy() {
+            return false;
+        }
         let greedy = self.eco.workers.values().filter(|w| w.is_greedy).count();
         let industrious = self.eco.workers.values().filter(|w| w.is_industrious).count();
         let pending = self.eco.new_workers.iter().filter(|id| !self.eco.workers.contains_key(id)).count();
@@ -93,7 +96,7 @@ impl Ai {
         let workers: Vec<_> = self.eco.workers.values().filter(|other| other.id != w.id).collect();
         let greedy = workers.iter().filter(|w| w.is_greedy).count();
         let industrious = workers.iter().filter(|w| w.is_industrious).count();
-        if partner_shortfall(greedy, industrious, 0) {
+        if self.eco_path_policy() && partner_shortfall(greedy, industrious, 0) {
             w.is_industrious = true;
         } else {
             // Preserve the old expansion/generalist ratio among builders
@@ -111,6 +114,12 @@ impl Ai {
     }
 
     pub(super) fn eco_refresh_expansion_goal(&mut self, wid: i32) {
+        if !self.eco_lanes() {
+            if let Some(w) = self.eco.workers.get_mut(&wid) {
+                w.expansion = None;
+            }
+            return;
+        }
         let Some(w) = self.eco.workers.get(&wid) else { return };
         // No expansion trip while recovering energy or replacing the factory.
         if self.eco.hard_estalled || self.fac.factories.is_empty() {
@@ -186,6 +195,12 @@ impl Ai {
     }
 
     pub(super) fn eco_expansion_goal_cost(&self, w: &Worker, t: &WorkerTask) -> f32 {
+        if self.eco_unified() {
+            return self.eco_unified_job_cost(w, t);
+        }
+        if !self.eco_lanes() {
+            return 0.0;
+        }
         let Some(goal) = w.expansion else { return 0.0 };
         // Emergency energy is selected locally before this auction. Do not
         // erase the direction of unrelated jobs when wind output fluctuates:
@@ -206,6 +221,9 @@ impl Ai {
     /// Allow local work and a little sideways placement slack; emergencies
     /// and explicit missions may still pull the worker away.
     pub(super) fn eco_expansion_backtracks(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if !self.eco_lanes() {
+            return false;
+        }
         let Some(goal) = w.expansion else { return false };
         let Some(def) = w.unit.def() else { return false };
         if self.eco_directed_job(w, t.id)
@@ -225,25 +243,28 @@ impl Ai {
     pub(super) fn eco_expansion_onward(&self, w: &Worker, t: &WorkerTask, cost: f32) -> bool {
         // Do not keep a worker in a lane whose only jobs are far away or
         // already overstaffed. Fall back to the ordinary auction instead.
-        w.expansion.is_some()
+        self.eco_lanes()
+            && w.expansion.is_some()
             && cost < MAX_ROUTE / 4.0
             && self.eco_worker_route(w, t.get_pos()) <= MAX_ROUTE
             && !self.eco_expansion_backtracks(w, t)
     }
 
     pub(super) fn eco_careful_energy(&self, wid: i32) -> bool {
-        self.eco.workers.get(&wid).is_some_and(|w| w.is_industrious) || self.eco_overdrive_phase()
+        !self.eco_path_policy()
+            || self.eco.workers.get(&wid).is_some_and(|w| w.is_industrious)
+            || self.eco_overdrive_phase()
     }
 
     /// Early expansion energy can land anywhere along a nearby link. Do
     /// not march to the connection head just to make the grid look complete.
     pub(super) fn eco_energy_lane_anchor(&self, wid: i32, from: Vec3) -> Vec3 {
         let Some(w) = self.eco.workers.get(&wid) else { return from };
-        let ahead = w
-            .expansion
-            .and_then(|goal| {
-                let path = w.routes.as_ref()?.path(goal.target, w.unit.def()?.build_distance())?;
-                let p = path.into_iter().find(|&p| distance(from, p) >= 256.0).unwrap_or(goal.target);
+        let goal = if self.eco_unified() { self.eco_unified_waypoint(wid) } else { w.expansion.map(|g| g.target) };
+        let ahead = goal
+            .and_then(|target| {
+                let path = w.routes.as_ref()?.path(target, w.unit.def()?.build_distance())?;
+                let p = path.into_iter().find(|&p| distance(from, p) >= 256.0).unwrap_or(target);
                 Some(route_anchor(from, p))
             })
             .unwrap_or(from);
@@ -305,6 +326,7 @@ mod tests {
             t.UnitDef_getWeaponMounts = Some(zero);
             t.UnitDef_getBuildSpeed = Some(scalar);
         });
+        ai.set_feature_off("lanes", false);
         let mut commander = Worker::new(Unit::from_id(ai.cb, 1).unwrap(), ai.team_id);
         commander.is_com = true;
         ai.eco.commanders.push(1);
@@ -377,6 +399,8 @@ mod tests {
             t.UnitDef_getSpeed = Some(scalar);
             t.UnitDef_getBuildDistance = Some(scalar);
         });
+        ai.set_feature_off("unifiedconquest", true);
+        ai.set_feature_off("lanes", false);
         let mut w = Worker::new(Unit::from_id(ai.cb, 10).unwrap(), ai.team_id);
         w.is_com = true;
         w.expansion = Some(ExpansionGoal { target: Vec3::xz(2400.0, 0.0), best: 1400.0, gained: 0 });

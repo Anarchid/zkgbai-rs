@@ -100,7 +100,6 @@ pub struct Colony {
     spots: Vec<Vec3>,
     /// The colonist (a worker id), and whether a Charon flies it there.
     colonist: i32,
-    ferried: bool,
     since: i32,
     policy: Policy,
     scale: f32,
@@ -109,6 +108,9 @@ pub struct Colony {
 impl Ai {
     /// Whether the colonist's job at `p` is a colony's.
     pub(super) fn eco_colony_bonus(&self, wid: i32, p: Vec3, mex: bool) -> f32 {
+        if self.eco_unified() {
+            return 0.0;
+        }
         match &self.eco.colony {
             Some(c) if mex && c.colonist == wid && distance(p, c.center) <= CLUSTER => COLONY_BONUS * c.scale,
             _ => 0.0,
@@ -117,7 +119,7 @@ impl Ai {
 
     /// See the colony under way to its end; or found one.
     pub(super) fn eco_plan_colony(&mut self) {
-        if self.dev_off("colonize") {
+        if self.eco_unified() || self.dev_off("colonize") {
             return;
         }
         let frame = self.frame;
@@ -225,7 +227,6 @@ impl Ai {
             (self.eco.colony_wants_air, self.eco.colony_after) = (Some(frame), frame + RETRY);
             return;
         };
-        let ferried = flown.is_some();
         if let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }
@@ -242,12 +243,12 @@ impl Ai {
             density.map_or_else(|| "unused".to_owned(), |d| format!("{d:.1}")),
             distance(center, self.graph.get_enemy_center()),
         ));
-        self.eco.colony = Some(Colony { center, spots, colonist: wid, ferried, since: frame, policy, scale });
+        self.eco.colony = Some(Colony { center, spots, colonist: wid, since: frame, policy, scale });
     }
 
     /// Whether `unit` can walk to `to` through regions of its movement tier
     /// that no enemy is known to stand in.
-    fn eco_walk_is_clear(&self, unit: springai::Unit, to: Vec3) -> bool {
+    pub(super) fn eco_walk_is_clear(&self, unit: springai::Unit, to: Vec3) -> bool {
         let Some(map) = unit.def().and_then(tier_of).and_then(|t| self.terrain().and_then(|m| m.tier(t))) else {
             return false;
         };
@@ -259,13 +260,19 @@ impl Ai {
     /// Whether an air factory should build a constructor to colonize with.
     pub(super) fn eco_wants_air_colonist(&self) -> bool {
         let flyers = self.eco.workers.values().filter(|w| w.unit.def().is_some_and(|d| d.is_able_to_fly())).count();
-        flyers == 0 && self.eco.colony_wants_air.is_some_and(|f| self.frame - f <= 2 * RETRY)
+        flyers == 0
+            && if self.eco_unified() {
+                self.eco.unified.want_air.is_some_and(|f| self.frame - f <= 2 * RETRY)
+            } else {
+                self.eco.colony_wants_air.is_some_and(|f| self.frame - f <= 2 * RETRY)
+            }
     }
 
     /// Whether worker `wid` is being flown to its colony (and so is not to
     /// be given jobs).
     pub(super) fn eco_in_transit(&self, wid: i32) -> bool {
-        self.eco.colony.as_ref().is_some_and(|c| c.ferried && c.colonist == wid) && self.drops_ferrying(wid)
+        // An accepted transport keeps ownership even across a policy switch.
+        self.drops_ferrying(wid)
     }
 }
 

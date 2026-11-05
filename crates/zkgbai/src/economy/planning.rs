@@ -388,7 +388,8 @@ impl Ai {
 
         // Any builder may seed needed energy. Industrious partners prioritize
         // it; expanders compare the work with their route and mex opportunities.
-        if self.eco_team_energy_needed()
+        if (self.eco_path_policy() || !is_greedy || self.eco_legacy_energy())
+            && self.eco_team_energy_needed()
             && ((self.eco.solar_tasks.len() + self.eco.wind_tasks.len()) as i32) < self.fac.num_workers
         {
             self.eco_create_energy_task(wid, position);
@@ -2108,7 +2109,7 @@ impl Ai {
     }
 
     fn eco_create_energy_task(&mut self, wid: i32, worker_pos: Vec3) {
-        if self.eco.hard_estalled {
+        if self.eco_path_policy() && self.eco.hard_estalled {
             self.eco_local_energy_task(wid);
             return;
         }

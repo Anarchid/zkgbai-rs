@@ -510,7 +510,7 @@ impl Ai {
         let unit = w.unit;
         let refresh =
             w.routes.as_ref().is_none_or(|r| self.frame - r.frame >= 30 || distance(r.origin, unit.pos()) >= 64.0);
-        if refresh {
+        if self.eco_path_policy() && refresh {
             let routes = self.pathfinder.worker_routes(&self.war, unit, self.frame);
             self.eco.workers.get_mut(&wid)?.routes = routes;
             self.eco_refresh_expansion_goal(wid);
@@ -538,7 +538,9 @@ impl Ai {
         let def = worker.unit.def();
         let range = def.map_or(0.0, |d| d.build_distance()) + 32.0;
         let reaches = |t: &WorkerTask| {
-            self.eco_worker_can_take(worker, t) && (self.op_priority(t.id) || self.logistics_allows(wid, t.id))
+            self.eco_unified_allows(worker, t)
+                && self.eco_worker_can_take(worker, t)
+                && (self.op_priority(t.id) || self.logistics_allows(wid, t.id))
         };
         // Metal only this type of constructor gets to goes first.
         let others = match def {
@@ -558,7 +560,11 @@ impl Ai {
         // and direct-distance fallback when it has no route.
         let price = |t: &WorkerTask| {
             let direct = distance(wpos, t.get_pos());
-            let routed = worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct);
+            let routed = if self.eco_path_policy() {
+                worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct)
+            } else {
+                direct
+            };
             let base = self.eco_cost_of_job_at_distance(worker, wpos, t, routed);
             if base >= NEVER {
                 return base;
@@ -572,7 +578,8 @@ impl Ai {
             task = Some(t.id);
             cost = price(t) - stranded(t);
             cost += threat_cost(t);
-            if !eco.hard_estalled
+            if self.eco_path_policy()
+                && !eco.hard_estalled
                 && threat_cost(t) <= 0.0
                 && worker.approach.is_some_and(|a| a.task == t.id && self.frame - a.gained < APPROACH_SLOW)
                 && distance(wpos, t.get_pos()) > range
@@ -907,6 +914,9 @@ impl Ai {
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
+                    if !self.eco_path_policy() && worker.is_greedy && !self.eco_legacy_energy() {
+                        return dist + 10000.0 * cost_mod;
+                    }
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
                         if worker.is_com {

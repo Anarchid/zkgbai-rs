@@ -84,7 +84,12 @@ use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 /// `bombcharge` (placed Imps and Snitches charge when the fight predictor
 /// says it beats sitting tight) is on for eyeballing (user, 2026-11-03;
 /// disable=bombcharge).
-pub(crate) const OFF_BY_DEFAULT: [&str; 13] = [
+/// `lanes` is opt-in. `unifiedconquest` supersedes colonize and lanes;
+/// it is on by default in wip, opt-in on main. Both off restores the
+/// worker policy from before the path experiment. Explicit conquest stays separate.
+pub(crate) const OFF_BY_DEFAULT: [&str; 15] = [
+    "lanes",
+    "unifiedconquest",
     "raidcommit",
     "limpet",
     "limpetshadow",

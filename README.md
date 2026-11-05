@@ -625,3 +625,31 @@ License
 -------
 
 GNU General Public License, version 2 (see `LICENSE`).
+
+### Expansion policy switches
+
+`unifiedconquest` shares the conquest objective atlas with economic expansion.
+Builders keep separate productive mex catchments; commanders advance through
+our half and need a friendly foothold and supporting force to go farther.
+Explicit conquest/compush missions, operator orders and project crews retain
+priority. This policy does not enable the rush-to-fortify conquest controller.
+It supersedes `colonize`, including its bonuses and constructor requests, while
+retaining remote expansion through ferries or a compatible constructor from an
+existing factory. It does not yet procure a new factory or combat army for an
+unreachable defended region.
+
+`lanes` selects the earlier expansion-sector/waypoint policy, including its
+paired energy workers, route prices, local early energy and onward-job rule.
+Unified conquest takes precedence when both switches are enabled.
+
+- Wip default: unified conquest on, lanes off.
+- Main default: both off; enable either explicitly for comparison.
+- Previous lanes: `enable=lanes disable=unifiedconquest`.
+- Before the path experiment: `disable=lanes,unifiedconquest`. This restores
+  ordinary distance-based assignment, greedy energy roles and grid placement;
+  `colonize` resumes unless separately disabled. Independent production changes,
+  explicit conquest policy and factory-defense bug fixes remain in place.
+
+Runtime changes release old direction/energy roles on the next five-second
+planning pass. An already accepted ferry retains control until delivery.
+The journal records `expansionpolicy` and `expansionmission` events.

@@ -413,9 +413,16 @@ fn prior() -> Vec<(Tier, f32)> {
 }
 
 impl Ai {
+    pub(crate) fn conquest_active(&self) -> bool {
+        !self.dev_off("conquest")
+    }
+
     pub(super) fn eco_conquest_update(&mut self, frame: i32) {
         if frame % PERIOD != (self.offset + 7) % PERIOD {
             return;
+        }
+        if self.eco_unified() {
+            self.conquest_plan(frame);
         }
         if self.dev_off("conquest") {
             if self.eco.conquest.op.is_some() {

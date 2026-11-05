@@ -664,6 +664,10 @@ impl Ai {
         if f.building_for.take() == Some(Role::SoloRaider) {
             f.scout_allowance -= 1;
         }
+        if let Some(def) = self.eco_expansion_constructor_order(fac_id) {
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
         let Some(f) = self.fac.factories.get(&fac_id) else { return };
         let mut fac = f.clone();
 
@@ -814,6 +818,7 @@ impl Ai {
         } else if unit.build(def, pos, 0, 0) {
             self.army_support_ordered(fac_id, def);
             self.sapper_ordered(fac_id, def);
+            self.eco_expansion_constructor_ordered(def);
         }
     }
 
@@ -849,6 +854,7 @@ impl Ai {
         } else if unit.build(def, pos, 0, 0) {
             self.army_support_ordered(fac_id, def);
             self.sapper_ordered(fac_id, def);
+            self.eco_expansion_constructor_ordered(def);
         }
     }
 
