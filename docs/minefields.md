@@ -6,7 +6,8 @@ unlock one mine; every additional five in that squad unlock another. Distinct
 squads add together, capped at eight mines. The grouping separates movement tiers
 and does not join long chains of scattered units. Existing mines, nanoframes and
 accepted production orders all count. Conquest no longer creates a separate
-unconditional quota. Excess mines are retained when demand falls.
+unconditional quota. The older random bomb choices are removed, so neither
+factory can bypass observed-clump demand. Excess mines are retained when demand falls.
 
 Squad membership is remembered for 90 seconds after the last qualifying sighting.
 Repeated sightings replace overlapping membership; confirmed deaths remove it.

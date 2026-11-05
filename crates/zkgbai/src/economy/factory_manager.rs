@@ -1061,10 +1061,6 @@ impl Ai {
             return "cloakaa";
         }
 
-        if income > 15.0 && kgb_rand() > 0.95 - f64::from(tf / 20.0) {
-            return "cloakbomb";
-        }
-
         if fm.has_fusion
             && kgb_rand() < f64::from((tf / 4.0) * (1.0 - fm.heavy_arty_value / war.enemy_heavy_porc_value))
         {
@@ -1259,10 +1255,6 @@ impl Ai {
             fac.raider_spam -= 4.0;
             fac.expensive_raider_spam -= 1.0;
             return "shieldfelon";
-        }
-
-        if income > 20.0 && kgb_rand() > 0.95 - f64::from(0.05f32.min(tf / 10.0)) {
-            return "shieldbomb";
         }
 
         let raid_threshold =
