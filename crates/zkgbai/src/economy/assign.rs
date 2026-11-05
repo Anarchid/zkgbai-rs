@@ -167,12 +167,17 @@ enum Order {
 
 impl Ai {
     pub(crate) fn eco_worker_held(&self, id: i32) -> bool {
+        self.eco_worker_externally_held(id) || self.logistics_holds(id)
+    }
+
+    /// Tactical execution excludes economic ownership itself: a project's
+    /// own commitment must not disqualify its crew from continuing it.
+    pub(super) fn eco_worker_externally_held(&self, id: i32) -> bool {
         self.eco.workers.get(&id).is_some_and(|w| {
             w.raid_defense.is_some()
                 || self.crab_escort(id)
                 || self.rush_push_escort(id)
                 || self.rush_holds(id)
-                || self.logistics_holds(id)
                 || self.eco_in_transit(id)
                 || self.eco.terraform_hold.get(&id).is_some_and(|until| self.frame < *until)
                 || super::terraform::is_terraforming(w.unit)
@@ -756,7 +761,8 @@ impl Ai {
             && w.unit.health() > 0.0
             && w.unit.team() == self.team_id
             && !springai::reserved::is_reserved(self.cb, wid)
-            && !self.eco_worker_held(wid)
+            && !self.eco_worker_externally_held(wid)
+            && (w.task == Some(task) || !self.logistics_holds(wid))
             && !self.jump_in_progress(w.unit)
             && !super::terraform::is_terraforming(w.unit)
             && self.eco_worker_can_take(w, t)

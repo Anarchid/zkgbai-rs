@@ -156,7 +156,7 @@ impl Ai {
         }
         let mut projects = BTreeSet::new();
         let mut pending = 0.0;
-        for w in self.eco.workers.values().filter(|w| self.dispatch_available(w)) {
+        for w in self.eco.workers.values().filter(|w| self.dispatch_present(w)) {
             let Some(t) = w.task.and_then(|id| self.eco.tasks.get(id)) else { continue };
             if !self.eco_energy_job(t) || !self.dispatch_valid(w, t) || !self.dispatch_safe(w, t) {
                 continue;
@@ -211,11 +211,15 @@ impl Ai {
     }
 
     fn dispatch_available(&self, w: &Worker) -> bool {
+        self.dispatch_present(w) && !self.logistics_holds(w.id)
+    }
+
+    fn dispatch_present(&self, w: &Worker) -> bool {
         !w.is_chicken
             && w.unit.health() > 0.0
             && w.unit.team() == self.team_id
             && !w.unit.is_being_built()
-            && !self.eco_worker_held(w.id)
+            && !self.eco_worker_externally_held(w.id)
             && !self.recovery_owns(w.id)
             && !self.jump_in_progress(w.unit)
             && !self.eco_in_transit(w.id)
@@ -483,6 +487,28 @@ mod tests {
         assert_eq!(ai.eco_dispatch_job(10), Some(b), "finish the emergency job after a transient recovery");
         ai.eco.workers.get_mut(&10).unwrap().end_task();
         assert_eq!(ai.eco_dispatch_job(10), Some(a));
+    }
+
+    #[test]
+    fn project_commitment_does_not_disqualify_its_own_crew_or_hide_energy_output() {
+        use crate::logistics::{Kind, Worth};
+        let (mut ai, a, b) = setup();
+        ai.set_feature_off("currency", false);
+        ai.eco.workers.get_mut(&11).unwrap().set_task(&mut ai.eco.tasks, b, 0);
+        ai.logistics_open(b, Kind::Energy, Worth::Flat(1000.0), "energy project", 0.0);
+        let issue = ai.logistics.issues.get_mut(&b).unwrap();
+        issue.crew = vec![11];
+        issue.value = 1000.0;
+        issue.share = 1000.0;
+        assert!(ai.logistics_holds(11));
+        assert!(ai.eco_project_hand(11, b), "a project's own hold is not a foreign controller");
+        assert!(!ai.eco_project_hand(11, a), "other projects cannot take its crew");
+        ai.eco.hard_estalled = true;
+        ai.eco.static_income = 12.0;
+        assert_eq!(ai.dispatch_energy_hand(), None, "committed solar output covers the shortage");
+        ai.eco.terraform_hold.insert(11, 1000);
+        assert!(!ai.eco_project_hand(11, b), "actual tactical ownership still excludes the worker");
+        assert_eq!(ai.dispatch_energy_hand(), Some(10));
     }
 
     #[test]
