@@ -34,6 +34,7 @@ pub mod terraform;
 mod watchtower;
 mod wind;
 pub mod worker;
+mod worker_energy;
 
 pub(crate) use assign::repair_loses_to_mex;
 pub use build_ids::BuildIds;
@@ -728,17 +729,6 @@ impl Ai {
     /// [`energy_shortfall`]).
     pub(crate) fn eco_energy_shortfall(&self) -> f32 {
         energy_shortfall(self.eco.effective_income_energy - self.eco.energy_upkeep, self.eco.static_income)
-    }
-
-    /// Let expansion-biased constructors build energy during a hard stall,
-    /// before storage fills. The first two constructors are usually greedy:
-    /// waiting for 80% metal storage left both off energy for a minute after
-    /// the plate finished on Mecharavaged (2026-11-05). A soft overdrive
-    /// target alone still leaves them expanding, unless metal is piling up.
-    pub(crate) fn eco_energy_crew_needed(&self) -> bool {
-        let eco = &self.eco;
-        !self.dev_off("energycrew")
-            && (eco.hard_estalled || (eco.estalled && eco.max_storage > 1.0 && eco.metal >= 0.8 * eco.max_storage))
     }
 
     /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once

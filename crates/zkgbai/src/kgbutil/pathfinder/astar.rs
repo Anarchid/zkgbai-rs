@@ -367,6 +367,51 @@ impl AStar {
         self.search_linked(start, closest, opts, &mut best, cost, links).then_some(closest)
     }
 
+    /// Dijkstra costs from one origin to every cell. One field prices all
+    /// builder jobs, using the same directed cell costs and jump links as A*.
+    pub fn costs<F: FnMut(usize) -> f32>(
+        &mut self,
+        origin: usize,
+        cost: &mut F,
+        links: Option<(&Links, f32)>,
+    ) -> Vec<f32> {
+        self.new_query();
+        self.next_search();
+        let mut distances = vec![f32::INFINITY; self.cells.len()];
+        if origin >= distances.len() {
+            return distances;
+        }
+        distances[origin] = 0.0;
+        self.heap.push(OpenNode { total_cost: 0.0, path_length: 0.0, pos: origin as u32, index: 0 });
+        while let Some(current) = self.heap.pop() {
+            let pos = current.pos as usize;
+            if current.path_length > distances[pos] {
+                continue;
+            }
+            let jumps = links.map_or(&[][..], |(l, _)| l.of(pos)).iter();
+            let extra = links.map_or(0.0, |l| l.1);
+            for (next, step) in
+                steps(self.width, distances.len(), pos).chain(jumps.map(|&(n, s)| (n as usize, s + extra)))
+            {
+                let Some(cell) = self.cells.get_mut(next) else { continue };
+                if cell.costed != self.query_id {
+                    cell.cost = cost(next);
+                    cell.costed = self.query_id;
+                }
+                if cell.cost == IMPASSABLE {
+                    continue;
+                }
+                let d = current.path_length + step * cell.cost;
+                if d < distances[next] {
+                    distances[next] = d;
+                    self.pq_index = self.pq_index.wrapping_add(1);
+                    self.heap.push(OpenNode { total_cost: d, path_length: d, pos: next as u32, index: self.pq_index });
+                }
+            }
+        }
+        distances
+    }
+
     /// Reachability of every cell towards `origin`, for many targets at once.
     ///
     /// Equivalent to running `search(target, origin)` with `pass_target` for

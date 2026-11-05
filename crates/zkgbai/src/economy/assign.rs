@@ -370,7 +370,7 @@ impl Ai {
         if blocked_task && let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }
-        let Some(task_id) = self.eco_get_cheapest_job(wid) else {
+        let Some(task_id) = self.eco_local_energy_task(wid).or_else(|| self.eco_get_cheapest_job(wid)) else {
             return;
         };
         let Some(w) = self.eco.workers.get(&wid) else {
@@ -671,7 +671,15 @@ impl Ai {
         self.eco.hard_estalled && matches!(&task.kind, TaskKind::Repair(r) if !r.target.is_being_built())
     }
 
-    fn eco_get_cheapest_job(&self, wid: i32) -> Option<TaskId> {
+    fn eco_get_cheapest_job(&mut self, wid: i32) -> Option<TaskId> {
+        let w = self.eco.workers.get(&wid)?;
+        let unit = w.unit;
+        let refresh =
+            w.routes.as_ref().is_none_or(|r| self.frame - r.frame >= 30 || distance(r.origin, unit.pos()) >= 64.0);
+        if refresh {
+            let routes = self.pathfinder.worker_routes(&self.war, unit, self.frame);
+            self.eco.workers.get_mut(&wid)?.routes = routes;
+        }
         let eco = &self.eco;
         let worker = eco.workers.get(&wid)?;
         let wpos = worker.get_pos();
@@ -715,13 +723,31 @@ impl Ai {
             bonus + self.eco_colony_bonus(wid, t.get_pos(), mex)
         };
 
+        let energy_bidders = self.eco_energy_bidders();
+        // One field serves every candidate. The grid cannot represent
+        // every narrow passage; retain the existing reachability decision
+        // and direct-distance fallback when it has no route.
+        let price = |t: &WorkerTask| {
+            let direct = distance(wpos, t.get_pos());
+            let routed = worker.routes.as_ref().and_then(|r| r.distance(t.get_pos(), range)).unwrap_or(direct);
+            self.eco_cost_of_job_at_distance(worker, wpos, t, routed)
+                + self.eco_energy_opportunity(worker, t, &energy_bidders)
+        };
         let mut task: Option<TaskId> = None;
         let mut cost = NEVER;
 
         if let Some(t) = worker.task.and_then(|id| eco.tasks.get(id)).filter(|&t| reaches(t)) {
             task = Some(t.id);
-            cost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
+            cost = price(t) - stranded(t);
             cost += threat_cost(t);
+            if !eco.hard_estalled
+                && threat_cost(t) <= 0.0
+                && worker.approach.is_some_and(|a| a.task == t.id && self.frame - a.gained < APPROACH_SLOW)
+                && distance(wpos, t.get_pos()) > range
+            {
+                // Six seconds of travel in the usual distance/4 currency.
+                cost -= def.map_or(0.0, |d| d.speed()) * 6.0 / 4.0;
+            }
         }
 
         let mut consider = |ids: &[TaskId], with_threat: bool, skip: &dyn Fn(&WorkerTask) -> bool| {
@@ -729,7 +755,7 @@ impl Ai {
                 if skip(t) || !reaches(t) {
                     continue;
                 }
-                let mut tmpcost = self.eco_cost_of_job(worker, wpos, t) - stranded(t);
+                let mut tmpcost = price(t) - stranded(t);
                 if with_threat {
                     tmpcost += threat_cost(t);
                 }
@@ -784,7 +810,7 @@ impl Ai {
                 .filter(|t| distance(wpos, t.get_pos()) <= radius && reaches(t))
                 .map(|t| {
                     let keep = if worker.task == Some(t.id) { REMEX_KEEP } else { 0.0 };
-                    (t, self.eco_cost_of_job(worker, wpos, t) - stranded(t) + threat_cost(t) - keep)
+                    (t, price(t) - stranded(t) + threat_cost(t) - keep)
                 })
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .filter(|&(_, c)| c < REMEX_CEILING);
@@ -911,10 +937,14 @@ impl Ai {
     }
 
     fn eco_cost_of_job(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+        self.eco_cost_of_job_at_distance(worker, wpos, task, distance(wpos, task.get_pos()))
+    }
+
+    fn eco_cost_of_job_at_distance(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask, route: f32) -> f32 {
         if self.eco_repair_paused(task) {
             return NEVER;
         }
-        let cost = self.eco_cost_of_job_alone(worker, wpos, task);
+        let cost = self.eco_cost_of_job_alone(worker, wpos, task, route);
         if cost >= NEVER {
             return cost;
         }
@@ -941,11 +971,12 @@ impl Ai {
         self.eco_cost_of_job(w, w.get_pos(), t) - self.eco_colony_bonus(w.id, t.get_pos(), mex)
     }
 
-    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask) -> f32 {
+    fn eco_cost_of_job_alone(&self, worker: &Worker, wpos: Vec3, task: &WorkerTask, route: f32) -> f32 {
         let eco = &self.eco;
         let mut cost_mod = 1.0f32;
         let task_pos = task.get_pos();
-        let dist = distance(wpos, task_pos);
+        let dist = route;
+        let direct = distance(wpos, task_pos);
 
         // Constables (5 build power for 135 metal, 550 health) go in pairs
         // on one build, as good players pair them: the first other Constable
@@ -957,7 +988,7 @@ impl Ai {
             // as long as they're closer or equaldist to the target.
             let idist = distance(w.get_pos(), task_pos);
             let rdist = idist.max(200.0);
-            let deltadist = (idist - dist).abs();
+            let deltadist = (idist - direct).abs();
             if w.id != worker.id {
                 if pairs
                     && !partner
@@ -968,7 +999,7 @@ impl Ai {
                     partner = true;
                 } else if w.is_com {
                     cost_mod += 2.0;
-                } else if rdist < dist || deltadist < 100.0 {
+                } else if rdist < direct || deltadist < 100.0 {
                     cost_mod += 1.0;
                 }
             }
@@ -1004,26 +1035,17 @@ impl Ai {
                 let ids = &eco.build_ids;
                 let def_id = ctask.build_type.id();
                 if def_id == ids.solar_id || def_id == ids.wind_id {
-                    // Greedy workers can cover a hard shortage before metal
-                    // storage fills (`energycrew`).
-                    let greedy = worker.is_greedy && !self.eco_energy_crew_needed();
                     // With `compush` the commander leaves the energy behind
                     // it to the energy worker.
                     let back = self.compush_back_cost(worker, wpos, task_pos);
                     // With `energyneed` the pull follows the shortfall
                     // against construction, a walk costing as for a mex.
                     if !self.dev_off("energyneed") {
-                        if greedy {
-                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
-                        }
                         let crowd = (1000.0 * (cost_mod - if worker.is_com { 2.0 } else { 1.0 })).max(0.0);
                         return (dist / 4.0) - NEED_PULL * self.eco_energy_shortfall() + crowd + back;
                     }
                     // for small energy
                     if eco.estalled || eco.effective_income_metal > eco.effective_income_energy - 2.5 {
-                        if greedy {
-                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
-                        }
                         if worker.is_com {
                             if eco.hard_estalled {
                                 return ((dist / 2.0) - 300.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
@@ -1032,9 +1054,6 @@ impl Ai {
                         }
                         return ((dist / 3.0) - 200.0) + (1000.0 * (cost_mod - 1.0)).max(0.0);
                     } else {
-                        if greedy {
-                            return dist + (10000.0 * cost_mod); // greedy workers shouldn't build energy at all.
-                        }
                         if worker.is_com {
                             return (dist / 4.0) + (1000.0 * (cost_mod - 2.0)).max(0.0) + back;
                         }
@@ -1650,7 +1669,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn greedy_constructors_cover_hard_stalls_before_storage_fills() {
+    fn energy_assignment_no_longer_depends_on_constructor_caste() {
         use springai::{Unit, UnitDef};
         let mut ai = assignment_ai(|_| {});
         ai.eco.build_ids.solar_id = 1;
@@ -1668,18 +1687,13 @@ pub(super) mod tests {
         for def in [1, 3] {
             let energy = WorkerTask::construction(UnitDef::from_id(ai.cb, def).unwrap(), pos, 0);
             ai.eco.hard_estalled = false;
-            assert!(!ai.eco_energy_crew_needed(), "a soft overdrive target leaves expansion workers alone");
-            assert!(ai.eco_cost_of_job_alone(&worker, pos, &energy) >= 10000.0);
+            let greedy_cost = ai.eco_cost_of_job(&worker, pos, &energy);
+            worker.is_greedy = false;
+            assert_eq!(greedy_cost, ai.eco_cost_of_job(&worker, pos, &energy));
+            worker.is_greedy = true;
             ai.eco.hard_estalled = true;
-            assert!(ai.eco_energy_crew_needed());
-            assert!(ai.eco_cost_of_job_alone(&worker, pos, &energy) < ai.eco_cost_of_job_alone(&worker, pos, &mex));
+            assert!(ai.eco_cost_of_job(&worker, pos, &energy) < ai.eco_cost_of_job(&worker, pos, &mex));
         }
-        ai.eco.hard_estalled = false;
-        ai.eco.metal = 400.0;
-        assert!(ai.eco_energy_crew_needed(), "retain the existing floating-metal response");
-        ai.set_feature_off("energycrew", true);
-        ai.eco.hard_estalled = true;
-        assert!(!ai.eco_energy_crew_needed());
     }
 
     #[test]
@@ -1893,8 +1907,17 @@ mod production_upgrade_tests {
         assert_eq!(ai.eco_remex_radius(task, 128.0), None);
         let worker = &ai.eco.workers[&3];
         let caretaker = WorkerTask::construction(ai.defs.get("staticcon").unwrap(), task.position, 0);
-        let plate_cost = ai.eco_cost_of_job_alone(worker, worker.get_pos(), task);
-        assert_eq!(plate_cost, ai.eco_cost_of_job_alone(worker, worker.get_pos(), &caretaker));
+        let plate_cost =
+            ai.eco_cost_of_job_alone(worker, worker.get_pos(), task, distance(worker.get_pos(), task.get_pos()));
+        assert_eq!(
+            plate_cost,
+            ai.eco_cost_of_job_alone(
+                worker,
+                worker.get_pos(),
+                &caretaker,
+                distance(worker.get_pos(), caretaker.get_pos())
+            )
+        );
         assert!(plate_cost < -1000.0, "the upgrade needs caretaker pull, not factory pricing");
 
         // A plate acquiring new tech keeps the ordinary expansion rule.
