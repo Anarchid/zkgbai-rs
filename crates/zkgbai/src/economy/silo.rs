@@ -401,6 +401,10 @@ impl Ai {
     }
 
     pub(super) fn eco_plan_missile_silo(&mut self) {
+        if self.dev_off("requisition") || self.op_requisition().is_some() {
+            self.missiles.site.cancel();
+            return;
+        }
         let Some(silo) = self.defs.get(missiles::SILO) else { return };
         // Live units are authoritative, even after threat cleanup dropped
         // their jobs or before unitCreated attached them to a task.
@@ -411,6 +415,7 @@ impl Ai {
             .filter(|u| u.health() > 0.0 && u.team() == self.team_id && u.def() == Some(silo))
             .collect();
         if !existing.is_empty() {
+            self.missiles.site.cancel();
             let completed = existing.iter().any(|u| !u.is_being_built());
             let finish = (!completed)
                 .then(|| {
@@ -434,6 +439,7 @@ impl Ai {
         // can still be adopted by eco_watch_allied_projects; do not open a
         // second assist each time another allied frame overtakes this one.
         if self.eco_silo_plan().is_some() {
+            self.missiles.site.cancel();
             return;
         }
         if !self.dev_off("missiles")
@@ -449,12 +455,10 @@ impl Ai {
             || self.eco.estalled
             || self.missiles.planned.is_some_and(|f| self.frame - f < SILO_REPLAN)
         {
+            self.missiles.site.cancel();
             return;
         }
-        let Some(choice) = self.missiles_site() else {
-            self.missiles_report_no_site();
-            return;
-        };
+        let Some(choice) = self.missiles_site() else { return };
         let site = choice.pos;
         // Reserve the exact scored footprint first, so guard placement
         // cannot occupy it. No worker assignment runs during this planning.

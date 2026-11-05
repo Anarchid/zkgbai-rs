@@ -2169,7 +2169,7 @@ impl Ai {
             return;
         }
         self.eco_plan_sub_defense();
-        self.eco_plan_missile_silo();
+        self.guard("eco.siloPlanner", |ai| ai.eco_plan_missile_silo());
         self.eco_plan_watchtower();
         self.eco_plan_colony();
         let r = self.eco_find_requisition();
