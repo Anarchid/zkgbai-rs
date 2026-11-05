@@ -553,19 +553,17 @@ impl Ai {
             let mut candidates =
                 ambushes.iter().find(|(r, _)| *r == sapper.radius).map_or_else(Vec::new, |(_, sites)| sites.clone());
             candidates.extend(candidate_sites(sapper.imp, sapper.radius, &fields, &finishers));
-            // Small shifts in the observed approach update the old job's value,
-            // not its exact destination. It still passes every safety filter.
-            if let Some(old) = sapper.site
-                && let Some(live) = candidates
-                    .iter()
-                    .find(|s| {
-                        s.ambush == old.ambush
-                            && distance(s.gate, old.gate) < 64.0
-                            && distance(s.position, old.position) <= 64.0
-                    })
-                    .copied()
-            {
-                candidates.push(Site { value: live.value, ..old });
+            if let Some(old) = sapper.site {
+                let committed = deployment.committed(frame);
+                let anchor_live = if old.ambush {
+                    self.sapper_live_anchor(old.gate) && (committed || self.graph.is_front_line(old.gate))
+                } else {
+                    fields.iter().any(|f| distance(f.gate, old.gate) < 32.0)
+                };
+                if let Some(refreshed) = refresh_site(old, &candidates, sapper.radius, committed, anchor_live) {
+                    // Still revalidate safety, mobility and support below.
+                    candidates.push(refreshed);
+                }
             }
             let own_map = unit.def().and_then(tier_of).and_then(|tier| self.terrain()?.tier(tier));
             let candidates: Vec<_> = candidates
