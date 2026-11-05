@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod carpet;
 mod defense;
 mod pool;
+mod procurement;
 mod release;
 mod retarget;
 mod speculation;
@@ -222,6 +223,7 @@ pub struct BomberHandler {
     defenses: Vec<FireSource>,
     utilization: BTreeMap<Plane, Utilization>,
     speculation: speculation::State,
+    lance_reserve: procurement::LanceReserve,
 }
 impl BomberHandler {
     pub fn new() -> Self {
@@ -327,15 +329,9 @@ impl Ai {
         if h.grounded || self.dev_off("airstrikes") {
             return None;
         }
-        let mut have = BTreeMap::<Plane, usize>::new();
-        for a in h.units.values() {
-            *have.entry(a.kind).or_default() += 1;
-        }
-        for &p in h.building.values() {
-            *have.entry(p).or_default() += 1;
-        }
-        for &(p, _) in h.orders.values().filter(|o| self.frame - o.1 < 30 * 30) {
-            *have.entry(p).or_default() += 1;
+        let have = h.inventory(self.frame);
+        if let Some(kind) = self.airstrike_lance_priority(&have) {
+            return Some(kind.name());
         }
         let mut plans: Vec<_> = h.recent.values().filter(|p| self.frame - p.job.seen <= MEMORY).collect();
         plans.sort_by(|a, b| b.score().total_cmp(&a.score()));
@@ -853,6 +849,7 @@ impl Ai {
         self.bomber_handler.recent.retain(|_, p| frame - p.job.seen <= MEMORY && known.contains(&p.job.target));
         // Recheck remembered routes too: an AA sighting elsewhere can close a
         // route without refreshing the target's radar contact.
+        let mut lance_reserve = procurement::LanceReserve::default();
         let unsafe_keys: Vec<_> = self
             .bomber_handler
             .recent
@@ -870,18 +867,34 @@ impl Ai {
                     enemies,
                 );
                 let allowed = packages(&p.job, r, self.bomber_handler.raven_damage.unwrap());
-                !p.packages.iter().any(|pkg| {
-                    allowed.contains(pkg)
-                        && pkg
-                            .iter()
-                            .all(|(k, _)| self.defs.get(k.name()).is_some_and(|d| k.survives(r, d.health(), d.speed())))
-                })
+                let safe: Vec<_> = p
+                    .packages
+                    .iter()
+                    .filter(|pkg| {
+                        allowed.contains(pkg)
+                            && pkg.iter().all(|(k, _)| {
+                                self.defs.get(k.name()).is_some_and(|d| k.survives(r, d.health(), d.speed()))
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                if p.job.kind == MissionKind::Heavy
+                    && self
+                        .war
+                        .targets
+                        .get(&p.job.target)
+                        .is_some_and(|e| !e.is_dead && e.identified && e.def_name == "hoverarty")
+                {
+                    lance_reserve.observe(p.job.target, r, &safe);
+                }
+                safe.is_empty()
             })
             .map(|(k, _)| *k)
             .collect();
         for key in unsafe_keys {
             self.bomber_handler.recent.remove(&key);
         }
+        self.bomber_handler.lance_reserve = lance_reserve;
         self.bomber_handler.grounded = self.dev_off("airstrikes")
             || (had_jobs && plans.is_empty() && self.bomber_handler.recent.is_empty())
             || self.war.get_aa_threat(home) > 1.25;

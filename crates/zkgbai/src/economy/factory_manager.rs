@@ -1986,6 +1986,9 @@ impl Ai {
         if let Some(name) = self.firefighters_order(FacKind::Plane) {
             return name;
         }
+        if let Some(name) = self.airstrike_lance_production() {
+            return name;
+        }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
             return scouts::OWL;
         }
