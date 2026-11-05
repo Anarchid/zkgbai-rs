@@ -750,3 +750,21 @@ quote, and surviving-post yield/repair activity. These are observational games;
 they do not estimate a causal advantage over the unplayed alternative.
 `test=reclaimpost` is a mechanics fixture mode that runs this policy without
 ordinary economic/military assignments; it is not used in normal games.
+
+The artificial mechanics fixture is `tools/arena/reclaim-post/run.sh` with
+`pit`, `wall`, or `threat`, followed by a unique output label. It uses the debug
+library in `CARGO_TARGET_DIR`, stores engine output there, and requires the
+installed Agalta/Zero-K/2026.07.04 engine assets. It gates on host-wide available
+memory and engine count. `verify.py RUN_DIRECTORY MODE` checks completion,
+reclaim, repair and construction assistance, or the known-artillery veto. The
+fixture supplies income, holds guns, and flattens terrain: it checks execution,
+not combat survival or economic advantage.
+
+On 2026-11-05 the synthetic pit and wall runs both completed a post, reclaimed
+about 741 and 510 metal respectively before the fixture removed the remaining
+wrecks, repaired a radar from 20/80 to 80/80 HP, and completed a Solar from 10%.
+Observed terraform spending was about 201 metal for the pit and 352 for the
+wall. A known-artillery variant made no post. All three reached five simulated
+minutes with zero AI errors or panics; the integrated library suite passed
+993 tests (four ignored). These supplied-income, held-fire scenes are mechanics
+checks only. Set `RECLAIM_POST_LIB` to test a release library with the fixture.

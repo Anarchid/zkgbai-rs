@@ -136,6 +136,7 @@ struct Project {
     budget: f32,
     stock: f32,
     quoted: bool,
+    quote_peak: f32,
     last_order: i32,
     sampled_spend: f32,
 }
@@ -550,6 +551,7 @@ impl Ai {
             budget,
             stock: s.metal,
             quoted: false,
+            quote_peak: 0.0,
             last_order: self.frame,
             sampled_spend: 0.0,
         });
@@ -603,6 +605,9 @@ impl Ai {
                 quote = f32::INFINITY;
             }
         }
+        if quote.is_finite() {
+            p.quote_peak = p.quote_peak.max(quote);
+        }
         let spent: f32 = p.helper_spent.values().sum();
         let terrain_done = self.reclaim_terrain_done(g);
         let reason = if self.dev_off("reclaimpost") {
@@ -636,7 +641,7 @@ impl Ai {
                 .retry
                 .insert(((g.center.x / 128.0).round() as i32, (g.center.z / 128.0).round() as i32), frame + 30 * 600);
             self.op_emit("reclaim_post",json!({"event":"abort","frame":frame,"site":[g.center.x,g.center.z],"why":reason,
-                "earthwork_quote":quote.is_finite().then_some(quote),"earthwork_spent_observed":spent,"budget":p.budget,"worker_spend_estimate":p.sampled_spend,"stock":stock}));
+                "earthwork_quote_peak":p.quote_peak,"earthwork_current_quote":quote.is_finite().then_some(quote),"earthwork_spent_observed":spent,"budget":p.budget,"worker_spend_estimate":p.sampled_spend,"stock":stock}));
             return;
         }
         self.eco_hold_terraform(&[p.worker], 90);
@@ -647,7 +652,7 @@ impl Ai {
                 p.building = true;
                 p.issued = frame;
                 p.last_order = frame;
-                self.op_emit("reclaim_post",json!({"event":"build","frame":frame,"site":[at.x,at.y,at.z],"earthwork_spent_observed":spent,"earthwork_quote":quote,"budget":p.budget}));
+                self.op_emit("reclaim_post",json!({"event":"build","frame":frame,"site":[at.x,at.y,at.z],"earthwork_spent_observed":spent,"earthwork_quote_peak":p.quote_peak,"budget":p.budget}));
             }
         }
         if p.building {
