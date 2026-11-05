@@ -139,15 +139,6 @@ impl Ai {
         let mine = blast(def);
         near.iter().all(|&(p, d)| blast_room(distance(p, pos), mine, blast(d)) >= 1.0)
     }
-
-    /// The first of `kinds` that may go at the site nearest `pos` it has,
-    /// and that site.
-    pub(crate) fn eco_mix_pick(&self, kinds: &[UnitDef], pos: Vec3) -> Option<(UnitDef, Vec3)> {
-        kinds.iter().find_map(|&def| {
-            let site = self.cb.map().find_closest_build_site(def, pos, 600.0, 3, 0);
-            (site.x >= 0.0 && self.eco_mix_allows(def, site)).then_some((def, site))
-        })
-    }
 }
 
 #[cfg(test)]

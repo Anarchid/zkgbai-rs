@@ -444,6 +444,11 @@ impl Ai {
             (None, None) if distance(anchor, approach) > 1.0 => get_directional_point(anchor, approach, OFFSET),
             (None, None) => anchor,
         };
+        // Admission precedes the platform and its power links: do not spend
+        // on preparation for a turret the shared economy policy will refuse.
+        if !self.eco_porc_admissible(def, site, self.eco_factory_emergency_at(site)) {
+            return Err("porc_policy");
+        }
         let gd = &self.eco.grid_defs;
         let (range, needs) = (gd.range(def.id()).unwrap_or(0.0), gd.needs(def.id()));
         let (links, pylons, grid) = match self.eco_grid_access(site, range, needs) {

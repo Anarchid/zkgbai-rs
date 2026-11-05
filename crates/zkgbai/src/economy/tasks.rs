@@ -48,6 +48,8 @@ pub struct ConstructionTask {
     pub fac_def: bool,
     /// A plate replacing a caretaker in the production build-power budget.
     pub production_upgrade: bool,
+    /// Forecast-driven defense; only allowed close to a threatened factory.
+    pub emergency_porc: bool,
     /// Opportunistic gate defense: requires support and a safe approach.
     pub fortification: bool,
     /// A shared site fulfilling an asset guard request; keep it on live disable.
@@ -102,6 +104,7 @@ impl WorkerTask {
                 assigned_plop: 0,
                 fac_def: false,
                 production_upgrade: false,
+                emergency_porc: false,
                 fortification: false,
                 point_defense: false,
                 prerequisites: Vec::new(),

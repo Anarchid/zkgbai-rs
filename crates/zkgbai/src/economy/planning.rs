@@ -144,6 +144,11 @@ const FACTORY_OPENING_TIME: i32 = 30 * 120;
 /// Income before investing in a gunship factory for a viable riot drop.
 const DROP_INCOME: f32 = 30.0;
 
+/// A dense front can justify siege before the fifth reactor. Use actual
+/// metal income, not the age-adjusted composition budget: geos and shared
+/// energy planning can keep the reactor count low in a mature economy.
+const SUPER_WEAPON_INCOME: f32 = 50.0;
+
 /// Air tempo: as a game runs on, and more so on larger maps, the speed of
 /// aircraft converts more of the enemy's value (raids across the map,
 /// strikes on whatever moves out). A dose (see [`air_tempo_dose`]) is
@@ -305,11 +310,6 @@ const ZONE_MIX: [(&str, f32); 7] = [
     ("turretheavy", 80.0),
 ];
 const SAME_KIND: usize = 2;
-/// What the push and front porc fall back to when the kind drawn may not go
-/// (see `porcmix`), in order.
-const PUSH_MIX: [&str; 4] = ["turretmissile", "turretheavylaser", "turretemp", "turretlaser"];
-const FRONT_MIX: [&str; 6] =
-    ["turretmissile", "turretlaser", "turretheavylaser", "turretgauss", "turretriot", "turretemp"];
 /// Posture turrets keep this far from every turret of ours (splash), elmos.
 const TURRET_SPACING: f32 = 150.0;
 /// A posture turret goes only where fewer than this many turrets of ours
@@ -369,6 +369,9 @@ impl Ai {
         crowding: bool,
     ) -> Option<TaskId> {
         let c = task.as_construction()?;
+        if c.target.is_none() && !self.eco_porc_admissible(c.build_type, task.position, c.emergency_porc) {
+            return None;
+        }
         if self.eco_super_project_exposed(c.build_type, task.position) {
             return None;
         }
@@ -417,7 +420,7 @@ impl Ai {
         let armed = !def.weapon_mounts().is_empty();
         let id = self
             .eco_add_construction(task, Some(List::Construction), armed.then_some(List::Porc))
-            .ok_or("the economy refused the site (too close to a factory's yard or a planned building)")?;
+            .ok_or("the economy refused the site (porc policy, factory yard, or planned building)")?;
         Ok((id, site))
     }
 
@@ -444,6 +447,10 @@ impl Ai {
     }
 
     fn eco_logistics_porc_on(&mut self, def: UnitDef, site: Vec3, near: f32) -> Option<(TaskId, bool)> {
+        let emergency = self.eco_factory_emergency_at(site);
+        if !self.eco_porc_site_allowed(def, site, emergency) {
+            return None;
+        }
         // What `eco_clean_orders` would drop at once: a blocked site, or one
         // enemy defenses cover; and where a worker would not go.
         if site.x < 0.0
@@ -456,13 +463,22 @@ impl Ai {
         let planned = (self.eco.porc_tasks.iter().copied())
             .filter(|&id| self.eco.tasks.get(id).is_some_and(|t| t.as_construction().is_some()))
             .min_by(|&a, &b| distance(self.eco.task_pos(a), site).total_cmp(&distance(self.eco.task_pos(b), site)))
-            .filter(|&id| distance(self.eco.task_pos(id), site) < near);
+            .filter(|&id| distance(self.eco.task_pos(id), site) < near)
+            .filter(|&id| {
+                self.eco
+                    .tasks
+                    .get(id)
+                    .and_then(|t| t.as_construction())
+                    .is_some_and(|c| self.eco_porc_site_allowed(c.build_type, self.eco.task_pos(id), emergency))
+            });
         if let Some(id) = planned {
+            self.eco.tasks.get_mut(id)?.as_construction_mut()?.emergency_porc = emergency;
             return Some((id, true));
         }
         let mut ct = WorkerTask::construction(def, site, 0);
         if let Some(c) = ct.as_construction_mut() {
             c.frame_issued = self.frame;
+            c.emergency_porc = emergency;
         }
         self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc)).map(|id| (id, false))
     }
@@ -655,16 +671,13 @@ impl Ai {
                 self.eco_defend_posture();
             }
         }
-        // porc push against nearby enemy porc and defend the front line
+        // Spend only at terrain gates and the fixed start-position bisector.
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
             // Without the posture, the terrain analysis's chokepoints.
             if !self.posture_on() {
                 self.eco_defend_chokes();
             }
-            self.eco_porc_push(position);
-            if self.graph.eminent_territory {
-                self.eco_defend_front(position);
-            }
+            self.eco_defend_midline(position);
         }
 
         // do we need pylons? (in the overdrive phase, see
@@ -695,13 +708,15 @@ impl Ai {
         // (`airstall`: nothing but air factories, air stalled and no ally's
         // ground factory to plate: a superweapon whatever the reactors.)
         let air_super = reactors <= 4 && self.eco_air_stall_super();
-        if !self.eco.chose_sup_wep
-            && !self.eco_energy_starved()
-            && (self.merged_allies == 0 || (self.eco.has_striders && self.fac.num_striders > 1))
-            && (reactors > 4 || air_super)
-        {
+        if self.eco_super_weapon_due(reactors, air_super) {
             if air_super {
                 self.log("airstall: nothing but air factories and no allied ground factory to plate: a superweapon");
+            } else if reactors <= 4 {
+                self.log(&format!(
+                    "economy: dense front ({:.0}), alliance income {:.0}; choosing a superweapon before five reactors",
+                    self.war.front.ratchet,
+                    self.eco.static_income * self.intel_alliance_scale()
+                ));
             }
             self.eco_choose_super_weapon();
         }
@@ -1426,6 +1441,20 @@ impl Ai {
         }
 
         self.eco_add_simple(aa, position, List::Porc, Some(List::Aa));
+    }
+
+    fn eco_super_weapon_due(&self, reactors: usize, air_super: bool) -> bool {
+        if self.eco.chose_sup_wep
+            || self.eco_energy_starved()
+            || (self.merged_allies > 0 && !(self.eco.has_striders && self.fac.num_striders > 1))
+        {
+            return false;
+        }
+        if reactors > 4 || air_super {
+            return true;
+        }
+        let income = self.eco.static_income * self.intel_alliance_scale();
+        self.front_escalation() >= 1.0 && income >= SUPER_WEAPON_INCOME && income >= 0.8 * self.intel.income
     }
 
     fn eco_choose_super_weapon(&mut self) {
@@ -2205,6 +2234,9 @@ impl Ai {
         let Some(def) = def else {
             return;
         };
+        if !self.eco_porc_admissible(def, position, false) {
+            return;
+        }
         // As many of its kind about as `porcmix` lets stand: the ring's
         // hundred tries would all be refused.
         let name = self.defs.name(def);
@@ -2732,111 +2764,6 @@ impl Ai {
     fn eco_porc_count(&self, pos: Vec3, radius: f32) -> usize {
         self.eco.porcs.iter().filter(|u| distance(pos, u.pos()) < radius).count()
             + self.eco.porc_tasks.iter().filter(|&&c| distance(pos, self.eco.task_pos(c)) < radius).count()
-    }
-
-    /// Whether existing porc (built or queued) is within `porcdist` of `pos`.
-    fn eco_porc_near(&self, pos: Vec3, porcdist: f32) -> bool {
-        self.eco.porcs.iter().any(|u| distance(pos, u.pos()) < porcdist)
-            || self.eco.porc_tasks.iter().any(|&c| distance(pos, self.eco.task_pos(c)) < porcdist)
-    }
-
-    /// `porc` at the site nearest `pos`; with `porcmix`, where that one may
-    /// not go, the first of `mix` that may (see `porcmix`).
-    fn eco_porc_mix(&self, porc: UnitDef, mix: &[&str], pos: Vec3) -> Option<(UnitDef, Vec3)> {
-        if self.dev_off(super::porcmix::FEATURE) {
-            return Some((porc, self.eco_build_site(porc, pos, 0)));
-        }
-        let kinds: Vec<UnitDef> = std::iter::once(porc)
-            .chain(mix.iter().filter_map(|n| self.defs.get(n)).filter(|d| d.id() != porc.id()))
-            .collect();
-        self.eco_mix_pick(&kinds, pos)
-    }
-
-    fn eco_porc_push(&mut self, position: Vec3) {
-        let tf2 = (self.graph.territory_fraction * 2.0).min(1.0);
-        let mut rnd = kgb_rand();
-        let mut porc = if rnd > 0.15 * tf2 as f64 {
-            self.defs.get("turretmissile")
-        } else {
-            rnd = kgb_rand();
-            if rnd > 0.35 { self.defs.get("turretheavylaser") } else { self.defs.get("turretemp") }
-        };
-
-        if self.eco.enemy_has_air && kgb_rand() > 0.95 {
-            porc = self.defs.get("turretaalaser");
-        }
-        let Some(enemy) = self.war.get_closest_enemy_porc(position).and_then(|id| self.war.targets.get(&id)) else {
-            return;
-        };
-        // port: an unidentified porc (no def) is skipped (the C++ dereferenced it).
-        let (Some(ud), Some(porc)) = (enemy.ud, porc) else {
-            return;
-        };
-
-        let pos = get_angular_point(enemy.position, position, ud.max_weapon_range() + 100.0);
-        // The kind drawn, else the next of the push's mix the site takes
-        // (`porcmix`: not a third Picket beside two).
-        let Some((porc, pos)) = self.eco_porc_mix(porc, &PUSH_MIX, pos) else {
-            return;
-        };
-
-        let porcdist = 150.0 + (150.0 * (1.0 - tf2));
-        if self.eco_porc_near(pos, porcdist) {
-            return;
-        }
-
-        let mut ct = WorkerTask::construction(porc, pos, 0);
-        if let Some(c) = ct.as_construction_mut() {
-            c.frame_issued = self.frame;
-        }
-        self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc));
-    }
-
-    fn eco_defend_front(&mut self, position: Vec3) {
-        let tf2 = (self.graph.territory_fraction * 2.0).min(1.0);
-        let mut rnd = kgb_rand();
-        let porc = if rnd > 0.6 {
-            self.defs.get("turretmissile")
-        } else if rnd > 0.25 * tf2 as f64 {
-            self.defs.get("turretlaser")
-        } else {
-            rnd = kgb_rand();
-            self.defs.get(if rnd > 0.75 {
-                "turretheavylaser"
-            } else if rnd > 0.5 {
-                "turretgauss"
-            } else if rnd > 0.25 {
-                "turretriot"
-            } else {
-                "turretemp"
-            })
-        };
-
-        let Some(ms_pos) = self.graph.get_closest_front_line_spot(position).map(|ms| ms.get_pos()) else {
-            return;
-        };
-
-        let fpos = self.graph.get_closest_battle_front(ms_pos);
-
-        let radius = 150.0 + (kgb_rand() as f32 * 350.0);
-        let pos = get_angular_point(ms_pos, fpos, radius);
-        let Some(porc) = porc else {
-            return;
-        };
-        let Some((porc, pos)) = self.eco_porc_mix(porc, &FRONT_MIX, pos) else {
-            return;
-        };
-
-        let porcdist = 200.0 + (150.0 * (1.0 - tf2));
-        if self.eco_porc_near(pos, porcdist) {
-            return;
-        }
-
-        let mut ct = WorkerTask::construction(porc, pos, 0);
-        if let Some(c) = ct.as_construction_mut() {
-            c.frame_issued = self.frame;
-        }
-        self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc));
     }
 
     fn eco_create_radar_task(&mut self, wid: i32) {
@@ -3447,6 +3374,59 @@ impl Ai {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dense_front_unlocks_siege_without_five_reactors_but_needs_a_sound_economy() {
+        let mut ai = crate::economy::commander::tests::test_ai_with(|_| {});
+        ai.eco.static_income = 50.0;
+        ai.intel.income = 60.0;
+        ai.war.front.ratchet = crate::military::front::HI;
+        assert!(ai.eco_super_weapon_due(2, false));
+
+        ai.war.front.ratchet = crate::military::front::LO;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        // The original reactor route still works on sparse maps.
+        assert!(ai.eco_super_weapon_due(5, false));
+        ai.war.front.ratchet = crate::military::front::HI;
+        ai.eco.static_income = 49.0;
+        ai.eco.adjusted_income = 100.0;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.eco.static_income = 50.0;
+        ai.intel.income = 70.0;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.intel.income = 60.0;
+
+        ai.set_feature_off("frontgate", true);
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(ai.eco_super_weapon_due(5, false));
+        // Air-only stalls retain their independent early route.
+        assert!(ai.eco_super_weapon_due(2, true));
+        ai.set_feature_off("frontgate", false);
+
+        // The early route follows the same alliance scale as nuke value
+        // planning, without letting one poor solo economy use game age.
+        ai.eco.static_income = 25.0;
+        ai.allies.push(3);
+        assert!(ai.eco_super_weapon_due(2, false));
+        ai.allies.clear();
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.eco.static_income = 50.0;
+
+        ai.eco.estalled = true;
+        ai.eco.metal = 300.0;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(!ai.eco_super_weapon_due(5, false));
+        assert!(!ai.eco_super_weapon_due(2, true));
+        ai.eco.estalled = false;
+        ai.merged_allies = 1;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        ai.eco.has_striders = true;
+        ai.fac.num_striders = 2;
+        assert!(ai.eco_super_weapon_due(2, false));
+        ai.eco.chose_sup_wep = true;
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(!ai.eco_super_weapon_due(5, false));
+    }
+
     #[test]
     fn factory_exit_clearance_rotates_with_all_four_facings() {
         use super::{EXIT_LANE, FACTORY_CLEARANCE, exit_rect};

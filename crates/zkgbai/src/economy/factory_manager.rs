@@ -380,6 +380,7 @@ impl Ai {
         self.airstrike_created(unit, builder);
         self.scouts_air_created(unit, builder);
         self.army_support_created(unit, builder);
+        self.sapper_created(unit, builder);
         if self.defs.name_of(unit) == scouts::SPARROW
             && !self.airstrike_claims(unit.id())
             && !self.eco.sparrows.contains(&unit)
@@ -648,6 +649,7 @@ impl Ai {
         // A new production decision means any uncreated prior scout order
         // was canceled; unfinished aircraft are counted from the team roster.
         self.scouts_air_idle(fac_id);
+        self.sapper_factory_idle(fac_id);
         // A staged strike builds its Widows itself (see `strike_test`); the
         // `hijack` and `impalerwar` tests play the economy as usual.
         // The staged raid game builds only firefighters (see `raid_test`).
@@ -756,13 +758,20 @@ impl Ai {
         // in place of a plain fighter. (Not of the scouts of the factories
         // that open with a wave of them: the QRF floor took a jump opening's
         // second Puppy for a Pyro guard.)
-        let special =
-            matches!(choice, "amphtele" | "gunshiptrans" | "striderantiheavy" | "shieldshield" | "cloakjammer")
-                || choice == scouts::WIDOW
-                || choice == scouts::SCYTHE
-                || choice == scouts::OWL
-                || self.firefighters_order(kind) == Some(choice)
-                || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
+        let special = matches!(
+            choice,
+            "amphtele"
+                | "gunshiptrans"
+                | "striderantiheavy"
+                | "shieldshield"
+                | "cloakjammer"
+                | "cloakbomb"
+                | "shieldbomb"
+        ) || choice == scouts::WIDOW
+            || choice == scouts::SCYTHE
+            || choice == scouts::OWL
+            || self.firefighters_order(kind) == Some(choice)
+            || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
         let picked = choice;
         // An air plant idle for an `airstall` stays idle: home defenders and
         // taskforce units from it would be aircraft too (the floor's
@@ -868,6 +877,7 @@ impl Ai {
             self.army_support_ordered(fac_id, def);
             self.eco_expansion_constructor_ordered(def);
             self.invade_constructor_ordered(fac_id, def);
+            self.sapper_ordered(fac_id, def);
         }
     }
 
@@ -904,6 +914,7 @@ impl Ai {
             self.army_support_ordered(fac_id, def);
             self.eco_expansion_constructor_ordered(def);
             self.invade_constructor_ordered(fac_id, def);
+            self.sapper_ordered(fac_id, def);
         }
     }
 
@@ -1013,8 +1024,8 @@ impl Ai {
             return "cloakcon";
         }
 
-        // Mines for the conquest objectives we hold (see `conquest`).
-        if self.conquest_wants_mines(self.sapper_count()) {
+        // Shared standing mine reserve, or conquest's larger demand.
+        if self.sapper_wants_mines() {
             return "cloakbomb";
         }
 
@@ -1179,8 +1190,8 @@ impl Ai {
             return "shieldcon";
         }
 
-        // Mines for the conquest objectives we hold (see `conquest`).
-        if self.conquest_wants_mines(self.sapper_count()) {
+        // Shared standing mine reserve, or conquest's larger demand.
+        if self.sapper_wants_mines() {
             return "shieldbomb";
         }
 

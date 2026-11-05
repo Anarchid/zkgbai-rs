@@ -17,11 +17,13 @@ pub mod factory_manager;
 mod fortify;
 mod geo;
 pub mod grid;
+mod grid_support;
 mod lotus;
 mod phase;
 pub(crate) mod planning;
 mod plate;
 mod plop;
+mod porc_policy;
 pub mod porcmix;
 mod raid_mex;
 mod rebuild;
@@ -187,6 +189,8 @@ pub struct EconomyManager {
     raw_mex_income: f32,
     /// The energy income the economy wants (stalled below it).
     energy_target: f32,
+    /// Persistent power restoration projects and protected pylon sites.
+    pub(crate) grid_support: grid_support::Support,
     /// Workers just ordered to terraform, until when they are left to it
     /// (the order reaches the engine a frame later; meanwhile they look
     /// free).
@@ -439,6 +443,7 @@ impl EconomyManager {
             energy_upkeep: 0.0,
             raw_mex_income: 0.0,
             energy_target: 0.0,
+            grid_support: grid_support::Support::default(),
             terraform_hold: BTreeMap::new(),
             effective_expenditure: 0.0,
             reclaim_value: Cell::new(0.0),
@@ -897,6 +902,9 @@ impl Ai {
         self.eco_plan_lotus_upgrades(frame);
         self.eco_dig_ditches(frame);
         self.eco_plan_grid(frame);
+        if frame % 30 == self.offset % 30 {
+            self.eco_bury_support_pylons(frame);
+        }
         self.eco_update_requisition(frame);
         if self.missiles.site.active() {
             self.guard("eco.siloPlanner", |ai| ai.eco_plan_missile_silo());
@@ -1331,11 +1339,6 @@ impl Ai {
 
         if matches!(def_name, "energysingu" | "staticnuke" | "zenith" | "raveparty") {
             self.eco_defend_singu(unit.pos());
-            for n in self.eco.nanos.values() {
-                if n.target == unit {
-                    n.unit.self_destruct(0);
-                }
-            }
             let unneeded: Vec<TaskId> = self
                 .eco
                 .nano_tasks
@@ -1401,26 +1404,22 @@ impl Ai {
             }
             if def_name == "staticcon" {
                 let ct_target = self.eco.tasks.get(id).and_then(|t| t.as_construction()).and_then(|c| c.ct_target);
-                match ct_target {
-                    Some(target) => {
-                        let nt = Nanotower { unit, target };
-                        self.eco.nanos.insert(unit.id(), nt);
-                        if self.defs.name_of(target) == AIRPAD {
-                            self.eco_adopt_pad_nano(unit, target);
-                        } else {
-                            self.eco_nano_post(nt);
-                        }
-                        self.eco_defend_nano(nt);
+                if let Some(target) = ct_target {
+                    let nt = Nanotower { unit, target };
+                    self.eco.nanos.insert(unit.id(), nt);
+                    if self.defs.name_of(target) == AIRPAD {
+                        self.eco_adopt_pad_nano(unit, target);
+                    } else {
+                        self.eco_nano_post(nt);
                     }
-                    // port: a caretaker without a target would be self-destructed
-                    // by checkNanos anyway (the C++ stored a null target).
-                    None => {
-                        unit.self_destruct(0);
-                    }
+                    self.eco_defend_nano(nt);
                 }
             }
 
             self.eco.drop_construction_task(id);
+        }
+        if def_name == "energypylon" {
+            self.eco_bury_support_pylons(self.frame);
         }
     }
 
@@ -1653,9 +1652,6 @@ impl Ai {
         }
 
         match def_name {
-            "staticcon" => {
-                unit.self_destruct(0);
-            }
             "staticmex" => {
                 if unit.is_being_built() {
                     self.eco_track_mex_construction(unit);
@@ -1799,9 +1795,8 @@ impl Ai {
         // the pad would repair the pad and nothing on it.
         let mut off_post = Vec::new();
         for n in self.eco.nanos.values() {
-            if n.target.health() <= 0.0 {
-                n.unit.self_destruct(0);
-            } else if self.defs.name_of(n.target) == AIRPAD
+            if n.target.health() > 0.0
+                && self.defs.name_of(n.target) == AIRPAD
                 && !self.walkin_lends(n.unit.id())
                 && !Self::eco_on_pad_post(n.unit)
             {
