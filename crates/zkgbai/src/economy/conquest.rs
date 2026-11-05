@@ -251,11 +251,8 @@ const GROUND_EVERY: i32 = 30 * 10;
 
 /// Mines at a held objective (user, 2026-11-03: "if we're a mine haver
 /// factory we should do the mines for these"): a field this far on its
-/// enemy side, mines wanted per held objective, and at most this many in
-/// all.
+/// enemy side. Production is gated by observed enemy clumps in `sappers`.
 const MINE_FORWARD: f32 = 250.0;
-const MINES_PER_HELD: usize = 3;
-const MINES_MAX: usize = 6;
 /// A mine site this near a held objective's field middle belongs to it.
 const MINE_FIELD_REACH: f32 = 700.0;
 
@@ -1648,13 +1645,6 @@ impl Ai {
     /// counts as front for the sappers though it is past our front line.
     pub(crate) fn conquest_mine_ground(&self, p: Vec3) -> bool {
         self.conquest_mine_fields().iter().any(|(c, _)| distance(*c, p) <= MINE_FIELD_REACH)
-    }
-
-    /// Whether a factory that makes mines should make one now for the
-    /// objectives we hold (`have`: our mines).
-    pub(crate) fn conquest_wants_mines(&self, have: usize) -> bool {
-        let held = self.conquest_mine_fields().len();
-        held > 0 && have < (MINES_PER_HELD * held).min(MINES_MAX)
     }
 
     /// The conquest turret's reach (Stinger 620 by default).

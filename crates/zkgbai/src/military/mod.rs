@@ -814,14 +814,10 @@ impl Ai {
             self.puppies_add(unit);
             return;
         }
-        // Set patient mine states now, but let the factory's short exit move
-        // finish before adopting them on idle. Mines do not retreat.
+        // Adopt immediately; the mine handler gives the factory exit a bounded
+        // grace period, then owns deployment even if an idle event never arrives.
         if self.unit_classes.sappers.contains(name) {
-            self.misc_prepare_sapper(unit);
-            self.war.new_units.insert(unit.id());
-            if !self.war.updated {
-                self.war_unit_idle(unit);
-            }
+            self.misc_add_sapper(unit);
             return;
         }
         // Jugglenauts pull (see `jumps`).
