@@ -167,7 +167,7 @@ pub(super) fn select_assignment(
     let old = sapper
         .site
         .and_then(|old| {
-            sites.iter().find(|s| distance(s.position, old.position) <= ARRIVED && distance(s.gate, old.gate) < 64.0)
+            sites.iter().find(|s| distance(s.position, old.position) < 1.0 && distance(s.gate, old.gate) < 64.0)
         })
         .copied();
     if let Some(old) = old {
@@ -558,10 +558,15 @@ mod tests {
         };
         let b = Site { position: Vec3::xz(2000.0, 1000.0), gate: Vec3::xz(1500.0, 1000.0), value: 40.0, ..a };
         sapper.site = Some(a);
+        let drift = Site { position: Vec3::xz(a.position.x + 8.0, a.position.z), value: 11.0, ..a };
+        assert_eq!(
+            select_assignment(&sapper, a.position, &[drift, a], &[], COMMIT + 1).unwrap().position.x,
+            a.position.x,
+            "a small route shift must not walk a cloaked mine away from its exact site"
+        );
         assert_eq!(select_assignment(&sapper, a.position, &[a, b], &[], 100).unwrap().position.x, a.position.x);
         assert_eq!(select_assignment(&sapper, a.position, &[a, b], &[], COMMIT + 1).unwrap().position.x, b.position.x);
         assert_eq!(select_assignment(&sapper, a.position, &[b], &[], 100).unwrap().position.x, b.position.x);
         assert!(select_assignment(&sapper, a.position, &[], &[], 100).is_none());
     }
-
 }
