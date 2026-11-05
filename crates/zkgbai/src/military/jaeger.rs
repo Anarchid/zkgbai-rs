@@ -32,8 +32,10 @@
 //! worth one within its jump, its squad's mark or not, even one its blast
 //! alone does not kill (feature `pounce`), and jumps where the heavy will
 //! be when it lands, by its velocity (feature `lead`).
+//! A cloaked Skuttle with its jump ready also closes a short gap to an
+//! exposed heavy, even while its squad is still forming.
 //!
-//! Hunters lie in wait rather than go after a heavy into the enemy's land
+//! Hunters normally lie in wait rather than go after a heavy into the enemy's land
 //! (feature `ambush`; supported Widows can join our army on either side
 //! of the lines): its way over the ground is foreseen (a travel-time
 //! field from it, as the QRF's, down to the asset of ours it heads for by
@@ -48,13 +50,18 @@
 //! 180, a Widow within 60) steps aside, where it stays clearest of them all;
 //! a Skuttle that cannot get clear on foot jumps clear, since its jumps
 //! are silent and keep it cloaked.
+//!
+//! Short independent approaches can cross either side of the lines when
+//! the jaegers' coarse interference map finds time to strike before a
+//! screen arrives, with little exposure to poorly observed ground. The
+//! map never replaces Widow finishers or the local jump and dodge checks.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use springai::{Resource, Unit, Vec3};
 
 use crate::Ai;
-use crate::military::jumps::SKUTTLE_PRESS;
+use crate::military::jumps::{JumpDef, SKUTTLE_PRESS};
 use crate::military::qrf::field::CELL;
 use crate::military::qrf::field::Mobility;
 use crate::military::{DefenseTarget, Enemy, Fighter, FighterStore, SquadId, SquadKind, Squads, scouts};
@@ -62,6 +69,8 @@ use crate::nav;
 use crate::terrain::reaches;
 use crate::util::{NULLPOS, distance, get_directional_point};
 
+mod approach;
+mod interference;
 mod opportunistic;
 pub(crate) use opportunistic::BiteAction;
 
@@ -335,6 +344,8 @@ struct Hunt {
     phase: Phase,
     /// Where it lies in wait for its heavy, if it does.
     ambush: Option<Ambush>,
+    /// Last update actually authorized a quiet approach, rather than waiting.
+    quiet: bool,
 }
 
 /// A place to lie in wait for a heavy.
@@ -353,6 +364,11 @@ struct Ambush {
 #[derive(Default)]
 pub struct Jaegers {
     opportunistic: opportunistic::Bites,
+    interference: interference::Map,
+    /// Individual Skuttles taking a quiet approach: target and last update.
+    approaches: BTreeMap<i32, (i32, i32)>,
+    /// Map evaluations since the summary: clear, screened, too uncertain.
+    interference_checks: std::cell::Cell<[u32; 3]>,
     /// Enemy army units seen lately, by enemy id.
     seen: BTreeMap<i32, Seen>,
     /// Fighter-store ids of our jaegers.
@@ -614,6 +630,7 @@ impl Ai {
 
     pub fn jaeger_remove_unit(&mut self, unit: Unit) {
         let id = unit.id();
+        self.jaegers.approaches.remove(&id);
         self.jaegers.opportunistic.forget(id);
         self.jaegers.held.remove(&id);
         self.jaegers.pounces.remove(&id);
@@ -644,6 +661,7 @@ impl Ai {
     /// and stays out of squads for `frames`, to act on its own. Call it
     /// before ordering the unit: a squad's leader leaving is stopped.
     pub fn jaeger_hold(&mut self, id: i32, frames: i32) {
+        self.jaegers.approaches.remove(&id);
         if self.jaegers.members.contains(&id) {
             self.jaeger_leave_squad(id);
             self.jaegers.held.insert(id, self.frame + frames);
@@ -654,6 +672,7 @@ impl Ai {
     /// as a pounce: out of its squad (call it before ordering the unit), its
     /// blast counted on the enemy, and attacking again should it land idle.
     pub fn jaeger_pounced(&mut self, id: i32, eid: i32) {
+        self.jaegers.approaches.remove(&id);
         if self.jaegers.members.contains(&id) {
             self.jaeger_leave_squad(id);
             self.jaegers.pounces.insert(id, (eid, self.frame));
@@ -694,13 +713,14 @@ impl Ai {
                 let (widows, rest) = self.jaeger_widow_metal();
                 let ultis = self.jaeger_ultis();
                 let j = &self.jaegers;
+                let [clear, screened, uncertain] = j.interference_checks.get();
                 // Cloak is paid from storage (15 energy a second moving, 5
                 // still): an empty one shows them.
                 let cloaked =
                     (j.members.iter().filter_map(|id| self.fighters.get(id))).filter(|f| f.unit.is_cloaked()).count();
                 let e = self.cb.economy();
                 self.log(&format!(
-                    "jaeger: {heavy:.0} of {army:.0} enemy army metal seen lately is heavy; {} jaegers ({cloaked} cloaked; energy {:.0} of {:.0}), {} squads, {} ordered; Widows {widows:.0} to {rest:.0} of the rest of our army; {} ambushes laid, {} threatened, {} dodges, {} dodge jumps; {ultis} Ultimatums{}",
+                    "jaeger: {heavy:.0} of {army:.0} enemy army metal seen lately is heavy; {} jaegers ({cloaked} cloaked; energy {:.0} of {:.0}), {} squads, {} ordered; Widows {widows:.0} to {rest:.0} of the rest of our army; {} ambushes laid, {} threatened, {} dodges, {} dodge jumps; quiet route checks {clear} clear, {screened} screened, {uncertain} uncertain; {ultis} Ultimatums{}",
                     j.members.len(),
                     e.current(self.energy),
                     e.storage(self.energy),
@@ -715,10 +735,13 @@ impl Ai {
             }
             let j = &mut self.jaegers;
             (j.ambushes, j.threatened, j.dodges, j.dodge_jumps) = (0, 0, 0, 0);
+            j.interference_checks.set([0; 3]);
         }
         if self.jaegers.members.is_empty() && self.jaegers.hunts.is_empty() {
             return;
         }
+        self.jaeger_update_interference(frame);
+        self.jaegers.approaches.retain(|_, (_, last)| frame - *last <= 2 * PERIOD);
         self.jaeger_muster();
         let sids: Vec<SquadId> = self.jaegers.hunts.keys().copied().collect();
         for sid in sids {
@@ -761,6 +784,7 @@ impl Ai {
                 continue;
             }
             if self.retreat_handler.is_retreating(id) {
+                self.jaegers.approaches.remove(&id);
                 self.jaeger_leave_squad(id);
                 continue;
             }
@@ -776,7 +800,7 @@ impl Ai {
                 _ => {
                     let sid = self.squads.create(SquadKind::Jaeger, team);
                     self.jaegers.forming.insert(kind.name, sid);
-                    self.jaegers.hunts.insert(sid, Hunt { kind, phase: Phase::Forming, ambush: None });
+                    self.jaegers.hunts.insert(sid, Hunt { kind, phase: Phase::Forming, ambush: None, quiet: false });
                     sid
                 }
             };
@@ -826,7 +850,7 @@ impl Ai {
     /// How dear heavy `id` is to a squad of `n` of `kind` at `from` (the
     /// nearer and the more valuable, the less), if it takes it, gets to it,
     /// and may strike there.
-    fn jaeger_cost(&self, kind: Kind, n: usize, from: Vec3, id: i32, army: &[Vec3]) -> Option<f32> {
+    fn jaeger_cost(&self, kind: Kind, n: usize, from: Vec3, id: i32, army: &[Vec3], continuing: bool) -> Option<f32> {
         let war = &self.war;
         let e = war.targets.get(&id)?;
         // An Ultimatum also takes what the original sent it after: anything
@@ -855,9 +879,8 @@ impl Ai {
             let supported = if kind.ambush > 0.0 && !self.dev_off("ambush") {
                 (kind.stuns && self.jaeger_finishes(p, e.def_health())) || !self.graph.is_enemy_territory(p)
             } else {
-                war.get_total_friendly_power(p) > 0.0
-                    || self.graph.is_ally_territory(p)
-                    || army.iter().any(|&a| distance(a, p) <= SUPPORT_RANGE)
+                self.jaeger_supported(p, army)
+                    || self.jaeger_quiet_approach(kind, from, id, kind.range, continuing).is_some()
             };
             if self.jaeger_defenses_too_strong(kind, p, e.def_health()) || !supported {
                 return None;
@@ -877,14 +900,15 @@ impl Ai {
     fn jaeger_target(&self, kind: Kind, n: usize, from: Vec3, taken: &[i32], army: &[Vec3]) -> Option<i32> {
         (self.war.targets.keys().copied())
             .filter(|id| !taken.contains(id))
-            .filter_map(|id| Some((id, self.jaeger_cost(kind, n, from, id, army)?)))
+            .filter_map(|id| Some((id, self.jaeger_cost(kind, n, from, id, army, false)?)))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(id, _)| id)
     }
 
     fn jaeger_assign(&mut self, sid: SquadId, frame: i32) {
         let Some(hunt) = self.jaegers.hunts.get(&sid) else { return };
-        let (kind, phase) = (hunt.kind, hunt.phase);
+        let (kind, phase, was_quiet) = (hunt.kind, hunt.phase, hunt.quiet);
+        let mut quiet_now = false;
         let Some(s) = self.squads.get(sid) else { return };
         let pos = s.get_pos(&self.fighters);
         let members: Vec<i32> = s.fighters.clone();
@@ -916,7 +940,7 @@ impl Ai {
                 }
             }
             Phase::Hunting(target) => {
-                let keep = target.filter(|&t| self.jaeger_cost(kind, ready, pos, t, &army).is_some());
+                let keep = target.filter(|&t| self.jaeger_cost(kind, ready, pos, t, &army, was_quiet).is_some());
                 let target = keep.or_else(|| self.jaeger_target(kind, ready, pos, &taken, &army));
                 let ambushing = kind.ambush > 0.0 && !self.dev_off("ambush");
                 match target.and_then(|t| Some((t, self.jaeger_heavy(t)?))) {
@@ -924,9 +948,41 @@ impl Ai {
                         let health = self.war.targets.get(&t).map_or(0.0, |e| e.def_health());
                         // A stun with nothing about to finish the heavy is wasted.
                         let finished = !ambushing || !kind.stuns || self.jaeger_finishes(at, health);
-                        // Supported Widows may join a fight on either side
-                        // of the lines; other hunters wait beyond them.
-                        let chase = !ambushing || (finished && (kind.stuns || !self.graph.is_enemy_territory(at)));
+                        // Independent hunters can cross quiet, observed ground
+                        // on either side of the territory boundary. Widows
+                        // still need finishers; ordinary supported fights stay.
+                        let supported = if kind.stuns {
+                            finished
+                        } else {
+                            self.jaeger_supported(at, &army) && (!kind.suicide || !self.graph.is_enemy_territory(at))
+                        };
+                        let continuing = was_quiet && phase == Phase::Hunting(Some(t));
+                        let quiet = if !supported
+                            && members.iter().all(|id| {
+                                let unit = self.fighters.get(id).map(|f| f.unit);
+                                unit.is_some_and(|u| u.is_cloaked() && (!kind.suicide || self.jump_ready(u).is_some()))
+                            }) {
+                            let stand = if kind.suicide { 320.0 } else { kind.range };
+                            // Check each hunter's crossing, not only the squad centre.
+                            let all_clear = members.iter().all(|id| {
+                                self.fighters.get(id).is_some_and(|f| {
+                                    self.jaeger_quiet_approach(kind, f.unit.pos(), t, stand, continuing).is_some()
+                                })
+                            });
+                            all_clear.then(|| self.jaeger_quiet_approach(kind, pos, t, stand, continuing)).flatten()
+                        } else {
+                            None
+                        };
+                        let chase = finished && (supported || quiet.is_some());
+                        if was_quiet && !chase {
+                            // Stop the old approach even if the fallback rally
+                            // is already nearby and would issue no movement.
+                            for id in &members {
+                                if let Some(f) = self.fighters.get(id) {
+                                    f.unit.stop(0);
+                                }
+                            }
+                        }
                         let ambush = if ambushing && !chase {
                             self.jaeger_ambush(sid, kind, t, pos, frame)
                         } else {
@@ -936,7 +992,9 @@ impl Ai {
                             None
                         };
                         let d = distance(pos, at);
-                        if finished && ((chase && d <= kind.range + STRIKE_RANGE) || d <= kind.range + AMBUSH_STRIKE) {
+                        if finished
+                            && ((supported && d <= kind.range + STRIKE_RANGE) || d <= kind.range + AMBUSH_STRIKE)
+                        {
                             self.jaeger_strike(sid, unit, true);
                             self.log(&format!(
                                 "jaeger: {ready} {} strike a heavy ({value:.0} metal) at ({:.0}, {:.0}){}",
@@ -947,26 +1005,42 @@ impl Ai {
                             ));
                             Phase::Striking(t, frame)
                         } else if chase {
+                            quiet_now = quiet.is_some();
                             if phase != Phase::Hunting(Some(t)) {
                                 self.log(&format!(
                                     "jaeger: {} {} go after a heavy at ({:.0}, {:.0})",
                                     ready, kind.name, at.x, at.z
                                 ));
                             }
-                            self.jaeger_go(sid, at, false);
+                            if let Some(q) = &quiet
+                                && !continuing
+                            {
+                                self.log(&format!(
+                                    "jaeger: {} quiet approach to {t}: interference margin {:.1}s, uncertain {:.1}s",
+                                    kind.name, q.assessment.margin, q.assessment.uncertain_seconds
+                                ));
+                            }
+                            self.jaeger_go(sid, quiet.map_or(at, |q| q.to), false);
                             Phase::Hunting(Some(t))
                         } else if let Some(a) = ambush {
                             self.jaeger_go(sid, a.at, false);
                             Phase::Hunting(Some(t))
                         } else {
-                            // Not after it into the enemy's land: by our
-                            // army, until it comes our way.
+                            // No safe short approach or ambush: by our army
+                            // until the heavy comes our way.
                             let wait = self.jaeger_wait_point(pos, &army);
                             self.jaeger_go(sid, wait, false);
                             Phase::Hunting(Some(t))
                         }
                     }
                     None => {
+                        if was_quiet {
+                            for id in &members {
+                                if let Some(f) = self.fighters.get(id) {
+                                    f.unit.stop(0);
+                                }
+                            }
+                        }
                         // Wait by our army, out of the way.
                         let wait = self.jaeger_wait_point(pos, &army);
                         self.jaeger_go(sid, wait, false);
@@ -1015,6 +1089,9 @@ impl Ai {
                 }
             }
         };
+        if let Some(h) = self.jaegers.hunts.get_mut(&sid) {
+            h.quiet = quiet_now;
+        }
         self.jaegers.set_phase(sid, next, &mut self.squads);
     }
 
@@ -1118,12 +1195,25 @@ impl Ai {
                     e.get_health() * e.def_health() > under_way
                 })
                 .filter(|(_, e)| self.jaeger_friends_near(e.position) <= cost(e, self.metal))
+                // An unreachable first choice must not hide another heavy
+                // we can actually jump onto this tick.
+                .filter(|(_, e)| {
+                    jump.is_some_and(|jd| self.skuttle_landing(unit, jd, e.unit, e.position).is_some())
+                        || Self::skuttle_presses_on(unit, distance(pos, e.position))
+                })
                 .map(|(&eid, e)| (eid, e, mark == Some(eid), cost(e, self.metal), distance(pos, e.position)))
                 .max_by(|a, b| a.2.cmp(&b.2).then(a.3.total_cmp(&b.3)).then(b.4.total_cmp(&a.4)))
                 .map(|(eid, e, marked, value, d)| {
                     (eid, e.unit, e.position, e.get_health() * e.def_health(), marked, value, d)
                 });
-            let Some((eid, target, at, health, marked, value, d)) = best else { continue };
+            let Some((eid, target, at, health, marked, value, d)) = best else {
+                if let Some(jd) = jump {
+                    self.jaeger_skuttle_approach(unit, jd, frame);
+                } else if self.jaegers.approaches.remove(&id).is_some() {
+                    unit.stop(0);
+                }
+                continue;
+            };
             // Without a jump, only one that presses on goes (never walking
             // up: see `jumps`).
             if jump.is_none() && !Self::skuttle_presses_on(unit, d) {
@@ -1132,6 +1222,7 @@ impl Ai {
             // Out of its squad first: a leader leaving it is stopped, which
             // would drop the attack queued after the jump (it flies anyway,
             // and lands idle by the heavy).
+            self.jaegers.approaches.remove(&id);
             self.jaeger_leave_squad(id);
             if !(jump.is_some() && self.jaeger_jump(unit, target, at, "skuttle pounce")) {
                 if !Self::skuttle_presses_on(unit, d) {
@@ -1157,6 +1248,63 @@ impl Ai {
             self.jump_strike(unit, target, known, why)
         } else {
             self.jump_lead(unit, target, known, why)
+        }
+    }
+
+    /// Override a forming squad's trip home for a nearby exposed heavy.
+    /// Keep the jump available and the approach cloaked; dodge still runs
+    /// afterwards if a screen moves into the way.
+    fn jaeger_skuttle_approach(&mut self, unit: Unit, jd: JumpDef, frame: i32) {
+        if self.retreat_handler.is_retreating(unit.id()) {
+            self.jaegers.approaches.remove(&unit.id());
+            return;
+        }
+        if !unit.is_cloaked() {
+            if self.jaegers.approaches.remove(&unit.id()).is_some() {
+                unit.stop(0);
+            }
+            return;
+        }
+        let Some(def) = unit.def() else { return };
+        let kind = kind_of("jumpbomb").unwrap();
+        let from = unit.pos();
+        let old = self.jaegers.approaches.get(&unit.id()).copied();
+        let best = self
+            .war
+            .targets
+            .values()
+            .filter(|e| !e.is_dead && e.visible && e.position != NULLPOS && frame - e.last_seen <= POUNCE_SEEN)
+            .filter(|e| is_heavy(e, self.metal) && cost(e, self.metal) >= kind.min_value)
+            .filter(|e| distance(from, e.position) <= 0.8 * jd.range + def.speed() * interference::MAX_WALK)
+            .filter(|e| self.war.can_hit(self.war.reach(Some(def)), e))
+            .filter(|e| {
+                let reserved = self.jaegers.pounces.values().filter(|p| p.0 == e.unit_id).count() as f32;
+                e.get_health() * e.def_health() > reserved * kind.alpha.unwrap()
+                    && self.jaeger_friends_near(e.position) <= cost(e, self.metal)
+            })
+            .filter_map(|e| {
+                let continuing = old.is_some_and(|(id, _)| id == e.unit_id);
+                let approach = self.jaeger_quiet_approach(kind, from, e.unit_id, 0.8 * jd.range, continuing)?;
+                Some((approach, distance(from, e.position), e.unit_id))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((approach, _, target)) = best {
+            let to = approach.to;
+            let map = self.cb.map();
+            unit.move_to(Vec3::new(to.x, map.elevation_at(to.x, to.z), to.z), 0);
+            self.jaegers.approaches.insert(unit.id(), (target, frame));
+            if old.is_none_or(|(id, _)| id != target) {
+                self.log(&format!(
+                    "jaeger: Skuttle {} quiet approach to {target}: interference margin {:.1}s, uncertain {:.1}s",
+                    unit.id(),
+                    approach.assessment.margin,
+                    approach.assessment.uncertain_seconds
+                ));
+            }
+        } else if self.jaegers.approaches.remove(&unit.id()).is_some() {
+            // An earlier direct move must not keep walking after its route
+            // becomes unsafe, even if the squad's rally command is cached.
+            unit.stop(0);
         }
     }
 
@@ -1516,7 +1664,7 @@ mod tests {
         let sid = squads.create(SquadKind::Jaeger, TEAM);
         let kind = kind_of("spiderantiheavy").unwrap();
         j.forming.insert(kind.name, sid);
-        j.hunts.insert(sid, Hunt { kind, phase: Phase::Forming, ambush: None });
+        j.hunts.insert(sid, Hunt { kind, phase: Phase::Forming, ambush: None, quiet: false });
         for id in [10, 11] {
             fighters.insert(id, Fighter::new(spawn(cb, id, 5), 280.0, TEAM));
             squads.get_mut(sid).unwrap().add_unit(id, &mut fighters, 0);

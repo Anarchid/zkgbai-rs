@@ -752,6 +752,11 @@ impl Ai {
     /// if it can now and that is in reach.
     fn jump_strike_landing(&mut self, unit: Unit, target: Unit, known: Vec3) -> Option<Vec3> {
         let jd = self.jump_ready(unit)?;
+        self.jump_strike_landing_ready(unit, jd, target, known)
+    }
+
+    /// Read-only landing check once jump readiness has been established.
+    fn jump_strike_landing_ready(&self, unit: Unit, jd: JumpDef, target: Unit, known: Vec3) -> Option<Vec3> {
         let seen = target.pos();
         let at = if seen == NULLPOS || (seen.x == 0.0 && seen.z == 0.0) { known } else { seen };
         let from = unit.pos();
@@ -768,9 +773,9 @@ impl Ai {
     /// Where a Skuttle of jumps `jd` lands jumping onto `target` (last seen
     /// at `known`), if in reach and clear: where it will be (`lead`), or by
     /// the old half-flight lead.
-    fn skuttle_landing(&mut self, unit: Unit, jd: JumpDef, target: Unit, known: Vec3) -> Option<Vec3> {
+    pub(super) fn skuttle_landing(&self, unit: Unit, jd: JumpDef, target: Unit, known: Vec3) -> Option<Vec3> {
         if self.dev_off("lead") {
-            return self.jump_strike_landing(unit, target, known);
+            return self.jump_strike_landing_ready(unit, jd, target, known);
         }
         let seen = target.pos();
         let unseen = seen == NULLPOS || (seen.x == 0.0 && seen.z == 0.0);
