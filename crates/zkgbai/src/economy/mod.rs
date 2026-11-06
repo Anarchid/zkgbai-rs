@@ -1366,6 +1366,9 @@ impl Ai {
         if matches!(def_name, "staticnuke" | "zenith" | "raveparty") {
             self.eco.has_super_wep = true;
         }
+        if allied::BIG_GUNS.contains(&def_name) {
+            self.eco_special_report(def_name, "complete", "unit_finished", None);
+        }
 
         if def.speed() > 0.0 && !def.build_options().is_empty() && self.defs.is_commander(def) {
             let mut w = Worker::new(unit, self.team_id);

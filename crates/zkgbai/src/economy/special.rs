@@ -307,6 +307,15 @@ mod tests {
     }
 
     #[test]
+    fn operator_deadline_is_not_replaced_by_automatic_capital_valuation() {
+        let (mut ai, id) = project_ai();
+        ai.logistics_open(id, Kind::Operator, Worth::Deadline { value: 40000.0, by: 100.0 }, "test", 0.0);
+        ai.eco_special_update();
+        assert_eq!(ai.logistics.issues[&id].kind, Kind::Operator);
+        assert_eq!(ai.logistics.issues[&id].worth.deadline(), Some(100.0));
+    }
+
+    #[test]
     fn survey_keeps_rear_candidates_when_centers_coincide_or_advance() {
         let home = Vec3::xz(1000.0, 1000.0);
         let same = seeds(home, home, home);

@@ -853,3 +853,22 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod special_dependency_tests {
+    use super::*;
+    #[test]
+    fn power_dependency_keeps_its_site_without_starting_a_duplicate() {
+        let mut ai = crate::economy::test_ai_with(|_| {});
+        ai.eco.chose_sup_wep = true;
+        ai.eco.s_wep = 1;
+        let pos = Vec3::xz(1500.0, 1000.0);
+        ai.eco.pending_power = Some(PendingPower {
+            def: UnitDef::from_id(ai.cb, 2).unwrap(), pos, list: List::SuperWep, since: 30,
+        });
+        ai.eco_special_update();
+        assert_eq!(ai.eco_special_json()["reason"], "power_connection");
+        assert_eq!(ai.eco.pending_power.as_ref().unwrap().pos, pos);
+        assert!(ai.eco.super_wep_tasks.is_empty());
+    }
+}
