@@ -8,6 +8,8 @@ use crate::Ai;
 use crate::military::Coward;
 use crate::nav;
 
+mod crab;
+
 #[derive(Default)]
 pub struct RetreatHandler {
     retreating_units: BTreeSet<i32>,
@@ -230,14 +232,26 @@ impl Ai {
         h.shields.remove(&id);
     }
 
-    fn retreat_coward_to(&mut self, id: i32, pos: Vec3) {
+    fn retreat_coward_to(&mut self, id: i32, pos: Vec3) -> bool {
         if self.taskforce_watch_retreat(id, pos) {
-            return;
+            return true;
         }
-        let mut nav = nav!(self);
-        if let Some(c) = self.retreat_handler.cowards.get_mut(&id) {
-            c.retreat_to(pos, &mut nav);
+        let Some(c) = self.retreat_handler.cowards.get(&id) else { return false };
+        let unit = c.unit;
+        let path = c.retreat_path(pos, &mut nav!(self));
+        if self.defs.name_of(unit) == "spidercrabe" && (path.is_empty() || !self.crab_retreat_safe(unit, &path)) {
+            // Cancel any old movement, keep firing from the armored position.
+            if unit.num_current_commands() > 0 {
+                unit.stop(0);
+            }
+            unit.set_move_state(0, 0);
+            self.retreat_handler.forget_retreat_order(id);
+            return false;
         }
+        if let Some(c) = self.retreat_handler.cowards.get(&id) {
+            c.retreat_along(&path, self.frame);
+        }
+        true
     }
 
     fn retreat_cowards(&mut self) {
@@ -297,7 +311,9 @@ impl Ai {
                             haven
                         }
                     };
-                    self.retreat_coward_to(id, haven);
+                    if !self.retreat_coward_to(id, haven) {
+                        continue;
+                    }
                     // Jumpers jump the first stretch, over the chasers.
                     if !is_flyer {
                         self.jump_escape(unit, haven);
@@ -309,7 +325,9 @@ impl Ai {
                 } else {
                     // If in enemy territory, maneuver back to safety before finding an airpad.
                     let center = self.graph.get_ally_center();
-                    self.retreat_coward_to(id, center);
+                    if !self.retreat_coward_to(id, center) {
+                        continue;
+                    }
                 }
                 self.retreat_handler.retreated_units.insert(id);
                 retreated = true;
