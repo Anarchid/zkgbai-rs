@@ -40,6 +40,7 @@ macro_rules! handle {
     ($(#[$m:meta])* $ty:ident, $id:ident) => {
         $(#[$m])*
         #[derive(Clone, Copy)]
+        #[checkpoint::state]
         pub struct $ty {
             pub(crate) cb: $crate::Callback,
             pub(crate) $id: i32,

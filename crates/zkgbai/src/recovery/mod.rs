@@ -26,6 +26,7 @@ const RETRY: i32 = 30 * 30;
 const OWNER: Owner = Owner { module: "recovery", helpers: &[] };
 
 #[derive(Default)]
+#[checkpoint::state]
 pub struct Recovery {
     probe: probe::Probe,
     watches: BTreeMap<i32, Watch>,
@@ -37,6 +38,7 @@ pub struct Recovery {
     ordered: Option<i32>,
 }
 
+#[checkpoint::state]
 struct Watch {
     unit: Unit,
     progress: Progress,
@@ -46,6 +48,7 @@ struct Watch {
 }
 
 #[derive(Clone, Copy)]
+#[checkpoint::state]
 struct Progress {
     low: Vec3,
     high: Vec3,
@@ -91,11 +94,13 @@ impl Progress {
     }
 }
 
+#[checkpoint::state]
 struct Loan {
     unit: Unit,
     lease: CommandLease,
 }
 
+#[checkpoint::state]
 struct Mission {
     method: &'static str,
     cargo: Unit,
@@ -106,9 +111,12 @@ struct Mission {
     deadline: i32,
     loans: Vec<Loan>,
     phase: Phase,
+    // Ordered remaining removals; save/load must retain an active corridor.
+    clearance: Vec<Unit>,
 }
 
 #[derive(Clone, Copy, Debug)]
+#[checkpoint::state]
 enum Phase {
     Walk,
     Clear { blocker: Unit, worker: Unit },
@@ -148,6 +156,7 @@ impl Ai {
         }
         let affected = self.recovery.mission.as_ref().is_some_and(|m| {
             m.loans.iter().any(|l| l.unit.id() == unit.id())
+                || m.clearance.iter().any(|u| u.id() == unit.id())
                 || matches!(m.phase, Phase::Clear { blocker, .. } if blocker.id() == unit.id())
         });
         if affected && let Some(m) = self.recovery.mission.take() {
@@ -439,51 +448,63 @@ impl Ai {
                 let Some(d) = blocker.def() else {
                     continue;
                 };
-                let mobiles = d.speed() > 0.0;
-                if local.escape(goal, None, mobiles).is_some()
-                    || local.escape(goal, Some(blocker.id()), mobiles).is_none()
-                {
+                if d.speed() <= 0.0 || d.is_able_to_fly() {
                     continue;
                 }
-                if d.speed() > 0.0 && !d.is_able_to_fly() {
-                    if let Some(to) = self.recovery_landing(blocker, goal, 160.0)
-                        && self.terrain_reaches(d, blocker.pos(), to, 32.0)
-                    {
-                        let m = self.recovery_begin(unit, goal, unit.pos(), Phase::Traffic, 12 * 30, &[blocker]);
-                        blocker.move_to(to, 0);
-                        self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 2;
-                        self.recovery.mission = Some(m);
+                if local.escape(goal, Some(blocker.id()), true).is_none() {
+                    continue;
+                }
+                if let Some(to) = self.recovery_landing(blocker, goal, 160.0)
+                    && self.terrain_reaches(d, blocker.pos(), to, 32.0)
+                {
+                    let m = self.recovery_begin(unit, goal, unit.pos(), Phase::Traffic, 12 * 30, &[blocker]);
+                    blocker.move_to(to, 0);
+                    self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 2;
+                    self.recovery.mission = Some(m);
+                    return;
+                }
+            }
+            let candidates: BTreeMap<_, _> = self
+                .cb
+                .friendly_units_in_cylinder(unit.pos(), RADIUS * 1.5)
+                .into_iter()
+                .filter(|&u| self.recovery_free(u) && self.recovery_expendable(u))
+                .map(|u| (u.id(), u))
+                .collect();
+            let prices =
+                candidates.iter().map(|(&id, u)| (id, u.def().unwrap().cost(self.metal).ceil() as u32)).collect();
+            if let Some(ids) = local.clearance(goal, &prices) {
+                let blockers: Vec<_> = ids.iter().map(|id| candidates[id]).collect();
+                if self.recovery_clearance_safe(&blockers) {
+                    let blocker = blockers[0];
+                    let worker = self
+                        .eco
+                        .workers
+                        .values()
+                        .map(|w| w.unit)
+                        .find(|&w| self.recovery_free(w) && self.recovery_reclaim_path(w, blocker).is_some());
+                    if let Some(worker) = worker {
+                        let mut m = self.recovery_begin(
+                            unit,
+                            goal,
+                            unit.pos(),
+                            Phase::Clear { blocker, worker },
+                            30 * 30,
+                            &[worker],
+                        );
+                        m.clearance = blockers[1..].to_vec();
+                        if blockers.iter().any(|u| self.defs.name_of(*u) == "energywind") {
+                            m.method = "wind";
+                        }
+                        if self.recovery_order_clear(worker, blocker) {
+                            self.log(&format!("recovery: clear corridor {:?} for #{}", ids, unit.id()));
+                            self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 2;
+                            self.recovery.mission = Some(m);
+                        } else {
+                            self.recovery_finish(m, false);
+                        }
                         return;
                     }
-                } else if self.recovery_expendable(blocker)
-                    && let Some(worker) = self.eco.workers.values().map(|w| w.unit).find(|&w| {
-                        self.recovery_free(w)
-                            && w.def().is_some_and(|d| {
-                                d.is_able_to_reclaim() && distance(w.pos(), blocker.pos()) < d.build_distance() * 0.9
-                            })
-                    })
-                {
-                    let m = self.recovery_begin(
-                        unit,
-                        goal,
-                        unit.pos(),
-                        Phase::Clear { blocker, worker },
-                        30 * 30,
-                        &[worker],
-                    );
-                    if worker.reclaim_unit(blocker, 0) {
-                        self.log(&format!(
-                            "recovery: reclaim owned {} #{} to open exit for #{}",
-                            self.defs.name_of(blocker),
-                            blocker.id(),
-                            unit.id()
-                        ));
-                        self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 2;
-                        self.recovery.mission = Some(m);
-                    } else {
-                        self.recovery_finish(m, false);
-                    }
-                    return;
                 }
             }
         }
@@ -495,27 +516,66 @@ impl Ai {
     }
 
     fn recovery_expendable(&self, unit: Unit) -> bool {
-        if unit.team() != self.team_id
-            || self.defs.name_of(unit) != "energysolar"
-            || self.eco.hard_estalled
-            || unit.def().is_none_or(|d| !d.is_reclaimable() || d.cost(self.metal) > 100.0)
-            || self.eco.effective_income_energy - 2.0 < self.eco.effective_expenditure
-        {
+        unit.team() == self.team_id
+            && matches!(self.defs.name_of(unit), "energysolar" | "energywind")
+            // Initial candidates pass recovery_free (finished units only).
+            // Reclaim itself lowers build progress; keep that active target
+            // eligible until it disappears instead of aborting a partial cut.
+            && unit.def().is_some_and(|d| d.is_reclaimable() && d.cost(self.metal) <= 100.0)
+    }
+
+    fn recovery_clearance_safe(&self, blockers: &[Unit]) -> bool {
+        if self.eco.hard_estalled || blockers.iter().any(|&u| !self.recovery_expendable(u)) {
             return false;
         }
-        // Conservatively preserve grid bridges: all direct neighbours must
-        // remain directly connected to one another without this Solar.
+        let loss: f32 = blockers
+            .iter()
+            .map(|u| {
+                // Wind output varies. Budget at least its current output and a
+                // conservative 2.5 E floor, rather than assuming Solar's fixed 2 E.
+                let floor = if self.defs.name_of(*u) == "energywind" { 2.5 } else { 2.0 };
+                u.rules_param_float("current_energyIncome", floor).max(floor)
+            })
+            .sum();
+        if self.eco.effective_income_energy - loss < self.eco.effective_expenditure {
+            return false;
+        }
         let nodes: Vec<_> = self
             .cb
             .friendly_units()
             .into_iter()
-            .filter(|u| u.id() != unit.id())
             .filter_map(|u| {
                 let r = u.def()?.custom_param("pylonrange")?.parse::<f32>().ok()?;
-                (distance(u.pos(), unit.pos()) < r + 100.0).then_some((u.pos(), r))
+                (r > 0.0 && !u.is_being_built()).then_some((u.id(), u.pos(), r))
             })
             .collect();
-        nodes.iter().all(|(a, ar)| nodes.iter().all(|(b, br)| distance(*a, *b) <= ar + br))
+        preserves_grid(&nodes, &blockers.iter().map(Unit::id).collect::<Vec<_>>())
+    }
+
+    fn recovery_reclaim_path(&self, worker: Unit, blocker: Unit) -> Option<Vec<Vec3>> {
+        let d = worker.def()?;
+        if !d.is_able_to_reclaim() || self.war.get_effective_threat(worker.pos()) > 0.0 {
+            return None;
+        }
+        let range = d.build_distance() * 0.85;
+        if distance(worker.pos(), blocker.pos()) < range {
+            return Some(Vec::new());
+        }
+        if distance(worker.pos(), blocker.pos()) > RADIUS + range {
+            return None;
+        }
+        let path = self.recovery_local(worker)?.within(blocker.pos(), range)?;
+        path.iter().all(|&p| self.war.get_effective_threat(p) <= 0.0).then_some(path)
+    }
+
+    fn recovery_order_clear(&self, worker: Unit, blocker: Unit) -> bool {
+        let Some(path) = self.recovery_reclaim_path(worker, blocker) else {
+            return false;
+        };
+        for (n, p) in path.iter().step_by(3).chain(path.last()).enumerate() {
+            worker.move_to(self.recovery_ground(*p), if n == 0 { 0 } else { springai::opt::SHIFT_KEY });
+        }
+        worker.reclaim_unit(blocker, if path.is_empty() { 0 } else { springai::opt::SHIFT_KEY })
     }
 
     fn recovery_begin(
@@ -529,6 +589,7 @@ impl Ai {
     ) -> Mission {
         let method = match phase {
             Phase::Walk => "walk",
+            Phase::Clear { blocker, .. } if self.defs.name_of(blocker) == "energywind" => "wind",
             Phase::Clear { .. } => "solar",
             Phase::Traffic => "traffic",
             Phase::Lobster { .. } => "lobster",
@@ -554,6 +615,7 @@ impl Ai {
             deadline: self.frame + duration,
             loans,
             phase,
+            clearance: Vec::new(),
         }
     }
 
@@ -607,9 +669,97 @@ impl Ai {
     }
 }
 
+/// Removing a corridor must not split any previously connected surviving grid
+/// nodes. Redundant chains count: requiring every neighbour to link directly
+/// incorrectly rejects ordinary wind farms with alternate paths.
+fn preserves_grid(nodes: &[(i32, Vec3, f32)], removed: &[i32]) -> bool {
+    let components = |exclude: bool| {
+        let mut group = vec![usize::MAX; nodes.len()];
+        for start in 0..nodes.len() {
+            if group[start] != usize::MAX || (exclude && removed.contains(&nodes[start].0)) {
+                continue;
+            }
+            group[start] = start;
+            let mut pending = vec![start];
+            while let Some(i) = pending.pop() {
+                for j in 0..nodes.len() {
+                    if group[j] == usize::MAX
+                        && !(exclude && removed.contains(&nodes[j].0))
+                        && distance(nodes[i].1, nodes[j].1) <= nodes[i].2 + nodes[j].2
+                    {
+                        group[j] = start;
+                        pending.push(j);
+                    }
+                }
+            }
+        }
+        group
+    };
+    let (before, after) = (components(false), components(true));
+    let mut mapping = BTreeMap::new();
+    for i in 0..nodes.len() {
+        if removed.contains(&nodes[i].0) {
+            continue;
+        }
+        if let Some(old) = mapping.insert(before[i], after[i])
+            && old != after[i]
+        {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grid_allows_redundant_wind_chain_but_preserves_bridges() {
+        let nodes = [
+            (1, Vec3::xz(0.0, 0.0), 63.0),
+            (2, Vec3::xz(100.0, 0.0), 63.0),
+            (3, Vec3::xz(200.0, 0.0), 63.0),
+            (4, Vec3::xz(0.0, 100.0), 63.0),
+            (5, Vec3::xz(100.0, 100.0), 63.0),
+            (6, Vec3::xz(200.0, 100.0), 63.0),
+        ];
+        assert!(preserves_grid(&nodes, &[2]));
+        assert!(preserves_grid(&nodes, &[1, 2]));
+        assert!(!preserves_grid(&nodes, &[2, 5]));
+        assert!(!preserves_grid(&nodes[..3], &[2]));
+    }
+
+    #[test]
+    fn active_clearance_roundtrip_preserves_order_deadlines_and_leases() {
+        let raw = unsafe { std::mem::zeroed() };
+        let cb = unsafe { springai::Callback::from_raw(19, &raw) };
+        let unit = |id| Unit::from_id(cb, id).unwrap();
+        let m = Mission {
+            method: "wind",
+            cargo: unit(1),
+            from: Vec3::xz(12.0, 34.0),
+            goal: Vec3::xz(500.0, 100.0),
+            to: Vec3::xz(12.0, 34.0),
+            since: 1500,
+            deadline: 2400,
+            loans: vec![Loan { unit: unit(2), lease: reserved::lend(cb, 2, OWNER) }],
+            phase: Phase::Clear { blocker: unit(3), worker: unit(2) },
+            clearance: vec![unit(5), unit(4)],
+        };
+        let bytes = checkpoint::encode(&m).unwrap();
+        let restored: Mission = springai::snapshot::with_callback(cb, || {
+            checkpoint::with_literals(&["wind"], || checkpoint::rmp_serde::from_slice(&bytes))
+        })
+        .unwrap();
+        assert_eq!(checkpoint::encode(&restored).unwrap(), bytes);
+        assert_eq!(restored.clearance.iter().map(Unit::id).collect::<Vec<_>>(), vec![5, 4]);
+        assert_eq!(restored.deadline, 2400);
+        assert!(restored.loans[0].lease.active());
+        for loan in restored.loans {
+            loan.lease.release();
+        }
+    }
+
     #[test]
     fn reorders_and_small_oscillation_cannot_hide_a_stall() {
         let mut p = Progress::new(Vec3::xz(0.0, 0.0), Vec3::xz(500.0, 0.0), 0);

@@ -19,11 +19,25 @@ one suspect per second gets a 16-elmo local occupancy search. The search expands
 mobile units and blocking features by the passenger's footprint, samples current
 slope/depth, and distinguishes a static enclosure from temporary traffic.
 
-Recovery tries a bounded walk out, then an owned mobile blocker or a Solar whose
-removal actually opens an exit. Allied blockers are never commanded or reclaimed.
-Solar reclaim requires a constructor already in range, spare energy, a cost of
-at most 100 metal, and no loss of connectivity between its direct grid neighbours.
+Recovery tries a bounded walk out, then an owned mobile blocker or a short
+corridor through owned Solars and wind generators. The corridor search keeps
+terrain, features, allied buildings and other structures impassable. It proposes
+at most three cheap buildings (150 metal total), whose combined removal opens
+an exit; it does not require each removal to open the entire route individually.
+A constructor must be in reclaim range or have a verified, locally reachable
+approach into range without known ground threat. Energy checks budget the entire
+remaining corridor, using current output (at least 2 E per Solar and 2.5 E per
+wind), and preserve connectivity among surviving grid nodes, allowing alternate
+grid paths. Recheck these conditions before each removal and during reclaim.
 The constructor may be the trapped unit itself. No stuck fighter is scrapped.
+
+The recovery state codec preserves the ordered remaining blockers, current
+reclaim, worker lease and deadlines. Engine save/load activation belongs to the
+repository-wide checkpoint integration. Disabling recovery cancels the mission on the next
+update; it does not discard the saved history. Ownership changes cancel affected
+clearance immediately. Active-mission snapshots predating the added mission
+field are rejected by the strict schema rather than silently losing pending
+removals.
 
 Evacuation uses an available Lobster, an idle deployed Djinn, or a compatible
 Charon/Hercules. Lobster checks every potential passenger and each translated
@@ -72,3 +86,15 @@ with zero reported panics/errors. Solar, Lobster, Djinn, Charon and Hercules
 completed their dispatched missions in 18, 11, 17, 13 and 22 seconds respectively.
 This verifies isolated mechanisms; contested, densely populated matches still
 need observation to tune intervention thresholds and rescue throughput.
+
+`test=recoverywind` exercises one, two and three wind generators in a narrow
+exit, including a constructor initially outside reclaim range. Its three cases
+use the normal recovery detector and require actual post-clearance movement.
+
+On 2026-11-06, all three `recoverywind` cases passed on Comet Catcher Redux
+v3.1 with Recoil 2026.07.04 (16,200 frames, seed 714). The one-, two-, and
+three-turbine missions completed in 11, 21 and 33 seconds; their Reavers moved
+959, 1,045 and 464 elmos. The existing five-case `recovery` suite also passed
+on the same library (27,001 frames). Both runs reported zero panics/errors.
+These isolated live checks validate clearance and evacuation mechanisms; they
+are not a replay counterfactual of the reported Ravaged match.
