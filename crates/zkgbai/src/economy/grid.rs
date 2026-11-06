@@ -688,16 +688,15 @@ fn components(members: &[Member]) -> (Vec<usize>, Vec<f32>) {
     // A nanoframe can receive power at its site, but cannot bridge two
     // live grids before completion. Pick a real adjacent component.
     for i in 0..n {
-        if !members[i].conducts {
-            if let Some(j) = (0..n)
+        if !members[i].conducts
+            && let Some(j) = (0..n)
                 .filter(|&j| {
                     members[j].conducts
                         && distance(members[i].pos, members[j].pos) < members[i].range + members[j].range
                 })
                 .max_by(|&a, &b| capacity[grid[a]].total_cmp(&capacity[grid[b]]))
-            {
-                grid[i] = grid[j];
-            }
+        {
+            grid[i] = grid[j];
         }
     }
     (grid, capacity)

@@ -967,9 +967,9 @@ impl Ai {
             let Some(f) = self.fighters.get(&id) else { continue };
             let spare_support = self.misc_handler.supports.contains(&id)
                 && self.unit_classes.mob_supports.contains(self.defs.name_of(f.unit));
-            if !f.shield_mob
-                && !spare_support
-                && !(self.squads.get(sid).is_some_and(|s| s.shape.doctrine == "dominatrix")
+            if !(f.shield_mob
+                || spare_support
+                || self.squads.get(sid).is_some_and(|s| s.shape.doctrine == "dominatrix")
                     && self.defs.name_of(f.unit) == "vehriot")
             {
                 continue;

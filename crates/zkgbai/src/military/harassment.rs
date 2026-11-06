@@ -469,8 +469,7 @@ mod tests {
 
     #[test]
     fn nondefault_checkpoint_continues_the_same_exit_and_cooldown() {
-        let mut h = Harassment::default();
-        h.cursor = 78;
+        let mut h = Harassment { cursor: 78, ..Default::default() };
         h.next_check.insert(78, 456);
         let mut p = plan();
         p.observe_shot(137);

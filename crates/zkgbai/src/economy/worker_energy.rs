@@ -45,10 +45,10 @@ impl Ai {
             .workers
             .values()
             .filter(|w| {
-                !w.is_chicken
-                    && !(w.assigned_plop && w.has_plop())
-                    && !self.eco_worker_held(w.id)
-                    && !springai::reserved::is_reserved(self.cb, w.id)
+                !(w.is_chicken
+                    || w.assigned_plop && w.has_plop()
+                    || self.eco_worker_held(w.id)
+                    || springai::reserved::is_reserved(self.cb, w.id))
                     && w.unit.health() > 0.0
                     && w.unit.team() == self.team_id
                     && !w.task.is_some_and(|id| self.op_priority(id) || self.conquest_bonus(w.id, id).is_some())

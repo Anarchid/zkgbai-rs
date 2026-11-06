@@ -863,7 +863,7 @@ impl Squad {
                 unit.set_move_state(0, 0);
                 self.fighters.push(id);
                 if self.license.is_some() {
-                    if let Some(nav) = nav.as_deref_mut() {
+                    if let Some(nav) = nav {
                         crate::military::license::transit(unit, leader.pos(), nav);
                     } else {
                         unit.stop(0);

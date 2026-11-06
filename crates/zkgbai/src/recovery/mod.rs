@@ -427,20 +427,20 @@ impl Ai {
         self.log(&format!("recovery: {} #{} stalled at ({:.0},{:.0}); factory={}, moveFailed={}, static_exit={}, traffic_exit={}, attempts={attempted}",
             self.defs.name_of(unit), unit.id(), unit.pos().x, unit.pos().z, self.recovery.births.contains_key(&unit.id()),
             self.recovery.failures.contains_key(&unit.id()), static_path.is_some(), path.is_some()));
-        if attempted & 1 == 0 {
-            if let Some(path) = path.or(static_path) {
-                let to = *path.last().unwrap();
-                let mission = self.recovery_begin(unit, goal, to, Phase::Walk, 15 * 30, &[]);
-                for (n, p) in path.iter().step_by(3).chain(path.last()).enumerate() {
-                    unit.move_to(self.recovery_ground(*p), if n == 0 { 0 } else { springai::opt::SHIFT_KEY });
-                }
-                self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 1;
-                self.recovery.mission = Some(mission);
-                return;
+        if attempted & 1 == 0
+            && let Some(path) = path.or(static_path)
+        {
+            let to = *path.last().unwrap();
+            let mission = self.recovery_begin(unit, goal, to, Phase::Walk, 15 * 30, &[]);
+            for (n, p) in path.iter().step_by(3).chain(path.last()).enumerate() {
+                unit.move_to(self.recovery_ground(*p), if n == 0 { 0 } else { springai::opt::SHIFT_KEY });
             }
-            // No walk was attempted. A neighbour's clearance can open a
-            // route before this unit moves; reconsider it on the next probe.
+            self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 1;
+            self.recovery.mission = Some(mission);
+            return;
         }
+        // No walk was attempted. A neighbour's clearance can open a
+        // route before this unit moves; reconsider it on the next probe.
         if attempted & 2 == 0 && local.escape(goal, None, true).is_none() {
             let blockers = self.cb.friendly_units_in_cylinder(unit.pos(), RADIUS);
             for blocker in blockers {

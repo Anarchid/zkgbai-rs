@@ -228,8 +228,9 @@ mod tests {
     fn routes_issue_raw_move_and_replace_then_queue() {
         use springai::ffi;
         use std::{cell::RefCell, ffi::c_void};
+        type SentCommand = (i32, i32, i16, Vec<f32>);
         thread_local! {
-            static SENT: RefCell<Vec<(i32, i32, i16, Vec<f32>)>> = const { RefCell::new(Vec::new()) };
+            static SENT: RefCell<Vec<SentCommand>> = const { RefCell::new(Vec::new()) };
         }
         unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, data: *mut c_void) -> i32 {
             if topic == ffi::CommandTopic::COMMAND_UNIT_CUSTOM as i32 {

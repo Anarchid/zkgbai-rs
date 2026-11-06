@@ -15,6 +15,9 @@ use crate::util::{NULLPOS, distance};
 
 const SHIELD_MARGIN: f32 = 90.0;
 
+/// Haven, protected destinations with their values, and dedicated-cloak entitlement.
+type CloakGroup = (Vec3, Vec<(Vec3, f32)>, bool);
+
 #[derive(Default)]
 #[checkpoint::state]
 pub struct Dominatrices {
@@ -419,8 +422,8 @@ impl Ai {
 
     /// VIPs at the same haven can share one field, including their captured
     /// commanders. Expose destinations so a free Iris meets them at safety.
-    pub(crate) fn dominatrix_cloak_groups(&self) -> Vec<(Vec3, Vec<(Vec3, f32)>, bool)> {
-        let mut groups: Vec<(Vec3, Vec<(Vec3, f32)>, bool)> = Vec::new();
+    pub(crate) fn dominatrix_cloak_groups(&self) -> Vec<CloakGroup> {
+        let mut groups: Vec<CloakGroup> = Vec::new();
         for vip in self.taskforces.dominatrices.retired.values() {
             if vip.home == NULLPOS || vip.unit.health() <= 0.0 || vip.unit.team() != self.team_id {
                 continue;

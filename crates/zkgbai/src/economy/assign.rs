@@ -632,8 +632,8 @@ impl Ai {
                 .reach_terrain()
                 .and_then(|t| t.tier(Tier::Spider))
                 .is_some_and(|m| m.reaches_within(terrain_pos(w.get_pos()), terrain_pos(t.get_pos()), range, SNAP));
-        !(t.as_construction().is_some_and(|c| c.fortification) && self.eco_fortify_travel(w, t.get_pos()).is_none())
-            && !self.eco_repair_paused(t)
+        !(t.as_construction().is_some_and(|c| c.fortification) && self.eco_fortify_travel(w, t.get_pos()).is_none()
+            || self.eco_repair_paused(t))
             && self.eco.silo_work_allowed(t)
             && self.eco_prerequisites_ready(t)
             && def.is_none_or(|d| self.terrain_reaches(d, w.get_pos(), t.get_pos(), range) || spider_reach)

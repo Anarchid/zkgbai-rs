@@ -74,7 +74,7 @@ fn lane_site(task: &WorkerTask, ids: &BuildIds) -> Option<Vec3> {
     let c = task.as_construction()?;
     let id = c.build_type.id();
     let expanding = id == ids.mex_id || id == ids.solar_id || id == ids.wind_id;
-    (expanding && !c.target.is_some_and(|u| !u.is_being_built())).then(|| task.get_pos())
+    (expanding && c.target.is_none_or(|u| u.is_being_built())).then(|| task.get_pos())
 }
 
 impl Ai {

@@ -99,6 +99,7 @@ impl Ai {
                 continue;
             }
             let Some(def) = unit.def().filter(|&d| constructor(d)) else { continue };
+            #[allow(clippy::manual_clamp, reason = "Preserve the finite fallback for NaN income")]
             let delay = def.cost(self.metal) * (1.0 - unit.build_progress()).clamp(0.0, 1.0)
                 / self.eco.effective_income.max(1.0).min(CON_BUILD_POWER);
             out.extend(self.invade_builder_source(def, unit.pos(), delay, 0.0, None));

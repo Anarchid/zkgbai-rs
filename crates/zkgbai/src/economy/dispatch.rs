@@ -250,12 +250,12 @@ impl Ai {
         let energy = self.dispatch_energy_hand() == Some(wid);
         if old.is_some() && (!valid || !safe) {
             self.dispatch_release(wid, if !valid { "invalid or unavailable" } else { "danger" }, true);
-        } else if let Some(current) = old {
-            if !self.dispatch_observe(wid, current) {
-                let pos = self.eco.task_pos(current);
-                self.eco.workers.get_mut(&wid)?.shunned.push((pos, self.frame + SHUN));
-                self.dispatch_release(wid, "no progress with resources available", false);
-            }
+        } else if let Some(current) = old
+            && !self.dispatch_observe(wid, current)
+        {
+            let pos = self.eco.task_pos(current);
+            self.eco.workers.get_mut(&wid)?.shunned.push((pos, self.frame + SHUN));
+            self.dispatch_release(wid, "no progress with resources available", false);
         }
         let current = self.eco.workers.get(&wid)?.task;
         if let Some((next, _, why, _)) =

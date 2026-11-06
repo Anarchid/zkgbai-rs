@@ -21,7 +21,7 @@ mod tests {
     use std::ffi::{CStr, c_char};
 
     thread_local! {
-        static OWNERS: RefCell<BTreeMap<i32, f32>> = RefCell::new(BTreeMap::new());
+        static OWNERS: RefCell<BTreeMap<i32, f32>> = const { RefCell::new(BTreeMap::new()) };
     }
 
     fn fixture() -> Ai {

@@ -376,11 +376,14 @@ impl Ai {
                 });
             }
             let mut assessment = None;
-            if !unknown && snap.units.len() <= 96 && snap.armed(0) > 0 && snap.armed(1) > 0 {
-                if let Some(model) = self.local_model() {
-                    let fates = model.ordered_kiting_fates(&snap, HORIZON);
-                    assessment = Some(trade(&snap, &fates));
-                }
+            if !unknown
+                && snap.units.len() <= 96
+                && snap.armed(0) > 0
+                && snap.armed(1) > 0
+                && let Some(model) = self.local_model()
+            {
+                let fates = model.ordered_kiting_fates(&snap, HORIZON);
+                assessment = Some(trade(&snap, &fates));
             }
             if assessment.is_some_and(|(harm, kills)| worthwhile(harm, kills)) {
                 l.members = local.iter().copied().collect();
