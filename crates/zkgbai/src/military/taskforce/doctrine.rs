@@ -1423,6 +1423,21 @@ pub fn seeds() -> Vec<Doctrine> {
     felon.regroup = true;
     felon.reinforce_engaged = true;
 
+    let mut dominatrix = Doctrine::new("dominatrix");
+    dominatrix.note = "Three Dominatrices form a fireteam, reinforcing up to ten. One optional Ripper per \
+                      three cores; after the density unlock, up to one rearward Aspis per core. \
+                      Valuable captors retire."
+        .into();
+    dominatrix.core = vec!["vehcapture".into()];
+    dominatrix.cores_per_force = 10;
+    dominatrix.core_keep = Keep::Formation;
+    dominatrix.reinforce_engaged = true;
+    dominatrix.muster = 0.0;
+    dominatrix.roles = vec![
+        Role { keep: Keep::Formation, ..Role::escort("rippers", &["vehriot"], "floor(cores / 3)", 100.0, 0.5) },
+        Role { keep: Keep::Trail, gauge: false, ..Role::escort("aspis", &["shieldshield"], "cores", 260.0, 0.0) },
+    ];
+
     let mut lance = Doctrine::new("lance");
     lance.note = "Up to four Lances share one standing spotter, with an Iris once the battery is full. \
                   Each Lance (980 range, 3000 a shot) has a Mace, or two Bolas, against the raiders that pick \
@@ -1655,8 +1670,8 @@ pub fn seeds() -> Vec<Doctrine> {
     ghostbombs.muster = 90.0;
 
     vec![
-        felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger, blitz, crab,
-        ghostbombs,
+        dominatrix, felon, lance, phantom, envoy, tremor, emissary, impaler, ravager, minotaur, scorcher, dagger,
+        blitz, crab, ghostbombs,
     ]
 }
 

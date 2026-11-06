@@ -172,6 +172,7 @@ impl Ai {
             && unit.team() == self.team_id
             && !unit.is_being_built()
             && !reserved::is_reserved(self.cb, id)
+            && !self.dominatrix_vip(id)
             && !self.recovery_owns(id)
             && !self.eco_worker_held(id)
             && !reserved::owner(self.cb, id).is_some_and(|o| matches!(o.module, "coalesce" | "strikes" | "airstrikes"))

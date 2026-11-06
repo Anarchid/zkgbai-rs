@@ -87,6 +87,11 @@ fn choose(
         for pos in candidates {
             let field = Field { pos, radius };
             let (total, added) = coverage(field, &group.assets, others);
+            // A retirement haven is one shared field, not partial coverage
+            // of whichever VIP is worth most. Its procurement counts one.
+            if group.squad.is_none() && group.priority == 0 && group.assets.iter().any(|&(p, _)| !field.covers(p)) {
+                continue;
+            }
             // A dedicated battery escort keeps its battery covered even
             // while two batteries pass through one another's cloak fields.
             let value = added + if locked.is_some() { total * 0.1 } else { 0.0 };
@@ -116,6 +121,31 @@ impl Ai {
             .and_then(|s| s.parse::<f32>().ok())
             .filter(|r| r.is_finite() && *r > EDGE)
             .unwrap_or(fallback)
+    }
+
+    /// A field already committed to a retirement haven is unavailable to
+    /// late battery recruitment, including while its Iris is still en route.
+    pub(crate) fn cloak_reserved_for_vips(&self, id: i32) -> bool {
+        let Some(&pos) = self.misc_handler.cloaks.posts.get(&id) else { return false };
+        let field = Field { pos, radius: self.cloak_radius("cloakjammer", 350.0) };
+        self.dominatrix_cloak_groups().iter().any(|(_, assets, _)| assets.iter().all(|(p, _)| field.covers(*p)))
+    }
+
+    pub(crate) fn existing_cloak_covers(&self, unit: Unit, pos: Vec3) -> bool {
+        if unit.health() <= 0.0 || unit.is_being_built() || unit.rules_param_float("cloak_shield", 2.0) <= 0.0 {
+            return false;
+        }
+        let nominal = match self.defs.name_of(unit) {
+            "cloakjammer" => self.cloak_radius("cloakjammer", 350.0),
+            "staticjammer" => self.cloak_radius("staticjammer", 400.0),
+            _ => return false,
+        };
+        let at = unit.pos();
+        let field = Field {
+            pos: Vec3::xz(unit.rules_param_float("cloaker_pos_x", at.x), unit.rules_param_float("cloaker_pos_z", at.z)),
+            radius: unit.rules_param_float("cloakerRadius", nominal).clamp(0.0, nominal),
+        };
+        field.covers(pos)
     }
 
     pub(super) fn misc_update_cloakers(&mut self, friendly: &[Unit]) {
@@ -163,7 +193,7 @@ impl Ai {
                 (r > EDGE).then_some(Field { pos, radius: r })
             })
             .collect();
-        let groups: Vec<_> = self
+        let mut groups: Vec<_> = self
             .support_ground_squads()
             .into_iter()
             .filter_map(|sid| {
@@ -190,9 +220,15 @@ impl Ai {
                     assets.iter().map(|a| a.0.x).sum::<f32>() / n,
                     assets.iter().map(|a| a.0.z).sum::<f32>() / n,
                 );
-                Some(Group { squad: Some(sid), priority: 0, anchor, assets })
+                Some(Group { squad: Some(sid), priority: 1, anchor, assets })
             })
             .collect();
+        groups.extend(self.dominatrix_cloak_groups().into_iter().map(|(anchor, assets, _)| Group {
+            squad: None,
+            priority: 0,
+            anchor,
+            assets,
+        }));
         let map = self.cb.map();
         let bounds = (map.width() as f32 * 8.0, map.height() as f32 * 8.0);
         for (id, unit, locked) in owned {
@@ -260,6 +296,22 @@ mod tests {
             anchor: Vec3::xz(x, 1000.0),
             assets: vec![(Vec3::xz(x, 1000.0), metal)],
         }
+    }
+
+    #[test]
+    fn retirement_haven_precedes_frontline_and_one_field_covers_every_vip() {
+        let front = Group { priority: 1, ..group(1, 2000.0, 50000.0) };
+        let vip = Group {
+            squad: None,
+            priority: 0,
+            anchor: Vec3::xz(1000.0, 1000.0),
+            assets: vec![(Vec3::xz(1000.0, 1000.0), 10000.0), (Vec3::xz(1180.0, 1000.0), 1000.0)],
+        };
+        let assets = vip.assets.clone();
+        let (post, squad) =
+            choose(&[front, vip], &[], 350.0, Vec3::xz(800.0, 1000.0), None, None, |_, _| true).unwrap();
+        assert_eq!(squad, None);
+        assert!(assets.iter().all(|(p, _)| (Field { pos: post, radius: 350.0 }).covers(*p)));
     }
 
     #[test]

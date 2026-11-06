@@ -62,6 +62,11 @@ fn fallback_priority(front: bool, turret: bool, combatant: bool, building: bool)
 impl Ai {
     fn support_squad_anchor(&self, sid: SquadId, support: Unit) -> Option<(Vec3, f32)> {
         let squad = self.squads.get(sid)?;
+        // Dominatrix shields are recruited with a per-core cap and placed
+        // behind the entire firing line by their doctrine.
+        if squad.shape.doctrine == "dominatrix" {
+            return None;
+        }
         let (pos, metal) = combat_anchor(squad, &self.fighters, &self.defs, &self.unit_classes, |id| {
             !self.retreat_handler.is_retreating(id)
                 && self.fighters.get(&id).and_then(|f| f.unit.def()).is_some_and(|d| !d.is_able_to_fly())
@@ -85,6 +90,16 @@ impl Ai {
                     || self.unit_classes.mob_supports.contains(name)
                     || matches!(name, "staticshield" | "staticjammer")
                     || self.retreat_handler.is_retreating(unit.id())
+                {
+                    return None;
+                }
+                if self.defs.name_of(support) == "shieldshield"
+                    && self
+                        .fighters
+                        .get(&unit.id())
+                        .and_then(|f| f.squad)
+                        .and_then(|sid| self.squads.get(sid))
+                        .is_some_and(|s| s.shape.doctrine == "dominatrix")
                 {
                     return None;
                 }

@@ -212,7 +212,7 @@ pub(crate) fn release_unit(unit: Unit) {
 impl Squad {
     pub(crate) fn release_fire(&mut self, fighters: &FighterStore) {
         if self.fire.active() {
-            for f in self.fighters.iter().filter_map(|id| fighters.get(id)) {
+            for f in self.everyone().filter_map(|id| fighters.get(&id)) {
                 release_unit(f.unit);
             }
             self.fire = FireState::default();
@@ -231,10 +231,13 @@ impl Ai {
     /// tactical controller can release them after a commitment or along a
     /// clear route home. The ordinary retreat handler owns them afterward.
     pub(crate) fn fire_controls(&self, id: i32) -> bool {
-        !self.dev_off("firesquads")
-            && self.fighters.get(&id).and_then(|f| f.squad).and_then(|sid| self.squads.get(sid)).is_some_and(|s| {
-                s.fire.active() && s.status == 'a' && !self.qrf_drafted(s.id) && self.op_squad_target(s.id).is_none()
-            })
+        self.fighters.get(&id).and_then(|f| f.squad).and_then(|sid| self.squads.get(sid)).is_some_and(|s| {
+            (!self.dev_off("firesquads") || s.shape.doctrine == "dominatrix")
+                && s.fire.active()
+                && s.status == 'a'
+                && !self.qrf_drafted(s.id)
+                && self.op_squad_target(s.id).is_none()
+        })
     }
 
     /// Like a pack's clear-way check, but for the wounded member's own
@@ -263,9 +266,10 @@ impl Ai {
         let Some(s) = self.squads.get(sid) else {
             return false;
         };
+        let dominatrix = s.is_taskforce() && s.shape.doctrine == "dominatrix";
         if self.limpet_squad_managed(sid)
-            || self.dev_off("firesquads")
-            || s.kind != SquadKind::Assault
+            || (!dominatrix && self.dev_off("firesquads"))
+            || (!dominatrix && s.kind != SquadKind::Assault)
             || s.is_air_squad
         {
             self.fire_release(sid);
@@ -273,9 +277,9 @@ impl Ai {
         }
         let old = s.fire.clone();
         let members: Vec<_> = s
-            .fighters
-            .iter()
-            .filter_map(|id| self.fighters.get(id))
+            .everyone()
+            .filter_map(|id| self.fighters.get(&id))
+            .filter(|f| !dominatrix || self.defs.name_of(f.unit) != "shieldshield")
             .filter(|f| !f.is_dead() && !self.retreat_handler.is_retreating(f.id))
             .filter_map(|f| {
                 let d = f.unit.def()?;
@@ -287,7 +291,7 @@ impl Ai {
                     unit: f.unit,
                     value: f.metal_value,
                     range: d.max_weapon_range(),
-                    skirmisher: core_type(self.defs.name(d)),
+                    skirmisher: core_type(self.defs.name(d)) || (dominatrix && self.defs.name(d) == "vehcapture"),
                     health: hp,
                     speed: d.speed(),
                 })
@@ -295,7 +299,12 @@ impl Ai {
             .collect();
         let total: f32 = members.iter().map(|m| m.value).sum();
         let guns = members.iter().filter(|m| m.skirmisher).map(|m| (m.range, m.value)).collect();
-        let Some(range) = core_range(total, guns, old.active()) else {
+        let range = if dominatrix {
+            members.iter().filter(|m| m.skirmisher).map(|m| m.range).reduce(f32::min)
+        } else {
+            core_range(total, guns, old.active())
+        };
+        let Some(range) = range else {
             self.fire_release(sid);
             return false;
         };
@@ -340,7 +349,10 @@ impl Ai {
         let out = outranged(&contacts, range, old.mode == Mode::Evade);
         // With no contact a newly formed squad still adopts ordinary
         // assault targeting; an existing line stays together in transit.
-        if !old.active() && (contacts.is_empty() || (!out && !contacts.iter().any(|e| !e.outranges(range)))) {
+        if !dominatrix
+            && !old.active()
+            && (contacts.is_empty() || (!out && !contacts.iter().any(|e| !e.outranges(range))))
+        {
             return false;
         }
         let focus_alive = old.focus.is_some_and(|id| contacts.iter().any(|e| e.id == id));
@@ -375,7 +387,9 @@ impl Ai {
         }
         let health = members.iter().map(|m| m.value * m.health).sum::<f32>() / total.max(1.0);
         let enemy_ids: Vec<_> = contacts.iter().map(|e| e.id).collect();
-        let favorable = out && self.fire_commit_favorable(sid, &enemy_ids);
+        // The damage predictor does not value capture beams. Do not turn
+        // its result into a charge that sacrifices the captors.
+        let favorable = !dominatrix && out && self.fire_commit_favorable(sid, &enemy_ids);
         let mode = choose_mode(old.mode, out, favorable, committed);
         let target = contacts
             .iter()
@@ -411,6 +425,7 @@ impl Ai {
         } else {
             self.incursion_block(sid).unwrap_or_else(|| self.war_get_target(leader, true))
         };
+        let goal = if goal == NULLPOS { anchor } else { goal };
         let focus = target.map(|e| e.id);
         let commit_until = if mode == Mode::Commit && (old.mode != mode || !committed) {
             self.frame + COMMIT_FRAMES
@@ -427,12 +442,36 @@ impl Ai {
         if let Some(s) = self.squads.get_mut(sid) {
             s.fire = FireState { mode, cores: cores.clone(), range, commit_until, focus };
             s.target = goal;
-            s.leader = Some(leader.id());
+            if dominatrix {
+                s.take_lead(leader.id(), &mut self.fighters);
+                s.engaging = true;
+            } else {
+                s.leader = Some(leader.id());
+            }
         }
-        let speed = members.iter().map(|m| m.speed).filter(|s| *s > 0.0).fold(f32::MAX, f32::min);
+        let mut speed = members.iter().map(|m| m.speed).filter(|s| *s > 0.0).fold(f32::MAX, f32::min);
+        if dominatrix {
+            // Once shields join, keep them within coverage as we advance.
+            // Their absence never slows or delays a bare fireteam.
+            for f in self.squads.get(sid).into_iter().flat_map(|s| s.everyone()).filter_map(|id| self.fighters.get(&id))
+            {
+                if !f.is_dead()
+                    && let Some(def) = f.unit.def()
+                    && def.speed() > 0.0
+                {
+                    speed = speed.min(def.speed());
+                }
+            }
+        }
         let step = (speed * 1.5).clamp(45.0, 180.0);
         let scattered = members.iter().any(|m| distance(m.unit.pos(), anchor) > 450.0);
         let facing = target.map_or(goal, |e| e.pos);
+        let facing = if distance(anchor, facing) < 1.0 {
+            let enemy = self.graph.get_enemy_center();
+            if enemy != NULLPOS && distance(anchor, enemy) >= 1.0 { enemy } else { Vec3::xz(anchor.x + 1.0, anchor.z) }
+        } else {
+            facing
+        };
         let front = if matches!(mode, Mode::Kite | Mode::Evade) {
             target.map_or(100.0, |e| (distance(anchor, e.pos) - e.range - MARGIN).clamp(0.0, 150.0))
         } else {

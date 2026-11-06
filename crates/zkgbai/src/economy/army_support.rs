@@ -136,6 +136,7 @@ impl Ai {
         let density = self.projected_metal_density();
         let mut army = 0.0;
         let mut other_cloaks = 0;
+        let mut other_shields = 0;
         let mut count = self.eco.army_support.pending();
         for unit in self.cb.team_units() {
             if unit.health() <= 0.0 || unit.team() != self.team_id {
@@ -144,6 +145,17 @@ impl Ai {
             let Some(def) = unit.def() else { continue };
             if let Some(support) = Support::from_mobile(self.defs.name(def)) {
                 count[support.index()] += 1;
+                if support == Support::Shield
+                    && !self.misc_handler.supports.contains(&unit.id())
+                    && self
+                        .fighters
+                        .get(&unit.id())
+                        .and_then(|f| f.squad)
+                        .and_then(|sid| self.squads.get(sid))
+                        .is_some_and(|s| s.is_taskforce() && s.shape.doctrine != "dominatrix")
+                {
+                    other_shields += 1;
+                }
                 // A cloaker committed to another taskforce, or a battery
                 // reduced below four guns, cannot cover a new full battery.
                 // Ordinary support followers can be recalled, so exclude them.
@@ -161,6 +173,7 @@ impl Ai {
                     other_cloaks += 1;
                 }
             } else if !unit.is_being_built()
+                && !self.dominatrix_vip(unit.id())
                 && def.speed() > 0.0
                 && def.build_speed() <= 0.0
                 && !def.is_able_to_fly()
@@ -176,8 +189,24 @@ impl Ai {
             .filter_map(|&sid| self.squads.get(sid))
             .filter(|s| s.shape.doctrine == "lance" && s.cores(&self.fighters) >= 4)
             .count();
-        let cloak_limit = self.support_ground_squads().len().max(batteries + other_cloaks);
-        demand(density, army, count, batteries + other_cloaks, cloak_limit)
+        let cloaks_required = batteries + other_cloaks + self.dominatrix_cloaks_required();
+        let cloak_limit =
+            (self.support_ground_squads().len() + self.dominatrix_cloak_groups().len()).max(cloaks_required);
+        let domis: usize = self
+            .squad_handler
+            .taskforces
+            .iter()
+            .filter_map(|&sid| self.squads.get(sid))
+            .filter(|s| s.shape.doctrine == "dominatrix")
+            .map(|s| s.cores(&self.fighters))
+            .sum();
+        if count[1] < cloaks_required {
+            vec![Support::Cloak]
+        } else if density > 2000.0 && count[0] < domis + other_shields {
+            vec![Support::Shield]
+        } else {
+            demand(density, army, count, cloaks_required, cloak_limit)
+        }
     }
 
     fn army_support_can_build(&self, factory: &Factory, support: Support) -> bool {
@@ -302,6 +331,40 @@ mod tests {
     fn unit(id: i32) -> Unit {
         let cb = unsafe { Callback::from_raw(0, Box::leak(Box::new(ffi::SSkirmishAICallback::default()))) };
         Unit::from_id(cb, id).unwrap()
+    }
+
+    #[test]
+    fn retired_dominatrix_cloak_bypasses_density_and_pending_orders_share_the_requirement() {
+        use crate::military::taskforce::dominatrix::tests::{add, fixture, spawn};
+        let mut ai = fixture();
+        add(&mut ai, 1, 0);
+        let prize = spawn(&ai, 10, 5, 1);
+        ai.dominatrix_observe_capture(prize);
+        ai.dominatrix_update(ai.offset);
+        assert!(ai.projected_metal_density() < 2000.0);
+        assert_eq!(ai.army_support_demand(), [Support::Cloak]);
+        ai.eco.army_support.orders.insert(100, (Support::Cloak, ai.frame));
+        assert!(ai.army_support_demand().is_empty());
+        ai.eco.army_support.orders.clear();
+        spawn(&ai, 20, 6, -1);
+        assert!(ai.army_support_demand().is_empty());
+        springai::reserved::clear(ai.cb);
+    }
+
+    #[test]
+    fn dominatrix_shield_quota_unlocks_at_density_without_the_general_army_budget() {
+        use crate::military::taskforce::dominatrix::tests::{add, fixture, spawn};
+        let mut ai = fixture();
+        for id in 1..=3 {
+            add(&mut ai, id, 0);
+        }
+        assert!(ai.army_support_demand().is_empty());
+        ai.frame = 30 * 60 * 10;
+        assert_eq!(ai.army_support_demand(), [Support::Shield]);
+        for id in 10..=12 {
+            spawn(&ai, id, 2, -1);
+        }
+        assert!(ai.army_support_demand().is_empty());
     }
 
     #[test]
