@@ -913,7 +913,7 @@ impl Ai {
             self.eco_bury_support_pylons(frame);
         }
         self.eco_update_requisition(frame);
-        if self.missiles.site.active() {
+        if self.missiles.site.due(frame) {
             self.guard("eco.siloPlanner", |ai| ai.eco_plan_missile_silo());
         }
         self.eco_update_new_factory(frame);

@@ -111,14 +111,16 @@ built first. Only live, completed defenses release the silo job; missing guards 
 and blocked preparation sites are abandoned. Existing defenses can satisfy the prerequisites.
 Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
 
-Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
+Besides the Eos/Shockley payoff trigger, reaching **at least 80%** of known and inferred
+enemy static value warrants a silo independently of battlefield density. The existing
+siege trigger also admits a silo when it covers **more than 70%** of
 known and inferred enemy static metal **or held enemy territory**, and battlefield density exceeds the
 **Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
 step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
 requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
 Density is `posture.density`: all allied standing metal plus known enemy metal, divided by usable
 ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
-remembered live statics remain counted. Coverage and battlefield density are separate gates;
+remembered live statics remain counted. The 70% siege trigger also requires battlefield density;
 the missile firing disk is not the density denominator. Density and lanes are measured even
 with defense posture disabled; before lanes are available the full slider threshold applies.
 Decision logs and the operator `regime` view report the adjusted threshold. Static value
@@ -127,6 +129,13 @@ confidence), without double-counting known mexes or assigning locations to unobs
 Territory coverage measures the union of held enemy territory cells around hostile mexes;
 shadow-only territory does not count. Both coverage routes exclude ground/value already reached
 by allied silos, while retaining the whole enemy area/value as the denominator.
+
+Site searches survive temporary income dips and hard energy stalls; these pause construction
+admission, while growth/overdrive energy demand does not block it. An accepted own or allied
+project remains committed. Background results retain the exact terrain samples used for the
+chosen site's flights: unrelated terrain changes are harmless, while relevant changes or stale
+results trigger a fresh search immediately. Only a completed search finding no site waits a
+minute before retrying. Disabling missiles/requisition or selecting another silo cancels search.
 
 Enemy tactical silos have first claim on Eos production and targeting, including newly scouted
 nanoframes. Eos are reserved immediately, and launch once last observed construction progress

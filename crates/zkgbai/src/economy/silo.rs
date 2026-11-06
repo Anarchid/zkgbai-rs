@@ -443,7 +443,7 @@ impl Ai {
             return;
         }
         if !self.dev_off("missiles")
-            && !self.eco.estalled
+            && !self.eco.hard_estalled
             && self.eco.adjusted_income >= missiles::SILO_INCOME
             && self.eco_assist_ally(silo)
         {
@@ -451,11 +451,15 @@ impl Ai {
         }
         if self.dev_off("missiles")
             || self.missiles_silo().is_some()
-            || self.eco.adjusted_income < missiles::SILO_INCOME
-            || self.eco.estalled
             || self.missiles.planned.is_some_and(|f| self.frame - f < SILO_REPLAN)
         {
             self.missiles.site.cancel();
+            return;
+        }
+        // Affordability pauses admission, not the pending search. Growth/overdrive
+        // demand is not a construction stall. Completed work stays in the worker
+        // until affordable, then is checked against current demand and terrain.
+        if self.eco.adjusted_income < missiles::SILO_INCOME || self.eco.hard_estalled {
             return;
         }
         let Some(choice) = self.missiles_site() else { return };
@@ -471,7 +475,7 @@ impl Ai {
         self.log(&format!(
             "missiles: silo at ({:.0}, {:.0}), {:.0} Eos/Shockley payoff ({} targets); \
              {:.0} static metal in reach ({:.1}%), {:.1}% held enemy territory; battlefield density {:.0}, \
-             coverage trigger needs >{:.0} metal/Melmo² (laneness {:.2}); {}",
+             80% static coverage bypasses density; other coverage needs >{:.0} metal/Melmo² (laneness {:.2}); {}",
             site.x,
             site.z,
             choice.payoff,
@@ -514,6 +518,71 @@ impl Ai {
 mod tests {
     use super::*;
     use springai::Callback;
+
+    #[test]
+    fn growth_demand_allows_search_and_temporary_unaffordability_preserves_it() {
+        use std::cell::Cell;
+        use std::ffi::c_char;
+        thread_local! {
+            static DEFINITIONS: Cell<bool> = const { Cell::new(false) };
+            static QUERIES: Cell<usize> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, max: i32) -> i32 {
+            if !DEFINITIONS.get() {
+                return 0;
+            }
+            if max > 0 && !out.is_null() {
+                unsafe {
+                    *out = 1;
+                }
+            }
+            1
+        }
+        unsafe extern "C" fn name(_: i32, _: i32) -> *const c_char {
+            c"staticmissilesilo".as_ptr()
+        }
+        unsafe extern "C" fn units(_: i32, _: *mut i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn site(_: i32, _: i32, _: *mut f32, _: f32, _: i32, _: i32, out: *mut f32) {
+            QUERIES.set(QUERIES.get() + 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping([-1.0, 0.0, 0.0].as_ptr(), out, 3);
+            }
+        }
+        DEFINITIONS.set(false);
+        QUERIES.set(0);
+        let mut ai = super::super::test_ai_with(|t| {
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.getFriendlyUnits = Some(units);
+            t.getTeamUnits = Some(units);
+            t.Map_findClosestBuildSite = Some(site);
+        });
+        DEFINITIONS.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai.frame = 600;
+        ai.eco.adjusted_income = missiles::SILO_INCOME;
+        ai.eco.estalled = true;
+        ai.eco_plan_missile_silo();
+        assert_eq!(QUERIES.get(), 2, "growth demand must not block candidate collection");
+        assert!(ai.missiles.site.active());
+        ai.frame += 1;
+        ai.eco.hard_estalled = true;
+        ai.eco_plan_missile_silo();
+        assert!(ai.missiles.site.active(), "a hard stall pauses, rather than erases, the search");
+        assert_eq!(QUERIES.get(), 2);
+        ai.frame += 1;
+        ai.eco.hard_estalled = false;
+        ai.eco.adjusted_income = missiles::SILO_INCOME - 1.0;
+        ai.eco_plan_missile_silo();
+        assert!(ai.missiles.site.active());
+        assert_eq!(QUERIES.get(), 2);
+        // A real policy override still cancels the outstanding search.
+        ai.set_feature_off("missiles", true);
+        ai.eco_plan_missile_silo();
+        assert!(!ai.missiles.site.active());
+    }
 
     #[test]
     fn nearly_built_silos_finish_before_their_guards_unless_under_fire() {

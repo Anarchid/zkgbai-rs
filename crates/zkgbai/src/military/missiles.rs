@@ -1,8 +1,9 @@
 //! Tactical missiles. A silo (`staticmissilesilo`: four pads, 1200 metal)
 //! goes up where it is safe and within Eos range of more than one enemy
 //! building worth a missile (a Fusion and up), or of an anti-nuke in the
-//! way of our nukes. Coverage of more than 70% of known and inferred static
-//! value or held enemy territory is another trigger once battlefield density exceeds
+//! way of our nukes. Reaching at least 80% of known/inferred static value
+//! independently warrants a silo. Coverage above 70% of static value or held
+//! enemy territory also warrants one once battlefield density exceeds
 //! `missile_silo_density`, discounted on lane-like terrain. Constructors rush it once
 //! threatened sites have completed their defenses (see `economy::silo`).
 //! Its Eos (`tacnuke`: 600 metal, 3502 damage,
@@ -68,6 +69,7 @@ pub const ENEMY_REACH: f32 = 3500.0;
 /// Silo sites are tried at our metal and this far ahead of it, elmos.
 const SITE_STEPS: [f32; 3] = [400.0, 800.0, 1200.0];
 const STATIC_SHARE: f32 = 0.7;
+const COOK_SHARE: f32 = 0.8;
 const DEFAULT_SIEGE_DENSITY: f32 = 1500.0;
 const MAX_SIEGE_DENSITY: f32 = 10000.0;
 /// A lost silo or nanoframe is evidence against the whole nearby site,
@@ -76,6 +78,7 @@ const LOSS_MEMORY: i32 = 30 * 300;
 const LOSS_RADIUS: f32 = 800.0;
 
 /// A final buildable firing position and the reasons it pays.
+#[checkpoint::state]
 pub struct SiloSite {
     pub pos: Vec3,
     pub payoff: f32,
@@ -86,6 +89,7 @@ pub struct SiloSite {
 }
 
 #[derive(Clone, Copy, Default)]
+#[checkpoint::state]
 pub struct StaticCoverage {
     pub value: f32,
     pub share: f32,
@@ -100,6 +104,7 @@ impl StaticCoverage {
 /// Progress towards siege, independent of the value inside a silo's range.
 /// The lane discount is a bounded tuning choice, not a fitted silo model.
 #[derive(Clone, Copy)]
+#[checkpoint::state]
 pub struct SiegeReadiness {
     pub density: f32,
     pub threshold: f32,
@@ -748,7 +753,7 @@ impl Ai {
         self.log(&format!(
             "missiles: no silo site: {} targets worth Eos ({value:.0} metal), the nearest {nearest} from our metal \
              (reach {REACH:.0}); {static_value:.0} known/inferred static metal, \
-             {territory_area:.2} Melmo² held enemy territory, either coverage needs >70%; \
+             {territory_area:.2} Melmo² held enemy territory, static coverage >=80% needs no density; otherwise either coverage needs >70%; \
              battlefield density {:.0}, needs >{:.0} metal/Melmo² (laneness {:.2})",
             targets.len(),
             siege.density,
@@ -1186,8 +1191,11 @@ fn choose_silo_site_checked(
                 territory.iter().filter(|&&&t| reaches(p, t)).count() as f32 / territory_total as f32
             };
             let territory_coverage = StaticCoverage { value: 0.0, share: territory_share };
-            (payoff >= SILO_COST || coverage.warrants_silo(siege) || territory_coverage.warrants_silo(siege))
-                .then_some(SiloSite { pos: p, payoff, targets: n, coverage, territory_share, siege })
+            (payoff >= SILO_COST
+                || coverage.share >= COOK_SHARE
+                || coverage.warrants_silo(siege)
+                || territory_coverage.warrants_silo(siege))
+            .then_some(SiloSite { pos: p, payoff, targets: n, coverage, territory_share, siege })
         })
         .collect();
     // The coverage trigger admits a site even without a known Eos target.
@@ -1402,6 +1410,27 @@ mod site_tests {
     }
 
     #[test]
+    fn eighty_percent_value_cooks_without_density_but_not_through_terrain_or_allies() {
+        let site = Vec3::xz(1000.0, 1000.0);
+        let enemy = Vec3::xz(3000.0, 1000.0);
+        let far = Vec3::xz(8000.0, 1000.0);
+        let statics = [(enemy, 800.0), (far, 200.0)];
+        let chosen = choose_silo_site(&[], [site].into_iter(), &[], &statics, &[], EARLY, enemy).unwrap();
+        assert_eq!(chosen.coverage.share, 0.8);
+        assert_eq!(chosen.payoff, 0.0);
+        assert!(
+            choose_silo_site(&[], [site].into_iter(), &[], &[(enemy, 799.0), (far, 201.0)], &[], EARLY, enemy)
+                .is_none()
+        );
+        assert!(choose_silo_site(&[site], [site].into_iter(), &[], &statics, &[], EARLY, enemy).is_none());
+        assert!(
+            choose_silo_site_checked(&[], [site].into_iter(), &[], &statics, &[], EARLY, enemy, |_, _| false).is_none()
+        );
+        // Merely covering empty enemy territory still needs siege readiness.
+        assert!(choose_silo_site(&[], [site].into_iter(), &[], &[], &[enemy], EARLY, enemy).is_none());
+    }
+
+    #[test]
     fn static_coverage_is_an_independent_trigger_with_strict_thresholds() {
         let at = Vec3::xz(1000.0, 1000.0);
         let enemy = Vec3::xz(3000.0, 1000.0);
@@ -1457,7 +1486,8 @@ mod site_tests {
         let statics = [(enemy, 5435.0)];
         let siege = SiegeReadiness::new(2254.0, 1500.0, 0.7);
         assert!(choose_silo_site(&[], [at].into_iter(), &[], &statics, &[], siege, enemy).is_some());
-        // Ravaged's laneness discounts the default to about 1111, not zero.
+        // Ravaged's siege threshold remains about 1111, but 100% value
+        // coverage now authorizes a silo before reaching that density.
         assert!((siege.threshold - 1111.11).abs() < 0.1);
         assert!(
             choose_silo_site(
@@ -1469,7 +1499,7 @@ mod site_tests {
                 SiegeReadiness::new(1000.0, 1500.0, 0.7),
                 enemy
             )
-            .is_none()
+            .is_some()
         );
     }
 

@@ -21,7 +21,7 @@ local options = {
 	{
 		key    = 'missile_silo_density',
 		name   = 'Missile silo siege density',
-		desc   = 'Also build a tactical missile silo when it reaches more than 70% of known and inferred enemy static metal and battlefield density exceeds this threshold divided by (1 + 0.5 * laneness). Density counts our standing metal plus known enemy metal per million square elmos of usable ground. The default requires 1500 on open terrain, falling to 1000 on fully lane-like terrain. Income and construction safety requirements still apply.',
+		desc   = 'Also build a tactical missile silo when it reaches more than 70% of known and inferred enemy static metal and battlefield density exceeds this threshold divided by (1 + 0.5 * laneness). Density counts our standing metal plus known enemy metal per million square elmos of usable ground. The default requires 1500 on open terrain, falling to 1000 on fully lane-like terrain. Reaching at least 80% of known/inferred static value independently qualifies, regardless of density. Income and construction safety requirements still apply.',
 		type   = 'number',
 		def    = 1500,
 		min    = 0,
