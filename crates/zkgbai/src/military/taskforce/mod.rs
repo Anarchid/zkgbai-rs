@@ -22,6 +22,7 @@
 
 pub mod arrowhead;
 pub mod doctrine;
+pub mod dominatrix;
 pub mod expr;
 pub mod marksman;
 pub mod pack;
@@ -142,6 +143,7 @@ pub struct Taskforces {
     /// Siege forces' stations and how their guns stand (see `siege`).
     pub siege: siege::Siege,
     pub sitzkrieg: sitzkrieg::Sitzkrieg,
+    pub dominatrices: dominatrix::Dominatrices,
     automatic_siege: BTreeSet<String>,
 }
 

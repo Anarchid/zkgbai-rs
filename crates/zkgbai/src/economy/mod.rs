@@ -596,7 +596,7 @@ impl EconomyManager {
     }
 
     /// Forget a worker (dead, captured, ...): leave its task and every list.
-    fn remove_worker(&mut self, wid: i32) {
+    pub(crate) fn remove_worker(&mut self, wid: i32) {
         if let Some(mut w) = self.workers.remove(&wid) {
             w.clear_task(&mut self.tasks);
             if w.is_greedy {
@@ -1190,6 +1190,9 @@ impl Ai {
     }
 
     pub fn eco_unit_finished(&mut self, unit: Unit) {
+        if self.dominatrix_vip(unit.id()) {
+            return;
+        }
         let Some(def) = unit.def() else {
             return;
         };
@@ -1506,6 +1509,9 @@ impl Ai {
     }
 
     pub fn eco_unit_given(&mut self, unit: Unit, old_team: i32, new_team: i32) {
+        if self.dominatrix_vip(unit.id()) {
+            return;
+        }
         let _ = old_team;
         if new_team != self.team_id {
             return;

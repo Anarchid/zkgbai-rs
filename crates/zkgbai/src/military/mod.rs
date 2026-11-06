@@ -591,6 +591,7 @@ impl Ai {
             self.license_observe();
         }
 
+        self.guard("dominatrix.update", |ai| ai.dominatrix_update(frame));
         self.guard("recovery.update", |ai| ai.recovery_update(frame));
 
         // Before the squads decide: their fight predictions arrive here.
@@ -678,6 +679,9 @@ impl Ai {
     }
 
     pub fn war_unit_finished(&mut self, unit: Unit) {
+        if self.dominatrix_vip(unit.id()) {
+            return;
+        }
         // The staged raid game's force is the QRF's alone (see `qrf`).
         if self.qrf_claims(unit.id()) {
             return;

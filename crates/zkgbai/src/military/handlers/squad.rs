@@ -207,8 +207,12 @@ impl Ai {
         let mut mixed = Vec::new();
         for sid in self.squads.ids() {
             let Some(s) = self.squads.get(sid) else { continue };
-            let spots =
-                |m: &i32| self.fighters.get(m).is_some_and(|f| s.shape.spot(f.unit.def().map(|d| d.id())).is_some());
+            let spots = |m: &i32| {
+                self.fighters.get(m).is_some_and(|f| {
+                    s.shape.spot(f.unit.def().map(|d| d.id())).is_some()
+                        || (s.shape.doctrine == "dominatrix" && self.defs.name_of(f.unit) == "shieldshield")
+                })
+            };
             let tiers: BTreeSet<Option<Tier>> =
                 s.fighters.iter().filter(|m| !spots(m)).map(|&m| self.squad_tier(m)).collect();
             if tiers.iter().any(|&a| tiers.iter().any(|&b| !same_ways(a, b))) {
@@ -252,6 +256,7 @@ impl Ai {
                 }
             }
         }
+        self.dominatrix_form_teams();
         self.squad_recruit_fire_escorts();
     }
 
@@ -401,13 +406,16 @@ impl Ai {
         if spots(id) {
             return true;
         }
-        // An Iris can follow a land battery despite its different movement
-        // tier. It must actually reach the leader; water batteries cannot
-        // recruit a landlocked cloaker. Do not let the Iris reject later
-        // hover escorts merely because it is already in the force.
+        // An Iris can follow a land battery, and an Aspis a Rover fireteam,
+        // despite a different movement tier. They must reach the leader;
+        // their presence must not reject subsequent combatants of its tier.
         let cloaker = |m: i32| {
-            s.shape.doctrine == "lance"
-                && self.fighters.get(&m).is_some_and(|f| self.defs.name_of(f.unit) == "cloakjammer")
+            self.fighters.get(&m).is_some_and(|f| {
+                matches!(
+                    (s.shape.doctrine.as_str(), self.defs.name_of(f.unit)),
+                    ("lance", "cloakjammer") | ("dominatrix", "shieldshield")
+                )
+            })
         };
         if cloaker(id) {
             return self.fighters.get(&id).is_some_and(|f| {
@@ -537,6 +545,9 @@ impl Ai {
         let tf = &self.taskforces;
         let Some(d) = tf.doctrine(&q.shape.doctrine) else { return false };
         let Some(r) = d.roles.get(role) else { return false };
+        if d.name == "dominatrix" && r.name == "aspis" && self.projected_metal_density() <= 2000.0 {
+            return false;
+        }
         if r.want.is_none() {
             return true;
         }
@@ -715,7 +726,12 @@ impl Ai {
         }
         let Some(unit) = self.fighters.get(&id).map(|f| f.unit) else { return };
         let name = self.defs.name_of(unit).to_owned();
-        let dname = self.squad_doctrine_for(&name);
+        let mut dname = self.squad_doctrine_for(&name);
+        // Singles keep their old shield-ball/assault role until three are
+        // available, unless an existing Dominatrix team has room for one.
+        if dname.as_deref() == Some("dominatrix") && !self.dominatrix_can_form() {
+            dname = self.taskforces.doctrine("felon").map(|d| d.name.clone());
+        }
         let tf = &self.taskforces;
         // Shared spotter types join a doctrine that actually has a vacancy.
         let doctrine = tf
@@ -840,7 +856,7 @@ impl Ai {
         if let Some(s) = self.squads.get_mut(sid) {
             s.add_unit_nav(id, &mut self.fighters, &mut nav);
         }
-        if is_core && dname.as_deref() == Some("lance") {
+        if is_core && matches!(dname.as_deref(), Some("lance" | "dominatrix")) {
             self.squad_call_taskforce_mobs(sid);
         }
     }
@@ -930,6 +946,7 @@ impl Ai {
         self.fighters.insert(id, f);
         self.squad_handler.fighters.insert(id);
         self.squad_assign_taskforce_member(id);
+        self.dominatrix_form_teams();
     }
 
     /// A new force calls the units its doctrine takes that fight elsewhere
@@ -941,7 +958,11 @@ impl Ai {
             let Some(f) = self.fighters.get(&id) else { continue };
             let spare_support = self.misc_handler.supports.contains(&id)
                 && self.unit_classes.mob_supports.contains(self.defs.name_of(f.unit));
-            if !f.shield_mob && !spare_support {
+            if !f.shield_mob
+                && !spare_support
+                && !(self.squads.get(sid).is_some_and(|s| s.shape.doctrine == "dominatrix")
+                    && self.defs.name_of(f.unit) == "vehriot")
+            {
                 continue;
             }
             if (!spare_support && f.squad.and_then(|s| self.squads.get(s)).is_some_and(|s| s.is_taskforce()))
@@ -950,7 +971,17 @@ impl Ai {
                 continue;
             }
             let unit = f.unit;
-            if self.retreat_handler.is_retreating(id) || unit.health() <= 0.0 || unit.team() != self.team_id {
+            if self.cloak_reserved_for_vips(id)
+                || springai::reserved::is_reserved(self.cb, id)
+                || f.squad.is_some_and(|s| {
+                    self.qrf_drafted(s)
+                        || self.op_squad_target(s).is_some()
+                        || self.op.over.squad_intents.contains_key(&s)
+                })
+                || self.retreat_handler.is_retreating(id)
+                || unit.health() <= 0.0
+                || unit.team() != self.team_id
+            {
                 continue;
             }
             let name = self.defs.name_of(unit);
@@ -1251,7 +1282,9 @@ impl Ai {
     fn squad_assign_taskforces(&mut self) {
         while let Some(sid) = self.squad_handler.taskforces.pop_front() {
             if self.squads.get(sid).is_some_and(|s| {
-                s.shape.doctrine == "lance" && self.frame - s.last_assignment_frame >= 30 && s.cores(&self.fighters) > 0
+                matches!(s.shape.doctrine.as_str(), "lance" | "dominatrix")
+                    && self.frame - s.last_assignment_frame >= 30
+                    && s.cores(&self.fighters) > 0
             }) {
                 self.squad_call_taskforce_mobs(sid);
             }
@@ -1275,6 +1308,12 @@ impl Ai {
             }
             if self.frame - s.last_assignment_frame < 30 {
                 self.squad_handler.taskforces.push_front(sid);
+                return;
+            }
+            if self.squads.get(sid).is_some_and(|s| s.shape.doctrine == "dominatrix") {
+                self.dominatrix_conduct(sid);
+                self.squads.get_mut(sid).unwrap().last_assignment_frame = self.frame;
+                self.squad_handler.taskforces.push_back(sid);
                 return;
             }
             if self.license_assign(sid) {

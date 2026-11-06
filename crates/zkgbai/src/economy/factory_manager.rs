@@ -1317,7 +1317,7 @@ impl Ai {
             return "vehheavyarty";
         }
 
-        if income > 20.0
+        if income >= 60.0
             && kgb_rand() < f64::from(1.0f32.min(2.0 * tf) * (1.0 - fm.light_arty_value / war.enemy_porc_value))
         {
             return "veharty";
@@ -1349,7 +1349,7 @@ impl Ai {
         }
         let rnd = kgb_rand();
         if eminent && rnd <= 0.2 {
-            "veharty"
+            "vehcapture"
         } else if fm.num_ravagers > fm.num_levelers * 3 || fm.num_levelers == 0 {
             "vehriot"
         } else {

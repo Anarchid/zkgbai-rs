@@ -892,6 +892,9 @@ impl Ai {
             return;
         }
         self.guard("recovery.unitGiven", |ai| ai.recovery_transferred(unit, new_team));
+        if new_team == self.team_id {
+            self.guard("dominatrix.capture", |ai| ai.dominatrix_observe_capture(unit));
+        }
         self.guard("eco.unitGiven", |ai| ai.eco_unit_given(unit, old_team, new_team));
         self.guard("war.unitGiven", |ai| ai.war_unit_given(unit, old_team, new_team));
         self.guard("fac.unitGiven", |ai| ai.fac_unit_given(unit, old_team, new_team));
@@ -1261,6 +1264,9 @@ impl Ai {
         }
         if feature == "fightlicense" && changed {
             self.license_switch(off);
+        }
+        if feature == "dominatrix" && changed {
+            self.dominatrix_switch(off);
         }
         if feature == "commander" && off {
             self.eco_release_commander_defense();
