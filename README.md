@@ -785,3 +785,18 @@ wall. A known-artillery variant made no post. All three reached five simulated
 minutes with zero AI errors or panics; the integrated library suite passed
 993 tests (four ignored). These supplied-income, held-fire scenes are mechanics
 checks only. Set `RECLAIM_POST_LIB` to test a release library with the fixture.
+
+### QRF screening movement
+
+Marking, screening, holding and withdrawal use direct raw-move control instead
+of attack-move. Each surface unit rechecks its route every half-second against
+nearby enemy weapon reach, with room for movement before the next check. Unsafe
+segments are clipped; exposed units back away. Safe queues continue without
+restarting pathing. Hold-position movement state permits fire without pursuit.
+This continues while the assignment planner is pending. An explicit strike,
+retreat, ownership transfer, release or raidcommit policy change clears the
+screening objective. The legacy `mark_fight` option no longer enables pursuit.
+
+Screening objectives live in an owned `checkpoint::state` component and have
+round-trip/continuation tests. This wip line still lacks full-bot checkpoint
+support; this change does not advertise engine save/load support.

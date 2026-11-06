@@ -110,8 +110,6 @@ struct Tune {
     strike: f32,
     /// Strike only a raid within this far of an asset (0: anywhere).
     commit: f32,
-    /// Mark with a fight order (else a move: shooting on the way only).
-    fight: bool,
     standoff: f32,
     /// Screen posts this far ahead of their gates.
     ahead: f32,
@@ -135,7 +133,6 @@ impl Default for Tune {
         Tune {
             strike: STRIKE_RATIO,
             commit: 0.0,
-            fight: true,
             standoff: STANDOFF,
             ahead: POST_AHEAD,
             latew: 1.0,
@@ -255,7 +252,6 @@ impl Ai {
         let t = Tune {
             strike: f("mark_strike", d.strike),
             commit: f("mark_commit", d.commit),
-            fight: f("mark_fight", 1.0) > 0.0,
             standoff: f("mark_standoff", d.standoff),
             ahead: f("mark_ahead", d.ahead),
             latew: f("mark_latew", d.latew),
@@ -266,8 +262,8 @@ impl Ai {
             value: f("mark_value", 0.0) > 0.0,
         };
         self.log(&format!(
-            "qrfmark: strike={} commit={} fight={} standoff={} ahead={} latew={} breach={} standw={} intercept={} goal={} value={}",
-            t.strike, t.commit, t.fight, t.standoff, t.ahead, t.latew, t.breach, t.standw, t.intercept, t.goal, t.value
+            "qrfmark: strike={} commit={} fight=false standoff={} ahead={} latew={} breach={} standw={} intercept={} goal={} value={}",
+            t.strike, t.commit, t.standoff, t.ahead, t.latew, t.breach, t.standw, t.intercept, t.goal, t.value
         ));
         self.qrf.mark.tune = Some(t);
         t
@@ -748,7 +744,7 @@ impl Ai {
                 }
                 _ => {
                     self.qrf.mark.stats.marks += 1;
-                    self.qrf_order_team(ids, spot, tune.fight);
+                    self.qrf_order_team(ids, spot, false);
                     self.qrf_mark_doing(team, if goal_kept { "goal" } else { "mark" }, spot, raid_power);
                 }
             }
@@ -768,12 +764,15 @@ impl Ai {
                         RoleKind::Hold => "hold",
                         _ => "post",
                     };
-                    if distance(pos, r.pos) > 120.0 {
-                        self.qrf_order_team(ids, r.pos, true);
-                    }
+                    self.qrf_order_team(ids, r.pos, false);
                     self.qrf_mark_doing(team, what, r.pos, 0.0);
                 }
-                _ if team >= MOON => self.qrf_mark_doing(team, "free", pos, 0.0),
+                _ if team >= MOON => {
+                    if self.qrf_drafted((team - MOON) as SquadId) {
+                        self.qrf_withdraw(ids);
+                    }
+                    self.qrf_mark_doing(team, "free", pos, 0.0);
+                }
                 _ => {
                     screens.insert(team);
                 }
@@ -800,9 +799,7 @@ impl Ai {
             };
             let p = posts.remove(k);
             self.qrf.mark.stats.screens += 1;
-            if distance(pos, p) > 150.0 {
-                self.qrf_order_team(ids, p, true);
-            }
+            self.qrf_order_team(ids, p, false);
             self.qrf_mark_doing(team, "screen", p, 0.0);
         }
         if frame % (30 * 30) < super::PERIOD {

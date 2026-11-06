@@ -148,7 +148,15 @@ impl Ai {
         if !self.raidcommit_available(unit) {
             return;
         }
+        self.move_outside_weapons(unit, goal, 0);
+    }
+
+    /// Shared movement control, independent of combat admission. QRF screens
+    /// reserve room for both units to move before the next control tick.
+    pub(crate) fn move_outside_weapons(&mut self, unit: Unit, goal: Vec3, reaction_frames: i32) {
         let pos = unit.pos();
+        let reaction = reaction_frames as f32 / 30.0;
+        let own_speed = unit.def().map_or(0.0, |d| d.speed());
         let goal = if goal == NULLPOS { pos } else { goal };
         let guns: Vec<_> = self
             .war
@@ -158,7 +166,8 @@ impl Ai {
             .filter(|e| !e.identified || e.surface_danger(e.is_submerged()) > 0.0)
             .map(|e| Gun {
                 pos: e.position,
-                radius: if e.identified { e.def_max_weapon_range() + MARGIN } else { 400.0 },
+                radius: if e.identified { e.def_max_weapon_range() + MARGIN } else { 400.0 }
+                    + reaction * (own_speed + e.ud.map_or(0.0, |d| d.speed())),
             })
             .collect();
         let keepout: Vec<_> = guns.iter().map(|g| (g.pos, g.radius)).collect();

@@ -591,7 +591,16 @@ impl Ai {
             self.qrf.draft_unmatched.remove(&sid);
             self.qrf.draft_raid.remove(&sid);
         }
-        self.qrf.members.retain(|id, m| m.squad.is_none_or(|s| eligible.get(&s).is_some_and(|ids| ids.contains(id))));
+        let released: Vec<_> = self
+            .qrf
+            .members
+            .iter()
+            .filter(|(id, m)| m.squad.is_some_and(|s| eligible.get(&s).is_none_or(|ids| !ids.contains(id))))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in released {
+            self.qrf_remove_unit(id);
+        }
         let metal = self.metal;
         for (sid, ids) in eligible {
             for id in ids {
@@ -954,6 +963,7 @@ impl Ai {
             (self.qrf.members.iter()).filter(|(_, m)| m.team == team && m.squad.is_none()).map(|(&id, _)| id).collect();
         self.qrf.releasing = true;
         for &id in &ids {
+            self.qrf_clear_screen(id);
             let Some(m) = self.qrf.members.remove(&id) else { continue };
             if self.qrf_return_stakeout(m.unit) {
                 continue;
@@ -1158,6 +1168,9 @@ impl Ai {
             self.qrf.members.values().filter(|m| m.squad.is_none()).map(|m| m.team).collect();
         for t in teams {
             self.qrf_release_team(t, "qrf switched off");
+        }
+        for id in self.qrf.screen.goals.keys().copied().collect::<Vec<_>>() {
+            self.qrf_clear_screen(id);
         }
         self.qrf.members.clear();
         self.qrf.drafted.clear();
