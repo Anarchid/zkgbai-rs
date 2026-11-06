@@ -24,6 +24,7 @@ pub mod intel;
 pub mod invade;
 pub mod jaeger;
 pub mod jumps;
+pub mod license;
 pub mod limpets;
 pub mod missiles;
 pub mod nukes;
@@ -225,6 +226,8 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    pub license_enabled: bool,
+    pub license_hazards: BTreeMap<i32, license::Hazard>,
     pub limpets: limpets::Limpets,
     /// The density of our fights (see [`front`]).
     pub front: front::Front,
@@ -299,6 +302,8 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            license_enabled: false,
+            license_hazards: BTreeMap::new(),
             limpets: Default::default(),
             front: front::Front::default(),
             air: airstall::AirLedger::default(),
@@ -561,6 +566,7 @@ fn ascii_value(val: i32, max: i32) -> char {
 /// Cross-module military logic and module events.
 impl Ai {
     pub fn war_init(&mut self) {
+        self.war.license_enabled = !self.dev_off("fightlicense");
         self.retreat_init();
 
         self.war.wolv_mine_id = self.defs.id("wolverine_mine");
@@ -588,6 +594,10 @@ impl Ai {
         }
         if frame % 150 == (self.offset + 5) % 150 {
             self.guard("war.idleSweep", |ai| ai.war_idle_sweep());
+        }
+
+        if self.war.license_enabled && frame % 7 == self.offset % 7 {
+            self.license_observe();
         }
 
         self.guard("recovery.update", |ai| ai.recovery_update(frame));
@@ -1340,6 +1350,7 @@ impl Ai {
 
     pub fn war_enemy_destroyed(&mut self, enemy: Unit, attacker: Option<Unit>) {
         let id = enemy.id();
+        self.war.license_hazards.remove(&id);
         // Commanders come free, so they do not count as metal destroyed.
         let cost = self.war.targets.get(&id).and_then(|e| e.ud.filter(|_| !e.is_com)).map(|ud| ud.cost(self.metal));
         if let Some(pos) = self.war.targets.get(&id).map(|e| e.position) {

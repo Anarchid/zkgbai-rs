@@ -733,6 +733,12 @@ impl Model {
         self.fates_config(snap, horizon, FateMode::AMove, &[], None, None, true)
     }
 
+    /// A committed Fight order: our units engage, while both sides retain
+    /// tactical movement. Other kiting queries keep their engagement prior.
+    pub(crate) fn ordered_kiting_fates(&self, snap: &FightSnapshot, horizon: i32) -> Vec<UnitFate> {
+        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, true, &[], None, true, None).0
+    }
+
     pub fn defense_fates(
         &self,
         snap: &FightSnapshot,
@@ -1870,8 +1876,24 @@ mod tests {
         let make = |spec: UnitSpec| FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { tubes: Vec::new(), reloads: Vec::new(), side: 0, spec: Arc::new(spec), hp: 660.0, x: 0.0, z: 0.0 },
-                SnapUnit { tubes: Vec::new(), reloads: Vec::new(), side: 1, spec: Arc::new(target.clone()), hp: 480.0, x: 260.0, z: 0.0 },
+                SnapUnit {
+                    tubes: Vec::new(),
+                    reloads: Vec::new(),
+                    side: 0,
+                    spec: Arc::new(spec),
+                    hp: 660.0,
+                    x: 0.0,
+                    z: 0.0,
+                },
+                SnapUnit {
+                    tubes: Vec::new(),
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: Arc::new(target.clone()),
+                    hp: 480.0,
+                    x: 260.0,
+                    z: 0.0,
+                },
             ],
         };
         let baseline = model.fates(&make(shooter.clone()), DT, FateMode::AMove);

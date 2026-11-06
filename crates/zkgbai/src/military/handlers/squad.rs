@@ -561,7 +561,7 @@ impl Ai {
     /// The metal force `sid` must be worth to go in: its doctrine's `engage`
     /// over the force and our income (as assault squads count it), else
     /// its `engage_value`.
-    fn squad_engage_threshold(&self, sid: SquadId) -> f32 {
+    pub(crate) fn squad_engage_threshold(&self, sid: SquadId) -> f32 {
         let Some(q) = self.squads.get(sid) else { return f32::INFINITY };
         let Some(e) = q.shape.engage.as_ref() else { return q.shape.engage_value };
         let tf = &self.taskforces;
@@ -1020,7 +1020,7 @@ impl Ai {
         // squad below 3 units and re-adding its units (inflating its metal
         // value) until it filled up; Java only cuts off finished squads.
         // It also dropped the cutoff for air squads and the leader choice.
-        if s.status != 'f' && !striking {
+        if s.status != 'f' && !striking && !s.license.as_ref().is_some_and(|l| l.active(self.frame)) {
             s.cutoff(&mut self.fighters);
         }
         s.select_leader(&self.fighters);
@@ -1110,6 +1110,9 @@ impl Ai {
     }
 
     fn squad_assign_squad(&mut self, sid: SquadId) {
+        if self.license_assign(sid) {
+            return;
+        }
         if self.limpet_squad_committed(sid) {
             return;
         }
@@ -1290,6 +1293,12 @@ impl Ai {
                 self.squad_handler.taskforces.push_front(sid);
                 return;
             }
+            if self.license_assign(sid) {
+                self.squads.get_mut(sid).unwrap().last_assignment_frame = self.frame;
+                self.squad_handler.taskforces.push_back(sid);
+                return;
+            }
+            let s = self.squads.get_mut(sid).unwrap();
             // Packs fight on the move, by a conduct of their own.
             if s.shape.aim == Aim::Pack {
                 let (engage_at, why) = self.taskforce_pack(sid);

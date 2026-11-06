@@ -117,7 +117,8 @@ const START_ROOM: f32 = 450.0;
 /// `lanes` is opt-in. `unifiedconquest` supersedes colonize and lanes;
 /// it is on by default in wip, opt-in on main. Both off restores the
 /// worker policy from before the path experiment. Explicit conquest stays separate.
-pub(crate) const OFF_BY_DEFAULT: [&str; 28] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 29] = [
+    "fightlicense",
     "lanes",
     "raidcommit",
     "limpetshadow",
@@ -1398,6 +1399,9 @@ impl Ai {
         }
         if feature == crate::military::raidcommit::FEATURE && changed {
             self.raidcommit_switch_changed();
+        }
+        if feature == "fightlicense" && changed {
+            self.license_switch(off);
         }
         if feature == "commander" && off {
             self.eco_release_commander_defense();

@@ -538,7 +538,8 @@ impl Ai {
                     .filter_map(|id| self.fighters.get(id)?.unit.def())
                     .map(|d| d.speed())
                     .fold(f32::INFINITY, f32::min);
-                if !matches!(sq.kind, SquadKind::Raider | SquadKind::Assault | SquadKind::Hover)
+                if self.license_covers(sid)
+                    || !matches!(sq.kind, SquadKind::Raider | SquadKind::Assault | SquadKind::Hover)
                     || sq.kind != SquadKind::Raider && slowest < MOON_SPEED
                     || sq.is_air_squad
                     || sq.is_dead(&self.fighters)

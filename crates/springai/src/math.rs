@@ -2,6 +2,7 @@ use std::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
 
 /// An engine-space position or direction (`AIFloat3`). `y` is up.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[checkpoint::state]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,

@@ -99,6 +99,8 @@ pub enum PathCost {
     AirCheck = 14,
     /// Can a flying raider (group) reach a destination in one piece?
     AirRaiderCheck = 15,
+    /// Experimental transit: prefer large detours; caller clips every segment.
+    SafeTransit = 16,
 }
 
 pub struct Pathfinder {
@@ -321,7 +323,9 @@ impl Pathfinder {
 
         // bounds check, needed because unit positions can sometimes be nonsensical for various reasons.
         if !self.terrain.in_map(start) || !self.terrain.in_map(target) {
-            result.push_back(target);
+            if cost != PathCost::SafeTransit {
+                result.push_back(target);
+            }
             return result;
         }
 
@@ -338,10 +342,15 @@ impl Pathfinder {
         let mut flyheight = 0.0;
         self.terrain.max_slope = 1.0;
         self.terrain.dive = war.dive(Some(def));
+        if cost == PathCost::SafeTransit {
+            self.terrain.max_threat =
+                war.view(Some(def)).get_threat(start).max(crate::military::license::remembered_threat(war, start));
+        }
         if let Some(md) = def.move_data() {
             self.terrain.set_movement(def, md);
             flyer = false;
-            if cost != PathCost::AvoidEnemies
+            if cost != PathCost::SafeTransit
+                && cost != PathCost::AvoidEnemies
                 && cost != PathCost::StriderPath
                 && Some(self.terrain.max_slope) == self.spider_max_slope
             {
@@ -366,7 +375,9 @@ impl Pathfinder {
         }
 
         let (Some(start_pos), Some(target_pos)) = (self.terrain.cell_of(start), self.terrain.cell_of(target)) else {
-            result.push_back(target);
+            if cost != PathCost::SafeTransit {
+                result.push_back(target);
+            }
             return result;
         };
 
@@ -390,7 +401,11 @@ impl Pathfinder {
         };
         match self.astar.find_path(start_pos, target_pos, &mut cell_cost, links) {
             // Nothing closer to the target is reachable: head straight for it.
-            None => result.push_back(target),
+            None => {
+                if cost != PathCost::SafeTransit {
+                    result.push_back(target);
+                }
+            }
             Some(end) => {
                 self.astar.trace(start_pos, end, &mut self.path_buf);
                 // A jump on the way: the way ends where it takes off, so the
@@ -422,7 +437,11 @@ impl Pathfinder {
                         self.jump_plans.insert(u.id(), plan);
                         result.push_back(from);
                     }
-                    _ => result.push_back(target),
+                    _ => {
+                        if cost != PathCost::SafeTransit || end == target_pos {
+                            result.push_back(target);
+                        }
+                    }
                 }
             }
         }
@@ -796,6 +815,8 @@ impl Terrain {
         let bad_depth = elev < self.max_depth || elev > self.min_depth;
         let max_slope = self.max_slope;
         // The threat maps as this unit sees them, under water too.
+        let remembered =
+            if kind == PathCost::SafeTransit { crate::military::license::remembered_threat(war, pos) } else { 0.0 };
         let war = war.view_dive(self.dive);
         match kind {
             PathCost::TestPath => {
@@ -861,6 +882,13 @@ impl Terrain {
                     return IMPASSABLE;
                 }
                 1.0 + (slope / max_slope) + 10.0 * war.get_threat(pos)
+            }
+            PathCost::SafeTransit => {
+                let threat = war.get_threat(pos).max(remembered);
+                if slope > max_slope || bad_depth || threat > self.max_threat + 0.00001 {
+                    return IMPASSABLE;
+                }
+                1.0 + (slope / max_slope) + 1000.0 * threat
             }
             PathCost::AvoidEnemies => {
                 if slope > max_slope || bad_depth {
