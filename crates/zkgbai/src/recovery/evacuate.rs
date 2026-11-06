@@ -329,6 +329,15 @@ impl Ai {
             || reserved::is_muted(self.cb, "recovery.update")
             || self.frame >= m.deadline
         {
+            self.log(&format!(
+                "recovery: #{} stopping {:?}: authority={}, disabled={}, muted={}, deadline={}",
+                m.cargo.id(),
+                m.phase,
+                valid,
+                self.dev_off("recovery"),
+                reserved::is_muted(self.cb, "recovery.update"),
+                self.frame >= m.deadline
+            ));
             // Do not abandon live cargo in a transport on a load/unload timeout.
             // The queued unload remains executable after command authority returns.
             if let Phase::Carry { transport, empty_mass }
@@ -395,11 +404,32 @@ impl Ai {
             }
             Phase::Clear { blocker, worker } => {
                 if blocker.health() <= 0.0 {
-                    self.recovery_verify(&mut m);
+                    m.clearance.retain(|u| u.health() > 0.0);
+                    if let Some(&next) = m.clearance.first() {
+                        if !self.recovery_free(next)
+                            || !self.recovery_clearance_safe(&m.clearance)
+                            || !self.recovery_order_clear(worker, next)
+                        {
+                            self.recovery_finish(m, false);
+                            return;
+                        }
+                        m.clearance.remove(0);
+                        m.phase = Phase::Clear { blocker: next, worker };
+                        m.deadline = self.frame + 30 * 30;
+                    } else {
+                        self.recovery_verify(&mut m);
+                    }
                 } else if blocker.team() != self.team_id
-                    || !self.recovery_expendable(blocker)
+                    || !self.recovery_clearance_safe(
+                        &std::iter::once(blocker)
+                            .chain(m.clearance.iter().copied().filter(|u| u.health() > 0.0))
+                            .collect::<Vec<_>>(),
+                    )
                     || self.war.get_effective_threat(worker.pos()) > 0.0
                 {
+                    self.log(&format!("recovery: clearance #{} stopped: team={}, progress={:.2}, energy={:.1}/{:.1}, estall={}, threat={:.1}",
+                        blocker.id(), blocker.team(), blocker.build_progress(), self.eco.effective_income_energy,
+                        self.eco.effective_expenditure, self.eco.hard_estalled, self.war.get_effective_threat(worker.pos())));
                     self.recovery_finish(m, false);
                     return;
                 }

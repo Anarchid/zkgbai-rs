@@ -68,7 +68,9 @@ thread_local! {
 /// Temporary command authority. Returning an old lease cannot undo a newer
 /// loan or role change. Operator reservations and module mutes still apply.
 #[derive(Debug)]
+#[checkpoint::state]
 pub struct CommandLease {
+    #[checkpoint(rebuild = "crate::snapshot::callback().ai_id()", reason = "Lease binds to the restored AI instance")]
     ai: i32,
     unit: i32,
     token: u64,

@@ -14,6 +14,7 @@ mod feature;
 mod macros;
 mod math;
 pub mod reserved;
+pub mod snapshot;
 mod unit;
 mod unitdef;
 mod weapondef;

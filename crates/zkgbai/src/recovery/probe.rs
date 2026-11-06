@@ -8,10 +8,12 @@ use springai::{
 };
 
 #[derive(Default)]
+#[checkpoint::state]
 pub(super) struct Probe {
     cases: Vec<Case>,
 }
 
+#[checkpoint::state]
 struct Case {
     name: &'static str,
     cargo: Unit,
@@ -25,7 +27,7 @@ struct Case {
 
 impl Ai {
     pub(super) fn recovery_probe(&mut self) {
-        if self.test.as_deref() != Some("recovery") {
+        if !matches!(self.test.as_deref(), Some("recovery" | "recoverywind")) {
             return;
         }
         let mut probe = std::mem::take(&mut self.recovery.probe);
@@ -50,10 +52,10 @@ impl Ai {
                     if case.cargo.health() > 0.0
                         && travel > 256.0
                         && (self.recovery.resolved.get(&case.cargo.id()).copied() == Some(case.name)
-                            || (case.name == "solar"
+                            || (matches!(case.name, "solar" | "wind")
                                 && case
                                     .helper
-                                    .is_some_and(|u| self.recovery.resolved.get(&u.id()).copied() == Some("solar"))))
+                                    .is_some_and(|u| self.recovery.resolved.get(&u.id()).copied() == Some(case.name))))
                     {
                         "PASS"
                     } else {
@@ -68,7 +70,11 @@ impl Ai {
                 case.reported = true;
             }
         }
-        let names = ["solar", "lobster", "djinn", "charon", "hercules"];
+        let names: &[&str] = if self.test.as_deref() == Some("recoverywind") {
+            &["wind", "wind", "wind"]
+        } else {
+            &["solar", "lobster", "djinn", "charon", "hercules"]
+        };
         let index = probe.cases.len();
         if index < names.len() && self.frame >= 30 * (30 + index as i32 * 180) {
             let name = names[index];
@@ -96,19 +102,33 @@ impl Ai {
                             spawn("staticstorage", side * 144.0, k as f32 * 48.0);
                         }
                         for k in -3i32..=3 {
-                            if name == "solar" && side > 0.0 && k.abs() <= 1 {
+                            if side > 0.0 && ((name == "solar" && k.abs() <= 1) || (name == "wind" && k.abs() <= 1)) {
                                 continue;
                             }
                             spawn("staticstorage", k as f32 * 48.0, side * 144.0);
                         }
                     }
-                    if name == "solar" {
-                        spawn("energysolar", 0.0, 144.0);
+                    if name == "wind" {
+                        // One, two, then three turbines in a narrow exit. The
+                        // last case starts its constructor outside reclaim range.
+                        for row in 0..=index {
+                            let z = 144.0 + row as f32 * 48.0;
+                            spawn("energywind", 0.0, z);
+                            for x in [-72.0, 72.0] {
+                                spawn("staticstorage", x, z);
+                            }
+                        }
+                    }
+                    if matches!(name, "solar" | "wind") {
+                        if name == "solar" {
+                            spawn("energysolar", 0.0, 144.0);
+                        }
                         spawn("energyfusion", -400.0, 0.0);
                         spawn("energyfusion", -400.0, 200.0);
                     }
                     let helper = match name {
                         "solar" => spawn("cloakcon", -48.0, 64.0),
+                        "wind" => spawn("cloakcon", -48.0, if index == 2 { -80.0 } else { 64.0 }),
                         "lobster" => spawn("amphlaunch", -64.0, 0.0),
                         "djinn" => spawn("amphtele", 800.0, 0.0),
                         "charon" => spawn("gunshiptrans", 500.0, 0.0),
