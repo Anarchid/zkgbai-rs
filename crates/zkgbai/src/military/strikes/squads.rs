@@ -173,7 +173,8 @@ impl Ai {
     }
 
     fn squad_strike_available(&self, sid: SquadId) -> bool {
-        !self.dev_off("strikes")
+        !self.license_covers(sid)
+            && !self.dev_off("strikes")
             && !self.qrf_drafted(sid)
             && !self.op.over.squad_intents.contains_key(&sid)
             && self.op_squad_target(sid).is_none()

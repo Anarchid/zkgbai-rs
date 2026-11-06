@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+checkpoint = { path = "../checkpoint" }
 springai-sys.workspace = true
 
 [[example]]

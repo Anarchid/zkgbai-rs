@@ -13,6 +13,7 @@ name = "zkgbai"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+checkpoint = { path = "../checkpoint" }
 springai.workspace = true
 zk-terrain.workspace = true
 serde_json = "1"

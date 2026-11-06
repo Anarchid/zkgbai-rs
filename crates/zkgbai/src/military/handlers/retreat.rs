@@ -182,7 +182,8 @@ impl Ai {
     pub fn retreat_check_unit(&mut self, unit: Unit, on_fire: bool) {
         let id = unit.id();
         // A raider gang has committed it (see `coalesce`).
-        if self.limpet_committed(id)
+        if self.license_committed(id)
+            || self.limpet_committed(id)
             || self.fire_controls(id)
             || self.lobster_strike_assessing(id)
             || self.coalesce_owns(id)
@@ -322,7 +323,7 @@ impl Ai {
     fn retreat_check_shields(&mut self) {
         let ids: Vec<i32> = self.retreat_handler.shields.iter().copied().collect();
         for id in ids {
-            if self.fire_controls(id) {
+            if self.license_committed(id) || self.fire_controls(id) {
                 continue;
             }
             let h = &mut self.retreat_handler;

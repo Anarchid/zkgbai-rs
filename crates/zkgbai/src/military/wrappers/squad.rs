@@ -59,6 +59,7 @@ pub struct Squad {
     pub courage: f32,
     /// Organic ranged formation and its current tactical decision.
     pub fire: crate::military::fire_squad::FireState,
+    pub license: Option<crate::military::license::License>,
     /// Taskforces: what their doctrine makes of each unit type, and the
     /// frame they formed (for mustering).
     pub shape: Arc<Shape>,
@@ -184,6 +185,7 @@ impl Squad {
             raider_type: '\0',
             courage: 1.0,
             fire: Default::default(),
+            license: None,
             shape: Arc::default(),
             formed: 0,
             low_shields: false,
@@ -631,6 +633,10 @@ impl Squad {
             nav.pathfinder.share_jump(leader_unit, f.unit);
             f.target = self.target;
             let fpos = f.get_pos();
+            if self.license.as_ref().is_some_and(|l| !l.permits(f.id, nav.frame)) {
+                crate::military::license::transit(f.unit, leader_pos, nav);
+                continue;
+            }
             let fdist = distance(fpos, leader_pos);
             if fdist > maxdist {
                 f.out_of_range = true;
@@ -649,7 +655,10 @@ impl Squad {
         // Add one extra waypoint.
         let Some(waypoint) = next_waypoint(&mut path, skip) else { return };
         for f in self.fighters.iter().filter_map(|id| fighters.get(id)) {
-            if f.unit.health() <= 0.0 || f.out_of_range {
+            if f.unit.health() <= 0.0
+                || f.out_of_range
+                || self.license.as_ref().is_some_and(|l| !l.permits(f.id, nav.frame))
+            {
                 continue;
             }
             fight_clear(f.unit, get_formation_point(f.get_pos(), leader_pos, waypoint), OPTION_SHIFT_KEY, nav);
@@ -667,6 +676,10 @@ impl Squad {
         let Some(waypoint) = next_waypoint(&mut path, 2) else { return };
         for id in &self.fighters {
             let Some(f) = fighters.get_mut(id) else { continue };
+            if self.license.as_ref().is_some_and(|l| !l.permits(f.id, nav.frame)) {
+                crate::military::license::transit(f.unit, leader_pos, nav);
+                continue;
+            }
             let fpos = f.get_pos();
             let fdist = distance(leader_pos, fpos);
             if fdist > maxdist {
@@ -751,6 +764,11 @@ impl Squad {
     }
 
     fn taskforce_add_unit(&mut self, id: i32, fighters: &mut FighterStore, frame: i32, mut nav: Option<&mut Nav>) {
+        if self.shape.aim == crate::military::taskforce::Aim::Assault
+            && nav.as_ref().is_some_and(|n| n.war.license_enabled)
+        {
+            self.license.get_or_insert_with(Default::default);
+        }
         let Some(f) = fighters.get_mut(&id) else { return };
         f.squad = Some(self.id);
         f.index = self.index;
@@ -807,6 +825,9 @@ impl Squad {
                     let target = self.target;
                     if let Some(l) = fighters.get_mut(&id) {
                         match nav.as_deref_mut() {
+                            Some(nav) if self.license.is_some() => {
+                                crate::military::license::transit(l.unit, target, nav)
+                            }
                             Some(nav) => l.fight_to(target, nav),
                             None => {
                                 l.unit.fight(target, 0);
@@ -822,7 +843,15 @@ impl Squad {
             Some((_, leader)) => {
                 unit.set_move_state(0, 0);
                 self.fighters.push(id);
-                self.keep_order(unit, leader, 0);
+                if self.license.is_some() {
+                    if let Some(nav) = nav.as_deref_mut() {
+                        crate::military::license::transit(unit, leader.pos(), nav);
+                    } else {
+                        unit.stop(0);
+                    }
+                } else {
+                    self.keep_order(unit, leader, 0);
+                }
             }
         }
     }
@@ -1016,6 +1045,16 @@ impl Squad {
             let Some(f) = fighters.get_mut(id) else { continue };
             let def = def_id(f.unit);
             let fpos = f.get_pos();
+            if let Some(l) = &self.license {
+                if l.permits(f.id, frame) && distance(leader_pos, fpos) <= 400.0 {
+                    self.keep_order(f.unit, leader, 0);
+                } else if let Some(nav) = nav.as_deref_mut() {
+                    crate::military::license::transit(f.unit, leader_pos, nav);
+                } else {
+                    f.unit.stop(0);
+                }
+                continue;
+            }
             // Spotters and trailing screens come back on their own, and
             // formations with the leader's next move.
             if distance(leader_pos, fpos) <= 600.0 || self.shape.own_way(def) || self.shape.keep(def) == Keep::Formation
@@ -1036,6 +1075,9 @@ impl Squad {
     /// `Keep`), after what it is doing with `opts` shift. Formations and
     /// trailing screens get none: their force's conduct moves them.
     fn keep_order(&self, unit: Unit, leader: Unit, opts: i16) {
+        if self.license.as_ref().is_some_and(|l| !l.members.contains(&unit.id())) {
+            return;
+        }
         let def = def_id(unit);
         if self.shape.cloaks(def) {
             return; // Field placement owns movement; guard would pack Irises together.
@@ -1056,7 +1098,7 @@ impl Squad {
 
     /// Give again the keep orders of the members that keep in `ways` (for a
     /// new leader, or a changed doctrine); spotters keep their own.
-    fn rekeep(&self, fighters: &FighterStore, ways: &[Keep]) {
+    pub(crate) fn rekeep(&self, fighters: &FighterStore, ways: &[Keep]) {
         let Some(leader) = self.leader_fighter(fighters).map(|l| l.unit) else { return };
         for f in self.fighters.iter().filter_map(|id| fighters.get(id)) {
             let def = def_id(f.unit);
@@ -1583,6 +1625,32 @@ mod tests {
         s.select_leader(&fighters);
         assert_eq!(s.leader, Some(21));
         assert!(!s.is_dead(&fighters));
+    }
+
+    #[test]
+    fn license_joiner_gets_no_orbit_until_it_is_in_the_committed_roster() {
+        let (cb, defs, mut fighters) = setup();
+        let mut s = Squad::new(1, SquadKind::Taskforce, TEAM);
+        let felon = seeds().into_iter().find(|d| d.name == "felon").unwrap();
+        s.shape = Arc::new(felon.shape(&defs, &crate::military::taskforce::Classes::default()));
+        s.license = Some(Default::default());
+        add(cb, &mut fighters, 30, FELON, 600.0);
+        add(cb, &mut fighters, 32, ASPIS, 600.0);
+        s.add_unit(30, &mut fighters, 0);
+        take_orders();
+        s.add_unit(32, &mut fighters, 0);
+        let orders = take_orders();
+        assert!(!orders.iter().any(
+            |&(id, topic, custom)| id == 32 && (topic == CommandTopic::COMMAND_UNIT_GUARD || custom == cmd::ORBIT)
+        ));
+        let l = s.license.as_mut().unwrap();
+        l.members.insert(30);
+        l.until = 450;
+        s.rekeep(&fighters, &[Keep::Orbit]);
+        assert!(!take_orders().iter().any(|o| o.2 == cmd::ORBIT));
+        s.license.as_mut().unwrap().members.insert(32);
+        s.rekeep(&fighters, &[Keep::Orbit]);
+        assert!(take_orders().iter().any(|o| o.0 == 32 && o.2 == cmd::ORBIT));
     }
 
     #[test]
