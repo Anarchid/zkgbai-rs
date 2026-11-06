@@ -614,6 +614,9 @@ impl Ai {
 
     /// Shared admission rule for the project planner and the executor.
     pub(super) fn eco_worker_can_take(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if !self.conquest_allows_job(w, t) {
+            return false;
+        }
         if self.conquest_skips_opening_mexes(w.id)
             && t.as_construction().is_some_and(|c| c.build_type.id() == self.eco.build_ids.mex_id)
         {
@@ -1149,17 +1152,23 @@ impl Ai {
             .collect()
     }
 
+    /// Task-level emergency admission, independent of crew eligibility.
+    /// Shared admission must not call the worker selector: that selector
+    /// checks logistics admission in turn.
+    pub(super) fn eco_factory_defense_requested(&self, task: &WorkerTask) -> bool {
+        !self.eco.hard_estalled
+            && task.as_construction().is_some_and(|c| c.fac_def)
+            && self
+                .eco_get_nearest_fac(task.get_pos())
+                .is_some_and(|f| f.unit.health() > 0.0 && f.unit.health() < f.unit.max_health())
+            && self.eco_prerequisites_ready(task)
+    }
+
     /// Factory damage summons the builder that can get to its defense
     /// first, not every commander regardless of distance. Explicit crews,
     /// retreating workers and unavailable builders are not substitutes.
     pub(super) fn eco_factory_defense_hand(&self, worker: &Worker, task: &WorkerTask) -> bool {
-        if self.eco.hard_estalled
-            || !task.as_construction().is_some_and(|c| c.fac_def)
-            || !self
-                .eco_get_nearest_fac(task.get_pos())
-                .is_some_and(|f| f.unit.health() > 0.0 && f.unit.health() < f.unit.max_health())
-            || !self.eco_prerequisites_ready(task)
-        {
+        if !self.eco_factory_defense_requested(task) {
             return false;
         }
         let arrival = |w: &Worker| {

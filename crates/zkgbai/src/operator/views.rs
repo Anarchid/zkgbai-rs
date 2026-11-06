@@ -262,6 +262,7 @@ pub fn economy(ai: &mut Ai, _: &Args) -> Out {
         "requisition": e.requisition.as_ref().map(|(f, why)| json!({"factory": f, "why": why})),
         "issues": ai.logistics.issues.len(),
         "special_project": ai.eco_special_json(),
+        "mex_defense": ai.eco_mex_defense_json(),
         "viable": {"bots": e.bots_viable, "spiders": e.spiders_viable, "ships": e.ships_viable},
         "defended_factory": e.defended_fac,
     }))

@@ -3,7 +3,11 @@
 
 use springai::{Unit, UnitDef, Vec3};
 
-use crate::{Ai, util::distance};
+use crate::{
+    Ai,
+    logistics::{Kind, Worth},
+    util::distance,
+};
 
 impl Ai {
     /// LOS events arrive before MilitaryManager has identified the enemy.
@@ -48,6 +52,66 @@ impl Ai {
         for at in contacts {
             self.eco_mexes_near_raider(at);
         }
+    }
+
+    /// Admission alone cannot mobilize a worker under persistent dispatch.
+    /// Give already admitted sparse raid guards the same crew contract as
+    /// other projects. Spacing, coverage and the normal porc budget still
+    /// decide whether a task exists; this adds no extra turret requests.
+    pub(super) fn eco_track_mex_defenses(&mut self) {
+        let tasks: Vec<_> = self
+            .eco
+            .construction_tasks
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let Some(t) = self.eco.tasks.get(id) else { return false };
+                let Some(c) = t.as_construction() else { return false };
+                !self.dev_off("porc")
+                    && matches!(c.build_type.name().as_str(), "turretlaser" | "turrettorp")
+                    && (self
+                        .eco
+                        .raid_mexes
+                        .values()
+                        .any(|&p| distance(t.position, p) <= c.build_type.max_weapon_range())
+                        || (c.target.is_some()
+                            && self.logistics.issues.get(&id).is_some_and(|i| i.kind == Kind::MexDefense)))
+            })
+            .collect();
+        let stale: Vec<_> = self
+            .logistics
+            .issues
+            .values()
+            .filter(|i| i.kind == Kind::MexDefense && !tasks.contains(&i.task))
+            .map(|i| i.task)
+            .collect();
+        for id in stale {
+            self.logistics_close(id, "mex defense released");
+        }
+        for id in tasks {
+            // Keep operator deadlines and active tactical defense predictions.
+            if self.logistics.issues.get(&id).is_some_and(|i| i.kind != Kind::MexDefense) {
+                continue;
+            }
+            let c = self.eco.tasks.get(id).unwrap().as_construction().unwrap();
+            let value = 2.0 * c.build_type.cost(self.metal);
+            self.logistics_open(
+                id,
+                Kind::MexDefense,
+                Worth::Stream { value, from: self.frame as f32 / 30.0, rate: value / 180.0 },
+                "sparse defense of a raided mex",
+                0.0,
+            );
+        }
+    }
+
+    pub(crate) fn eco_mex_defense_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "raided_mexes": self.eco.raid_mexes.iter().map(|(id, p)|
+                serde_json::json!({"unit": id, "pos": [p.x, p.z]})).collect::<Vec<_>>(),
+            "projects": self.logistics.issues.values().filter(|i| i.kind == Kind::MexDefense)
+                .map(|i| i.task).collect::<Vec<_>>()
+        })
     }
 
     pub(super) fn eco_mex_porc_allowed(&self, at: Vec3) -> bool {

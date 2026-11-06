@@ -162,6 +162,8 @@ impl Worth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Defense,
+    /// Persistent sparse coverage requested by a raided mex.
+    MexDefense,
     /// A turret against a force nothing of ours would meet (`walkin`).
     Walkin,
     /// A turret the posture ordered (see `posture`): crewed like a defense,
@@ -180,6 +182,7 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Defense => "defense",
+            Kind::MexDefense => "mex_defense",
             Kind::Walkin => "walkin",
             Kind::Posture => "posture",
             Kind::Grid => "grid",
@@ -725,7 +728,7 @@ impl Ai {
         let mut hands: Vec<Hand> = (self.eco.workers.values())
             .filter(|w| !w.is_chicken && w.bp > 0.0)
             .filter(|w| !self.eco_worker_held(w.id))
-            .filter(|w| task.is_none_or(|t| self.eco_project_hand(w.id, t)))
+            .filter(|w| task.map_or_else(|| !self.conquest_owns_worker(w.id), |t| self.eco_project_hand(w.id, t)))
             .filter_map(|w| {
                 let d = w.unit.def()?;
                 let speed = d.speed();

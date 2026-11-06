@@ -205,7 +205,11 @@ mod tests {
             false
         }
         unsafe extern "C" fn name(_: i32, id: i32) -> *const c_char {
-            if id == 2 { c"staticnuke".as_ptr() } else { c"cloakcon".as_ptr() }
+            match id {
+                2 => c"staticnuke".as_ptr(),
+                3 => c"turretlaser".as_ptr(),
+                _ => c"cloakcon".as_ptr(),
+            }
         }
         unsafe extern "C" fn params(_: i32, _: i32, _: *mut *const c_char, _: *mut *const c_char) -> i32 {
             0
@@ -231,6 +235,7 @@ mod tests {
             t.UnitDef_getWeaponMounts = Some(zero);
             t.UnitDef_getBuildSpeed = Some(scalar);
             t.UnitDef_getBuildTime = Some(build_time);
+            t.UnitDef_getMaxWeaponRange = Some(scalar);
             t.UnitDef_getName = Some(name);
             t.UnitDef_getCost = Some(cost);
             t.UnitDef_getSpeed = Some(scalar);
@@ -259,6 +264,66 @@ mod tests {
         ai.eco.construction_tasks.push(id);
         ai.eco.super_wep_tasks.push(id);
         (ai, id)
+    }
+
+    #[test]
+    fn reactive_mex_guard_recruits_an_economy_worker_and_retries_after_a_stall() {
+        use super::super::WorkerTask;
+        let (mut ai, id) = project_ai();
+        ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().build_type =
+            UnitDef::from_id(ai.cb, 3).unwrap();
+        ai.eco.super_wep_tasks.clear();
+        ai.eco.porc_tasks.push(id);
+        ai.eco.raid_mexes.insert(90, Vec3::xz(1100.0, 100.0));
+        let ordinary = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::xz(1000.0, 100.0),
+            0,
+        ));
+        ai.eco.construction_tasks.push(ordinary);
+        ai.eco.workers.get_mut(&10).unwrap().set_task(&mut ai.eco.tasks, ordinary, ai.frame);
+        ai.eco_track_mex_defenses();
+        assert_eq!(ai.logistics.issues[&id].kind, Kind::MexDefense);
+        ai.logistics_update(ai.frame);
+        assert_eq!(ai.logistics.issues[&id].crew, vec![10]);
+        ai.eco_assign_worker(10);
+        assert_eq!(ai.eco.workers[&10].task, Some(id), "raid defense must mobilize an ordinary incumbent");
+        assert!(ai.eco.tasks.get(ordinary).is_some(), "the interrupted job remains available");
+        ai.eco.hard_estalled = true;
+        ai.frame += 30;
+        ai.eco_track_mex_defenses();
+        ai.logistics_update(ai.frame);
+        assert!(ai.logistics.issues[&id].crew.is_empty());
+        ai.eco.hard_estalled = false;
+        ai.frame += 30;
+        ai.eco_track_mex_defenses();
+        ai.logistics_update(ai.frame);
+        assert_eq!(ai.logistics.issues[&id].crew, vec![10]);
+        ai.eco.raid_mexes.clear();
+        ai.eco_track_mex_defenses();
+        assert!(!ai.logistics.issues.contains_key(&id), "an unstarted guard loses its request with its mex");
+    }
+
+    #[test]
+    fn reactive_mex_tracking_preserves_tactical_deadlines_and_started_guards() {
+        let (mut ai, id) = project_ai();
+        // A heavy strategic weapon never becomes sparse mex defense.
+        ai.eco.raid_mexes.insert(90, Vec3::xz(1100.0, 100.0));
+        ai.eco_track_mex_defenses();
+        assert!(!ai.logistics.issues.contains_key(&id));
+        ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().build_type =
+            UnitDef::from_id(ai.cb, 3).unwrap();
+        ai.eco_track_mex_defenses();
+        assert!(ai.logistics.issues.contains_key(&id));
+        ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().target = springai::Unit::from_id(ai.cb, 50);
+        ai.eco.raid_mexes.clear();
+        ai.eco_track_mex_defenses();
+        assert!(ai.logistics.issues.contains_key(&id), "finish the already committed frame");
+        ai.logistics_open(id, Kind::Operator, Worth::Deadline { value: 1000.0, by: 300.0 }, "operator", 0.0);
+        ai.eco.raid_mexes.insert(90, Vec3::xz(1100.0, 100.0));
+        ai.eco_track_mex_defenses();
+        assert_eq!(ai.logistics.issues[&id].kind, Kind::Operator);
+        assert_eq!(ai.logistics.issues[&id].worth.deadline(), Some(300.0));
     }
 
     #[test]

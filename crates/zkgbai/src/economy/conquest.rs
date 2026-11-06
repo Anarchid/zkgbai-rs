@@ -138,7 +138,7 @@ use zk_terrain::conquest::{Objective, Params, objectives};
 use zk_terrain::strategy::{Asset, Side};
 use zk_terrain::{Pos, Tier, TierMap};
 
-use super::{List, TaskId, WorkerTask};
+use super::{List, TaskId, Worker, WorkerTask};
 use crate::Ai;
 use crate::terrain::{pos, tier_of};
 use crate::util::distance;
@@ -455,6 +455,40 @@ impl Ai {
     /// default) for the trip with `compush` off.
     pub(crate) fn conquest_active(&self) -> bool {
         self.conquest_push() || !self.dev_off("conquest")
+    }
+
+    /// Ownership lasts for the operation, including travel and gaps between
+    /// construction jobs. A historical station is only a location preference;
+    /// completion/cancellation releases ownership without erasing that history.
+    /// Derived from the existing mission state, so policy disable releases it
+    /// immediately and checkpoint restoration needs no second reservation ledger.
+    pub(crate) fn conquest_owns_worker(&self, wid: i32) -> bool {
+        self.conquest_active()
+            && ((!self.conquest_push() && self.eco.conquest.op.as_ref().is_some_and(|op| op.crew == wid))
+                || self.eco.conquest.energy.as_ref().is_some_and(|e| e.id == wid))
+    }
+
+    pub(super) fn conquest_worker_travelling(&self, wid: i32) -> bool {
+        self.conquest_active()
+            && !self.conquest_push()
+            && self.eco.conquest.op.as_ref().is_some_and(|op| op.crew == wid && op.stage == Stage::Walk)
+    }
+
+    /// Shared by crew forecasting and job execution. Travel has no buildpower
+    /// to lend; at the objective explicit emergency/operator work may interrupt
+    /// the mission, while ordinary projects must wait for its release.
+    pub(super) fn conquest_allows_job(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if !self.conquest_owns_worker(w.id) {
+            return true;
+        }
+        if self.conquest_worker_travelling(w.id) {
+            return false;
+        }
+        self.op_priority(t.id)
+            || self.eco_build_guard_task(w.id) == Some(t.id)
+            || self.eco_factory_defense_requested(t)
+            || (self.eco.hard_estalled && self.eco_energy_job(t))
+            || self.conquest_bonus(w.id, t.id).is_some()
     }
 
     pub(super) fn eco_conquest_update(&mut self, frame: i32) {
@@ -2051,12 +2085,44 @@ mod tests {
 
     thread_local! {
         static COMMANDER_HOME: Cell<bool> = const { Cell::new(false) };
+        static ENERGY_DEFS: Cell<bool> = const { Cell::new(false) };
         static WALK_ORDERS: RefCell<Vec<(i32, Vec<f32>)>> = const { RefCell::new(Vec::new()) };
     }
 
     /// Commander 10 (out, or home), constructors 11 (far from home) and
     /// 12 (near), both greedy; home is our start at (1000, 1000).
     fn energy_ai() -> Ai {
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, n: i32) -> i32 {
+            if !ENERGY_DEFS.get() {
+                return 0;
+            }
+            if !out.is_null() && n > 0 {
+                unsafe {
+                    *out = 2;
+                }
+            }
+            1
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const std::ffi::c_char {
+            if id == 2 { c"energysolar".as_ptr() } else { c"staticcon".as_ptr() }
+        }
+        unsafe extern "C" fn params(
+            _: i32,
+            _: i32,
+            _: *mut *const std::ffi::c_char,
+            _: *mut *const std::ffi::c_char,
+        ) -> i32 {
+            0
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn cost(_: i32, _: i32, _: i32) -> f32 {
+            100.0
+        }
         unsafe extern "C" fn elevation(_: i32, _: f32, _: f32) -> f32 {
             0.0
         }
@@ -2092,6 +2158,7 @@ mod tests {
             };
             unsafe { std::ptr::copy_nonoverlapping(p.as_ptr(), out, 3) };
         }
+        ENERGY_DEFS.set(false);
         COMMANDER_HOME.with(|h| h.set(false));
         WALK_ORDERS.with_borrow_mut(Vec::clear);
         let mut ai = super::super::commander::tests::test_ai_with(|t| {
@@ -2106,6 +2173,16 @@ mod tests {
             t.Unit_getMaxHealth = Some(health);
             t.UnitDef_getWeaponMounts = Some(zero);
             t.Unit_getWeapons = Some(zero);
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_isAbleToAttack = Some(no);
+            t.UnitDef_getMaxWaterDepth = Some(scalar);
+            t.UnitDef_getSpeed = Some(scalar);
+            t.UnitDef_getCost = Some(cost);
+            t.UnitDef_getBuildTime = Some(scalar);
         });
         ai.graph.set_start_pos(Vec3::new(1000.0, 0.0, 1000.0));
         for (id, com, greedy) in [(10, true, false), (11, false, true), (12, false, true)] {
@@ -2165,6 +2242,112 @@ mod tests {
             contest: 0.0,
         });
         ai
+    }
+
+    #[test]
+    fn mission_reservation_covers_job_gaps_travel_and_policy_release() {
+        let mut ai = direct_ai();
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        assert!(ai.eco_project_hand(10, job), "baseline worker is available");
+        ai.eco.conquest.op = Some(walking());
+        for stage in [Stage::Prepare, Stage::Walk, Stage::Watch, Stage::Fortify] {
+            ai.eco.conquest.op.as_mut().unwrap().stage = stage;
+            assert!(ai.eco.workers[&10].task.is_none());
+            assert!(!ai.eco_project_hand(10, job), "no project borrowing during {stage:?}");
+            assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], ai.eco.tasks.get(job).unwrap()));
+            assert!(ai.eco_project_hand(11, job), "ordinary builders remain available");
+        }
+        ai.eco.conquest.op.as_mut().unwrap().mex_tasks.push(job);
+        assert!(ai.eco_project_hand(10, job), "the mission may staff its own construction");
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Walk;
+        assert!(!ai.eco_project_hand(10, job), "even mission work waits for arrival");
+        ai.set_feature_off("conquest", true);
+        assert!(ai.eco_project_hand(10, job), "disable takes effect before state cleanup");
+        ai.set_feature_off("conquest", false);
+        ai.eco.conquest.op = None;
+        ai.eco.conquest.station = Some(Station { crew: 10, center: Vec3::default(), since: 0 });
+        assert!(ai.eco_project_hand(10, job), "completed missions release workers, even with station history");
+    }
+
+    #[test]
+    fn project_forecast_releases_a_crew_when_conquest_claims_it_between_jobs() {
+        use crate::logistics::{Kind, Worth};
+        let mut ai = direct_ai();
+        ai.eco.workers.retain(|&id, _| id == 10);
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        ai.eco.construction_tasks.push(job);
+        ai.eco.metal = 1000.0;
+        ai.eco.energy = 1000.0;
+        ai.eco.effective_income = 100.0;
+        ai.set_feature_off("logistics", false);
+        ai.set_feature_off("porc", true);
+        ai.set_feature_off("pause", true);
+        ai.logistics_open(job, Kind::Special, Worth::Flat(1000.0), "test project", 0.0);
+        ai.frame = 3017;
+        ai.offset = 0;
+        ai.logistics_update(ai.frame);
+        assert_eq!(ai.logistics.issues[&job].crew, vec![10]);
+        ai.eco.conquest.op = Some(walking());
+        ai.frame += 30;
+        ai.logistics_update(ai.frame);
+        assert!(ai.logistics.issues[&job].crew.is_empty(), "forecast cannot lend a travelling commander");
+        assert_eq!(ai.logistics.issues[&job].reason, "no_safe_available_workers");
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Watch;
+        ai.frame += 30;
+        ai.logistics_update(ai.frame);
+        assert!(ai.logistics.issues[&job].crew.is_empty(), "gaps after arrival still belong to conquest");
+        ai.eco.conquest.op = None;
+        ai.frame += 30;
+        ai.logistics_update(ai.frame);
+        assert_eq!(ai.logistics.issues[&job].crew, vec![10], "release resumes the persistent project");
+    }
+
+    #[test]
+    fn mission_reservation_allows_operator_and_stall_overrides_at_the_objective() {
+        let mut ai = direct_ai();
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 2).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        ai.eco.conquest.op = Some(walking());
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Watch;
+        ai.op.over.priority_tasks.insert(job);
+        assert!(ai.eco_project_hand(10, job));
+        ai.op.over.priority_tasks.clear();
+        ai.eco.build_ids.solar_id = 2;
+        ENERGY_DEFS.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai.eco.hard_estalled = true;
+        assert!(ai.eco_project_hand(10, job), "energy emergency may interrupt at the objective");
+        ai.eco.hard_estalled = false;
+        assert!(!ai.eco_project_hand(10, job));
+    }
+
+    #[test]
+    fn home_energy_reservation_survives_gaps_and_releases_with_the_role() {
+        let mut ai = direct_ai();
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(1100.0, 0.0, 1000.0),
+            0,
+        ));
+        ai.eco.conquest.energy = Some(EnergyWorker { id: 11, was_greedy: true, since: 100 });
+        assert!(!ai.eco_project_hand(11, job));
+        ai.eco.build_ids.solar_id = 1;
+        assert!(ai.eco_project_hand(11, job), "home energy belongs to the role");
+        ai.eco.tasks.get_mut(job).unwrap().position = Vec3::new(8000.0, 0.0, 8000.0);
+        assert!(!ai.eco_project_hand(11, job), "the role does not promise distant power");
+        ai.eco.conquest.energy = None;
+        assert!(ai.eco_project_hand(11, job));
     }
 
     #[test]

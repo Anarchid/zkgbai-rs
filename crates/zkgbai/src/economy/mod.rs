@@ -930,6 +930,7 @@ impl Ai {
             self.eco_watch_allied_projects();
             // remove finished or invalidated tasks
             self.eco_clean_orders();
+            self.eco_track_mex_defenses();
             self.eco_special_update();
             self.eco_plan_team_energy();
             self.eco_plan_army_support();

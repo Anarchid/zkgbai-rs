@@ -220,6 +220,7 @@ impl Ai {
             && w.unit.team() == self.team_id
             && !w.unit.is_being_built()
             && !self.eco_worker_externally_held(w.id)
+            && !self.conquest_worker_travelling(w.id)
             && !self.recovery_owns(w.id)
             && !self.jump_in_progress(w.unit)
             && !self.eco_in_transit(w.id)
