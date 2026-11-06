@@ -970,7 +970,7 @@ impl Ai {
             return;
         }
         // Temporary controllers keep the picket's assignment for its return.
-        if self.coalesce_owns(id) || self.qrf_claims(id) {
+        if self.harassment_owns(id) || self.coalesce_owns(id) || self.qrf_claims(id) {
             return;
         }
         let (unit, p, sight, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.duty);
@@ -1431,7 +1431,7 @@ impl Ai {
             .filter(|(_, m)| m.strike.is_none_or(|s| s.target == eid))
             .filter(|(_, m)| distance(m.f.get_pos(), epos) <= STRIKE_REACH)
             .filter(|(id, m)| {
-                !self.coalesce_owns(**id) && !self.qrf_claims(**id) && !self.retreat_is_retreating(m.f.unit)
+                !self.harassment_owns(**id) && !self.coalesce_owns(**id) && !self.qrf_claims(**id) && !self.retreat_is_retreating(m.f.unit)
             })
             .map(|(&id, m)| (id, m.f.unit))
             .collect();

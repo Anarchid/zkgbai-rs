@@ -601,6 +601,7 @@ impl Ai {
                 && u.team() == self.team_id
                 && !springai::reserved::is_reserved(self.cb, id)
                 && !self.recovery_owns(id)
+                && !self.harassment_owns(id)
                 && !u.is_being_built()
                 && !def.is_able_to_fly()
                 && def.max_weapon_range() > 0.0

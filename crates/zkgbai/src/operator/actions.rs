@@ -389,6 +389,8 @@ pub(crate) const FEATURES: &[(&str, &str, &str)] = &[
     ),
     ("limpetshadow", "Army", "with limpet disabled, journal its commitment verdicts without changing orders"),
     ("fightshadow", "Army", "the fight predictor runs and logs, not acting"),
+    ("harasskodachi", "Army", "Kodachi forecasted attack then post-shot withdrawal; disabling finishes existing sorties"),
+    ("harasswide", "Army", "experimental attack then withdrawal for Blitz, Bolas, Cyclops, Minotaur, Ravager, Dominatrix, Scorcher and Pyro (default off)"),
     ("finishmargin", "Army", "require a 5% remaining-health finishing reserve for new attacks on armed mobile prizes"),
     (
         "coalesce",

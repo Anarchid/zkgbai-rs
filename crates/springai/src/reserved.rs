@@ -77,6 +77,12 @@ pub struct CommandLease {
 }
 
 impl CommandLease {
+    /// Persist this token with the unit ID; resolve against the current AI's
+    /// restored authority table, never a saved callback or AI instance number.
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+
     pub fn active(&self) -> bool {
         LEASED.with_borrow(|l| l.get(&(self.ai, self.unit)).is_some_and(|(t, _)| *t == self.token))
     }
@@ -99,6 +105,18 @@ fn lend_unit(ai: i32, unit: i32, owner: Owner) -> CommandLease {
     NEXT_LEASE.set(token);
     LEASED.with_borrow_mut(|l| l.insert((ai, unit), (token, owner)));
     CommandLease { ai, unit, token }
+}
+
+/// Check a persisted lease using the current callback (which may have rebound).
+pub fn lease_active(cb: Callback, unit_id: i32, token: u64) -> bool {
+    LEASED.with_borrow(|l| l.get(&(cb.ai_id(), unit_id)).is_some_and(|(t, _)| *t == token))
+}
+
+/// Return only this lease; a newer controller always wins.
+pub fn release_lease(cb: Callback, unit_id: i32, token: u64) {
+    if lease_active(cb, unit_id, token) {
+        LEASED.with_borrow_mut(|l| l.remove(&(cb.ai_id(), unit_id)));
+    }
 }
 
 /// Reserve unit `unit_id` of AI `cb`; `false` if it already was.

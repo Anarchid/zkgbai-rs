@@ -187,7 +187,8 @@ impl Ai {
     pub fn retreat_check_unit(&mut self, unit: Unit, on_fire: bool) {
         let id = unit.id();
         // A raider gang has committed it (see `coalesce`).
-        if self.license_committed(id)
+        if self.harassment_owns(id)
+            || self.license_committed(id)
             || self.limpet_committed(id)
             || self.fire_controls(id)
             || self.lobster_strike_assessing(id)

@@ -117,8 +117,9 @@ const START_ROOM: f32 = 450.0;
 /// `lanes` is opt-in. `unifiedconquest` supersedes colonize and lanes;
 /// it is on by default in wip, opt-in on main. Both off restores the
 /// worker policy from before the path experiment. Explicit conquest stays separate.
-pub(crate) const OFF_BY_DEFAULT: [&str; 29] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 30] = [
     "fightlicense",
+    "harasswide",
     "lanes",
     "raidcommit",
     "limpetshadow",
@@ -1007,6 +1008,7 @@ impl Ai {
             }
             Event::WeaponFired { unit, weapon } => {
                 if weapon.is_none_or(|w| w.range() > 0.0 && !w.name().contains("fake")) {
+                    self.guard("harassment.weaponFired", |ai| ai.harassment_fired(unit));
                     self.guard("pack.weaponFired", |ai| ai.pack_fired(unit));
                 }
             }

@@ -25,6 +25,7 @@ pub mod invade;
 pub mod jaeger;
 pub mod jumps;
 pub mod license;
+pub mod harassment;
 pub mod limpets;
 pub mod missiles;
 pub mod nukes;
@@ -226,6 +227,7 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    pub harassment: harassment::Harassment,
     pub license_enabled: bool,
     pub license_hazards: BTreeMap<i32, license::Hazard>,
     pub limpets: limpets::Limpets,
@@ -302,6 +304,7 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            harassment: harassment::Harassment::default(),
             license_enabled: false,
             license_hazards: BTreeMap::new(),
             limpets: Default::default(),
@@ -605,6 +608,7 @@ impl Ai {
         // Before the squads decide: their fight predictions arrive here.
         self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
         self.guard("limpet.update", |ai| ai.limpet_update(frame));
+        self.guard("harassment.update", |ai| ai.harassment_update(frame));
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
         self.guard("ammo.update", |ai| ai.ammo_update(frame));
         self.guard("coalesce.update", |ai| ai.coalesce_update(frame));

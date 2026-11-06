@@ -134,6 +134,7 @@ impl Ai {
             && unit.team() == self.team_id
             && !unit.is_being_built()
             && !reserved::is_reserved(self.cb, unit.id())
+            && !self.harassment_owns(unit.id())
             && !self.coalesce_owns(unit.id())
             && !self.recovery_owns(unit.id())
             && !self.retreat_is_retreating(unit)

@@ -1177,6 +1177,7 @@ impl Ai {
                 || u.team() != self.team_id
                 || self.retreat_is_retreating(u)
                 || self.coalesce_owns(id)
+                || self.harassment_owns(id)
             {
                 continue;
             }
