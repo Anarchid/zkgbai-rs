@@ -437,7 +437,8 @@ impl Ai {
                 self.recovery.mission = Some(mission);
                 return;
             }
-            self.recovery.watches.get_mut(&unit.id()).unwrap().attempted |= 1;
+            // No walk was attempted. A neighbour's clearance can open a
+            // route before this unit moves; reconsider it on the next probe.
         }
         if attempted & 2 == 0 && local.escape(goal, None, true).is_none() {
             let blockers = self.cb.friendly_units_in_cylinder(unit.pos(), RADIUS);
