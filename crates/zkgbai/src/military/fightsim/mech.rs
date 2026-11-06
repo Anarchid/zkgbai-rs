@@ -591,7 +591,12 @@ pub enum RaidAim {
     Free,
 }
 
+mod sortie;
+use sortie::SortieRun;
+pub use sortie::{ExitTrigger, HarassOrder, HarassOutcome, HarassUnit};
+
 struct Run<'a> {
+    sortie: Option<SortieRun>,
     construction: Option<&'a Construction>,
     progress: f32,
     defense: Option<&'a Defense>,
@@ -885,6 +890,7 @@ impl Model {
         let flags =
             if pass { SimFlags { twod: false, focus: snap.flags.least_health(), ..snap.flags } } else { snap.flags };
         let mut run = Run {
+            sortie: None,
             construction,
             progress: construction.map_or(1.0, |c| c.progress.clamp(0.0, 1.0)),
             defense,
@@ -1228,6 +1234,7 @@ pub(super) fn simulate_mech_kiting(
     kiting: Option<&Kiting>,
 ) -> (f64, f64) {
     let mut run = Run {
+        sortie: None,
         construction: None,
         progress: 1.0,
         defense: None,
@@ -1351,6 +1358,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         kill(&mut us, &mut killed, b.index, 0);
     }
     while f < run.horizon {
+        if let Some(sortie) = run.sortie.as_mut() {
+            sortie.update(&us, f);
+            if sortie.active_exit().is_some() || run.focus.is_some_and(|i| !us[i].u.alive) {
+                run.focus = None;
+            }
+        }
         if let Some(hz) = hazard
             && f > 0
             && f % 30 == 0
@@ -1420,7 +1433,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                         && us.get(h.index).is_some_and(|b| b.u.alive && b.u.side == b.orig_side)
                 })
         });
-        if !goes_on && !building {
+        if !goes_on && !building && run.sortie.is_none() {
             if run.defense.is_some_and(|d| {
                 d.arrivals
                     .iter()
@@ -1539,6 +1552,18 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 continue;
             }
             let side = us[i].u.side as usize;
+            // A planned exit is one persistent Move destination. Keep firing,
+            // cooldowns and status effects; do not rebuild the fight snapshot.
+            if side == 0
+                && let Some(exit) = run.sortie.as_ref().and_then(|s| s.active_exit())
+            {
+                let dist = (exit.0 - us[i].u.x).hypot(exit.1 - us[i].lat);
+                let step = (us[i].u.speed * (1.0 - us[i].slowed()) * dt).min(dist);
+                step_to(&mut us[i], exit.0, exit.1, step, 1.0, run.twod);
+                us[i].u.moving = step > 0.0;
+                moved |= step > 0.0;
+                continue;
+            }
             let mut nearest: Option<(f64, f64, f64, usize)> = None;
             for &j in &sides[1 - side] {
                 if side == 0 && run.focus.is_some_and(|target| target != j)
@@ -1600,7 +1625,11 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             // ZK's tactical AI: only the closest enemy decides; skirm it at
             // range (more while reloading) or flee it beyond its range.
-            if let Some(want) = run.kiting.and_then(|k| k.want(&us, i, nj, dist, f)) {
+            if let Some(want) = run
+                .kiting
+                .filter(|_| run.sortie.as_ref().is_none_or(|s| s.kites(side)))
+                .and_then(|k| k.want(&us, i, nj, dist, f))
+            {
                 if dist < want - 1.0 {
                     let step = (speed * dt).min(want - dist);
                     step_to(&mut us[i], nx, nz, step, -1.0, run.twod);
@@ -1701,6 +1730,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 }
                 us[i].u.weapons[wi].next = f + if sf > 0.0 { (reload as f64 / (1.0 - sf)) as i32 } else { reload };
                 shot_fired = true;
+                if side == 0
+                    && let Some(sortie) = run.sortie.as_mut()
+                {
+                    sortie.first_shot.get_or_insert(f);
+                    sortie.shots += 1;
+                }
                 let rb = if range > 0.0 { ((RBANDS as f64 * dist / range) as i32).min(RBANDS) } else { RBANDS };
                 let sb = speed_band(if us[j].u.moving { us[j].u.speed } else { 0.0 });
                 let hit = hits.lookup(key, us[j].u.target, rb as u8, sb);
@@ -2910,6 +2945,7 @@ mod tests {
         us[1].cap_hit = 0;
         us[0].u.weapons[0].next = 10_000;
         let mut run = Run {
+            sortie: None,
             construction: None,
             progress: 1.0,
             defense: None,

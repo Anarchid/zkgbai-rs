@@ -26,6 +26,7 @@ mod bomb;
 pub mod live;
 pub mod local;
 pub mod mech;
+pub use mech::{ExitTrigger, HarassOrder, HarassOutcome, HarassUnit};
 pub mod plan;
 mod reloads;
 pub mod scenario;
