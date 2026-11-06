@@ -1088,7 +1088,15 @@ mod tests {
         x: f32,
     ) -> SnapUnit {
         let weapons = w.map_or_else(Vec::new, |(name, kind, range, reload, damage)| {
-            vec![WeaponSpec { leading: None, name: name.into(), weapon_type: kind.into(), range, reload, salvo: 1, damage }]
+            vec![WeaponSpec {
+                leading: None,
+                name: name.into(),
+                weapon_type: kind.into(),
+                range,
+                reload,
+                salvo: 1,
+                damage,
+            }]
         });
         let spec = UnitSpec {
             def: def.into(),

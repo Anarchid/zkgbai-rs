@@ -296,7 +296,7 @@ targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
 `artemis` (an Artemis at the centroid of our front against over 4000 metal of enemy air),
 `mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
-`regionsplit` (on by default in the wip line, `disable=regionsplit`; off on main) has the terrain model cut regions
+`regionsplit` (on by default, `disable=regionsplit`) has the terrain model cut regions
 holding many metal spots into pieces around clusters of them.
 Independently of `mexporc`, a mex that has a scout or raider come within Lotus weapon range
 remembers that encounter for life and uses the same sparse mex defense, with the usual spacing
@@ -677,8 +677,7 @@ unreachable defended region.
 paired energy workers, route prices, local early energy and onward-job rule.
 Unified conquest takes precedence when both switches are enabled.
 
-- Wip default: unified conquest on, lanes off.
-- Main default: both off; enable either explicitly for comparison.
+- Default in 0.7.0: unified conquest on, lanes off.
 - Previous lanes: `enable=lanes disable=unifiedconquest`.
 - Before the path experiment: `disable=lanes,unifiedconquest`. This restores
   ordinary distance-based assignment, greedy energy roles and grid placement;

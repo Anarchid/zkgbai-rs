@@ -241,6 +241,7 @@ impl Ai {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn dominatrix_validate_checkpoint(&self) -> Result<(), String> {
         for (&id, vip) in &self.taskforces.dominatrices.retired {
             if id != vip.unit.id() || self.fighters.contains_key(&id) || self.eco.workers.contains_key(&id) {

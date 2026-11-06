@@ -215,7 +215,8 @@ fn three_cores_form_without_escorts_then_accrete_to_ten_and_leave_a_pair_alone()
     assert_eq!(domi_teams(&ai), [(team[0].0, 10)]);
     add(&mut ai, 13, 0);
     assert_eq!(domi_teams(&ai).iter().map(|t| t.1).collect::<Vec<_>>(), [10, 3]);
-    let all: Vec<_> = ai.squads.ids().into_iter().filter_map(|sid| ai.squads.get(sid)).flat_map(|s| s.everyone()).collect();
+    let all: Vec<_> =
+        ai.squads.ids().into_iter().filter_map(|sid| ai.squads.get(sid)).flat_map(|s| s.everyone()).collect();
     for id in 1..=13 {
         assert_eq!(all.iter().filter(|&&i| i == id).count(), 1, "duplicated {id}");
     }

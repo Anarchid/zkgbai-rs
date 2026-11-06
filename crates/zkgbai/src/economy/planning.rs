@@ -1524,7 +1524,9 @@ impl Ai {
             self.eco_special_report("staticheavyarty", "blocked", "definition_missing", None);
             return;
         };
-        if self.eco_assist_ally(bertha) { return; }
+        if self.eco_assist_ally(bertha) {
+            return;
+        }
         let Some(position) = self.eco_bertha_site(bertha) else {
             self.eco_special_report("staticheavyarty", "blocked", "no_safe_firing_site", None);
             return;
@@ -1600,7 +1602,11 @@ impl Ai {
     }
 
     pub(super) fn eco_create_super_wep_task(&mut self) {
-        let name = match self.eco.s_wep { 1 => "staticnuke", 2 => "zenith", _ => "raveparty" };
+        let name = match self.eco.s_wep {
+            1 => "staticnuke",
+            2 => "zenith",
+            _ => "raveparty",
+        };
         if self.fac.factories.is_empty() {
             self.eco_special_report(name, "blocked", "no_factory", None);
             return;
@@ -1610,7 +1616,9 @@ impl Ai {
             return;
         };
         // Part-paid allied frames precede our own site search and turn-taking.
-        if self.eco_assist_ally(def) { return; }
+        if self.eco_assist_ally(def) {
+            return;
+        }
         if self.eco.s_wep == 1 && self.eco_alliance_nuke().is_some() {
             self.eco_special_report(name, "satisfied", "alliance_silo", None);
             self.eco.s_wep = 0;

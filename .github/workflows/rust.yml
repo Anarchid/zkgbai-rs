@@ -132,6 +132,7 @@ jobs:
       VERSION: ${{ needs.package.outputs.version }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.package.outputs.artifact }}
@@ -158,8 +159,13 @@ jobs:
           The libraries were built by this repository's CI; check one with
           \`gh attestation verify libSkirmishAI.so -R $GITHUB_REPOSITORY\`.
           EOF
+          generated=(--generate-notes)
+          if [ -f "docs/releases/$VERSION.md" ]; then
+            cp "docs/releases/$VERSION.md" notes.md
+            generated=()
+          fi
           prerelease=()
           [[ $VERSION == *-* ]] && prerelease=(--prerelease)
           gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --verify-tag \
-            --title "ZKGBAI $VERSION" --notes-file notes.md --generate-notes "${prerelease[@]}" \
+            --title "ZKGBAI $VERSION" --notes-file notes.md "${generated[@]}" "${prerelease[@]}" \
             "ZKGBAI-$VERSION.zip" SHA256SUMS

@@ -80,8 +80,7 @@ const START_ROOM: f32 = 450.0;
 /// `densgate` (phase gates on the map's density clock) waits for its A/B
 /// (enable=densgate to opt in).
 /// `regionsplit` (terrain regions holding many metal spots cut into pieces
-/// around clusters of them, 2026-11-02) is on in the wip line for
-/// eyeballing (disable=regionsplit); off on main until its A/B.
+/// around clusters of them) is on by default (disable=regionsplit).
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
@@ -115,7 +114,7 @@ const START_ROOM: f32 = 450.0;
 /// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
 /// ledger that is 99.5% right; the ledger still counts and journals.
 /// `lanes` is opt-in. `unifiedconquest` supersedes colonize and lanes;
-/// it is on by default in wip, opt-in on main. Both off restores the
+/// it is on by default. Both off restores the
 /// worker policy from before the path experiment. Explicit conquest stays separate.
 pub(crate) const OFF_BY_DEFAULT: [&str; 30] = [
     "fightlicense",

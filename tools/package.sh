@@ -29,14 +29,14 @@ cd "$root"
 
 if [ "$native" = 1 ]; then
     cargo build --release -p zkgbai
-    cp target/release/libzkgbai.so "$ai/libSkirmishAI.so"
+    cp "${CARGO_TARGET_DIR:-target}"/release/libzkgbai.so "$ai/libSkirmishAI.so"
 else
     export PATH="$root/.toolchains/venv/bin:$root/.toolchains/bin:$PATH"
     command -v cargo-zigbuild > /dev/null || { echo "run tools/setup-toolchain.sh first (or use --native)" >&2; exit 1; }
     cargo zigbuild --release -p zkgbai --target x86_64-unknown-linux-gnu.2.17
     cargo zigbuild --release -p zkgbai --target x86_64-pc-windows-gnu
-    cp target/x86_64-unknown-linux-gnu/release/libzkgbai.so "$ai/libSkirmishAI.so"
-    cp target/x86_64-pc-windows-gnu/release/zkgbai.dll "$ai/SkirmishAI.dll"
+    cp "${CARGO_TARGET_DIR:-target}"/x86_64-unknown-linux-gnu/release/libzkgbai.so "$ai/libSkirmishAI.so"
+    cp "${CARGO_TARGET_DIR:-target}"/x86_64-pc-windows-gnu/release/zkgbai.dll "$ai/SkirmishAI.dll"
 fi
 
 sed "s/@VERSION@/$version/" crates/zkgbai/data/AIInfo.lua > "$ai/AIInfo.lua"
