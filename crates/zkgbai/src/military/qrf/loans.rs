@@ -10,6 +10,8 @@ impl Ai {
     pub(crate) fn qrf_can_borrow_stakeout(&self, id: i32) -> bool {
         self.role_of(id) == Some(Role::Stakeout)
             && self.stakeouts.contains(id)
+            && self.stakeouts_qrf_available(id)
+            && !self.stayveto_borrowed(id)
             && !self.qrf.members.contains_key(&id)
             && !reserved::is_reserved(self.cb, id)
             && !self.retreat_handler.is_retreating(id)
@@ -184,7 +186,7 @@ pub(super) mod tests {
         assert_eq!(team, 7);
         assert_eq!(ai.qrf.next_team, 8);
         assert_eq!(ai.stakeouts.count(), 2, "borrowing must not trigger replacement production");
-        assert!(ai.stakeouts_borrowable().is_empty(), "coalesce must not take QRF's scouts");
+        assert!(ai.stakeouts_borrowable(ai.frame).is_empty(), "coalesce must not take QRF's scouts");
         assert_eq!(ai.qrf_borrow_stakeouts(&units), None, "repeated damage must not create another team");
         for &unit in &units {
             assert_eq!(ai.role_of(unit.id()), Some(Role::Stakeout));

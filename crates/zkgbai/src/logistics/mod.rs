@@ -10,15 +10,23 @@
 //! Paused projects retain their identity and report why they cannot proceed.
 //! While an urgent issue is under way
 //! it can also hold back the metal of other construction and of the
-//! factories (Zero-K build priority).
+//! factories (Zero-K build priority; the `pause` feature).
 //!
 //! The first client is defense against incursions the terrain model
 //! forecasts (`incursions`): at the first of our assets an enemy group can
 //! reach, a turret sized to the group, if one can stand in time and the
-//! value at risk pays for it. The others are capital that waits: grid links restoring
-//! powered buildings or overdrive income, a factory a module requisitioned, an anti-nuke; each worth
+//! value at risk pays for it. The walk-in guard (`walkin`, see [`walkin`])
+//! fortifies whatever we value that a force worth 800 metal or more gets
+//! to with nothing of ours to meet it. The others (feature `clients`) are capital
+//! that waits: grid links restoring powered buildings or overdrive income, a factory a module requisitioned, an anti-nuke; each worth
 //! what it unlocks or saves, less a share of it for every second it is
 //! late. The operator can open issues of its own (tool `issue`).
+//!
+//! The crew's bonus is in metal, so the danger of the job can be too
+//! (feature `currency`, off by default: it lost its mirrors): what sending
+//! the worker risks is its cost times the chance of losing it there, and a
+//! worker whose share is more than that stays on the job where it would
+//! otherwise run.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,11 +35,12 @@ use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3};
 
 use crate::Ai;
 use crate::defs::cmd;
-use crate::economy::TaskId;
+use crate::economy::{TaskId, Worker};
 use crate::military::wrappers::weapon_power;
 use crate::util::{distance, get_directional_point};
 
 mod projects;
+pub mod walkin;
 
 /// Frames between assessments.
 const PERIOD: i32 = 30;
@@ -153,24 +162,36 @@ impl Worth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Defense,
+    /// Persistent sparse coverage requested by a raided mex.
+    MexDefense,
+    /// A turret against a force nothing of ours would meet (`walkin`).
+    Walkin,
+    /// A turret the posture ordered (see `posture`): crewed like a defense,
+    /// but never urgent enough to hold back the rest (no pause).
+    Posture,
     Grid,
     Factory,
     Antinuke,
     Energy,
     Operator,
     Special,
+    Allied,
 }
 
 impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::Defense => "defense",
+            Kind::MexDefense => "mex_defense",
+            Kind::Walkin => "walkin",
+            Kind::Posture => "posture",
             Kind::Grid => "grid",
             Kind::Factory => "factory",
             Kind::Antinuke => "antinuke",
             Kind::Energy => "energy",
             Kind::Operator => "operator",
             Kind::Special => "special",
+            Kind::Allied => "allied",
         }
     }
 }
@@ -196,6 +217,9 @@ pub struct Issue {
     pub value: f32,
     pub share: f32,
     pub started: bool,
+    def_id: i32,
+    target: Option<Unit>,
+    target_team: Option<i32>,
     progress: projects::Progress,
     retry_at: i32,
     pub(crate) state: &'static str,
@@ -204,6 +228,27 @@ pub struct Issue {
 }
 
 impl Issue {
+    fn reset_execution(&mut self, frame: i32) {
+        self.crew.clear();
+        self.assigned = 0;
+        self.share = 0.0;
+        self.value = 0.0;
+        self.eta = f32::INFINITY;
+        self.retry_at = 0;
+        self.progress = projects::Progress::new(frame);
+        self.state = "pending";
+        self.reason = "retargeted";
+    }
+
+    fn matches_task(&self, task: &crate::economy::WorkerTask) -> bool {
+        task.as_construction().is_some_and(|c| {
+            self.def_id == c.build_type.id()
+                && self.target == c.target
+                && self.target_team == c.target.map(|u| u.team())
+                && distance(self.pos, task.get_pos()) < 0.1
+        })
+    }
+
     fn json(&self) -> Value {
         json!({
             "id": self.id,
@@ -220,6 +265,7 @@ impl Issue {
             "value": self.value.round(),
             "share": self.share.round(),
             "started": self.started,
+            "target": self.target.map(|u| u.id()), "target_team": self.target_team,
             "opened": self.opened,
             "state": self.state, "reason": self.reason, "assigned": self.assigned,
             "last_progress": self.progress.last, "retry_at": self.retry_at,
@@ -270,6 +316,8 @@ pub struct Logistics {
     /// Construction and factories set to low priority for an urgent issue.
     paused: Vec<Unit>,
     frame: i32,
+    /// The walk-in guard.
+    pub walkin: walkin::State,
 }
 
 /// Defense power of a turret of type `def`, on the scale of the enemy
@@ -342,9 +390,24 @@ fn best_crew(
     worth: &Worth,
     now: f32,
 ) -> (usize, f32, f32) {
+    best_crew_stretched(hands, work, cost, metal, income, worth, now, PESSIMISM)
+}
+
+/// [`best_crew`] with forecast completion times stretched by `stretch`.
+#[allow(clippy::too_many_arguments)]
+fn best_crew_stretched(
+    hands: &[Hand],
+    work: f32,
+    cost: f32,
+    metal: f32,
+    income: f32,
+    worth: &Worth,
+    now: f32,
+    stretch: f32,
+) -> (usize, f32, f32) {
     let mut plans = Vec::with_capacity(MAX_CREW);
     for k in 1..=hands.len().min(MAX_CREW) {
-        let eta = finish_time(&hands[..k], work, cost, metal, income) * PESSIMISM;
+        let eta = finish_time(&hands[..k], work, cost, metal, income) * stretch;
         plans.push((k, eta, worth.at(now + eta)));
     }
     let Some(top) = plans.iter().map(|p| p.2).fold(None, |m: Option<f32>, v| Some(m.map_or(v, |m| m.max(v)))) else {
@@ -369,9 +432,15 @@ impl Ai {
         let now = frame as f32 / 30.0;
         self.logistics_close_gone(now);
         self.logistics_defenses(now);
+        if !self.dev_off(walkin::FEATURE) && !self.dev_off("porc") {
+            self.logistics_walkins(now);
+        }
         self.logistics_grid(now);
         self.logistics_forecast(now);
-        self.logistics_pause(now);
+        self.walkin_caretakers();
+        if !self.dev_off("pause") {
+            self.logistics_pause(now);
+        }
         if frame / STATS_PERIOD != self.logistics.frame / STATS_PERIOD {
             self.logistics_summary();
         }
@@ -397,16 +466,47 @@ impl Ai {
             s.unpaid,
             s.nosite
         ));
+        if !self.dev_off(walkin::FEATURE) {
+            let w = self.logistics.walkin.stats;
+            self.log(&format!(
+                "walkin: {} force looks, {} with a place in reach, {} met everywhere, {} breaches: {} turrets opened, \
+                 {} already coming, {} capped, {} outranged, {} late, {} no site; {} stood down, {} bumped",
+                w.groups,
+                w.threats,
+                w.defended,
+                w.breaches,
+                w.opened,
+                w.pending,
+                w.capped,
+                w.outranged,
+                w.late,
+                w.nosite,
+                w.stood_down,
+                w.bumped
+            ));
+        }
     }
 
     /// The bonus worker `wid` gets in the assignment loop for task `task`:
-    /// its share of the issue's value, if it is on the crew.
+    /// its share of the issue's value, if it is on the crew; the whole value
+    /// if the job is already its own (on its way or at it). A split share
+    /// (140-380 among two to four) lost to every other bonus about: on
+    /// Agalta constructors walked 1300 elmos to a geothermal vent and left it
+    /// at 200-250 for conquest turrets, bonused mexes and home turbines, the
+    /// crew changing 25 times in five minutes (smokes of 2026-11-03).
     pub fn logistics_bonus(&self, wid: i32, task: TaskId) -> Option<f32> {
         if self.dev_off("logistics") {
             return None;
         }
         let issue = self.logistics.issues.get(&task)?;
-        (issue.share > 0.0 && issue.crew.contains(&wid)).then_some(issue.share)
+        if !self.eco.tasks.get(task).is_some_and(|t| issue.matches_task(t))
+            || issue.share <= 0.0
+            || !issue.crew.contains(&wid)
+        {
+            return None;
+        }
+        let own = self.eco.workers.get(&wid).is_some_and(|w| w.task == Some(task));
+        Some(if own { issue.value.min(BONUS_CAP).max(issue.share) } else { issue.share })
     }
 
     /// The crew's assignment is a contract with the worker scheduler, not
@@ -418,14 +518,19 @@ impl Ai {
         self.logistics
             .issues
             .values()
-            .find(|i| i.crew.contains(&wid) && (!self.eco.hard_estalled || i.kind == Kind::Energy))
+            .find(|i| {
+                self.eco.tasks.get(i.task).is_some_and(|t| i.matches_task(t))
+                    && i.crew.contains(&wid)
+                    && (!self.eco.hard_estalled || i.kind == Kind::Energy)
+            })
             .map(|i| i.task)
     }
 
     pub(crate) fn logistics_allows(&self, wid: i32, task: TaskId) -> bool {
         self.dev_off("logistics")
             || self.logistics.issues.get(&task).is_none_or(|i| {
-                i.state == "pending"
+                self.eco.tasks.get(task).is_some_and(|t| !i.matches_task(t))
+                    || i.state == "pending"
                     || (i.crew.contains(&wid)
                         && (!self.eco.hard_estalled || i.kind == Kind::Energy)
                         && self.eco_project_hand(wid, task))
@@ -437,25 +542,41 @@ impl Ai {
         self.logistics.issues.contains_key(&task)
     }
 
+    /// What sending worker `w` to `p` risks, in metal: its cost times the
+    /// chance of losing it to the enemy power there (or seen near there
+    /// lately, `raiders_near`: the raid memory) against ours.
+    pub fn logistics_risk(&self, w: &Worker, p: Vec3, raiders_near: f32) -> f32 {
+        let Some(cost) = w.unit.def().map(|d| d.cost(self.metal)) else { return 0.0 };
+        let enemy = self.war.get_enemy_power(p).max(raiders_near);
+        cost * loss_chance(enemy, self.war.get_total_friendly_power(p))
+    }
+
+    /// Whether worker `wid` stays on its job in danger: it is on the crew
+    /// of the issue its job is, and its share of the value is more than
+    /// what it risks. (Commanders never: they are worth more than they
+    /// cost.)
+    pub fn logistics_holds(&self, wid: i32) -> bool {
+        if self.dev_off("currency") {
+            return false;
+        }
+        let Some(w) = self.eco.workers.get(&wid) else { return false };
+        if w.is_com {
+            return false;
+        }
+        let Some(share) = w.task.and_then(|t| self.logistics_bonus(wid, t)) else { return false };
+        let p = w.get_pos();
+        share > self.logistics_risk(w, p, self.eco_raiders_near(p))
+    }
+
     /// Open an issue on construction task `task` (or re-value one).
     pub fn logistics_open(&mut self, task: TaskId, kind: Kind, worth: Worth, why: &str, against: f32) -> Option<u32> {
+        self.logistics_sync_task(task);
         let t = self.eco.tasks.get(task)?;
         let c = t.as_construction()?;
         let what = self.defs.name(c.build_type).to_owned();
         let pos = t.get_pos();
         let (cost, build_time) = (c.build_type.cost(self.metal), c.build_type.build_time());
         if let Some(i) = self.logistics.issues.get_mut(&task) {
-            // Allied adoption can move a task without changing its identity.
-            // Travel, remaining work and crew progress must follow that frame.
-            if i.pos != pos || i.what != what {
-                i.pos = pos;
-                i.what = what;
-                i.cost = cost;
-                i.build_time = build_time;
-                i.crew.clear();
-                i.retry_at = 0;
-                i.progress.start(self.frame);
-            }
             i.worth = worth;
             i.why = why.to_owned();
             i.against = against;
@@ -481,6 +602,9 @@ impl Ai {
             value: 0.0,
             share: 0.0,
             started: c.target.is_some(),
+            def_id: c.build_type.id(),
+            target: c.target,
+            target_team: c.target.map(|u| u.team()),
             progress: projects::Progress::new(self.frame),
             retry_at: 0,
             state: "pending",
@@ -502,6 +626,72 @@ impl Ai {
         self.logistics.issues.insert(task, issue);
         self.logistics.stats.opened += 1;
         Some(id)
+    }
+
+    /// Task identity survives allied adoption, relocation and type changes;
+    /// the crew and forecasts belong to the actual implementation of that task.
+    pub(crate) fn logistics_sync_task(&mut self, task: TaskId) {
+        let Some(t) = self.eco.tasks.get(task) else { return };
+        let Some(c) = t.as_construction() else { return };
+        let Some(i) = self.logistics.issues.get_mut(&task) else { return };
+        if i.matches_task(t) {
+            return;
+        }
+        i.what = self.defs.name(c.build_type).to_owned();
+        i.pos = t.get_pos();
+        i.def_id = c.build_type.id();
+        i.target = c.target;
+        i.target_team = c.target.map(|u| u.team());
+        i.cost = c.build_type.cost(self.metal);
+        i.build_time = c.build_type.build_time();
+        i.started = c.target.is_some();
+        i.reset_execution(self.frame);
+        let note = i.json();
+        self.op_emit("issue", json!({"event": "retarget", "issue": note}));
+    }
+
+    /// Two local jobs now refer to one frame: preserve the existing project
+    /// valuation rather than closing it as a vanished construction site.
+    pub(crate) fn logistics_handoff(&mut self, from: TaskId, to: TaskId) {
+        if from == to {
+            self.logistics_sync_task(to);
+            return;
+        }
+        let Some(mut issue) = self.logistics.issues.remove(&from) else { return };
+        if self.logistics.issues.get(&to).is_some_and(|i| i.kind == Kind::Operator) {
+            self.op_emit("issue", json!({"event": "superseded", "id": issue.id, "task": to}));
+            return;
+        }
+        issue.task = to;
+        issue.reset_execution(self.frame);
+        self.op_emit("issue", json!({"event": "handoff", "id": issue.id, "from": from, "task": to}));
+        self.logistics.issues.insert(to, issue);
+        self.logistics_sync_task(to);
+    }
+
+    /// The economy has already decided to help this allied frame. Give that
+    /// decision a crew without introducing a new alliance-wide planner.
+    pub(crate) fn logistics_assist(&mut self, task: TaskId) {
+        if self.dev_off("logistics") || self.dev_off("clients") {
+            return;
+        }
+        self.logistics_sync_task(task);
+        if self.logistics.issues.contains_key(&task) {
+            return;
+        }
+        let Some(c) = self.eco.tasks.get(task).and_then(|t| t.as_construction()) else { return };
+        let Some(u) = c.target.filter(|u| u.team() != self.team_id && self.allies.contains(&u.team())) else { return };
+        let def = c.build_type;
+        let kind = if self.defs.name(def).starts_with("energy") { Kind::Energy } else { Kind::Allied };
+        let now = self.frame as f32 / 30.0;
+        let value = def.cost(self.metal) * (1.0 - u.build_progress()).clamp(0.0, 1.0);
+        self.logistics_open(
+            task,
+            kind,
+            Worth::Stream { value, from: now, rate: value / PAYBACK },
+            "finish the allied project selected by the economy",
+            0.0,
+        );
     }
 
     /// Close the issue on `task`, saying how it ended.
@@ -532,11 +722,13 @@ impl Ai {
     }
 
     /// Workers that could crew a job at `pos`, nearest first (the current
-    /// `crew` a little nearer than it is).
-    fn logistics_hands(&self, pos: Vec3, crew: &[i32]) -> Vec<Hand> {
+    /// `crew` a little nearer than it is), using shared admission rules
+    /// when the concrete `task` is known.
+    fn logistics_hands(&self, pos: Vec3, crew: &[i32], task: Option<TaskId>) -> Vec<Hand> {
         let mut hands: Vec<Hand> = (self.eco.workers.values())
             .filter(|w| !w.is_chicken && w.bp > 0.0)
-            .filter(|w| crew.contains(&w.id) || !self.eco_worker_held(w.id))
+            .filter(|w| !self.eco_worker_held(w.id))
+            .filter(|w| task.map_or_else(|| !self.conquest_owns_worker(w.id), |t| self.eco_project_hand(w.id, t)))
             .filter_map(|w| {
                 let d = w.unit.def()?;
                 let speed = d.speed();
@@ -545,7 +737,7 @@ impl Ai {
                 }
                 let wpos = w.get_pos();
                 let range = d.build_distance();
-                if !self.terrain_reaches(d, wpos, pos, range + 32.0) {
+                if task.is_none() && !self.terrain_reaches(d, wpos, pos, range + 32.0) {
                     return None;
                 }
                 let mut travel = (distance(wpos, pos) - range).max(0.0) / speed;
@@ -565,9 +757,13 @@ impl Ai {
             self.logistics.issues.keys().copied().filter(|&t| self.eco.tasks.get(t).is_none()).collect();
         for task in gone {
             let Some(issue) = self.logistics.issues.get(&task) else { continue };
-            let about = self.cb.friendly_units_in(issue.pos, 48.0);
-            let stands = (self.eco.porcs.iter().chain(about.iter())).any(|u| {
+            // A cylinder: an issue's position carries no height, and on high
+            // ground the engine's sphere missed a finished Lucifer beside it
+            // (11-04 Thornford: built, closed "gone").
+            let about = self.cb.friendly_units_in_cylinder(issue.pos, 48.0);
+            let stands = (issue.target.iter().chain(self.eco.porcs.iter()).chain(about.iter())).any(|u| {
                 !u.is_being_built()
+                    && (u.team() == self.team_id || self.allies.contains(&u.team()))
                     && u.health() > 0.0
                     && distance(u.pos(), issue.pos) < 48.0
                     && self.defs.name_of(*u) == issue.what
@@ -600,7 +796,8 @@ impl Ai {
             if p.seconds <= MARGIN || !self.eco_factory_emergency_at(p.pos) {
                 continue;
             }
-            let same = |i: &Issue| i.kind == Kind::Defense && distance(i.pos, p.pos) < SAME_RADIUS;
+            let same =
+                |i: &Issue| matches!(i.kind, Kind::Defense | Kind::Walkin) && distance(i.pos, p.pos) < SAME_RADIUS;
             if self.logistics.issues.values().any(same) {
                 continue;
             }
@@ -617,13 +814,19 @@ impl Ai {
                 continue;
             }
             let by = now + p.seconds - MARGIN;
-            let hands = self.logistics_hands(p.pos, &[]);
+            let hands = self.logistics_hands(p.pos, &[], None);
             if hands.is_empty() {
                 continue;
             }
             let site = if distance(p.pos, p.from) > 1.0 { get_directional_point(p.pos, p.from, OFFSET) } else { p.pos };
             let mut best: Option<(UnitDef, f32, f32, f32, f32)> = None;
+            // No third mid-heavy at a place (see `walkin::MIDCAP`).
+            let mid_full =
+                !self.dev_off(walkin::MIDCAP) && self.walkin_standing(p.pos, &walkin::MID_HEAVY) >= walkin::MID_CAP;
             for name in TURRETS {
+                if mid_full && walkin::MID_HEAVY.contains(&name) {
+                    continue;
+                }
                 let Some(def) = self.defs.get(name) else { continue };
                 if !self.eco_porc_admissible(def, self.cb.map().find_closest_build_site(def, site, 600.0, 3, 0), true) {
                     continue;
@@ -673,10 +876,19 @@ impl Ai {
     /// Renew while disconnected: existing capital and recurring overdrive
     /// income do not become worthless after an arbitrary waiting period.
     fn logistics_grid(&mut self, now: f32) {
-        let stale: Vec<_> = self.logistics.issues.values()
+        if self.dev_off("clients") {
+            return;
+        }
+        let stale: Vec<_> = self
+            .logistics
+            .issues
+            .values()
             .filter(|i| i.kind == Kind::Grid && self.eco_grid_issue(i.task).is_none())
-            .map(|i| i.task).collect();
-        for task in stale { self.logistics_close(task, "connection_resolved"); }
+            .map(|i| i.task)
+            .collect();
+        for task in stale {
+            self.logistics_close(task, "connection_resolved");
+        }
         for task in self.eco.pylon_tasks().to_vec() {
             if let Some((value, rate, threat, why)) = self.eco_grid_issue(task) {
                 self.logistics_open(task, Kind::Grid, Worth::Stream { value, from: now, rate }, &why, threat);
@@ -688,7 +900,7 @@ impl Ai {
     /// share of the `value` it answers, less a [`PAYBACK`] share of that
     /// for every second it is not there.
     pub fn logistics_factory(&mut self, task: TaskId, value: f32, why: &str) {
-        if self.dev_off("logistics") || value <= 0.0 {
+        if self.dev_off("logistics") || self.dev_off("clients") || value <= 0.0 {
             return;
         }
         let value = value * VAR_UTILITY;
@@ -700,7 +912,7 @@ impl Ai {
     /// its energy would cost in solars), less a [`PAYBACK`] share of that
     /// for every second it is not there.
     pub fn logistics_energy(&mut self, task: TaskId, value: f32, why: &str) {
-        if self.dev_off("logistics") || value <= 0.0 {
+        if self.dev_off("logistics") || self.dev_off("clients") || value <= 0.0 {
             return;
         }
         let now = self.frame as f32 / 30.0;
@@ -712,7 +924,7 @@ impl Ai {
     /// suspicion), less that again for every missile's worth of the
     /// enemy's income late.
     pub fn logistics_antinuke(&mut self, task: TaskId, sure: bool) {
-        if self.dev_off("logistics") {
+        if self.dev_off("logistics") || self.dev_off("clients") {
             return;
         }
         let blast = self.nukes_worst_blast();
@@ -736,6 +948,7 @@ impl Ai {
         let mut abandon = Vec::new();
         let mut expired = Vec::new();
         for task in tasks {
+            self.logistics_sync_task(task);
             let Some(t) = self.eco.tasks.get(task) else { continue };
             let Some(c) = t.as_construction() else { continue };
             let built = c.target.map_or(0.0, |u| u.build_progress().clamp(0.0, 1.0));
@@ -746,6 +959,9 @@ impl Ai {
                 .crew
                 .iter()
                 .filter_map(|id| {
+                    if self.logistics.walkin.helping.get(id).is_some_and(|u| Some(*u) == c.target) {
+                        return Some((*id, 0.0));
+                    }
                     let w = self.eco.workers.get(id).filter(|w| w.task == Some(task) && !w.is_chicken)?;
                     Some((*id, (distance(w.get_pos(), pos) - w.unit.def()?.build_distance()).max(0.0)))
                 })
@@ -780,8 +996,18 @@ impl Ai {
             }
             let (work, cost, worth, crew) =
                 (issue.build_time * (1.0 - built), issue.cost * (1.0 - built), issue.worth, issue.crew.clone());
-            let mut hands = self.logistics_hands(pos, &crew);
-            hands.retain(|h| self.eco_project_hand(h.0, task));
+            let walkin = issue.kind == Kind::Walkin;
+            let mut hands = if walkin {
+                self.walkin_hands(pos, &crew, Some(task), started)
+            } else {
+                self.logistics_hands(pos, &crew, Some(task))
+            };
+            hands.retain(|h| {
+                self.eco_project_hand(h.0, task)
+                    || (self.walkin_is_caretaker(h.0) && !springai::reserved::is_reserved(self.cb, h.0))
+            });
+            let support = hands.iter().filter(|h| self.walkin_is_caretaker(h.0)).map(|h| h.0).collect();
+            let stretch = if walkin { walkin::STRETCH } else { PESSIMISM };
             reasons.insert(
                 task,
                 if !reason.is_empty() {
@@ -793,8 +1019,18 @@ impl Ai {
                 },
             );
             if reason.is_empty() {
-                requests.push(projects::Request { task, worth, work, cost, incumbent: !crew.is_empty(),
-                    urgent: self.eco_grid_issue(task).is_some(), hands });
+                requests.push(projects::Request {
+                    task,
+                    worth,
+                    work,
+                    cost,
+                    urgent: self.eco_grid_issue(task).is_some(),
+                    incumbent: !crew.is_empty(),
+                    hands,
+                    stretch,
+                    support,
+                    start_required: !started,
+                });
             }
         }
         let mut allocations = projects::allocate(requests, self.eco.metal, self.eco.effective_income, now);
@@ -810,15 +1046,20 @@ impl Ai {
                 issue.eta = f32::INFINITY;
                 issue.value = 0.0;
             }
-            issue.share =
-                if issue.crew.is_empty() { 0.0 } else { (issue.value / issue.crew.len() as f32).min(BONUS_CAP) };
+            let mobile = issue.crew.iter().filter(|id| !self.eco.nanos.contains_key(id)).count();
+            issue.share = if mobile == 0 { 0.0 } else { (issue.value / mobile as f32).min(BONUS_CAP) };
             if old.2 != issue.crew && !issue.crew.is_empty() {
                 issue.progress.start(frame);
             }
             issue.assigned = issue
                 .crew
                 .iter()
-                .filter(|id| self.eco.workers.get(id).is_some_and(|w| w.task == Some(task) && !w.is_chicken))
+                .filter(|id| {
+                    self.eco.workers.get(id).is_some_and(|w| w.task == Some(task) && !w.is_chicken)
+                        || self.logistics.walkin.helping.get(id).is_some_and(|u| {
+                            self.eco.tasks.get(task).and_then(|t| t.as_construction()?.target) == Some(*u)
+                        })
+                })
                 .count();
             (issue.state, issue.reason) = if issue.crew.is_empty() {
                 ("paused", reasons.get(&task).copied().unwrap_or("task_gone"))
@@ -845,10 +1086,19 @@ impl Ai {
     }
 
     /// Zero-K build priority: an urgent defense or grid repair gets high, the
-    /// other construction and the factories low, until it is done.
+    /// other construction and the factories low, until it is done. A heavy
+    /// walk-in turret (a Lucifer, a Desolator: see [`walkin::heavy`]) gets
+    /// high priority but holds nothing back: it is no emergency build.
     fn logistics_pause(&mut self, now: f32) {
+        let heavy = |i: &Issue| walkin::heavy::HEAVIES.contains(&i.what.as_str());
+        for i in self.logistics.issues.values().filter(|i| i.kind == Kind::Walkin && i.started && heavy(i)) {
+            if let Some(u) = self.eco.tasks.get(i.task).and_then(|t| t.as_construction()?.target) {
+                u.execute_custom_command(cmd::PRIORITY, &[2.0], 0, NO_TIMEOUT);
+            }
+        }
         let urgent: Vec<Unit> = (self.logistics.issues.values())
-            .filter(|i| matches!(i.kind, Kind::Defense | Kind::Grid) && i.started && i.value >= MIN_NET)
+            .filter(|i| matches!(i.kind, Kind::Defense | Kind::Walkin | Kind::Grid) && i.started && i.value >= MIN_NET)
+            .filter(|i| !heavy(i))
             .filter(|i| i.worth.deadline().is_none_or(|by| now <= by + DECAY))
             .filter_map(|i| self.eco.tasks.get(i.task)?.as_construction()?.target)
             .collect();
@@ -895,7 +1145,8 @@ impl Ai {
     /// The open issues and the totals, for the operator.
     pub fn logistics_json(&self) -> Value {
         let issues: Vec<Value> = self.logistics.issues.values().map(Issue::json).collect();
-        json!({"issues": issues, "stats": self.logistics.stats.json(), "paused": self.logistics.paused.len()})
+        json!({"issues": issues, "stats": self.logistics.stats.json(), "paused": self.logistics.paused.len(),
+               "walkin": self.logistics.walkin.stats.json()})
     }
 }
 

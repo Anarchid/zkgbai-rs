@@ -81,12 +81,10 @@
 //! hurt at an objective our force still holds leaves its turrets queued for
 //! the usual builders.
 //!
-//! On the way and lean (user, 2026-11-03: "move towards these while
-//! capturing mexes on site; and still fewer turrets"): walking out, the
-//! commander takes the free spots near its way first, nearest first, a spot
-//! off the straight line costing `ENROUTE_DETOUR_COST` per elmo it adds (up
-//! to `ENROUTE_DETOUR`), so it creeps toward the objective instead of
-//! walking past metal; an objective is one turret site (the search plans
+//! Direct opening (user, 2026-11-04): after the free factory and any heavy
+//! rush assistance, build the home Lotus and go straight to the objective.
+//! No opening mex quota or en-route mex stops; the objective's own mexes
+//! are worked on arrival. An objective is one turret site (the search plans
 //! single sites), and attacks add Lotuses only.
 //!
 //! Allies (user, 2026-11-03: "they build independent turrets instead of
@@ -96,7 +94,7 @@
 //! kind standing at the site counts as ours, and an ally's turret frame
 //! within `ALLY_TURRET_REACH` is helped instead (any ally). With allied
 //! ZKGBAIs, an instance whose objectives the lower-numbered ones would all
-//! take goes as support: it walks out taking mexes as before, orders no
+//! take goes as support: it walks straight to the objective, orders no
 //! turrets of its own and helps the allied turrets rising within
 //! `SUPPORT_RADIUS` of the objective, for `SUPPORT_FOR` after it arrives.
 //!
@@ -122,7 +120,15 @@
 //! control are read there, attacks count near any of its doors, and each
 //! door has its turret (one at a time, within our means).
 //!
+//! Compush (feature `compush`, user 2026-11-03; off by default since that
+//! evening, enable=compush) drops
+//! the trip: the commander expands toward the enemy and the objectives whose
+//! spots become ours, by any hands, get their turrets; `conquestroute`
+//! plans the trip's start and opening mexes with it (see `compush`).
+//!
 //! Every decision goes to the journal (`conquest` records).
+
+mod compush;
 
 use std::sync::mpsc;
 
@@ -132,7 +138,7 @@ use zk_terrain::conquest::{Objective, Params, objectives};
 use zk_terrain::strategy::{Asset, Side};
 use zk_terrain::{Pos, Tier, TierMap};
 
-use super::{List, TaskId, WorkerTask};
+use super::{List, TaskId, Worker, WorkerTask};
 use crate::Ai;
 use crate::terrain::{pos, tier_of};
 use crate::util::distance;
@@ -147,10 +153,6 @@ const PRIOR: [(Tier, f32); 5] =
     [(Tier::Bot, 3.0), (Tier::Vehicle, 2.0), (Tier::Hover, 1.0), (Tier::Spider, 1.0), (Tier::Amphib, 1.0)];
 /// A seen factory counts as this much metal of its tier's units.
 const FACTORY_EVIDENCE: f32 = 1500.0;
-/// The commander sets out once we hold this many mexes (its first ones)...
-const OPENING_MEXES: usize = 3;
-/// ... or from this frame on.
-const OPENING_LATEST: i32 = 30 * 100;
 /// Objectives farther than this from our start (walking) are left alone.
 const MAX_WALK: f32 = 4500.0;
 /// Walk lead (enemy's walk minus ours, elmos) worth doubling an
@@ -165,9 +167,6 @@ const HELP_RADIUS: f32 = 900.0;
 /// or this long after it set out.
 const ARRIVE: f32 = 900.0;
 const WALK_TIMEOUT: i32 = 30 * 300;
-/// Spots on the way (see the module notes).
-const ENROUTE_DETOUR: f32 = 700.0;
-const ENROUTE_DETOUR_COST: f32 = 0.5;
 /// Turret sites an objective has (the search's `max_sites`).
 const SITES: usize = 1;
 /// Lines and the front pick (see the module notes).
@@ -283,6 +282,17 @@ pub struct Conquest {
     /// it (see `conquest_ground`), and when that was weighed.
     pub ground: Vec<f32>,
     pub ground_at: i32,
+    /// With `compush`: objectives whose spots became ours, their turrets
+    /// coming (see `compush`), and when a failed one may be seized again.
+    pub seized: Vec<compush::Seized>,
+    pub seize_cool: Vec<(usize, i32)>,
+    /// With `conquestroute`: the commander's opening mexes, in order, on
+    /// its way to the objective planned with the start (see `compush`).
+    pub route: Vec<Vec3>,
+    pub route_next: Option<(Vec3, TaskId)>,
+    /// The atlas (and the route) went to the journal.
+    pub reported: bool,
+    pub route_note: Option<serde_json::Value>,
 }
 
 /// Who holds an objective, as our AI reads it.
@@ -341,7 +351,7 @@ pub struct EnergyWorker {
 pub enum Stage {
     /// The commander puts up the home guard before it sets out.
     Prepare,
-    /// The commander goes there and takes the spots.
+    /// The commander walks directly there; mex jobs resume on arrival.
     Walk,
     /// Arrived, the turrets did not pay yet: asked again every update.
     Watch,
@@ -368,6 +378,8 @@ pub struct Op {
     pub mex_tasks: Vec<TaskId>,
     pub turrets: Vec<Turret>,
     pub started: i32,
+    /// Last direct travel order; ordinary economy jobs cannot interrupt the walk.
+    walk_order: Option<i32>,
     /// When the turrets were committed.
     pub fortify_from: i32,
     danger: u32,
@@ -397,6 +409,28 @@ pub struct Turret {
     pub built: bool,
 }
 
+/// The objectives' search, ready to run on any thread.
+pub(super) struct SearchInput {
+    maps: Vec<TierMap>,
+    walk: TierMap,
+    pub ally: Vec3,
+    pub enemy: Vec3,
+    pub assets: Vec<Asset>,
+    params: Params,
+    pub range: f32,
+}
+
+impl SearchInput {
+    pub(super) fn run(self) -> Vec<Objective> {
+        let refs: Vec<&TierMap> = self.maps.iter().collect();
+        objectives(&refs, &self.walk, pos(self.ally), &[pos(self.enemy)], &self.assets, &self.params)
+    }
+
+    pub(super) fn walk(&self) -> &TierMap {
+        &self.walk
+    }
+}
+
 /// Metal now against metal later: 2x until 3:00, 1x from 5:00 (see the
 /// module notes).
 fn metal_price(frame: i32) -> f32 {
@@ -410,8 +444,51 @@ fn prior() -> Vec<(Tier, f32)> {
 }
 
 impl Ai {
+    /// `compush` (off by default), with or without `conquest`: no trip, the
+    /// commander expands and the objectives whose spots become ours get
+    /// their turrets (see `compush`).
+    pub(crate) fn conquest_push(&self) -> bool {
+        !self.dev_off("compush")
+    }
+
+    /// Whether conquest runs at all: `compush`, or `conquest` (off by
+    /// default) for the trip with `compush` off.
     pub(crate) fn conquest_active(&self) -> bool {
-        !self.dev_off("conquest")
+        self.conquest_push() || !self.dev_off("conquest")
+    }
+
+    /// Ownership lasts for the operation, including travel and gaps between
+    /// construction jobs. A historical station is only a location preference;
+    /// completion/cancellation releases ownership without erasing that history.
+    /// Derived from the existing mission state, so policy disable releases it
+    /// immediately and checkpoint restoration needs no second reservation ledger.
+    pub(crate) fn conquest_owns_worker(&self, wid: i32) -> bool {
+        self.conquest_active()
+            && ((!self.conquest_push() && self.eco.conquest.op.as_ref().is_some_and(|op| op.crew == wid))
+                || self.eco.conquest.energy.as_ref().is_some_and(|e| e.id == wid))
+    }
+
+    pub(super) fn conquest_worker_travelling(&self, wid: i32) -> bool {
+        self.conquest_active()
+            && !self.conquest_push()
+            && self.eco.conquest.op.as_ref().is_some_and(|op| op.crew == wid && op.stage == Stage::Walk)
+    }
+
+    /// Shared by crew forecasting and job execution. Travel has no buildpower
+    /// to lend; at the objective explicit emergency/operator work may interrupt
+    /// the mission, while ordinary projects must wait for its release.
+    pub(super) fn conquest_allows_job(&self, w: &Worker, t: &WorkerTask) -> bool {
+        if !self.conquest_owns_worker(w.id) {
+            return true;
+        }
+        if self.conquest_worker_travelling(w.id) {
+            return false;
+        }
+        self.op_priority(t.id)
+            || self.eco_build_guard_task(w.id) == Some(t.id)
+            || self.eco_factory_defense_requested(t)
+            || (self.eco.hard_estalled && self.eco_energy_job(t))
+            || self.conquest_bonus(w.id, t.id).is_some()
     }
 
     pub(super) fn eco_conquest_update(&mut self, frame: i32) {
@@ -421,7 +498,7 @@ impl Ai {
         if self.eco_unified() {
             self.conquest_plan(frame);
         }
-        if self.dev_off("conquest") {
+        if !self.conquest_active() {
             if self.eco.conquest.op.is_some() {
                 self.conquest_end("switched off", false);
             }
@@ -432,9 +509,18 @@ impl Ai {
         self.conquest_observe();
         self.conquest_attacks(frame);
         self.conquest_control(frame);
-        if self.eco.conquest.op.is_some() {
+        if self.conquest_push() {
+            // No trip: the commander expands toward the enemy, and the
+            // objectives whose spots become ours get their turrets.
+            if self.eco.conquest.op.is_some() {
+                self.conquest_end("compush", false);
+            }
+            self.conquest_seized_step(frame);
+        } else if self.eco.conquest.op.is_some() {
             self.conquest_step(frame);
+            self.escort_update();
         } else if !self.eco.conquest.done {
+            self.conquest_route_step();
             self.conquest_start(frame);
         }
         self.conquest_energy(frame);
@@ -492,13 +578,26 @@ impl Ai {
     /// While the commander is away, the constructor nearest home becomes
     /// non-greedy (greedy ones never build energy) and puts energy first;
     /// once a commander is home again it goes back to what it was. If the
-    /// commanders are all gone, it stays on (non-greedy).
+    /// commanders are all gone, it stays on (non-greedy). With `compush` the
+    /// commander is out expanding from the start: the role holds from the
+    /// first constructor until the overdrive phase (home energy is then
+    /// fusions). Without it the commander built the home energy, 38% of its
+    /// first five minutes against 41% on mexes, and the constructors 1%
+    /// (battery b1, 2026-11-03).
     fn conquest_energy(&mut self, frame: i32) {
         if self.eco.conquest.energy.as_ref().is_some_and(|e| !self.eco.workers.contains_key(&e.id)) {
             let id = self.eco.conquest.energy.take().map_or(0, |e| e.id);
             self.op_emit("conquest", json!({"event": "energy", "t": frame / 30, "what": "lost", "worker": id}));
         }
         let home = self.conquest_home();
+        if self.conquest_push() {
+            if self.eco_overdrive_phase() {
+                self.conquest_energy_release("overdrive phase", true);
+            } else if self.eco.conquest.energy.is_none() {
+                self.conquest_energy_pick(frame, home);
+            }
+            return;
+        }
         if self.eco.conquest.op.is_some() {
             if self.eco.conquest.energy.is_none() {
                 self.conquest_energy_pick(frame, home);
@@ -596,40 +695,22 @@ impl Ai {
             self.eco.conquest.control = vec![Control::default(); self.eco.conquest.objectives.len()];
             self.conquest_report_atlas();
         }
+        // Found before the start (`conquestroute`): to the journal now.
+        if self.eco.conquest.asked && self.eco.conquest.job.is_none() && !self.eco.conquest.reported {
+            self.conquest_report_atlas();
+            if let Some(note) = self.eco.conquest.route_note.take() {
+                self.op_emit("conquest", note);
+            }
+        }
         if self.eco.conquest.asked || frame < 90 {
             return;
         }
-        let Some(terrain) = self.terrain.get() else { return };
-        let Some((mut ally, mut enemy)) = self.strategy_bases() else { return };
-        let box_ally = Some(self.graph.get_ally_base()).filter(|b| !b.is_zero());
-        if !self.dev_off("conquestsym")
-            && let (Some(a), Some(e)) = (box_ally, self.graph.get_enemy_base())
-        {
-            // Both walks from the same kind of place (see the module notes).
-            (ally, enemy) = (a, e);
-        }
-        let maps: Vec<TierMap> = TIERS.iter().filter_map(|&t| terrain.tier(t).cloned()).collect();
-        let Some(walk) = terrain.tier(Tier::Bot).cloned() else { return };
-        let lines = !self.dev_off("conquestlines");
-        let assets = if lines { self.conquest_assets() } else { self.strategy_assets() };
-        let range = self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0);
-        let params = if lines {
-            Params {
-                range,
-                max_sites: SITES,
-                door_slack: DOOR_SLACK,
-                lines: true,
-                per_tier: PER_TIER,
-                ..Params::default()
-            }
-        } else {
-            Params { range, max_sites: SITES, ..Params::default() }
-        };
+        let Some(input) = self.conquest_search_input() else { return };
         let (tx, rx) = mpsc::channel();
-        let (a, e, spots) = (pos(ally), pos(enemy), assets.clone());
+        let (ally, enemy, range) = (input.ally, input.enemy, input.range);
+        let assets = input.assets.clone();
         let spawned = std::thread::Builder::new().name("zkgbai-conquest".into()).spawn(move || {
-            let refs: Vec<&TierMap> = maps.iter().collect();
-            let _ = tx.send(objectives(&refs, &walk, a, &[e], &spots, &params));
+            let _ = tx.send(input.run());
         });
         self.eco.conquest.asked = true;
         match spawned {
@@ -645,7 +726,41 @@ impl Ai {
         }
     }
 
+    /// What the objectives' search needs: the terrain's tiers, both bases
+    /// and the spots as conquest sees them (see `conquest_plan`).
+    pub(super) fn conquest_search_input(&self) -> Option<SearchInput> {
+        let terrain = self.terrain.get()?;
+        // Both walks from the same kind of place (see the module notes):
+        // the start boxes' metal, known before the game starts.
+        let boxes = (!self.dev_off("conquestsym"))
+            .then(|| Some(self.graph.get_ally_base()).filter(|b| !b.is_zero()).zip(self.graph.get_enemy_base()))
+            .flatten();
+        let (ally, enemy) = match boxes {
+            Some(b) => b,
+            None => self.strategy_bases()?,
+        };
+        let maps: Vec<TierMap> = TIERS.iter().filter_map(|&t| terrain.tier(t).cloned()).collect();
+        let walk = terrain.tier(Tier::Bot).cloned()?;
+        let lines = !self.dev_off("conquestlines");
+        let assets = if lines { self.conquest_assets() } else { self.strategy_assets() };
+        let range = self.conquest_turret().map(|d| d.max_weapon_range()).filter(|r| *r > 100.0).unwrap_or(620.0);
+        let params = if lines {
+            Params {
+                range,
+                max_sites: SITES,
+                door_slack: DOOR_SLACK,
+                lines: true,
+                per_tier: PER_TIER,
+                ..Params::default()
+            }
+        } else {
+            Params { range, max_sites: SITES, ..Params::default() }
+        };
+        Some(SearchInput { maps, walk, ally, enemy, assets, params, range })
+    }
+
     fn conquest_report_atlas(&mut self) {
+        self.eco.conquest.reported = true;
         let c = &self.eco.conquest;
         let mut lines = Vec::new();
         let list: Vec<serde_json::Value> = c
@@ -712,7 +827,7 @@ impl Ai {
     }
 
     /// Each enemy team's tier as a distribution: what we saw, or the prior.
-    fn conquest_belief(&self) -> Vec<(i32, Vec<(Tier, f32)>)> {
+    pub(crate) fn conquest_belief(&self) -> Vec<(i32, Vec<(Tier, f32)>)> {
         let c = &self.eco.conquest;
         if c.seen.is_empty() {
             return vec![(-1, prior())];
@@ -744,23 +859,6 @@ impl Ai {
     /// `AFFORD_SECS` of our metal income.
     fn conquest_affordable(&self, def: UnitDef) -> bool {
         def.cost(self.metal) <= AFFORD_SECS * self.eco.effective_income.max(0.0)
-    }
-
-    /// Walking out, a free spot near the commander's way: as dear as the
-    /// objective's own, less the detour it adds (see the module notes).
-    fn conquest_enroute_bonus(&self, op: &Op, wid: i32, task: TaskId) -> Option<f32> {
-        if wid != op.crew || op.stage != Stage::Walk {
-            return None;
-        }
-        let t = self.eco.tasks.get(task)?;
-        if t.as_construction()?.build_type.id() != self.eco.build_ids.mex_id {
-            return None;
-        }
-        let from = self.eco.workers.get(&wid)?.get_pos();
-        let to = self.conquest_v3(self.conquest_anchor(self.eco.conquest.objectives.get(op.idx)?));
-        let at = t.get_pos();
-        let detour = distance(from, at) + distance(at, to) - distance(from, to);
-        (detour <= ENROUTE_DETOUR).then(|| BONUS + MEX_FIRST - ENROUTE_DETOUR_COST * detour.max(0.0))
     }
 
     /// The turret an attack adds: a Lotus, if within our means
@@ -837,9 +935,6 @@ impl Ai {
         if c.objectives.is_empty() {
             return;
         }
-        if self.eco.mexes.len() < OPENING_MEXES && frame < OPENING_LATEST {
-            return;
-        }
         if !c.taken.is_empty() && frame > SEQ_UNTIL {
             self.eco.conquest.done = true;
             self.log("conquest: too late for another objective");
@@ -850,6 +945,7 @@ impl Ai {
         let Some(crew) = self.eco.commanders.iter().copied().find(|id| {
             self.eco.workers.get(id).is_some_and(|w| {
                 !w.has_plop()
+                    && !self.rush_holds(*id)
                     && w.unit.health() > 0.0
                     && w.unit.health() >= need * w.unit.max_health()
                     && w.unit.team() == self.team_id
@@ -857,6 +953,19 @@ impl Ai {
         }) else {
             return;
         };
+        let ranked = self.conquest_ranked();
+        let best = if self.iq.peers.is_empty() {
+            ranked.first().map(|&(i, e)| (i, e, false))
+        } else {
+            self.conquest_team_pick(crew, &ranked)
+        };
+        self.conquest_go(frame, crew, best);
+    }
+
+    /// The objectives open to a trip, best first: (index, expected denial),
+    /// by the denial expected times the race factor (see the module notes).
+    pub(super) fn conquest_ranked(&self) -> Vec<(usize, f32)> {
+        let c = &self.eco.conquest;
         let best: Vec<(usize, f32)> = (0..c.objectives.len())
             .filter(|&i| {
                 let o = &c.objectives[i];
@@ -880,11 +989,11 @@ impl Ai {
         };
         let mut ranked = best;
         ranked.sort_by(|a, b| (b.1 * race(b.0)).total_cmp(&(a.1 * race(a.0))));
-        let best = if self.iq.peers.is_empty() {
-            ranked.first().map(|&(i, e)| (i, e, false))
-        } else {
-            self.conquest_team_pick(crew, &ranked)
-        };
+        ranked
+    }
+
+    /// Set out for the objective picked (none open: conquest is done).
+    fn conquest_go(&mut self, frame: i32, crew: i32, best: Option<(usize, f32, bool)>) {
         let Some((idx, expected, support)) = best else {
             self.eco.conquest.done = true;
             self.log("conquest: no objective is open");
@@ -905,6 +1014,7 @@ impl Ai {
                 .map(|site| Turret { light: false, site, task: None, retries: 0, built: false })
                 .collect(),
             started: frame,
+            walk_order: None,
             fortify_from: 0,
             danger: 0,
             home_guard: None,
@@ -933,6 +1043,14 @@ impl Ai {
                    "worth": worth, "cost": cost, "ratio": ratio, "belief": belief, "mexes": self.eco.mexes.len(),
                    "taken": self.eco.conquest.taken.len()}),
         );
+        self.banter_mark("conquest", self.conquest_v3(center), crate::banter::Fields::new());
+        // A team of the QRF's to stand on it (`conquestescort`).
+        let at = self.conquest_v3(center);
+        self.escort_open(at);
+        // Queue the guard now so the next worker assignment cannot pick a mex
+        // in the interval before the next conquest tick.
+        self.conquest_guard_step(frame, true);
+        self.eco_assign_worker(crew);
     }
 
     /// With allied ZKGBAIs playing on their own (see `iq`): the eligible
@@ -1020,6 +1138,9 @@ impl Ai {
         if let Some(bonus) = self.conquest_energy_bonus(wid, task) {
             return Some(bonus);
         }
+        if let Some(bonus) = self.conquest_seized_bonus(wid, task) {
+            return Some(bonus);
+        }
         let op = self.eco.conquest.op.as_ref()?;
         // Before setting out the commander stays home on the home guard: the
         // objective's jobs and those on the way wait for it (it had walked
@@ -1035,9 +1156,6 @@ impl Ai {
         }
         if op.mex_tasks.contains(&task) {
             return (wid == op.crew).then_some(BONUS + MEX_FIRST);
-        }
-        if let Some(bonus) = self.conquest_enroute_bonus(op, wid, task) {
-            return Some(bonus);
         }
         if op.help.contains(&task) {
             return (wid == op.crew).then_some(BONUS);
@@ -1064,6 +1182,52 @@ impl Ai {
         }
         let w = self.eco.workers.get(&wid)?;
         (banked && distance(w.get_pos(), t.site) <= HELP_RADIUS).then_some(HELP_BONUS)
+    }
+
+    /// Reserve opening mexes for ordinary constructors while the trip's
+    /// objective search, factory plop and home guard are still pending.
+    pub(super) fn conquest_skips_opening_mexes(&self, wid: i32) -> bool {
+        let c = &self.eco.conquest;
+        if self.dev_off("conquest") || self.conquest_push() || c.done || !self.eco.commanders.contains(&wid) {
+            return false;
+        }
+        match &c.op {
+            Some(op) => op.crew == wid && matches!(op.stage, Stage::Prepare | Stage::Walk),
+            // No objective on this map, or a search that never became ready:
+            // release the opening instead of withholding mexes indefinitely.
+            None => !c.objectives.is_empty() || (self.frame < 30 * 100 && !(c.asked && c.job.is_none())),
+        }
+    }
+
+    /// Own the commander's travel until arrival. Keep emergency retreats and
+    /// commander defense in control, but never substitute an economy job for
+    /// the move just because a mex happens to be nearby.
+    pub(super) fn conquest_walk_worker(&mut self, wid: i32) -> bool {
+        let Some(op) = self.eco.conquest.op.as_ref() else { return false };
+        if op.crew != wid || op.stage != Stage::Walk || !self.conquest_active() || self.conquest_push() {
+            return false;
+        }
+        let Some(w) = self.eco.workers.get(&wid) else { return false };
+        if w.is_chicken {
+            return true;
+        }
+        let Some(o) = self.eco.conquest.objectives.get(op.idx) else { return false };
+        let at = self.conquest_v3(self.conquest_anchor(o));
+        if w.task.is_none()
+            && w.unit.num_current_commands() > 0
+            && op.walk_order.is_some_and(|sent| self.frame - sent < 30 * 10)
+        {
+            return true;
+        }
+        self.eco_suspend_assignment(wid, "conquest travel");
+        let w = self.eco.workers.get_mut(&wid).unwrap();
+        if w.task.is_some() {
+            w.clear_task(&mut self.eco.tasks);
+            w.approach = None;
+        }
+        crate::kgbutil::kgb_move_to(w.unit, at, 0, self.frame);
+        self.eco.conquest.op.as_mut().unwrap().walk_order = Some(self.frame);
+        true
     }
 
     fn conquest_step(&mut self, frame: i32) {
@@ -1107,6 +1271,7 @@ impl Ai {
                 {
                     op.stage = Stage::Walk;
                     op.started = frame;
+                    self.eco_assign_worker(crew);
                 }
             }
             Stage::Walk => {
@@ -1250,9 +1415,38 @@ impl Ai {
         let d = distance(mex, enemy).max(1.0);
         let site =
             Vec3::new(mex.x + (enemy.x - mex.x) * GUARD_OUT / d, mex.y, mex.z + (enemy.z - mex.z) * GUARD_OUT / d);
-        let guarded = (self.eco.porcs.iter())
-            .any(|u| distance(u.pos(), site) <= 300.0 && u.def().is_some_and(|d| self.defs.name(d) == GUARD_TURRET));
-        (!guarded).then_some(site)
+        let guarded = self.eco.porcs.iter().any(|u| {
+            u.health() > 0.0
+                && !u.is_being_built()
+                && distance(u.pos(), site) <= 300.0
+                && u.def().is_some_and(|d| self.defs.name(d) == GUARD_TURRET)
+        });
+        if guarded {
+            return None;
+        }
+        // With no opening mexes, `home` is the factory itself. The nearest
+        // engine-legal site can still be in the economy's reserved exit lane.
+        // Search around it instead of retrying that same rejected site until
+        // the guard is abandoned. Keep the home within the Lotus's range.
+        if let Some(def) = self.defs.get(GUARD_TURRET) {
+            let map = self.cb.map();
+            let heading = (enemy.z - home.z).atan2(enemy.x - home.x);
+            for radius in [0.0, 96.0, 192.0, 288.0, 384.0] {
+                let steps = if radius == 0.0 { 1 } else { 12 };
+                for k in 0..steps {
+                    let angle = heading + k as f32 * std::f32::consts::TAU / steps as f32;
+                    let near = Vec3::xz(site.x + radius * angle.cos(), site.z + radius * angle.sin());
+                    let at = map.find_closest_build_site(def, near, 48.0, 3, 0);
+                    if at.x >= 0.0
+                        && distance(at, home) <= 0.9 * def.max_weapon_range()
+                        && self.eco_build_check(def, at, 0)
+                    {
+                        return Some(at);
+                    }
+                }
+            }
+        }
+        Some(site)
     }
 
     /// Where the objective's guard goes: among its spots (else its center).
@@ -1441,7 +1635,7 @@ impl Ai {
     /// (0: none, or not a spot).
     pub(crate) fn conquest_ground(&self, p: Vec3) -> f32 {
         let g = &self.eco.conquest.ground;
-        if g.is_empty() || self.dev_off("conquest") {
+        if g.is_empty() || !self.conquest_active() {
             return 0.0;
         }
         self.graph.spot_under(p).and_then(|i| g.get(i)).copied().unwrap_or(0.0)
@@ -1471,7 +1665,7 @@ impl Ai {
     /// Minefields for the objectives we hold: (middle, value), on each
     /// one's enemy side (see `sappers`).
     pub(crate) fn conquest_mine_fields(&self) -> Vec<(Vec3, f32)> {
-        if self.dev_off("conquest") {
+        if !self.conquest_active() {
             return Vec::new();
         }
         let c = &self.eco.conquest;
@@ -1555,12 +1749,15 @@ impl Ai {
             return;
         }
         let c = &self.eco.conquest;
-        if c.op.is_none() && c.held.is_empty() {
+        if c.op.is_none() && c.held.is_empty() && c.seized.is_empty() {
             return;
         }
         let p = unit.pos();
         let op_center = c.op.as_ref().and_then(|op| c.objectives.get(op.idx)).map(|o| self.conquest_near_site(o, p));
+        let seized = (c.seized.iter().filter_map(|s| c.objectives.get(s.idx)))
+            .any(|o| distance(self.conquest_near_site(o, p), p) <= ATTACK_RADIUS);
         let near = op_center.is_some_and(|q| distance(q, p) <= ATTACK_RADIUS)
+            || seized
             || c.held.iter().any(|h| distance(h.center, p) <= ATTACK_RADIUS);
         if near && self.eco.conquest.attacks.len() < 32 {
             self.eco.conquest.attacks.push((self.frame, p));
@@ -1576,6 +1773,8 @@ impl Ai {
         if attacks.is_empty() {
             return;
         }
+        // Seized objectives still watching: their turrets go up now.
+        self.conquest_seized_attacked(frame, &attacks);
         // The turret an attack adds: none when even a Lotus is beyond us.
         let Some((def, light)) = self.conquest_attack_turret() else { return };
         let toward = |p: Vec3, c: Vec3| Vec3::new(p.x + (c.x - p.x) * 0.4, p.y, p.z + (c.z - p.z) * 0.4);
@@ -1804,6 +2003,7 @@ impl Ai {
     /// Release the commander; drop turret jobs not yet started.
     fn conquest_end(&mut self, why: &str, success: bool) {
         let Some(op) = self.eco.conquest.op.take() else { return };
+        self.escort_close(why);
         if success {
             self.eco.conquest.taken.push(op.idx);
             if let Some(o) = self.eco.conquest.objectives.get(op.idx) {
@@ -1853,6 +2053,7 @@ impl Ai {
             "done": c.done,
             "taken": c.taken,
             "belief": self.conquest_belief_json(),
+            "escort": self.escort_json(),
             "energy_worker": c.energy.as_ref().map(|e| json!({"worker": e.id, "was_greedy": e.was_greedy, "since": e.since / 30})),
             "station": c.station.as_ref().map(|s| json!({"crew": s.crew, "x": s.center.x.round(), "z": s.center.z.round(), "since": s.since / 30, "leash": !self.dev_off("conquestleash")})),
             "op": c.op.as_ref().map(|op| {
@@ -1867,6 +2068,9 @@ impl Ai {
                 "added": op.added,
             })}),
             "held": c.held.iter().map(|h| json!({"objective": h.idx, "added": h.added})).collect::<Vec<_>>(),
+            "seized": c.seized.iter().map(|s| json!({"objective": s.idx, "committed": s.committed,
+                "turrets": s.turrets.iter().filter(|t| t.built).count()})).collect::<Vec<_>>(),
+            "route": c.route.iter().map(|p| [p.x.round(), p.z.round()]).collect::<Vec<_>>(),
             "control": c.control.iter().map(|k| k.hold.name()).collect::<Vec<_>>(),
             "ground": c.ground.iter().filter(|&&w| w >= GROUND_SAFE).count(),
         })
@@ -1877,20 +2081,67 @@ impl Ai {
 mod tests {
     use super::*;
     use springai::Unit;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     thread_local! {
         static COMMANDER_HOME: Cell<bool> = const { Cell::new(false) };
+        static ENERGY_DEFS: Cell<bool> = const { Cell::new(false) };
+        static WALK_ORDERS: RefCell<Vec<(i32, Vec<f32>)>> = const { RefCell::new(Vec::new()) };
     }
 
     /// Commander 10 (out, or home), constructors 11 (far from home) and
     /// 12 (near), both greedy; home is our start at (1000, 1000).
     fn energy_ai() -> Ai {
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, n: i32) -> i32 {
+            if !ENERGY_DEFS.get() {
+                return 0;
+            }
+            if !out.is_null() && n > 0 {
+                unsafe {
+                    *out = 2;
+                }
+            }
+            1
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const std::ffi::c_char {
+            if id == 2 { c"energysolar".as_ptr() } else { c"staticcon".as_ptr() }
+        }
+        unsafe extern "C" fn params(
+            _: i32,
+            _: i32,
+            _: *mut *const std::ffi::c_char,
+            _: *mut *const std::ffi::c_char,
+        ) -> i32 {
+            0
+        }
+        unsafe extern "C" fn no(_: i32, _: i32) -> bool {
+            false
+        }
+        unsafe extern "C" fn scalar(_: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn cost(_: i32, _: i32, _: i32) -> f32 {
+            100.0
+        }
+        unsafe extern "C" fn elevation(_: i32, _: f32, _: f32) -> f32 {
+            0.0
+        }
+        unsafe extern "C" fn command(_: i32, _: i32, _: i32, topic: i32, data: *mut std::ffi::c_void) -> i32 {
+            if topic as u32 == springai::ffi::CommandTopic::COMMAND_UNIT_CUSTOM {
+                let c = unsafe { &*(data as *const springai::ffi::SCustomUnitCommand) };
+                let params = unsafe { std::slice::from_raw_parts(c.params, c.params_size as usize) }.to_vec();
+                WALK_ORDERS.with_borrow_mut(|o| o.push((c.cmdId, params)));
+            }
+            0
+        }
         unsafe extern "C" fn team(_: i32, _: i32) -> i32 {
             2
         }
         unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
             1000.0
+        }
+        unsafe extern "C" fn rules(_: i32, _: i32, _: *const std::ffi::c_char, default: f32) -> f32 {
+            default
         }
         unsafe extern "C" fn bp(_: i32, _: i32) -> f32 {
             5.0
@@ -1907,8 +2158,14 @@ mod tests {
             };
             unsafe { std::ptr::copy_nonoverlapping(p.as_ptr(), out, 3) };
         }
+        ENERGY_DEFS.set(false);
         COMMANDER_HOME.with(|h| h.set(false));
+        WALK_ORDERS.with_borrow_mut(Vec::clear);
         let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.Map_getElevationAt = Some(elevation);
+            t.Engine_handleCommand = Some(command);
+            t.Unit_getRulesParamFloat = Some(rules);
+            t.Unit_getCurrentCommands = Some(zero);
             t.Unit_getTeam = Some(team);
             t.Unit_getHealth = Some(health);
             t.Unit_getPos = Some(pos);
@@ -1916,6 +2173,16 @@ mod tests {
             t.Unit_getMaxHealth = Some(health);
             t.UnitDef_getWeaponMounts = Some(zero);
             t.Unit_getWeapons = Some(zero);
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.UnitDef_getCustomParams = Some(params);
+            t.UnitDef_isMoveDataAvailable = Some(no);
+            t.UnitDef_isAbleToFly = Some(no);
+            t.UnitDef_isAbleToAttack = Some(no);
+            t.UnitDef_getMaxWaterDepth = Some(scalar);
+            t.UnitDef_getSpeed = Some(scalar);
+            t.UnitDef_getCost = Some(cost);
+            t.UnitDef_getBuildTime = Some(scalar);
         });
         ai.graph.set_start_pos(Vec3::new(1000.0, 0.0, 1000.0));
         for (id, com, greedy) in [(10, true, false), (11, false, true), (12, false, true)] {
@@ -1937,6 +2204,7 @@ mod tests {
             mex_tasks: vec![],
             turrets: vec![],
             started: 0,
+            walk_order: None,
             fortify_from: 0,
             danger: 0,
             home_guard: None,
@@ -1947,6 +2215,202 @@ mod tests {
             added: 0,
             last_attack: 0,
         }
+    }
+
+    fn direct_ai() -> Ai {
+        let mut ai = energy_ai();
+        trip(&mut ai);
+        let at = Pos::new(3000.0, 3000.0);
+        ai.eco.conquest.assets.push(Asset { pos: at, value: 2.0, side: Side::Neutral });
+        ai.eco.conquest.objectives.push(Objective {
+            sites: vec![at],
+            spots: vec![0],
+            income: 2.0,
+            denial: vec![zk_terrain::conquest::Denial {
+                tier: Tier::Bot,
+                enemy: 0,
+                worth: 10.0,
+                own: 2.0,
+                sealed: 1,
+                shield: vec![],
+            }],
+            design: Tier::Bot,
+            walk: 1000.0,
+            enemy_walk: 1000.0,
+            score: 10.0,
+            line: false,
+            contest: 0.0,
+        });
+        ai
+    }
+
+    #[test]
+    fn mission_reservation_covers_job_gaps_travel_and_policy_release() {
+        let mut ai = direct_ai();
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        assert!(ai.eco_project_hand(10, job), "baseline worker is available");
+        ai.eco.conquest.op = Some(walking());
+        for stage in [Stage::Prepare, Stage::Walk, Stage::Watch, Stage::Fortify] {
+            ai.eco.conquest.op.as_mut().unwrap().stage = stage;
+            assert!(ai.eco.workers[&10].task.is_none());
+            assert!(!ai.eco_project_hand(10, job), "no project borrowing during {stage:?}");
+            assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], ai.eco.tasks.get(job).unwrap()));
+            assert!(ai.eco_project_hand(11, job), "ordinary builders remain available");
+        }
+        ai.eco.conquest.op.as_mut().unwrap().mex_tasks.push(job);
+        assert!(ai.eco_project_hand(10, job), "the mission may staff its own construction");
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Walk;
+        assert!(!ai.eco_project_hand(10, job), "even mission work waits for arrival");
+        ai.set_feature_off("conquest", true);
+        assert!(ai.eco_project_hand(10, job), "disable takes effect before state cleanup");
+        ai.set_feature_off("conquest", false);
+        ai.eco.conquest.op = None;
+        ai.eco.conquest.station = Some(Station { crew: 10, center: Vec3::default(), since: 0 });
+        assert!(ai.eco_project_hand(10, job), "completed missions release workers, even with station history");
+    }
+
+    #[test]
+    fn project_forecast_releases_a_crew_when_conquest_claims_it_between_jobs() {
+        use crate::logistics::{Kind, Worth};
+        let mut ai = direct_ai();
+        ai.eco.workers.retain(|&id, _| id == 10);
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        ai.eco.construction_tasks.push(job);
+        ai.eco.metal = 1000.0;
+        ai.eco.energy = 1000.0;
+        ai.eco.effective_income = 100.0;
+        ai.set_feature_off("logistics", false);
+        ai.set_feature_off("porc", true);
+        ai.set_feature_off("pause", true);
+        ai.logistics_open(job, Kind::Special, Worth::Flat(1000.0), "test project", 0.0);
+        ai.frame = 3017;
+        ai.offset = 0;
+        ai.logistics_update(ai.frame);
+        assert_eq!(ai.logistics.issues[&job].crew, vec![10]);
+        ai.eco.conquest.op = Some(walking());
+        ai.frame += 30;
+        ai.logistics_update(ai.frame);
+        assert!(ai.logistics.issues[&job].crew.is_empty(), "forecast cannot lend a travelling commander");
+        assert_eq!(ai.logistics.issues[&job].reason, "no_safe_available_workers");
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Watch;
+        ai.frame += 30;
+        ai.logistics_update(ai.frame);
+        assert!(ai.logistics.issues[&job].crew.is_empty(), "gaps after arrival still belong to conquest");
+        ai.eco.conquest.op = None;
+        ai.frame += 30;
+        ai.logistics_update(ai.frame);
+        assert_eq!(ai.logistics.issues[&job].crew, vec![10], "release resumes the persistent project");
+    }
+
+    #[test]
+    fn mission_reservation_allows_operator_and_stall_overrides_at_the_objective() {
+        let mut ai = direct_ai();
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 2).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        ai.eco.conquest.op = Some(walking());
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Watch;
+        ai.op.over.priority_tasks.insert(job);
+        assert!(ai.eco_project_hand(10, job));
+        ai.op.over.priority_tasks.clear();
+        ai.eco.build_ids.solar_id = 2;
+        ENERGY_DEFS.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai.eco.hard_estalled = true;
+        assert!(ai.eco_project_hand(10, job), "energy emergency may interrupt at the objective");
+        ai.eco.hard_estalled = false;
+        assert!(!ai.eco_project_hand(10, job));
+    }
+
+    #[test]
+    fn home_energy_reservation_survives_gaps_and_releases_with_the_role() {
+        let mut ai = direct_ai();
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(1100.0, 0.0, 1000.0),
+            0,
+        ));
+        ai.eco.conquest.energy = Some(EnergyWorker { id: 11, was_greedy: true, since: 100 });
+        assert!(!ai.eco_project_hand(11, job));
+        ai.eco.build_ids.solar_id = 1;
+        assert!(ai.eco_project_hand(11, job), "home energy belongs to the role");
+        ai.eco.tasks.get_mut(job).unwrap().position = Vec3::new(8000.0, 0.0, 8000.0);
+        assert!(!ai.eco_project_hand(11, job), "the role does not promise distant power");
+        ai.eco.conquest.energy = None;
+        assert!(ai.eco_project_hand(11, job));
+    }
+
+    #[test]
+    fn conquest_starts_before_any_opening_mexes() {
+        let mut ai = direct_ai();
+        assert!(ai.eco.mexes.is_empty());
+        ai.conquest_start(30);
+        let op = ai.eco.conquest.op.as_ref().expect("no mex or 100-second prerequisite");
+        assert_eq!(op.stage, Stage::Prepare, "the home guard still comes first");
+        assert_eq!(op.crew, 10);
+    }
+
+    #[test]
+    fn direct_walk_owns_only_its_commander_and_yields_after_arrival() {
+        let mut ai = direct_ai();
+        ai.eco.conquest.op = Some(walking());
+        assert!(!ai.conquest_walk_worker(11));
+        let job = ai.eco.tasks.insert(WorkerTask::construction(
+            UnitDef::from_id(ai.cb, 1).unwrap(),
+            Vec3::new(4100.0, 0.0, 4000.0),
+            0,
+        ));
+        ai.eco.workers.get_mut(&10).unwrap().set_task(&mut ai.eco.tasks, job, 0);
+        ai.eco_assign_worker(10);
+        assert!(ai.eco.workers[&10].task.is_none(), "leave the nearby economy job");
+        WALK_ORDERS
+            .with_borrow(|o| assert_eq!(o.as_slice(), &[(crate::defs::cmd::RAW_MOVE, vec![3000.0, 0.0, 3000.0])]));
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Watch;
+        assert!(!ai.conquest_walk_worker(10), "economy jobs resume at the objective");
+    }
+
+    #[test]
+    fn opening_mexes_wait_for_arrival_even_while_objectives_are_being_searched() {
+        let mut ai = energy_ai();
+        trip(&mut ai);
+        ai.eco.build_ids.mex_id = 1;
+        let mex = WorkerTask::construction(UnitDef::from_id(ai.cb, 1).unwrap(), Vec3::default(), 0);
+        assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], &mex));
+        assert!(!ai.conquest_skips_opening_mexes(11), "ordinary constructors keep expanding");
+        ai.eco.conquest.asked = true;
+        assert!(!ai.conquest_skips_opening_mexes(10), "an empty search releases the opening");
+        ai.eco.conquest.asked = false;
+        ai.frame = 30 * 100;
+        assert!(!ai.conquest_skips_opening_mexes(10), "missing terrain cannot starve the opening forever");
+        ai.eco.conquest.op = Some(walking());
+        assert!(!ai.eco_worker_can_take(&ai.eco.workers[&10], &mex));
+        ai.eco.conquest.op.as_mut().unwrap().stage = Stage::Fortify;
+        assert!(!ai.conquest_skips_opening_mexes(10), "take the objective's mexes on arrival");
+        ai.eco.conquest.op = None;
+        ai.eco.conquest.done = true;
+        assert!(!ai.conquest_skips_opening_mexes(10), "a failed trip releases the commander");
+        ai.eco.conquest.done = false;
+        push(&mut ai);
+        assert!(!ai.conquest_skips_opening_mexes(10), "compush retains its expansion opening");
+    }
+
+    #[test]
+    fn direct_walk_does_not_replace_emergency_retreat() {
+        let mut ai = direct_ai();
+        ai.eco.conquest.op = Some(walking());
+        ai.eco.workers.get_mut(&10).unwrap().is_chicken = true;
+        assert!(ai.conquest_walk_worker(10));
+        WALK_ORDERS.with_borrow(|o| assert!(o.is_empty(), "do not overwrite retreat"));
     }
 
     #[test]
@@ -1962,9 +2426,54 @@ mod tests {
         ai.eco.workers.get(&id).unwrap().is_greedy
     }
 
+    /// The trip: `conquest` on, `compush` off.
+    fn trip(ai: &mut Ai) {
+        ai.set_feature_off("conquest", false);
+        ai.set_feature_off("compush", true);
+    }
+
+    /// `compush` on (off by default since 2026-11-03 evening).
+    fn push(ai: &mut Ai) {
+        ai.set_feature_off("compush", false);
+    }
+
+    #[test]
+    fn compush_alone_runs_conquest_and_the_trip_needs_both_switches() {
+        let mut ai = energy_ai();
+        assert!(ai.dev_off("conquest") && ai.dev_off("compush") && !ai.conquest_active(), "the default: nothing");
+        push(&mut ai);
+        assert!(ai.dev_off("conquest") && ai.conquest_push() && ai.conquest_active(), "compush alone");
+        ai.set_feature_off("compush", true);
+        assert!(!ai.conquest_active(), "both off: nothing");
+        trip(&mut ai);
+        assert!(ai.conquest_active() && !ai.conquest_push(), "the trip");
+        ai.set_feature_off("compush", false);
+        assert!(ai.conquest_push(), "both on: compush");
+    }
+
+    #[test]
+    fn with_compush_the_energy_worker_holds_from_the_start_to_the_overdrive_phase() {
+        let mut ai = energy_ai();
+        push(&mut ai);
+        COMMANDER_HOME.with(|h| h.set(true));
+        ai.conquest_energy(600);
+        let e = ai.eco.conquest.energy.as_ref().expect("an energy worker without a trip");
+        assert_eq!((e.id, e.was_greedy), (12, true));
+        assert!(!greedy(&ai, 12));
+        ai.conquest_energy(900);
+        assert!(ai.eco.conquest.energy.is_some(), "the commander home does not end it");
+        ai.eco.od_phase = Some(900);
+        ai.conquest_energy(1200);
+        assert!(ai.eco.conquest.energy.is_none());
+        assert!(greedy(&ai, 12));
+        ai.conquest_energy(1500);
+        assert!(ai.eco.conquest.energy.is_none(), "not picked again");
+    }
+
     #[test]
     fn the_constructor_nearest_home_builds_energy_until_the_commander_is_back() {
         let mut ai = energy_ai();
+        trip(&mut ai);
         ai.eco.conquest.op = Some(walking());
         ai.conquest_energy(600);
         let e = ai.eco.conquest.energy.as_ref().expect("an energy worker");
@@ -1986,6 +2495,7 @@ mod tests {
     #[test]
     fn without_a_commander_the_energy_worker_stays_non_greedy() {
         let mut ai = energy_ai();
+        trip(&mut ai);
         ai.eco.conquest.op = Some(walking());
         ai.conquest_energy(600);
         ai.eco.conquest.op = None;

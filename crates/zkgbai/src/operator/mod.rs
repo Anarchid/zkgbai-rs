@@ -99,8 +99,12 @@ pub struct Overrides {
     /// Mobile build power the factories keep, as a multiple of metal
     /// income (0 = the default target, 1.2 times income).
     pub buildpower: f32,
-    /// Standing metal per square kilo-elmo at which the map counts as
-    /// dense (see `regime`; `None`: the AI's own).
+    /// The fixed-defense budget's levers (see `posture`; `None`: the AI's
+    /// own).
+    pub defense_floor: Option<f32>,
+    pub defense_lane: Option<f32>,
+    pub defense_density: Option<f32>,
+    pub defense_cap: Option<f32>,
     pub density_ref: Option<f32>,
 }
 
@@ -204,9 +208,24 @@ pub struct Operator {
 
 /// A setting from the AI option `key`, else the environment; `None` if
 /// unset or off.
-/// The density reference's range (see `Overrides::density_ref`).
-pub(crate) fn density_ref_clamp(v: f32) -> f32 {
-    v.clamp(100.0, 10000.0)
+/// The posture's levers as start options (and environment variables), with
+/// where each goes.
+type Slot = fn(&mut Overrides) -> &mut Option<f32>;
+pub(crate) const POSTURE_SETTINGS: [(&str, &str, Slot); 5] = [
+    ("defense_floor", "ZKGBAI_DEFENSE_FLOOR", |o| &mut o.defense_floor),
+    ("defense_lane", "ZKGBAI_DEFENSE_LANE", |o| &mut o.defense_lane),
+    ("defense_density", "ZKGBAI_DEFENSE_DENSITY", |o| &mut o.defense_density),
+    ("defense_cap", "ZKGBAI_DEFENSE_CAP", |o| &mut o.defense_cap),
+    ("density_ref", "ZKGBAI_DENSITY_REF", |o| &mut o.density_ref),
+];
+
+/// A posture lever's value within its range.
+pub(crate) fn posture_clamp(key: &str, v: f32) -> f32 {
+    match key {
+        "density_ref" => v.clamp(100.0, 10000.0),
+        "defense_cap" => v.clamp(0.0, 0.9),
+        _ => v.clamp(0.0, 0.9),
+    }
 }
 
 fn setting(cb: Callback, key: &str, env: &str) -> Option<String> {
@@ -349,9 +368,11 @@ impl Ai {
             self.op.over.buildpower = b.clamp(0.5, 3.0);
             self.log(&format!("operator: buildpower {:.2}", self.op.over.buildpower));
         }
-        if let Some(v) = setting(self.cb, "density_ref", "ZKGBAI_DENSITY_REF").and_then(|v| v.parse::<f32>().ok()) {
-            self.op.over.density_ref = Some(density_ref_clamp(v));
-            self.log(&format!("operator: density_ref {v:.0}"));
+        for (key, env, slot) in POSTURE_SETTINGS {
+            if let Some(v) = setting(self.cb, key, env).and_then(|v| v.parse::<f32>().ok()) {
+                *slot(&mut self.op.over) = Some(posture_clamp(key, v));
+                self.log(&format!("operator: {key} {v:.2}"));
+            }
         }
         let listen = self.op.listen.clone();
         let journal_dir = self.op.journal_dir.clone();
@@ -912,7 +933,7 @@ impl Ai {
     /// starve what is already there).
     pub(crate) fn op_greed(&self) -> f32 {
         let g = if self.op.over.greed > 0.0 { self.op.over.greed } else { 1.0 };
-        if self.eco.estalled { g.min(1.0) } else { g }
+        if self.eco.estalled && !self.dev_off("greedcap") { g.min(1.0) } else { g }
     }
 
     /// The constructor rule's target: mobile build power as a multiple of

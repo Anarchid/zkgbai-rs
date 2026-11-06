@@ -2,7 +2,7 @@
 <img width="1911" height="966" alt="image" src="https://github.com/user-attachments/assets/76a7c004-719b-4891-914e-47e182f98be1" />
 
 zkgbai-rs
-=========
+==
 
 The "Zero-K Graph-Based AI": a skirmish AI for the [Zero-K](https://zero-k.info) RTS on the
 [Recoil](https://github.com/beyond-all-reason/RecoilEngine) engine. It reasons over a graph of the
@@ -12,6 +12,33 @@ the fog of war, and drives raiders, assault squads, artillery, air and the econo
 This is the Rust rewrite. It is a native engine AI (a plain `cdylib` speaking the engine's C AI
 interface), so unlike the original Java AI it needs no JVM and ships the same way CircuitAI does:
 a folder with `libSkirmishAI.so`, `SkirmishAI.dll`, `AIInfo.lua` and `AIOptions.lua`.
+
+Scout retirement stops both ordinary scout refills and opening scout waves, even when
+map-wide density remains below the opening threshold. Retired Kodachis return to their
+solo controller; other scouts use a supported solo, small-raider or medium-raider handler.
+Retirement journal records report solo raiders separately from squads.
+
+Stakeout damage response
+------------------------
+
+`stakeoutqrf` is on by default. When an enemy ground or sea raider/scout damages one of our
+economy units, available stakeouts join QRF if their estimated travel time to firing range,
+plus time to kill the attacker and a one-second response margin, is less than the victim's
+remaining HP divided by the attacker's sustained HP DPS. Each qualifying stakeout joins;
+there is no fixed radius or single-responder cap. Fast units can rescue from farther away.
+The estimate uses terrain route cost, current health, armor-specific weapon damage, salvo/reload,
+weapon range and the responder's slow state. Unreachable, unarmed, disarmed and paralyzed responders do
+not qualify. EMP, slow-only and disarm damage do not count as lethal DPS. This is a single-attacker
+sustained-fire estimate, not a prediction of dodging, healing, shields or the full nearby fight.
+Constructors, commanders, factories, caretakers, income, grid and storage buildings qualify,
+including unfinished buildings; combat units, turrets and terraform markers do not.
+Units retreating for repairs or reserved by the operator keep their existing orders.
+This works while looking, moving or shadowing as well as while parked. It requires QRF to be
+enabled. Use `disable=stakeoutqrf`, `ZKGBAI_DISABLE=stakeoutqrf`, or
+`feature stakeoutqrf off=true` for the control. The first hit is evaluated immediately; repeated
+hits on the same victim by the same attacker are rechecked at most twice per second.
+The operator journal records `stakeout` events with `event=damage_qrf`, recruited units, victim,
+attacker, estimated survival time and each responder's travel and kill times.
 
 Layout
 ------
@@ -26,6 +53,103 @@ Layout
 | `tools/terrain-view` | Renders a tier's regions (darker on slopes units crawl up), gates (red, orange where going round them is easy) and borders (magenta where crossing is free, blue with a yellow tick into the side it climbs into) to PNG and, given a scenario dumped by the AI (`ZKGBAI_DUMP_TERRAIN=<dir>`), overlays and prints the strategic analysis; `--split` cuts the regions around the scenario's metal spots first (seams in cyan). |
 | `tools/operator` | `zkop.py`: finds running instances, calls their tools, follows their events, summarizes run journals. `luaui/gui_zkgbai_operator.lua`: the same in the game, as a LuaUI widget. |
 | `tools/dll-smoke` | Loads a built library outside the engine and checks its FFI contract (exports, panic containment). |
+
+Above 2000 projected metal per square kiloelmo, each full 2000 metal of completed ground
+combat units allows one Aspis or Iris (a shared allowance). Existing shield/cloak factories
+supply them; otherwise constructors build dedicated Aegis/Cornea statics and morph them.
+Support units do not contribute to the army budget. Nanoframes, pending factory orders,
+construction jobs and active morphs reserve slots; ordinary static defenses are left in place.
+
+Gate fortification scores the direct route and equidistant frontier using ground travel between
+our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
+gate's value; distance from home and constructor travel reduce it sharply. The planner compares
+turret sites by uncovered gate value per metal, including shared sites between gates, and checks
+range and terrain clearance at the centre and both edges of each front. Existing and queued
+defenses reserve each sample separately, so complementary coverage counts and saturated overlap
+earns no additional value. Built or queued Lotus range circles must not overlap.
+Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
+covers them; when both have affordable, safe sites, a fair coin chooses the type, using its best
+site. Both become eligible at 25 metal income, subject to the pooled budget. Repeated checks of
+one request do not add credit. Planned upgrades reserve demand,
+and cancelled upgrades release it. Placement still requires a safe constructor route and, when
+posture is enabled, sufficient posture budget. Lower standing-metal density and a larger share
+of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
+pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
+so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
+reuse a matching existing or queued turret when it covers the asset's nearby approaches. New
+orders, including conquest guards and pooled upgrades, pass one shared porc policy: within
+300 elmos of a selected unblocked chokepoint, or a 160-elmo band around the perpendicular
+bisector of our start and the enemy start-box estimate. This line stays fixed as the front
+moves; a turret there must reach at least 160 elmos into their half. Nearby supported builders
+can seed sparse Lotus coverage on that line; generic frontline and counter-porc pushes are removed.
+
+Routine economy porc is limited to 20 seconds of adjusted metal income, clamped to 300–1200
+metal. Factory emergencies can use up to 1800 total, and require a current threat or a stronger
+enemy forecast within 60 seconds. Their final build site must be within 400 elmos of a live
+factory. No new order may bring ground-turret commitments within 800 elmos of its site above
+600 metal. Live turrets and queued construction count together, with nanoframes counted once;
+these limits do not reclaim existing defenses. Off-policy unstarted orders are cancelled,
+including emergency orders whose threat has passed. AA and strategic weapons are outside this
+budget. Tactical siege-support turrets retain their existing behavior; the admission limits
+apply to economy orders. Neither `mexporc` requests nor a `fortify` fallback bypasses the policy.
+Thresholds live in `crates/zkgbai/src/economy/porc_policy.rs`.
+
+Forward construction and ditches require local support, reachable approaches, and checks against
+current threats and recent raids; workers reconsider fortification jobs when support changes.
+The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds
+in `crates/zkgbai/src/economy/fortify.rs`.
+
+The `fortify` feature is on by default. Set `disable=fortify` (or
+`ZKGBAI_DISABLE=fortify`) to restore the previous gate planner; it can also be
+toggled live with the operator feature switch. The new planner respects the
+posture defense budget and the existing `detour` ditch-value and job-cost checks.
+
+Tactical missile silos are scored at their final buildable positions, with a 3450-elmo reach
+including a margin for the pads. Sites near significant enemy region density or recent raids
+reserve their silo footprint while a heavy laser, two light lasers, flak and an area shield are
+built first. Only live, completed defenses release the silo job; missing guards are requeued,
+and blocked preparation sites are abandoned. Existing defenses can satisfy the prerequisites.
+Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
+
+Besides the Eos/Shockley payoff trigger, reaching **at least 80%** of known and inferred
+enemy static value warrants a silo independently of battlefield density. The existing
+siege trigger also admits a silo when it covers **more than 70%** of
+known and inferred enemy static metal **or held enemy territory**, and battlefield density exceeds the
+**Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
+step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
+requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
+Density is `posture.density`: all allied standing metal plus known enemy metal, divided by usable
+ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
+remembered live statics remain counted. The 70% siege trigger also requires battlefield density;
+the missile firing disk is not the density denominator. Density and lanes are measured even
+with defense posture disabled; before lanes are available the full slider threshold applies.
+Decision logs and the operator `regime` view report the adjusted threshold. Static value
+includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
+confidence), without double-counting known mexes or assigning locations to unobserved spending.
+Territory coverage measures the union of held enemy territory cells around hostile mexes;
+shadow-only territory does not count. Both coverage routes exclude ground/value already reached
+by allied silos, while retaining the whole enemy area/value as the denominator.
+
+Site searches survive temporary income dips and hard energy stalls; these pause construction
+admission, while growth/overdrive energy demand does not block it. An accepted own or allied
+project remains committed. Background results retain the exact terrain samples used for the
+chosen site's flights: unrelated terrain changes are harmless, while relevant changes or stale
+results trigger a fresh search immediately. Only a completed search finding no site waits a
+minute before retrying. Disabling missiles/requisition or selecting another silo cancels search.
+
+Enemy tactical silos have first claim on Eos production and targeting, including newly scouted
+nanoframes. Eos are reserved immediately, and launch once last observed construction progress
+is **greater than 50%**. Ordinary payoff thresholds and allied target delegation do not apply
+to these rivals; range, shield feasibility and committed shield follow-ups still apply. Hidden
+silos request another scout look. Construction progress is remembered from observation, never
+extrapolated through fog.
+
+Berthas, nukes, Zeniths and Disco Rave Parties require sites beyond tactical missile reach
+(3500 elmos) from held enemy territory or a known enemy silo. This also gates assistance to
+allied frames, queued plans that have not started, and sites waiting for grid power.
+
+The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
+and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
 
 Building
 --------
@@ -66,7 +190,7 @@ Installing
 
 Unzip a release's `ZKGBAI-<version>.zip` into the spring data directory (the one holding `games/`
 and `maps/`), or copy a local build's `dist-rs/AI/Skirmish/ZKGBAI/<version>` to
-`<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.5.2`.
+`<spring data dir>/AI/Skirmish/ZKGBAI/<version>`, e.g. `~/.spring/AI/Skirmish/ZKGBAI/0.4.0`.
 Lobbies listing local AIs will then offer it.
 
 The lobby's `ZKGBAI wip` is the branch `wip`. Work meant for it is merged or cherry-picked into
@@ -91,8 +215,54 @@ available metal and energy is released, with the project reconsidered after 10 s
 projects remain visible and are reassessed every second. Expired, unstarted deadline jobs are
 cancelled; other exhausted valuations return their tasks to the ordinary economy for reassessment.
 Started frames are preserved. Replacement workers value partial construction too.
+Mex assignment values an active crew before recruiting replacements: paid progress attracts the
+current crew or a rescuer for idle work, not a replacement for a constructor already spending on
+the current engine build/repair command. Actual spending on that command counts even when the
+builder is outside nominal build distance: the engine also includes the target's radius.
+Crowding affects new assignments only, across all worker jobs. An arriving helper never raises
+an incumbent's job cost; two workers can finish together, including through resource pauses.
+Stalled or retreating workers release the active-mex preference; urgent jobs can still win.
+
+Ordinary worker job switches pay 50 job-score points per estimated second of walking to the
+new site, using the terrain route, movement speed and actual build range. This replaces the
+small fixed preference for an existing approach. The cost applies only while the old job is
+valid, safe and making progress: spending on its current build/repair command, reclaiming in
+range, or walking with recent headway. Idle workers and stalled approaches choose freely. Explicit priorities,
+commander missions, forecast project crews, replacement factories and hard energy shortages
+bypass the charge. The same price is used when choosing between mex expansion lanes; nearby
+work within build range costs nothing to switch to, and sufficiently valuable work can still win.
+
+An on-site builder actively spending on construction at least 80% complete keeps the job when
+at most ten seconds remain at its current spending/build rate. Ordinary job bidding and new
+project crews both respect this final work; explicit priorities, danger, and energy emergencies
+can still preempt it. A stalled build receives no indefinite hold.
+For a threatened turret that can finish within 15 seconds at observed spending, `buildguard`
+compares staying to build with that constructor withdrawing. Both fights include nearby allies
+and the exposed nanoframe; surviving builders add health and progress, and the turret fires
+only after completion. The builder withdraws once the frame finishes or is destroyed.
+The decision prices combat losses, remaining construction spending, and the value of a completed
+surviving turret. Other builders can finish in the retreat branch.
+A favorable fresh prediction overrides threat-map retreat and routine reassignment, but retains
+the commander's existing survival limits. Unknown fire, changed tasks, stalls, and new damage
+invalidate the answer. `disable=buildguard` turns this comparison off; `buildguard` journal
+events record the two alternatives.
 Resource forecasts cover tracked projects; factories and untracked jobs can still compete for
 the actual economy, so these remain forecasts rather than guaranteed completion times.
+
+Allied construction selected by the existing economy planner receives a local commitment too
+(with `clients` enabled). Adopting another frame, moving a task, or changing its building type
+refreshes the site, remaining-work forecast and crew; merging duplicate jobs retains one project.
+Tactical silo assistance must satisfy the normal missile target/range or siege-coverage checks
+at the ally's actual position. An unfinished allied silo stops reserving coverage after 90 seconds
+without observed construction progress, and resumes reserving it if construction resumes.
+Silos at least 30% built remain eligible for assistance despite stalling, including nearly
+finished frames with little work left. A suitable rescue is selected before planning a new
+silo, and its assist job survives the stall timeout; the same safety and target checks apply.
+These budgets remain local to each AI; allied contributions are observed through frame progress.
+
+Combat gangs (`coalesce`) temporarily lease command authority as well as borrowing units from
+their regular handlers. Returning a lease restores the underlying role; a role change invalidates
+the lease, and operator reservations and module mutes continue to apply.
 
 Automatic QRF reinforcements from stakeouts temporarily lease command authority. Their
 scouting assignments and budget membership survive the loan; release cancels the
@@ -108,7 +278,7 @@ Testing against other AIs
 Requires a Zero-K data dir (`~/.spring` with an engine under `engine/linux64`, the game and maps).
 
     tools/arena/match.sh -m "Comet Catcher Redux v3.1" \
-        "ZKGBAI:dev@$PWD/dist-rs/AI/Skirmish/ZKGBAI/0.5.2/libSkirmishAI.so" "CircuitAI:stable"
+        "ZKGBAI:dev@$PWD/dist-rs/AI/Skirmish/ZKGBAI/0.4.0/libSkirmishAI.so" "CircuitAI:stable"
     tools/arena/series.sh -n 2 -j 4 "ZKGBAI:dev@<lib>" "1052188CircuitAIBrutal64:stable"
 
 The harness runs `spring-headless` at 20× speed in throw-away write dirs, injects a small LuaUI widget
@@ -125,12 +295,104 @@ against `NullAI:0.1`). `ZKGBAI_DISABLE` switches features off for A/B series, co
 targets and factory choice), `refuge`, `teleport`, `drops`, `ditch`, `reanalysis`, `intel`, `grid`, `nukes`, `missiles`,
 `scouts`, `radar` (watchtowers), `requisition`, `colonize`, `aaintel` (anti-air inferred from hits on our aircraft),
 `artemis` (an Artemis at the centroid of our front against over 4000 metal of enemy air),
-`mexporc` (the turret by every mex and link, the "porc tax"). `regionsplit` (on by default, `disable=regionsplit`)
-has the terrain model cut regions holding many metal spots into pieces around clusters of them.
+`mexporc` (the turret by every mex and link: the "porc tax" of `zkgbai-runs/vs-human/briefings/B4`).
+`regionsplit` (on by default in the wip line, `disable=regionsplit`; off on main) has the terrain model cut regions
+holding many metal spots into pieces around clusters of them.
+Independently of `mexporc`, a mex that has a scout or raider come within Lotus weapon range
+remembers that encounter for life and uses the same sparse mex defense, with the usual spacing
+and Lotus overlap rules. This includes unfinished mexes and identified contacts currently on
+radar, but not stale sightings. Memory belongs to that mex, not its constructor or replacements;
+it does not enable turrets along links.
 `ZKGBAI_MUTE` (or the AI option `mute`) silences modules: `eco`, `fac`, `raider`, `squad`, `scouts`, ... (the
 list is in `AIOptions.lua`) keep thinking but every order they give a unit is dropped, so an operator can do
 that module's job itself; `ZKGBAI_MUTE=raider,squad` against the plain build shows what the army modules are
 worth.
+With `enable=firesquads` (or `ZKGBAI_ENABLE=firesquads`), ordinary ground assault squads
+automatically adopt fire-squad tactics when anti-unit skirmishers
+supply at least 55% of their metal (45% to remain in that mode). The longest range supported by
+that share defines the cores; other units screen them in a paced formation. Firewalker joins
+jumpbot assault squads; siege artillery such as Sling and Impaler cannot be cores. Against a
+local enemy force with at least 30% of its value outranging the cores or unanswerable by them (20% while evading),
+the whole squad evades unless the mechanics predictor approves a ten-second committed a-move.
+The prediction uses the squad alone, expects at least 15% more enemy metal lost than friendly
+metal. Equal-range opponents are engaged. Members below 60% effective health leave individually
+for repairs once a commitment ends (its ten-second window expires or its target is gone), or
+sooner if their own complete, reachable route to a haven is free of known enemy threat and porc.
+Without either condition they stay with the formation. Healthy members keep fighting; after
+releasing the wounded, the squad immediately reassesses its cores and tactics. The ordinary
+retreat handler returns healed units to the assault pool. Individual departures appear as
+`firesquad_repair` journal records; there is no whole-squad recovery state.
+Fire squads are disabled by default; without the switch, Firewalker keeps its artillery role.
+`disable=firesquads` restores ordinary assault conduct. Fire-squad predictions run independently
+of the default-on `fightsim` veto for ordinary attacks. The `squads` operator response
+labels active formations `fireteam` and exposes their tactic, cores, range and focus; mode changes appear as `firesquad` journal
+records. The dashboard, map labels, HUD and in-game operator widget show the fireteam label
+and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
+
+Live fight snapshots read each allied or currently visible enemy weapon's engine reload
+clock (`reloads`, default on; `disable=reloads` restores the previous estimates).
+Known cooldowns override the bomb-charge predictor's busy-enemy reload guesses,
+so Snitches can evaluate an actual Ripper reload window. Active bursts and beams
+remain immediate threats; losing LOS returns to unknown cooldowns. Cached
+QRF and strike answers are invalidated when the observed reload window changes.
+This is independent of `ammo`, the default-off hit-based ledger for scripted
+tube magazines. Cooldowns do not identify a shot's target or represent missiles
+already in flight. Hypothetical future encounters still start ready.
+
+Ordinary ground assault and raider squads use `fightsim` as a default-on veto.
+Only predicted crushing defeats add a refusal: at least 75% of our armed metal
+lost, at most 5% of theirs, and enemy metal losses no greater than one tenth of
+ours. Otherwise the ordinary threat policy decides; a predicted win is never
+required, and a prediction cannot cancel an existing retreat. Vetoed squads
+move to a haven to regroup and reassess on their ordinary assignment cadence,
+without a new cooldown. This also protects attacks on friendly territory.
+
+The existing bounded worker runs the prediction, with the mechanics model by
+default. Missing, older-than-three-second, or materially changed answers do not
+veto. Snapshots include nearby friendly fighters and fresh identified enemies
+along the next 1200 elmos of the approach plus their weapon reach. Fights above
+96 units are skipped, never truncated. Shield support, submerged combat and
+cloaked/bomb squads are excluded where the model cannot represent the tactic.
+Strike missions, explicit operator orders and specialized controllers retain
+their conduct. `disable=fightsim`, `ZKGBAI_DISABLE=fightsim`, or the operator's
+`feature` tool with `{"name":"fightsim","off":true}` disables the veto. With
+`fightshadow` enabled, predictions still appear in the journal. Verdict records
+use mode `veto` and report `veto`, `armed_metal`, predicted casualties and the
+baseline threat decision, so actual refusals can be compared against losses.
+
+
+### Finishing reserve
+
+`finishmargin` (on by default, `disable=finishmargin`) adds a finishing reserve
+when admitting a new coalesce or raidcommit/QRF attack on an armed mobile prize
+(heavy or commander). The forecast increases the enemy's current and maximum HP by 5%, preserving
+its health fraction and metal value. The reserve shrinks with remaining HP, so
+an already wounded target stays easier to finish.
+This is a conservative tuning margin, not a retreat-at-health assumption. Existing
+gangs recheck actual HP. The judgement journal records `finish_margin` and each
+adjusted enemy's actual/forecast HP in `finish_hp`. It uses the ordinary single
+forecast, so there is no additional rollout.
+
+Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
+on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.
+Setting the option's `def` to `'on'` in the installed AIOptions.lua does the same for every instance of that
+version the lobby leaves the option unset on.
+
+Playing apart, they (and any ally, human or AI) share their projects instead of racing them. An ally's
+half-built building takes the job of ours that would go there, and an ally's superweapon, Bertha, reactor or
+anti-nuke rising near our base gets our help before we start our own. Allied instances start superweapons and
+anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. One nuke is
+enough for an alliance: none of ours starts while anyone's silo stands or rises (Berthas, Zeniths and Disco Rave
+Parties may follow). Opening
+factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Turns wait for
+actual allied placements, with a bounded, staggered fallback if a predecessor never places; a pregame announcement
+alone does not release the next turn. A visible own factory is preserved even before its creation event arrives.
+Autonomous factory expansion waits two actual game minutes after our first factory becomes usable, regardless of
+the density-scaled phase clock. Free openings, replacement of the last lost factory, and explicit operator or
+developer factory choices bypass this floor. Where much of
+a side's metal lies under water, one instance takes the start nearest it and an amphibious or hover opening; from
+3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on
+the ally's (`disable=plates` builds our own instead).
 `ZKGBAI_NUKE_TEST` cheats the AI a nuke silo and logs which way of ordering it fires a missile.
 The AI option `test` stages a strike on an anti-nuke with cheats: play `ZKGBAI?test=bite` against
 `ZKGBAI?test=anti` (an anti-nuke and four Fusions at its base) and the attacker, given a silo and a
@@ -152,320 +414,17 @@ modeled target-death probability; the older `strike_margin` setting no longer co
 See [assassination waves](crates/zkgbai/src/military/strikes/README.md) for tactic rules and isolated engine scenarios.
 `ZKGBAI_SEED=<n>` fixes the AI's random seed (otherwise it comes from the clock).
 
-Behaviour
----------
-
-Most of these have a feature switch: `disable=<name>` (AI option) or `ZKGBAI_DISABLE=<name>` turns
-off one that is on by default, `enable=<name>` or `ZKGBAI_ENABLE=<name>` turns on one that is off
-by default (the list is `OFF_BY_DEFAULT` in `crates/zkgbai/src/ai.rs`), and the operator's
-`feature` tool switches one mid-game.
-
-### QRF predictor assignment
-
-`qrfpredict` is on by default for small encounters (at most four teams, four raids and 32 units
-per local rollout) under the live QRF's default algorithm, `mark`. `disable=qrfpredict` restores the
-legacy arrival/value matching and power-ratio conduct. The operator feature
-switch can toggle it during play. A background worker evaluates every eligible
-team subset against each raid, including leaving it unanswered, and chooses
-disjoint subsets by expected friendly losses. Protected assets, current health,
-EMP, observed asset targets and terrain travel delays participate in 30-second
-mechanics rollouts. Nearby response is therefore not interchangeable with a
-distant assignment. Predictor-selected teams bypass the legacy attack power
-ratio and are not split afterward by the metal-ratio rule. Unknown encounters
-and larger forces retain the legacy policy; pending or materially stale
-predictions preserve current orders. `qrf-predict` journal events record the
-assignments, loss estimates, snapshot age, simulations and worker time.
-
-Small known ground groups already in weapon range of protected assets (or
-recently observed firing at them) can also be evaluated beyond the legacy
-strength/territory gates. This includes bombardment by skirmishers such as
-Rogues. Threat deadlines account for weapon range, and the rollout judges
-whether reaching the shooter helps, rather than requiring a defender to
-reach the mex first. These additional groups are never attacked through the
-legacy fallback when prediction is unavailable; leaving them unanswered is
-still a valid predicted outcome.
-
-The rollout uses two-dimensional straight movement plus path-derived detour
-delays, not engine path simulation. Raiders keep their last observed asset
-target and then select nearby surviving assets. Up to four threatened assets
-are considered per raid; overlapping asset values are divided among threats.
-
-### Stakeout damage response
-
-`stakeoutqrf` is on by default. When an enemy ground or sea raider/scout damages one of our
-economy units, available stakeouts join QRF if their estimated travel time to firing range,
-plus time to kill the attacker and a one-second response margin, is less than the victim's
-remaining HP divided by the attacker's sustained HP DPS. Each qualifying stakeout joins;
-there is no fixed radius or single-responder cap. Fast units can rescue from farther away.
-The estimate uses terrain route cost, current health, armor-specific weapon damage, salvo/reload,
-weapon range and the responder's slow state. Unreachable, unarmed, disarmed and paralyzed responders do
-not qualify. EMP, slow-only and disarm damage do not count as lethal DPS. This is a single-attacker
-sustained-fire estimate, not a prediction of dodging, healing, shields or the full nearby fight.
-Constructors, commanders, factories, caretakers, income, grid and storage buildings qualify,
-including unfinished buildings; combat units, turrets and terraform markers do not.
-Units retreating for repairs or reserved by the operator keep their existing orders.
-This works while looking, moving or shadowing as well as while parked. It requires QRF to be
-enabled. Use `disable=stakeoutqrf`, `ZKGBAI_DISABLE=stakeoutqrf`, or
-`feature stakeoutqrf off=true` for the control. The first hit is evaluated immediately; repeated
-hits on the same victim by the same attacker are rechecked at most twice per second.
-The operator journal records `stakeout` events with `event=damage_qrf`, recruited units, victim,
-attacker, estimated survival time and each responder's travel and kill times.
-
-### Commanders on raid defense
-
-Commanders answer raids within 650 elmos of where they were working, closing to weapon
-range and returning to work when the raid leaves. They keep a fixed response area, avoid enemy
-turrets, and leave defense when below 65% health or short of shields. Recon commanders jump
-along safe routes both when responding and when traveling to construction, repair or reclaim
-jobs; reload, landing terrain and flight clearance are checked before each jump. This defaults
-on; the operator's `feature` tool with `{"name":"commander","off":true}` disables both behaviors
-and immediately releases active defenders to economy work. `off:false` re-enables them.
-`disable=commander` or `ZKGBAI_DISABLE=commander` disables them at startup.
-
-### Gate fortification
-
-Gate fortification scores the direct route and equidistant frontier using ground travel between
-our start and the initial inferred enemy base. Nearby resources and narrow passages increase a
-gate's value; distance from home and constructor travel reduce it sharply. The planner compares
-turret sites by uncovered gate value per metal, including shared sites between gates, and checks
-range and terrain clearance at the centre and both edges of each front. Existing and queued
-defenses reserve each sample separately, so complementary coverage counts and saturated overlap
-earns no additional value. Built or queued Lotus range circles must not overlap.
-Further requests are deferred and pool their nominal metal cost toward a Stinger or Gauss that
-covers them; when both have affordable, safe sites, a fair coin chooses the type, using its best
-site. Both become eligible at 25 metal income, subject to the pooled budget. Repeated checks of
-one request do not add credit. Planned upgrades reserve demand,
-and cancelled upgrades release it. Placement still requires a safe constructor route. Lower
-standing-metal density and a larger share
-of unclaimed mex income outside known enemy territory slow opportunistic gate orders and discount
-pooled upgrade demand: expansion keeps priority while it pays. Requests keep their nominal value,
-so the penalty relaxes as the map fills up. Fusion, Caretaker, Singularity and geothermal ground-defense requests
-reuse a matching existing or queued turret when it covers the asset's nearby approaches. New
-orders, including conquest guards and pooled upgrades, pass one shared porc policy: within
-300 elmos of a selected unblocked chokepoint, or a 160-elmo band around the perpendicular
-bisector of our start and the enemy start-box estimate. This line stays fixed as the front
-moves; a turret there must reach at least 160 elmos into their half. Nearby supported builders
-can seed sparse Lotus coverage on that line; generic frontline and counter-porc pushes are removed.
-
-Routine economy porc is limited to 20 seconds of adjusted metal income, clamped to 300–1200
-metal. Factory emergencies can use up to 1800 total, and require a current threat or a stronger
-enemy forecast within 60 seconds. Their final build site must be within 400 elmos of a live
-factory. No new order may bring ground-turret commitments within 800 elmos of its site above
-600 metal. Live turrets and queued construction count together, with nanoframes counted once;
-these limits do not reclaim existing defenses. Off-policy unstarted orders are cancelled,
-including emergency orders whose threat has passed. AA and strategic weapons are outside this
-budget. Tactical siege-support turrets retain their existing behavior; the admission limits
-apply to economy orders. Neither `mexporc` requests nor a `fortify` fallback bypasses the policy.
-Thresholds live in `crates/zkgbai/src/economy/porc_policy.rs`.
-
-Forward construction and ditches require local support, reachable approaches, and checks against
-current threats and recent raids; workers reconsider fortification jobs when support changes.
-The scoring constants live in `crates/terrain/src/fortify.rs`, and placement and safety thresholds
-in `crates/zkgbai/src/economy/fortify.rs`.
-
-The `fortify` feature is on by default. Set `disable=fortify` (or
-`ZKGBAI_DISABLE=fortify`) to restore the previous gate planner; it can also be
-toggled live with the operator feature switch. Ditches are valued by how much longer they
-make the enemy's way to our metal and priced against constructors' jobs.
-
-### Shield and cloak support
-
-Above 2000 projected metal per square kiloelmo, each full 2000 metal of completed ground
-combat units allows one Aspis or Iris (a shared allowance). Existing shield/cloak factories
-supply them; otherwise constructors build dedicated Aegis/Cornea statics and morph them.
-Support units do not contribute to the army budget. Nanoframes, pending factory orders,
-construction jobs and active morphs reserve slots; ordinary static defenses are left in place.
-
-### Tactical missile silos
-
-Tactical missile silos are scored at their final buildable positions, with a 3450-elmo reach
-including a margin for the pads. Sites near significant enemy region density or recent raids
-reserve their silo footprint while a heavy laser, two light lasers, flak and an area shield are
-built first. Only live, completed defenses release the silo job; missing guards are requeued,
-and blocked preparation sites are abandoned. Existing defenses can satisfy the prerequisites.
-Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
-
-Besides the Eos/Shockley payoff trigger, a silo is worthwhile when it covers **more than 70%** of
-known and inferred enemy static metal **or held enemy territory**, and battlefield density exceeds the
-**Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
-step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain adjustment
-requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
-Density is `regime.density`: all allied standing metal plus known enemy metal, divided by usable
-ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
-remembered live statics remain counted. Coverage and battlefield density are separate gates;
-the missile firing disk is not the density denominator. Before lanes are available the full
-slider threshold applies.
-Decision logs and the operator `regime` view report the adjusted threshold. Static value
-includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
-confidence), without double-counting known mexes or assigning locations to unobserved spending.
-Territory coverage measures the union of held enemy territory cells around hostile mexes;
-shadow-only territory does not count. Both coverage routes exclude ground/value already reached
-by allied silos, while retaining the whole enemy area/value as the denominator.
-
-Enemy tactical silos have first claim on Eos production and targeting, including newly scouted
-nanoframes. Eos are reserved immediately, and launch once last observed construction progress
-is **greater than 50%**. Ordinary payoff thresholds and allied target delegation do not apply
-to these rivals; range, shield feasibility and committed shield follow-ups still apply. Hidden
-silos request another scout look. Construction progress is remembered from observation, never
-extrapolated through fog.
-
-Berthas, nukes, Zeniths and Disco Rave Parties require sites beyond tactical missile reach
-(3500 elmos) from held enemy territory or a known enemy silo. This also gates assistance to
-allied frames, queued plans that have not started, and sites waiting for grid power.
-
-The constants and construction prerequisites live in `crates/zkgbai/src/economy/silo.rs`; placement
-and coverage scoring live in `crates/zkgbai/src/military/missiles.rs`.
-
-Superweapon selection normally opens at five reactors. With `frontgate`, full front
-escalation (`front_hi`, default 2000) also opens it once estimated alliance metal income
-reaches 50/s and at least 80% of estimated enemy income. This uses actual metal income,
-without the game-age bonus, so geothermal and shared-energy economies need not build
-extra reactors first. Energy starvation and merged-team strider prerequisites still
-apply. A profitable uncovered nuke target retains its separate early trigger. These gates
-live in `crates/zkgbai/src/economy/planning.rs` and `crates/zkgbai/src/military/nukes.rs`.
-
-### Colonization
 
 Colonization discounts a candidate's metal value by its distance from the enemy
 centroid relative to the distance from our start to that centroid (capped at one).
 Its constructor job bonus also gets that discount, multiplied by
-`clamp(regime.density / 400, 0, 1)`. This is the same global standing-metal per
+`clamp(posture.density / 400, 0, 1)`. This is the same global standing-metal per
 usable square kiloelmo estimate used for missile-silo eligibility. Both adjustments
 are on by default: `colonize_policy=combined`. Use `enemy_distance` or `density`
 to keep only one, or `baseline` for the original scoring and bonus.
 `disable=colonize` still disables colonization entirely.
 
-### Fire squads
-
-With `enable=firesquads` (or `ZKGBAI_ENABLE=firesquads`), ordinary ground assault squads
-automatically adopt fire-squad tactics when anti-unit skirmishers
-supply at least 55% of their metal (45% to remain in that mode). The longest range supported by
-that share defines the cores; other units screen them in a paced formation. Firewalker joins
-jumpbot assault squads; siege artillery such as Sling and Impaler cannot be cores. Against a
-local enemy force with at least 30% of its value outranging the cores or unanswerable by them (20% while evading),
-the whole squad evades unless the mechanics predictor approves a ten-second committed a-move.
-The prediction uses the squad alone, expects at least 15% more enemy metal lost than friendly
-metal. Equal-range opponents are engaged. Members below 60% effective health leave individually
-for repairs once a commitment ends (its ten-second window expires or its target is gone), or
-sooner if their own complete, reachable route to a haven is free of known enemy threat and porc.
-Without either condition they stay with the formation. Healthy members keep fighting; after
-releasing the wounded, the squad immediately reassesses its cores and tactics. The ordinary
-retreat handler returns healed units to the assault pool. Individual departures appear as
-`firesquad_repair` journal records; there is no whole-squad recovery state.
-Fire squads are disabled by default; without the switch, Firewalker keeps its artillery role.
-`disable=firesquads` restores ordinary assault conduct. Fire-squad predictions run independently
-of the `fightsim` veto for ordinary attacks. The `squads` operator response
-labels active formations `fireteam` and exposes their tactic, cores, range and focus; mode changes appear as `firesquad` journal
-records. The dashboard, map labels, HUD and in-game operator widget show the fireteam label
-and current tactic. Doctrine taskforces, aircraft, operator orders and QRF assignments keep their own conduct.
-
-### Fight predictor veto
-
-Live fight snapshots read each allied or currently visible enemy weapon's engine reload
-clock (`reloads`, default on; `disable=reloads` restores the previous estimates).
-Known cooldowns override the bomb-charge predictor's busy-enemy reload guesses,
-so Snitches can evaluate an actual Ripper reload window. Active bursts and beams
-remain immediate threats; losing LOS returns to unknown cooldowns. Cached
-QRF and strike answers are invalidated when the observed reload window changes.
-Cooldowns do not identify a shot's target or represent missiles
-already in flight. Hypothetical future encounters still start ready.
-
-Ordinary ground assault and raider squads use the predictor as a default-on veto.
-Only predicted crushing defeats add a refusal: at least 75% of our armed metal
-lost, at most 5% of theirs, and enemy metal losses no greater than one tenth of
-ours. Otherwise the ordinary threat policy decides; a predicted win is never
-required, and a prediction cannot cancel an existing retreat. Vetoed squads
-move to a haven to regroup and reassess on their ordinary assignment cadence,
-without a new cooldown. This also protects attacks on friendly territory.
-
-The existing bounded worker runs the prediction, with the mechanics model by
-default. Missing, older-than-three-second, or materially changed answers do not
-veto. Snapshots include nearby friendly fighters and fresh identified enemies
-along the next 1200 elmos of the approach plus their weapon reach. Fights above
-96 units are skipped, never truncated. Shield support, submerged combat and
-cloaked/bomb squads are excluded where the model cannot represent the tactic.
-Strike missions, explicit operator orders and specialized controllers retain
-their conduct. `disable=fightsim`, `ZKGBAI_DISABLE=fightsim`, or the operator's
-`feature` tool with `{"name":"fightsim","off":true}` disables the veto. With
-`fightshadow` enabled, predictions still appear in the journal. Verdict records
-use mode `veto` and report `veto`, `armed_metal`, predicted casualties and the
-baseline threat decision, so actual refusals can be compared against losses.
-
-### Raider gangs and the stay veto
-
-`raidcommit` replaces ordinary ground-raider threat-map convergence with explicit combat
-permission (default **off on both main and wip**; `enable=raidcommit` / `disable=raidcommit`,
-or the operator `feature` tool). It keeps coalesce running even if `coalesce` itself is disabled:
-solo raiders, Kodachis and raider squads travel/scout using continuous threat-aware MOVE queues;
-coalesce alone commits them to local armed fights, including singletons. A rejected encounter
-assembles its participants outside known weapon coverage; missing predictions, unknown contacts
-and exhausted query budgets never authorize an attack. Breaking a gang cancels its old pursuit; a successful fight releases units to press onward.
-Normal fights need a favorable expected trade, not a clean sweep of every supporting enemy;
-three consecutive failed rechecks break an existing commitment.
-QRF retains its roles and assignment planner, but defenders assigned to one raid share the same
-favorable-trade admission policy, evaluated at their actual positions. Repositioning stays MOVE.
-Friendly threat paint still serves other controllers and routing; it grants no engagement
-permission in these paths. Explicit operator/strike orders and specialized cloaked, submerged
-and air controllers retain their existing behavior. The switch is experimental: its shared
-predictor and conservative assembly policy still need game-outcome validation. `raidcommit`
-journal events record assembly and QRF commitments; coalesce retains its outcome windows.
-
-`coalesce` (on by default, `disable=coalesce`) lets raiders that stand near one
-another take a local fight together whoever drives them: solo raiders, Kodachis,
-raider-squad members and armed stakeout pickets. Twice a second it clusters the
-raiders free to be borrowed and asks the predictor (`fightsim::local`) about each
-cluster's fight: a clean a-move that kills every armed enemy for little loss, or
-a dive on one prize (commander, factory, heavy, big economy) worth several times
-what it costs. A plan that passes forms a gang; its members skip their own
-controllers and do not retreat to repair until the gang breaks up (prize dead,
-no armed enemy left, the forecast turned, or its time up).
-
-`finishmargin` (on by default, `disable=finishmargin`) adds a finishing reserve
-when admitting a new coalesce or raidcommit/QRF attack on an armed mobile prize
-(heavy or commander). The forecast increases the enemy's current and maximum HP by 5%, preserving
-its health fraction and metal value. The reserve shrinks with remaining HP, so
-an already wounded target stays easier to finish.
-This is a conservative tuning margin, not a retreat-at-health assumption. Existing
-gangs recheck actual HP. The judgement journal records `finish_margin` and each
-adjusted enemy's actual/forecast HP in `finish_hp`. It uses the ordinary single
-forecast, so there is no additional rollout.
-
-`stayveto` (off by default, `enable=stayveto`) keeps units about to run home for
-repairs in their fight when the predictor says staying wins far more than it
-risks. It is off since the 2026-11-01 batteries: it lost its mirror 3-15 and
-changed nothing against Circuit or Wires.
-
-With either switched off, `coalesceshadow` and `stayshadow` journal what it would
-have done (`k=coalesce`, `k=stayveto`), with the same windows, for the off arm of
-an A/B.
-
-### Lobster throws
-
-Optional Lobster squad equipment is on by default (`lobsters`): amphib factories aim for one
-launcher per full 2,500 metal of non-raider armed amphib units, including those under construction
-but excluding Lobsters themselves. Squads gather briefly for a throw when a loaded launcher is nearby,
-then continue normally while it reloads and catches up; a fresh launcher may take over.
-Use `feature name=lobsters off=true` to stop new production and cancel pending throws;
-`feature name=lobsters off=false` turns it back on. Flights already underway finish.
-For A/B runs use `disable=lobsters` or `ZKGBAI_DISABLE=lobsters`.
-
-### Allied instances
-
-Allied instances of the AI each play their own team. With `ZKGBAI_HIVEMIND=on` (or the AI option `hivemind`
-on every one of them) they merge into one instead: the lowest team leads and the others hand it their units.
-Setting the option's `def` to `'on'` in the installed AIOptions.lua does the same for every instance of that
-version the lobby leaves the option unset on.
-
-Playing apart, they (and any ally, human or AI) share their projects instead of racing them. An ally's
-half-built building takes the job of ours that would go there, and an ally's superweapon, Bertha, reactor or
-anti-nuke rising near our base gets our help before we start our own. Allied instances start superweapons and
-anti-nukes in turns, in team order, and an allied anti-nuke where ours would stand counts as ours. One nuke is
-enough for an alliance: none of ours starts while anyone's silo stands or rises (Berthas, Zeniths and Disco Rave
-Parties may follow). Opening
-factories go by turns too, each instance preferring a factory whose units move unlike its allies'. Where much of
-a side's metal lies under water, one instance takes the start nearest it and an amphibious or hover opening; from
-3v3 on, an opening is now and then an air plant. A factory of a type an ally already has becomes a factory plate on
-the ally's (`disable=plates` builds our own instead).
+### Allied reactor budget
 
 In allied games, reactors follow an alliance-wide energy goal based on total mex income and the existing
 territory/phase ramp. Existing production, unfinished energy plants (at full completed output), geothermal
@@ -566,6 +525,14 @@ pinned reads (`hud pin=enemies args={...}`) and the `board`, the map as a PNG (`
 MCPL hosts get it as an image block). Calls run on the AI's thread at its next frame, so they are
 answered while the game runs.
 
+Optional Lobster squad equipment is on by default (`lobsters`): amphib factories aim for one
+launcher per full 2,500 metal of non-raider armed amphib units, including those under construction
+but excluding Lobsters themselves. Squads gather briefly for a throw when a loaded launcher is nearby,
+then continue normally while it reloads and catches up; a fresh launcher may take over.
+Use `feature name=lobsters off=true` to stop new production and cancel pending throws;
+`feature name=lobsters off=false` turns it back on. Flights already underway finish.
+For A/B runs use `disable=lobsters` or `ZKGBAI_DISABLE=lobsters`.
+
 **Piloting.** `tools/arena/pilot.sh -m "Agalta v1.0" -f factorytank -D mexporc` starts a real-time
 match of the operator-served build against an unsteered copy of itself and prints the pilot's
 endpoints (`PILOT url=... mcpl=ws://127.0.0.1:7460/mcpl out=...`); the replay stays in `out/wd/demos/`
@@ -634,6 +601,66 @@ License
 
 GNU General Public License, version 2 (see `LICENSE`).
 
+Commanders also answer raids within 650 elmos of where they were working, closing to weapon
+range and returning to work when the raid leaves. They keep a fixed response area, avoid enemy
+turrets, and leave defense when below 65% health or short of shields. Recon commanders jump
+along safe routes both when responding and when traveling to construction, repair or reclaim
+jobs; reload, landing terrain and flight clearance are checked before each jump. This defaults
+on; the operator's `feature` tool with `{"name":"commander","off":true}` disables both behaviors
+and immediately releases active defenders to economy work. `off:false` re-enables them.
+`disable=commander` or `ZKGBAI_DISABLE=commander` disables them at startup.
+
+QRF predictor assignment
+------------------------
+
+`qrfpredict` is on by default for Mark's small encounters (at most four teams,
+four raids and 32 units per local rollout). `disable=qrfpredict` restores the
+legacy arrival/value matching and power-ratio conduct. The operator feature
+switch can toggle it during play. A background worker evaluates every eligible
+team subset against each raid, including leaving it unanswered, and chooses
+disjoint subsets by expected friendly losses. Protected assets, current health,
+EMP, observed asset targets and terrain travel delays participate in 30-second
+mechanics rollouts. Nearby response is therefore not interchangeable with a
+distant assignment. Predictor-selected teams bypass the legacy attack power
+ratio and are not split afterward by the metal-ratio rule. Unknown encounters
+and larger forces retain the legacy policy; pending or materially stale
+predictions preserve current orders. `qrf-predict` journal events record the
+assignments, loss estimates, snapshot age, simulations and worker time.
+
+Small known ground groups already in weapon range of protected assets (or
+recently observed firing at them) can also be evaluated beyond the legacy
+strength/territory gates. This includes bombardment by skirmishers such as
+Rogues. Threat deadlines account for weapon range, and the rollout judges
+whether reaching the shooter helps, rather than requiring a defender to
+reach the mex first. These additional groups are never attacked through the
+legacy fallback when prediction is unavailable; leaving them unanswered is
+still a valid predicted outcome.
+
+The rollout uses two-dimensional straight movement plus path-derived detour
+delays, not engine path simulation. Raiders keep their last observed asset
+target and then select nearby surviving assets. Up to four threatened assets
+are considered per raid; overlapping asset values are divided among threats.
+These bounded approximations should be checked against game outcomes.
+
+### Explicit raider engagements
+
+`raidcommit` replaces ordinary ground-raider threat-map convergence with explicit combat
+permission (default **off on both main and wip**; `enable=raidcommit` / `disable=raidcommit`,
+or the operator `feature` tool). It keeps coalesce running even if `coalesce` itself is disabled:
+solo raiders, Kodachis and raider squads travel/scout using continuous threat-aware MOVE queues;
+coalesce alone commits them to local armed fights, including singletons. A rejected encounter
+assembles its participants outside known weapon coverage; missing predictions, unknown contacts
+and exhausted query budgets never authorize an attack. Breaking a gang cancels its old pursuit; a successful fight releases units to press onward.
+Normal fights need a favorable expected trade, not a clean sweep of every supporting enemy;
+three consecutive failed rechecks break an existing commitment.
+QRF retains its roles and assignment planner, but defenders assigned to one raid share the same
+favorable-trade admission policy, evaluated at their actual positions. Repositioning stays MOVE.
+Friendly threat paint still serves other controllers and routing; it grants no engagement
+permission in these paths. Explicit operator/strike orders and specialized cloaked, submerged
+and air controllers retain their existing behavior. The switch is experimental: its shared
+predictor and conservative assembly policy still need game-outcome validation. `raidcommit`
+journal events record assembly and QRF commitments; coalesce retains its outcome windows.
+
 ### Expansion policy switches
 
 `unifiedconquest` shares the conquest objective atlas with economic expansion.
@@ -661,3 +688,115 @@ Unified conquest takes precedence when both switches are enabled.
 Runtime changes release old direction/energy roles on the next five-second
 planning pass. An already accepted ferry retains control until delivery.
 The journal records `expansionpolicy` and `expansionmission` events.
+
+### Persistent economic dispatch (wip first cut)
+
+`economydispatch` is on by default (`disable=economydispatch` restores the
+continuous worker auction). The existing task store is the project ledger:
+unfinished structures, allied assists and prerequisites retain their identity.
+The auction allocates available workers; normal price changes no longer reopen
+an admitted assignment. Operator requests, factory defense, explicit conquest
+and logistics crews can interrupt it, with interrupted tasks considered before
+fresh work when the worker becomes available again. Helpers do not displace
+incumbents. Conquest travel and tactical controllers retain their existing
+execution authority; this first cut does not replace their military policy.
+
+Observed progress or construction spending renews execution evidence. A resource
+pause is distinct from failed execution; twenty seconds without headway when
+resources are available releases that worker and temporarily shuns the site,
+without deleting its project. Missing build commands are repaired, while queued
+travel/build commands persist. Emergency energy recruits available hands using
+remaining-work cost and counts staffed, near-term output before recruiting more.
+Tracked logistics projects retain their shared metal/crew allocator; ordinary
+projects still use the existing spending priorities, not a new global budget
+optimizer. `dispatch` journal events record assignment, suspension, release and
+project closure with reasons. This is the execution foundation, not Gosplan's
+long-horizon search.
+
+Superweapon timing
+-----------------
+
+Superweapon selection normally opens at five reactors. With `frontgate`, full front
+escalation (`front_hi`, default 2000) also opens it once estimated alliance metal income
+reaches 50/s and at least 80% of estimated enemy income. This uses actual metal income,
+without the game-age bonus, so geothermal and shared-energy economies need not build
+extra reactors first. Energy starvation and merged-team strider prerequisites still
+apply. A profitable uncovered nuke target retains its separate early trigger. These gates
+live in `crates/zkgbai/src/economy/planning.rs` and `crates/zkgbai/src/military/nukes.rs`.
+
+Fortified reclaim Caretakers (WIP observation)
+--------------------------------------------
+
+`reclaimpost` is default-on; `disable=reclaimpost` prevents new earthwork and
+cancels its current constructor project. Completed posts stay useful. They
+reclaim visible wrecks first, then repair damaged friendly units or assist
+unfinished construction in reach; new wrecks take priority again. Operator
+reservations take precedence. Caretakers are never automatically self-destructed
+when their assist target is missing, lost or finished, or when they are gifted.
+
+The detector surveys at most 128 grid sites every ten seconds and requires
+seven consecutive qualifying observations at the same site and half-disc
+orientation. Admission needs at least 360 visible remaining metal, 25% under
+known enemy nominal range, two completed direct-damage turrets with 100 nominal
+DPS, terrain-clear range coverage at 22 of 24 approach samples, no enemy reach
+within an 80-elmo margin, and no nearby unidentified contact. These conservative
+thresholds are starting assumptions, not validated optimal cutoffs. Threat
+knowledge is the bot's own; unobserved artillery remains a risk.
+
+A nearby non-commander constructor must have no higher-priority assignment,
+remain outside the earthwork, and reach the eventual building in three
+dimensions. Deep ground gets a flat pit 112 elmos below the lowest footprint
+sample; shallow positive ground gets a surrounding wall 56 elmos above its
+highest footprint sample. These use the Caretaker's 56-elmo collision height.
+Water sites request a Conch from an existing Amphibious factory rather than
+placing a Caretaker. No new Amphibious factory is bought by this policy.
+
+Only one earthwork/construction job runs at a time, with at most two retained
+posts per bot. Earthwork quotes are read from the gadget and capped at the
+lesser of 400 metal or half the wreck stock remaining after buying the
+Caretaker. Actual progress, stock, danger and energy stalls are checked during
+construction. Interrupted, overpriced or unsafe jobs release the constructor
+and wait ten minutes before retrying that site. Partially altered ground is
+not undone. Terraform spending and unit yields are sampled estimates, not
+an exact event-level economic ledger.
+
+`reclaim_post` journal records include bounded survey denominators, rejection
+reasons, candidate coordinates and shelter geometry, half-disc stock, coverage,
+known threat, start/build/abort/ready events, observed terraform spending and
+quote, and surviving-post yield/repair activity. These are observational games;
+they do not estimate a causal advantage over the unplayed alternative.
+`test=reclaimpost` is a mechanics fixture mode that runs this policy without
+ordinary economic/military assignments; it is not used in normal games.
+
+The artificial mechanics fixture is `tools/arena/reclaim-post/run.sh` with
+`pit`, `wall`, or `threat`, followed by a unique output label. It uses the debug
+library in `CARGO_TARGET_DIR`, stores engine output there, and requires the
+installed Agalta/Zero-K/2026.07.04 engine assets. It gates on host-wide available
+memory and engine count. `verify.py RUN_DIRECTORY MODE` checks completion,
+reclaim, repair and construction assistance, or the known-artillery veto. The
+fixture supplies income, holds guns, and flattens terrain: it checks execution,
+not combat survival or economic advantage.
+
+On 2026-11-05 the synthetic pit and wall runs both completed a post, reclaimed
+about 741 and 510 metal respectively before the fixture removed the remaining
+wrecks, repaired a radar from 20/80 to 80/80 HP, and completed a Solar from 10%.
+Observed terraform spending was about 201 metal for the pit and 352 for the
+wall. A known-artillery variant made no post. All three reached five simulated
+minutes with zero AI errors or panics; the integrated library suite passed
+993 tests (four ignored). These supplied-income, held-fire scenes are mechanics
+checks only. Set `RECLAIM_POST_LIB` to test a release library with the fixture.
+
+### QRF screening movement
+
+Marking, screening, holding and withdrawal use direct raw-move control instead
+of attack-move. Each surface unit rechecks its route every half-second against
+nearby enemy weapon reach, with room for movement before the next check. Unsafe
+segments are clipped; exposed units back away. Safe queues continue without
+restarting pathing. Hold-position movement state permits fire without pursuit.
+This continues while the assignment planner is pending. An explicit strike,
+retreat, ownership transfer, release or raidcommit policy change clears the
+screening objective. The legacy `mark_fight` option no longer enables pursuit.
+
+Screening objectives live in an owned `checkpoint::state` component and have
+round-trip/continuation tests. This wip line still lacks full-bot checkpoint
+support; this change does not advertise engine save/load support.

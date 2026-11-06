@@ -24,7 +24,7 @@ def main(refit, crate):
     E.init(refit)
     out = Path(crate)/"src/military/fightsim/testdata/mech_limpet_fates.tsv"
     with out.open("w") as fh:
-        fh.write("# Limpet death customparams in every formulation; Python mechanics fates, no hazard.\n")
+        fh.write("# Limpet death customparams in every formulation; ordered; Python mechanics fates, no hazard.\n")
         fh.write("case\tvariant\tbombs\tunits\thorizon\tfates\n")
         for name, (a, b, distance) in CASES.items():
             fight = E.make_fight(predict.G["ud"], a, b, distance, "crowd")
@@ -32,7 +32,7 @@ def main(refit, crate):
                 for bombs in (0, 1):
                     for horizon in (300, 900):
                         fates = {}
-                        mech.simulate_mech(fight, dict(E.opts_of(variant), bombs=bombs),
+                        mech.simulate_mech(fight, dict(E.opts_of(variant), bombs=bombs, ordered=1),
                                            fates=fates, horizon=horizon)
                         rows = ";".join(f"{int(d)}:{-1 if t is None else t}:{h:.10g}:{p:.10g}"
                                         for d, t, h, p in zip(fates["dead"], fates["death_f"], fates["hp"], fates["pdead"]))

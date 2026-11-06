@@ -766,7 +766,12 @@ impl Ai {
             // a straight-line siege safety test sent the Crab back home.
             // The loner's assault path can route around intervening defenses,
             // and engine fight orders decide where to stop and fire.
-            return (self.war_get_target(leader, false), 0, 0.0, "crab mobile mission");
+            return (
+                self.rush_push_target(leader.id()).unwrap_or_else(|| self.war_get_target(leader, false)),
+                0,
+                0.0,
+                "crab mobile mission",
+            );
         }
         // What climbs a pillar or outranges it refuses the perch (the
         // `refuse_climbers` dial): the enemy's spider or jump factories seen,
@@ -1310,8 +1315,6 @@ impl Ai {
                 } else if self.squads.get(sid).is_some_and(|q| q.shape.doctrine == "crab")
                     && !f.support.paused.is_empty()
                 {
-                    // The Crab's escorts set the raise aside to repair or guard
-                    // and take it up again; none are sent in their stead.
                 } else if working == 0 && since >= 20 && ps.tries < RAISE_TRIES && (since as f32) < perch.borrow_s {
                     // The raisers were called away (threatened, or taken):
                     // others are sent, up to RAISE_TRIES within the borrow.

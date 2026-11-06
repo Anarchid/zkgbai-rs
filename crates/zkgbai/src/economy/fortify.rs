@@ -23,7 +23,7 @@ pub(super) fn travel_discount(travel: f32) -> f32 {
 }
 
 /// Static investment must compete with expansion. Density is standing
-/// metal per usable area relative to the regime's reference; neutral is
+/// metal per usable area relative to the posture's reference; neutral is
 /// the share of map metal still available outside known enemy territory.
 fn tempo_weight(density: f32, neutral: f32) -> f32 {
     (0.35 + 0.65 * density.clamp(0.0, 1.0)) / (1.0 + 2.0 * neutral.clamp(0.0, 1.0))
@@ -116,8 +116,8 @@ fn safe_approach(waypoints: &[Vec3], safe: impl Fn(Vec3) -> bool) -> bool {
 
 impl Ai {
     pub(crate) fn eco_fortify_tempo(&self) -> f32 {
-        let reference = self.regime_density_ref();
-        let density = if reference > 0.0 { self.regime.density / reference } else { 0.0 };
+        let reference = self.posture_levers().density_ref;
+        let density = if reference > 0.0 { self.posture.density / reference } else { 0.0 };
         let total: f32 = self.graph.metal_spots.iter().map(|s| s.value.max(0.0)).sum();
         let free: f32 = self
             .graph
@@ -187,6 +187,7 @@ impl Ai {
             || worker.unit.health() <= 0.0
             || self.eco_in_transit(worker.id)
             || self.crab_escort(worker.id)
+            || self.rush_holds(worker.id)
         {
             return None;
         }
@@ -339,6 +340,7 @@ impl Ai {
                 || !self.eco_build_check(def, site, 0)
                 || (def.name() == "turretlaser" && self.eco_lotus_crowded(site))
                 || !self.eco_fire_coverage(def, site, &guard).iter().all(|&hit| hit)
+                || (self.posture_on() && self.posture_shuns(site))
             {
                 continue;
             }
@@ -400,6 +402,12 @@ impl Ai {
         self.eco.last_fortify_plan = self.frame;
         let eco = &mut self.eco;
         eco.fortify_tasks.retain(|&id| eco.tasks.get(id).is_some());
+        let posture = self.posture_on();
+        if posture
+            && (self.posture_deficit() <= 0.0 || self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize)
+        {
+            return false;
+        }
         let Some(strategy) = &self.strategy else { return false };
         let Some(map) = self.terrain().and_then(|t| t.tier(strategy.tier)) else { return false };
         let gates: Vec<_> = strategy.fortify.iter().take(MAX_GATES).cloned().collect();
@@ -417,7 +425,21 @@ impl Ai {
         }
         // A longer-ranged first turret may cost less than several short
         // ones. Let it compete on value per metal before a gate has porc.
-        for (name, income) in [("turretlaser", 10.0), ("turretheavylaser", 25.0), ("turretgauss", 60.0)] {
+        // With `porcmix` a kind already at a gate may not go beside it again:
+        // the riot and EMP turrets compete too, so another kind can.
+        let mix = !self.dev_off(super::porcmix::FEATURE);
+        let competing: &[(&str, f32)] = if mix {
+            &[
+                ("turretlaser", 10.0),
+                ("turretheavylaser", 25.0),
+                ("turretgauss", 60.0),
+                ("turretriot", 20.0),
+                ("turretemp", 25.0),
+            ]
+        } else {
+            &[("turretlaser", 10.0), ("turretheavylaser", 25.0), ("turretgauss", 60.0)]
+        };
+        for &(name, income) in competing {
             if self.eco.adjusted_income >= income
                 && let Some(d) = self.defs.get(name)
                 && !types.iter().any(|t| t.id() == d.id())
@@ -434,6 +456,9 @@ impl Ai {
         let mut deferred = Vec::new();
         let mut best: Option<(f32, UnitDef, Vec3, Vec<usize>, f32)> = None;
         for def in types {
+            if posture && def.cost(self.metal) > self.posture_deficit() {
+                continue;
+            }
             let mut visited = Vec::new();
             for seed in seeds(&points, def.max_weapon_range()) {
                 let site = self.cb.map().find_closest_build_site(def, Vec3::xz(seed.x, seed.z), 160.0, 3, 0);
@@ -441,7 +466,10 @@ impl Ai {
                     continue;
                 }
                 visited.push(site);
-                if !self.eco_porc_admissible(def, site, false) || !self.eco_build_check(def, site, 0) {
+                if !self.eco_porc_admissible(def, site, false)
+                    || !self.eco_build_check(def, site, 0)
+                    || (posture && self.posture_shuns(site))
+                {
                     continue;
                 }
                 let Some(region) = map.region_at(pos(site)) else { continue };
@@ -492,9 +520,15 @@ impl Ai {
             let mut task = WorkerTask::construction(def, site, 0);
             let c = task.as_construction_mut().unwrap();
             c.fortification = true;
-            c.frame_issued = self.frame;
+            c.frame_issued = if posture { 0 } else { self.frame };
             if let Some(id) = self.eco_add_construction(task, Some(List::Porc), Some(List::Porc)) {
                 self.eco.fortify_tasks.insert(id);
+                if posture {
+                    let cost = def.cost(self.metal);
+                    self.posture.stats.front_orders += 1;
+                    self.posture_ordered(id, site, cost, cost * 2.0, "fortify: shared gate coverage");
+                    self.posture.defense += cost;
+                }
                 let ids: Vec<_> = covered.iter().map(|&i| gates[i].choke).collect();
                 self.log(&format!(
                     "terrain: {} at ({:.0}, {:.0}) covers gates {ids:?}, constructor travel {travel:.0}",

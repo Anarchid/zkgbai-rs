@@ -3,13 +3,16 @@
 
 pub(crate) mod air_demand;
 pub mod air_intel;
+pub mod airstall;
 pub mod airstrikes;
+pub mod ammo;
 pub mod arsenal;
 pub mod blasts;
 pub mod coalesce;
 pub mod cyclops;
 pub mod drops;
 pub mod enemy;
+pub mod facframe;
 pub mod fightsim;
 pub mod fire_squad;
 pub mod firefighters;
@@ -18,9 +21,11 @@ pub mod handlers;
 pub mod impalers;
 pub mod incursions;
 pub mod intel;
+pub mod invade;
 pub mod jaeger;
 pub mod jumps;
 pub mod license;
+pub mod harassment;
 pub mod limpets;
 pub mod missiles;
 pub mod nukes;
@@ -31,8 +36,10 @@ pub mod radar;
 pub mod raid_test;
 pub mod raidcommit;
 pub mod roles;
+pub(crate) mod rush_push;
 pub mod scouts;
 pub mod shadow_probe;
+pub(crate) mod siege_cover;
 pub mod stakeouts;
 pub mod stayveto;
 pub mod stomp_test;
@@ -220,11 +227,14 @@ pub struct MilitaryManager {
 
     /// The fight predictor (see [`fightsim::live`]).
     pub fightsim: fightsim::live::FightSim,
+    pub harassment: harassment::Harassment,
     pub license_enabled: bool,
     pub license_hazards: BTreeMap<i32, license::Hazard>,
     pub limpets: limpets::Limpets,
     /// The density of our fights (see [`front`]).
     pub front: front::Front,
+    /// What our aircraft killed and cost lately (see [`airstall`]).
+    pub air: airstall::AirLedger,
     /// The Jugglenaut's def while they walk past enemy buildings rather
     /// than attack-move (`sumostatic`, see `jumps::SUMO_LOCK`).
     pub sumo_walks: Option<i32>,
@@ -294,10 +304,12 @@ impl MilitaryManager {
             sniper_bullet_id: -1,
             brawler_bullet_id: -1,
             fightsim: fightsim::live::FightSim::default(),
+            harassment: harassment::Harassment::default(),
             license_enabled: false,
             license_hazards: BTreeMap::new(),
             limpets: Default::default(),
             front: front::Front::default(),
+            air: airstall::AirLedger::default(),
             sumo_walks: None,
         }
     }
@@ -597,10 +609,14 @@ impl Ai {
         // Before the squads decide: their fight predictions arrive here.
         self.guard("fightsim.update", |ai| ai.fightsim_update(frame));
         self.guard("limpet.update", |ai| ai.limpet_update(frame));
+        self.guard("harassment.update", |ai| ai.harassment_update(frame));
         self.guard("retreat.update", |ai| ai.retreat_update(frame));
+        self.guard("ammo.update", |ai| ai.ammo_update(frame));
         self.guard("coalesce.update", |ai| ai.coalesce_update(frame));
         self.guard("raider.update", |ai| ai.raider_update(frame));
+        self.guard("invade.update", |ai| ai.invade_update(frame));
         self.guard("squad.update", |ai| ai.squad_update(frame));
+        self.guard("facframe.update", |ai| ai.facframe_update(frame));
         self.guard("misc.update", |ai| ai.misc_update(frame));
         self.guard("cyclops.update", |ai| ai.cyclops_update(frame));
         self.guard("bomber.update", |ai| ai.bomber_update(frame));
@@ -627,6 +643,7 @@ impl Ai {
         self.guard("stomp_test.update", |ai| ai.stomp_test_update(frame));
         self.guard("qrf.update", |ai| ai.qrf_update(frame));
         self.guard("front.update", |ai| ai.front_update(frame));
+        self.guard("airstall.update", |ai| ai.airstall_update(frame));
 
         if frame % 22 == self.offset % 22 && !self.war.aas.is_empty() {
             self.guard("war.updateAAs", |ai| ai.war_update_aas());
@@ -920,6 +937,16 @@ impl Ai {
         if name == "jumpraid" {
             unit.execute_custom_command(cmd::DONT_FIRE_AT_RADAR, &[1.0], 0, NO_TIMEOUT);
         }
+        // A conquest escort short of this kind takes it first, from the
+        // raider handler too, never from the stakeouts (see `qrf::escort`).
+        if self.escort_wants(unit) && self.role_of(unit.id()) != Some(Role::Stakeout) {
+            if self.role_of(unit.id()).is_some() {
+                self.raider_remove_unit(unit);
+            }
+            if self.escort_take(unit) {
+                return;
+            }
+        }
         // Units with a role are their handler's already (see `roles`), but
         // for raiding Venoms: the spider raider phase makes them to be the
         // home defense, so the QRF's floor may post one (see `qrf::floor`).
@@ -1037,6 +1064,7 @@ impl Ai {
         paralyzer: bool,
     ) {
         self.raider_friendly_hit(unit, attacker, paralyzer);
+        self.ammo_hit(unit, attacker, dir, weapon);
         // Turrets for objectives under attack (see `economy::conquest`).
         if unit.team() == self.team_id {
             self.conquest_attacked(unit, attacker);
@@ -1129,6 +1157,7 @@ impl Ai {
         let id = unit.id();
 
         self.war.new_units.remove(&id);
+        self.airstall_unit_destroyed(unit);
         self.raid_test_unit_destroyed(unit);
         self.stomp_test_unit_destroyed(unit);
         self.firefighters_unit_destroyed(unit, attacker);
@@ -1151,6 +1180,7 @@ impl Ai {
         self.puppies_remove_unit(unit);
         self.stakeouts_remove_unit(unit, attacker);
         self.roles_unit_destroyed(id);
+        self.facframe_unit_destroyed(id);
 
         if is_nuke {
             self.war.has_nuke = false;
@@ -1335,9 +1365,11 @@ impl Ai {
             self.missiles_note_death(pos, cost.unwrap_or(0.0));
         }
         self.intel_enemy_destroyed(id, cost);
+        self.airstall_enemy_destroyed(cost, attacker);
         self.jaeger_enemy_destroyed(id);
         self.fightsim_enemy_destroyed(id);
         self.coalesce_enemy_destroyed(id);
+        self.ammo_enemy_destroyed(id);
         self.stayveto_enemy_destroyed(id);
         self.bomber_target_destroyed(enemy.id());
         self.counterbattery_destroyed(enemy.id());

@@ -392,6 +392,9 @@ impl Ai {
             if self.retreat_handler.is_retreating(id) {
                 continue;
             }
+            if self.rush_push_target(id).is_some() && u.rules_param_float("disarmed", 0.0) <= 0.0 {
+                continue;
+            }
             let pos = u.pos();
             let target = if u.rules_param_float("disarmed", 0.0) > 0.0 {
                 self.graph_get_closest_air_haven(pos)
@@ -411,6 +414,9 @@ impl Ai {
             let Some(u) = self.fighters.get(&id).map(|f| f.unit) else { continue };
             // (A Cyclops driving into its cannon's reach: see `cyclops`.)
             if self.retreat_handler.is_retreating(id) || self.cyclopes.holds(id, self.frame) {
+                continue;
+            }
+            if self.rush_push_target(id).is_some() && u.rules_param_float("disarmed", 0.0) <= 0.0 {
                 continue;
             }
             let pos = u.pos();

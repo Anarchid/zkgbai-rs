@@ -617,6 +617,10 @@ impl Ai {
     /// for a role with `produce`: rolled at its `produce` chance, the first
     /// that comes up; with the doctrine and role, for the log.
     pub(crate) fn squad_produce(&self, options: &[UnitDef]) -> Option<(UnitDef, String, String)> {
+        if let Some(def) = self.rush_support_produce(options) {
+            let role = if def.is_builder() { "combat engineer" } else { "riot guard" };
+            return Some((def, "rush".into(), role.into()));
+        }
         if let Some(def) = self.crab_support_produce(options) {
             return Some((def, "crab".into(), "Weaver escort".into()));
         }
@@ -645,7 +649,12 @@ impl Ai {
                                 && (d.cores_per_force == 0 || q.cores(&self.fighters) < d.cores_per_force as usize)
                         })
                 };
-                if room && kgb_rand() < f64::from(d.produce) {
+                let scale = if d.aim == taskforce::Aim::Siege {
+                    crate::military::siege_cover::production_scale(self.front_escalation())
+                } else {
+                    1.0
+                };
+                if room && kgb_rand() < f64::from((d.produce * scale).min(1.0)) {
                     return Some((def, d.name.clone(), "core".to_owned()));
                 }
             }
@@ -1146,6 +1155,13 @@ impl Ai {
         }
         // Sent somewhere by the operator.
         if let Some(target) = self.op_squad_target(sid) {
+            self.squad_strike_cancel(sid);
+            self.fire_release(sid);
+            self.squad_set_target(sid, target);
+            return;
+        }
+        // Sent at an invasion target's defenders (see `invade`).
+        if let Some(target) = self.invade_squad_target(sid) {
             self.squad_strike_cancel(sid);
             self.fire_release(sid);
             self.squad_set_target(sid, target);

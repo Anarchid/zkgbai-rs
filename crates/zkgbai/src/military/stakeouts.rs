@@ -52,23 +52,29 @@
 //! holds like a picket that cannot cloak until it has gone `SPOOK_FOR`
 //! without stepping back or following, and only then stands to cloak
 //! again. It follows only what a picket that cannot cloak may follow.
+//! `disable=spook` keeps the old Flea: it moves only for the decloak
+//! radius, stands as soon as the enemy is out of it plus a margin (so its
+//! step back ends within a tick), and follows under its cloak's rules.
 //! One that cannot cloak (the Dart, the
 //! Dirtbag, the raiders) is seen wherever it stands, so it holds every
 //! armed enemy at the edge of its own sight, or farther where the enemy's
 //! reach leaves no safe band inside it: it steps back as soon as an enemy
 //! comes nearer, picking the way that keeps clear of every enemy about,
 //! not only the one it watches. The retreat handler pulls it home at the
-//! first scratch.
+//! first scratch. With `disable=edgehold` it runs instead, like any coward,
+//! once an enemy comes within its reach: to the nearest haven, looking
+//! again only after a while (a Dart stood still for most of that while:
+//! the run is only two path steps long).
 //!
 //! The factory keeps a scout short of a post or a looker (see
 //! `fac_assign_factory_task`), unless pickets have been dying fast lately: a
 //! lane that eats pickets is not a lane to picket. Spider and vehicle
 //! factories build scouts only for the stakeouts; others build for them
-//! while they are short, the opening scout included,
+//! while they are short (feature `anyscout`), the opening scout included,
 //! which so looks for the enemy rather than waiting at home. An opening
 //! jump, tank or ship factory of a 1v1 builds a wave of them first while
-//! the map is sparse, then a wave more per so many raiders (see
-//! `fac_opening_scout`). Either way the unit comes from
+//! the map is sparse, then a wave more per so many raiders (feature
+//! `openscouts`, see `fac_opening_scout`). Either way the unit comes from
 //! the factory's [`scout_roster`]. A unit built for the stakeouts is theirs alone (see
 //! `roles`). `disable=stakeouts` leaves the scouts to the factory's old
 //! scout budget.
@@ -171,7 +177,7 @@ const KEEP_MIN: f32 = 300.0;
 /// ...one that cloaks when still cannot be seen standing, so it moves only
 /// when an enemy would come this much closer than its decloak radius...
 const DECLOAK_MARGIN: f32 = 100.0;
-/// ...or this much outside a mobile enemy's reach: it is seen as
+/// ...or (`spook`) this much outside a mobile enemy's reach: it is seen as
 /// soon as it moves.
 const CLOAK_RANGE_MARGIN: f32 = 100.0;
 /// A static weapon (a turret) shoots a moving picket within its range plus
@@ -181,7 +187,7 @@ const TURRET_MARGIN: f32 = 100.0;
 /// enemy: one decisive step, then it stands (and cloaks).
 const BACK_TO: f32 = 60.0;
 /// A picket that cannot cloak steps back once an enemy comes this much
-/// nearer than the distance it holds at...
+/// nearer than the distance it holds at (`edgehold`)...
 const HOLD_SLACK: f32 = 100.0;
 /// ...turning off the line straight away from the enemy by one of these
 /// (degrees) where that ground is not ours or another enemy is nearer...
@@ -189,7 +195,7 @@ const STEP_TURNS: [f32; 7] = [0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0];
 /// ...counting the enemies within this of it.
 const STEP_SCAN: f32 = 2000.0;
 /// A picket that cloaks, spooked, holds like one that cannot for this long
-/// (frames) after it last stepped back or followed.
+/// (frames) after it last stepped back or followed (`spook`).
 const SPOOK_FOR: i32 = 30 * 30;
 /// Following, it stops this much inside its own sight.
 const FOLLOW_TO: f32 = 100.0;
@@ -208,7 +214,8 @@ const SORTIE_RECENT: i32 = 90;
 
 /// A stakeout follows an enemy only with this much speed in hand: a chase
 /// at equal speed is a death if the enemy turns (a cloaker that stands
-/// again vanishes).
+/// again vanishes). Without `edgehold` one that cannot cloak does not
+/// shadow at all (it runs, see `stakeouts_flee`).
 const SPEED_PARITY: f32 = 1.05;
 
 /// A looked-at spot counts as fresh this long (frames).
@@ -239,9 +246,36 @@ const DRONE_REACH: f32 = 400.0;
 /// and the lookers' targets from them).
 const SUMMARY_PERIOD: i32 = 30 * 30;
 
-/// A picket's courage outside a squad: with the retreat level of a light
+/// Without `edgehold`, a picket that cannot cloak runs from an enemy for
+/// this long (frames) before it looks again...
+const FLEE_FOR: i32 = 30 * 8;
+/// ...and its courage outside a squad: with the retreat level of a light
 /// unit (0.5), it runs home for repairs below 95% health.
 const PICKET_COURAGE: f32 = 0.5;
+
+/// `picketstrike`: the pickets near a contact fight it together when the
+/// fight predictor (the veto's kiting judge over its horizon) has them
+/// killing this share of the contact party's armed metal ...
+const STRIKE_WIN: f32 = 0.5;
+/// ... while losing at most this share of their own.
+const STRIKE_LOSS: f32 = 0.2;
+/// A strike under way goes on while the forecast stays this good (a
+/// margin below the entry, so it does not flicker)...
+const STRIKE_HOLD_WIN: f32 = 0.3;
+const STRIKE_HOLD_LOSS: f32 = 0.4;
+/// Armed enemies this near the contact fight beside it.
+const STRIKE_GROUP: f32 = 600.0;
+/// Pickets this near the contact join the strike.
+const STRIKE_REACH: f32 = 900.0;
+/// A picket asks the predictor at most this often (frames), striking or
+/// not.
+const STRIKE_REVIEW: i32 = 60;
+/// A strike is given up after this long whatever the forecast.
+const STRIKE_MAX: i32 = 30 * 60;
+/// The attack order is repeated this often (the target moves).
+const STRIKE_REISSUE: i32 = 45;
+/// One refused strike in this many is journaled (to tune the thresholds).
+const STRIKE_NO_SAMPLE: u32 = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Duty {
@@ -276,6 +310,10 @@ struct Stakeout {
     look: Option<usize>,
     /// A soft target under attack.
     sortie: Option<i32>,
+    /// A contact we fight on the predictor's word (`picketstrike`).
+    strike: Option<Strike>,
+    /// Frame of the last predictor query (strike or not).
+    strike_asked: i32,
     last_tick: i32,
     /// Frame of the last move order.
     moved: i32,
@@ -286,6 +324,9 @@ struct Stakeout {
     decloak: f32,
     /// Has a weapon (sorties); the Dirtbag has none.
     armed: bool,
+    /// Running from an enemy until this frame (pickets that cannot cloak,
+    /// without `edgehold`).
+    fleeing_until: i32,
     /// Where a picket that cannot cloak is stepping back to: it is not
     /// stopped short of there while the enemy stays outside its band.
     step_to: Option<Vec3>,
@@ -343,12 +384,34 @@ pub struct Post {
 struct Stats {
     claimed: u32,
     lost: u32,
+    /// Pickets let go once the fights were dense (`frontretire`).
+    retired: u32,
     sightings: u32,
     flights: u32,
     follows: u32,
     sorties: u32,
     kills: u32,
     spooks: u32,
+    /// Strikes called (one per party), targets killed under a strike,
+    /// pickets lost while striking, strikes given up (forecast turned,
+    /// target gone or time).
+    strikes: u32,
+    strike_kills: u32,
+    strike_losses: u32,
+    strike_breaks: u32,
+    /// Predictor queries that could have started a strike, and pickets
+    /// that joined one under way.
+    strike_asks: u32,
+    strike_joins: u32,
+}
+
+/// A strike on a contact (`picketstrike`).
+#[derive(Clone, Copy, Debug)]
+struct Strike {
+    target: i32,
+    since: i32,
+    /// Frame of the last attack order.
+    ordered: i32,
 }
 
 #[derive(Default)]
@@ -370,6 +433,8 @@ pub struct Stakeouts {
     loaned: BTreeSet<i32>,
     /// Metal spots lookers fled from, until a frame.
     shunned: BTreeMap<usize, i32>,
+    /// Strike targets credited as kills (once each).
+    strike_credited: BTreeSet<i32>,
     stats: Stats,
 }
 
@@ -429,23 +494,24 @@ fn soft(e: &Enemy) -> bool {
 
 /// How close a mobile enemy of `reach` may come to a picket that cloaks
 /// standing (decloak radius `decloak`): it cannot see the picket outside
-/// that radius, but it also keeps out of its reach, since stepping back
-/// decloaks it.
-fn cloaked_keep(decloak: f32, reach: f32) -> f32 {
-    (decloak + DECLOAK_MARGIN).max(reach + CLOAK_RANGE_MARGIN)
+/// that radius, but a `wary` picket (`spook`) also keeps out of its reach,
+/// since stepping back decloaks it.
+fn cloaked_keep(decloak: f32, reach: f32, wary: bool) -> f32 {
+    let keep = decloak + DECLOAK_MARGIN;
+    if wary { keep.max(reach + CLOAK_RANGE_MARGIN) } else { keep }
 }
 
 /// How close an enemy may come to a picket: a turret shoots a moving
 /// picket within its range; a mobile enemy cannot see a cloaked one
 /// standing (`cloaks`, see `cloaked_keep`); a picket that cannot cloak
 /// stays out of weapon range.
-fn keep_from(e: &Enemy, cloaks: Option<f32>) -> f32 {
+fn keep_from(e: &Enemy, cloaks: Option<f32>, wary: bool) -> f32 {
     if e.is_static {
         e.threat_radius + TURRET_MARGIN
     } else if e.is_com {
         e.threat_radius + DRONE_REACH
     } else if let Some(decloak) = cloaks {
-        cloaked_keep(decloak, e.threat_radius)
+        cloaked_keep(decloak, e.threat_radius, wary)
     } else {
         (e.threat_radius + RANGE_MARGIN).max(KEEP_MIN)
     }
@@ -466,8 +532,8 @@ fn hold_within(keep: f32, sight: f32) -> f32 {
 
 /// How near an enemy may come before a picket steps back: `keep_from`, or
 /// for one that holds at the edge of its sight (`holds`), `hold_within`.
-fn back_off_within(e: &Enemy, cloaks: Option<f32>, sight: f32, holds: bool) -> f32 {
-    let keep = keep_from(e, cloaks);
+fn back_off_within(e: &Enemy, cloaks: Option<f32>, wary: bool, sight: f32, holds: bool) -> f32 {
+    let keep = keep_from(e, cloaks, wary);
     if holds { hold_within(keep, sight) } else { keep }
 }
 
@@ -548,11 +614,14 @@ impl Ai {
                 standing: false,
                 look: None,
                 sortie: None,
+                strike: None,
+                strike_asked: 0,
                 last_tick: frame - PERIOD,
                 moved: 0,
                 cloaks: def.custom_param("idle_cloak").is_some() || (def.is_able_to_cloak() && def.cloak_cost() <= 0.0),
                 decloak: Some(def.decloak_distance()).filter(|&d| d > 0.0).unwrap_or(130.0),
                 armed: !def.weapon_mounts().is_empty(),
+                fleeing_until: 0,
                 step_to: None,
                 spooked_until: 0,
                 displacement: Displacement::default(),
@@ -588,6 +657,9 @@ impl Ai {
         let frame = self.frame;
         let s = &mut self.stakeouts;
         s.stats.lost += 1;
+        if m.strike.is_some() {
+            s.stats.strike_losses += 1;
+        }
         s.losses.push_back(frame);
         while s.losses.front().is_some_and(|f| frame - f > LOSS_RECALL) {
             s.losses.pop_front();
@@ -601,7 +673,8 @@ impl Ai {
         self.op_emit(
             "stakeout",
             json!({"event": "lost", "t": frame / 30, "unit": id, "def": self.defs.name(m.def), "duty": m.duty.name(),
-                   "post": m.post, "x": pos.x.round(), "z": pos.z.round(), "attacker": attacker, "recent_losses": recent}),
+                   "post": m.post, "x": pos.x.round(), "z": pos.z.round(), "attacker": attacker, "recent_losses": recent,
+                   "striking": m.strike.map(|s| s.target)}),
         );
     }
 
@@ -620,15 +693,24 @@ impl Ai {
         }
     }
 
-    /// Armed pickets a raider gang may borrow (see `coalesce`): not pulled
-    /// home for repairs.
-    pub(crate) fn stakeouts_borrowable(&self) -> Vec<(i32, Unit)> {
+    /// Armed pickets a raider gang may borrow (see `coalesce`): not running
+    /// from an enemy and not pulled home for repairs.
+    pub(crate) fn stakeouts_borrowable(&self, frame: i32) -> Vec<(i32, Unit)> {
         (self.stakeouts.members.iter())
-            .filter(|(_, m)| m.armed && !m.f.is_dead())
+            .filter(|(_, m)| m.armed && frame >= m.fleeing_until && !m.f.is_dead())
+            // A picket striking a contact (`picketstrike`) is busy: since
+            // gangs can order what they borrow (coalown), lending it would end
+            // its strike.
+            .filter(|(_, m)| m.strike.is_none())
             .filter(|(_, m)| !self.retreat_handler.is_retreating(m.f.id))
             .filter(|(id, _)| !self.qrf.members.contains_key(id))
             .map(|(&id, m)| (id, m.f.unit))
             .collect()
+    }
+
+    /// Existing strike commitments finish before emergency borrowing.
+    pub(crate) fn stakeouts_qrf_available(&self, id: i32) -> bool {
+        self.stakeouts.members.get(&id).is_some_and(|m| m.strike.is_none())
     }
 
     /// A picket a gang or the QRF borrowed comes back: it forgets what it was
@@ -638,6 +720,7 @@ impl Ai {
             m.standing = false;
             m.bogey = None;
             m.sortie = None;
+            m.strike = None;
             m.step_to = None;
             m.last_tick = 0;
         }
@@ -651,9 +734,14 @@ impl Ai {
 
     /// How many units a factory of this kind should build for the
     /// stakeouts: what they are short of (less those being built), if its
-    /// scout is one of theirs or it has a unit for them.
+    /// scout is one of theirs or, with `anyscout`, it has a unit for them.
     pub(crate) fn stakeouts_short(&self, kind: FacKind) -> i32 {
-        let builds = self.stakeouts_own(kind) || (!self.dev_off("stakeouts") && !scout_roster(kind).is_empty());
+        // `frontretire`: none once the fights are dense (`military::front`).
+        if self.front_retired() {
+            return 0;
+        }
+        let builds = self.stakeouts_own(kind)
+            || (!self.dev_off("stakeouts") && !self.dev_off("anyscout") && !scout_roster(kind).is_empty());
         if !builds || self.stakeouts_hot() {
             return 0;
         }
@@ -679,7 +767,14 @@ impl Ai {
         }
         // Posts are planned before any scout exists: the factory builds
         // for them.
-        if frame % 30 == (self.offset + 11) % 30 {
+        // `frontretire`: the fights are dense, the pickets stand down. Those
+        // still on loan, striking or running are let go when they are free
+        // (they are ticked meanwhile, so a strike can end).
+        if self.front_retired() {
+            if frame % 30 == (self.offset + 11) % 30 {
+                self.stakeouts_stand_down(frame);
+            }
+        } else if frame % 30 == (self.offset + 11) % 30 {
             self.stakeouts.home_range = self.defs.get("turretlaser").map_or(460.0, |d| d.max_weapon_range());
             self.stakeouts.home = (self.cb.team_units().into_iter())
                 .filter(|u| !u.is_being_built() && u.def().is_some_and(|d| d.speed() <= 0.0))
@@ -704,6 +799,52 @@ impl Ai {
         if frame % SUMMARY_PERIOD == (self.offset + 17) % SUMMARY_PERIOD {
             self.stakeouts_summary(frame);
         }
+    }
+
+    /// `frontretire`: the free pickets and lookers leave, Puppies to their
+    /// herd (see `puppies`), the rest to their solo or squad raider handler
+    /// according to unit type. Neither scout production path refills them.
+    fn stakeouts_stand_down(&mut self, frame: i32) {
+        let free: Vec<Unit> = (self.stakeouts.members.iter())
+            .filter(|&(&id, m)| {
+                m.strike.is_none()
+                    && !self.coalesce_owns(id)
+                    && !self.stayveto_borrowed(id)
+                    && !self.qrf.members.contains_key(&id)
+                    && !self.retreat_handler.is_retreating(id)
+            })
+            .map(|(_, m)| m.f.unit)
+            .collect();
+        if free.is_empty() {
+            return;
+        }
+        let (mut herd, mut squads, mut solo) = (0, 0, 0);
+        for unit in free {
+            if self.defs.name_of(unit) == puppies::PUPPY {
+                self.role_end_stakeout(unit);
+                self.puppies_add(unit);
+                herd += 1;
+            } else {
+                unit.stop(0);
+                self.assign_role(unit, Role::SquadRaider);
+                if self.role_of(unit.id()) == Some(Role::SoloRaider) {
+                    solo += 1;
+                } else {
+                    squads += 1;
+                }
+            }
+        }
+        // Loans need not come back.
+        self.stakeouts.loaned.clear();
+        let left = self.stakeouts.members.len();
+        self.stakeouts.stats.retired += (herd + squads + solo) as u32;
+        self.op_emit(
+            "stakeout",
+            json!({"event": "retire", "t": frame / 30, "herd": herd, "squads": squads, "solo": solo, "left": left}),
+        );
+        self.log(&format!(
+            "stakeouts: dense fights, {herd} pickets to the Puppy herd, {squads} to raider squads, {solo} to solo raiders, {left} busy"
+        ));
     }
 
     /// Plan the posts from the strategic analysis: for each region holding
@@ -829,7 +970,7 @@ impl Ai {
             return;
         }
         // Temporary controllers keep the picket's assignment for its return.
-        if self.coalesce_owns(id) || self.qrf_claims(id) {
+        if self.harassment_owns(id) || self.coalesce_owns(id) || self.qrf_claims(id) {
             return;
         }
         let (unit, p, sight, duty) = (m.f.unit, m.f.get_pos(), m.sight, m.duty);
@@ -838,10 +979,11 @@ impl Ai {
         let displaced = m.displacement.from.is_some_and(|from| distance(from, p) > ARRIVE);
         // Running, or pulled home for repairs (see `retreat`).
         if self.retreat_is_retreating(unit) {
+            self.stakeouts_strike_end(id, "retreat", frame);
             self.stakeouts_displaced(id);
             return;
         }
-        if self.raidcommit_wait(&[unit]) {
+        if frame < m.fleeing_until || self.raidcommit_wait(&[unit]) {
             return;
         }
         if standing && self.stakeouts.near_home(p) {
@@ -871,8 +1013,9 @@ impl Ai {
         }
         // One that cannot cloak holds what it sees at the edge of its sight,
         // and so does a spooked one that can (counting on no cloak).
-        let holds = cloaks.is_none() || spooked;
+        let holds = (cloaks.is_none() && !self.dev_off("edgehold")) || spooked;
         let cloaks = cloaks.filter(|_| !spooked);
+        let wary = !self.dev_off("spook");
 
         // The nearest armed enemy that could shoot us, else the nearest
         // mobile one in or near our sight (the one we shadow a while
@@ -889,7 +1032,7 @@ impl Ai {
                 continue;
             }
             let d = distance(p, e.position);
-            let keep = back_off_within(e, cloaks, sight, holds);
+            let keep = back_off_within(e, cloaks, wary, sight, holds);
             if d < keep && danger.is_none_or(|(_, b)| d - keep < b) {
                 danger = Some((e.unit_id, d - keep));
             }
@@ -934,6 +1077,10 @@ impl Ai {
             m.step_to = None;
             return;
         }
+        // A fight we win: the pickets about take it on together.
+        if self.stakeouts_strike(id, near.map(|(eid, _)| eid), frame) {
+            return;
+        }
         if let Some((eid, _)) = danger.or(near) {
             // A looker that fled leaves that spot alone for a while.
             if danger.is_some()
@@ -947,14 +1094,23 @@ impl Ai {
             }
             // A cloaker that must step back is spooked (and steps back by
             // the rules it now holds by).
-            if danger.is_some() && cloaks.is_some() {
+            if danger.is_some() && cloaks.is_some() && wary {
                 if let Some(m) = self.stakeouts.members.get_mut(&id) {
                     m.spooked_until = frame + SPOOK_FOR;
                 }
                 self.stakeouts.stats.spooks += 1;
             }
-            self.stakeouts_shadow(id, eid, frame);
-            return;
+            if cloaks.is_some() || holds {
+                self.stakeouts_shadow(id, eid, frame);
+                return;
+            }
+            // One that cannot cloak runs from what could shoot it, and
+            // otherwise only notes what it sees and keeps to its duty.
+            if danger.is_some() {
+                self.stakeouts_flee(id, eid, frame);
+                return;
+            }
+            self.stakeouts_sighted(id, eid, frame, false);
         }
 
         // Nothing about: back from shadowing to the duty we had.
@@ -1133,6 +1289,173 @@ impl Ai {
     }
 
     /// Note an enemy a stakeout sees (once per enemy in a row).
+    /// `picketstrike`: fight the contact `anchor` when the predictor has
+    /// the pickets about winning, and keep a strike under way going while
+    /// its target lives and the forecast holds. True while this picket
+    /// strikes (it is then neither shadowing nor fleeing).
+    fn stakeouts_strike(&mut self, id: i32, anchor: Option<i32>, frame: i32) -> bool {
+        if self.dev_off("picketstrike") || !self.fightsim_runs() {
+            return false;
+        }
+        let Some(m) = self.stakeouts.members.get(&id) else { return false };
+        if !m.armed {
+            return false;
+        }
+        let (unit, asked) = (m.f.unit, m.strike_asked);
+        if let Some(s) = m.strike {
+            let target = self.war.targets.get(&s.target);
+            let dead = target.is_none_or(|e| e.is_dead);
+            if dead {
+                if self.stakeouts.strike_credited.insert(s.target) {
+                    self.stakeouts.stats.strike_kills += 1;
+                }
+                self.stakeouts_strike_end(id, "kill", frame);
+                return false;
+            }
+            let (eunit, seen) = target.map(|e| (e.unit, frame - e.last_seen <= BOGEY_RECENT)).unwrap_or((unit, false));
+            if !seen {
+                self.stakeouts_strike_end(id, "gone", frame);
+                return false;
+            }
+            if frame - s.since > STRIKE_MAX {
+                self.stakeouts_strike_end(id, "time", frame);
+                return false;
+            }
+            if frame - asked >= STRIKE_REVIEW {
+                if let Some(m) = self.stakeouts.members.get_mut(&id) {
+                    m.strike_asked = frame;
+                }
+                let holds = self
+                    .stakeouts_strike_judge(s.target, frame)
+                    .is_some_and(|(loss, _)| loss[1] >= STRIKE_HOLD_WIN && loss[0] <= STRIKE_HOLD_LOSS);
+                if !holds {
+                    self.stakeouts_strike_end(id, "forecast", frame);
+                    return false;
+                }
+            }
+            if frame - s.ordered >= STRIKE_REISSUE
+                && let Some(m) = self.stakeouts.members.get_mut(&id)
+                && let Some(s) = m.strike.as_mut()
+            {
+                s.ordered = frame;
+                m.standing = false;
+                m.moved = frame;
+                unit.attack(eunit, 0);
+            }
+            return true;
+        }
+        let Some(eid) = anchor else { return false };
+        if frame - asked < STRIKE_REVIEW {
+            return false;
+        }
+        if let Some(m) = self.stakeouts.members.get_mut(&id) {
+            m.strike_asked = frame;
+        }
+        let Some((loss, party)) = self.stakeouts_strike_judge(eid, frame) else { return false };
+        let Some(e) = self.war.targets.get(&eid) else { return false };
+        let (eunit, ename, epos, ehp) = (e.unit, e.def_name.clone(), e.position, e.get_health());
+        let loss2 = [(loss[0] * 100.0).round() / 100.0, (loss[1] * 100.0).round() / 100.0];
+        self.stakeouts.stats.strike_asks += 1;
+        if loss[1] < STRIKE_WIN || loss[0] > STRIKE_LOSS {
+            if self.stakeouts.stats.strike_asks.is_multiple_of(STRIKE_NO_SAMPLE) {
+                self.op_emit(
+                    "stakeout",
+                    json!({"event": "strike_no", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
+                           "party": party.len(), "loss": loss2, "hp": (ehp * 100.0).round() / 100.0}),
+                );
+            }
+            return false;
+        }
+        // Joining a strike under way on this contact is not a new one.
+        let joins = party
+            .iter()
+            .any(|pid| self.stakeouts.members.get(pid).is_some_and(|m| m.strike.is_some_and(|s| s.target == eid)));
+        let units: Vec<Unit> =
+            party.iter().filter_map(|pid| self.stakeouts.members.get(pid)).map(|m| m.f.unit).collect();
+        let theirs: Vec<i32> = (self.war.targets.values())
+            .filter(|f| f.identified && armed(f) && frame - f.last_seen <= BOGEY_RECENT)
+            .filter(|f| distance(f.position, epos) <= STRIKE_GROUP)
+            .map(|f| f.unit_id)
+            .collect();
+        let amove = self.fight_predict_units(&units, &theirs);
+        if joins {
+            self.stakeouts.stats.strike_joins += 1;
+        } else {
+            self.stakeouts.stats.strikes += 1;
+        }
+        self.op_emit(
+            "stakeout",
+            json!({"event": "strike", "t": frame / 30, "unit": id, "enemy": eid, "def": ename,
+                   "x": epos.x.round(), "z": epos.z.round(), "party": party.len(), "foes": theirs.len(),
+                   "join": joins, "loss": loss2, "hp": (ehp * 100.0).round() / 100.0,
+                   "p_win": amove.map(|o| (o.p_a_wins * 100.0).round() / 100.0),
+                   "amove": amove.map(|o| [(o.mean_a * 100.0).round() / 100.0, (o.mean_b * 100.0).round() / 100.0])}),
+        );
+        for pid in party {
+            let Some(m) = self.stakeouts.members.get_mut(&pid) else { continue };
+            if m.strike.is_some_and(|s| s.target == eid) {
+                continue;
+            }
+            m.strike = Some(Strike { target: eid, since: frame, ordered: frame });
+            m.strike_asked = frame;
+            m.standing = false;
+            m.moved = frame;
+            m.sortie = None;
+            m.step_to = None;
+            m.f.unit.attack(eunit, 0);
+        }
+        true
+    }
+
+    /// The fight the pickets about contact `eid` would have against it and
+    /// the armed enemies beside it, as the veto judges fights: each side's
+    /// killed share of its armed metal by the horizon, and the pickets'
+    /// ids. None for a contact not worth asking about (unidentified,
+    /// static, flying, long unseen, or under a turret's guns).
+    fn stakeouts_strike_judge(&mut self, eid: i32, frame: i32) -> Option<([f32; 2], Vec<i32>)> {
+        let e = self.war.targets.get(&eid)?;
+        if !e.identified || !mobile_armed(e) || frame - e.last_seen > BOGEY_RECENT {
+            return None;
+        }
+        let epos = e.position;
+        if self.war.get_porc_threat(epos) > 0.0 {
+            return None;
+        }
+        let theirs: Vec<i32> = (self.war.targets.values())
+            .filter(|f| f.identified && armed(f) && frame - f.last_seen <= BOGEY_RECENT)
+            .filter(|f| distance(f.position, epos) <= STRIKE_GROUP)
+            .map(|f| f.unit_id)
+            .collect();
+        let party: Vec<(i32, Unit)> = (self.stakeouts.members.iter())
+            .filter(|(_, m)| m.armed && !m.f.is_dead())
+            .filter(|(_, m)| m.strike.is_none_or(|s| s.target == eid))
+            .filter(|(_, m)| distance(m.f.get_pos(), epos) <= STRIKE_REACH)
+            .filter(|(id, m)| {
+                !self.harassment_owns(**id) && !self.coalesce_owns(**id) && !self.qrf_claims(**id) && !self.retreat_is_retreating(m.f.unit)
+            })
+            .map(|(&id, m)| (id, m.f.unit))
+            .collect();
+        let units: Vec<Unit> = party.iter().map(|&(_, u)| u).collect();
+        let loss = self.fight_judge_units(&units, &theirs)?;
+        Some((loss, party.into_iter().map(|(id, _)| id).collect()))
+    }
+
+    /// A strike is over for this picket.
+    fn stakeouts_strike_end(&mut self, id: i32, why: &str, frame: i32) {
+        let Some(m) = self.stakeouts.members.get_mut(&id) else { return };
+        let Some(s) = m.strike.take() else { return };
+        m.standing = false;
+        m.step_to = None;
+        if why != "kill" {
+            self.stakeouts.stats.strike_breaks += 1;
+        }
+        self.op_emit(
+            "stakeout",
+            json!({"event": "strike_end", "t": frame / 30, "unit": id, "enemy": s.target, "why": why,
+                   "held_s": (frame - s.since) / 30}),
+        );
+    }
+
     fn stakeouts_sighted(&mut self, id: i32, eid: i32, frame: i32, follows: bool) {
         let Some(e) = self.war.targets.get(&eid) else { return };
         let (epos, ename) = (e.position, e.def_name.clone());
@@ -1150,12 +1473,31 @@ impl Ai {
         );
     }
 
+    /// A picket that cannot cloak runs from an enemy like any coward: to
+    /// the nearest haven, and on for a while (no turning back at the rim of
+    /// the enemy's reach).
+    fn stakeouts_flee(&mut self, id: i32, eid: i32, frame: i32) {
+        self.stakeouts_displaced(id);
+        self.stakeouts_sighted(id, eid, frame, false);
+        let Some(m) = self.stakeouts.members.get(&id) else { return };
+        let haven = self.graph_get_closest_haven(m.f.get_pos());
+        self.stakeouts.stats.flights += 1;
+        let mut nav = nav!(self);
+        if let Some(m) = self.stakeouts.members.get_mut(&id) {
+            m.fleeing_until = frame + FLEE_FOR;
+            m.standing = false;
+            m.moved = frame;
+            m.sortie = None;
+            m.f.sneak(haven, &mut nav);
+        }
+    }
+
     /// Keep an enemy at a distance: outside its reach, inside our sight;
     /// follow it if we are faster, else let it go. A picket that cannot
     /// cloak, or is spooked, steps back whenever the enemy comes nearer
     /// than the edge of its sight, the way that keeps clear of every enemy
     /// about; none follows into another's reach. A cloaker that moves for
-    /// an enemy is spooked.
+    /// an enemy is spooked (`spook`).
     fn stakeouts_shadow(&mut self, id: i32, eid: i32, frame: i32) {
         let Some(e) = self.war.targets.get(&eid) else { return };
         // (`Enemy::speed` is elmos per frame; ours per second.)
@@ -1165,17 +1507,18 @@ impl Ai {
         let (cloaker, spooked) = (m.cloaks, frame < m.spooked_until);
         let cloaks = m.cloaks.then_some(m.decloak).filter(|_| !spooked);
         let holds = cloaks.is_none();
+        let wary = !self.dev_off("spook");
         let d = distance(p, epos);
-        let keep = keep_from(e, cloaks);
+        let keep = keep_from(e, cloaks, wary);
         let back_to = hold_at(keep, sight);
-        let within = back_off_within(e, cloaks, sight, holds);
+        let within = back_off_within(e, cloaks, wary, sight, holds);
         let follow_to = sight - FOLLOW_TO;
-        // A follower moves, and is seen: a cloaker follows only what one
+        // A follower moves, and is seen: a wary cloaker follows only what one
         // that cannot cloak may.
-        let follow_keep = keep_from(e, None);
+        let follow_keep = if wary { keep_from(e, None, false) } else { keep };
         let follows = speed >= SPEED_PARITY * espeed && !e.is_static && follow_keep + 150.0 <= follow_to;
         self.stakeouts_sighted(id, eid, frame, follows);
-        let threats = self.stakeouts_threats(p, sight, eid, frame);
+        let threats = if holds || wary { self.stakeouts_threats(p, sight, eid, frame) } else { Vec::new() };
         let start = self.graph.get_start_pos();
         let target = if d < within {
             let away = if holds {
@@ -1216,7 +1559,7 @@ impl Ai {
                     s.follows += 1;
                 }
                 // On the move it is seen: spooked from its last move.
-                let spooks = cloaker;
+                let spooks = cloaker && wary;
                 if spooks && !spooked {
                     s.spooks += 1;
                 }
@@ -1261,8 +1604,8 @@ impl Ai {
             .filter(|e| distance(p, e.position) < STEP_SCAN)
             .map(|e| Threat {
                 pos: e.position,
-                within: back_off_within(e, None, sight, true),
-                keep: keep_from(e, None),
+                within: back_off_within(e, None, false, sight, true),
+                keep: keep_from(e, None, false),
             })
             .collect()
     }
@@ -1384,7 +1727,8 @@ impl Ai {
         let st = &s.stats;
         self.log(&format!(
             "stakeouts: t={} members={} (look {look}, post {post}, shadow {shadow}) posts={} manned={manned} wanted={} \
-             claimed={} lost={} sightings={} flights={} follows={} sorties={} kills={} spooks={}",
+             claimed={} lost={} sightings={} flights={} follows={} sorties={} kills={} spooks={} \
+             strikes={} strike_kills={} strike_losses={} strike_breaks={} strike_asks={} strike_joins={}",
             frame / 30,
             s.count(),
             s.posts.len(),
@@ -1396,7 +1740,13 @@ impl Ai {
             st.follows,
             st.sorties,
             st.kills,
-            st.spooks
+            st.spooks,
+            st.strikes,
+            st.strike_kills,
+            st.strike_losses,
+            st.strike_breaks,
+            st.strike_asks,
+            st.strike_joins
         ));
         let posts: Vec<_> = (s.posts.iter())
             .map(|p| {
@@ -1412,7 +1762,7 @@ impl Ai {
                     .and_then(|i| self.graph.metal_spots.get(i))
                     .map(|sp| json!({"spot": m.look, "x": sp.position.x.round(), "z": sp.position.z.round()}));
                 json!({"unit": id, "def": self.defs.name(m.def), "duty": m.duty.name(), "post": m.post, "look": look,
-                       "bogey": m.bogey, "sortie": m.sortie, "standing": m.standing, "cloaked": m.f.unit.is_cloaked(), "spooked": frame < m.spooked_until,
+                       "bogey": m.bogey, "sortie": m.sortie, "strike": m.strike.map(|s| s.target), "standing": m.standing, "cloaked": m.f.unit.is_cloaked(), "spooked": frame < m.spooked_until,
                        "x": p.x.round(), "z": p.z.round()})
             })
             .collect();
@@ -1420,8 +1770,10 @@ impl Ai {
             "stakeout",
             json!({"event": "summary", "t": frame / 30, "members": s.count(), "look": look, "post": post, "shadow": shadow,
                    "posts": posts, "manned": manned, "wanted": s.wanted(self.phase_frame()), "pickets": members,
-                   "claimed": st.claimed, "lost": st.lost, "sightings": st.sightings, "flights": st.flights,
-                   "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks}),
+                   "claimed": st.claimed, "lost": st.lost, "retired": st.retired, "sightings": st.sightings, "flights": st.flights,
+                   "follows": st.follows, "sorties": st.sorties, "kills": st.kills, "spooks": st.spooks,
+                   "strikes": st.strikes, "strike_kills": st.strike_kills, "strike_losses": st.strike_losses,
+                   "strike_breaks": st.strike_breaks, "strike_asks": st.strike_asks, "strike_joins": st.strike_joins}),
         );
     }
 }
@@ -1447,14 +1799,14 @@ mod tests {
         m.standing = true;
         m.armed = true;
         m.last_tick = 4500;
-        assert!(ai.stakeouts_borrowable().iter().any(|(id, _)| *id == 1));
+        assert!(ai.stakeouts_borrowable(ai.frame).iter().any(|(id, _)| *id == 1));
         let team = ai.qrf_borrow_stakeouts(&[unit]).unwrap();
         ai.stakeouts_tick(1, 4590);
         let m = &ai.stakeouts.members[&1];
         assert_eq!(m.last_tick, 4500, "borrowed pickets must not tick");
         assert!(m.standing);
         assert_eq!(m.post, Some(0));
-        assert!(!ai.stakeouts_borrowable().iter().any(|(id, _)| *id == 1));
+        assert!(!ai.stakeouts_borrowable(ai.frame).iter().any(|(id, _)| *id == 1));
         ai.qrf_release_team(team, "over budget");
         let m = &ai.stakeouts.members[&1];
         assert_eq!(m.post, Some(0));
@@ -1464,6 +1816,24 @@ mod tests {
         assert_eq!(ai.stakeouts.posts[0].manned, Some(1));
         assert!(ai.stakeouts.loaned.is_empty(), "retained membership must not be counted twice");
         springai::reserved::clear(ai.cb);
+    }
+
+    #[test]
+    fn retired_scouts_release_all_kodachis_to_their_controller() {
+        let mut ai = crate::military::roles::retirement_tests::raider_test_ai(c"tankraid");
+        for id in 1..=49 {
+            ai.assign_role(Unit::from_id(ai.cb, id).unwrap(), Role::Stakeout);
+        }
+        ai.stakeouts_stand_down(30 * 963);
+        assert_eq!(ai.stakeouts.count(), 0);
+        assert_eq!(ai.stakeouts.stats.retired, 49);
+        assert_eq!(ai.raider_handler.kodachis.len(), 49);
+        assert!(ai.raider_handler.medium_raiders.is_empty());
+        for id in 1..=49 {
+            assert_eq!(ai.role_of(id), Some(Role::SoloRaider));
+        }
+        ai.stakeouts_stand_down(30 * 964);
+        assert_eq!(ai.raider_handler.kodachis.len(), 49);
     }
 
     #[test]
@@ -1590,12 +1960,14 @@ mod tests {
     }
 
     #[test]
-    fn cloaker_keeps_out_of_reach() {
+    fn wary_cloaker_keeps_out_of_reach() {
         // A Flea (decloak 130) on a Glaive (range 185) and a Bandit (232).
-        assert_eq!(cloaked_keep(130.0, 185.0), 285.0);
-        assert_eq!(cloaked_keep(130.0, 232.0), 332.0);
+        assert_eq!(cloaked_keep(130.0, 185.0, false), 230.0);
+        assert_eq!(cloaked_keep(130.0, 232.0, false), 230.0);
+        assert_eq!(cloaked_keep(130.0, 185.0, true), 285.0);
+        assert_eq!(cloaked_keep(130.0, 232.0, true), 332.0);
         // Unidentified: no known reach.
-        assert_eq!(cloaked_keep(130.0, 0.0), 230.0);
+        assert_eq!(cloaked_keep(130.0, 0.0, true), 230.0);
     }
 
     #[test]

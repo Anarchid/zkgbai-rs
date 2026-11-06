@@ -5,7 +5,7 @@
 //! armed enemy aircraft we know of are worth over [`AIR_TRIGGER`] metal, we
 //! build one at the centroid of our front. Income must allow it:
 //! [`MIN_INCOME`], or [`MIN_INCOME_DENSE`] once the map is full (density at
-//! the reference, see `regime`: the front holds still and statics pay).
+//! the reference, see `posture`: the front holds still and statics pay).
 //! It steps back toward our center, [`STEP`] at a time up to [`MAX_BACK`],
 //! only while the site is unsafe, and only as long as it still reaches
 //! [`KEEP`] of what one at the centroid would. Front spots count as reached
@@ -109,7 +109,7 @@ impl Ai {
             );
         }
         let income = self.eco.effective_income;
-        let (density, dense_at) = (self.regime.density, self.regime_density_ref());
+        let (density, dense_at) = (self.posture.density, self.posture_levers().density_ref);
         let dense = density >= dense_at;
         if income < MIN_INCOME && !(dense && income >= MIN_INCOME_DENSE) {
             let need = if dense { MIN_INCOME_DENSE } else { MIN_INCOME };

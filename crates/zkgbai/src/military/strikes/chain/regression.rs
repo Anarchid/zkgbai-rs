@@ -172,6 +172,7 @@ fn fixture() -> Ai {
         job: ai.strike_jobs(SNIPER_MEMORY).remove(0),
         needed: 20,
         members: vec![1, 2, 3],
+        chain: Chain::default(),
         phase: Phase::Diving,
         since: 0,
         home: Vec3::xz(100.0, 1000.0),

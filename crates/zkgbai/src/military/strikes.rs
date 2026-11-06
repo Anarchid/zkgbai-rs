@@ -31,6 +31,25 @@ const HALBERD_REQUISITION_PERIOD: i32 = 30 * 30;
 const DIVE_TIMEOUT: i32 = 30 * 45;
 const MAX_WAVE: usize = 128;
 const SPREAD: f32 = 105.0;
+/// `strikechain`: a dive that ends, for whatever reason, first looks this
+/// far round the wave for another target it can take on as it stands...
+const CHAIN_REACH: f32 = 1000.0;
+/// Candidates put to the predictor before the wave goes home, and how long
+/// (frames) each may wait for its answer.
+const CHAIN_ASKS: usize = 3;
+const CHAIN_WAIT: i32 = 30 * 4;
+/// Dives one wave may chain.
+const MAX_LINKS: u32 = 6;
+/// A waiting wave given up for any reason but a kill keeps its job off the
+/// list this long (frames), so it is not formed and released every pass.
+const REFORM_COOLDOWN: i32 = 30 * 20;
+/// `dirtpack`: a Dirtbag pack takes on a lone light turret. Light: armed
+/// against Dirtbags and worth at most this much metal (Lotus 90, Picket 95,
+/// Urchin 120; Faraday, Stardust and Newton are dearer)...
+const LIGHT_TURRET_COST: f32 = 150.0;
+/// ... and at least this many go (staged 2026-11-04: four kill a full Lotus in
+/// 15-17 s and lose one, 3 of 3 on three maps, as the predictor says).
+const DIRT_PACK: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tactic {
@@ -84,13 +103,17 @@ enum Prey {
     Defenseless,
     Commander,
     Heavy,
+    /// A light turret nothing else armed covers (see `LIGHT_TURRET_COST`):
+    /// Dirtbags only, from those on hand (no production for it: one wave at a
+    /// time, and a Phantom must not wait on a Dirtbag order).
+    LoneTurret,
 }
 impl Prey {
     fn needs_stun(self, tactic: Tactic) -> bool {
         tactic.light_swarm() && matches!(self, Self::Commander | Self::Heavy)
     }
     fn can_requisition(self, tactic: Tactic) -> bool {
-        self != Self::Commander && self.allows(tactic, true) && !self.needs_stun(tactic)
+        self != Self::Commander && self != Self::LoneTurret && self.allows(tactic, true) && !self.needs_stun(tactic)
     }
     fn allows(self, tactic: Tactic, stunned: bool) -> bool {
         match self {
@@ -99,6 +122,7 @@ impl Prey {
             Self::Defenseless => tactic.light_swarm(),
             Self::Commander => matches!(tactic, Tactic::Halberd | Tactic::Dirtbag) || (tactic.light_swarm() && stunned),
             Self::Heavy => tactic.light_swarm() && stunned,
+            Self::LoneTurret => tactic == Tactic::Dirtbag,
         }
     }
 }
@@ -115,6 +139,9 @@ struct Job {
 }
 impl Job {
     fn size(&self, tactic: Tactic, cost: f32) -> usize {
+        if self.prey == Prey::LoneTurret {
+            return ((self.value / 25.0).ceil() as usize).max(DIRT_PACK);
+        }
         tactic.size(if self.phantom() { self.count } else { 1 }, self.value, cost)
     }
     fn production_pays(&self, tactic: Tactic, cost: f32) -> bool {
@@ -138,9 +165,25 @@ enum Phase {
     Screening,
     Forming,
     Diving,
+    /// A dive ended; the predictor is asked about a chain target.
     Chaining,
     Returning,
 }
+
+/// `strikechain` state of a wave.
+#[derive(Clone, Debug, Default)]
+struct Chain {
+    /// Chained dives so far.
+    links: u32,
+    /// Candidates not yet asked about.
+    asks: Vec<Job>,
+    /// The job whose dive just ended: its cooldown waits on the chain.
+    ended: Option<Job>,
+    /// Places this wave struck along its chain: they cool down when it goes
+    /// home, not before (clustered Lances sit inside one another's 500).
+    struck: Vec<Vec3>,
+}
+
 struct Wave {
     tactic: Tactic,
     job: Job,
@@ -150,6 +193,7 @@ struct Wave {
     since: i32,
     home: Vec3,
     query: Option<(u64, i32)>,
+    chain: Chain,
 }
 
 #[derive(Default)]
@@ -209,6 +253,7 @@ impl Ai {
                     "fresh": self.frame - j.last < SNIPER_MEMORY,
                     "flea_requires_stun": j.prey.needs_stun(Tactic::Flea),
                     "fragile": j.prey == Prey::Fragile,
+                    "lone_turret": j.prey == Prey::LoneTurret,
                     "stun_frames": self.strike_stun(j).map(|(_, frames)| frames),
                 })
             })
@@ -223,6 +268,7 @@ impl Ai {
                     distance(f.get_pos(), w.home) < staging::muster_radius(w.tactic, w.members.len()))).count(),
                 "prediction_pending": w.query.is_some(),
                 "evading": w.members.iter().filter(|id| self.strike_evasion_goal(**id).is_some()).count(),
+                "chain_links": w.chain.links, "chain_asks": w.chain.asks.len(),
             })
         });
         serde_json::json!({ "enabled": !self.dev_off("strikes"), "fragile_enabled": !self.dev_off("strikefragile"), "jobs": jobs, "wave": wave, "squad_missions": self.squad_strikes_status(), "raider_missions": self.squad_strikes_status(), "lobster_missions": self.lobster_strikes_status(), "counterbattery": self.counterbattery_status() })
@@ -231,6 +277,7 @@ impl Ai {
     /// Merge seen Phantoms with impact estimates by max, not addition: a
     /// firing Phantom may be observed and inferred at the same time.
     fn strike_jobs(&self, age: i32) -> Vec<Job> {
+        let lone_threats = if self.dev_off("dirtpack") { Vec::new() } else { self.strike_static_threats() };
         let phantom_cost = self.defs.get("cloaksnipe").map_or(750.0, |d| d.cost(self.metal));
         let mut jobs: Vec<Job> = self
             .phantom_fixes(age)
@@ -263,6 +310,8 @@ impl Ai {
                 && ((e.visible && e.unit.is_paralyzed()) || self.jaeger_stun_expected(e.unit_id))
             {
                 Prey::Heavy
+            } else if self.strike_lone_turret(e, &lone_threats) {
+                Prey::LoneTurret
             } else {
                 continue;
             };
@@ -507,10 +556,23 @@ impl Ai {
         self.strikes.evasion.remove(&unit.id());
     }
 
-    fn strikes_release(&mut self, w: Wave) {
+    fn strikes_release(&mut self, w: Wave, why: &str) {
         self.strikes.killed.clear();
-        self.log(&format!("strikes: {} survivors of {} return to normal handlers", w.members.len(), w.tactic.name()));
+        self.log(&format!(
+            "strikes: {} survivors of {} return to normal handlers ({why})",
+            w.members.len(),
+            w.tactic.name()
+        ));
         self.strikes_release_members(w.members);
+    }
+
+    /// Give up a waiting wave and keep its job off the list a while: the
+    /// reasons behind this flicker (a wounded target blinking out of sight,
+    /// a member stuck off the target's ground), and every pass that formed
+    /// and released the wave again stopped its members in their tracks.
+    fn strikes_drop(&mut self, w: Wave, why: &str) {
+        self.strikes.cooldowns.push((w.job.pos, self.frame - COOLDOWN + REFORM_COOLDOWN));
+        self.strikes_release(w, why);
     }
 
     fn strikes_release_members(&mut self, members: Vec<i32>) {
@@ -603,6 +665,12 @@ impl Ai {
         if j.prey == Prey::Defenseless {
             return self.strike_opportunity_clear(from, j.pos);
         }
+        if j.prey == Prey::LoneTurret {
+            // No other armed building over the way in or the turret (units
+            // about it are the predictor's to weigh).
+            let others = opportunities::others(self.strike_static_threats(), j.pos);
+            return opportunities::clear(from, j.pos, &others) && opportunities::clear(j.pos, j.pos, &others);
+        }
         if !tactic.light_swarm() {
             return true;
         }
@@ -638,6 +706,42 @@ impl Ai {
                 || (name == Tactic::Scythe.name() && self.raider_handler.medium_raiders.contains(&f.id)))
     }
 
+    /// The reach (plus `RANGE_MARGIN`) of every armed enemy building
+    /// identified, AA-only ones aside (radar blips are mostly mexes).
+    fn strike_static_threats(&self) -> Vec<opportunities::Threat> {
+        self.war
+            .targets
+            .values()
+            .filter(|e| e.is_static && e.identified && !e.is_dead && e.position != NULLPOS)
+            .filter(|e| e.ud.is_none_or(|d| !self.strike_defenseless(d)))
+            .map(|e| opportunities::Threat::at(e.position, e.def_max_weapon_range() + opportunities::RANGE_MARGIN))
+            .filter(|t| t.radius() > opportunities::RANGE_MARGIN)
+            .collect()
+    }
+
+    /// `dirtpack`: a light turret (see `LIGHT_TURRET_COST`) that can hit a
+    /// Dirtbag, with no other armed building's reach (`threats`, from
+    /// `strike_static_threats`) over it.
+    fn strike_lone_turret(&self, e: &crate::military::Enemy, threats: &[opportunities::Threat]) -> bool {
+        if threats.is_empty() || !e.is_static || e.is_com || e.is_dead {
+            return false;
+        }
+        let (Some(def), Some(dirt)) = (e.ud, self.defs.get(Tactic::Dirtbag.name())) else { return false };
+        if def.cost(self.metal) > LIGHT_TURRET_COST {
+            return false;
+        }
+        let mask = dirt.category();
+        let armed = def.weapon_mounts().iter().any(|m| {
+            m.weapon_def().is_some_and(|w| {
+                !w.is_shield()
+                    && !super::water::is_fake(&w.name())
+                    && m.only_target_category() & mask != 0
+                    && w.damage_types().iter().any(|d| *d > 0.0)
+            })
+        });
+        armed && opportunities::clear(e.position, e.position, &opportunities::others(threats.to_vec(), e.position))
+    }
+
     fn strike_cooling(&self, pos: Vec3) -> bool {
         self.strikes.cooldowns.iter().any(|(p, f)| self.frame - *f < COOLDOWN && distance(*p, pos) < 500.0)
     }
@@ -662,7 +766,7 @@ impl Ai {
         self.strikes.cooldowns.retain(|(_, f)| frame - *f < COOLDOWN);
         if self.dev_off("strikes") {
             if let Some(w) = self.strikes.wave.take() {
-                self.strikes_release(w);
+                self.strikes_release(w, "strikes switched off");
             }
             return;
         }
@@ -740,6 +844,7 @@ impl Ai {
                         since: frame,
                         home,
                         query: None,
+                        chain: Chain::default(),
                     });
                     break 'jobs;
                 }
@@ -750,7 +855,7 @@ impl Ai {
         if let Some(mut w) = self.strikes.wave.take() {
             if matches!(w.phase, Phase::Forming | Phase::Screening) {
                 if w.job.id.is_some_and(|id| self.strikes.killed.contains(&id)) {
-                    self.strikes_release(w);
+                    self.strikes_release(w, "target killed meanwhile");
                     return;
                 }
                 // Surviving estimates are refreshed below from the kill-adjusted
@@ -773,7 +878,7 @@ impl Ai {
                     w.query = None;
                 }
             }
-            if w.tactic.light_swarm() && matches!(w.phase, Phase::Forming | Phase::Screening | Phase::Returning) {
+            if w.tactic.light_swarm() && !matches!(w.phase, Phase::Diving | Phase::Chaining) {
                 let positions: Vec<_> = w
                     .members
                     .iter()
@@ -800,10 +905,11 @@ impl Ai {
                     w.phase = Phase::Forming;
                     w.since = frame;
                     w.query = None;
+                    w.chain = Chain::default();
                 }
             }
             if matches!(w.phase, Phase::Forming | Phase::Screening) && !self.strike_preparable(w.tactic, &w.job) {
-                self.strikes_release(w);
+                self.strikes_drop(w, "target no longer eligible");
                 return;
             }
             self.strikes.wave = Some(w);
@@ -835,20 +941,21 @@ impl Ai {
             if let Some(j) = fresh {
                 w.job = j;
             } else {
-                self.strikes_release(w);
+                self.strikes_drop(w, "target left the job list");
                 return;
             }
-            if w.job.id.is_some_and(|id| self.strikes.killed.remove(&id))
-                || frame - w.job.last >= JOB_MEMORY
-                || frame - w.since > JOB_MEMORY * 2
-            {
-                self.strikes_release(w);
+            if w.job.id.is_some_and(|id| self.strikes.killed.remove(&id)) {
+                self.strikes_release(w, "target killed meanwhile");
+                return;
+            }
+            if frame - w.job.last >= JOB_MEMORY || frame - w.since > JOB_MEMORY * 2 {
+                self.strikes_drop(w, "job too old");
                 return;
             }
             if !self.strike_tactic_reaches(w.tactic, w.home, w.job.pos)
                 || (!w.members.is_empty() && !self.strike_members_reach(&w.members, w.job.pos))
             {
-                self.strikes_release(w);
+                self.strikes_drop(w, "target out of reach");
                 return;
             }
             let cost = self.defs.get(w.tactic.name()).map_or(1.0, |d| d.cost(self.metal));
@@ -861,7 +968,7 @@ impl Ai {
                     && (!w.job.production_pays(w.tactic, cost)
                         || !self.fac.factories.values().any(|f| f.kind() == w.tactic.factory())))
             {
-                self.strikes_release(w);
+                self.strikes_drop(w, "wave cannot be filled");
                 return;
             }
             // Follow the front while waiting, and gather before a likely call.
@@ -873,8 +980,7 @@ impl Ai {
                 w.query = None;
             }
             if w.job.prey == Prey::Defenseless && !self.strike_opportunity_clear(w.home, w.job.pos) {
-                self.log("strikes: release opportunistic wave; approach is defended");
-                self.strikes_release(w);
+                self.strikes_drop(w, "opportunity approach defended");
                 return;
             }
             let expected = w.job.id.is_some_and(|id| self.jaeger_stun_expected(id));
@@ -941,8 +1047,9 @@ impl Ai {
                 || frame - w.since > DIVE_TIMEOUT
                 || w.members.is_empty()
             {
+                let hp = w.job.id.and_then(|id| self.war.targets.get(&id)).map(|e| e.get_health());
                 self.log(&format!(
-                    "strikes: {} ended ({})",
+                    "strikes: {} ended ({}){}",
                     w.tactic.name(),
                     if dead {
                         "target killed"
@@ -954,16 +1061,15 @@ impl Ai {
                         "fragile target no longer eligible"
                     } else if !self.strike_target_allowed(w.tactic, &w.job) {
                         "stun window closed"
+                    } else if w.members.is_empty() {
+                        "wave lost"
                     } else {
-                        "search expired or wave lost"
-                    }
+                        "dive timed out"
+                    },
+                    hp.filter(|_| !dead).map_or(String::new(), |h| format!(", target at {:.0}%", 100.0 * h))
                 ));
-                // Reassess with the survivors before cooling the area or
-                // issuing return orders. The expired target is still a job.
-                if !self.strike_chain(&mut w) {
-                    w.phase = Phase::Returning;
-                    w.since = frame;
-                    self.strikes.cooldowns.push((w.job.pos, frame));
+                if !self.strike_chain_start(&mut w, dead, frame) {
+                    self.strike_chain_home(&mut w, frame);
                 }
             } else if let Some(e) = target.filter(|e| e.visible || e.is_radar_visible) {
                 w.job.pos = e.position;
@@ -982,7 +1088,7 @@ impl Ai {
             }
         }
         if w.phase == Phase::Chaining {
-            self.strike_chain_update(&mut w);
+            self.strike_chain_step(&mut w, frame);
         }
         if w.phase == Phase::Returning
             && (w.members.iter().all(|id| self.fighters.get(id).is_none_or(|f| distance(f.get_pos(), w.home) < 450.0))
@@ -1001,12 +1107,13 @@ impl Ai {
                     w.phase = Phase::Forming;
                     w.since = frame;
                     w.query = None;
+                    w.chain = Chain::default();
                 } else {
-                    self.strikes_release(w);
+                    self.strikes_release(w, "next job too big");
                     return;
                 }
             } else {
-                self.strikes_release(w);
+                self.strikes_release(w, "back home, no next job");
                 return;
             }
         }
@@ -1204,6 +1311,42 @@ mod tests {
         assert!(!j.production_pays(Tactic::Flea, 25.0));
         j.value = 800.0;
         assert!(j.production_pays(Tactic::Flea, 25.0));
+    }
+
+    #[test]
+    fn lone_turrets_are_dirtbag_packs_from_units_on_hand() {
+        let job = |value: f32| Job {
+            id: Some(1),
+            pos: Vec3::xz(0.0, 0.0),
+            last: 0,
+            count: 1,
+            value,
+            name: "turretlaser".into(),
+            prey: Prey::LoneTurret,
+        };
+        for tactic in [Tactic::Halberd, Tactic::Scythe, Tactic::Flea, Tactic::Dart] {
+            assert!(!Prey::LoneTurret.allows(tactic, true));
+        }
+        assert!(Prey::LoneTurret.allows(Tactic::Dirtbag, false));
+        // No production for it: the Dirtbags already raiding go.
+        assert!(!Prey::LoneTurret.can_requisition(Tactic::Dirtbag));
+        assert!(!job(90.0).production_pays(Tactic::Dirtbag, 30.0));
+        // Four for a Lotus or a Picket, more for a dearer light turret.
+        assert_eq!(job(90.0).size(Tactic::Dirtbag, 30.0), 4);
+        assert_eq!(job(95.0).size(Tactic::Dirtbag, 30.0), 4);
+        assert_eq!(job(120.0).size(Tactic::Dirtbag, 30.0), 5);
+    }
+
+    #[test]
+    fn a_lone_turret_has_no_other_threat_disc_over_it() {
+        let lotus = Vec3::xz(1000.0, 1000.0);
+        let own = opportunities::Threat::at(lotus, 610.0);
+        let far = opportunities::Threat::at(Vec3::xz(2000.0, 1000.0), 610.0);
+        let near = opportunities::Threat::at(Vec3::xz(1400.0, 1000.0), 610.0);
+        let lone = opportunities::others(vec![own.clone(), far.clone()], lotus);
+        assert!(opportunities::clear(lotus, lotus, &lone));
+        let covered = opportunities::others(vec![own, far, near], lotus);
+        assert!(!opportunities::clear(lotus, lotus, &covered));
     }
 
     #[test]

@@ -2,11 +2,26 @@
 use super::*;
 
 const ESCORT_RADIUS: f32 = 600.0;
-const RANGE_MARGIN: f32 = 150.0;
+pub(super) const RANGE_MARGIN: f32 = 150.0;
 
+#[derive(Clone)]
 pub(super) struct Threat {
     pos: Vec3,
     radius: f32,
+}
+
+impl Threat {
+    pub(super) fn at(pos: Vec3, radius: f32) -> Self {
+        Self { pos, radius }
+    }
+    pub(super) fn radius(&self) -> f32 {
+        self.radius
+    }
+}
+
+/// The threat discs but the one centred on `at` (a lone turret's own).
+pub(super) fn others(threats: Vec<Threat>, at: Vec3) -> Vec<Threat> {
+    threats.into_iter().filter(|t| distance(t.pos, at) > 1.0).collect()
 }
 
 /// Check the approach corridor as well as the destination. Friendly strength

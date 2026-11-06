@@ -46,6 +46,8 @@ pub struct ConstructionTask {
     /// Unit id of the commander that owns the factory plop.
     pub assigned_plop: i32,
     pub fac_def: bool,
+    /// A plate replacing a caretaker in the production build-power budget.
+    pub production_upgrade: bool,
     /// Forecast-driven defense; only allowed close to a threatened factory.
     pub emergency_porc: bool,
     /// Opportunistic gate defense: requires support and a safe approach.
@@ -101,6 +103,7 @@ impl WorkerTask {
                 fac_plop: false,
                 assigned_plop: 0,
                 fac_def: false,
+                production_upgrade: false,
                 emergency_porc: false,
                 fortification: false,
                 point_defense: false,
@@ -134,6 +137,34 @@ impl WorkerTask {
 
     pub fn combat_reclaim(target: Unit) -> Self {
         Self::with_kind(target.pos(), TaskKind::CombatReclaim(CombatReclaimTask { target }))
+    }
+
+    /// The engine's active command names this build/repair, not merely a
+    /// queued future job or another nearby structure. Together with actual
+    /// spending this proves work even outside the nominal centre-to-centre
+    /// build distance (the engine also counts the target's radius).
+    pub(super) fn build_command_matches(&self, unit: Unit) -> bool {
+        let Some(cmd) = unit.current_commands().first().copied() else { return false };
+        self.matches_build(cmd.id(), &cmd.params())
+    }
+
+    /// The approach may have move commands ahead of its build command.
+    pub(super) fn queued_build_matches(&self, unit: Unit) -> bool {
+        unit.current_commands().iter().any(|cmd| self.matches_build(cmd.id(), &cmd.params()))
+    }
+
+    fn matches_build(&self, id: i32, params: &[f32]) -> bool {
+        let (target, build) = match &self.kind {
+            TaskKind::Construction(c) => (c.target, Some((c.build_type, self.position))),
+            TaskKind::Repair(r) => (Some(r.target), r.target.def().map(|d| (d, r.target.pos()))),
+            _ => return false,
+        };
+        if id == 40 {
+            return params.len() == 1 && target.is_some_and(|u| params[0] == u.id() as f32);
+        }
+        build.is_some_and(|(def, pos)| {
+            id == -def.id() && params.len() >= 3 && crate::util::distance(Vec3::xz(params[0], params[2]), pos) <= 8.0
+        })
     }
 
     /// Where the work happens (reclaim and repair tasks follow their target).

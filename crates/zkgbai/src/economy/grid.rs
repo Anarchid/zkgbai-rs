@@ -6,12 +6,13 @@
 //!
 //! The economy's own pylon building links metal spots as the territory
 //! grows. On top of it, this planner links buildings starved of power to
-//! the strongest grid, and in the overdrive phase links grids by the
-//! overdrive they gain (below). Chains are laid a pylon at a time and
-//! checked against the grid as built, so a misplaced pylon is made up for
-//! next time.
+//! the strongest grid, and late in the game joins every grid that makes
+//! energy (or needs it) into one along a minimum spanning tree of pylon
+//! chains. Chains are laid a pylon at a time and checked against the grid
+//! as built, so a misplaced pylon is made up for next time.
 //!
-//! Overdrive: late in the game the economy's own linking stops short. Its small energy goes up only while
+//! Overdrive (feature `gridmex`, on by default): late in the game the
+//! economy's own linking stops short. Its small energy goes up only while
 //! energy stalls, which the plants end early, and its pylons stay within
 //! 1500 of a plant, all in the base: on Folsom 20 of 33 mexes stood on no
 //! grid next to three singularities (2026-10-27). So in the overdrive
@@ -61,11 +62,11 @@ const PYLON_SAME: f32 = 250.0;
 const POWER_WAIT: i32 = 30 * 180;
 
 /// Seconds a link's pylons may take to pay for themselves in overdrive
-/// metal.
+/// metal (`gridmex`).
 const MEX_PAYBACK: f32 = 600.0;
 
 /// Share of the energy made that overdrive gets at least, whatever the
-/// spending of the moment.
+/// spending of the moment (`gridmex`).
 const MIN_SPARE: f32 = 0.25;
 
 /// A building that needs power, waiting for its site to be linked.
@@ -110,6 +111,19 @@ impl GridDefs {
     pub fn range(&self, def_id: i32) -> Option<f32> {
         self.by_def.get(&def_id).map(|&(r, _)| r)
     }
+}
+
+/// What power a site has (see [`Ai::eco_grid_access`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum GridAccess {
+    /// The grids it would join make this much, enough.
+    Powered(f32),
+    /// Not enough, but `pylons` pylons in all, chains from the members at
+    /// `links` (where, pylon range), link it to grids making `energy`
+    /// together.
+    Link { links: Vec<(Vec3, f32)>, pylons: f32, energy: f32 },
+    /// Not enough and no grid that makes up the rest: what it would have.
+    Unpowered(f32),
 }
 
 /// One of our grid members (or a building's site waiting for power).
@@ -413,7 +427,7 @@ impl Ai {
                 self.eco.grid_support.jobs.remove(&id);
             }
         }
-        if self.eco_overdrive_phase() {
+        if self.eco_overdrive_phase() && !self.dev_off("gridmex") {
             if let Some(((i, j), why, gain)) = self.eco_overdrive_link(&members, &all, &capacity, pr) {
                 let (a, b) = (&members[i], &members[j]);
                 // The endpoint on the higher-capacity component supplies power.
@@ -428,6 +442,21 @@ impl Ai {
                 };
                 self.eco_reconnect_power(goal.pos, goal.range, source.pos, source.range, job);
             }
+        } else if self.eco_overdrive_phase() && nodes.len() > 1 {
+            // Retain the legacy spanning-tree planner when gridmex is disabled.
+            let mut edges = Vec::new();
+            for (k, &a) in nodes.iter().enumerate() {
+                for &b in &nodes[k + 1..] {
+                    let (pylons, ends) = link(a, b);
+                    edges.push((pylons, ends, a, b));
+                }
+            }
+            edges.sort_by(|x, y| x.0.total_cmp(&y.0));
+            if let Some(e) = edges.first() {
+                let (a, b) = (&members[e.1.0], &members[e.1.1]);
+                let why = format!("grids making {:.0} and {:.0} energy", capacity[e.2], capacity[e.3]);
+                self.eco_lay_pylons(a.pos, a.range, b.pos, b.range, &why);
+            }
         }
     }
 
@@ -439,7 +468,7 @@ impl Ai {
         ((made - self.cb.economy().usage(self.energy)) / made).clamp(MIN_SPARE, 1.0)
     }
 
-    /// The overdrive link: of the links between a grid making
+    /// The overdrive link (`gridmex`): of the links between a grid making
     /// energy and another grid with mexes (or energy), the one gaining the
     /// most overdrive metal per pylon, if it pays back in [`MEX_PAYBACK`];
     /// none under enemy porc, none already being laid.
@@ -507,6 +536,67 @@ impl Ai {
         ))
     }
 
+    /// What a building of pylon range `range` at `pos` that needs `needs`
+    /// energy would have: the energy of the grids it would join standing
+    /// there, or else the fewest pylons that link it to a grid making the
+    /// rest (see [`GridAccess`]).
+    pub(crate) fn eco_grid_access(&self, pos: Vec3, range: f32, needs: f32) -> GridAccess {
+        let gd = &self.eco.grid_defs;
+        let pr = gd.pylon_range;
+        let members: Vec<(Vec3, f32, f32)> = (self.cb.team_units().into_iter())
+            .filter(|u| u.health() > 0.0 && !u.is_being_built())
+            .filter_map(|u| {
+                let range = gd.range(u.def()?.id())?;
+                Some((u.pos(), range, u.rules_param_float("current_energyIncome", 0.0).max(0.0)))
+            })
+            .collect();
+        let n = members.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        for i in 0..n {
+            for j in i + 1..n {
+                if distance(members[i].0, members[j].0) < members[i].1 + members[j].1 {
+                    let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                    parent[a] = b;
+                }
+            }
+        }
+        let grid: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
+        let mut capacity = vec![0.0f32; n];
+        for (i, m) in members.iter().enumerate() {
+            capacity[grid[i]] += m.2;
+        }
+        let mut joined: Vec<usize> =
+            (0..n).filter(|&i| distance(members[i].0, pos) < members[i].1 + range).map(|i| grid[i]).collect();
+        joined.sort_unstable();
+        joined.dedup();
+        let has: f32 = joined.iter().map(|&g| capacity[g]).sum();
+        if has >= needs {
+            return GridAccess::Powered(has);
+        }
+        if pr <= 0.0 {
+            return GridAccess::Unpowered(has);
+        }
+        // Each other grid making energy by the fewest pylons to it, then
+        // the cheapest in pylons per energy first until the rest is made up
+        // (several small grids may: a base of turbines is that, 2026-11-04
+        // Thornford: 100-120 energy in all, no single grid of 50 near).
+        let mut nearest: Vec<(usize, f32, usize)> = Vec::new();
+        for i in (0..n).filter(|&i| !joined.contains(&grid[i]) && capacity[grid[i]] > 0.0) {
+            let pylons = link_pylons(distance(members[i].0, pos), members[i].1, range, pr);
+            match nearest.iter_mut().find(|e| e.0 == grid[i]) {
+                Some(e) if pylons < e.1 => (e.1, e.2) = (pylons, i),
+                Some(_) => {}
+                None => nearest.push((grid[i], pylons, i)),
+            }
+        }
+        let (links, pylons, energy) = gather_links(&nearest, &capacity, has, needs);
+        if energy < needs {
+            return GridAccess::Unpowered(has);
+        }
+        let links = links.into_iter().map(|i| (members[i].0, members[i].1)).collect();
+        GridAccess::Link { links, pylons, energy }
+    }
+
     /// Whether a pylon stands (or is queued) where one is planned.
     fn eco_pylon_near(&self, p: Vec3) -> bool {
         self.eco.pylons.iter().any(|u| distance(u.pos(), p) < PYLON_SAME)
@@ -555,7 +645,7 @@ impl Ai {
 
     /// Queue the pylons of a chain from `a` (range `ra`) to `b` that are not
     /// there yet.
-    pub(super) fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
+    pub(crate) fn eco_lay_pylons(&mut self, a: Vec3, ra: f32, b: Vec3, rb: f32, why: &str) {
         let Some(pylon) = self.defs.get("energypylon") else { return };
         let mut queued = 0;
         for p in chain(a, ra, b, rb, self.eco.grid_defs.pylon_range) {
@@ -642,6 +732,31 @@ fn shortest_link(members: &[Member], a: &[usize], b: &[usize], pr: f32) -> (f32,
     (1.0 + (best.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil(), ends)
 }
 
+/// Which of the grids `nearest` (grid, pylons to it, member nearest) to link
+/// to make `needs` from `has`: the cheapest in pylons per energy first.
+/// Their members, the pylons in all, the energy then.
+fn gather_links(nearest: &[(usize, f32, usize)], capacity: &[f32], has: f32, needs: f32) -> (Vec<usize>, f32, f32) {
+    let mut order: Vec<&(usize, f32, usize)> = nearest.iter().collect();
+    order.sort_by(|a, b| (a.1 / capacity[a.0]).total_cmp(&(b.1 / capacity[b.0])));
+    let (mut links, mut pylons, mut energy) = (Vec::new(), 0.0, has);
+    for &&(g, p, i) in &order {
+        if energy >= needs {
+            break;
+        }
+        links.push(i);
+        pylons += p;
+        energy += capacity[g];
+    }
+    (links, pylons, energy)
+}
+
+/// Pylons (of range `pr`) a link between buildings `d` apart, of pylon
+/// ranges `ra` and `rb`, takes (as [`shortest_link`] counts them).
+fn link_pylons(d: f32, ra: f32, rb: f32, pr: f32) -> f32 {
+    let gap = d - CHAIN_SLACK * (ra + rb + 2.0 * pr);
+    1.0 + (gap.max(0.0) / (2.0 * pr * CHAIN_SLACK)).ceil()
+}
+
 /// Where the pylons (of range `pr`) of a chain from `a` (range `ra`) to `b`
 /// (range `rb`) stand: the first within reach of `a`, each next within
 /// reach of the last, the last within reach of `b`.
@@ -712,6 +827,30 @@ mod tests {
         assert_eq!(points.len(), 4);
         // Close by, one does.
         assert_eq!(chain(a, ra, Vec3::xz(800.0, 0.0), rb, pr).len(), 1);
+    }
+
+    #[test]
+    fn small_grids_add_up_cheapest_first() {
+        // Grids 0..3 making 20, 30, 60, 10; pylons to them 1, 1, 3, 1.
+        let capacity = [20.0, 30.0, 60.0, 10.0];
+        let nearest = [(0, 1.0, 10), (1, 1.0, 11), (2, 3.0, 12), (3, 1.0, 13)];
+        // 50 from nothing: the 30 and the 20 (2 pylons) beat the 60 (3).
+        let (links, pylons, energy) = gather_links(&nearest, &capacity, 0.0, 50.0);
+        assert_eq!((links, pylons, energy), (vec![11, 10], 2.0, 50.0));
+        // Never enough: all of it.
+        assert_eq!(gather_links(&nearest, &capacity, 0.0, 500.0).2, 120.0);
+    }
+
+    #[test]
+    fn link_pylons_count_as_the_chain_lays_them() {
+        // A Lucifer (range 50) 900 from a solar (100), pylons 500: one
+        // pylon spans 0.85 x 1150 = 977.
+        assert_eq!(link_pylons(900.0, 100.0, 50.0, 500.0), 1.0);
+        assert_eq!(link_pylons(1500.0, 100.0, 50.0, 500.0), 2.0);
+        for d in [900.0, 1500.0, 2400.0] {
+            let n = chain(Vec3::xz(0.0, 0.0), 100.0, Vec3::xz(d, 0.0), 50.0, 500.0).len() as f32;
+            assert!(n <= link_pylons(d, 100.0, 50.0, 500.0), "{d}: chain {n}");
+        }
     }
 }
 

@@ -4,8 +4,12 @@ use std::collections::HashMap;
 
 use springai::{Callback, Unit, UnitDef};
 
-/// Zero-K LuaRules custom command ids.
+/// Zero-K LuaRules custom command ids (and engine ones the AI interface
+/// has no typed command for).
 pub mod cmd {
+    /// The engine's CMD_REPAIR. With four parameters (x, y, z, radius) it is
+    /// an area repair; with ALT it stays when nothing there needs repair.
+    pub const REPAIR: i32 = 40;
     pub const ORBIT: i32 = 13923;
     pub const ORBIT_DRAW: i32 = 13924;
     pub const RAW_MOVE: i32 = 31109;
@@ -24,6 +28,8 @@ pub mod cmd {
     /// fire at will, 2 on fire at will (the Lance's and Phantom's default),
     /// 3 unless a single target is given, 4 always.
     pub const PREVENT_OVERKILL: i32 = 38291;
+    /// ZK's Avoid Bad Targets state (0 off, 1 minimum enabled, up to 4).
+    pub const PREVENT_BAIT: i32 = 38293;
     /// Puppies' wreck eating (ZK's unit_grey_goo): 0 off, 1 on, 2 also
     /// while cloaked.
     pub const GOO_GATHER: i32 = 35646;

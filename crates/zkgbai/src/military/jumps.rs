@@ -14,7 +14,8 @@
 //! crowd (the landing stomps everything within 170 for up to 1001, friends
 //! too: none of their jumps land on ours or our allies', see [`STOMP`]),
 //! and Skuttles onto their heavy (see
-//! `jaeger`). Jumps at enemies land where they will be by then. A Skuttle shown against its
+//! `jaeger`). Jumps at enemies land where they will be by then (`lead`;
+//! off, onto where they are). A Skuttle shown against its
 //! will (an enemy near, or hit) jumps at once: onto the best blast in
 //! reach, or else away from what shows it. Skuttles never walk up to
 //! their mark: the blast (90) is short of the decloak (180), so one
@@ -233,7 +234,7 @@ const ESCAPE_WALKS: usize = 4;
 const ESCAPE_SEEN: i32 = 90;
 
 /// An enemy about: where it is (live while in sight or on radar), where it
-/// goes (elmos a frame; none out of sight), its metal
+/// goes (elmos a frame; none out of sight, or with `lead` off), its metal
 /// and health, its top speed (elmos a second) and its guns' reach.
 #[derive(Clone, Copy, Debug)]
 struct Seen {
@@ -710,12 +711,15 @@ impl Ai {
 
     /// Where enemy `e` is now (live while in sight or on radar, else where
     /// it was last seen) and its velocity (elmos a frame on the ground
-    /// plane; none out of sight), cut back to its top
+    /// plane; none out of sight or with `lead` off), cut back to its top
     /// speed (a faster one is pushed or thrown).
     fn enemy_motion(&self, e: &super::enemy::Enemy) -> (Vec3, Vec3) {
         let live = e.unit.pos();
         if live == NULLPOS || (live.x == 0.0 && live.z == 0.0) {
             return (e.position, Vec3::default());
+        }
+        if self.dev_off("lead") {
+            return (live, Vec3::default());
         }
         let v = e.unit.vel();
         let (speed, top) = (v.x.hypot(v.z), e.def_speed() / 30.0 * LEAD_TOP);
@@ -734,9 +738,45 @@ impl Ai {
         2.0 * half / jd.speed
     }
 
+    /// Jump `unit` onto `target` (leading it; at `known`, its last known
+    /// position, when it is out of sight) and attack it on landing, if it
+    /// can now and it is in reach; `why` is counted.
+    pub fn jump_strike(&mut self, unit: Unit, target: Unit, known: Vec3, why: &str) -> bool {
+        let Some(to) = self.jump_strike_landing(unit, target, known) else { return false };
+        self.jump_order(unit, to, why);
+        unit.attack(target, OPTION_SHIFT_KEY);
+        true
+    }
+
+    /// Where `unit` would land jumping onto `target` (see `jump_strike`),
+    /// if it can now and that is in reach.
+    fn jump_strike_landing(&mut self, unit: Unit, target: Unit, known: Vec3) -> Option<Vec3> {
+        let jd = self.jump_ready(unit)?;
+        self.jump_strike_landing_ready(unit, jd, target, known)
+    }
+
+    /// Read-only landing check once jump readiness has been established.
+    fn jump_strike_landing_ready(&self, unit: Unit, jd: JumpDef, target: Unit, known: Vec3) -> Option<Vec3> {
+        let seen = target.pos();
+        let at = if seen == NULLPOS || (seen.x == 0.0 && seen.z == 0.0) { known } else { seen };
+        let from = unit.pos();
+        if at == NULLPOS {
+            return None;
+        }
+        let lead = Self::jump_flight(jd, distance(from, at)) * 0.5;
+        let v = target.vel();
+        let to = Vec3::new(at.x + (v.x * lead).clamp(-150.0, 150.0), at.y, at.z + (v.z * lead).clamp(-150.0, 150.0));
+        let d = distance(from, to);
+        ((MIN_ENGAGE * 0.5..=jd.range * REACH).contains(&d) && self.jump_clear(jd, from, to)).then_some(to)
+    }
+
     /// Where a Skuttle of jumps `jd` lands jumping onto `target` (last seen
-    /// at `known`), if in reach and clear: where it will be.
-    fn skuttle_landing(&mut self, unit: Unit, jd: JumpDef, target: Unit, known: Vec3) -> Option<Vec3> {
+    /// at `known`), if in reach and clear: where it will be (`lead`), or by
+    /// the old half-flight lead.
+    pub(super) fn skuttle_landing(&self, unit: Unit, jd: JumpDef, target: Unit, known: Vec3) -> Option<Vec3> {
+        if self.dev_off("lead") {
+            return self.jump_strike_landing_ready(unit, jd, target, known);
+        }
         let seen = target.pos();
         let unseen = seen == NULLPOS || (seen.x == 0.0 && seen.z == 0.0);
         let (at, v) = if unseen { (known, Vec3::default()) } else { (seen, target.vel()) };
@@ -777,11 +817,9 @@ impl Ai {
         false
     }
 
-    /// Jump `unit` onto `target` (at `known`, its last known position, when
-    /// it is out of sight) and attack it on landing, if it can now; `why` is
-    /// counted. It lands where `target` will be: it keeps its velocity until
-    /// then (heavies are slow to speed up or stop, though they may turn).
-    /// Lands within reach or not at all.
+    /// [`Ai::jump_strike`], landing where `target` will be: it keeps its
+    /// velocity until then (heavies are slow to speed up or stop, though
+    /// they may turn). Lands within reach or not at all.
     pub fn jump_lead(&mut self, unit: Unit, target: Unit, known: Vec3, why: &str) -> bool {
         let Some(jd) = self.jump_ready(unit) else { return false };
         let seen = target.pos();
@@ -1206,7 +1244,7 @@ impl Ai {
     }
 
     pub fn jumps_update(&mut self, frame: i32) {
-        self.pathfinder.jumps_on = !self.dev_off("jumps");
+        self.pathfinder.jumps_on = !self.dev_off("jumps") && !self.dev_off("jumppath");
         for (def, n, ms) in std::mem::take(&mut self.pathfinder.jump_link_builds) {
             self.log(&format!("jumps: {n} jump links for the ways of {def} ({ms:.0} ms)"));
         }
@@ -1364,8 +1402,12 @@ impl Ai {
         if let Some((worth, target, at)) = best
             && worth >= 100.0
         {
-            // Onto where it will be.
-            self.jump_lead(unit, target, at, "jack");
+            // Onto where it will be (`lead` off: half the flight's lead).
+            if self.dev_off("lead") {
+                self.jump_strike(unit, target, at, "jack");
+            } else {
+                self.jump_lead(unit, target, at, "jack");
+            }
         }
     }
 

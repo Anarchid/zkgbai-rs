@@ -1,7 +1,7 @@
 //! Task generation: factories, energy and grid, caretakers, storage, radar,
 //! static defenses, superweapons, reclaim, morphs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use springai::{NO_TIMEOUT, Unit, UnitDef, Vec3, WeaponDef};
 
@@ -33,6 +33,14 @@ pub(crate) const FACTORY_CLEARANCE: f32 = 64.0;
 /// A factory's exit is clear below this cost (see `eco_exit_cost`): a few
 /// steep cells units drive round, nothing across the way.
 const EXIT_CLEAR: f32 = 0.1;
+
+/// What a factory's exit costs more when its units start on ground cut
+/// off from the metal: its yard (the flat ground under it) connected to
+/// less than `REACH_RIVAL` of what the best connected ground of their tier
+/// holds. More than any blocked lane, so a pit is the last resort.
+/// Terrain7 (2026-11-04): an Amphibious Complex went into a 130-deep walled
+/// trench beside the start; its lane, down the flat floor, cost 0.
+const TRAPPED: f32 = 10.0;
 
 /// The engine slope map's cell, elmos.
 const SLOPE_CELL: f32 = 16.0;
@@ -66,12 +74,52 @@ pub(crate) fn exit_rect(pos: Vec3, hx: f32, hz: f32, facing: i32) -> [f32; 4] {
     }
 }
 
+/// What a factory's exit must be clear for: see `Ai::eco_exit_check`.
+pub(super) struct ExitCheck {
+    /// The movement classes of its ground units.
+    classes: Vec<MoveClass>,
+    /// The engine's slope map.
+    slopes: Vec<f32>,
+    /// The metal its units' tier gets to from each piece of ground; `None`
+    /// without a terrain model (or metal).
+    reach: Option<ExitReach>,
+}
+
+/// Metal by connected ground, for one movement tier.
+struct ExitReach {
+    tier: Tier,
+    /// Metal spot value by the terrain model's static component (a spot
+    /// counts for the ground within `FACTORY_REACH` of it).
+    metal: HashMap<u32, f32>,
+    /// All metal on the map.
+    total: f32,
+    /// The most metal one component holds.
+    best: f32,
+}
+
+impl ExitReach {
+    /// Share of the map's metal held by component `c` (`None`: no ground).
+    fn share(&self, c: Option<u32>) -> f32 {
+        c.and_then(|c| self.metal.get(&c)).map_or(0.0, |m| m / self.total)
+    }
+
+    /// Whether ground holding `share` of the metal is a pit.
+    fn trapped(&self, share: f32) -> bool {
+        share < REACH_RIVAL * self.best / self.total
+    }
+}
+
 /// Water at least this deep takes an Urchin, elmos.
 const URCHIN_DEPTH: f32 = 8.0;
 
 /// An opening factory is ruled out when its units reach less than this
 /// share of what the best one's do.
 const REACH_RIVAL: f32 = 0.8;
+
+/// How long the pregame waits for the terrain model to weigh the opening
+/// and the commander by reach from the start (`comreach`; the analysis
+/// takes 0.1-0.5 s).
+const COMREACH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The share of the metal we do not hold, out of our units' reach, for
 /// which another factory is asked for.
@@ -89,6 +137,9 @@ pub(super) const NEW_FAC_INCOME: f32 = 50.0;
 const NEW_FAC_EVERY: i32 = 30 * 300;
 const NEW_FAC_JITTER: i32 = 30 * 60;
 const NEW_FAC_PER: f32 = 25.0;
+/// Let the opening produce for two actual minutes before autonomous tech
+/// expansion. Density-scaled phase time must not skip this commitment.
+const FACTORY_OPENING_TIME: i32 = 30 * 120;
 
 /// Income before investing in a gunship factory for a viable riot drop.
 const DROP_INCOME: f32 = 30.0;
@@ -97,6 +148,64 @@ const DROP_INCOME: f32 = 30.0;
 /// metal income, not the age-adjusted composition budget: geos and shared
 /// energy planning can keep the reactor count low in a mature economy.
 const SUPER_WEAPON_INCOME: f32 = 50.0;
+
+/// Air tempo: as a game runs on, and more so on larger maps, the speed of
+/// aircraft converts more of the enemy's value (raids across the map,
+/// strikes on whatever moves out). A dose (see [`air_tempo_dose`]) is
+/// zero before `AIR_TEMPO_FROM_MIN` minutes, rises to one by
+/// `AIR_TEMPO_FULL_MIN`, and scales with the map's diagonal (heightmap
+/// squares) against `AIR_TEMPO_DIAG` (a 14x14 map), between
+/// `AIR_TEMPO_DIAG_MIN` and `AIR_TEMPO_DIAG_MAX`. Two uses: the ordinary
+/// factory switch (the random pick of the next factory, and the roll of
+/// a new type) weighs the air factory it prefers 1 + `AIR_TEMPO_PICK` x
+/// dose against 1 for every other candidate; and when nothing else asks
+/// for a factory, an air factory is asked for once per game, if none
+/// stands or is going up, worth `AIR_TEMPO_SHARE` of the enemy's standing
+/// value times the dose, once that is worth the factory's cost. Planes
+/// rather than gunships where static anti-air worth `AIR_TEMPO_AA_PLANES`
+/// or an enemy air force worth `AIR_TEMPO_AIR_PLANES` was seen.
+/// Off by default (unverified): `enable=airtempo` turns both on.
+const AIR_TEMPO_SHARE: f32 = 0.15;
+const AIR_TEMPO_PICK: f32 = 3.0;
+const AIR_TEMPO_FROM_MIN: f32 = 10.0;
+const AIR_TEMPO_FULL_MIN: f32 = 30.0;
+const AIR_TEMPO_DIAG: f32 = 1270.0;
+const AIR_TEMPO_DIAG_MIN: f32 = 0.5;
+const AIR_TEMPO_DIAG_MAX: f32 = 1.5;
+const AIR_TEMPO_AA_PLANES: f32 = 800.0;
+const AIR_TEMPO_AIR_PLANES: f32 = 1000.0;
+/// How an air tempo requisition's reason starts (the consumer knows it
+/// by this).
+pub(super) const AIR_TEMPO_WHY: &str = "air tempo";
+
+/// Air fire: raids that cost us mexes and power where no home defense
+/// team was near (see `firefighters::UNANSWERED_DIST`) are what aircraft
+/// answer, and the firefighters only wait for an air factory. With none
+/// owned or going up, once the unanswered losses of the last five
+/// minutes weigh `firefighters::WANTED_AT`, an air factory is asked for,
+/// ahead of the Widow scout, worth the metal of those losses (a mex's
+/// income over the memory counted) continued over the payback. Once a
+/// game. `disable=airfire`.
+pub(super) const AIR_FIRE_WHY: &str = "air fire";
+
+/// Air stall: our aircraft do not pay and every factory of ours makes
+/// them (see `military::airstall`): a plate on an ally's ground factory,
+/// and nothing but a plate (no factory of our own for it).
+pub(super) const AIR_STALL_WHY: &str = "air stall";
+
+/// Whether a requisition's reason is one of the air ones (fire or tempo).
+pub(super) fn is_air_requisition(why: &str) -> bool {
+    why.starts_with(AIR_FIRE_WHY) || why.starts_with(AIR_TEMPO_WHY)
+}
+
+/// The air tempo dose `minutes` into the game on a map of diagonal
+/// `map_diag` heightmap squares: zero before `AIR_TEMPO_FROM_MIN`, then
+/// growing with time and with the map's size (see `AIR_TEMPO_SHARE`).
+pub(super) fn air_tempo_dose(minutes: f32, map_diag: f32) -> f32 {
+    let time = ((minutes - AIR_TEMPO_FROM_MIN) / (AIR_TEMPO_FULL_MIN - AIR_TEMPO_FROM_MIN)).clamp(0.0, 1.0);
+    let size = (map_diag / AIR_TEMPO_DIAG).clamp(AIR_TEMPO_DIAG_MIN, AIR_TEMPO_DIAG_MAX);
+    time * size
+}
 
 /// One of `list` for the roll `roll` in [0, 1), each name's odds in
 /// proportion to `weight(name)` (uniform when all weigh the same).
@@ -170,6 +279,54 @@ pub(super) fn factory_tier(name: &str) -> Option<Tier> {
         _ => None,
     }
 }
+
+/// Metal income from which fusions may be built, and energy income from
+/// which singularities may (also with two fusions standing); see
+/// `eco_create_fusion_task`.
+const FUSION_INCOME: f32 = 30.0;
+const SINGU_ENERGY: f32 = 150.0;
+
+/// A turret this near a mex covers it (point defense), elmos.
+const POINT_COVER: f32 = 350.0;
+/// Distance from the enemy at which a spot counts as plainly exposed: nearer
+/// counts more (up to 4x), farther less.
+const EXPOSURE_REF: f32 = 2000.0;
+/// A spot on our side not yet taken, against an owned mex.
+const FUTURE_WORTH: f32 = 0.25;
+/// What a posture turret is worth to the project tracker, in multiples of
+/// its cost.
+const POSTURE_WORTH: f32 = 2.0;
+/// Turret kinds a posture zone mixes, in order, with the income (metal/s)
+/// each wants: Lotus, Picket, Stardust, Stinger, Faraday, Gauss, Desolator.
+/// At most [`SAME_KIND`] of a kind per zone (user, 2026-10-26: no more
+/// stacks of Lotuses).
+const ZONE_MIX: [(&str, f32); 7] = [
+    ("turretlaser", 0.0),
+    ("turretmissile", 0.0),
+    ("turretriot", 10.0),
+    ("turretheavylaser", 15.0),
+    ("turretemp", 25.0),
+    ("turretgauss", 40.0),
+    ("turretheavy", 80.0),
+];
+const SAME_KIND: usize = 2;
+/// Posture turrets keep this far from every turret of ours (splash), elmos.
+const TURRET_SPACING: f32 = 150.0;
+/// A posture turret goes only where fewer than this many turrets of ours
+/// reach within a Lotus's range: nowhere under more than two Lotus circles
+/// (the posture keeps us from being naked, no more; Circuit overporcs, we
+/// should not).
+const MAX_OVERLAP: usize = 2;
+const LOTUS_REACH: f32 = 460.0;
+/// A turret must take at least this much spot-exposure off (a well covered
+/// mex far from the enemy is not worth another).
+const MIN_GAIN: f32 = 0.06;
+/// Point defense stands this far from its mex towards the enemy, elmos,
+/// and at most [`POINT_SHIFT`] from there.
+const POINT_FORWARD: f32 = 110.0;
+const POINT_SHIFT: f32 = 200.0;
+/// Candidates tried per call, best first, before giving up for now.
+const PLACE_TRIES: usize = 4;
 
 /// Turrets within this distance of a chokepoint's defense position count as
 /// its defenses.
@@ -273,7 +430,25 @@ impl Ai {
     /// it was adopted.
     pub(crate) fn eco_logistics_porc(&mut self, def: UnitDef, pos: Vec3, near: f32) -> Option<(TaskId, bool)> {
         let site = self.eco_build_site(def, pos, 0);
-        if !self.eco_factory_emergency_at(site) {
+        self.eco_logistics_porc_on(def, site, near)
+    }
+
+    /// [`Self::eco_logistics_porc`] at `pos` itself, or the legal site
+    /// within `slack` of it (a turret on a platform raised for it: the
+    /// nearest legal site may be off the top).
+    pub(crate) fn eco_logistics_porc_at(&mut self, def: UnitDef, pos: Vec3, slack: f32) -> Option<TaskId> {
+        let map = self.cb.map();
+        let site = if map.is_possible_to_build_at(def, pos, 0) {
+            pos
+        } else {
+            map.find_closest_build_site(def, pos, slack, 0, 0)
+        };
+        self.eco_logistics_porc_on(def, site, 0.0).map(|(t, _)| t)
+    }
+
+    fn eco_logistics_porc_on(&mut self, def: UnitDef, site: Vec3, near: f32) -> Option<(TaskId, bool)> {
+        let emergency = self.eco_factory_emergency_at(site);
+        if !self.eco_porc_site_allowed(def, site, emergency) {
             return None;
         }
         // What `eco_clean_orders` would drop at once: a blocked site, or one
@@ -289,15 +464,21 @@ impl Ai {
             .filter(|&id| self.eco.tasks.get(id).is_some_and(|t| t.as_construction().is_some()))
             .min_by(|&a, &b| distance(self.eco.task_pos(a), site).total_cmp(&distance(self.eco.task_pos(b), site)))
             .filter(|&id| distance(self.eco.task_pos(id), site) < near)
-            .filter(|&id| self.eco_factory_emergency_at(self.eco.task_pos(id)));
+            .filter(|&id| {
+                self.eco
+                    .tasks
+                    .get(id)
+                    .and_then(|t| t.as_construction())
+                    .is_some_and(|c| self.eco_porc_site_allowed(c.build_type, self.eco.task_pos(id), emergency))
+            });
         if let Some(id) = planned {
-            self.eco.tasks.get_mut(id)?.as_construction_mut()?.emergency_porc = true;
+            self.eco.tasks.get_mut(id)?.as_construction_mut()?.emergency_porc = emergency;
             return Some((id, true));
         }
         let mut ct = WorkerTask::construction(def, site, 0);
         if let Some(c) = ct.as_construction_mut() {
             c.frame_issued = self.frame;
-            c.emergency_porc = true;
+            c.emergency_porc = emergency;
         }
         self.eco_add_construction(ct, Some(List::Porc), Some(List::Porc)).map(|id| (id, false))
     }
@@ -328,10 +509,13 @@ impl Ai {
             return;
         };
         let position = worker.get_pos();
-        let (is_com, is_greedy, assigned_plop) = (worker.is_com, worker.is_greedy, worker.assigned_plop);
+        let (is_com, is_greedy, mut assigned_plop) = (worker.is_com, worker.is_greedy, worker.assigned_plop);
 
         // do we need a factory?
         let has_plop = worker.has_plop();
+        if has_plop && assigned_plop && self.eco_plop_lost(wid) {
+            assigned_plop = false;
+        }
         {
             let eco = &self.eco;
             // Income for factory timing, on the phase clock (`densgate`).
@@ -347,10 +531,19 @@ impl Ai {
                 || (frame > 900 && !has_plop && nfac < 1 + merged && no_fac_tasks)
                 // a factory a module asked for (that we have none of: it may be
                 // stale, asked for before one went up another way)
+                // (an air factory for tempo past the usual cap, with the room
+                // a factory of a new type gets)
                 || (eco.requisition.as_ref().is_some_and(|(f, _)| !self.eco_has_factory(f))
                     && phase_static > REQUISITION_INCOME
                     && nfac >= 1
-                    && ntech < 3 + merged
+                    && (ntech < 3 + merged
+                        || (eco.requisition.as_ref().is_some_and(|(_, why)| is_air_requisition(why))
+                            && (ntech as f32) < 1.0 + phase_static / NEW_FAC_PER))
+                    && no_fac_tasks)
+                // a plate in place of the air that stopped paying (cheap:
+                // no income gate)
+                || (eco.requisition.as_ref().is_some_and(|(f, why)| why.starts_with(AIR_STALL_WHY) && !self.eco_has_factory(f))
+                    && nfac >= 1
                     && no_fac_tasks)
                 || (phase_static > 50.0 && ntech == 1 && nnanos > 3 && no_fac_tasks)
                 // a factory of a new type, now and then
@@ -404,20 +597,23 @@ impl Ai {
         // mexes, and sinks triggered by free spots or by the metal float
         // never fired in time; by 15:00 this rule plus the second factory
         // already spend what buildpower 1.6 brings in.
-        let built =
-            self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() + self.eco.factory_tasks.len();
+        // Airpad caretakers (`padnano`) come on top of this budget.
+        let built = self.eco.nanos.len() + self.eco.nano_tasks.len() + self.fac.factories.len() - self.eco_pad_nanos()
+            + self.eco.factory_tasks.len();
         let want = (self.eco.static_income / 10.0).floor();
         if !self.fac.factories.is_empty()
             && (built as f32) < want
             && let Some(target) = self.eco_get_caretaker_target()
         {
-            self.eco_create_nano_turret_task(wid, target);
+            if !self.eco_first_production_plate(wid, target) {
+                self.eco_create_nano_turret_task(wid, target);
+            }
         }
 
         //do we need storages?
         if frame > 600
             && !self.fac.factories.is_empty()
-            && !self.eco_energy_starved()
+            && (!self.eco_energy_starved() || self.dev_off("storagegate"))
             && (self.eco.metal / self.eco.max_storage > 0.8
                 || ((self.eco.commanders.len() + self.eco.storages.len()) as i32) < 1 + self.merged_allies)
             && self.eco.storage_tasks.is_empty()
@@ -439,20 +635,58 @@ impl Ai {
             self.eco_create_air_pad_task(target);
         }
 
+        // do we need caretakers at the airpads? (`padnano`; airpads come
+        // only past 15 static income already)
+        if !self.dev_off("padnano")
+            && !self.eco.hard_estalled
+            && self.airstrike_fleet_metal() >= super::PAD_NANO_FLEET_METAL
+            && let Some(pad) = self
+                .eco
+                .airpads
+                .iter()
+                .copied()
+                .find(|p| p.health() > 0.0 && !p.is_being_built() && self.eco_nanos_on(p.id()) == 0)
+        {
+            let fleet = self.airstrike_fleet_metal();
+            self.eco_create_nano_turret_task(wid, pad);
+            if self.eco_nanos_on(pad.id()) > 0 {
+                self.log(&format!(
+                    "economy: airpad caretaker planned for pad {} (air fleet {fleet:.0} metal)",
+                    pad.id()
+                ));
+            }
+        }
+
         // do we need radar?
         if !is_com && self.eco.adjusted_income > 20.0 && !self.eco.hard_estalled {
             self.eco_create_radar_task(wid);
         }
 
+        // The posture's budget and sites (see `posture`): its own queue, not
+        // the rest's (its orders would crowd out theirs, and theirs its).
+        if self.posture_on() && self.eco.defended_fac {
+            // Shared gate sites spend the same posture budget. If none is
+            // safe or useful, retain its ordinary point-defense planner.
+            if self.dev_off("fortify") || !self.eco_defend_shared_chokes() {
+                self.eco_defend_posture();
+            }
+        }
         // Spend only at terrain gates and the fixed start-position bisector.
         if self.eco.defended_fac && (self.eco.porc_tasks.len() as f32) < self.fac.num_workers as f32 * 1.5 {
-            // The terrain analysis's chokepoints.
-            self.eco_defend_chokes();
+            // Without the posture, the terrain analysis's chokepoints.
+            if !self.posture_on() {
+                self.eco_defend_chokes();
+            }
             self.eco_defend_midline(position);
         }
 
-        // Pylons in the overdrive phase: the grid planner links the mexes
-        // (see `grid`).
+        // do we need pylons? (in the overdrive phase, see
+        // `eco_overdrive_phase`; it was two fusions). With `gridmex` the
+        // grid planner links the mexes instead (see `grid`).
+        if self.eco_overdrive_phase() && self.dev_off("gridmex") {
+            // (the C++ port lowered this from > 3, since grid requirements exist)
+            self.eco_create_grid_task(position);
+        }
 
         if self.eco.big_map
             && self.eco.super_weps.len() > 3
@@ -471,8 +705,13 @@ impl Ai {
         } else {
             self.eco_alliance_reactors()
         };
-        if self.eco_super_weapon_due(reactors) {
-            if reactors <= 4 {
+        // (`airstall`: nothing but air factories, air stalled and no ally's
+        // ground factory to plate: a superweapon whatever the reactors.)
+        let air_super = reactors <= 4 && self.eco_air_stall_super();
+        if self.eco_super_weapon_due(reactors, air_super) {
+            if air_super {
+                self.log("airstall: nothing but air factories and no allied ground factory to plate: a superweapon");
+            } else if reactors <= 4 {
                 self.log(&format!(
                     "economy: dense front ({:.0}), alliance income {:.0}; choosing a superweapon before five reactors",
                     self.war.front.ratchet,
@@ -564,10 +803,10 @@ impl Ai {
     }
 
     /// What a factory's exit must be clear for: the movement classes of its
-    /// units with the engine's slope map, `None` for the aircraft plants.
-    /// Spiders climb any slope, so only buildings wall the spider factory's
-    /// exit.
-    pub(super) fn eco_exit_check(&self, factory: UnitDef) -> Option<(Vec<MoveClass>, Vec<f32>)> {
+    /// units with the engine's slope map, and the metal their tier gets to
+    /// by connected ground; `None` for the aircraft plants. Spiders climb
+    /// any slope, so only buildings wall the spider factory's exit.
+    pub(super) fn eco_exit_check(&self, factory: UnitDef) -> Option<ExitCheck> {
         if !keeps_exit(self.defs.name(factory)) {
             return None;
         }
@@ -575,15 +814,43 @@ impl Ai {
             .filter(|d| d.speed() > 0.0 && !d.is_able_to_fly())
             .filter_map(move_class)
             .collect();
-        Some((classes, self.cb.map().slope_map()))
+        let reach = factory_tier(&self.fac_tech(factory)).filter(|_| !self.dev_off("facpit")).and_then(|tier| {
+            let map = self.reach_terrain()?.tier(tier)?;
+            let (mut metal, mut total) = (HashMap::new(), 0.0);
+            for s in &self.graph.metal_spots {
+                total += s.value;
+                if let Some(c) = map.component_near(terrain_pos(s.position), FACTORY_REACH) {
+                    *metal.entry(c).or_insert(0.0) += s.value;
+                }
+            }
+            let best = metal.values().copied().fold(0.0, f32::max);
+            (best > 0.0).then_some(ExitReach { tier, metal, total, best })
+        });
+        Some(ExitCheck { classes, slopes: self.cb.map().slope_map(), reach })
+    }
+
+    /// The share of the map's metal the units of a factory of type `def` at
+    /// `pos` get to from its yard, and whether that makes it a pit (see
+    /// `TRAPPED`); `None` when not known. The yard, not the door: a door
+    /// against a trench wall would find the ground on top of it. (The yard
+    /// is flat, buildable ground; the look for passable ground stays on
+    /// it.)
+    fn eco_exit_reach(&self, def: UnitDef, pos: Vec3, check: &ExitCheck) -> Option<(f32, bool)> {
+        let r = check.reach.as_ref()?;
+        let map = self.reach_terrain()?.tier(r.tier)?;
+        let yard = def.x_size().min(def.z_size()) as f32 * 4.0;
+        let share = r.share(map.component_near(terrain_pos(pos), yard));
+        Some((share, r.trapped(share)))
     }
 
     /// How blocked the exit of a factory of type `def` at `pos` facing
-    /// `facing` is, 0 when clear: the share of its lane one of `classes`
-    /// cannot drive over (off the map counts), plus one for each row across
-    /// the lane mostly blocked, and one for each building, queued job and
-    /// metal spot in it.
-    fn eco_exit_cost(&self, def: UnitDef, pos: Vec3, facing: i32, classes: &[MoveClass], slopes: &[f32]) -> f32 {
+    /// `facing` is, 0 when clear: the share of its lane one of the
+    /// `check`'s classes cannot drive over (off the map counts), plus one
+    /// for each row across the lane mostly blocked, and one for each
+    /// building, queued job and metal spot in it; `TRAPPED` more when it
+    /// stands in a pit.
+    fn eco_exit_cost(&self, def: UnitDef, pos: Vec3, facing: i32, check: &ExitCheck) -> f32 {
+        let (classes, slopes) = (&check.classes, &check.slopes);
         let lane = exit_lane(def, pos, facing);
         let inside = |p: Vec3, pad: f32| {
             p.x + pad > lane[0] && p.x - pad < lane[2] && p.z + pad > lane[1] && p.z - pad < lane[3]
@@ -644,6 +911,9 @@ impl Ai {
         if self.graph.get_closest_spot(centre).is_some_and(|s| inside(s.get_pos(), 24.0)) {
             cost += 1.0;
         }
+        if self.eco_exit_reach(def, pos, check).is_some_and(|(_, trapped)| trapped) {
+            cost += TRAPPED;
+        }
         cost
     }
 
@@ -656,7 +926,7 @@ impl Ai {
         def: UnitDef,
         pos: Vec3,
         order: [i32; 4],
-        exit: Option<&(Vec<MoveClass>, Vec<f32>)>,
+        exit: Option<&ExitCheck>,
     ) -> Option<(Vec3, i32, f32)> {
         let mut best: Option<(Vec3, i32, f32)> = None;
         for f in order {
@@ -665,7 +935,7 @@ impl Ai {
             if site.x < 0.0 || !self.eco_build_check(def, site, f) {
                 continue;
             }
-            let cost = exit.map_or(0.0, |(classes, slopes)| self.eco_exit_cost(def, site, f, classes, slopes));
+            let cost = exit.map_or(0.0, |check| self.eco_exit_cost(def, site, f, check));
             if cost < EXIT_CLEAR {
                 return Some((site, f, cost));
             }
@@ -682,13 +952,17 @@ impl Ai {
     /// when nothing fits. Also run from `init` for the pregame
     /// announcement, before any unit exists.
     pub(crate) fn eco_first_factory_site(&self, factory: UnitDef, from: Vec3) -> Option<(Vec3, i32)> {
+        let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
+        // Off where allies we give way to will plop (see `plop`).
+        let from = self.eco_plop_search_origin(factory, from, clearance + 20.0);
         let facings = self.eco_factory_facings(from);
         let facing = facings[0];
         let exit = self.eco_exit_check(factory);
         let mut best: Option<(Vec3, i32, f32)> = None;
+        // The best site found on an ally's plop, if none is clear of them.
+        let mut best_on_plop: Option<(Vec3, i32, f32)> = None;
         let map_center = self.graph.get_map_center();
         let closest_spot = |p: Vec3| self.graph.get_closest_spot(p).map(|s| s.get_pos());
-        let clearance = factory.x_size().max(factory.z_size()) as f32 * 4.0;
         for i in 1..=11 {
             let mut position = get_directional_point(from, map_center, clearance + 20.0);
             position = self.eco_build_site(factory, position, facing);
@@ -700,6 +974,7 @@ impl Ai {
                 || !self.cb.features_in(position, clearance).is_empty()
                 || closest.is_some_and(|c| distance(c, position) < 100.0)
                 || !self.eco_build_check(factory, position, 0)
+                || !self.eco_clear_of_allied_plops(factory, position, facing)
             {
                 if j > 5 {
                     break;
@@ -714,21 +989,34 @@ impl Ai {
                 closest = closest_spot(position);
             }
             // only for preventing stupid placement; then a way out for its units
-            if let Some(site) = self.eco_factory_exit(factory, position, facings, exit.as_ref())
-                && best.is_none_or(|b| site.2 < b.2)
-            {
-                best = Some(site);
+            if let Some(site) = self.eco_factory_exit(factory, position, facings, exit.as_ref()) {
+                let slot =
+                    if self.eco_clear_of_allied_plops(factory, site.0, site.1) { &mut best } else { &mut best_on_plop };
+                if slot.is_none_or(|b| site.2 < b.2) {
+                    *slot = Some(site);
+                }
             }
             if best.is_some_and(|b| b.2 < EXIT_CLEAR) {
                 break;
             }
         }
-        best.map(|(pos, face, _)| (pos, face))
+        best.or(best_on_plop).map(|(pos, face, _)| (pos, face))
+    }
+
+    fn eco_factory_expansion_waits(&self, is_plop: bool) -> bool {
+        !is_plop
+            && !self.fac.factories.is_empty()
+            && self.eco.dev_facs.is_empty()
+            && self.op.over.requisition.is_none()
+            && self.frame - self.eco.factory_opened_at.unwrap_or(0) < FACTORY_OPENING_TIME
     }
 
     fn eco_create_factory_task(&mut self, wid: i32, is_plop: bool) {
         let nfac = self.fac.factories.len();
         let merged = self.merged_allies;
+        if self.eco_factory_expansion_waits(is_plop) {
+            return;
+        }
         if is_plop && self.eco_wait_for_allied_plop() {
             return;
         }
@@ -811,18 +1099,24 @@ impl Ai {
         let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
         let mut timed_expansion = false;
 
-        if self.eco.potential_fac_list.is_empty() && reach_fac.is_none() && new_type.is_none() {
+        if self.eco.potential_fac_list.is_empty()
+            && reach_fac.is_none()
+            && new_type.is_none()
+            && self.rush_opening().is_none()
+        {
             self.eco.added_facs = false;
             return;
         }
 
         // Allies reserve types only for a plop. Keep the underlying viable
         // pool intact for retries, exhausted diversity and later factories.
-        let choices = if is_plop && self.eco.user_fac.is_empty() && self.eco.dev_pick.is_none() {
-            self.eco_plop_choices(&self.eco.potential_fac_list)
-        } else {
-            self.eco.potential_fac_list.clone()
-        };
+        // (A rusher's opening is the plan's: see `rush`.)
+        let choices =
+            if is_plop && self.eco.user_fac.is_empty() && self.eco.dev_pick.is_none() && !self.rush_binds_opening() {
+                self.eco_plop_choices(&self.eco.potential_fac_list)
+            } else {
+                self.eco.potential_fac_list.clone()
+            };
         let mut fac_name = String::new();
         let factory: Option<UnitDef>;
         // Keep the announced opening unless reach or allied diversity
@@ -848,6 +1142,11 @@ impl Ai {
             factory = self.defs.get(&dev_fac);
             self.eco.potential_fac_list.remove(&dev_fac);
             fac_name = dev_fac;
+        } else if let Some(rushed) = self.rush_opening().filter(|_| nfac == 0) {
+            // The rush commitment survives failed placement and candidate pruning.
+            fac_name = rushed.to_owned();
+            factory = self.defs.get(rushed);
+            self.eco.potential_fac_list.remove(rushed);
         } else if let Some(reach_fac) = reach_fac {
             factory = self.defs.get(&reach_fac);
             self.eco.potential_fac_list.remove(&reach_fac);
@@ -870,12 +1169,20 @@ impl Ai {
             factory = self.defs.get(&fac_name);
             self.eco.potential_fac_list.remove(&fac_name);
         } else if (nfac as i32) < 1 + merged.max(1) || has_striders || is_plop || self.eco.pylons.is_empty() {
+            // (The air factory for tempo weighs more as the game runs on.)
+            let (gunship, plane) = self.eco_air_tempo_weights();
             // An air plop only by its own roll above (see `plop`).
             let ground = choices.iter().any(|f| !super::plop::AIR_FACTORIES.contains(&f.as_str()));
-            let weight = |f: &str| if is_plop && ground && super::plop::AIR_FACTORIES.contains(&f) { 0.0 } else { 1.0 };
+            let weight = |f: &str| match f {
+                _ if is_plop && ground && super::plop::AIR_FACTORIES.contains(&f) => 0.0,
+                "factorygunship" => gunship,
+                "factoryplane" => plane,
+                _ => 1.0,
+            };
             fac_name = weighted_pick(&choices, weight, kgb_rand()).unwrap_or_default();
+            self.eco_air_tempo_rolled(&fac_name, weight(&fac_name));
             // The opening rolled at the start (the commander suits it).
-            if let Some(opening) = self.eco.opening.take().filter(|f| nfac == 0 && choices.contains(f)) {
+            if let Some(opening) = self.eco.opening.clone().filter(|f| nfac == 0 && choices.contains(f)) {
                 fac_name = opening;
             }
             factory = self.defs.get(&fac_name);
@@ -909,8 +1216,9 @@ impl Ai {
         // A type an ally has (standing or rising): a plate on theirs instead
         // (see `plate`). Else ours in our turn, so allies that want the
         // type at once do not each build one. Not the opening, nor while
-        // energy is what we lack.
-        if !is_plop && nfac > 0 && !self.eco_energy_starved() {
+        // energy is what we lack (but the air stall's 150-metal plate).
+        let stall_plate = asked.as_ref().is_some_and(|(f, why)| *f == fac_name && why.starts_with(AIR_STALL_WHY));
+        if !is_plop && nfac > 0 && (!self.eco_energy_starved() || stall_plate) {
             if let Some(id) = self.eco_plate_instead(wid, factory) {
                 if timed_expansion {
                     self.log(&format!("economy: a factory of a new type: {fac_name}"));
@@ -920,6 +1228,9 @@ impl Ai {
                     && *f == fac_name
                 {
                     self.logistics_factory(id, asked_value, why);
+                    if is_air_requisition(why) {
+                        self.eco.air_asked = true;
+                    }
                     self.eco.requisition = None;
                 }
                 return;
@@ -929,6 +1240,16 @@ impl Ai {
                 restore(self, &fac_name);
                 return;
             }
+        }
+        // The air stall asks for a plate; no plate (yet), no factory of our
+        // own for it (the requisition stays asked for, see `airstall`).
+        if stall_plate {
+            if self.frame - self.war.air.plate_logged >= 30 * 60 {
+                self.war.air.plate_logged = self.frame;
+                let why = self.eco_plate_blocked(wid, &fac_name);
+                self.log(&format!("airstall: no plate for the {fac_name} yet (worker {wid}): {why}"));
+            }
+            return;
         }
 
         let Some(wpos) = self.eco.workers.get(&wid).map(|w| w.get_pos()) else {
@@ -952,8 +1273,12 @@ impl Ai {
             (position, facing) = site;
         } else if self.fac.factories.is_empty() || is_plop {
             // Where the pregame announced it to allies, if it still fits.
-            let announced = (self.eco.opening_site.take())
-                .filter(|&(def, pos, face)| def.id() == factory.id() && self.eco_build_check(factory, pos, face))
+            let announced = (self.eco.opening_site)
+                .filter(|&(def, pos, face)| {
+                    def.id() == factory.id()
+                        && self.eco_build_check(factory, pos, face)
+                        && self.eco_clear_of_allied_plops(factory, pos, face)
+                })
                 .map(|(_, pos, face)| (pos, face));
             let Some(site) = announced.or_else(|| self.eco_first_factory_site(factory, wpos)) else {
                 restore(self, &fac_name);
@@ -1044,10 +1369,19 @@ impl Ai {
             && (is_plop || rebuild || !self.eco_energy_starved())
         {
             self.eco.rebuild_tried_at = None;
-            let exit_cost = (self.eco_exit_check(factory))
-                .map_or(0.0, |(classes, slopes)| self.eco_exit_cost(factory, position, facing, &classes, &slopes));
+            let check = self.eco_exit_check(factory);
+            let exit_cost = check.as_ref().map_or(0.0, |c| self.eco_exit_cost(factory, position, facing, c));
+            let reach = (check.as_ref().and_then(|c| self.eco_exit_reach(factory, position, c)))
+                .map(|(share, trapped)| {
+                    format!(
+                        ", its units get to {:.0}% of the metal{}",
+                        share * 100.0,
+                        if trapped { " (a pit)" } else { "" }
+                    )
+                })
+                .unwrap_or_default();
             self.log(&format!(
-                "economy: {} at ({:.0}, {:.0}) facing {facing} (map middle: {}), exit cost {exit_cost:.2}",
+                "economy: {} at ({:.0}, {:.0}) facing {facing} (map middle: {}), exit cost {exit_cost:.2}{reach}",
                 self.defs.name(factory),
                 position.x,
                 position.z,
@@ -1064,6 +1398,11 @@ impl Ai {
             let id = self.eco.tasks.insert(ct);
             self.eco.construction_tasks.push(id);
             self.eco.factory_tasks.push(id);
+            if nfac == 0 {
+                // A placement attempt is not yet a committed construction task.
+                self.eco.opening = None;
+                self.eco.opening_site = None;
+            }
             // Selecting a type is only an attempt. Failed siting, reachability
             // or energy checks must leave the timed request pending.
             if timed_expansion {
@@ -1079,6 +1418,9 @@ impl Ai {
                 && *f == fac_name
             {
                 self.logistics_factory(id, asked_value, why);
+                if is_air_requisition(why) {
+                    self.eco.air_asked = true;
+                }
                 self.eco.requisition = None;
             }
         } else {
@@ -1111,14 +1453,14 @@ impl Ai {
         self.eco_add_simple(aa, position, List::Porc, Some(List::Aa));
     }
 
-    fn eco_super_weapon_due(&self, reactors: usize) -> bool {
+    fn eco_super_weapon_due(&self, reactors: usize, air_super: bool) -> bool {
         if self.eco.chose_sup_wep
             || self.eco_energy_starved()
             || (self.merged_allies > 0 && !(self.eco.has_striders && self.fac.num_striders > 1))
         {
             return false;
         }
-        if reactors > 4 {
+        if reactors > 4 || air_super {
             return true;
         }
         let income = self.eco.static_income * self.intel_alliance_scale();
@@ -1289,19 +1631,12 @@ impl Ai {
     /// (from `from`, by the terrain model's tiers; aircraft get everywhere)
     /// than the best one's do.
     fn eco_weigh_factories_by_reach(&mut self, from: Vec3) {
-        let Some(terrain) = self.reach_terrain() else { return };
-        let reaches = |tier: Tier, p: Vec3| {
-            terrain.tier(tier).is_none_or(|m| m.connected(terrain_pos(from), terrain_pos(p), FACTORY_REACH))
-        };
-        let spots = &self.graph.metal_spots;
-        let share = |tier: Tier| {
-            let (total, reached) = spots
-                .iter()
-                .fold((0.0, 0.0), |(t, r), s| (t + s.value, if reaches(tier, s.position) { r + s.value } else { r }));
-            if total > 0.0 { reached / total } else { 1.0 }
-        };
-        let candidates: Vec<(String, f32)> =
-            self.eco.potential_fac_list.iter().filter_map(|f| Some((f.clone(), share(factory_tier(f)?)))).collect();
+        if self.reach_terrain().is_none() {
+            return;
+        }
+        let candidates: Vec<(String, f32)> = (self.eco.potential_fac_list.iter())
+            .filter_map(|f| Some((f.clone(), self.eco_reach_share(from, factory_tier(f)?))))
+            .collect();
         let best = candidates.iter().map(|c| c.1).fold(0.0, f32::max);
         let out: Vec<String> = candidates.iter().filter(|c| c.1 < REACH_RIVAL * best).map(|c| c.0.clone()).collect();
         if !out.is_empty() {
@@ -1311,6 +1646,70 @@ impl Ai {
                 self.eco.potential_fac_list.remove(&f);
             }
         }
+    }
+
+    /// The share of the map's metal (by value) units of `tier` get to from
+    /// `from`, by the terrain model; 1 without a model of that tier (or
+    /// without metal).
+    pub(crate) fn eco_reach_share(&self, from: Vec3, tier: Tier) -> f32 {
+        let Some(map) = self.reach_terrain().and_then(|t| t.tier(tier)) else { return 1.0 };
+        let (total, reached) = self.graph.metal_spots.iter().fold((0.0, 0.0), |(t, r), s| {
+            let near = map.connected(terrain_pos(from), terrain_pos(s.position), FACTORY_REACH);
+            (t + s.value, if near { r + s.value } else { r })
+        });
+        if total > 0.0 { reached / total } else { 1.0 }
+    }
+
+    /// Before the game, once the start is chosen (`comreach`, on): the
+    /// opening factory weighed by reach from the start as the first factory
+    /// is (see `eco_weigh_factories_by_reach`), and rolled again when ruled
+    /// out; and whether the commander, walking, would be penned in there:
+    /// it gets to less than `REACH_RIVAL` of what the best-placed movement
+    /// tier gets to. Altair Crossing 3v3 (2026-11-04): a start on a corner
+    /// plateau with 2% of the metal for bots rolled an Amphibious Complex,
+    /// so an Engineer was picked; at frame 9 the reach check left only the
+    /// Spider Factory, and the Engineer never got off the plateau.
+    pub(crate) fn eco_opening_in_reach(&mut self, opening: Option<String>) -> (Option<String>, bool) {
+        if self.dev_off("comreach") {
+            return (opening, false);
+        }
+        let start = self.graph.get_start_pos();
+        if start.is_zero() {
+            return (opening, false);
+        }
+        if !self.terrain_wait(COMREACH_WAIT) {
+            self.log("economy: no terrain model before the start; opening and commander as rolled");
+            return (opening, false);
+        }
+        self.eco_weigh_factories_by_reach(start);
+        let mut opening = opening;
+        // (A chosen factory or a rusher's opening stays.)
+        if self.eco.user_fac.is_empty()
+            && !self.rush_binds_opening()
+            && let Some(was) = opening.clone().filter(|f| !self.eco.potential_fac_list.contains(f))
+        {
+            opening = self.eco_roll_opening();
+            self.log(&format!(
+                "economy: opening {was} ruled out by reach from the start; {} instead",
+                opening.as_deref().unwrap_or("none")
+            ));
+        }
+        let walker = (self.defs.get("dyntrainer_support_base").and_then(crate::terrain::tier_of)).unwrap_or(Tier::Bot);
+        let walks = self.eco_reach_share(start, walker);
+        let best = [Tier::Spider, Tier::Bot, Tier::Vehicle, Tier::Hover, Tier::Amphib]
+            .into_iter()
+            .map(|t| self.eco_reach_share(start, t))
+            .fold(0.0, f32::max);
+        let penned = walks < REACH_RIVAL * best;
+        if penned {
+            self.log(&format!(
+                "economy: a walking commander gets to {:.0}% of the metal from the start ({:.0}% the best tier): \
+                 one that jumps",
+                walks * 100.0,
+                best * 100.0
+            ));
+        }
+        (opening, penned)
     }
 
     /// The factory whose units get to most of the metal we do not hold and
@@ -1376,7 +1775,14 @@ impl Ai {
         if types.is_empty() {
             return None;
         }
-        weighted_pick(&types.into_iter().collect(), |_: &str| 1.0, kgb_rand())
+        // (The air factory for tempo weighs more as the game runs on.)
+        let (gunship, plane) = self.eco_air_tempo_weights();
+        let weight = |f: &str| match f {
+            "factorygunship" => gunship,
+            "factoryplane" => plane,
+            _ => 1.0,
+        };
+        weighted_pick(&types.into_iter().collect(), weight, kgb_rand())
     }
 
     fn eco_reach_gap(&self) -> Option<(&'static str, f32, f32)> {
@@ -1426,6 +1832,15 @@ impl Ai {
     pub(crate) fn eco_roll_opening(&mut self) -> Option<String> {
         // Decided first: the starts of the others depend on it too.
         self.eco.water_side = self.eco_water_side();
+        // A rush (see `rush`) is planned now, since the starts depend on it
+        // too: its rusher opens with the heavy's factory, which the others
+        // leave to it.
+        self.rush_plan();
+        if let Some(f) = self.rush_opening() {
+            self.eco.opening = Some(f.to_owned());
+            return self.eco.opening.clone();
+        }
+        let rushed = self.rush_planned_factory();
         if !self.eco.user_fac.is_empty() {
             return Some(self.eco.user_fac.clone());
         }
@@ -1459,6 +1874,7 @@ impl Ai {
         let rest: Vec<&String> = (list.iter())
             .filter(|f| !super::plop::AIR_FACTORIES.contains(&f.as_str()))
             .filter(|f| !(others_water && super::plop::WATER_FACTORIES.contains(&f.as_str())))
+            .filter(|f| rushed != Some(f.as_str()))
             .collect();
         let pick = |v: &[&str]| v[((kgb_rand() * v.len() as f64) as usize).min(v.len() - 1)].to_owned();
         let roll = if list.contains("factoryship") && !others_water && kgb_rand() < 0.5 {
@@ -1479,6 +1895,9 @@ impl Ai {
     /// The factory a module wants, why, and what that answers in metal
     /// (for `logistics`).
     fn eco_find_requisition(&self) -> Option<(String, String, f32)> {
+        if let Some(r) = self.eco_air_stall_requisition() {
+            return Some(r);
+        }
         if let Some((f, gap, fills)) = self.eco_reach_gap() {
             // The metal out of reach, as income over a payback period.
             let value = gap * self.eco.static_income * crate::logistics::PAYBACK;
@@ -1529,6 +1948,11 @@ impl Ai {
                 self.intel.unaccounted().max(0.0),
             ));
         }
+        // (Ahead of the Widow scout, which otherwise takes the second
+        // factory in nearly every game.)
+        if let Some(r) = self.eco_air_fire() {
+            return Some(r);
+        }
         let scouts = self.scouts_policy();
         if !self.dev_off("scouts") && scouts.owls > 0 && !owned("factoryplane") {
             return Some((
@@ -1574,7 +1998,146 @@ impl Ai {
                 prospect,
             ));
         }
-        None
+        self.eco_air_tempo()
+    }
+
+    /// The air tempo dose now (see [`AIR_TEMPO_SHARE`]); zero when off.
+    fn eco_air_tempo_dose(&self) -> f32 {
+        if self.dev_off("airtempo") {
+            return 0.0;
+        }
+        air_tempo_dose(self.phase_minutes(), self.map_diag)
+    }
+
+    /// The enemy's standing value (the production estimate less what
+    /// died, or at least what we have seen and not seen die), the static
+    /// anti-air seen, and whether that or the enemy's air force calls for
+    /// planes rather than gunships.
+    fn eco_air_tempo_enemy(&self) -> (f32, f32, bool) {
+        let (mut seen, mut static_aa) = (0.0f32, 0.0f32);
+        for e in self.war.targets.values().filter(|e| e.identified && !e.is_dead) {
+            seen += e.value;
+            if e.is_static && e.is_aa {
+                static_aa += e.value;
+            }
+        }
+        let enemy = (self.intel.produced - self.intel.killed).max(seen);
+        let planes = static_aa >= AIR_TEMPO_AA_PLANES || self.war.max_enemy_air_value >= AIR_TEMPO_AIR_PLANES;
+        (enemy, static_aa, planes)
+    }
+
+    /// The weights of the gunship and the plane factory in the ordinary
+    /// switch's roll (every other candidate weighs 1): the one air tempo
+    /// prefers at 1 + `AIR_TEMPO_PICK` x dose.
+    fn eco_air_tempo_weights(&self) -> (f64, f64) {
+        let dose = self.eco_air_tempo_dose();
+        if dose <= 0.0 {
+            return (1.0, 1.0);
+        }
+        let w = 1.0 + f64::from(AIR_TEMPO_PICK * dose);
+        if self.eco_air_tempo_enemy().2 { (1.0, w) } else { (w, 1.0) }
+    }
+
+    /// Log an air factory the ordinary switch rolled with air tempo's
+    /// weight on it.
+    fn eco_air_tempo_rolled(&self, name: &str, weight: f64) {
+        if weight > 1.0 && matches!(name, "factorygunship" | "factoryplane") {
+            self.log(&format!(
+                "economy: {AIR_TEMPO_WHY} {:.2} weighed the roll: {name} at {weight:.1} to 1 ({:.0} min, map diagonal {:.0})",
+                self.eco_air_tempo_dose(),
+                self.frame as f32 / 1800.0,
+                self.map_diag
+            ));
+        }
+    }
+
+    /// Whether an air factory may be asked for: none stands or is going
+    /// up, and none was asked for this way before.
+    fn eco_air_open(&self) -> bool {
+        !self.eco.air_asked && !self.eco_has_factory("factorygunship") && !self.eco_has_factory("factoryplane")
+    }
+
+    /// An air factory for the firefighters (see [`AIR_FIRE_WHY`]): which,
+    /// why, and what it is worth in metal.
+    fn eco_air_fire(&self) -> Option<(String, String, f32)> {
+        use crate::military::firefighters::{MEMORY, UNANSWERED_DIST, WANTED_AT};
+        if self.dev_off("airfire") || self.dev_off("firefighters") || !self.eco_air_open() {
+            return None;
+        }
+        let (weight, metal) = self.firefighters_unanswered();
+        if weight < WANTED_AT {
+            return None;
+        }
+        let value = metal * crate::logistics::PAYBACK / (MEMORY as f32 / 30.0);
+        let (_, static_aa, planes) = self.eco_air_tempo_enemy();
+        let name = if planes { "factoryplane" } else { "factorygunship" };
+        self.defs.get(name)?;
+        let kind = if planes {
+            format!(
+                "planes, past {static_aa:.0} metal of anti-air and {:.0} of aircraft seen",
+                self.war.max_enemy_air_value
+            )
+        } else {
+            "gunships".to_owned()
+        };
+        Some((
+            name.to_owned(),
+            format!(
+                "{AIR_FIRE_WHY} {weight:.1}: {metal:.0} metal of mexes and power lost to raids in the last {:.0} min with no \
+                 home defense team within {UNANSWERED_DIST:.0}; firefighters, {kind}",
+                MEMORY as f32 / 1800.0
+            ),
+            value,
+        ))
+    }
+
+    /// An air factory for tempo (see [`AIR_TEMPO_SHARE`]): which, why, and
+    /// what it is worth in metal; none while one stands or is going up,
+    /// after one was taken this way, or before it pays for itself.
+    fn eco_air_tempo(&self) -> Option<(String, String, f32)> {
+        if !self.eco_air_open() {
+            return None;
+        }
+        let dose = self.eco_air_tempo_dose();
+        if dose <= 0.0 {
+            return None;
+        }
+        let (enemy, static_aa, planes) = self.eco_air_tempo_enemy();
+        // Our share of the enemy: of its army seen, what is ours to answer
+        // (see `military::Faced`); an even share before any is seen.
+        let share = if self.allies.is_empty() {
+            1.0
+        } else if self.war.enemy_fighter_value > 0.0 {
+            self.war.faced.fighter / self.war.enemy_fighter_value
+        } else {
+            1.0 / (1 + self.allies.len()) as f32
+        };
+        let enemy = enemy * share;
+        let value = AIR_TEMPO_SHARE * enemy * dose;
+        let name = if planes { "factoryplane" } else { "factorygunship" };
+        let cost = self.defs.get(name)?.cost(self.metal);
+        if value < cost {
+            return None;
+        }
+        let kind = if planes {
+            format!(
+                "planes, past {static_aa:.0} metal of anti-air and {:.0} of aircraft seen",
+                self.war.max_enemy_air_value
+            )
+        } else {
+            "gunships".to_owned()
+        };
+        Some((
+            name.to_owned(),
+            format!(
+                "{AIR_TEMPO_WHY} {dose:.2} ({:.0} min, map diagonal {:.0}): {:.0}% of the enemy's {enemy:.0} metal \
+                 standing is what aircraft would convert; {kind}",
+                self.frame as f32 / 1800.0,
+                self.map_diag,
+                100.0 * AIR_TEMPO_SHARE
+            ),
+            value,
+        ))
     }
 
     /// An Urchin where enemies were seen under water lately, by the nearest
@@ -1654,6 +2217,15 @@ impl Ai {
         if !self.eco_porc_admissible(def, position, false) {
             return;
         }
+        // As many of its kind about as `porcmix` lets stand: the ring's
+        // hundred tries would all be refused.
+        let name = self.defs.name(def);
+        if super::porcmix::is_mixed(name)
+            && !self.dev_off(super::porcmix::FEATURE)
+            && self.eco_turret_kinds(position, radius).get(name).copied().unwrap_or(0) >= super::porcmix::kind_cap(name)
+        {
+            return;
+        }
         if extra == Some(List::Porc)
             && self.eco_share_point_defense(
                 def,
@@ -1706,7 +2278,7 @@ impl Ai {
     }
 
     pub(super) fn eco_defend_mex(&mut self, position: Vec3) {
-        if !self.op_porc_allowed(position) {
+        if !self.eco_mex_porc_allowed(position) {
             return;
         }
         let turret = self.eco_light_turret();
@@ -1732,7 +2304,7 @@ impl Ai {
     }
 
     pub(super) fn eco_fortify_mex(&mut self, position: Vec3, wd: Option<WeaponDef>) {
-        if !self.op_porc_allowed(position) {
+        if !self.eco_mex_porc_allowed(position) {
             return;
         }
         let porc;
@@ -1940,6 +2512,220 @@ impl Ai {
         }
     }
 
+    /// Metal in our fixed defenses: built, and under way or planned.
+    pub(crate) fn eco_defense_value(&self) -> f32 {
+        let built: f32 = self.eco.porcs.iter().filter_map(|u| u.def()).map(|d| d.cost(self.metal)).sum();
+        let planned: f32 = (self.eco.porc_tasks.iter())
+            .filter_map(|&id| self.eco.tasks.get(id).and_then(|t| t.as_construction()))
+            .filter(|c| c.target.is_none_or(|u| !self.eco.porcs.iter().any(|p| p.id() == u.id())))
+            .map(|c| c.build_type.cost(self.metal))
+            .sum();
+        built + planned
+    }
+
+    /// Spend the posture's budget (see `posture`): one turret per call while
+    /// the posture's own turrets hold less than their share, where it takes
+    /// the most raid exposure off our metal per metal.
+    ///
+    /// A spot's exposure is its worth (an owned mex 1, a spot on our side
+    /// not yet taken a quarter) by how near the enemy it is, halved by every
+    /// turret covering it (any turret, the rest of the AI's too): one within
+    /// [`POINT_COVER`] of it, or one at the front site its raid route crosses
+    /// (see `zk_terrain::lanes`). A front site takes half the exposure of
+    /// every spot routed through it, a point site half of its mex's and its
+    /// neighbours': chokepoints win where many routes cross, point defense
+    /// for a mex no front guards.
+    fn eco_defend_posture(&mut self) {
+        if self.eco.adjusted_income < 6.0 || self.posture_deficit() <= 0.0 {
+            return;
+        }
+        // At most so many orders waiting for a crew.
+        if self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize {
+            return;
+        }
+        let enemy = self.graph.get_enemy_center();
+        if enemy.is_zero() {
+            return;
+        }
+        let spots: Vec<(Vec3, bool)> = self.graph.metal_spots.iter().map(|s| (s.position, s.owned)).collect();
+        let metal: Vec<f32> = self.graph.metal_spots.iter().map(|s| s.value).collect();
+        let mean_metal = (metal.iter().sum::<f32>() / metal.len().max(1) as f32).max(0.01);
+        let decisive = self.posture.decisive();
+        let lanes = decisive.filter(|_| self.posture.laneness() > 0.0);
+        let ours = |i: usize| lanes.is_some_and(|l| l.ours.get(i).copied().unwrap_or(false));
+        // How far a raid has to come: by ground from the enemy's start where
+        // the lanes measured it (a maze corner is far by any route), else
+        // as the crow flies from their center.
+        let reach = |i: usize| {
+            decisive
+                .and_then(|l| l.enemy_ground.get(i).copied())
+                .filter(|d| d.is_finite())
+                .unwrap_or_else(|| distance(spots[i].0, enemy))
+        };
+        let worth: Vec<f32> = (0..spots.len())
+            .map(|i| {
+                let near = (EXPOSURE_REF / reach(i).max(EXPOSURE_REF * 0.25)).min(4.0);
+                let w = if spots[i].1 {
+                    1.0
+                } else if ours(i) {
+                    FUTURE_WORTH
+                } else {
+                    0.0
+                };
+                w * near * metal[i] / mean_metal
+            })
+            .collect();
+        // Front sites: (site, width per site, spots routed through it).
+        let fronts: Vec<(Vec3, f32, Vec<usize>)> = lanes
+            .map(|l| {
+                (l.perimeter.fronts.iter())
+                    .flat_map(|f| {
+                        let width = f.span / f.sites.len().max(1) as f32;
+                        (f.sites.iter().zip(&f.routes)).map(move |(s, r)| (Vec3::xz(s.x, s.z), width, r.clone()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // Turrets covering each spot.
+        let mut cover: Vec<u32> = spots.iter().map(|&(p, _)| self.eco_porc_count(p, POINT_COVER) as u32).collect();
+        for (site, _, routed) in &fronts {
+            let n = self.eco_porc_count(*site, CHOKE_PORC_RADIUS) as u32;
+            for &i in routed {
+                if let Some(c) = cover.get_mut(i) {
+                    *c += n;
+                }
+            }
+        }
+        let left = |i: usize| worth[i] * 0.5f32.powi(cover[i].min(16) as i32);
+        // Not naked, not much more (user, 2026-10-26): no site where two of
+        // our turrets' Lotus circles already meet.
+        let safe = |ai: &Ai, p: Vec3| {
+            ai.war.get_porc_threat(p) <= 0.0
+                && ai.war.get_effective_threat(p) <= ai.war.get_total_friendly_threat(p)
+                && !ai.posture_shuns(p)
+                && ai.eco_porc_count(p, LOTUS_REACH) < MAX_OVERLAP
+        };
+        let budget = self.posture_deficit();
+        // Candidates: (gain per metal, gain, site, zone radius, front width
+        // or none for a point, how far the turret may stand from the site).
+        let mut candidates: Vec<(f32, f32, Vec3, f32, Option<f32>, f32)> = Vec::new();
+        for (site, width, routed) in &fronts {
+            let gain: f32 = routed.iter().map(|&i| 0.5 * left(i)).sum();
+            if gain >= MIN_GAIN && safe(self, *site) {
+                candidates.push((0.0, gain, *site, CHOKE_PORC_RADIUS, Some(*width), CHOKE_PORC_RADIUS * 0.6));
+            }
+        }
+        for (i, &(p, owned)) in spots.iter().enumerate() {
+            if !owned || worth[i] <= 0.0 {
+                continue;
+            }
+            let gain: f32 = (0..spots.len())
+                .filter(|&j| spots[j].1 && distance(spots[j].0, p) < POINT_COVER)
+                .map(|j| 0.5 * left(j))
+                .sum();
+            // From the value towards the enemy: between the mex and where
+            // a raid on it comes from.
+            let site = get_directional_point(p, enemy, POINT_FORWARD);
+            if gain >= MIN_GAIN && safe(self, site) {
+                // Within [`POINT_SHIFT`] of the site, so well inside the
+                // cover that counts it (a turret pushed out of it was never
+                // counted, and the spot drew turret after turret: fourteen
+                // Lotuses in a Hide and Seek corner).
+                candidates.push((0.0, gain, site, POINT_COVER, None, POINT_SHIFT));
+            }
+        }
+        // Each candidate's turret: the zone's next kind (see `ZONE_MIX`).
+        let mut priced: Vec<(f32, f32, Vec3, UnitDef, bool, f32)> = (candidates.into_iter())
+            .filter_map(|(_, gain, site, radius, width, shift)| {
+                let turret = self.eco_zone_turret(site, radius, width, budget)?;
+                Some((gain / turret.cost(self.metal).max(1.0), gain, site, turret, width.is_some(), shift))
+            })
+            .collect();
+        priced.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, gain, site, turret, front, shift) in priced.into_iter().take(PLACE_TRIES) {
+            // Spread out: no turret of ours within [`TURRET_SPACING`].
+            let Some(at) = self.eco_spaced_site(turret, site, shift) else { continue };
+            // Unstamped (`frame_issued` 0): stamped porc nobody took up is
+            // dropped after 20 s (`eco_clean_orders`), before a crew from
+            // far away can get there; the posture's ledger keeps its own
+            // time.
+            let Some(task) = self.eco_add_simple(turret, at, List::Porc, Some(List::Porc)) else { continue };
+            let cost = turret.cost(self.metal);
+            if front {
+                self.posture.stats.front_orders += 1;
+            } else {
+                self.posture.stats.point_orders += 1;
+            }
+            let why = format!(
+                "posture: {} {} takes {:.2} spot-exposure off ({:.0}% share)",
+                if front { "front" } else { "point" },
+                turret.name(),
+                gain,
+                self.posture.share * 100.0
+            );
+            self.posture_ordered(task, at, cost, cost * POSTURE_WORTH, &why);
+            return;
+        }
+    }
+
+    /// The next turret for a posture zone (within `radius` of `at`): the
+    /// first kind of [`ZONE_MIX`] the income allows, the zone has fewer
+    /// than [`SAME_KIND`] of (built or planned), and `budget` covers (a
+    /// Lotus always fits). A narrow front (`width` under 250) starts with
+    /// the riot turret.
+    fn eco_zone_turret(&self, at: Vec3, radius: f32, width: Option<f32>, budget: f32) -> Option<UnitDef> {
+        let income = self.eco.adjusted_income;
+        let mut kinds: Vec<&(&str, f32)> = ZONE_MIX.iter().collect();
+        if width.is_some_and(|w| w < 250.0) {
+            kinds.sort_by_key(|(name, _)| *name != "turretriot");
+        }
+        let count = |id: i32| {
+            let built = (self.eco.porcs.iter())
+                .filter(|u| distance(u.pos(), at) < radius && u.def().is_some_and(|d| d.id() == id))
+                .count();
+            let planned = (self.eco.porc_tasks.iter())
+                .filter(|&&t| distance(self.eco.task_pos(t), at) < radius)
+                .filter(|&&t| {
+                    self.eco.tasks.get(t).and_then(|t| t.as_construction()).is_some_and(|c| c.build_type.id() == id)
+                })
+                .count();
+            built + planned
+        };
+        let lotus = self.defs.get("turretlaser").map_or(90.0, |d| d.cost(self.metal));
+        (kinds.into_iter())
+            .filter(|(_, wants)| income >= *wants)
+            .filter_map(|(name, _)| self.defs.get(name))
+            .find(|d| count(d.id()) < SAME_KIND && d.cost(self.metal) <= budget.max(lotus))
+    }
+
+    /// A legal site for `def` within `shift` of `near` with no turret of
+    /// ours (built or planned) within [`TURRET_SPACING`]: splash then hits
+    /// one at a time. Tries rings round `near`, nearest first.
+    fn eco_spaced_site(&self, def: UnitDef, near: Vec3, shift: f32) -> Option<Vec3> {
+        let others: Vec<Vec3> = (self.eco.porcs.iter().map(|u| u.pos()))
+            .chain(self.eco.porc_tasks.iter().map(|&t| self.eco.task_pos(t)))
+            .collect();
+        let map = self.cb.map();
+        let mut r = 0.0;
+        while r <= shift {
+            let steps = if r == 0.0 { 1 } else { 8 };
+            for k in 0..steps {
+                let a = k as f32 * std::f32::consts::TAU / steps as f32;
+                let p = Vec3::new(near.x + r * a.cos(), near.y, near.z + r * a.sin());
+                let site = map.find_closest_build_site(def, p, 48.0, 3, 0);
+                if site.x < 0.0 || distance(site, near) > shift {
+                    continue;
+                }
+                let overlap = others.iter().filter(|&&o| distance(o, site) < LOTUS_REACH).count();
+                if overlap < MAX_OVERLAP && others.iter().all(|&o| distance(o, site) >= TURRET_SPACING) {
+                    return Some(site);
+                }
+            }
+            r += 70.0;
+        }
+        None
+    }
+
     /// The `nth` turret for a chokepoint `width` elmos wide: a riot turret
     /// for narrow gates or an LLT first, then an HLT, then heavier porc.
     fn eco_choke_turret(&self, width: f32, nth: usize) -> Option<UnitDef> {
@@ -2005,8 +2791,9 @@ impl Ai {
 
         for position in spots {
             // A spot an ally queued a mex at in the pregame is the ally's
-            // (see `iq`): no task for it, and one made before the queue
-            // arrived is dropped, until the claim lapses.
+            // (see `iq`; one our queue holds too goes by team order): no
+            // task for it, and one made before the queue arrived is
+            // dropped, until the claim lapses.
             if let Some(team) = self.iq_spot_claimed(position) {
                 if self.iq_note_skipped(position) {
                     self.log(&format!(
@@ -2037,6 +2824,58 @@ impl Ai {
                     self.eco.construction_tasks.push(id);
                 }
             }
+        }
+        self.eco_adopt_own_mex_frames(mex);
+    }
+
+    /// A job for each mex frame of ours that no job builds. Dropping a
+    /// job does not stop its worker, so a worker near the site can still
+    /// put the frame down before its next order. In team games this happens
+    /// at the start: a pregame spot that an ally's queue claims is dropped,
+    /// and a commander that starts beside the spot starts the mex anyway.
+    /// The frame makes the spot ours (`graph_unit_created`), so the capture
+    /// loop above never makes a job for it, and allies leave a frame this
+    /// cheap alone ([`super::allied::ASSIST_LEFT`]). On Adamantine Mountain 2
+    /// (3v3), two such frames in the shared base stayed at 1-5% all game.
+    fn eco_adopt_own_mex_frames(&mut self, mex: UnitDef) {
+        let frames: Vec<(Vec3, Unit)> = (self.graph.metal_spots.iter())
+            .filter_map(|ms| ms.extractor.map(|u| (ms.position, u)))
+            .filter(|&(_, u)| {
+                u.team() == self.team_id
+                    && u.health() > 0.0
+                    && u.is_being_built()
+                    && u.def().is_some_and(|d| d.id() == mex.id())
+            })
+            .collect();
+        for (position, u) in frames {
+            // A job at the spot not yet aimed at the frame gets it in
+            // `eco_clean_orders`.
+            let has_job = (self.eco.construction_tasks.iter()).any(|&id| {
+                self.eco.tasks.get(id).is_some_and(|t| {
+                    t.as_construction().is_some_and(|c| {
+                        c.target == Some(u)
+                            || (c.target.is_none()
+                                && c.build_type.id() == mex.id()
+                                && distance(t.position, position) < 1.0)
+                    })
+                })
+            });
+            if has_job || self.war.get_porc_threat(position) > 0.0 {
+                continue;
+            }
+            self.log(&format!(
+                "economy: our mex frame at ({:.0},{:.0}) ({:.0}% built) had no job: one made",
+                position.x,
+                position.z,
+                100.0 * u.build_progress()
+            ));
+            let mut ct = WorkerTask::construction(mex, position, 0);
+            if let Some(c) = ct.as_construction_mut() {
+                c.target = Some(u);
+                c.frame_issued = self.frame;
+            }
+            let id = self.eco.tasks.insert(ct);
+            self.eco.construction_tasks.push(id);
         }
     }
 
@@ -2165,13 +3004,30 @@ impl Ai {
             .filter(|&&ft| eco.tasks.get(ft).and_then(|t| t.as_construction()).is_some_and(|c| c.target.is_some()))
             .count() as i32;
         let (nft, nfus) = (eco.fusion_tasks.len() as i32, eco.fusions.len() as i32);
-        // Which plants the economy may build: a fusion from 35 metal income
-        // with eminent territory (40% of the spots owned), a singularity from
-        // three fusions with it. (An income and density ladder, `ecoladder`,
-        // lost the 2026-10-27 Eye of Horus mirror and was removed.)
-        let eminent = self.graph.eminent_territory;
-        let (fusion_open, singu_open, allowed) =
-            (eco.effective_income > 35.0 && eminent, nfus > 2 && eminent, (eco.static_income / 27.5).floor());
+        // Which plants the economy may build. The old ladder wanted eminent
+        // territory (40% of the spots owned, rare on a contested map) and 35
+        // energy for a fusion, three fusions for a singularity; geothermal
+        // and wind counted for nothing. The plants are for overdrive (a
+        // surplus), so they open with the economy instead (user,
+        // 2026-10-26): fusions from [`FUSION_INCOME`], singularities from
+        // [`SINGU_ENERGY`] energy income or two fusions, or either from the
+        // map's density. Off by default since 2026-10-27 (`enable=ecoladder`,
+        // see `ai::OFF_BY_DEFAULT`): the old ladder.
+        // Density opens them too, on any income (a 16v16 on a small map):
+        // standing metal per usable area (see `posture`), one fusion per
+        // density reference, a singularity from twice it.
+        let dense = self.posture.density / self.posture_levers().density_ref.max(1.0);
+        let (fusion_open, singu_open, allowed) = if self.dev_off("ecoladder") {
+            let eminent = self.graph.eminent_territory;
+            (eco.effective_income > 35.0 && eminent, nfus > 2 && eminent, (eco.static_income / 27.5).floor())
+        } else {
+            let fusions = (eco.fusions.iter()).filter(|u| self.defs.name_of(**u) == "energyfusion").count();
+            (
+                eco.static_income > FUSION_INCOME || dense >= 1.0,
+                eco.effective_income_energy >= SINGU_ENERGY || fusions >= 2 || dense >= 2.0,
+                (eco.static_income / 27.5).floor().max(dense.floor()),
+            )
+        };
 
         let name = if fusion_open
             && allowed > nfus as f32
@@ -2207,6 +3063,47 @@ impl Ai {
         self.eco_add_construction(WorkerTask::construction(def, position, 0), None, Some(List::Fusion));
     }
 
+    fn eco_create_grid_task(&mut self, position: Vec3) {
+        let Some(pylon) = self.defs.get("energypylon") else {
+            return;
+        };
+
+        let mut fdist = 65535.0;
+        let mut best = position;
+        for f in &self.eco.fusions {
+            let fpos = f.pos();
+            let tmpdist = distance(fpos, position);
+            if tmpdist < fdist {
+                fdist = tmpdist;
+                best = fpos;
+            }
+        }
+
+        best = self.graph.get_overdrive_sweet_spot(best, "energypylon");
+        if best == NULLPOS {
+            return;
+        }
+        best = self.eco_build_site(pylon, best, 0);
+        // don't build pylons in the middle of nowhere
+        if self.eco_get_fusion_dist(best) > 1500.0 {
+            return;
+        }
+
+        // check the build site for existing pylons, since getOverdriveSweetSpot may cluster them.
+        let gdist = self
+            .eco
+            .pylons
+            .iter()
+            .map(|u| distance(best, u.pos()))
+            .chain(self.eco.pylon_tasks.iter().map(|&c| distance(best, self.eco.task_pos(c))))
+            .fold(65535.0f32, f32::min);
+        if gdist <= 750.0 {
+            return; // Already have one
+        }
+
+        self.eco_add_simple(pylon, best, List::Pylon, Some(List::Pylon));
+    }
+
     pub(super) fn eco_create_nano_turret_task(&mut self, wid: i32, target: Unit) {
         let Some(nano) = self.defs.get("staticcon") else {
             return;
@@ -2215,6 +3112,8 @@ impl Ai {
         let def_name = self.defs.name_of(target);
         let (radius, mut build_dist) = if def_name == "striderhub" || def_name.contains("factory") {
             (400.0, 350.0)
+        } else if def_name == super::AIRPAD {
+            (super::PAD_NANO_SITE, super::PAD_NANO_SITE * 0.8)
         } else {
             (350.0, 300.0) // for superweapons
         };
@@ -2313,6 +3212,57 @@ impl Ai {
         }
     }
 
+    /// Caretakers, built or queued, whose target is this unit.
+    fn eco_nanos_on(&self, id: i32) -> usize {
+        let eco = &self.eco;
+        let built = eco.nanos.values().filter(|n| n.target.health() > 0.0 && n.target.id() == id).count();
+        let queued = (eco.nano_tasks.iter())
+            .filter_map(|&c| eco.tasks.get(c).and_then(|t| t.as_construction()).and_then(|c| c.ct_target))
+            .filter(|t| t.health() > 0.0 && t.id() == id)
+            .count();
+        built + queued
+    }
+
+    /// Fixture diagnostics: the caretaker jobs queued (target, place, worker
+    /// count) and what each worker is building.
+    pub(crate) fn eco_nano_debug(&self) -> String {
+        let eco = &self.eco;
+        let mut out = String::new();
+        for &id in &eco.nano_tasks {
+            let Some(t) = eco.tasks.get(id) else { continue };
+            if let Some(c) = t.as_construction() {
+                let p = t.get_pos();
+                out.push_str(&format!(
+                    " nano-task(target {:?}, at {:.0},{:.0}, started {})",
+                    c.ct_target.map(|u| u.id()),
+                    p.x,
+                    p.z,
+                    c.target.is_some()
+                ));
+            }
+        }
+        for w in eco.workers.values() {
+            let job = w
+                .task
+                .and_then(|id| eco.tasks.get(id))
+                .and_then(|t| t.as_construction())
+                .map(|c| self.defs.name(c.build_type).to_owned());
+            out.push_str(&format!(" worker {}:{}:{:?}", w.id, self.defs.name_of(w.unit), job));
+        }
+        out
+    }
+
+    /// Caretakers, built or queued, for airpads (`padnano`).
+    fn eco_pad_nanos(&self) -> usize {
+        let eco = &self.eco;
+        let pad = |t: &Unit| self.defs.name_of(*t) == super::AIRPAD;
+        eco.nanos.values().filter(|n| pad(&n.target)).count()
+            + (eco.nano_tasks.iter())
+                .filter_map(|&c| eco.tasks.get(c).and_then(|t| t.as_construction()).and_then(|c| c.ct_target))
+                .filter(|t| pad(t))
+                .count()
+    }
+
     /// The factory (or factory under construction) with the fewest
     /// caretakers, with some per-type priority.
     fn eco_get_caretaker_target(&self) -> Option<Unit> {
@@ -2406,52 +3356,55 @@ impl Ai {
 mod tests {
     #[test]
     fn dense_front_unlocks_siege_without_five_reactors_but_needs_a_sound_economy() {
-        let mut ai = crate::economy::test_ai_with(|_| {});
+        let mut ai = crate::economy::commander::tests::test_ai_with(|_| {});
         ai.eco.static_income = 50.0;
         ai.intel.income = 60.0;
         ai.war.front.ratchet = crate::military::front::HI;
-        assert!(ai.eco_super_weapon_due(2));
+        assert!(ai.eco_super_weapon_due(2, false));
 
         ai.war.front.ratchet = crate::military::front::LO;
-        assert!(!ai.eco_super_weapon_due(2));
+        assert!(!ai.eco_super_weapon_due(2, false));
         // The original reactor route still works on sparse maps.
-        assert!(ai.eco_super_weapon_due(5));
+        assert!(ai.eco_super_weapon_due(5, false));
         ai.war.front.ratchet = crate::military::front::HI;
         ai.eco.static_income = 49.0;
         ai.eco.adjusted_income = 100.0;
-        assert!(!ai.eco_super_weapon_due(2));
+        assert!(!ai.eco_super_weapon_due(2, false));
         ai.eco.static_income = 50.0;
         ai.intel.income = 70.0;
-        assert!(!ai.eco_super_weapon_due(2));
+        assert!(!ai.eco_super_weapon_due(2, false));
         ai.intel.income = 60.0;
 
         ai.set_feature_off("frontgate", true);
-        assert!(!ai.eco_super_weapon_due(2));
-        assert!(ai.eco_super_weapon_due(5));
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(ai.eco_super_weapon_due(5, false));
+        // Air-only stalls retain their independent early route.
+        assert!(ai.eco_super_weapon_due(2, true));
         ai.set_feature_off("frontgate", false);
 
         // The early route follows the same alliance scale as nuke value
         // planning, without letting one poor solo economy use game age.
         ai.eco.static_income = 25.0;
         ai.allies.push(3);
-        assert!(ai.eco_super_weapon_due(2));
+        assert!(ai.eco_super_weapon_due(2, false));
         ai.allies.clear();
-        assert!(!ai.eco_super_weapon_due(2));
+        assert!(!ai.eco_super_weapon_due(2, false));
         ai.eco.static_income = 50.0;
 
         ai.eco.estalled = true;
         ai.eco.metal = 300.0;
-        assert!(!ai.eco_super_weapon_due(2));
-        assert!(!ai.eco_super_weapon_due(5));
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(!ai.eco_super_weapon_due(5, false));
+        assert!(!ai.eco_super_weapon_due(2, true));
         ai.eco.estalled = false;
         ai.merged_allies = 1;
-        assert!(!ai.eco_super_weapon_due(2));
+        assert!(!ai.eco_super_weapon_due(2, false));
         ai.eco.has_striders = true;
         ai.fac.num_striders = 2;
-        assert!(ai.eco_super_weapon_due(2));
+        assert!(ai.eco_super_weapon_due(2, false));
         ai.eco.chose_sup_wep = true;
-        assert!(!ai.eco_super_weapon_due(2));
-        assert!(!ai.eco_super_weapon_due(5));
+        assert!(!ai.eco_super_weapon_due(2, false));
+        assert!(!ai.eco_super_weapon_due(5, false));
     }
 
     #[test]
@@ -2480,8 +3433,52 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn factory_expansion_keeps_two_real_minutes_for_the_opening() {
+        let mut ai = super::super::commander::tests::test_ai_with(|_| {});
+        let u = springai::Unit::from_id(ai.cb, 42).unwrap();
+        ai.fac.factories.insert(u.id(), super::super::Factory::new(u, "factoryamph", true, 1000.0));
+        ai.eco.factory_opened_at = Some(300);
+        ai.eco.static_income = 1000.0;
+        ai.eco.new_fac_due = true;
+        ai.eco.requisition = Some(("factoryplane".into(), "density calls for air".into()));
+        ai.frame = 300 + FACTORY_OPENING_TIME - 1;
+        assert!(ai.eco_factory_expansion_waits(false));
+        assert!(!ai.eco_factory_expansion_waits(true), "another commander's free opening can proceed");
+        ai.frame += 1;
+        assert!(!ai.eco_factory_expansion_waits(false));
+        ai.frame = 301;
+        ai.op.over.requisition = Some("factoryplane".into());
+        assert!(!ai.eco_factory_expansion_waits(false), "explicit operator orders take precedence");
+        ai.op.over.requisition = None;
+        ai.fac.factories.clear();
+        assert!(!ai.eco_factory_expansion_waits(false), "losing the opening must allow rebuilding");
+    }
+
     fn list(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_yard_on_ground_cut_off_from_the_metal_is_a_pit() {
+        // Terrain7: the plain beside the start holds most of the metal, a
+        // walled trench none; a far island a little.
+        let reach = ExitReach {
+            tier: Tier::Amphib,
+            metal: HashMap::from([(0, 90.0), (1, 0.0), (2, 10.0)]),
+            total: 100.0,
+            best: 90.0,
+        };
+        assert!(!reach.trapped(reach.share(Some(0))));
+        assert!(reach.trapped(reach.share(Some(1))));
+        assert!(reach.trapped(reach.share(Some(2))));
+        // No ground under the yard, or ground with no spot near it.
+        assert!(reach.trapped(reach.share(None)));
+        assert!(reach.trapped(reach.share(Some(7))));
+        // Two halves of a map: neither is a pit.
+        let halves =
+            ExitReach { tier: Tier::Bot, metal: HashMap::from([(0, 50.0), (1, 50.0)]), total: 100.0, best: 50.0 };
+        assert!(!halves.trapped(halves.share(Some(0))) && !halves.trapped(halves.share(Some(1))));
     }
 
     #[test]
@@ -2492,6 +3489,37 @@ mod tests {
             assert_eq!(picked_factory(&with, k), picked_factory(&without, k));
         }
         assert_eq!(picked_factory(&list(&["factoryjump"]), 3), "factoryjump");
+    }
+
+    #[test]
+    fn air_tempo_dose_grows_with_time_and_map_size() {
+        // Nothing before the threshold, on any map.
+        for diag in [724.0, 1086.0, 1448.0, 2172.0] {
+            assert_eq!(air_tempo_dose(0.0, diag), 0.0);
+            assert_eq!(air_tempo_dose(AIR_TEMPO_FROM_MIN - 0.1, diag), 0.0);
+            assert!(air_tempo_dose(AIR_TEMPO_FROM_MIN + 1.0, diag) > 0.0);
+        }
+        // Monotone in time (non-decreasing, strictly while ramping).
+        let mut last = 0.0;
+        for m in 0..60 {
+            let d = air_tempo_dose(m as f32, 1448.0);
+            assert!(d >= last, "minute {m}: {d} < {last}");
+            if (m as f32) > AIR_TEMPO_FROM_MIN && (m as f32) <= AIR_TEMPO_FULL_MIN {
+                assert!(d > last, "minute {m} should still ramp");
+            }
+            last = d;
+        }
+        assert_eq!(air_tempo_dose(AIR_TEMPO_FULL_MIN, AIR_TEMPO_DIAG), 1.0);
+        assert_eq!(air_tempo_dose(90.0, AIR_TEMPO_DIAG), 1.0);
+        // Monotone in the map's diagonal, bounded both ways.
+        let mut last = 0.0;
+        for diag in (400..3000).step_by(100) {
+            let d = air_tempo_dose(AIR_TEMPO_FULL_MIN, diag as f32);
+            assert!(d >= last, "diagonal {diag}: {d} < {last}");
+            assert!((AIR_TEMPO_DIAG_MIN..=AIR_TEMPO_DIAG_MAX).contains(&d));
+            last = d;
+        }
+        assert!(air_tempo_dose(20.0, 2172.0) > air_tempo_dose(20.0, 724.0));
     }
 
     #[test]

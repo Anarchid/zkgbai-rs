@@ -119,6 +119,7 @@ impl Ai {
             return;
         }
         if old.is_none() {
+            self.eco_suspend_assignment(id, "commander defense");
             let w = self.eco.workers.get_mut(&id).unwrap();
             w.clear_task(&mut self.eco.tasks);
             unit.set_move_state(0, 0);
@@ -366,6 +367,9 @@ pub(crate) mod tests {
         unsafe extern "C" fn name(_: i32, _: i32) -> *const c_char {
             c"staticcon".as_ptr()
         }
+        unsafe extern "C" fn no_spending(_: i32, _: i32, _: i32) -> f32 {
+            0.0
+        }
         unsafe extern "C" fn def(_: i32, _: i32) -> i32 {
             1
         }
@@ -415,6 +419,7 @@ pub(crate) mod tests {
             UnitDef_getSpeed: Some(speed),
             UnitDef_getBuildDistance: Some(range),
             Unit_getDef: Some(def),
+            Unit_getResourceUse: Some(no_spending),
             Unit_isBeingBuilt: Some(building),
             Unit_getPos: Some(pos),
             Unit_getRulesParamFloat: Some(rules),

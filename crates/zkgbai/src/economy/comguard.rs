@@ -224,6 +224,11 @@ impl Ai {
     }
 
     fn comguard_check(&mut self, id: i32, frame: i32) {
+        // This alternative keeps the commander at the nanoframe and includes
+        // the gun coming online; the ordinary a-move omits unfinished units.
+        if self.eco_refresh_build_guard(id) {
+            return;
+        }
         let Some(unit) = self.eco.workers.get(&id).map(|w| w.unit) else { return };
         if unit.health() <= 0.0 || unit.team() != self.team_id || unit.is_being_built() {
             return;

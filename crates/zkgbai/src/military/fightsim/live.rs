@@ -41,7 +41,7 @@ use serde_json::json;
 use springai::{Unit, UnitDef, Vec3};
 
 use super::worker::{FightAnswer, FightRequest, FightWorker};
-use super::{FightSnapshot, Model, SnapUnit, UnitFate, UnitSpec, WeaponSpec};
+use super::{FightOutcome, FightSnapshot, Model, SnapUnit, UnitFate, UnitSpec, WeaponSpec};
 use crate::Ai;
 use crate::military::{SquadId, SquadKind};
 use crate::util::{NULLPOS, distance};
@@ -609,7 +609,9 @@ impl Ai {
             notes.members.push((id, spec.cost));
             notes.metal[0] += spec.cost;
             notes.n[0] += 1;
-            snap.units.push(SnapUnit { reloads: self.snap_reloads(id), side: 0, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(id);
+            let reloads = self.snap_reloads(id);
+            snap.units.push(SnapUnit { reloads, side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         let (mut air, mut statics) = (0.0, 0.0);
         for (eid, def, hp, p, flies, is_static) in theirs {
@@ -626,13 +628,78 @@ impl Ai {
             if is_static {
                 statics += spec.cost;
             }
-            snap.units.push(SnapUnit { reloads: self.snap_reloads(eid), side: 1, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(eid);
+            let reloads = self.snap_reloads(eid);
+            snap.units.push(SnapUnit { reloads, side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         if notes.metal[1] > 0.0 {
             notes.air_share = air / notes.metal[1];
             notes.static_share = statics / notes.metal[1];
         }
         (snap.armed(0) > 0 && snap.armed(1) > 0).then_some((snap, notes))
+    }
+
+    /// Our units `ours` against enemies `theirs` as they stand now, judged
+    /// as the veto judges (kiting losses over [`VETO_HORIZON`]): each
+    /// side's killed share of its armed metal. None without the predictor,
+    /// without an armed unit on each side, or with what the sim does not
+    /// do (shields, submerged fights, too many units).
+    pub(crate) fn fight_judge_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<[f32; 2]> {
+        let model = veto_model().ok()?;
+        let snap = self.fight_snapshot_units(ours, theirs)?;
+        Some(self.fightsim_judge(model, &snap).0)
+    }
+
+    /// The same fight run as the a-move fight the model was fitted on
+    /// (calibrated win probability and killed shares), for the record.
+    pub(crate) fn fight_predict_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<FightOutcome> {
+        let model = veto_model().ok()?;
+        let snap = self.fight_snapshot_units(ours, theirs)?;
+        Some(model.predict(&snap))
+    }
+
+    /// The snapshot behind [`Ai::fight_judge_units`].
+    fn fight_snapshot_units(&mut self, ours: &[Unit], theirs: &[i32]) -> Option<FightSnapshot> {
+        if !self.fightsim_runs() {
+            return None;
+        }
+        let frame = self.frame;
+        let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
+        for u in ours {
+            let (Some(def), hp, p) = (u.def(), u.health(), u.pos()) else { continue };
+            if hp <= 0.0 {
+                continue;
+            }
+            if p.y < -5.0 || def.weapon_mounts().iter().filter_map(|m| m.weapon_def()).any(|w| w.is_shield()) {
+                return None;
+            }
+            let spec = self.fight_spec_of(u.id(), def);
+            let tubes = self.snap_tubes(u.id());
+            let reloads = self.snap_reloads(u.id());
+            snap.units.push(SnapUnit { reloads, side: 0, spec, hp, x: p.x, z: p.z, tubes });
+        }
+        let mut foes: Vec<(i32, UnitDef, f32, Vec3)> = Vec::new();
+        for eid in theirs {
+            let Some(e) = self.war.targets.get(eid) else { continue };
+            if e.is_dead || !e.identified || frame - e.last_seen > LATCH_MEMORY {
+                continue;
+            }
+            let Some(def) = e.ud else { continue };
+            if e.position.y < -5.0 {
+                return None;
+            }
+            foes.push((*eid, def, e.get_health() * e.def_health(), e.position));
+        }
+        for (eid, def, hp, p) in foes {
+            let spec = self.fight_spec_of(eid, def);
+            let tubes = self.snap_tubes(eid);
+            let reloads = self.snap_reloads(eid);
+            snap.units.push(SnapUnit { reloads, side: 1, spec, hp, x: p.x, z: p.z, tubes });
+        }
+        if snap.units.len() > MAX_UNITS || snap.armed(0) == 0 || snap.armed(1) == 0 {
+            return None;
+        }
+        Some(snap)
     }
 
     /// Judge `snap` on this thread, counting the cost.
@@ -796,11 +863,15 @@ impl Ai {
         for (side, id, d, hp, p) in raw {
             // A casualty, reinforcement, substantial damage, or movement
             // invalidates the old result even inside the freshness window.
+            // So does a tube weapon firing or loading.
+            let tubes = self.snap_tubes(id);
+            let reloads = self.snap_reloads(id);
             (side, id, d.id(), (hp / d.health().max(1.0) * 5.0) as i32, (p.x / 256.0) as i32, (p.z / 256.0) as i32)
                 .hash(&mut hash);
+            tubes.len().hash(&mut hash);
             let spec = self.fight_spec_of(id, d);
             metal[side as usize] += spec.cost;
-            let unit = SnapUnit { reloads: self.snap_reloads(id), side, spec, hp, x: p.x, z: p.z };
+            let unit = SnapUnit { reloads, side, spec, hp, x: p.x, z: p.z, tubes };
             unit.hash_reloads(self.frame, &mut hash);
             snapshot.units.push(unit);
         }
@@ -951,6 +1022,7 @@ mod veto_tests {
                     spec: spec.clone(),
                     x,
                     z: i as f32 * 40.0,
+                    tubes: Vec::new(),
                 });
             }
         }
@@ -1008,7 +1080,8 @@ mod veto_tests {
     #[test]
     fn losses_are_armed_metal_weighted_death_chances() {
         let snap = encounter(2, 1);
-        let fate = |p| UnitFate { dead: false, death_frame: None, hp_left: 0.0, p_dead: 0.5, p_raw: p };
+        let fate =
+            |p| UnitFate { dead: false, death_frame: None, hp_left: 0.0, p_dead: 0.5, p_raw: p, captured: false };
         let (loss, metal) = kiting_losses(&snap, &[fate(1.0), fate(0.0), fate(0.5)]);
         assert_eq!(metal, [700.0, 220.0]);
         assert_eq!(loss, [0.5, 0.5]);

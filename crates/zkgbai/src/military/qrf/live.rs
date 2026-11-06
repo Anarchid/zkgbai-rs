@@ -323,12 +323,17 @@ impl Budget {
 
 /// The autopilot's want: `gain` times a typical recent raid, for as
 /// many teams as raids came at once (up to three), more for losses, less
-/// half of what moonlights, at most `cap` of the army.
+/// half of what moonlights and the metal of the turrets the posture keeps
+/// for the same job (`turrets`, see `posture`: on a lane map the raids
+/// the force answers are partly answered already, and a force sized as if
+/// they were not keeps the army home), at most `cap` of the army.
+#[allow(clippy::too_many_arguments)]
 pub fn auto_wanted(
     raids: usize,
     strongest: f32,
     losses: f32,
     moonlight: f32,
+    turrets: f32,
     army: f32,
     gain: f32,
     cap: f32,
@@ -340,11 +345,16 @@ pub fn auto_wanted(
     let per_team = gain * strongest.max(150.0);
     let need = per_team * teams * (1.0 + 0.25 * losses.min(4.0));
     let ceiling = cap * army;
-    let want = (need - 0.5 * moonlight).max(0.0);
+    let want = (need - 0.5 * moonlight - turrets).max(0.0);
     if want > ceiling {
         (ceiling, format!("capped: {teams:.0} x {per_team:.0} (losses {losses:.1}) over {cap:.2} of {army:.0}"))
     } else {
-        (want, format!("{teams:.0} x {per_team:.0} (losses {losses:.1}) less half of {moonlight:.0} moonlighting"))
+        (
+            want,
+            format!(
+                "{teams:.0} x {per_team:.0} (losses {losses:.1}) less half of {moonlight:.0} moonlighting and {turrets:.0} in posture turrets"
+            ),
+        )
     }
 }
 
@@ -581,7 +591,16 @@ impl Ai {
             self.qrf.draft_unmatched.remove(&sid);
             self.qrf.draft_raid.remove(&sid);
         }
-        self.qrf.members.retain(|id, m| m.squad.is_none_or(|s| eligible.get(&s).is_some_and(|ids| ids.contains(id))));
+        let released: Vec<_> = self
+            .qrf
+            .members
+            .iter()
+            .filter(|(id, m)| m.squad.is_some_and(|s| eligible.get(&s).is_none_or(|ids| !ids.contains(id))))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in released {
+            self.qrf_remove_unit(id);
+        }
         let metal = self.metal;
         for (sid, ids) in eligible {
             for id in ids {
@@ -699,6 +718,8 @@ impl Ai {
             }
         }
         let losses = self.firefighters_pressure().0.max(0.0);
+        // The posture's turrets answer raids too (see `auto_wanted`).
+        let turrets = if self.posture_on() && !self.dev_off("turretcredit") { self.posture.defense } else { 0.0 };
         let anti_raiders = (self.fac.factories.values())
             .filter_map(|f| f.unit.def())
             .any(|d| d.build_options().iter().any(|o| ANTI_RAIDERS.contains(&self.defs.name(*o))));
@@ -713,7 +734,7 @@ impl Ai {
             Mode::Off => (0.0, "off: moonlighting only (qrf_set defense sets a force)".into()),
             Mode::Auto if !b.armed() => (0.0, format!("quiet [{}: nothing lost to a raid lately]", b.size.name())),
             Mode::Auto => {
-                let (w, r) = auto_wanted(raids, strongest, losses, moon, army, b.gain, b.cap);
+                let (w, r) = auto_wanted(raids, strongest, losses, moon, turrets, army, b.gain, b.cap);
                 (w, format!("{r} [{} raid {strongest:.0}]", b.size.name()))
             }
             Mode::Metal(v) => (v, "set by the operator".into()),
@@ -817,6 +838,9 @@ impl Ai {
     pub fn qrf_production(&mut self, factory: Unit, choice: &str) -> Option<&'static str> {
         if !self.qrf.on || !self.qrf.live {
             return None;
+        }
+        if let Some(name) = self.escort_production(factory, choice) {
+            return Some(name);
         }
         if let Some(name) = self.qrf_floor_production(factory, choice) {
             return Some(name);
@@ -939,6 +963,7 @@ impl Ai {
             (self.qrf.members.iter()).filter(|(_, m)| m.team == team && m.squad.is_none()).map(|(&id, _)| id).collect();
         self.qrf.releasing = true;
         for &id in &ids {
+            self.qrf_clear_screen(id);
             let Some(m) = self.qrf.members.remove(&id) else { continue };
             if self.qrf_return_stakeout(m.unit) {
                 continue;
@@ -1144,6 +1169,9 @@ impl Ai {
         for t in teams {
             self.qrf_release_team(t, "qrf switched off");
         }
+        for id in self.qrf.screen.goals.keys().copied().collect::<Vec<_>>() {
+            self.qrf_clear_screen(id);
+        }
         self.qrf.members.clear();
         self.qrf.drafted.clear();
         self.qrf.doing.clear();
@@ -1212,21 +1240,25 @@ mod tests {
 
     #[test]
     fn quiet_wants_nothing() {
-        assert_eq!(auto_wanted(0, 0.0, 0.0, 0.0, 5000.0, GAIN, CAP).0, 0.0);
+        assert_eq!(auto_wanted(0, 0.0, 0.0, 0.0, 0.0, 5000.0, GAIN, CAP).0, 0.0);
     }
 
     #[test]
     fn raids_want_teams_up_to_the_cap() {
         // Two raids of 300 at once: two teams of 450.
-        let (w, _) = auto_wanted(2, 300.0, 0.0, 0.0, 10000.0, GAIN, CAP);
+        let (w, _) = auto_wanted(2, 300.0, 0.0, 0.0, 0.0, 10000.0, GAIN, CAP);
         assert!((w - 900.0).abs() < 1.0);
         // Moonlighters count half.
-        let (w, _) = auto_wanted(2, 300.0, 0.0, 400.0, 10000.0, GAIN, CAP);
+        let (w, _) = auto_wanted(2, 300.0, 0.0, 400.0, 0.0, 10000.0, GAIN, CAP);
         assert!((w - 700.0).abs() < 1.0);
+        // The posture's turrets count in full.
+        let (w, _) = auto_wanted(2, 300.0, 0.0, 0.0, 600.0, 10000.0, GAIN, CAP);
+        assert!((w - 300.0).abs() < 1.0);
+        assert_eq!(auto_wanted(2, 300.0, 0.0, 0.0, 2000.0, 10000.0, GAIN, CAP).0, 0.0);
         // Capped by the army.
-        let (w, r) = auto_wanted(3, 1000.0, 2.0, 0.0, 2000.0, GAIN, CAP);
+        let (w, r) = auto_wanted(3, 1000.0, 2.0, 0.0, 0.0, 2000.0, GAIN, CAP);
         assert!((w - 600.0).abs() < 1.0 && r.starts_with("capped"));
         // Losses alone call for a team.
-        assert!(auto_wanted(0, 0.0, 1.0, 0.0, 10000.0, GAIN, CAP).0 > 0.0);
+        assert!(auto_wanted(0, 0.0, 1.0, 0.0, 0.0, 10000.0, GAIN, CAP).0 > 0.0);
     }
 }

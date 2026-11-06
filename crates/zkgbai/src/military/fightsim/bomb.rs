@@ -184,6 +184,7 @@ mod tests {
             hp: s[def].health,
             x,
             z,
+            tubes: Vec::new(),
         };
         let mut units = vec![unit(0, "turretlaser", 0.0, 0.0)];
         units.extend(theirs.iter().map(|&(d, x, z)| unit(1, d, x, z)));
@@ -225,6 +226,7 @@ mod tests {
             hp: specs[name].health,
             x,
             z,
+            tubes: Vec::new(),
         };
         let m = Model::load().unwrap();
         for flags in [
@@ -411,6 +413,7 @@ mod tests {
                         hp: 230.0,
                         x,
                         z: -80.0 - (i / 5) as f32 * 40.0,
+                        tubes: Vec::new(),
                     },
                 );
             }

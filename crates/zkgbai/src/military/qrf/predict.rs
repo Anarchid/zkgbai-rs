@@ -267,6 +267,7 @@ impl Ai {
                 hp: u.health(),
                 x: p.x,
                 z: p.z,
+                tubes: self.snap_tubes(u.id()),
             },
         })
     }
@@ -316,6 +317,7 @@ impl Ai {
                             x: pos.x,
                             z: pos.z,
                             spec,
+                            tubes: self.snap_tubes(id),
                         },
                     });
                     focus.push(pressed_on);
@@ -478,7 +480,11 @@ mod regression {
         })
     }
     fn observed(id: i32, spec: Arc<UnitSpec>, side: u8, x: f32, z: f32) -> Observed {
-        Observed { id, paralysis: 0.0, unit: SnapUnit { reloads: Vec::new(), hp: spec.health, spec, side, x, z } }
+        Observed {
+            id,
+            paralysis: 0.0,
+            unit: SnapUnit { reloads: Vec::new(), hp: spec.health, spec, side, x, z, tubes: Vec::new() },
+        }
     }
     fn incident() -> Raid {
         let venom = spec("spideremp", 190.0, 740.0, 2.8, Some(("spideremp_spider", 240.0, 1.2, 65.0)));

@@ -57,6 +57,7 @@ fn main() {
                 hp: num(u, "hp"),
                 x: num(u, "x"),
                 z: num(u, "z"),
+                ..Default::default()
             })
             .collect();
         let bomb = c["bomb"].as_u64().unwrap() as usize;
@@ -64,7 +65,7 @@ fn main() {
             for horizon in [300, 600, 900] {
                 let snap = FightSnapshot {
                     units: units.clone(),
-                    flags: SimFlags { bombs: true, ..SimFlags::from_switches(twod, true, true) },
+                    flags: SimFlags { bombs: true, ordered: true, ..SimFlags::from_switches(twod, true, true) },
                 };
                 // Segmented logs do not carry reliable current reload phases.
                 // Busy is deliberately empty: loaded weapons, no invented evidence.

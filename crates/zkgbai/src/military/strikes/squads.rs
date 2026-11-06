@@ -316,7 +316,7 @@ impl Ai {
                         matches!(w.phase, Phase::Forming | Phase::Screening) && same_job(&w.job, &m.job)
                     }) {
                         let w = self.strikes.wave.take().unwrap();
-                        self.strikes_release(w);
+                        self.strikes_release(w, "a squad strike took the job");
                     }
                     for id in &m.members {
                         if self.retreat_handler.is_coward(*id) {
@@ -419,7 +419,10 @@ impl Ai {
     }
 
     fn squad_strike_chain(&mut self, sid: SquadId, m: &mut Mission) -> bool {
-        let Some(from) = self.strike_members_center(&m.members) else { return false };
+        if self.dev_off("strikechain") {
+            return false;
+        }
+        let Some(from) = self.strike_wave_center(&m.members) else { return false };
         let Some(job) = self.squad_strike_next_job(from, &m.members, m.halberds) else { return false };
         let Some(key) = self.squad_strike_predict(&job, &m.members, from, m.halberds, true) else { return false };
         self.log(&format!("strikes: squad {sid} reassesses {} {} for chain strike", job.name, job.id.unwrap_or(-1)));
@@ -482,6 +485,7 @@ impl Ai {
                 since: m.since,
                 home: m.home,
                 query: None,
+                chain: Default::default(),
             });
             let target = if m.diving { m.job.pos } else { m.home };
             if let Some(s) = self.squads.get_mut(sid) {

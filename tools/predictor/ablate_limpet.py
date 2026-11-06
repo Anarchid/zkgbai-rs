@@ -38,7 +38,7 @@ def run(input_path):
             ca, cb = cent(f["A"]), cent(f["B"])
             f["d0"] = math.hypot(cb[0]-ca[0], cb[1]-ca[1])
             fates = {}
-            mech.simulate_mech(f, dict(E.opts_of("2d"), bombs=1,
+            mech.simulate_mech(f, dict(E.opts_of("2d"), bombs=1, ordered=1,
                                       limpet_slow=0 if mode == "damage_only" else 10),
                                fates=fates, horizon=600)
             us = f["A"]+f["B"]

@@ -303,7 +303,9 @@ impl Ai {
             let spec = self.fight_spec_of(u.id(), def);
             let p = u.pos();
             local.ours.push(Ours { id: u.id(), cost: spec.cost });
-            local.snap.units.push(SnapUnit { reloads: self.snap_reloads(u.id()), side: 0, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(u.id());
+            let reloads = self.snap_reloads(u.id());
+            local.snap.units.push(SnapUnit { reloads, side: 0, spec, hp, x: p.x, z: p.z, tubes });
         }
         for (eid, def, hp, p, armed, name) in theirs {
             let spec = self.fight_spec_of(eid, def);
@@ -311,7 +313,9 @@ impl Ai {
             let (value, is_prize) = (spec.cost * weight(e), prize(e, spec.cost));
             let armed = armed && !spec.weapons.is_empty();
             local.theirs.push(Theirs { id: eid, def: name, cost: spec.cost, value, armed, prize: is_prize, pos: p });
-            local.snap.units.push(SnapUnit { reloads: self.snap_reloads(eid), side: 1, spec, hp, x: p.x, z: p.z });
+            let tubes = self.snap_tubes(eid);
+            let reloads = self.snap_reloads(eid);
+            local.snap.units.push(SnapUnit { reloads, side: 1, spec, hp, x: p.x, z: p.z, tubes });
         }
         Some(local)
     }
@@ -323,11 +327,12 @@ impl Ai {
         Some(model.fates(&local.snap, HORIZON, mode))
     }
 
-    /// A committed local Fight order with tactical movement on both sides.
-    pub(crate) fn local_ordered_kiting_fates(&mut self, local: &Local, budget: &mut Budget) -> Option<Vec<UnitFate>> {
+    /// A local Fight order with tactical movement on both sides. Commitment
+    /// comes from the snapshot's ordered flag, including the dev switch.
+    pub(crate) fn local_kiting_fates(&mut self, local: &Local, budget: &mut Budget) -> Option<Vec<UnitFate>> {
         let model = self.local_model()?;
         budget.queries += 1;
-        Some(model.ordered_kiting_fates(&local.snap, HORIZON))
+        Some(model.kiting_fates(&local.snap, HORIZON))
     }
 }
 
@@ -350,7 +355,15 @@ mod tests {
         let mut l = Local { snap: FightSnapshot::default(), ours: Vec::new(), theirs: Vec::new(), unknown: false };
         for (i, &c) in ours.iter().enumerate() {
             l.ours.push(Ours { id: i as i32, cost: c });
-            l.snap.units.push(SnapUnit { reloads: Vec::new(), side: 0, spec: spec.clone(), hp: 1.0, x: 0.0, z: 0.0 });
+            l.snap.units.push(SnapUnit {
+                reloads: Vec::new(),
+                side: 0,
+                spec: spec.clone(),
+                hp: 1.0,
+                x: 0.0,
+                z: 0.0,
+                tubes: Vec::new(),
+            });
         }
         for (i, &(c, v, armed)) in theirs.iter().enumerate() {
             l.theirs.push(Theirs {
@@ -362,7 +375,15 @@ mod tests {
                 prize: false,
                 pos: Vec3::xz(0.0, 0.0),
             });
-            l.snap.units.push(SnapUnit { reloads: Vec::new(), side: 1, spec: spec.clone(), hp: 1.0, x: 0.0, z: 0.0 });
+            l.snap.units.push(SnapUnit {
+                reloads: Vec::new(),
+                side: 1,
+                spec: spec.clone(),
+                hp: 1.0,
+                x: 0.0,
+                z: 0.0,
+                tubes: Vec::new(),
+            });
         }
         l
     }
@@ -463,7 +484,15 @@ mod probe {
                         pos: springai::Vec3::xz(x, z),
                     });
                 }
-                l.snap.units.push(SnapUnit { reloads: Vec::new(), side, spec: s.clone(), hp: s.health * hp, x, z });
+                l.snap.units.push(SnapUnit {
+                    reloads: Vec::new(),
+                    side,
+                    spec: s.clone(),
+                    hp: s.health * hp,
+                    x,
+                    z,
+                    tubes: Vec::new(),
+                });
             }
         }
         l

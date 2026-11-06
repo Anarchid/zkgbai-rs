@@ -1,10 +1,16 @@
 //! A tactical silo's final footprint is also its firing position. Reserve
 //! it while preparing a threatened site; only completed defenses unlock it.
+//!
+//! A nanoframe already begun is never given up for want of room for its
+//! guards: it waits for those that fit, and from [`FINISH_FIRST`] built it
+//! is finished before them (2026-11-04, Adamantine Mountain 3v3: a silo
+//! stood 99.5% built for 13 minutes beside a nuke being built, its job
+//! dropped and re-adopted every poll because the full layout never fit).
 
 use springai::{Callback, NO_TIMEOUT, Unit, UnitDef, Vec3};
 use zk_terrain::occupancy::Occupancy;
 
-use super::tasks::BuildPrerequisite;
+use super::tasks::{BuildPrerequisite, ConstructionTask};
 use super::{EconomyManager, List, SITE_SLACK, TaskId, TaskKind, WorkerTask};
 use crate::Ai;
 use crate::defs::cmd;
@@ -14,9 +20,16 @@ use crate::util::{NULLPOS, distance, get_directional_point};
 
 const SILO_REPLAN: i32 = 30 * 120;
 const GUARD_AHEAD: f32 = 220.0;
-const GUARD_SPREAD: f32 = 110.0;
+/// The side Lotuses stand this far from the Stinger between them: clear
+/// of its 130-elmo death blast, which `porcmix` checks in `eco_build_check`
+/// (at 110 it refused them both).
+const GUARD_SPREAD: f32 = 140.0;
 const GUARD_SEARCH: f32 = 96.0;
 const CARETAKERS: usize = 2;
+/// A nanoframe this far built is finished before its guards unless the
+/// site is under fire: the rest of it costs less than any one guard, and
+/// the guards stay queued (`eco_fortify_silo` reuses them).
+const FINISH_FIRST: f32 = 0.8;
 /// Look beyond the site's current weapon-range threat: forces in the
 /// same region or across nearby entrances can arrive during construction.
 const NEAR_REGION: f32 = 1200.0;
@@ -43,6 +56,12 @@ fn prerequisite_unit(cb: Callback, team: i32, required: &BuildPrerequisite) -> O
 fn prerequisites_ready(cb: Callback, team: i32, requirements: &[BuildPrerequisite], threatened: bool) -> bool {
     (!threatened || !requirements.is_empty())
         && requirements.iter().all(|p| prerequisite_unit(cb, team, p).is_some_and(|u| !u.is_being_built()))
+}
+
+/// Whether a silo nanoframe `progress` built, at a site with `threat`, is
+/// finished before its guards.
+fn finish_first(progress: f32, threat: f32) -> bool {
+    progress >= FINISH_FIRST && threat <= 0.0
 }
 
 /// Prefer the furthest-along live nanoframe, breaking ties deterministically.
@@ -124,11 +143,22 @@ impl Ai {
         prerequisite_unit(self.cb, self.team_id, required)
     }
 
+    /// Whether this silo job's nanoframe is far enough along to finish
+    /// before its guards (see [`FINISH_FIRST`]).
+    fn eco_silo_finishing(&self, c: &ConstructionTask, at: Vec3) -> bool {
+        c.target.is_some_and(|u| {
+            u.health() > 0.0 && u.is_being_built() && finish_first(u.build_progress(), self.war.get_threat(at))
+        })
+    }
+
     pub(super) fn eco_prerequisites_ready(&self, task: &WorkerTask) -> bool {
         task.as_construction().is_none_or(|c| {
             let silo = self.defs.name(c.build_type) == missiles::SILO;
             if silo && self.missiles_shuns_site(task.position) {
                 return false;
+            }
+            if silo && self.eco_silo_finishing(c, task.position) {
+                return true;
             }
             // Close the gate immediately if danger arrives between
             // preparation polls. The poll will queue the missing guards.
@@ -163,7 +193,10 @@ impl Ai {
             "turretaaflak" => List::Aa,
             _ => List::Porc,
         };
-        self.eco_add_construction(task, Some(list), (list != List::Construction).then_some(list)).map(Some)
+        // Placed on purpose, like conquest's guards: the Lotus-overlap rule
+        // (no Lotus within twice its reach of another) refused the second
+        // of the pair 2 x GUARD_SPREAD apart, so the full layout never fit.
+        self.eco_add_construction_uncrowded(task, Some(list), (list != List::Construction).then_some(list)).map(Some)
     }
 
     fn eco_silo_guard_layout(&self, at: Vec3) -> [(&'static str, Vec3); 5] {
@@ -237,14 +270,19 @@ impl Ai {
         }
     }
 
-    /// Reserve all guards before workers may resume this silo. A partial
-    /// layout never counts as preparation, even if the silo already started.
+    /// Reserve the guards before workers may resume this silo. A plan not
+    /// yet begun needs the full layout, else it is dropped (a later plan
+    /// may find a better site). A begun nanoframe keeps the guards that
+    /// fit: dropping its job only re-adopted it next poll, so the metal in
+    /// it never paid. From [`FINISH_FIRST`] built its workers stay on it.
     fn eco_prepare_silo(&mut self, id: TaskId) -> bool {
         let site = self.eco.task_pos(id);
-        let idle = self.eco.stop_workers(id);
-        self.eco.idle_workers(&idle);
+        let Some(c) = self.eco.tasks.get(id).and_then(|t| t.as_construction()) else { return false };
+        let frame = c.target.filter(|u| u.health() > 0.0 && u.is_being_built());
+        let finishing = self.eco_silo_finishing(c, site);
         let mut guards = Vec::new();
         let mut created = Vec::new();
+        let mut missing = Vec::new();
         for (name, seed) in self.eco_silo_guard_layout(site) {
             let required = self
                 .defs
@@ -252,6 +290,10 @@ impl Ai {
                 .and_then(|def| self.eco_silo_guard_site(def, seed).map(|pos| BuildPrerequisite { def, pos }));
             let queued = required.and_then(|r| self.eco_ensure_silo_guard(&r).map(|id| (r, id)));
             let Some((required, task)) = queued else {
+                if frame.is_some() {
+                    missing.push(name);
+                    continue;
+                }
                 for task in created {
                     self.eco.drop_construction_task(task);
                 }
@@ -261,6 +303,30 @@ impl Ai {
             };
             guards.push(required);
             created.extend(task);
+        }
+        if let Some(unit) = frame
+            && !missing.is_empty()
+            && self.missiles.guards_noted != Some(unit.id())
+        {
+            self.missiles.guards_noted = Some(unit.id());
+            self.log(&format!(
+                "missiles: no room for {} by the silo at ({:.0}, {:.0}), {:.0}% built; {}",
+                missing.join(", "),
+                site.x,
+                site.z,
+                100.0 * unit.build_progress(),
+                if finishing {
+                    "finishing it first".to_owned()
+                } else {
+                    format!("waiting for the {} guards that fit", guards.len())
+                }
+            ));
+        }
+        // With no guard to wait for, the gate closes only while danger is
+        // at the site itself (`eco_prerequisites_ready`).
+        if !guards.is_empty() && !finishing {
+            let idle = self.eco.stop_workers(id);
+            self.eco.idle_workers(&idle);
         }
         self.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().prerequisites = guards;
         true
@@ -272,30 +338,65 @@ impl Ai {
         let Some(id) = self.eco_silo_plan() else { return };
         let task = self.eco.tasks.get(id).unwrap();
         let site = task.position;
-        let guards = task.as_construction().unwrap().prerequisites.clone();
+        let c = task.as_construction().unwrap();
+        let guards = c.prerequisites.clone();
+        let begun = c.target.is_some_and(|u| u.health() > 0.0 && u.is_being_built());
+        let finishing = self.eco_silo_finishing(c, site);
         if self.missiles_shuns_site(site) {
             self.eco.drop_construction_task(id);
             return;
         }
         if guards.is_empty() && self.eco_silo_needs_guards(site) {
             if self.eco_prepare_silo(id) {
-                self.log(&format!(
-                    "missiles: danger reached the silo site at ({:.0}, {:.0}); pausing for completed lasers, flak and shield",
-                    site.x, site.z
-                ));
+                let has_guards = self
+                    .eco
+                    .tasks
+                    .get(id)
+                    .and_then(|t| t.as_construction())
+                    .is_some_and(|c| !c.prerequisites.is_empty());
+                if has_guards {
+                    self.log(&format!(
+                        "missiles: danger reached the silo site at ({:.0}, {:.0}); {}",
+                        site.x,
+                        site.z,
+                        if finishing {
+                            "finishing the nanoframe first, guards queued"
+                        } else {
+                            "pausing for completed lasers, flak and shield"
+                        }
+                    ));
+                }
             }
             return;
         }
-        if !prerequisites_ready(self.cb, self.team_id, &guards, false) {
+        if !finishing && !prerequisites_ready(self.cb, self.team_id, &guards, false) {
             let idle = self.eco.stop_workers(id);
             self.eco.idle_workers(&idle);
         }
-        for guard in guards {
-            if self.eco_ensure_silo_guard(&guard).is_none() {
-                self.eco.drop_construction_task(id);
-                self.log("missiles: abandoning silo preparation: a required defense site is blocked");
-                break;
+        let mut blocked = Vec::new();
+        for (i, guard) in guards.iter().enumerate() {
+            if self.eco_ensure_silo_guard(guard).is_none() {
+                if !begun {
+                    self.eco.drop_construction_task(id);
+                    self.log("missiles: abandoning silo preparation: a required defense site is blocked");
+                    return;
+                }
+                blocked.push(i);
             }
+        }
+        // A begun nanoframe stops waiting for a guard whose site is gone.
+        if !blocked.is_empty()
+            && let Some(c) = self.eco.tasks.get_mut(id).and_then(|t| t.as_construction_mut())
+        {
+            c.prerequisites =
+                guards.iter().enumerate().filter(|(i, _)| !blocked.contains(i)).map(|(_, &g)| g).collect();
+            let left = c.prerequisites.len();
+            self.log(&format!(
+                "missiles: {} guard site(s) of the begun silo at ({:.0}, {:.0}) blocked; waiting for the other {left}",
+                blocked.len(),
+                site.x,
+                site.z
+            ));
         }
     }
 
@@ -334,17 +435,31 @@ impl Ai {
             // nanoframe still prevents commissioning a replacement.
             return;
         }
+        // Keep the selected project (ours or an ally's). Pending own jobs
+        // can still be adopted by eco_watch_allied_projects; do not open a
+        // second assist each time another allied frame overtakes this one.
         if self.eco_silo_plan().is_some() {
             self.missiles.site.cancel();
             return;
         }
+        if !self.dev_off("missiles")
+            && !self.eco.hard_estalled
+            && self.eco.adjusted_income >= missiles::SILO_INCOME
+            && self.eco_assist_ally(silo)
+        {
+            return;
+        }
         if self.dev_off("missiles")
             || self.missiles_silo().is_some()
-            || self.eco.adjusted_income < missiles::SILO_INCOME
-            || self.eco.estalled
             || self.missiles.planned.is_some_and(|f| self.frame - f < SILO_REPLAN)
         {
             self.missiles.site.cancel();
+            return;
+        }
+        // Affordability pauses admission, not the pending search. Growth/overdrive
+        // demand is not a construction stall. Completed work stays in the worker
+        // until affordable, then is checked against current demand and terrain.
+        if self.eco.adjusted_income < missiles::SILO_INCOME || self.eco.hard_estalled {
             return;
         }
         let Some(choice) = self.missiles_site() else { return };
@@ -360,7 +475,7 @@ impl Ai {
         self.log(&format!(
             "missiles: silo at ({:.0}, {:.0}), {:.0} Eos/Shockley payoff ({} targets); \
              {:.0} static metal in reach ({:.1}%), {:.1}% held enemy territory; battlefield density {:.0}, \
-             coverage trigger needs >{:.0} metal/Melmo² (laneness {:.2}); {}",
+             80% static coverage bypasses density; other coverage needs >{:.0} metal/Melmo² (laneness {:.2}); {}",
             site.x,
             site.z,
             choice.payoff,
@@ -403,6 +518,88 @@ impl Ai {
 mod tests {
     use super::*;
     use springai::Callback;
+
+    #[test]
+    fn growth_demand_allows_search_and_temporary_unaffordability_preserves_it() {
+        use std::cell::Cell;
+        use std::ffi::c_char;
+        thread_local! {
+            static DEFINITIONS: Cell<bool> = const { Cell::new(false) };
+            static QUERIES: Cell<usize> = const { Cell::new(0) };
+        }
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, max: i32) -> i32 {
+            if !DEFINITIONS.get() {
+                return 0;
+            }
+            if max > 0 && !out.is_null() {
+                unsafe {
+                    *out = 1;
+                }
+            }
+            1
+        }
+        unsafe extern "C" fn name(_: i32, _: i32) -> *const c_char {
+            c"staticmissilesilo".as_ptr()
+        }
+        unsafe extern "C" fn units(_: i32, _: *mut i32, _: i32) -> i32 {
+            0
+        }
+        unsafe extern "C" fn site(_: i32, _: i32, _: *mut f32, _: f32, _: i32, _: i32, out: *mut f32) {
+            QUERIES.set(QUERIES.get() + 1);
+            unsafe {
+                std::ptr::copy_nonoverlapping([-1.0, 0.0, 0.0].as_ptr(), out, 3);
+            }
+        }
+        DEFINITIONS.set(false);
+        QUERIES.set(0);
+        let mut ai = super::super::test_ai_with(|t| {
+            t.getUnitDefs = Some(defs);
+            t.UnitDef_getName = Some(name);
+            t.getFriendlyUnits = Some(units);
+            t.getTeamUnits = Some(units);
+            t.Map_findClosestBuildSite = Some(site);
+        });
+        DEFINITIONS.set(true);
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        ai.frame = 600;
+        ai.eco.adjusted_income = missiles::SILO_INCOME;
+        ai.eco.estalled = true;
+        ai.eco_plan_missile_silo();
+        assert_eq!(QUERIES.get(), 2, "growth demand must not block candidate collection");
+        assert!(ai.missiles.site.active());
+        ai.frame += 1;
+        ai.eco.hard_estalled = true;
+        ai.eco_plan_missile_silo();
+        assert!(ai.missiles.site.active(), "a hard stall pauses, rather than erases, the search");
+        assert_eq!(QUERIES.get(), 2);
+        ai.frame += 1;
+        ai.eco.hard_estalled = false;
+        ai.eco.adjusted_income = missiles::SILO_INCOME - 1.0;
+        ai.eco_plan_missile_silo();
+        assert!(ai.missiles.site.active());
+        assert_eq!(QUERIES.get(), 2);
+        // A real policy override still cancels the outstanding search.
+        ai.set_feature_off("missiles", true);
+        ai.eco_plan_missile_silo();
+        assert!(!ai.missiles.site.active());
+    }
+
+    #[test]
+    fn nearly_built_silos_finish_before_their_guards_unless_under_fire() {
+        // The Adamantine silo: 99.5% built, danger in the region, none firing.
+        assert!(finish_first(0.995, 0.0));
+        assert!(finish_first(FINISH_FIRST, 0.0));
+        assert!(!finish_first(0.36, 0.0));
+        assert!(!finish_first(0.995, 0.5));
+    }
+
+    #[test]
+    fn guard_lotuses_stand_clear_of_the_stinger_s_death_blast() {
+        // porcmix: death blasts of 130 (Stinger) and 90 (Lotus) elmos.
+        use crate::economy::porcmix::blast_room;
+        assert!(blast_room(GUARD_SPREAD, 90.0, 130.0) >= 1.0);
+        assert!(blast_room(2.0 * GUARD_SPREAD, 90.0, 90.0) >= 1.0);
+    }
 
     #[test]
     fn nearby_region_density_distinguishes_an_army_from_a_sparse_region() {

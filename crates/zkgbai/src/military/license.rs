@@ -335,7 +335,15 @@ impl Ai {
                 };
                 let hp = (unit.health() - unit.paralyze_damage()).max(0.0) * (1.0 - unit.capture_progress());
                 let spec = self.fight_spec_of(*id, d);
-                snap.units.push(SnapUnit { side: 0, spec, hp, x: p.x, z: p.z, reloads: self.snap_reloads(*id) });
+                snap.units.push(SnapUnit {
+                    side: 0,
+                    spec,
+                    hp,
+                    x: p.x,
+                    z: p.z,
+                    reloads: self.snap_reloads(*id),
+                    tubes: self.snap_tubes(*id),
+                });
             }
             for &(id, p, _, identified, seen) in &contacts {
                 let Some(e) = self.war.targets.get(&id) else {
@@ -357,7 +365,15 @@ impl Ai {
                 }
                 let hp = e.get_health() * e.def_health();
                 let spec = self.fight_spec_of(id, d);
-                snap.units.push(SnapUnit { side: 1, spec, hp, x: p.x, z: p.z, reloads: self.snap_reloads(id) });
+                snap.units.push(SnapUnit {
+                    side: 1,
+                    spec,
+                    hp,
+                    x: p.x,
+                    z: p.z,
+                    reloads: self.snap_reloads(id),
+                    tubes: self.snap_tubes(id),
+                });
             }
             let mut assessment = None;
             if !unknown && snap.units.len() <= 96 && snap.armed(0) > 0 && snap.armed(1) > 0 {

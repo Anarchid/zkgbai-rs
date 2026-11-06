@@ -193,6 +193,7 @@ mod tests {
                     hp: 230.0,
                     x: if i % 2 == 0 { 0.0 } else { 400.0 },
                     z: i as f32 * 10.0,
+                    tubes: Vec::new(),
                 })
                 .collect(),
         };

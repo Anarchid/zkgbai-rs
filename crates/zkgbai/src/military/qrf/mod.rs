@@ -22,11 +22,13 @@
 
 mod async_fields;
 pub mod cover;
+pub mod escort;
 pub mod field;
 pub mod floor;
 pub mod intent;
 pub mod live;
 mod loans;
+mod screen;
 #[cfg(test)]
 pub(crate) use loans::tests::loan_test_ai;
 pub mod mark;
@@ -197,7 +199,10 @@ pub struct Qrf {
     /// The operator's roles for teams (and the floor's zones, see `floor`).
     pub roles: BTreeMap<usize, live::Role>,
     pub floor: floor::Floor,
+    /// The conquest escort (see `escort`).
+    pub escort: escort::Escorts,
     predict: predict::Predictor,
+    screen: screen::Screening,
     /// Moonlighting squads sent at a raid, with the frame last sent;
     /// periods each has gone unmatched since; and every squad ever drafted
     /// (a second draft is a redraft, counted apart).
@@ -292,6 +297,7 @@ impl Ai {
     }
 
     pub fn qrf_remove_unit(&mut self, id: i32) {
+        self.qrf_clear_screen(id);
         if let Some(lease) = self.qrf.stakeout_loans.remove(&id) {
             lease.release();
         }
@@ -352,6 +358,9 @@ impl Ai {
         });
         if self.qrf.live && !self.qrf.plan_pending {
             self.qrf_live_after(frame);
+        }
+        if self.qrf.live {
+            self.guard("qrf.screen", |ai| ai.qrf_screen_tick());
         }
         if frame % LOG_PERIOD < PERIOD {
             self.qrf_log(frame);
@@ -582,6 +591,7 @@ impl Ai {
         if self.qrf.stakeout_loans.get(&id).is_some_and(|lease| !lease.active()) {
             return;
         }
+        self.qrf_clear_screen(id);
         let frame = self.frame;
         let Some(m) = self.qrf.members.get_mut(&id) else { return };
         let pos = m.unit.pos();
@@ -599,6 +609,7 @@ impl Ai {
         let y = self.cb.map().elevation_at(to.x, to.z);
         let to = Vec3::new(to.x, y, to.z);
         if fight {
+            m.unit.set_move_state(1, 0);
             m.unit.fight(to, 0);
         } else {
             m.unit.move_to(to, 0);
@@ -615,6 +626,9 @@ impl Ai {
     }
 
     pub(crate) fn qrf_reset_commit_orders(&mut self) {
+        for id in self.qrf.screen.goals.keys().copied().collect::<Vec<_>>() {
+            self.qrf_clear_screen(id);
+        }
         for m in self.qrf.members.values_mut() {
             m.order = None;
         }
@@ -624,6 +638,9 @@ impl Ai {
     pub fn qrf_order_team(&mut self, ids: &[i32], to: Vec3, fight: bool) {
         self.qrf_prune_stakeout_loans();
         if self.raidcommit_on() {
+            for &id in ids {
+                self.qrf_clear_screen(id);
+            }
             // Specialized submerged/cloaked/air defenders keep their controller.
             let special: Vec<_> = ids
                 .iter()
@@ -650,6 +667,10 @@ impl Ai {
             for u in units {
                 self.raidcommit_move(u, to);
             }
+            return;
+        }
+        if self.qrf.live && !fight {
+            self.qrf_reposition(ids, to);
             return;
         }
         for &id in ids {

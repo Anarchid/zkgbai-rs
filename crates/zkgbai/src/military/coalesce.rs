@@ -1,4 +1,4 @@
-//! `coalesce` (on by default, `disable=coalesce`): raiders standing near
+//! `coalesce` (off by default, `enable=coalesce`): raiders standing near
 //! one another, whoever drives them, take the local fight together when
 //! the fight predictor says it pays (user, 2026-10-31: a stakeout, a solo
 //! raider and two survivors of a raider squad seeing a Lotus could become
@@ -16,7 +16,8 @@
 //! the air or under water, no cloaked Scythes) are clustered by [`LINK`]
 //! (single linkage; a raider squad's members always share a cluster). A
 //! cluster of [`MIN_MEMBERS`] or more with an armed enemy in its local fight
-//! (`fightsim::local`) is judged two ways:
+//! (`fightsim::local`), or a lone raider beside an enemy whose tubes are
+//! all empty (`ammo`, [`LONE_OPEN`]), is judged two ways:
 //!
 //! - **clean**: all of it a-moving in. Every armed enemy likely dead (each
 //!   P(dead) >= [`CLEAN_MIN_P`], [`CLEAN_SHARE`] of their armed metal), at
@@ -36,6 +37,26 @@
 //! go back to whoever drove them, and a new gang may form at once (the
 //! Lotus is dead: the mexes behind it are the next fight).
 //!
+//! `coalsize` (default on): a gang is sized to its fight, as the QRF's
+//! mark sizes a team. The cluster's blocks (a raider squad is one block:
+//! its handler skips the whole squad while any member is borrowed) are
+//! taken nearest the focus first until they are worth [`JUST_ENOUGH`]
+//! times the fight's armed enemy metal, and that prefix is judged; if it
+//! fails (the clean plan's loss is a share of the gang's metal, so a
+//! small gang fails where a big one passes) the prefix is doubled, up to
+//! [`SIZE_STEPS`] times, and only then the whole cluster (the lobby, 11-04:
+//! six raiders chasing one Dagger, seven one Ravager, whole clusters on a
+//! lone Dart). A raider squad is split too: the members taken are lent to
+//! this module (see `springai::reserved::lend`), so the squad's own orders no
+//! longer reach them, and its handler drives the rest on (it skips a squad
+//! only when its leader, or all of it, is borrowed; the leader is never
+//! taken into a prefix, so the squad keeps its place). A clean gang
+//! that is not closing on its focus (out of its guns' reach and the gap
+//! not shrinking by [`CHASE_CLOSE`] a recheck, [`CHASE_TICKS`] rechecks
+//! running: the focus kites or flees at our speed) breaks off (`chase`),
+//! and that enemy is left alone for [`SHY`] frames, so the same Dart does
+//! not form a new gang every few seconds.
+//!
 //! `coalesceshadow` (with `coalesce` off) judges the same clusters and
 //! journals what would have formed, with the same windows, for the off arm
 //! of an A/B.
@@ -49,11 +70,11 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use springai::{Unit, Vec3};
+use springai::{Unit, Vec3, reserved};
 
 use crate::Ai;
 use crate::military::SquadId;
-use crate::military::fightsim::local::{Budget, Local, Tally, kills, tally, their_index};
+use crate::military::fightsim::local::{Budget, CONTACT, Local, Tally, Theirs, kills, tally, their_index};
 use crate::military::fightsim::{FateMode, UnitFate};
 use crate::military::wrappers::fighter::fight_clear;
 use crate::nav;
@@ -65,6 +86,7 @@ pub const FINISH_MARGIN: &str = "finishmargin";
 /// Admission-only reserve against a mobile prize surviving on a sliver of HP.
 /// A tuning value, not an enemy retreat policy or a fitted damage coefficient.
 const FINISH_HP_SHARE: f32 = 0.05;
+pub const SIZE: &str = "coalsize";
 
 /// Frames between scans (2 Hz).
 const PERIOD: i32 = 15;
@@ -72,6 +94,10 @@ const PERIOD: i32 = 15;
 const LINK: f32 = 450.0;
 /// Legacy minimum. `raidcommit` also judges singletons.
 const MIN_MEMBERS: usize = 2;
+/// ...unless an enemy in its fight has fired every tube, for at least this
+/// many more frames (`ammo`): a Kodachi that has taken a Picket's three
+/// missiles, a Glaive whose pair-mate did.
+const LONE_OPEN: i32 = 60;
 /// Synchronous query time per scan (microseconds); clusters left over wait.
 const BUDGET_US: u128 = 4000;
 /// Prizes tried per cluster, most valuable first.
@@ -100,6 +126,17 @@ const FAILS: u8 = 3;
 const MAX_LIFE: i32 = 30 * 45;
 /// Orders are repeated at most this often, unless the focus changes.
 const REORDER: i32 = 60;
+/// A sized gang is worth this many times the fight's armed enemy metal.
+const JUST_ENOUGH: f32 = 2.0;
+/// A failing prefix is doubled this many times before the whole cluster.
+const SIZE_STEPS: u32 = 2;
+/// A clean gang out of reach of its focus is chasing when the gap does
+/// not shrink by this much (elmos) per recheck, this many rechecks
+/// running (a closing gang shrinks it by 50 or more at raider speed).
+const CHASE_CLOSE: f32 = 20.0;
+const CHASE_TICKS: u8 = 4;
+/// An enemy that outran a gang is left alone this long (frames).
+const SHY: i32 = 30 * 15;
 /// Frames after a form (or would) over which the outcome is read.
 const WINDOW: i32 = 30 * 30;
 /// A unit in a `would` record is not recorded again for this long, so the
@@ -120,7 +157,7 @@ pub enum Origin {
 }
 
 impl Origin {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Origin::Solo => "solo",
             Origin::Kodachi => "kodachi",
@@ -156,6 +193,10 @@ struct Gang {
     /// Failed judgements in a row, and the last judgement's sums.
     fails: u8,
     last: Option<(Tally, f32)>,
+    /// The focus and our gap to it at the last recheck, and how many
+    /// rechecks running the gap has grown (`coalsize`).
+    gap: Option<(i32, f32)>,
+    chasing: u8,
 }
 
 /// A gang's judgement.
@@ -197,6 +238,7 @@ pub struct Coalesce {
     gangs: Vec<Gang>,
     /// Unit id -> gang id.
     owner: BTreeMap<i32, u32>,
+    leases: BTreeMap<i32, reserved::CommandLease>,
     next_id: u32,
     windows: Vec<Window>,
     /// Shadow records: unit id -> frame until which it is not recorded.
@@ -213,7 +255,36 @@ pub struct Coalesce {
     scans: u64,
     over_budget: u64,
     forms: u64,
+    /// Lone raiders judged beside an emptied tube weapon (`ammo`), and
+    /// the gangs of one formed (or would be).
+    lone_judged: u64,
+    lone_formed: u64,
+    /// Gangs formed as a sized prefix of their cluster, and clean gangs
+    /// broken off a chase (`coalsize`).
+    sized: u64,
+    sized_failed: u64,
+    chases: u64,
+    /// Enemies that outran a gang: unit id -> frame until which no gang
+    /// forms on them.
+    shy: BTreeMap<i32, i32>,
     last_report: i32,
+}
+
+/// Blocks (a raider squad is one block) `(distance to the focus, metal,
+/// member indices)`, nearest first, until they are worth `need`: the
+/// indices taken. At least `min_units` units when the blocks have them.
+fn take_blocks(blocks: &mut [(f32, f32, Vec<usize>)], need: f32, min_units: usize) -> Vec<usize> {
+    blocks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut taken = Vec::new();
+    let mut have = 0.0;
+    for (_, cost, idx) in blocks.iter() {
+        if have >= need && taken.len() >= min_units {
+            break;
+        }
+        taken.extend(idx.iter().copied());
+        have += cost;
+    }
+    taken
 }
 
 fn passes(plan: Plan, t: &Tally, p_prize: f32, holding: bool, minimum_value: f32) -> bool {
@@ -340,11 +411,16 @@ impl Ai {
         self.coalesce.owner.contains_key(&id)
     }
 
-    /// Whether any member of raider squad `sid` is borrowed.
+    /// Whether raider squad `sid` is a gang's: its leader borrowed, or all
+    /// of it (with `coalsize` a squad lends some members and goes on).
     pub fn coalesce_owns_squad(&self, sid: SquadId) -> bool {
         !self.coalesce.owner.is_empty()
             && self.squads.get(sid).is_some_and(|s| {
-                s.fighters.iter().chain(s.leader.iter()).any(|id| self.coalesce.owner.contains_key(id))
+                let owned = |id: &i32| self.coalesce.owner.contains_key(id);
+                if self.dev_off(SIZE) {
+                    return s.fighters.iter().chain(s.leader.iter()).any(owned);
+                }
+                s.leader.as_ref().is_some_and(owned) || !s.fighters.is_empty() && s.fighters.iter().all(owned)
             })
     }
 
@@ -481,7 +557,8 @@ impl Ai {
     }
 
     /// The raiders free to join a gang, and where each comes from.
-    fn coalesce_candidates(&self) -> Vec<(i32, Origin, Unit)> {
+    pub(crate) fn coalesce_candidates(&self) -> Vec<(i32, Origin, Unit)> {
+        let frame = self.frame;
         let h = &self.raider_handler;
         let mut out: Vec<(i32, Origin, Unit)> = Vec::new();
         let fighter = |id: &i32| self.fighters.get(id).map(|f| f.unit);
@@ -512,7 +589,7 @@ impl Ai {
             };
             out.push((*id, origin, f.unit));
         }
-        for (id, u) in self.stakeouts_borrowable() {
+        for (id, u) in self.stakeouts_borrowable(frame) {
             out.push((id, Origin::Stakeout, u));
         }
         out.retain(|&(id, _, u)| {
@@ -524,6 +601,7 @@ impl Ai {
                 && u.team() == self.team_id
                 && !springai::reserved::is_reserved(self.cb, id)
                 && !self.recovery_owns(id)
+                && !self.harassment_owns(id)
                 && !u.is_being_built()
                 && !def.is_able_to_fly()
                 && def.max_weapon_range() > 0.0
@@ -534,6 +612,7 @@ impl Ai {
                 && !self.fire_controls(id)
                 && !self.limpet_controls(id)
                 && !self.blasts_waiting(u.pos())
+                && !self.stayveto_borrowed(id)
         });
         out
     }
@@ -544,24 +623,31 @@ impl Ai {
         if self.raidcommit_on() && budget.spent() {
             return Judged::Unknown;
         }
-        let Some(local) = self.local_fight(units) else {
+        let Some(mut local) = self.local_fight(units) else {
             return if self.raidcommit_on() { Judged::Unknown } else { Judged::NoFight };
         };
         if self.raidcommit_on() && (local.unknown || local.ours.len() != units.len()) {
             return Judged::Unknown;
         }
+        local.snap.flags.ordered = !self.dev_off(crate::military::fightsim::ORDERED);
         if !local.armed_theirs() {
             return Judged::NoFight;
         }
         if local.unknown {
             return Judged::Unknown;
         }
+        // An enemy that outran a gang is left alone a while (`coalsize`).
+        let sized = !self.dev_off(SIZE);
+        let shy = |id: i32| sized && self.coalesce.shy.contains_key(&id);
+        if local.theirs.iter().filter(|t| t.armed).all(|t| shy(t.id)) {
+            return Judged::NoFight;
+        }
         let mid = {
             let n = units.len().max(1) as f32;
             Vec3::xz(units.iter().map(|u| u.pos().x).sum::<f32>() / n, units.iter().map(|u| u.pos().z).sum::<f32>() / n)
         };
         let focus = (local.theirs.iter())
-            .filter(|t| t.armed)
+            .filter(|t| t.armed && !shy(t.id))
             .min_by(|a, b| distance(a.pos, mid).total_cmp(&distance(b.pos, mid)))
             .map(|t| t.id);
         let mut plans: Vec<Plan> = match hold {
@@ -599,7 +685,7 @@ impl Ai {
             }
             let (fates, prize_index) = match plan {
                 // Clean gangs receive Fight orders with UnitAI still active.
-                Plan::Clean => (self.local_ordered_kiting_fates(forecast, budget), None),
+                Plan::Clean => (self.local_kiting_fates(forecast, budget), None),
                 Plan::Prize(id) => {
                     let Some(i) = local.theirs.iter().position(|t| t.id == id) else { continue };
                     let mode = FateMode::Assassinate { target: their_index(&local, i) };
@@ -647,6 +733,8 @@ impl Ai {
                 .filter(|&(id, origin, u)| {
                     u.health() > 0.0
                         && u.team() == self.team_id
+                        && !reserved::is_reserved(self.cb, id)
+                        && self.coalesce.leases.get(&id).is_some_and(|l| l.active())
                         && !self.recovery_owns(id)
                         && !self.retreat_handler.is_retreating(id)
                         && !self.squad_strike_owns(id)
@@ -665,6 +753,9 @@ impl Ai {
                 .collect();
             for &(id, ..) in members.iter().filter(|m| !kept.iter().any(|k| k.0 == m.0)) {
                 self.coalesce.owner.remove(&id);
+                if let Some(lease) = self.coalesce.leases.remove(&id) {
+                    lease.release();
+                }
             }
             if let Some(g) = self.coalesce.gangs.iter_mut().find(|g| g.id == gid) {
                 g.members = kept.clone();
@@ -703,6 +794,12 @@ impl Ai {
                         g.last = Some((v.tally, v.p_prize));
                     }
                     self.coalesce_order(gid, v.focus);
+                    if plan == Plan::Clean
+                        && !self.dev_off(SIZE)
+                        && let Some(fid) = v.focus
+                    {
+                        self.coalesce_chase(gid, fid, &units);
+                    }
                 }
                 Judged::NoFight => self.coalesce_end(gid, "clear"),
                 Judged::Unknown => fail(self, "unknown", None),
@@ -716,10 +813,10 @@ impl Ai {
         let frame = self.frame;
         let shadow = !self.coalesce_on();
         self.coalesce.quiet.retain(|_, until| *until > frame);
+        self.coalesce.shy.retain(|_, until| *until > frame);
         let free: Vec<(i32, Origin, Unit)> =
             self.coalesce_candidates().into_iter().filter(|c| !self.coalesce.owner.contains_key(&c.0)).collect();
-        let minimum = if self.raidcommit_on() { 1 } else { MIN_MEMBERS };
-        if free.len() < minimum {
+        if free.is_empty() {
             return;
         }
         let points: Vec<Vec3> = free.iter().map(|c| c.2.pos()).collect();
@@ -728,7 +825,9 @@ impl Ai {
             _ => false,
         })
         .into_iter()
-        .filter(|g| g.len() >= minimum)
+        .filter(|g| {
+            self.raidcommit_on() || g.len() >= MIN_MEMBERS || self.ammo_open_near(points[g[0]], CONTACT, LONE_OPEN)
+        })
         .filter(|g| !shadow || g.iter().all(|&i| !self.coalesce.quiet.contains_key(&free[i].0)))
         .collect();
         if groups.is_empty() {
@@ -744,14 +843,60 @@ impl Ai {
             }
             let group = &groups[(start + k) % n];
             let members: Vec<(i32, Origin, Unit)> = group.iter().map(|&i| free[i]).collect();
+            let cluster = members.len();
+            // Just enough of the cluster first, then twice that, then
+            // four times (`coalsize`).
+            let mut sized = false;
+            if !self.dev_off(SIZE) {
+                let mut last = 0;
+                for step in 0..=SIZE_STEPS {
+                    let ratio = JUST_ENOUGH * (1 << step) as f32;
+                    let Some(prefix) = self.coalesce_prefix(&members, ratio) else { break };
+                    if prefix.len() == last {
+                        continue;
+                    }
+                    last = prefix.len();
+                    let units: Vec<Unit> = prefix.iter().map(|m| m.2).collect();
+                    let judged = self.coalesce_judge(&units, None, false, budget);
+                    if let Judged::Pass(v) = judged {
+                        self.coalesce.sized += 1;
+                        self.coalesce_form(prefix, v, shadow, cluster);
+                        sized = true;
+                        break;
+                    }
+                    self.coalesce.sized_failed += 1;
+                    // Why the prefix failed (for the read).
+                    let why = match &judged {
+                        Judged::Fail(t, p) => json!({"tally": tally_json(t), "p_prize": p}),
+                        Judged::NoFight => json!("nofight"),
+                        Judged::Unknown => json!("unknown"),
+                        Judged::Pass(_) => json!("pass"),
+                    };
+                    self.op_emit(
+                        "coalesce",
+                        json!({"event": "sized_no", "t": frame / 30, "ratio": ratio, "prefix": prefix.len(),
+                               "cluster": cluster, "why": why}),
+                    );
+                    if budget.spent() {
+                        sized = true;
+                        break;
+                    }
+                }
+            }
+            if sized {
+                continue;
+            }
             let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
+            let lone = members.len() == 1;
+            self.coalesce.lone_judged += u64::from(lone);
             match self.coalesce_judge(&units, None, false, budget) {
                 Judged::Pass(v) => {
                     for u in &units {
                         self.coalesce.holds.remove(&u.id());
                         self.coalesce.assembly_retry.remove(&u.id());
                     }
-                    self.coalesce_form(members, v, shadow);
+                    self.coalesce.lone_formed += u64::from(lone);
+                    self.coalesce_form(members, v, shadow, cluster);
                 }
                 Judged::Fail(..) | Judged::Unknown if self.raidcommit_on() => {
                     // An explicit rendezvous, outside weapon coverage after routing.
@@ -778,8 +923,83 @@ impl Ai {
         self.coalesce.rotate = start + 1;
     }
 
-    fn coalesce_form(&mut self, members: Vec<(i32, Origin, Unit)>, v: Verdict, shadow: bool) {
+    /// The cluster's blocks nearest the fight's focus until they are worth
+    /// [`JUST_ENOUGH`] times its armed enemy metal (`coalsize`); `None`
+    /// when that is the whole cluster, or there is no fight to size to.
+    fn coalesce_prefix(&mut self, members: &[(i32, Origin, Unit)], ratio: f32) -> Option<Vec<(i32, Origin, Unit)>> {
+        if members.len() <= MIN_MEMBERS {
+            return None;
+        }
+        let units: Vec<Unit> = members.iter().map(|m| m.2).collect();
+        let local = self.local_fight(&units)?;
+        let armed: Vec<&Theirs> =
+            (local.theirs.iter()).filter(|t| t.armed && !self.coalesce.shy.contains_key(&t.id)).collect();
+        if armed.is_empty() {
+            return None;
+        }
+        let n = units.len() as f32;
+        let mid = Vec3::xz(
+            units.iter().map(|u| u.pos().x).sum::<f32>() / n,
+            units.iter().map(|u| u.pos().z).sum::<f32>() / n,
+        );
+        let focus = (armed.iter()).min_by(|a, b| distance(a.pos, mid).total_cmp(&distance(b.pos, mid)))?.pos;
+        let need = ratio * armed.iter().map(|t| t.cost).sum::<f32>();
+        let metal = self.metal;
+        // Every raider its own block; a squad's leader stays with its squad.
+        let mut blocks: Vec<(f32, f32, Vec<usize>)> = Vec::new();
+        for (i, m) in members.iter().enumerate() {
+            if let Origin::Squad(sid) = m.1
+                && self.squads.get(sid).is_some_and(|s| s.leader == Some(m.0))
+            {
+                continue;
+            }
+            let d = distance(m.2.pos(), focus);
+            let cost = m.2.def().map_or(0.0, |def| def.cost(metal));
+            blocks.push((d, cost, vec![i]));
+        }
+        if blocks.len() < MIN_MEMBERS {
+            return None;
+        }
+        let taken = take_blocks(&mut blocks, need, MIN_MEMBERS);
+        if taken.len() >= members.len() {
+            return None;
+        }
+        Some(taken.iter().map(|&i| members[i]).collect())
+    }
+
+    /// A clean gang that is not closing on its focus breaks off, and that
+    /// enemy is left alone a while (`coalsize`).
+    fn coalesce_chase(&mut self, gid: u32, fid: i32, units: &[Unit]) {
         let frame = self.frame;
+        let Some(e) = self.war.targets.get(&fid) else { return };
+        let Some(ed) = e.ud else { return };
+        if e.is_static || e.is_dead {
+            return;
+        }
+        let reach = units.iter().filter_map(|u| u.def()).map(|d| d.max_weapon_range()).fold(0.0, f32::max);
+        let n = units.len().max(1) as f32;
+        let mid = Vec3::xz(
+            units.iter().map(|u| u.pos().x).sum::<f32>() / n,
+            units.iter().map(|u| u.pos().z).sum::<f32>() / n,
+        );
+        let gap = distance(mid, e.position);
+        let Some(g) = self.coalesce.gangs.iter_mut().find(|g| g.id == gid) else { return };
+        let stalled = g.gap.is_some_and(|(f, last)| f == fid && gap > last - CHASE_CLOSE);
+        g.gap = Some((fid, gap));
+        g.chasing = if stalled && gap > reach + 50.0 && ed.speed() > 0.0 { g.chasing + 1 } else { 0 };
+        if g.chasing >= CHASE_TICKS {
+            self.coalesce.shy.insert(fid, frame + SHY);
+            self.coalesce.chases += 1;
+            self.coalesce_end(gid, "chase");
+        }
+    }
+
+    fn coalesce_form(&mut self, members: Vec<(i32, Origin, Unit)>, v: Verdict, shadow: bool, cluster: usize) {
+        let frame = self.frame;
+        for (id, _, _) in &members {
+            self.coalesce.holds.remove(id);
+            self.coalesce.assembly_retry.remove(id);
+        }
         let c = &mut self.coalesce;
         let gid = c.next_id;
         c.next_id += 1;
@@ -795,6 +1015,9 @@ impl Ai {
         rec["gang"] = json!(gid);
         rec["t"] = json!(frame / 30);
         rec["members"] = json!(origins);
+        rec["lone"] = json!(members.len() == 1);
+        rec["cluster"] = json!(cluster);
+        rec["spare"] = json!(cluster.saturating_sub(members.len()));
         rec["p_prize"] = json!(v.p_prize);
         if shadow {
             for m in &members {
@@ -806,6 +1029,25 @@ impl Ai {
         c.forms += 1;
         for m in &members {
             c.owner.insert(m.0, gid);
+            c.leases.insert(
+                m.0,
+                reserved::lend(
+                    self.cb,
+                    m.0,
+                    reserved::Owner {
+                        module: "coalesce",
+                        helpers: &[
+                            "fac.unitCreated",
+                            "war.unitFinished",
+                            "war.unitIdle",
+                            "retreat",
+                            "teleport",
+                            "water",
+                            "facframe",
+                        ],
+                    },
+                ),
+            );
         }
         c.gangs.push(Gang {
             id: gid,
@@ -816,6 +1058,8 @@ impl Ai {
             focus: None,
             fails: 0,
             last: Some((v.tally, v.p_prize)),
+            gap: None,
+            chasing: 0,
         });
         // Solo raiders leave their scout task (they had stopped for it).
         for m in &members {
@@ -864,14 +1108,17 @@ impl Ai {
         let g = self.coalesce.gangs.remove(i);
         for (id, origin, _) in &g.members {
             self.coalesce.owner.remove(id);
+            if let Some(lease) = self.coalesce.leases.remove(id) {
+                lease.release();
+            }
             match origin {
+                Origin::Squad(_) | Origin::Loose => {}
                 Origin::Stakeout => self.stakeouts_release(*id),
                 Origin::Solo | Origin::Kodachi => {
                     if let Some(f) = self.fighters.get_mut(id) {
                         f.last_task_frame = 0;
                     }
                 }
-                _ => {}
             }
         }
         if self.raidcommit_on() {
@@ -942,7 +1189,8 @@ impl Ai {
             "event": "cost", "t": frame / 30, "mode": mode,
             "scans_per_min": c.scans as f64 / minutes, "queries": c.queries,
             "mean_us": c.micros as f64 / c.scans as f64, "over_budget": c.over_budget, "forms": c.forms,
-            "gangs": c.gangs.len(),
+            "gangs": c.gangs.len(), "lone_judged": c.lone_judged, "lone_formed": c.lone_formed,
+            "sized": c.sized, "sized_failed": c.sized_failed, "chases": c.chases,
         });
         c.scans = 0;
         c.micros = 0;
@@ -960,10 +1208,11 @@ fn coalesce_record(local: &Local, fates: &[UnitFate], plan: Plan, t: &Tally, p_p
         .map(|(o, f)| json!({"id": o.id, "cost": o.cost, "p": f.p_raw, "pc": f.p_dead}))
         .collect();
     let k = kills(local, fates);
-    let theirs: Vec<Value> = (local.theirs.iter().zip(&fates[n.min(fates.len())..]).zip(k))
-        .map(|((e, f), kv)| {
+    let theirs: Vec<Value> = (local.theirs.iter().zip(&fates[n.min(fates.len())..]).zip(k).enumerate())
+        .map(|(i, ((e, f), kv))| {
+            let tubes = local.snap.units.get(n + i).map_or(&[][..], |u| &u.tubes[..]);
             json!({"id": e.id, "def": e.def, "cost": e.cost, "value": e.value, "armed": e.armed,
-                   "prize": e.prize, "p": f.p_raw, "pc": f.p_dead, "kill": kv})
+                   "prize": e.prize, "p": f.p_raw, "pc": f.p_dead, "kill": kv, "tubes": tubes})
         })
         .collect();
     json!({
@@ -1037,7 +1286,8 @@ mod tests {
     #[test]
     fn finishing_reserve_prices_a_marginal_kill_without_mutating_live_specs() {
         use crate::military::fightsim::Model;
-        let local = finishing_fixture();
+        let mut local = finishing_fixture();
+        local.snap.flags.ordered = true;
         let cached = local.snap.units[1].spec.clone();
         let padded = finishing_forecast(&local, false, true).unwrap();
         assert_eq!(local.snap.units[1].hp, 8.25);
@@ -1047,8 +1297,8 @@ mod tests {
         assert_eq!(padded.theirs[0].value, 850.0);
         assert!(Arc::ptr_eq(&local.snap.units[0].spec, &padded.snap.units[0].spec));
         let model = Model::load().unwrap();
-        assert!(model.ordered_kiting_fates(&local.snap, 3)[1].dead);
-        assert!(!model.ordered_kiting_fates(&padded.snap, 3)[1].dead);
+        assert!(model.kiting_fates(&local.snap, 3)[1].dead);
+        assert!(!model.kiting_fates(&padded.snap, 3)[1].dead);
     }
 
     #[test]
@@ -1067,6 +1317,23 @@ mod tests {
         Arc::make_mut(&mut local.snap.units[1].spec).mobile = true;
         Arc::make_mut(&mut local.snap.units[1].spec).air = true;
         assert!(finishing_forecast(&local, false, true).is_none());
+    }
+
+    #[test]
+    fn a_gang_takes_the_nearest_blocks_until_just_enough() {
+        // Four solos at 100/200/300/400 elmos worth 70 each vs need 150: the two nearest.
+        let mut b =
+            vec![(300.0, 70.0, vec![2]), (100.0, 70.0, vec![0]), (400.0, 70.0, vec![3]), (200.0, 70.0, vec![1])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![0, 1, 2]);
+        assert_eq!(take_blocks(&mut b, 100.0, 2), vec![0, 1]);
+        // A squad is one block: taken whole, and enough on its own.
+        let mut b = vec![(250.0, 210.0, vec![1, 2, 3]), (100.0, 70.0, vec![0])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![0, 1, 2, 3]);
+        let mut b = vec![(50.0, 210.0, vec![1, 2, 3]), (100.0, 70.0, vec![0])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![1, 2, 3]);
+        // Never fewer than the minimum when the cluster has them.
+        let mut b = vec![(50.0, 500.0, vec![0]), (100.0, 70.0, vec![1])];
+        assert_eq!(take_blocks(&mut b, 150.0, 2), vec![0, 1]);
     }
 
     fn t(own_cost: f32, own_loss: f32, kill_value: f32, armed_share: f32, min_armed_p: f32) -> Tally {
@@ -1173,6 +1440,7 @@ mod tests {
                 x,
                 z,
                 reloads: Vec::new(),
+                tubes: Vec::new(),
             });
         }
         local.theirs.push(Theirs {
@@ -1184,8 +1452,17 @@ mod tests {
             prize: false,
             pos: Vec3::xz(0.0, 0.0),
         });
-        local.snap.units.push(SnapUnit { side: 1, hp: foe.health, spec: foe, x: 0.0, z: 0.0, reloads: Vec::new() });
-        let fates = Model::load().unwrap().ordered_kiting_fates(&local.snap, HORIZON);
+        local.snap.units.push(SnapUnit {
+            side: 1,
+            hp: foe.health,
+            spec: foe,
+            x: 0.0,
+            z: 0.0,
+            reloads: Vec::new(),
+            tubes: Vec::new(),
+        });
+        local.snap.flags.ordered = true;
+        let fates = Model::load().unwrap().kiting_fates(&local.snap, HORIZON);
         tally(&local, &fates, true)
     }
 

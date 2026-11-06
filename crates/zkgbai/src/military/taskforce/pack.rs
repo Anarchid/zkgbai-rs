@@ -59,6 +59,9 @@
 //! back to its screen, parks / is repaired, takes in (merges), is led from
 //! its bulk; engages and break-offs as other forces'.
 
+mod range;
+mod rush;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -179,6 +182,7 @@ impl Pass {
 /// A pack's state between conducts.
 #[derive(Clone, Debug)]
 pub struct Pack {
+    rush: rush::RushRun,
     /// What it dives (`NULLPOS`: nothing), since which frame, the pass it
     /// is on, and how many passes it made over it.
     pub target: Vec3,
@@ -214,6 +218,7 @@ pub struct Pack {
 impl Default for Pack {
     fn default() -> Self {
         Pack {
+            rush: rush::RushRun::default(),
             target: NULLPOS,
             since: 0,
             pass: None,
@@ -340,7 +345,7 @@ pub fn plan_pass(
     guns: &[((f32, f32), f32)],
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
-    plan_pass_inner(pos, heading, target, guns, None, clear)
+    plan_pass_inner(pos, heading, target, guns, None, None, clear)
 }
 
 /// A forced tangential pass keeps the entire formation to one side of
@@ -354,7 +359,32 @@ fn plan_tangent_pass(
     clearance: f32,
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
-    plan_pass_inner(pos, heading, target, guns, Some(clearance), clear)
+    // Do not buy one extra gun by bringing the near edge of a broad
+    // formation pointblank. Prefer a partial volley at useful range.
+    let reach = guns.iter().map(|g| g.1).filter(|r| *r > 0.0).reduce(f32::min).unwrap_or(0.0);
+    let axis = super::pack::heading(Vec3::ZERO, pos, target);
+    let mut best: Option<(Pass, usize, f32, f32)> = None;
+    // A line parallel to a broad formation can put every gun at range.
+    // Merely shifting a head-on line sideways unnecessarily sacrifices guns.
+    for degrees in [-90.0f32, -60.0, -30.0, 0.0, 30.0, 60.0, 90.0] {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let way = (axis.0 * cos - axis.1 * sin, axis.0 * sin + axis.1 * cos);
+        let Some((p, n)) =
+            plan_pass_inner(pos, heading, target, guns, Some(clearance.max(0.85 * reach)), Some(way), &clear)
+        else {
+            continue;
+        };
+        let left = p.left();
+        let gap =
+            guns.iter().map(|&((x, z), _)| (p.side + x * left.0 + z * left.1).abs()).fold(f32::INFINITY, f32::min);
+        let approach = distance(pos, p.point(target)) + 100.0 * (1.0 - heading.0 * way.0 - heading.1 * way.1);
+        if best
+            .is_none_or(|(_, m, g, a)| n > m || (n == m && (gap > g + 0.1 || ((gap - g).abs() <= 0.1 && approach < a))))
+        {
+            best = Some((p, n, gap, approach));
+        }
+    }
+    best.map(|(p, n, _, _)| (p, n))
 }
 
 fn plan_pass_inner(
@@ -363,11 +393,12 @@ fn plan_pass_inner(
     target: Vec3,
     guns: &[((f32, f32), f32)],
     tangent: Option<f32>,
+    direction: Option<(f32, f32)>,
     clear: impl Fn(&Pass) -> bool,
 ) -> Option<(Pass, usize)> {
     let (dx, dz) = (target.x - pos.x, target.z - pos.z);
     let d = (dx * dx + dz * dz).sqrt();
-    let way = if d > 1.0 { (dx / d, dz / d) } else { heading };
+    let way = direction.unwrap_or_else(|| if d > 1.0 { (dx / d, dz / d) } else { heading });
     let left = (-way.1, way.0);
     // Where the heading's line runs by the target, across the way.
     let ahead = (dx * heading.0 + dz * heading.1).max(0.0);
@@ -577,6 +608,11 @@ impl Ai {
     /// A pack's conduct (see the module): where it dives now, if it does;
     /// else why not.
     pub(crate) fn taskforce_pack(&mut self, sid: SquadId) -> (Option<Vec3>, String) {
+        match self.squads.get(sid).map(|s| s.shape.doctrine.as_str()) {
+            Some("rush") => return self.taskforce_rush_pack(sid),
+            Some("rush-guard") => return self.taskforce_rush_guard(sid),
+            _ => {}
+        }
         self.pack_merge(sid);
         self.pack_lead(sid);
         let turn = self.pack_turn_distance(sid);
@@ -1034,7 +1070,34 @@ impl Ai {
             let [a, b] = pass_way(pos, st.pass_target, &pass);
             // Swinging round to come back over it.
             let way: Vec<Vec3> = turn_point(pos, head, a, turn).into_iter().chain([a, b]).collect();
-            self.pack_drive(sid, &way);
+            let way = if shape.attack == Attack::Pass {
+                range::around_range(pos, &way, st.pass_target, pass.side.abs())
+            } else {
+                way
+            };
+            // Raw-move cannot safely navigate an arbitrary geometric arc
+            // through a cliff or off-map waypoint.
+            let map = self.cb.map();
+            let mut from = pos;
+            let clear = shape.attack != Attack::Pass
+                || way.iter().all(|&to| {
+                    let valid = to.x >= 0.0
+                        && to.z >= 0.0
+                        && to.x <= map.width() as f32 * 8.0
+                        && to.z <= map.height() as f32 * 8.0
+                        && leader.def().is_some_and(|d| self.terrain_reaches(d, from, to, 0.0));
+                    from = to;
+                    valid
+                });
+            if clear {
+                self.pack_drive(sid, &way);
+            } else {
+                // Drop the unsafe pass and clear its previously queued path.
+                st.pass = None;
+                st.shun.push((target, self.frame + SHUN_FOR));
+                st.target = NULLPOS;
+                self.pack_go(sid, pos, head, home, false);
+            }
         }
         self.pack_screen(sid, home, false);
         self.taskforces.packs.insert(sid, st);
@@ -1108,11 +1171,20 @@ impl Ai {
                     hp: *hp,
                     x: p.x + sx,
                     z: p.z + sz,
+                    tubes: Vec::new(),
                 });
             }
             for &i in &group {
                 let (spec, hp, p, _) = &armed[i];
-                snap.units.push(SnapUnit { reloads: Vec::new(), side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+                snap.units.push(SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: spec.clone(),
+                    hp: *hp,
+                    x: p.x,
+                    z: p.z,
+                    tubes: Vec::new(),
+                });
             }
             let out = model.predict_with(&snap, true);
             let cost_a: f32 = pack.iter().map(|u| u.0.cost).sum();
@@ -1166,13 +1238,26 @@ impl Ai {
         let s = self.squads.get(sid)?;
         let (horizon, lasting) = ((s.shape.fate_secs * 30.0) as i32, s.shape.lasting);
         let reach_share = s.shape.pass_reach;
-        let ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
+        let rush = s.shape.doctrine == "rush";
+        let mut ours: Vec<(i32, UnitDef, f32, Vec3)> = (s.everyone().filter_map(|id| self.fighters.get(&id)))
             .filter(|f| s.shape.is_core(f.unit.def().map(|d| d.id())) && f.unit.health() > 0.0)
             .filter_map(|f| f.unit.def().map(|d| (f.unit.id(), d, f.unit.health(), f.get_pos())))
             .collect();
+        if rush && let Some(leader) = s.get_leader(&self.fighters) {
+            let mut nearby = self.cb.friendly_units_in_cylinder(leader.pos(), 650.0);
+            nearby.sort_by(|a, b| distance(a.pos(), leader.pos()).total_cmp(&distance(b.pos(), leader.pos())));
+            for unit in nearby.into_iter().filter(|u| u.health() > 0.0 && !u.is_being_built()).take(24) {
+                if ours.iter().any(|u| u.0 == unit.id()) {
+                    continue;
+                }
+                if let Some(def) = unit.def().filter(|d| d.is_able_to_attack() && !d.is_builder() && d.speed() > 0.0) {
+                    ours.push((unit.id(), def, unit.health(), unit.pos()));
+                }
+            }
+        }
         let frame = self.frame;
         let seen: Vec<(i32, UnitDef, f32, Vec3, bool)> = (self.war.targets.values())
-            .filter(|e| !e.is_dead && e.identified && frame - e.last_seen <= JUDGE_SEEN)
+            .filter(|e| !e.is_dead && e.identified && ((rush && e.is_static) || frame - e.last_seen <= JUDGE_SEEN))
             .filter_map(|e| e.ud.map(|d| (e.unit_id, d, e.get_health() * e.def_health(), e.position, e.can_fly())))
             .collect();
         let mut pack: Vec<(Arc<UnitSpec>, f32, Vec3, i32)> =
@@ -1223,17 +1308,41 @@ impl Ai {
             };
             let mut snap = FightSnapshot { flags: self.sim_flags(), ..Default::default() };
             for (spec, hp, p, _) in &pack {
-                snap.units.push(SnapUnit { reloads: Vec::new(), side: 0, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+                snap.units.push(SnapUnit {
+                    reloads: Vec::new(),
+                    side: 0,
+                    spec: spec.clone(),
+                    hp: *hp,
+                    x: p.x,
+                    z: p.z,
+                    tubes: Vec::new(),
+                });
             }
             for &i in &group {
                 let (_, spec, hp, p, _, _) = &near[i];
-                snap.units.push(SnapUnit { reloads: Vec::new(), side: 1, spec: spec.clone(), hp: *hp, x: p.x, z: p.z });
+                snap.units.push(SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: spec.clone(),
+                    hp: *hp,
+                    x: p.x,
+                    z: p.z,
+                    tubes: Vec::new(),
+                });
             }
             let fates = model.fates(&snap, horizon, FateMode::Pass { offset });
             let (ours_f, theirs_f) = fates.split_at(pack.len());
             let loss: f32 = pack.iter().zip(ours_f).map(|(u, f)| f.p_dead * u.0.cost).sum();
             let gain: f32 = (group.iter().zip(theirs_f))
-                .map(|(&i, f)| f.p_dead * near[i].1.cost * if near[i].1.mobile { 1.0 } else { lasting })
+                .map(|(&i, f)| {
+                    let e = self.war.targets.get(&near[i].0);
+                    let prize = !rush
+                        || e.is_some_and(|e| {
+                            crate::military::rush_push::rush_prize(e.is_static, e.is_raider, e.value)
+                                && crate::military::rush_push::rush_bait_allows(e)
+                        });
+                    if prize { f.p_dead * near[i].1.cost * if near[i].1.mobile { 1.0 } else { lasting } } else { 0.0 }
+                })
                 .sum();
             j.loss += loss;
             j.gain += gain;
@@ -1693,16 +1802,16 @@ mod tests {
         let guns = [((0.0, 0.0), 252.0), ((0.0, 75.0), 252.0)];
         let (pass, n) = plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |_| true).unwrap();
         assert_eq!(n, 2);
-        for &((_, z), reach) in &guns {
-            assert!((pass.side + z).abs() >= 170.0);
-            assert!((pass.side + z).abs() <= reach);
+        for &((x, z), reach) in &guns {
+            let gap = (pass.side + x * pass.left().0 + z * pass.left().1).abs();
+            assert!(gap >= 0.85 * reach && gap <= reach + 0.01);
         }
         // If only a head-on line is clear, abandon it rather than ram.
         assert!(plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |p| p.side.abs() < 5.0).is_none());
         // Turn away from a blocked side, keeping both guns outside the body.
         let (other, n) = plan_tangent_pass(pos, (1.0, 0.0), target, &guns, 70.0, |p| p.side < 0.0).unwrap();
         assert_eq!(n, 2);
-        assert!(other.side < -170.0);
+        assert!(other.side < -250.0);
     }
 
     #[test]

@@ -281,30 +281,48 @@ impl Ai {
         }
         let TerrainModel::Pending { job } = &self.terrain else { return };
         match job.rx.try_recv() {
-            Ok((terrain, compute, split)) => {
-                self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
-                self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
-                if split > 0 {
-                    self.log(&format!("terrain: regions cut around clusters of the {split} metal spots (regionsplit)"));
-                }
-                for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
-                    let count = |k: ChokeKind| t.chokes.iter().filter(|c| c.kind == k).count();
-                    let (gates, seams) = (count(ChokeKind::Gate), count(ChokeKind::Seam));
-                    let pieces = t.regions.iter().filter(|r| r.whole != r.id).count();
-                    self.log(&format!(
-                        "terrain: {:<8} {:>5.1}% passable, {} regions ({pieces} new from cuts), {gates} gates, {} borders, {seams} seams",
-                        t.tier.name(),
-                        t.passable_fraction * 100.0,
-                        t.regions.len(),
-                        count(ChokeKind::Border),
-                    ));
-                }
-            }
+            Ok((terrain, compute, split)) => self.terrain_ready(terrain, compute, split),
             Err(TryRecvError::Empty) => self.terrain_watchdog(frame),
             Err(TryRecvError::Disconnected) => {
                 self.log("terrain: analysis failed; continuing without terrain model");
                 self.terrain = TerrainModel::Unavailable;
             }
+        }
+    }
+
+    /// Wait up to `timeout` for the first analysis (it takes ~0.1 s): for
+    /// choices made before the game starts. Whether the model is ready.
+    pub(crate) fn terrain_wait(&mut self, timeout: Duration) -> bool {
+        if let TerrainModel::Pending { job } = &self.terrain {
+            match job.rx.recv_timeout(timeout) {
+                Ok((terrain, compute, split)) => self.terrain_ready(terrain, compute, split),
+                Err(mpsc::RecvTimeoutError::Timeout) => return false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.log("terrain: analysis failed; continuing without terrain model");
+                    self.terrain = TerrainModel::Unavailable;
+                }
+            }
+        }
+        self.terrain.get().is_some()
+    }
+
+    fn terrain_ready(&mut self, terrain: Terrain, compute: Duration, split: usize) {
+        self.terrain = TerrainModel::Ready { terrain, rebuild: None, split };
+        self.log(&format!("terrain: analysis took {:.0} ms", compute.as_secs_f64() * 1e3));
+        if split > 0 {
+            self.log(&format!("terrain: regions cut around clusters of the {split} metal spots (regionsplit)"));
+        }
+        for t in self.terrain().map(|t| t.tiers()).unwrap_or_default() {
+            let count = |k: ChokeKind| t.chokes.iter().filter(|c| c.kind == k).count();
+            let (gates, seams) = (count(ChokeKind::Gate), count(ChokeKind::Seam));
+            let pieces = t.regions.iter().filter(|r| r.whole != r.id).count();
+            self.log(&format!(
+                "terrain: {:<8} {:>5.1}% passable, {} regions ({pieces} new from cuts), {gates} gates, {} borders, {seams} seams",
+                t.tier.name(),
+                t.passable_fraction * 100.0,
+                t.regions.len(),
+                count(ChokeKind::Border),
+            ));
         }
     }
 
@@ -828,10 +846,12 @@ impl Ai {
         let Some(map) = self.terrain().and_then(|t| t.tier(tier)) else { return };
         let all_assets = self.strategy_assets();
         let mut assets = all_assets.clone();
-        // Chokepoints are held (and walled) for our own metal only, not half
-        // of every free spot behind them: on Otago three mexes of ours had
-        // gates fortified at 1:29.
-        assets.retain(|a| a.side != Side::Neutral);
+        // With `detour`, chokepoints are held (and walled) for our own metal
+        // only, not half of every free spot behind them: on Otago three
+        // mexes of ours had gates fortified at 1:29.
+        if !self.dev_off("detour") {
+            assets.retain(|a| a.side != Side::Neutral);
+        }
         let analysis = Analysis::run(&Scenario { map, ally_base: pos(ally), enemy_base: pos(enemy), assets: &assets });
         let elevation = self.cb.map();
         let leyline_enemy = self.strategy.as_ref().map_or(pos(enemy), |s| s.leyline_enemy);

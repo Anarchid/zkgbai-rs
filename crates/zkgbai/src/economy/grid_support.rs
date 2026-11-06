@@ -414,6 +414,7 @@ impl Ai {
                 .min_by(|a, c| distance(a.get_pos(), b.at).total_cmp(&distance(c.get_pos(), b.at)))
                 .map(|w| w.id);
             let Some(wid) = worker else { continue };
+            self.eco_suspend_assignment(wid, "grid terraform");
             let w = self.eco.workers.get_mut(&wid).unwrap();
             w.clear_task(&mut self.eco.tasks);
             let worker = w.unit;

@@ -1,5 +1,5 @@
 //! Shared resource allocation and execution evidence for tracked projects.
-use super::{Hand, Worth, best_crew};
+use super::{Hand, Worth, best_crew_stretched};
 use crate::economy::TaskId;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,6 +11,9 @@ pub(super) struct Request {
     pub incumbent: bool,
     pub urgent: bool,
     pub hands: Vec<Hand>,
+    pub stretch: f32,
+    pub support: BTreeSet<i32>,
+    pub start_required: bool,
 }
 
 pub(super) struct Allocation {
@@ -51,7 +54,22 @@ pub(super) fn allocate(
     let mut out = BTreeMap::new();
     for mut r in requests {
         r.hands.retain(|h| !used.contains(&h.0));
-        let (k, eta, value) = best_crew(&r.hands, r.work, r.cost, metal, income, &r.worth, now);
+        if r.start_required {
+            let first = r.hands.iter().filter(|h| !r.support.contains(&h.0)).map(|h| h.1).min_by(f32::total_cmp);
+            if let Some(first) = first {
+                for h in &mut r.hands {
+                    if r.support.contains(&h.0) {
+                        h.1 = h.1.max(first);
+                    }
+                }
+                r.hands.sort_by(|a, b| {
+                    a.1.total_cmp(&b.1).then_with(|| r.support.contains(&a.0).cmp(&r.support.contains(&b.0)))
+                });
+            } else {
+                r.hands.clear();
+            }
+        }
+        let (k, eta, value) = best_crew_stretched(&r.hands, r.work, r.cost, metal, income, &r.worth, now, r.stretch);
         let crew: Vec<_> =
             if eta.is_finite() && value > 0.0 { r.hands.iter().take(k).map(|h| h.0).collect() } else { Vec::new() };
         if !crew.is_empty() {
@@ -60,7 +78,7 @@ pub(super) fn allocate(
             metal -= stored;
             // Reserve the rate the forecast needs before its pessimism
             // allowance, rather than allocating that allowance again.
-            let rate = (r.cost - stored).max(0.0) / (eta / super::PESSIMISM).max(0.001);
+            let rate = (r.cost - stored).max(0.0) / (eta / r.stretch).max(0.001);
             income = (income - rate).max(0.0);
         }
         out.insert(r.task, Allocation { value: if crew.is_empty() { 0.0 } else { value }, crew, eta });
@@ -107,7 +125,18 @@ mod tests {
     use super::*;
 
     fn job(task: TaskId, incumbent: bool, hands: Vec<Hand>) -> Request {
-        Request { task, incumbent, urgent: false, hands, work: 100.0, cost: 0.0, worth: Worth::Flat(1000.0) }
+        Request {
+            task,
+            incumbent,
+            urgent: false,
+            hands,
+            work: 100.0,
+            cost: 0.0,
+            worth: Worth::Flat(1000.0),
+            stretch: super::super::PESSIMISM,
+            support: BTreeSet::new(),
+            start_required: true,
+        }
     }
 
     #[test]
@@ -153,6 +182,32 @@ mod tests {
         assert_eq!(plan[&1].crew, vec![1]);
         assert!(plan[&2].crew.is_empty());
         assert!(plan[&2].eta.is_infinite());
+    }
+
+    #[test]
+    fn caretakers_need_a_starter_and_keep_the_walkin_forecast_margin() {
+        let mut a = job(1, false, vec![(1, 0.0, 10.0)]);
+        a.support.insert(1);
+        let plan = allocate(vec![a], 0.0, 10.0, 0.0);
+        assert!(plan[&1].crew.is_empty());
+
+        let mut a = job(1, true, vec![(1, 0.0, 10.0)]);
+        a.support.insert(1);
+        a.start_required = false;
+        a.stretch = 3.0;
+        let plan = allocate(vec![a], 0.0, 10.0, 0.0);
+        assert_eq!(plan[&1].crew, vec![1]);
+        assert_eq!(plan[&1].eta, 30.0);
+    }
+
+    #[test]
+    fn preempting_the_starter_cannot_leave_caretakers_building_an_unstarted_frame() {
+        let urgent = job(1, true, vec![(1, 0.0, 10.0)]);
+        let mut supported = job(2, false, vec![(1, 0.0, 10.0), (2, 0.0, 10.0)]);
+        supported.support.insert(2);
+        let plan = allocate(vec![supported, urgent], 0.0, 10.0, 0.0);
+        assert_eq!(plan[&1].crew, vec![1]);
+        assert!(plan[&2].crew.is_empty());
     }
 
     #[test]

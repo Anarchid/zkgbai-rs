@@ -7,13 +7,8 @@ The mechanics correction is now unconditional in every Rust/Python mechanics
 formulation. The initial probe left recruitment, orders and retreat unchanged;
 the live tactic added later is documented at the end of this file.
 
-The original experiment ran on `codex/limpet-probe`, based on `wip` at
+Worktree branch: `codex/limpet-probe`, based on `wip` at
 `f5f9dbdad017c405f9a2ada92c039961e6615a8e`.
-
-This main-branch port preserves main's existing engagement prior and snapshot
-format: it does not import wip's `ordered`, capture or tube-state features.
-The results below describe the original wip experiment; rerunning on main
-measures main's model and can give different trades.
 
 ## What was missing
 

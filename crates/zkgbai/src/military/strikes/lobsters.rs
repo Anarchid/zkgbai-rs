@@ -312,7 +312,7 @@ impl Ai {
                             matches!(w.phase, Phase::Forming | Phase::Screening) && same_job(&w.job, &m.job)
                         }) {
                             let w = self.strikes.wave.take().unwrap();
-                            self.strikes_release(w);
+                            self.strikes_release(w, "a squad strike took the job");
                         }
                         for id in m.members.iter().chain(std::iter::once(&m.launcher)) {
                             if self.retreat_handler.is_coward(*id) {

@@ -25,6 +25,18 @@
 //! the cannon's reach by that estimate (the guess was short, or terrain or
 //! friends block the shot), it steps [`NUDGE`] nearer its nearest ground
 //! enemy, but never inside [`NUDGE_FLOOR`] of the cannon's range.
+//!
+//! A cannon is not quiet when it fires at whatever it finds itself: a weapon
+//! that cannot hit the unit's attack target picks its own targets (Recoil
+//! `CWeapon::AllowWeaponAutoTarget`). Wires' base above it on Adamantine
+//! Mountain (11-04), a Cyclops told to attack a spider factory (`facframe`)
+//! or a Lotus stood in its beam's reach for minutes while its cannon killed
+//! the frames on the pad, nearer and lower. So (switch `cyclopsorder`) a
+//! standing Cyclops whose first order is an attack on a ground unit its
+//! beam reaches drives in to [`CLOSE`] of the cannon's reach of that unit
+//! when the cannon falls short of it by the estimate, and steps [`NUDGE`]
+//! nearer it once the cannon has fired [`ELSEWHERE_SHOTS`] times while it
+//! lost no health, cannon quiet or not.
 
 use std::collections::BTreeMap;
 
@@ -34,6 +46,8 @@ use crate::Ai;
 use crate::kgbutil::kgb_move_to;
 use crate::kgbutil::line_of_fire::{Flight, Gun, ZK_CANNON_GRAVITY};
 use crate::util::{OPTION_SHIFT_KEY, distance};
+
+const CMD_ATTACK: i32 = 20;
 
 pub const CYCLOPS: &str = "tankheavyassault";
 
@@ -63,6 +77,9 @@ const NUDGE_AFTER: u32 = 4;
 const NUDGE: f32 = 80.0;
 /// ...but not nearer than this share of the cannon's range.
 const NUDGE_FLOOR: f32 = 0.6;
+/// Cannon shots while the attack target lost no health that tell the
+/// cannon fires at something else.
+const ELSEWHERE_SHOTS: u32 = 2;
 
 /// The guns of a Cyclops def: weapon indices and the cannon as a gun at the
 /// origin (its reach by height).
@@ -73,6 +90,31 @@ struct Guns {
     beam_range: f32,
     gun: Gun,
 }
+
+/// A Cyclops's attack target and its cannon: the target's health when it
+/// last lost some, and the cannon's shots since (reload frames seen).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Watch {
+    target: i32,
+    hp: f32,
+    shots: u32,
+    reload: i32,
+}
+
+/// The watch after a check finds attack target `target` at `hp` and the
+/// cannon's reload frame at `reload`.
+fn watch_step(prev: Option<Watch>, target: i32, hp: f32, reload: i32) -> Watch {
+    match prev {
+        Some(w) if w.target == target && hp >= w.hp - 1.0 => {
+            Watch { shots: w.shots + u32::from(reload != w.reload), reload, ..w }
+        }
+        _ => Watch { target, hp, shots: 0, reload },
+    }
+}
+
+/// A drive in: how far the Cyclops stands from the enemy, how near it
+/// goes, the enemy's aim above its own, the enemy, where, and its def.
+type Drive = (f32, f32, f32, i32, Vec3, String);
 
 /// A Cyclops driving in.
 struct Closing {
@@ -88,6 +130,8 @@ pub struct Cyclopes {
     closing: BTreeMap<i32, Closing>,
     /// Checks running that found each Cyclops stalled.
     streak: BTreeMap<i32, u32>,
+    /// Each standing Cyclops's attack target and cannon (`cyclopsorder`).
+    watch: BTreeMap<i32, Watch>,
     /// Since the summary: checks that found a Cyclops stalled (beam on,
     /// cannon quiet, standing), drives ordered, and drives after which the
     /// cannon fired before the hold ran out.
@@ -95,6 +139,8 @@ pub struct Cyclopes {
     drives: u32,
     nudges: u32,
     fired: u32,
+    /// Drives toward the attack target the cannon could not hit.
+    ordered: u32,
 }
 
 impl Cyclopes {
@@ -174,11 +220,13 @@ impl Ai {
         if frame % 1800 == (self.offset + 23) % 1800 && self.cyclopes.stalls + self.cyclopes.drives > 0 {
             let c = &self.cyclopes;
             self.log(&format!(
-                "cyclops: in the last minute {} checks found a Cyclops stalled (beam on, cannon quiet), {} drives in \
-                 ({} nudges), the cannon fired after {}{}",
+                "cyclops: in the last minute {} checks found a Cyclops stalled (beam on, cannon quiet or not on its \
+                 target), {} drives in ({} nudges, {} toward the target it was ordered to attack), the cannon fired \
+                 after {}{}",
                 c.stalls,
                 c.drives,
                 c.nudges,
+                c.ordered,
                 c.fired,
                 if self.dev_off("cyclops") { " (cyclops off)" } else { "" }
             ));
@@ -186,6 +234,7 @@ impl Ai {
             self.cyclopes.drives = 0;
             self.cyclopes.nudges = 0;
             self.cyclopes.fired = 0;
+            self.cyclopes.ordered = 0;
         }
         if frame % PERIOD != (self.offset + 8) % PERIOD {
             return;
@@ -220,8 +269,42 @@ impl Ai {
         }
     }
 
-    /// Checks whether `unit` stands stalled (beam on, cannon quiet) and if so
-    /// drives it in; whether it was stalled.
+    /// The ground unit a standing Cyclops at `pos` was ordered to attack
+    /// (its first order), if the beam reaches it and the cannon cannot hit
+    /// it: out of the cannon's reach by the estimate (a drive in), or fired
+    /// [`ELSEWHERE_SHOTS`] times while it lost no health (a nudge); with
+    /// whether it is the latter. Keeps the watch on the target either way.
+    fn cyclops_ordered(&mut self, unit: Unit, g: &Guns, pos: Vec3, own_aim: f32, reload: i32) -> Option<(Drive, bool)> {
+        let first = unit.current_commands().into_iter().next();
+        let target = first.map(|c| (c.id(), c.params())).filter(|(id, p)| *id == CMD_ATTACK && p.len() == 1);
+        let Some(e) = target.and_then(|(_, p)| self.war.targets.get(&(p[0] as i32))) else {
+            self.cyclopes.watch.remove(&unit.id());
+            return None;
+        };
+        if e.is_dead || !e.visible || e.can_fly() {
+            self.cyclopes.watch.remove(&unit.id());
+            return None;
+        }
+        let (tid, at, hp) = (e.unit_id, e.unit.pos(), e.unit.health());
+        let d = distance(pos, at);
+        let dh = at.y + aim_height(e.ud) - (pos.y + own_aim);
+        let name = e.def_name.clone();
+        let w = watch_step(self.cyclopes.watch.get(&unit.id()).copied(), tid, hp, reload);
+        self.cyclopes.watch.insert(unit.id(), w);
+        if d > g.beam_range + BEAM_SLACK {
+            return None;
+        }
+        if let Some(want) = drive_in(&g.gun, d, dh) {
+            return Some(((d, want, dh, tid, at, name), false));
+        }
+        if w.shots >= ELSEWHERE_SHOTS {
+            return nudge(&g.gun, d).map(|want| ((d, want, dh, tid, at, name), true));
+        }
+        None
+    }
+
+    /// Checks whether `unit` stands stalled (beam on, cannon quiet or not
+    /// on its attack target) and if so drives it in; whether it was stalled.
     fn cyclops_stalled(&mut self, unit: Unit, frame: i32) -> bool {
         if unit.is_being_built() || unit.health() <= 0.0 || unit.is_paralyzed() {
             return false;
@@ -233,11 +316,13 @@ impl Ai {
             return false;
         };
         // The beam fired lately (its reload frame is when it fired plus its
-        // reload); the cannon has been ready a while and has not.
+        // reload); the cannon has been ready a while and has not, or it
+        // cannot hit the unit's attack target.
         let cannon_was = cannon.reload_frame();
-        if beam.reload_frame() < frame - BEAM_LIVE || frame - cannon_was < CANNON_IDLE {
+        if beam.reload_frame() < frame - BEAM_LIVE {
             return false;
         }
+        let quiet = frame - cannon_was >= CANNON_IDLE;
         let v = unit.vel();
         if v.x.hypot(v.z) * 30.0 > STANDING * def.speed() {
             return false;
@@ -246,43 +331,69 @@ impl Ai {
             return false;
         }
         let pos = unit.pos();
+        let own_aim = aim_height(Some(def));
+        let ordered =
+            if self.dev_off("cyclopsorder") { None } else { self.cyclops_ordered(unit, &g, pos, own_aim, cannon_was) };
+        if !quiet && ordered.is_none() {
+            return false;
+        }
         let streak = {
             let s = self.cyclopes.streak.entry(unit.id()).or_insert(0);
             *s += 1;
             *s
         };
-        let own_aim = aim_height(Some(def));
-        // Its nearest ground enemy that the beam reaches and the cannon not;
-        // failing one, after a streak, its nearest ground enemy.
-        let mut best: Option<(f32, f32, f32, i32, Vec3, String)> = None;
-        let mut near: Option<(f32, f32, f32, i32, Vec3, String)> = None;
-        for e in self.war.targets.values() {
-            if e.is_dead || e.can_fly() || (!e.is_static && frame - e.last_seen > FRESH) {
-                continue;
-            }
-            let live = e.unit.pos();
-            let at = if e.visible && (live.x != 0.0 || live.z != 0.0) { live } else { e.position };
-            let d = distance(pos, at);
-            if d > g.beam_range + BEAM_SLACK {
-                continue;
-            }
-            let dh = at.y + aim_height(e.ud) - (pos.y + own_aim);
-            if best.as_ref().is_none_or(|b| d < b.0)
-                && let Some(want) = drive_in(&g.gun, d, dh)
-            {
-                best = Some((d, want, dh, e.unit_id, at, e.def_name.clone()));
-            }
-            if streak >= NUDGE_AFTER
-                && d <= g.beam_range
-                && near.as_ref().is_none_or(|b| d < b.0)
-                && let Some(want) = nudge(&g.gun, d)
-            {
-                near = Some((d, want, dh, e.unit_id, at, e.def_name.clone()));
-            }
-        }
         self.cyclopes.stalls += 1;
-        let nudged = best.is_none() && near.is_some();
-        let Some((d, want, dh, tid, at, name)) = best.or(near) else { return true };
+        let toward_order = ordered.is_some();
+        let (choice, how) = match ordered {
+            Some((drive, elsewhere)) => {
+                let how = if elsewhere {
+                    format!(
+                        "its cannon fired {ELSEWHERE_SHOTS} shots and the target it attacks lost no health, nudges in"
+                    )
+                } else {
+                    "the target it attacks is out of the cannon's reach, drives in".to_string()
+                };
+                (Some(drive), how)
+            }
+            None => {
+                // Its nearest ground enemy that the beam reaches and the
+                // cannon not; failing one, after a streak, its nearest
+                // ground enemy.
+                let mut best: Option<Drive> = None;
+                let mut near: Option<Drive> = None;
+                for e in self.war.targets.values() {
+                    if e.is_dead || e.can_fly() || (!e.is_static && frame - e.last_seen > FRESH) {
+                        continue;
+                    }
+                    let live = e.unit.pos();
+                    let at = if e.visible && (live.x != 0.0 || live.z != 0.0) { live } else { e.position };
+                    let d = distance(pos, at);
+                    if d > g.beam_range + BEAM_SLACK {
+                        continue;
+                    }
+                    let dh = at.y + aim_height(e.ud) - (pos.y + own_aim);
+                    if best.as_ref().is_none_or(|b| d < b.0)
+                        && let Some(want) = drive_in(&g.gun, d, dh)
+                    {
+                        best = Some((d, want, dh, e.unit_id, at, e.def_name.clone()));
+                    }
+                    if streak >= NUDGE_AFTER
+                        && d <= g.beam_range
+                        && near.as_ref().is_none_or(|b| d < b.0)
+                        && let Some(want) = nudge(&g.gun, d)
+                    {
+                        near = Some((d, want, dh, e.unit_id, at, e.def_name.clone()));
+                    }
+                }
+                let how = if best.is_none() && near.is_some() {
+                    format!("stalled {streak} checks, nudges in")
+                } else {
+                    "drives in".to_string()
+                };
+                (best.or(near), how)
+            }
+        };
+        let Some((d, want, dh, tid, at, name)) = choice else { return true };
         if self.dev_off("cyclops") {
             return true;
         }
@@ -293,16 +404,19 @@ impl Ai {
         self.cyclopes.closing.insert(unit.id(), Closing { until: frame + drive + HOLD, cannon_was });
         self.cyclopes.drives += 1;
         self.cyclopes.streak.remove(&unit.id());
-        if nudged {
+        self.cyclopes.watch.remove(&unit.id());
+        if toward_order {
+            self.cyclopes.ordered += 1;
+        }
+        if how.contains("nudges") {
             self.cyclopes.nudges += 1;
         }
         self.log(&format!(
             "cyclops: {} stands {d:.0} from {name} {tid} ({dh:+.0} aim above it: the cannon reaches {:.0}, the beam \
-             {:.0}); {} to {want:.0}",
+             {:.0}); {how} to {want:.0}",
             unit.id(),
             g.gun.reach_2d(dh),
             g.beam_range,
-            if nudged { format!("stalled {streak} checks, nudges in") } else { "drives in".to_string() }
         ));
         true
     }
@@ -310,6 +424,7 @@ impl Ai {
     pub fn cyclops_remove_unit(&mut self, id: i32) {
         self.cyclopes.closing.remove(&id);
         self.cyclopes.streak.remove(&id);
+        self.cyclopes.watch.remove(&id);
     }
 }
 
@@ -355,6 +470,24 @@ mod tests {
         assert!(want <= 360.0, "{want}");
         let p = stand_off(Vec3::xz(0.0, 0.0), Vec3::xz(400.0, 0.0), 340.0);
         assert!((p.x - 340.0).abs() < 0.01 && p.z.abs() < 0.01);
+    }
+
+    #[test]
+    fn the_watch_counts_cannon_shots_while_the_target_loses_no_health() {
+        let w = watch_step(None, 7, 4000.0, 100);
+        assert_eq!(w.shots, 0);
+        // Same reload frame: no shot. A new one: a shot. Healing is no hit.
+        let w = watch_step(Some(w), 7, 4000.0, 100);
+        assert_eq!(w.shots, 0);
+        let w = watch_step(Some(w), 7, 4000.0, 220);
+        let w = watch_step(Some(w), 7, 4025.0, 340);
+        assert_eq!(w.shots, 2);
+        // The target lost health: shots count from there.
+        let hit = watch_step(Some(w), 7, 3000.0, 460);
+        assert_eq!((hit.shots, hit.hp), (0, 3000.0));
+        // Another target: a new watch.
+        let other = watch_step(Some(w), 8, 785.0, 460);
+        assert_eq!((other.target, other.shots), (8, 0));
     }
 
     #[test]

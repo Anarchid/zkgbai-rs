@@ -25,6 +25,16 @@
 //!   its skirm range, farther while reloading; one that flees it keeps
 //!   out of its range. Not in the fitted answer: mech2 found it moved
 //!   skirmisher losses the right way without changing who wins overall.
+//! - capture (Rust only, [`SimFlags::capture`]): unit_capture.lua. A capture
+//!   ray (Dominatrix, the Reef's Gulls) does no health damage; its hits fill
+//!   the target's capture meter, faster the more hurt the target is, and a
+//!   full meter hands the unit to the capturer's side, where it fights its
+//!   old friends. The capturer then cannot fire for its post-capture
+//!   reload; a meter left alone drains. A Dominatrix that dies frees what it
+//!   took, still 95% captured. A captured unit counts as lost to its owner
+//!   (killed shares, fates) while the enemy holds it. The logs have no hits
+//!   for these rays (the gadget zeroes their damage), so they hit as a
+//!   donor beam's cells say.
 //!
 //! The parameters and a calibration refitted on these outputs are compiled
 //! in from `data/fightsim_mech.tsv`, written by
@@ -65,6 +75,45 @@ fn goes_off(k: &MechUnit, n: &MechUnit, dist: f64) -> bool {
 fn kamikaze_reach(def: &str, bombs: bool) -> f64 {
     (KAMIKAZE_DIST.iter().find(|(d, _)| bombs && *d == def)).map_or(KAMIKAZE_REACH, |&(_, r)| r)
 }
+/// A capture weapon (capture_defs.lua, the def's customparams).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Capture {
+    /// Frames the capturer's weapons stop after a capture
+    /// (`post_capture_reload`, for a finished unit).
+    reload: i32,
+    /// What it took goes back when it dies. The Reef's Gulls hand their
+    /// captures to the carrier (`capture_to_drone_controller`), which stays
+    /// out of the fight here, so they keep them.
+    reverts: bool,
+    /// The weapon whose hit cells stand in for its own: a beam on a similar
+    /// shooter (the Lotus laser, 4.9M logged shots, hits its target 83% in
+    /// range; the commander drone's laser for the Gulls).
+    donor: &'static str,
+}
+
+/// The capture rays: weapon def, its capture rules.
+const CAPTURES: [(&str, Capture); 2] = [
+    ("vehcapture_captureray", Capture { reload: 360, reverts: true, donor: "turretlaser_laser" }),
+    ("dronecarry_captureray", Capture { reload: 150, reverts: false, donor: "dronelight_laser" }),
+];
+
+fn capture_def(weapon: &str) -> Option<Capture> {
+    CAPTURES.iter().find(|(w, _)| *w == weapon).map(|(_, c)| *c)
+}
+
+/// unit_capture.lua FIREWALL_HEALTH: the meter fills at max health plus
+/// this, and each hit counts (max health + this) / (health + this) times
+/// its damage, so a hurt unit goes faster.
+const CAPTURE_FIREWALL: f64 = 1000.0;
+/// Share of a full meter lost per 32 frames once it is left alone
+/// (DEGRADE_FACTOR)...
+const CAPTURE_DECAY: f64 = 0.04;
+/// ...which starts on the sixth 32-frame tick after the last hit
+/// (GENERAL_DEGRADE_TIMER 5): 176 frames on average.
+const CAPTURE_HOLD: i32 = 176;
+/// A freed unit's meter for its dead capturer's side (CAPTURE_LINGER).
+const CAPTURE_LINGER: f64 = 0.95;
+
 /// Seconds for full paralysis to wear off (unit_paralysis_damage.lua).
 const STUN_DECAY_S: f64 = 40.0;
 
@@ -120,6 +169,9 @@ struct WeaponMech {
     paralyzer: bool,
     /// Damage landed over nominal by range band (heatrays).
     dyn_frac: Option<[Option<f64>; RBANDS as usize + 1]>,
+    /// A capture ray, with [`SimFlags::capture`] (set by
+    /// [`Model::mech_units`], not the tables).
+    capture: Option<Capture>,
 }
 
 const PLAIN: WeaponMech = WeaponMech {
@@ -132,6 +184,7 @@ const PLAIN: WeaponMech = WeaponMech {
     overslow: 0.0,
     paralyzer: false,
     dyn_frac: None,
+    capture: None,
 };
 
 /// A unit def's death explosion.
@@ -327,6 +380,7 @@ impl MechTables {
                         paralyzer: num(8)? != 0.0,
                         overslow: if f.len() > 9 { num(9)? } else { 0.0 },
                         dyn_frac: None,
+                        capture: None,
                     };
                     weapons.insert(name, w);
                 }
@@ -430,9 +484,21 @@ pub(super) struct MechUnit {
     rad: f64,
     /// Per weapon, in `u.weapons` order: its splash in the plane fight.
     splash: Vec<Option<Splash>>,
+    /// The side it started on; `u.side` changes when it is captured.
+    orig_side: u8,
+    /// Capture meter: the other side's capture damage on it, full at
+    /// [`MechUnit::cap_full`], and the frame of the last capture hit.
+    cap: f64,
+    cap_hit: i32,
+    /// The unit holding it, if it goes back when that one dies.
+    controller: Option<usize>,
 }
 
 impl MechUnit {
+    fn cap_full(&self) -> f64 {
+        self.maxhp + CAPTURE_FIREWALL
+    }
+
     fn stunned(&self) -> bool {
         self.para > self.maxhp
     }
@@ -488,6 +554,26 @@ pub struct Defense {
     pub raid_aim: RaidAim,
 }
 
+/// A vulnerable nanoframe and the builders actually working on it. Rates
+/// are observed progress per second, already limited by resource spending.
+#[derive(Clone, Debug)]
+pub struct Construction {
+    pub target: usize,
+    pub progress: f32,
+    pub builders: Vec<BuildHand>,
+    /// In the alternative branch, this builder withdraws instead of working.
+    pub retreat: Option<usize>,
+    /// This builder withdraws once the job finishes or the frame is lost.
+    pub release: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BuildHand {
+    pub index: usize,
+    pub rate: f32,
+    pub range: f32,
+}
+
 /// Whom the raiders of a raid-defense rollout shoot and walk to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RaidAim {
@@ -505,7 +591,14 @@ pub enum RaidAim {
     Free,
 }
 
+mod sortie;
+use sortie::SortieRun;
+pub use sortie::{ExitTrigger, HarassOrder, HarassOutcome, HarassUnit};
+
 struct Run<'a> {
+    sortie: Option<SortieRun>,
+    construction: Option<&'a Construction>,
+    progress: f32,
     defense: Option<&'a Defense>,
     defense_engagement: Option<(&'a FightSnapshot, &'a [f64; 13])>,
     hazard: Option<&'a Hazard>,
@@ -558,6 +651,8 @@ pub(super) enum BombMode {
 struct Track {
     var: Vec<f64>,
     death_f: Vec<Option<i32>>,
+    /// The frame the enemy took it, while it holds it.
+    captured_f: Vec<Option<i32>>,
 }
 
 /// mech.py `_pdead`: P(dead by the horizon), the expected damage taken by
@@ -648,7 +743,7 @@ impl Model {
     /// A committed Fight order: our units engage, while both sides retain
     /// tactical movement. Other kiting queries keep their engagement prior.
     pub(crate) fn ordered_kiting_fates(&self, snap: &FightSnapshot, horizon: i32) -> Vec<UnitFate> {
-        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, true, &[], None, true, None).0
+        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, true, &[], None, true, None, None).0
     }
 
     /// Forecast an exposed retreat along the actual command queue. Health is
@@ -663,7 +758,8 @@ impl Model {
     ) -> Vec<UnitFate> {
         let mut snap = snap.clone();
         snap.flags.twod = true;
-        self.fates_run(&snap, horizon, FateMode::AMove, paralysis, None, None, false, &[], None, true, Some(path)).0
+        self.fates_run(&snap, horizon, FateMode::AMove, paralysis, None, None, false, &[], None, true, None, Some(path))
+            .0
     }
 
     pub fn defense_fates(
@@ -687,7 +783,35 @@ impl Model {
         defense: Option<&Defense>,
         kiting: bool,
     ) -> Vec<UnitFate> {
-        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false, None).0
+        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false, None, None).0
+    }
+
+    /// Hold the working builders at their posts, add construction HP while
+    /// they live and can work, and enable the turret only once it finishes.
+    /// The retreat branch keeps the unfinished frame exposed and lets the
+    /// other builders continue. Returns fates and achieved build progress.
+    pub fn construction_fates(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        construction: &Construction,
+        paralysis: &[(usize, f32)],
+    ) -> (Vec<UnitFate>, f32) {
+        let (fates, _, progress) = self.fates_run(
+            snap,
+            horizon,
+            FateMode::AMove,
+            paralysis,
+            None,
+            None,
+            true,
+            &[],
+            None,
+            false,
+            Some(construction),
+            None,
+        );
+        (fates, progress)
     }
 
     /// An a-move's fates for [`Model::bomb_charge`]: each unit's weapons
@@ -702,7 +826,9 @@ impl Model {
         bomb: Option<BombRun>,
         ordered: bool,
     ) -> (Vec<UnitFate>, f64) {
-        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered, None)
+        let (fates, survive, _) =
+            self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered, None, None);
+        (fates, survive)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -718,8 +844,9 @@ impl Model {
         phase: &[f64],
         bomb: Option<BombRun>,
         ordered: bool,
+        construction: Option<&Construction>,
         retreat_path: Option<&[(f32, f32)]>,
-    ) -> (Vec<UnitFate>, f64) {
+    ) -> (Vec<UnitFate>, f64, f32) {
         let mut units = self.mech_units(snap);
         if ordered {
             for m in units.iter_mut().filter(|m| m.u.side == 0 || retreat_path.is_some()) {
@@ -773,7 +900,7 @@ impl Model {
             }
         };
         let n = units.len();
-        let track = Track { var: vec![0.0; n], death_f: vec![None; n] };
+        let track = Track { var: vec![0.0; n], death_f: vec![None; n], captured_f: vec![None; n] };
         let focus = match mode {
             FateMode::Assassinate { target } => Some(target),
             _ => None,
@@ -783,6 +910,9 @@ impl Model {
         let flags =
             if pass { SimFlags { twod: false, focus: snap.flags.least_health(), ..snap.flags } } else { snap.flags };
         let mut run = Run {
+            sortie: None,
+            construction,
+            progress: construction.map_or(1.0, |c| c.progress.clamp(0.0, 1.0)),
             defense,
             defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
             hazard: None,
@@ -801,7 +931,7 @@ impl Model {
         };
         let (_, end) = run_mech(&units, &self.hits, self.mech.stun_cap_s, &mut run);
         let ln_survive = run.bomb_ln_survive;
-        let Some(tr) = run.track else { return (Vec::new(), ln_survive) };
+        let Some(tr) = run.track else { return (Vec::new(), ln_survive, run.progress) };
         let cal = self.mech.calibration(flags);
         let c = &cal.fate;
         let ln_h = (horizon.max(1) as f64 / 150.0).ln();
@@ -810,18 +940,22 @@ impl Model {
             .zip(&end)
             .enumerate()
             .map(|(i, (u0, u))| {
-                let raw = p_dead(u0.u.hp, u.u.hp, tr.death_f[i], tr.var[i], horizon);
+                // Held by the enemy at the horizon: lost to its owner, a
+                // death as every consumer counts one.
+                let captured = u.u.alive && u.u.side != u.orig_side;
+                let raw = if captured { 1.0 } else { p_dead(u0.u.hp, u.u.hp, tr.death_f[i], tr.var[i], horizon) };
                 let z = c[1] * logit(raw.clamp(0.005, 0.995)) + c[2] * if u0.u.mobile { 0.0 } else { 1.0 };
                 UnitFate {
-                    dead: !u.u.alive,
-                    death_frame: tr.death_f[i],
-                    hp_left: if u.u.alive { u.u.hp.max(0.0) as f32 } else { 0.0 },
+                    dead: !u.u.alive || captured,
+                    death_frame: if captured { tr.captured_f[i] } else { tr.death_f[i] },
+                    hp_left: if u.u.alive && !captured { u.u.hp.max(0.0) as f32 } else { 0.0 },
                     p_dead: expit(c[0] + z + c[3] * ln_h) as f32,
                     p_raw: raw as f32,
+                    captured,
                 }
             })
             .collect();
-        (fates, ln_survive)
+        (fates, ln_survive, run.progress)
     }
 
     /// The tactical AI of the snapshot's units, `units` being its
@@ -855,7 +989,8 @@ impl Model {
 
     /// The snapshot's units for the mechanics fight. Pure EMP weapons go
     /// last with no health damage (mech.py adds them back after the base
-    /// weapons); weapons doing neither are dropped.
+    /// weapons); weapons doing neither are dropped. With
+    /// [`SimFlags::capture`] a capture ray hits as its donor's cells say.
     pub(super) fn mech_units(&self, snap: &FightSnapshot) -> Vec<MechUnit> {
         let t = &self.mech;
         let twod = snap.flags.twod;
@@ -873,14 +1008,26 @@ impl Model {
                     .filter(|(w, m)| !m.paralyzer && w.damage > 0.0)
                     .chain(ws.iter().filter(|(_, m)| m.paralyzer));
                 let (mut weapons, mut mech, mut splash) = (Vec::new(), Vec::new(), Vec::new());
+                // The unit's empty tubes are its first tube weapon's (as `sim_weapons`).
+                let first = (snap.flags.sreload)
+                    .then(|| su.spec.weapons.iter().find(|w| self.sreload.contains_key(&w.name)))
+                    .flatten();
                 for (w, m) in ordered {
-                    let mut sw = self.sim_weapon(w, snap.flags, su.reload(&w.name));
+                    let empty: &[i32] = if first.is_some_and(|f| std::ptr::eq(f, *w)) { &su.tubes } else { &[] };
+                    let mut sw = self.sim_weapon(w, snap.flags, empty, su.reload(&w.name));
+                    let mut m = *m;
                     if m.paralyzer {
                         sw.nominal = 0.0;
                     }
+                    if snap.flags.capture
+                        && let Some(c) = capture_def(&w.name)
+                    {
+                        m.capture = Some(c);
+                        sw.key = self.hits.weapon(c.donor);
+                    }
                     splash.push(if twod && !sw.hitscan { t.splash.get(&w.name).copied() } else { None });
                     weapons.push(sw);
-                    mech.push(*m);
+                    mech.push(m);
                 }
                 let hp = su.hp as f64;
                 MechUnit {
@@ -902,11 +1049,18 @@ impl Model {
                     lat,
                     rad: if su.spec.radius > 0.0 { su.spec.radius as f64 } else { 12.0 },
                     splash,
+                    orig_side: su.side,
+                    cap: 0.0,
+                    cap_hit: -1_000_000_000,
+                    controller: None,
                 }
             })
             .collect();
         for (i, m) in us.iter_mut().enumerate() {
-            if m.u.armed && m.u.max_range > 0.0 {
+            if snap.flags.ordered && snap.units[i].side == 0 {
+                // under our order: fires for certain (SimFlags::ordered)
+                m.engage = 1.0;
+            } else if m.u.armed && m.u.max_range > 0.0 {
                 m.engage =
                     expit(engage_features(snap, i, m.u.max_range).iter().zip(&t.engage).map(|(a, b)| a * b).sum());
             }
@@ -985,11 +1139,12 @@ fn hurt(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, dmg: f64, f: i32) 
 }
 
 /// mech.py `kill`: no check that `t` lives (a kamikaze caught in a blast
-/// still blows up when it reaches the enemy, as in the Python model).
+/// still blows up when it reaches the enemy, as in the Python model). A
+/// captured unit was counted lost to its owner when taken.
 fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, f: i32) {
     us[t].u.alive = false;
-    if us[t].u.armed {
-        killed[us[t].u.side as usize] += us[t].u.cost;
+    if us[t].u.armed && us[t].u.side == us[t].orig_side {
+        killed[us[t].orig_side as usize] += us[t].u.cost;
     }
     let Some(d) = us[t].death else { return };
     for o in 0..us.len() {
@@ -1013,6 +1168,48 @@ fn kill(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, f: i32) {
                 if us[t].limpet {
                     us[o].cap_slow();
                 }
+            }
+        }
+    }
+}
+
+/// unit_capture.lua `recusivelyTransfer`: `t` goes to `side`, and what it
+/// holds goes there first (in a two-sided fight that is home, so freed). A
+/// unit held by the enemy counts in its owner's killed share. `linger`: its
+/// meter stays 95% full for the side it left (its capturer died), else
+/// empty. The engine stops it (CMD_STOP).
+fn transfer(us: &mut [MechUnit], killed: &mut [f64; 2], t: usize, side: u8, linger: bool, f: i32) {
+    for o in 0..us.len() {
+        if us[o].controller == Some(t) {
+            us[o].controller = None;
+            if us[o].u.alive {
+                transfer(us, killed, o, side, linger, f);
+            }
+        }
+    }
+    let m = &mut us[t];
+    let (was_lost, lost) = (m.u.side != m.orig_side, side != m.orig_side);
+    if m.u.armed && was_lost != lost {
+        killed[m.orig_side as usize] += if lost { m.u.cost } else { -m.u.cost };
+    }
+    m.u.side = side;
+    m.controller = None;
+    m.cap = if linger { CAPTURE_LINGER * m.cap_full() } else { 0.0 };
+    m.cap_hit = f;
+    m.u.moving = false;
+}
+
+/// unit_capture.lua `UnitDestroyed`: units held by a capturer that died go
+/// back to their owners, still 95% captured by its side.
+fn release(us: &mut [MechUnit], killed: &mut [f64; 2], f: i32) {
+    for o in 0..us.len() {
+        if let Some(c) = us[o].controller
+            && !us[c].u.alive
+        {
+            us[o].controller = None;
+            if us[o].u.alive {
+                let home = us[o].orig_side;
+                transfer(us, killed, o, home, true, f);
             }
         }
     }
@@ -1058,6 +1255,9 @@ pub(super) fn simulate_mech_kiting(
     kiting: Option<&Kiting>,
 ) -> (f64, f64) {
     let mut run = Run {
+        sortie: None,
+        construction: None,
+        progress: 1.0,
         defense: None,
         defense_engagement: None,
         hazard,
@@ -1161,6 +1361,15 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut raid_focus = vec![None; n];
     let mut retreat_waypoint = if run.retreat_path.is_some() { vec![0; n] } else { Vec::new() };
     let mut engagement_members = Vec::new();
+    // A unit has changed sides (capture): look for capturers that died.
+    let mut captures = false;
+    if let Some(c) = run.construction
+        && let Some(target) = us.get_mut(c.target)
+        && run.progress < 1.0
+    {
+        // Nanoframes do not explode with the finished unit's weapon blast.
+        target.death = None;
+    }
     let leading = us.iter().any(|m| m.u.weapons.iter().any(|w| w.leading.is_some()));
     // Reuse storage; derive world velocity from this step's actual, slowed move.
     // Separation is a numerical overlap correction, not target velocity.
@@ -1172,6 +1381,12 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         kill(&mut us, &mut killed, b.index, 0);
     }
     while f < run.horizon {
+        if let Some(sortie) = run.sortie.as_mut() {
+            sortie.update(&us, f);
+            if sortie.active_exit().is_some() || run.focus.is_some_and(|i| !us[i].u.alive) {
+                run.focus = None;
+            }
+        }
         if let Some(hz) = hazard
             && f > 0
             && f % 30 == 0
@@ -1181,6 +1396,9 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             exp_k[0] += surv * h * k[0];
             exp_k[1] += surv * h * k[1];
             surv *= 1.0 - h;
+        }
+        if captures {
+            release(&mut us, &mut killed, f);
         }
         alive.clear();
         alive
@@ -1229,7 +1447,16 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
         } else {
             armed(0) && armed(1)
         };
-        if !goes_on {
+        let building = run.construction.is_some_and(|c| {
+            run.progress < 1.0
+                && us.get(c.target).is_some_and(|t| t.u.alive && t.u.side == t.orig_side)
+                && c.builders.iter().any(|h| {
+                    Some(h.index) != c.retreat
+                        && h.rate > 0.0
+                        && us.get(h.index).is_some_and(|b| b.u.alive && b.u.side == b.orig_side)
+                })
+        });
+        if !goes_on && !building && run.sortie.is_none() {
             if run.defense.is_some_and(|d| {
                 d.arrivals
                     .iter()
@@ -1286,8 +1513,36 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             if m.slowdmg > 0.0 {
                 m.cap_slow();
             }
+            if m.cap > 0.0 && f - m.cap_hit > CAPTURE_HOLD {
+                m.cap = (m.cap - CAPTURE_DECAY * m.cap_full() * dt / 32.0).max(0.0);
+            }
         }
         alive.retain(|&i| us[i].u.alive);
+        if let Some(c) = run.construction
+            && run.progress < 1.0
+            && us.get(c.target).is_some_and(|t| t.u.alive && t.u.side == t.orig_side)
+        {
+            let rate: f32 = c
+                .builders
+                .iter()
+                .filter_map(|h| {
+                    let b = us.get(h.index)?;
+                    (Some(h.index) != c.retreat
+                        && b.u.alive
+                        && b.u.side == b.orig_side
+                        && !b.stunned()
+                        && apart(b, &us[c.target]) <= h.range as f64)
+                        .then_some(h.rate.max(0.0))
+                })
+                .sum();
+            let step = (rate * DT as f32 / 30.0).min(1.0 - run.progress);
+            run.progress = (run.progress + step).min(1.0);
+            let target = &mut us[c.target];
+            target.u.hp = (target.u.hp + target.maxhp * step as f64).min(target.maxhp);
+            if run.progress >= 1.0 {
+                target.death = template[c.target].death;
+            }
+        }
         // Movement towards the nearest enemy alive at the top of the step
         // (mech.py reads the step's opening sides here).
         if leading {
@@ -1308,6 +1563,15 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 }
             }
             if !us[i].u.mobile || us[i].u.speed <= 0.0 || us[i].stunned() {
+                continue;
+            }
+            let builder_leaves = run.construction.is_some_and(|c| {
+                c.retreat == Some(i)
+                    || c.release == Some(i)
+                        && (run.progress >= 1.0
+                            || us.get(c.target).is_none_or(|t| !t.u.alive || t.u.side != t.orig_side))
+            });
+            if !builder_leaves && run.construction.is_some_and(|c| c.builders.iter().any(|h| h.index == i)) {
                 continue;
             }
             let side = us[i].u.side as usize;
@@ -1331,6 +1595,18 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     }
                     retreat_waypoint[i] += 1;
                 }
+                continue;
+            }
+            // A planned exit is one persistent Move destination. Keep firing,
+            // cooldowns and status effects; do not rebuild the fight snapshot.
+            if side == 0
+                && let Some(exit) = run.sortie.as_ref().and_then(|s| s.active_exit())
+            {
+                let dist = (exit.0 - us[i].u.x).hypot(exit.1 - us[i].lat);
+                let step = (us[i].u.speed * (1.0 - us[i].slowed()) * dt).min(dist);
+                step_to(&mut us[i], exit.0, exit.1, step, 1.0, run.twod);
+                us[i].u.moving = step > 0.0;
+                moved |= step > 0.0;
                 continue;
             }
             let mut nearest: Option<(f64, f64, f64, usize)> = None;
@@ -1357,7 +1633,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 moved = true;
                 continue;
             }
-            if withdraw && side == 0 {
+            if withdraw && side == 0 || builder_leaves {
                 step_to(&mut us[i], nx, nz, speed * dt, -1.0, run.twod);
                 us[i].u.moving = true;
                 moved = true;
@@ -1394,7 +1670,11 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             }
             // ZK's tactical AI: only the closest enemy decides; skirm it at
             // range (more while reloading) or flee it beyond its range.
-            if let Some(want) = run.kiting.and_then(|k| k.want(&us, i, nj, dist, f)) {
+            if let Some(want) = run
+                .kiting
+                .filter(|_| run.sortie.as_ref().is_none_or(|s| s.kites(side)))
+                .and_then(|k| k.want(&us, i, nj, dist, f))
+            {
                 if dist < want - 1.0 {
                     let step = (speed * dt).min(want - dist);
                     step_to(&mut us[i], nx, nz, step, -1.0, run.twod);
@@ -1435,13 +1715,16 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 || !us[i].u.alive
                 || us[i].stunned()
                 || run.insertion.is_some_and(|p| i < p.count && f < p.end)
+                || run.construction.is_some_and(|c| c.target == i && run.progress < 1.0)
             {
                 continue;
             }
             let side = us[i].u.side as usize;
             foes.clear();
+            // (A unit captured earlier in this step has changed sides.)
             foes.extend(sides[1 - side].iter().copied().filter(|&j| {
                 us[j].u.alive
+                    && us[j].u.side as usize != side
                     && (side != 0 || run.focus.is_none_or(|target| target == j))
                     && (side != 1 || raid_focus[i].is_none_or(|target| target == j))
             }));
@@ -1492,9 +1775,36 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 }
                 us[i].u.weapons[wi].next = f + if sf > 0.0 { (reload as f64 / (1.0 - sf)) as i32 } else { reload };
                 shot_fired = true;
+                if side == 0
+                    && let Some(sortie) = run.sortie.as_mut()
+                {
+                    sortie.first_shot.get_or_insert(f);
+                    sortie.shots += 1;
+                }
                 let rb = if range > 0.0 { ((RBANDS as f64 * dist / range) as i32).min(RBANDS) } else { RBANDS };
                 let sb = speed_band(if us[j].u.moving { us[j].u.speed } else { 0.0 });
                 let hit = hits.lookup(key, us[j].u.target, rb as u8, sb);
+                if let Some(c) = m.capture {
+                    // No health damage: the ray (a shot every frame, more
+                    // than one a step) fills the meter, each hit scaled up
+                    // by the health the target is missing.
+                    let period = if sf > 0.0 { reload as f64 / (1.0 - sf) } else { reload as f64 };
+                    let k = (dt / period.max(1.0)).max(1.0);
+                    let t = &mut us[j];
+                    let full = t.cap_full();
+                    t.cap += k * hit.p_tgt * eff * nominal * full / (t.u.hp.max(0.0) + CAPTURE_FIREWALL);
+                    t.cap_hit = f;
+                    if t.cap >= full {
+                        transfer(&mut us, &mut killed, j, side as u8, false, f);
+                        us[j].controller = c.reverts.then_some(i);
+                        captures = true;
+                        for w in &mut us[i].u.weapons {
+                            w.next = w.next.max(f + c.reload);
+                        }
+                        break;
+                    }
+                    continue;
+                }
                 let frac = m.dyn_frac.and_then(|d| d[rb as usize]).unwrap_or(hit.frac);
                 let shots = if hitscan { 1.0 } else { salvo as f64 };
                 // The plane fight lands splash on the units around the target
@@ -1556,12 +1866,27 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                     }
                     hurt(&mut us, &mut killed, j, dmg, f);
                 }
+                // The Puppy is its own missile (`SPENT_ON_FIRING`).
+                if us[i].u.spent {
+                    us[i].u.alive = false;
+                    killed[us[i].u.side as usize] += us[i].u.cost;
+                    break;
+                }
             }
         }
         if let Some(tr) = run.track.as_mut() {
             for (d, m) in tr.death_f.iter_mut().zip(&us) {
                 if !m.u.alive && d.is_none() {
                     *d = Some(f);
+                }
+            }
+            if captures {
+                for (c, m) in tr.captured_f.iter_mut().zip(&us) {
+                    if m.u.side == m.orig_side {
+                        *c = None;
+                    } else if c.is_none() {
+                        *c = Some(f);
+                    }
                 }
             }
             f += DT;
@@ -1572,6 +1897,10 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
             break;
         }
         f += DT;
+    }
+    // A capturer killed in the last step frees what it held.
+    if captures {
+        release(&mut us, &mut killed, f);
     }
     let k = kfrac(&killed);
     let shares = if hazard.is_some() { (exp_k[0] + surv * k[0], exp_k[1] + surv * k[1]) } else { (k[0], k[1]) };
@@ -1596,6 +1925,8 @@ mod tests {
     const SRELOAD_UNITS: &str = include_str!("testdata/mech_sreload_units.tsv");
     const SRELOAD_CASES: &str = include_str!("testdata/mech_sreload_cases.tsv");
     const SRELOAD_FATES: &str = include_str!("testdata/mech_sreload_fates.tsv");
+    const ORDERED_CASES: &str = include_str!("testdata/mech_ordered_cases.tsv");
+    const ORDERED_FATES: &str = include_str!("testdata/mech_ordered_fates.tsv");
     const BOMBS_UNITS: &str = include_str!("testdata/mech_bombs_units.tsv");
     const BOMBS_CASES: &str = include_str!("testdata/mech_bombs_cases.tsv");
     const BOMBS_FATES: &str = include_str!("testdata/mech_bombs_fates.tsv");
@@ -1699,8 +2030,24 @@ mod tests {
         let make = |spec: UnitSpec| FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { reloads: Vec::new(), side: 0, spec: Arc::new(spec), hp: 660.0, x: 0.0, z: 0.0 },
-                SnapUnit { reloads: Vec::new(), side: 1, spec: Arc::new(target.clone()), hp: 480.0, x: 260.0, z: 0.0 },
+                SnapUnit {
+                    tubes: Vec::new(),
+                    reloads: Vec::new(),
+                    side: 0,
+                    spec: Arc::new(spec),
+                    hp: 660.0,
+                    x: 0.0,
+                    z: 0.0,
+                },
+                SnapUnit {
+                    tubes: Vec::new(),
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: Arc::new(target.clone()),
+                    hp: 480.0,
+                    x: 260.0,
+                    z: 0.0,
+                },
             ],
         };
         let baseline = model.fates(&make(shooter.clone()), DT, FateMode::AMove);
@@ -1754,7 +2101,8 @@ mod tests {
             .collect()
     }
 
-    /// A case's units, `side:def:hp:x:z` separated by `;`.
+    /// A case's units, `side:def:hp:x:z[:tubes]` separated by `;` (tubes:
+    /// frames until each empty tube is loaded, `,`-separated).
     fn snapshot(units: &str, specs: &HashMap<String, Arc<UnitSpec>>) -> FightSnapshot {
         let units = units
             .split(';')
@@ -1767,6 +2115,7 @@ mod tests {
                     hp: p[2].parse().unwrap(),
                     x: p[3].parse().unwrap(),
                     z: p[4].parse().unwrap(),
+                    tubes: p.get(5).map_or_else(Vec::new, |t| t.split(',').map(|f| f.parse().unwrap()).collect()),
                 }
             })
             .collect();
@@ -1787,6 +2136,72 @@ mod tests {
             .collect()
     }
 
+    fn construction_case() -> (FightSnapshot, Construction) {
+        let defs = specs();
+        let snap = snapshot("0:cloakcon:600:-100:0;0:turretlaser:628:0:0;1:cloakcon:600:250:0", &defs);
+        let plan = Construction {
+            target: 1,
+            progress: 0.8,
+            builders: vec![BuildHand { index: 0, rate: 0.02, range: 150.0 }],
+            retreat: None,
+            release: Some(0),
+        };
+        (snap, plan)
+    }
+
+    #[test]
+    fn construction_has_no_weapon_until_finished_and_retreat_stops_work() {
+        let model = Model::load().unwrap();
+        let (snap, plan) = construction_case();
+        let (early, progress) = model.construction_fates(&snap, 90, &plan, &[]);
+        assert!(progress > 0.8 && progress < 1.0);
+        assert!(early[1].hp_left > 628.0);
+        assert_eq!(early[2].hp_left, 600.0, "unfinished turret cannot fire");
+        let (done, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert_eq!(progress, 1.0);
+        assert!(done[2].hp_left < 600.0, "finished turret contributes to the fight");
+        let (left, progress) = model.construction_fates(&snap, 450, &Construction { retreat: Some(0), ..plan }, &[]);
+        assert_eq!(progress, 0.8);
+        assert_eq!(left[2].hp_left, 600.0);
+    }
+
+    #[test]
+    fn construction_counts_other_builders_when_one_withdraws_and_emp_stops_work() {
+        let model = Model::load().unwrap();
+        let (mut snap, mut plan) = construction_case();
+        let (stunned, progress) = model.construction_fates(&snap, 450, &plan, &[(0, 2.0)]);
+        assert_eq!(progress, 0.8);
+        assert_eq!(stunned[2].hp_left, 600.0);
+        let mut helper = snap.units[0].clone();
+        helper.z = 50.0;
+        snap.units.push(helper);
+        plan.builders.push(BuildHand { index: 3, rate: 0.02, range: 150.0 });
+        plan.retreat = Some(0);
+        let (done, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert_eq!(progress, 1.0, "another builder can complete after our retreat");
+        assert!(done[2].hp_left < 600.0);
+    }
+
+    #[test]
+    fn construction_does_not_resurrect_a_destroyed_frame_or_finish_without_its_builder() {
+        let model = Model::load().unwrap();
+        let (mut snap, plan) = construction_case();
+        let defs = specs();
+        snap.units[2].spec = defs["turretlaser"].clone();
+        Arc::make_mut(&mut snap.units[2].spec).weapons[0].damage = 100_000.0;
+        // The nanoframe is nearest, and gets destroyed before completion.
+        let (dead, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert!(dead[1].dead);
+        assert!(progress < 1.0);
+        snap.units[0].x = 50.0;
+        snap.units[0].hp = 1.0;
+        snap.units[1].hp = 1_000_000.0;
+        Arc::make_mut(&mut snap.units[1].spec).health = 1_000_000.0;
+        let (dead, progress) = model.construction_fates(&snap, 450, &plan, &[]);
+        assert!(dead[0].dead);
+        assert!(progress < 1.0, "a dead constructor contributes no later build power");
+    }
+
     #[test]
     fn insertion_cannot_fire_early_and_keeps_incoming_damage() {
         let model = Model::load().unwrap();
@@ -1801,8 +2216,17 @@ mod tests {
                     hp: 1450.0,
                     x: 0.0,
                     z: 0.0,
+                    tubes: Vec::new(),
                 },
-                SnapUnit { reloads: Vec::new(), side: 1, spec: defs["cloakriot"].clone(), hp: 820.0, x: 100.0, z: 0.0 },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: defs["cloakriot"].clone(),
+                    hp: 820.0,
+                    x: 100.0,
+                    z: 0.0,
+                    tubes: Vec::new(),
+                },
             ],
         };
         // Only the passenger has a weapon in the first comparison.
@@ -1834,8 +2258,17 @@ mod tests {
                     hp: 1450.0,
                     x: 0.0,
                     z: 0.0,
+                    tubes: Vec::new(),
                 },
-                SnapUnit { reloads: Vec::new(), side: 1, spec: defs["cloakcon"].clone(), hp: 600.0, x: 1000.0, z: 0.0 },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: defs["cloakcon"].clone(),
+                    hp: 600.0,
+                    x: 1000.0,
+                    z: 0.0,
+                    tubes: Vec::new(),
+                },
             ],
         };
         let mode = FateMode::Assassinate { target: 1 };
@@ -1905,10 +2338,19 @@ mod tests {
                     hp: 1250.0,
                     x: i as f32 * 30.0 - 45.0,
                     z: 0.0,
+                    tubes: Vec::new(),
                 })
                 .collect(),
         };
-        snap.units.push(SnapUnit { reloads: Vec::new(), side: 1, spec: lance, hp: 1000.0, x: 0.0, z: 1000.0 });
+        snap.units.push(SnapUnit {
+            reloads: Vec::new(),
+            side: 1,
+            spec: lance,
+            hp: 1000.0,
+            x: 0.0,
+            z: 1000.0,
+            tubes: Vec::new(),
+        });
         let mode = FateMode::Assassinate { target: 4 };
         let flight = Insertion { count: 4, dx: 0.0, dz: 570.4, wait: 45, flight: 155 };
         let healthy = model.fates_with_insertion(&snap, 1350, mode, &[], Some(flight));
@@ -2023,6 +2465,7 @@ mod tests {
             hp: 2500.0,
             x: 0.0,
             z: 0.0,
+            tubes: Vec::new(),
         }];
         for i in 0..5 {
             units.push(SnapUnit {
@@ -2032,6 +2475,7 @@ mod tests {
                 hp: 660.0,
                 x: 600.0,
                 z: 25.0 * i as f32,
+                tubes: Vec::new(),
             });
         }
         let snap = FightSnapshot { flags: Default::default(), units };
@@ -2041,7 +2485,9 @@ mod tests {
         let plain = m.fates(&snap, 450, FateMode::AMove);
         assert!(plain[1..].iter().any(|f| f.hp_left < 659.0), "{plain:?}");
         // Committing our Knight must not disable the enemy's kiting.
-        let ordered = m.ordered_kiting_fates(&snap, 450);
+        let mut committed = snap.clone();
+        committed.flags.ordered = true;
+        let ordered = m.kiting_fates(&committed, 450);
         assert!(ordered[0].dead && ordered[0].p_raw > 0.99, "{ordered:?}");
         assert!(ordered[1..].iter().all(|f| !f.dead && f.hp_left >= 659.0), "{ordered:?}");
     }
@@ -2050,7 +2496,7 @@ mod tests {
     fn ordered_kiting_commits_our_fire_without_committing_the_enemy() {
         let model = Model::load().unwrap();
         let defs = specs_from(TACAI_UNITS);
-        let snap = FightSnapshot {
+        let mut snap = FightSnapshot {
             flags: variant("focus"),
             units: vec![
                 SnapUnit {
@@ -2060,6 +2506,7 @@ mod tests {
                     hp: 100000.0,
                     x: 0.0,
                     z: 0.0,
+                    tubes: Vec::new(),
                 },
                 SnapUnit {
                     reloads: Vec::new(),
@@ -2068,12 +2515,15 @@ mod tests {
                     hp: 100000.0,
                     x: 100.0,
                     z: 0.0,
+                    tubes: Vec::new(),
                 },
             ],
         };
         // No deaths or tactical retreat can hide the engagement difference.
+        snap.flags.ordered = false;
         let prior = model.kiting_fates(&snap, 300);
-        let ordered = model.ordered_kiting_fates(&snap, 300);
+        snap.flags.ordered = true;
+        let ordered = model.kiting_fates(&snap, 300);
         assert!(ordered[1].hp_left < prior[1].hp_left, "prior={prior:?}, ordered={ordered:?}");
         assert_eq!(ordered[0].hp_left, prior[0].hp_left);
     }
@@ -2085,7 +2535,15 @@ mod tests {
         let snap = FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { reloads: Vec::new(), side: 0, spec: defs["hoverassault"].clone(), hp: 30.0, x: 0.0, z: 0.0 },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 0,
+                    spec: defs["hoverassault"].clone(),
+                    hp: 30.0,
+                    x: 0.0,
+                    z: 0.0,
+                    tubes: Vec::new(),
+                },
                 SnapUnit {
                     reloads: Vec::new(),
                     side: 1,
@@ -2093,6 +2551,7 @@ mod tests {
                     hp: 100000.0,
                     x: 100.0,
                     z: 0.0,
+                    tubes: Vec::new(),
                 },
             ],
         };
@@ -2120,9 +2579,17 @@ mod tests {
         let snap = FightSnapshot {
             flags: Default::default(),
             units: vec![
-                SnapUnit { reloads: Vec::new(), side: 0, spec: ours, hp: 1450.0, x: 0.0, z: 0.0 },
-                SnapUnit { reloads: Vec::new(), side: 1, spec: decoy.clone(), hp: 1.0, x: 50.0, z: 0.0 },
-                SnapUnit { reloads: Vec::new(), side: 1, spec: decoy, hp: 1.0, x: 150.0, z: 0.0 },
+                SnapUnit { reloads: Vec::new(), side: 0, spec: ours, hp: 1450.0, x: 0.0, z: 0.0, tubes: Vec::new() },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: decoy.clone(),
+                    hp: 1.0,
+                    x: 50.0,
+                    z: 0.0,
+                    tubes: Vec::new(),
+                },
+                SnapUnit { reloads: Vec::new(), side: 1, spec: decoy, hp: 1.0, x: 150.0, z: 0.0, tubes: Vec::new() },
             ],
         };
         let focused = model.fates(&snap, 300, FateMode::Assassinate { target: 2 });
@@ -2287,6 +2754,70 @@ mod tests {
         assert!(n >= 10);
     }
 
+    /// `ordered` (side 0 fires for certain) against mech.simulate_mech with
+    /// each variant's opts + sreload + ordered, and without ordered
+    /// (testdata/mech_ordered_cases.tsv, export_ordered.py).
+    #[test]
+    fn ordered_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(SRELOAD_UNITS);
+        let s = m.mech.stun_cap_s;
+        let (mut n, mut changed, mut worst_all) = (0, 0, 0.0f64);
+        for l in data_lines(ORDERED_CASES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let flags = SimFlags { sreload: true, ordered: true, ..variant(f[1]) };
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = flags;
+            let units = m.mech_units(&snap);
+            let want: Vec<f64> = f[3..11].iter().map(|v| v.parse().unwrap()).collect();
+            let dps = simulate_mech_flags(&units, &m.hits, s, None, false, flags);
+            let stop = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), false, flags);
+            let wd = simulate_mech_flags(&units, &m.hits, s, Some(&m.hazard), true, flags);
+            let mut off = snap.clone();
+            off.flags.ordered = false;
+            let o = simulate_mech_flags(&m.mech_units(&off), &m.hits, s, None, false, off.flags);
+            let got = [dps.0, dps.1, stop.0, stop.1, wd.0, wd.1, o.0, o.1];
+            let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0, f64::max);
+            assert!(worst <= TOL, "{} {}: got {got:?}, python {want:?}", f[0], f[1]);
+            worst_all = worst_all.max(worst);
+            changed += usize::from((o.0 - dps.0).abs() + (o.1 - dps.1).abs() > 1e-6);
+            n += 1;
+        }
+        eprintln!(
+            "ordered parity: {n} cases ({changed} changed by the switch), worst |rust - python| = {worst_all:.2e}"
+        );
+        // In most of these the raiders' engage prior is already near 1; 3 of
+        // 33 move (2026-11-03).
+        assert!(n >= 12 && changed >= 3);
+    }
+
+    /// The `ordered` fates against mech.simulate_mech(fates=...)
+    /// (testdata/mech_ordered_fates.tsv).
+    #[test]
+    fn ordered_fates_parity_with_python() {
+        let m = Model::load().unwrap();
+        let specs = specs_from(SRELOAD_UNITS);
+        let mut n = 0;
+        for l in data_lines(ORDERED_FATES) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let mut snap = snapshot(f[2], &specs);
+            snap.flags = SimFlags { sreload: true, ordered: true, ..variant(f[1]) };
+            let got = m.fates(&snap, f[3].parse().unwrap(), FateMode::AMove);
+            let want: Vec<Vec<&str>> = f[4].split(';').map(|u| u.split(':').collect()).collect();
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let death: i32 = w[1].parse().unwrap();
+                let (hp, pd): (f64, f64) = (w[2].parse().unwrap(), w[3].parse().unwrap());
+                assert_eq!(g.dead, w[0] == "1", "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert_eq!(g.death_frame, (death >= 0).then_some(death), "{} {} unit {i}", f[0], f[1]);
+                assert!((g.hp_left as f64 - hp).abs() <= 0.5 + 1e-3 * hp, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+                assert!((g.p_raw as f64 - pd).abs() <= TOL, "{} {} unit {i}: {g:?} vs {w:?}", f[0], f[1]);
+            }
+            n += 1;
+        }
+        assert!(n >= 10);
+    }
+
     /// `bombs` (kamikazeDistance per def, or touching) against
     /// mech.simulate_mech with each variant's opts + bombs
     /// (testdata/mech_bombs_cases.tsv, export_bombs.py).
@@ -2399,7 +2930,7 @@ mod tests {
         for line in data_lines(include_str!("testdata/mech_limpet_fates.tsv")) {
             let f: Vec<_> = line.split('\t').collect();
             let mut snap = snapshot(f[3], &s);
-            snap.flags = SimFlags { bombs: f[2] == "1", ..variant(f[1]) };
+            snap.flags = SimFlags { bombs: f[2] == "1", ordered: true, ..variant(f[1]) };
             let got = m.fates(&snap, f[4].parse().unwrap(), FateMode::AMove);
             for (i, (g, want)) in got.iter().zip(f[5].split(';')).enumerate() {
                 let w: Vec<_> = want.split(':').collect();
@@ -2427,9 +2958,212 @@ mod tests {
         let s = specs_from(BOMBS_UNITS);
         let mut snap =
             snapshot("0:amphbomb:400:80:0;0:amphraid:360:0:0;0:amphraid:360:-20:40;1:amphcon:1000:320.3:0", &s);
-        snap.flags = SimFlags::from_switches(true, true, true);
+        snap.flags = SimFlags { ordered: true, ..SimFlags::from_switches(true, true, true) };
         let v = m.bomb_charge(&snap, 0, &[], 900);
         assert!(v.spent > 0.99 && v.net < -150.0, "{v:?}");
+    }
+
+    /// The Dominatrix as the AI reads it (units/vehcapture.lua).
+    fn dominatrix() -> Arc<UnitSpec> {
+        Arc::new(UnitSpec {
+            def: "vehcapture".into(),
+            cost: 420.0,
+            health: 820.0,
+            speed: 58.5 / 30.0,
+            mobile: true,
+            radius: 13.0,
+            weapons: vec![WeaponSpec {
+                leading: None,
+                name: "vehcapture_captureray".into(),
+                weapon_type: "BeamLaser".into(),
+                range: 450.0,
+                reload: 1.0 / 30.0,
+                salvo: 1,
+                damage: 22.0,
+            }],
+            ..Default::default()
+        })
+    }
+
+    fn capture_on() -> SimFlags {
+        SimFlags { capture: true, ..SimFlags::from_switches(false, true, true) }
+    }
+
+    #[test]
+    fn capture_changes_nothing_without_a_capture_ray() {
+        let m = Model::load().unwrap();
+        for (name, snap, _) in cases() {
+            let on = FightSnapshot { flags: SimFlags { capture: true, ..snap.flags }, units: snap.units.clone() };
+            assert_eq!(m.predict_with(&snap, true), m.predict_with(&on, true), "{name}");
+            let (a, b) = (m.fates(&snap, 300, FateMode::AMove), m.fates(&on, 300, FateMode::AMove));
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{name}");
+        }
+    }
+
+    /// A full Glaive needs (230 + 1000) / 22 = 56 ray hits: about 2 s.
+    #[test]
+    fn a_dominatrix_takes_a_glaive_in_about_two_seconds() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let units = vec![
+            SnapUnit { reloads: Vec::new(), side: 0, spec: dominatrix(), hp: 820.0, x: 0.0, z: 0.0, tubes: vec![] },
+            SnapUnit {
+                reloads: Vec::new(),
+                side: 1,
+                spec: defs["cloakraid"].clone(),
+                hp: 230.0,
+                x: 420.0,
+                z: 0.0,
+                tubes: vec![],
+            },
+        ];
+        let on = m.fates(&FightSnapshot { flags: capture_on(), units: units.clone() }, 300, FateMode::AMove);
+        let off_flags = SimFlags { capture: false, ..capture_on() };
+        let off = m.fates(&FightSnapshot { flags: off_flags, units }, 300, FateMode::AMove);
+        let g = &on[1];
+        assert!(g.captured && g.dead && g.hp_left == 0.0 && g.p_raw == 1.0, "{g:?}");
+        let at = g.death_frame.unwrap();
+        assert!((55..=120).contains(&at), "captured at frame {at}");
+        assert!(!on[0].dead && on[0].hp_left > 700.0, "{:?}", on[0]);
+        // Off, the ray never lands: the Glaive lives and chews on it.
+        assert!(!off[1].dead && !off[1].captured && off[1].hp_left == 230.0, "{:?}", off[1]);
+        assert!(off[0].hp_left < on[0].hp_left, "{off:?}");
+    }
+
+    /// After a capture the ray is out for 12 s: a second Glaive standing by
+    /// is taken only then, and a meter left alone drains.
+    #[test]
+    fn the_ray_is_out_for_twelve_seconds_after_a_capture() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let mut glaive = (*defs["cloakraid"]).clone();
+        glaive.weapons.clear();
+        let glaive = Arc::new(glaive);
+        let snap = FightSnapshot {
+            flags: capture_on(),
+            units: vec![
+                SnapUnit { reloads: Vec::new(), side: 0, spec: dominatrix(), hp: 820.0, x: 0.0, z: 0.0, tubes: vec![] },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: glaive.clone(),
+                    hp: 230.0,
+                    x: 400.0,
+                    z: 0.0,
+                    tubes: vec![],
+                },
+                SnapUnit { reloads: Vec::new(), side: 1, spec: glaive, hp: 230.0, x: 430.0, z: 0.0, tubes: vec![] },
+            ],
+        };
+        let f = m.fates(&snap, 900, FateMode::AMove);
+        let (a, b) = (f[1].death_frame.unwrap(), f[2].death_frame.unwrap());
+        assert!(f[1].captured && f[2].captured, "{f:?}");
+        assert!(b - a >= 360 && b - a < 360 + 120, "taken at {a} and {b}");
+        let mut us = m.mech_units(&snap);
+        us[1].cap = 0.5 * us[1].cap_full();
+        us[1].cap_hit = 0;
+        us[0].u.weapons[0].next = 10_000;
+        let mut run = Run {
+            sortie: None,
+            construction: None,
+            progress: 1.0,
+            defense: None,
+            defense_engagement: None,
+            hazard: None,
+            withdraw: false,
+            retreat_path: None,
+            pass: false,
+            focus: None,
+            insertion: None,
+            kiting: None,
+            horizon: 30 * 20,
+            track: Some(Track { var: vec![0.0; 3], death_f: vec![None; 3], captured_f: vec![None; 3] }),
+            twod: false,
+            least_health: true,
+            bomb: None,
+            bomb_ln_survive: 0.0,
+        };
+        let (_, end) = run_mech(&us, &m.hits, m.mech.stun_cap_s, &mut run);
+        // 20 s: held 176 frames, then 4% of a full meter per 32 frames.
+        let left = 0.5 - CAPTURE_DECAY * (600.0 - CAPTURE_HOLD as f64) / 32.0;
+        assert!((end[1].cap / end[1].cap_full() - left.max(0.0)).abs() < 0.02, "{} vs {left}", end[1].cap);
+    }
+
+    #[test]
+    fn a_captured_unit_counts_lost_once_and_goes_home_when_its_captor_dies() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let snap = FightSnapshot {
+            flags: capture_on(),
+            units: vec![
+                SnapUnit { reloads: Vec::new(), side: 0, spec: dominatrix(), hp: 820.0, x: 0.0, z: 0.0, tubes: vec![] },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: defs["cloakriot"].clone(),
+                    hp: 820.0,
+                    x: 300.0,
+                    z: 0.0,
+                    tubes: vec![],
+                },
+            ],
+        };
+        let mut us = m.mech_units(&snap);
+        assert_eq!(us[0].mech[0].capture.map(|c| c.reload), Some(360));
+        let mut killed = [0.0; 2];
+        transfer(&mut us, &mut killed, 1, 0, false, 30);
+        us[1].controller = Some(0);
+        assert_eq!((us[1].u.side, killed), (0, [0.0, 210.0]));
+        release(&mut us, &mut killed, 60);
+        assert_eq!(us[1].u.side, 0, "its captor lives");
+        kill(&mut us, &mut killed, 0, 0);
+        assert_eq!(killed, [420.0, 210.0]);
+        release(&mut us, &mut killed, 90);
+        assert_eq!((us[1].u.side, us[1].controller, killed), (1, None, [420.0, 0.0]));
+        assert!((us[1].cap - 0.95 * 1820.0).abs() < 1e-9 && us[1].cap_hit == 90);
+        // Taken again and killed while held: lost once.
+        transfer(&mut us, &mut killed, 1, 0, false, 120);
+        kill(&mut us, &mut killed, 1, 0);
+        assert_eq!(killed, [420.0, 210.0]);
+    }
+
+    /// A worn Dominatrix takes a Conjurer, then walks into a Lotus's reach
+    /// and dies while its ray is still out after the capture: the
+    /// Conjurer goes home, after the Lotus shot it as an enemy.
+    #[test]
+    fn what_a_dead_dominatrix_took_goes_home() {
+        let m = Model::load().unwrap();
+        let defs = specs();
+        let snap = FightSnapshot {
+            flags: capture_on(),
+            units: vec![
+                SnapUnit { reloads: Vec::new(), side: 0, spec: dominatrix(), hp: 300.0, x: 0.0, z: 0.0, tubes: vec![] },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: defs["cloakcon"].clone(),
+                    hp: 600.0,
+                    x: 400.0,
+                    z: 0.0,
+                    tubes: vec![],
+                },
+                SnapUnit {
+                    reloads: Vec::new(),
+                    side: 1,
+                    spec: defs["turretlaser"].clone(),
+                    hp: 785.0,
+                    x: 700.0,
+                    z: 0.0,
+                    tubes: vec![],
+                },
+            ],
+        };
+        let early = m.fates(&snap, 150, FateMode::AMove);
+        let late = m.fates(&snap, 600, FateMode::AMove);
+        assert!(early[1].captured && !early[0].dead, "{early:?}");
+        assert!(late[0].dead && !late[0].captured && late[0].death_frame > Some(360), "{late:?}");
+        let con = &late[1];
+        assert!(!con.captured && !con.dead && con.hp_left > 0.0 && con.hp_left < 600.0, "{late:?}");
     }
 
     /// A ring of Glaives round a Kodachi: the plane puts them round it, the
@@ -2448,10 +3182,11 @@ mod tests {
                     hp: 230.0,
                     x: 300.0 * a.cos(),
                     z: 300.0 * a.sin(),
+                    tubes: Vec::new(),
                 }
             })
             .collect();
-        units.push(SnapUnit { reloads: Vec::new(), side: 1, spec: k, hp: 660.0, x: 0.0, z: 0.0 });
+        units.push(SnapUnit { reloads: Vec::new(), side: 1, spec: k, hp: 660.0, x: 0.0, z: 0.0, tubes: Vec::new() });
         let snap = FightSnapshot { flags: SimFlags::from_switches(true, false, false), units };
         let p = plane(&snap);
         for (x, z) in &p[..4] {
@@ -2482,8 +3217,15 @@ mod tests {
     #[test]
     fn engagement_reads_blockers_and_crowding() {
         let specs = specs();
-        let unit =
-            |side, def: &str, x, z| SnapUnit { reloads: Vec::new(), side, spec: specs[def].clone(), hp: 100.0, x, z };
+        let unit = |side, def: &str, x, z| SnapUnit {
+            reloads: Vec::new(),
+            side,
+            spec: specs[def].clone(),
+            hp: 100.0,
+            x,
+            z,
+            tubes: Vec::new(),
+        };
         // A Rogue behind a file of Glaives, facing one Bandit 400 out.
         let mut snap = FightSnapshot {
             flags: Default::default(),
@@ -2551,6 +3293,7 @@ mod tests {
                     hp: 230.0,
                     x: -40.0 * row,
                     z: 30.0 * col,
+                    tubes: Vec::new(),
                 });
                 let def = if i % 3 == 0 { "tankraid" } else { "shieldraid" };
                 let hp = specs[def].health;
@@ -2561,6 +3304,7 @@ mod tests {
                     hp,
                     x: 350.0 + 40.0 * row,
                     z: 30.0 * col,
+                    tubes: Vec::new(),
                 });
             }
             let mut line = format!("{per_side:2} a side:");

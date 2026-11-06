@@ -40,6 +40,13 @@ fn lobster_cargo(name: &str, armed: bool, classes: &UnitClasses) -> bool {
         && !classes.solo_raiders.contains(name)
 }
 
+/// Plates keep ordinary production flowing while their full factory builds
+/// heavies. Krows fill the same role in the air but are not in the ground
+/// fighter-value classification.
+fn factory_combat_allowed(allow_heavy: bool, name: &str, classes: &UnitClasses) -> bool {
+    allow_heavy || (!classes.heavies.contains(name) && name != "gunshipkrow")
+}
+
 /// Early Constables (see `fac_wants_early_constable`): for this long, at
 /// least this many, one per this much metal income, at most this many.
 const EARLY_CONS_FRAMES: i32 = 30 * 60 * 12;
@@ -65,6 +72,9 @@ const VENOM_RAIDERS_FROM: i32 = 30 * 120;
 /// Glaive-sized raiders a Venom counts as in a factory's raider budget
 /// (about its cost over a Glaive's).
 const VENOM_RAIDER_SLOTS: f32 = 3.0;
+/// Enemy line metal (see `Intel::line_value`) at which the spider factory
+/// leaves the raider phase whatever the map's density: five Venoms' worth.
+const VENOM_PHASE_LINE: f32 = 1000.0;
 
 pub struct FactoryManager {
     cb: Callback,
@@ -338,14 +348,17 @@ impl Ai {
         if frame % 60 != self.offset % 60 {
             return;
         }
-        // Deliberately idle air plants need another decision when missions change;
-        // the engine does not keep sending idle events for an empty queue.
+        // Deliberately idle air plants need another decision when missions change
+        // (or an `airstall` ends); the engine does not keep sending idle events for
+        // an empty queue.
         let idle_air: Vec<i32> = self
             .fac
             .factories
             .iter()
             .filter(|(_, f)| {
-                f.kind() == FacKind::Plane && !f.unit.is_being_built() && f.unit.num_current_commands() == 0
+                matches!(f.kind(), FacKind::Plane | FacKind::Gunship)
+                    && !f.unit.is_being_built()
+                    && f.unit.num_current_commands() == 0
             })
             .map(|(&id, _)| id)
             .collect();
@@ -480,6 +493,7 @@ impl Ai {
     /// Produce from `unit`, a factory or a plate, as one of type `tech`.
     pub(crate) fn fac_register(&mut self, unit: Unit, tech: &str) {
         let Some(def) = unit.def() else { return };
+        self.eco.factory_opened_at.get_or_insert(self.frame);
         let first_fac = (self.fac.factories.len() as i32) < 1 + self.merged_allies;
         let mut fac = Factory::new(unit, tech, first_fac, self.phase_map_diag());
         if !tech.contains("hub") {
@@ -631,7 +645,7 @@ impl Ai {
     }
 
     /// Queue the next unit for factory (or strider hub) `fac_id`.
-    fn fac_assign_factory_task(&mut self, fac_id: i32) {
+    pub(crate) fn fac_assign_factory_task(&mut self, fac_id: i32) {
         // A new production decision means any uncreated prior scout order
         // was canceled; unfinished aircraft are counted from the team roster.
         self.scouts_air_idle(fac_id);
@@ -664,7 +678,22 @@ impl Ai {
         if f.building_for.take() == Some(Role::SoloRaider) {
             f.scout_allowance -= 1;
         }
+        // A rush (see `rush`): the rusher's factory builds its heavy, the
+        // others wait for it.
+        match self.rush_factory(fac_id) {
+            Some(super::rush::RushOrder::Heavy(def)) => {
+                self.log(&format!("rush: factory {fac_id} builds the {}", self.defs.name(def)));
+                self.rush_ordered();
+                return self.fac_build_ordered(fac_id, def);
+            }
+            Some(super::rush::RushOrder::Hold) => return,
+            None => {}
+        }
         if let Some(def) = self.eco_expansion_constructor_order(fac_id) {
+            self.fac_build_ordered(fac_id, def);
+            return;
+        }
+        if let Some(def) = self.invade_constructor_order(fac_id) {
             self.fac_build_ordered(fac_id, def);
             return;
         }
@@ -681,10 +710,14 @@ impl Ai {
         // Where the scout is a lane picket (Fleas, Darts; see `stakeouts`),
         // the stakeouts say how many: a post unmanned is a raid unseen, and
         // a picket more than they want is metal idle. Other factories build
-        // their cheapest fast unit for the stakeouts while they are short,
-        // then scouts for raiding alone as before.
+        // their cheapest fast unit for the stakeouts while they are short
+        // (feature `anyscout`), then scouts for raiding alone as before.
         let short = self.stakeouts_short(fac.kind());
-        self.fac.scout_budget = if self.stakeouts_own(fac.kind()) || short > 0 {
+        // `frontretire`: no scouts once the fights are dense (radar sees
+        // all; see `military::front`), so pickets let go are not rebuilt.
+        self.fac.scout_budget = if self.front_retired() {
+            0
+        } else if self.stakeouts_own(fac.kind()) || short > 0 {
             short
         } else {
             scouts_needed.min(fac.scout_allowance).max(0)
@@ -696,20 +729,23 @@ impl Ai {
         });
 
         let kind = fac.kind();
+        // A plate shares its parent's `tech`, so use the actual building's
+        // definition. Skip heavy branches before they incur scout/raider debt.
+        let allow_heavy = self.fac_allows_heavies(&fac);
         let choice = match self.fac_opening_scout(&mut fac) {
             Some(scout) => scout,
             None => match kind {
                 FacKind::Cloak => self.fac_get_cloaky(&mut fac),
-                FacKind::Ship => self.fac_get_boats(&mut fac),
+                FacKind::Ship => self.fac_get_boats(&mut fac, allow_heavy),
                 FacKind::Shield => self.fac_get_shields(&mut fac),
-                FacKind::Gunship => self.fac_get_gunship(&mut fac),
+                FacKind::Gunship => self.fac_get_gunship(&mut fac, allow_heavy),
                 FacKind::Plane => self.fac_get_planes(&mut fac),
-                FacKind::Amph => self.fac_get_amphs(&mut fac),
+                FacKind::Amph => self.fac_get_amphs(&mut fac, allow_heavy),
                 FacKind::Veh => self.fac_get_lv(&mut fac),
                 FacKind::Hover => self.fac_get_hovers(&mut fac),
-                FacKind::Tank => self.fac_get_tanks(&mut fac),
-                FacKind::Spider => self.fac_get_spiders(&mut fac),
-                FacKind::Jump => self.fac_get_jumps(&mut fac),
+                FacKind::Tank => self.fac_get_tanks(&mut fac, allow_heavy),
+                FacKind::Spider => self.fac_get_spiders(&mut fac, allow_heavy),
+                FacKind::Jump => self.fac_get_jumps(&mut fac, allow_heavy),
                 FacKind::StriderHub => self.fac_get_strider(),
                 FacKind::Other => return,
             },
@@ -737,7 +773,11 @@ impl Ai {
             || self.firefighters_order(kind) == Some(choice)
             || (fac.building_for == Some(Role::Stakeout) && opens_with_scouts(kind));
         let picked = choice;
-        let choice = match (ai_wants_builder || special, fac.unit) {
+        // An air plant idle for an `airstall` stays idle: home defenders and
+        // taskforce units from it would be aircraft too (the floor's
+        // garrison took 15 Locusts so, 2026-11-04).
+        let hold = choice.is_empty() && self.air_stalled();
+        let choice = match (ai_wants_builder || special || hold, fac.unit) {
             (false, unit) => self.qrf_production(unit, choice).unwrap_or(choice),
             _ => choice,
         };
@@ -753,9 +793,10 @@ impl Ai {
         }
         // Now and then, in place of a fighter, a unit a taskforce is short
         // of (a role with `produce`; see `taskforce`).
-        let options = fac.unit.def().map(|d| d.build_options()).unwrap_or_default();
+        let options = self.fac_production_options(&fac);
         if !ai_wants_builder
             && !special
+            && !hold
             && let Some((def, doctrine, role)) = self.squad_produce(&options)
         {
             let name = self.defs.name(def).to_owned();
@@ -768,7 +809,12 @@ impl Ai {
         }
         // Dedicated waves and periodic Phantom insurance replace only an
         // ordinary combat slot, preserving constructors and explicit orders.
-        let strike = if !ai_wants_builder && !special { self.strikes_order(kind, fac_id) } else { None };
+        let strike = if !ai_wants_builder && !special {
+            self.strikes_order(kind, fac_id)
+                .filter(|name| factory_combat_allowed(allow_heavy, name, &self.unit_classes))
+        } else {
+            None
+        };
         let choice = strike.unwrap_or(choice);
         if strike.is_some() {
             fac.building_for = None;
@@ -779,6 +825,18 @@ impl Ai {
         // Empty is an intentional production pause, not a missing unit def.
         if choice.is_empty() {
             return;
+        }
+        // (Firefighters and anti-air gunships are meant; anything else that
+        // fights from a stalled plant is a leak to find.)
+        if self.airstall_leaks(choice)
+            && self.firefighters_order(kind) != Some(choice)
+            && !self.unit_classes.aas.contains(choice)
+        {
+            self.log(&format!(
+                "airstall: factory {fac_id} builds a {choice} while air stands stalled (picked {picked}, special \
+                 {special}, hold {hold}, strike {})",
+                strike.is_some()
+            ));
         }
         if kind == FacKind::Plane && self.firefighters_order(kind) != Some(choice) {
             self.airstrike_ordered(fac_id, choice);
@@ -817,8 +875,9 @@ impl Ai {
             unit.build(def, site, 0, 0);
         } else if unit.build(def, pos, 0, 0) {
             self.army_support_ordered(fac_id, def);
-            self.sapper_ordered(fac_id, def);
             self.eco_expansion_constructor_ordered(def);
+            self.invade_constructor_ordered(fac_id, def);
+            self.sapper_ordered(fac_id, def);
         }
     }
 
@@ -853,8 +912,9 @@ impl Ai {
             unit.build(def, site, 0, 0);
         } else if unit.build(def, pos, 0, 0) {
             self.army_support_ordered(fac_id, def);
-            self.sapper_ordered(fac_id, def);
             self.eco_expansion_constructor_ordered(def);
+            self.invade_constructor_ordered(fac_id, def);
+            self.sapper_ordered(fac_id, def);
         }
     }
 
@@ -869,6 +929,24 @@ impl Ai {
         } else {
             false
         }
+    }
+
+    fn fac_allows_heavies(&self, fac: &Factory) -> bool {
+        !self.defs.name_of(fac.unit).starts_with("plate")
+    }
+
+    /// Filter before taskforce selection so a plate never reserves an order
+    /// for a heavy it cannot produce under this policy. Explicit operator
+    /// orders still override automatic composition.
+    fn fac_production_options(&self, fac: &Factory) -> Vec<UnitDef> {
+        let allow_heavy = self.fac_allows_heavies(fac);
+        fac.unit
+            .def()
+            .map(|d| d.build_options())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| factory_combat_allowed(allow_heavy, self.defs.name(*d), &self.unit_classes))
+            .collect()
     }
 
     fn fac_need_workers(&self, fac: &Factory) -> bool {
@@ -918,6 +996,11 @@ impl Ai {
                 && eco.max_storage > 0.5
                 && worker_deficit > -1)
             || (self.fac_early_worker() && fm.num_workers < 2 * (1 + merged))
+            // With `compush` the first constructor builds the home energy
+            // while the commander expands (see `conquest_energy`): it comes
+            // first, as on big maps (Cloakbots and Hovercraft otherwise
+            // opened with ten raiders, the constructor at 1:50).
+            || (self.conquest_push() && fm.num_workers < 2 * (1 + merged))
         {
             return true;
         }
@@ -1017,7 +1100,7 @@ impl Ai {
         }
     }
 
-    fn fac_get_boats(&self, fac: &mut Factory) -> &'static str {
+    fn fac_get_boats(&self, fac: &mut Factory, allow_heavy: bool) -> &'static str {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
@@ -1070,14 +1153,14 @@ impl Ai {
         let rnd = kgb_rand();
         if income < 35.0 && !self.graph.eminent_territory {
             fac.expensive_raider_spam -= 2.0;
-            if fm.army_value < 1000.0 || rnd < 0.3 {
+            if allow_heavy && (fm.army_value < 1000.0 || rnd < 0.3) {
                 fac.expensive_raider_spam -= 1.0;
                 return "shipassault";
             }
             if rnd < 0.2 { "shipriot" } else { "shipskirm" }
         } else {
             fac.expensive_raider_spam -= 1.0;
-            if fm.army_value < 2000.0 || rnd < 0.3 {
+            if allow_heavy && (fm.army_value < 2000.0 || rnd < 0.3) {
                 fac.expensive_raider_spam -= 2.0;
                 fac.add_scout_allowance(1);
                 return "shipassault";
@@ -1189,13 +1272,13 @@ impl Ai {
         }
     }
 
-    fn fac_get_amphs(&self, fac: &mut Factory) -> &'static str {
+    fn fac_get_amphs(&self, fac: &mut Factory, allow_heavy: bool) -> &'static str {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
         let income = self.phase_income();
 
-        if self.fac_need_workers(fac) {
+        if self.reclaim_wants_conch() || self.fac_need_workers(fac) {
             return "amphcon";
         }
 
@@ -1228,12 +1311,13 @@ impl Ai {
             return "amphlaunch";
         }
 
-        if let Some(heavy) = self.fac_front_heavy("amphassault") {
+        if allow_heavy && let Some(heavy) = self.fac_front_heavy("amphassault") {
             fac.add_scout_allowance(3);
             return heavy;
         }
 
-        if income > 30.0
+        if allow_heavy
+            && income > 30.0
             && fm.fighter_value - fm.arty_value > 1500.0
             && kgb_rand() < f64::from((tf / 2.0) * (1.0 - fm.arty_value / war.enemy_porc_value))
         {
@@ -1256,7 +1340,7 @@ impl Ai {
             fac.raider_spam -= ((income / 5.0).floor() as i32).clamp(6, 12) as f32;
         }
 
-        if income > 35.0 && kgb_rand() > 0.9 && fm.fighter_value - fm.arty_value > 2000.0 {
+        if allow_heavy && income > 35.0 && kgb_rand() > 0.9 && fm.fighter_value - fm.arty_value > 2000.0 {
             fac.add_scout_allowance(2);
             return "amphassault";
         }
@@ -1312,7 +1396,14 @@ impl Ai {
             fac.add_scout_allowance(1);
         }
 
-        if eminent && kgb_rand() < f64::from((tf / 10.0) * (1.0 - fm.heavy_arty_value / war.enemy_heavy_porc_value)) {
+        // Dense fronts support a larger battery as well as more frequent orders.
+        let siege_chance = crate::military::siege_cover::production_chance(
+            tf / 10.0,
+            fm.heavy_arty_value,
+            war.enemy_heavy_porc_value,
+            self.front_escalation(),
+        );
+        if eminent && kgb_rand() < f64::from(siege_chance) {
             fac.add_scout_allowance(1);
             return "vehheavyarty";
         }
@@ -1430,7 +1521,7 @@ impl Ai {
         "hoverskirm"
     }
 
-    fn fac_get_tanks(&self, fac: &mut Factory) -> &'static str {
+    fn fac_get_tanks(&self, fac: &mut Factory, allow_heavy: bool) -> &'static str {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
@@ -1440,7 +1531,9 @@ impl Ai {
             return "tankcon";
         }
 
-        if war.slasher_spam as f32 * 140.0 > war.enemy_porc_value || war.slasher_spam as f32 * 560.0 > fm.assault_value
+        if allow_heavy
+            && (war.slasher_spam as f32 * 140.0 > war.enemy_porc_value
+                || war.slasher_spam as f32 * 560.0 > fm.assault_value)
         {
             return "tankassault";
         }
@@ -1467,15 +1560,18 @@ impl Ai {
             return "tankaa";
         }
 
-        if let Some(heavy) = self.fac_front_heavy("tankheavyassault") {
+        if allow_heavy && let Some(heavy) = self.fac_front_heavy("tankheavyassault") {
             fac.add_scout_allowance(1);
             return heavy;
         }
 
-        if income > 25.0
-            && war.enemy_heavy_porc_value > 0.0
-            && kgb_rand() < f64::from(tf * (1.0 - fm.arty_value / war.enemy_porc_value))
-        {
+        let siege_chance = crate::military::siege_cover::production_chance(
+            tf,
+            fm.arty_value,
+            war.enemy_porc_value,
+            self.front_escalation(),
+        );
+        if income > 25.0 && war.enemy_heavy_porc_value > 0.0 && kgb_rand() < f64::from(siege_chance) {
             fac.expensive_raider_spam -= 1.0;
             return "tankarty";
         }
@@ -1489,7 +1585,9 @@ impl Ai {
         let rnd = kgb_rand();
         if income < 35.0 && !self.graph.eminent_territory {
             fac.expensive_raider_spam -= 2.0;
-            if fm.num_banishers > fm.num_reapers || war.enemy_heavy_porc_value > 850.0 * fm.num_reapers as f32 {
+            if allow_heavy
+                && (fm.num_banishers > fm.num_reapers || war.enemy_heavy_porc_value > 850.0 * fm.num_reapers as f32)
+            {
                 fac.expensive_raider_spam -= 1.0;
                 "tankassault"
             } else {
@@ -1497,12 +1595,12 @@ impl Ai {
             }
         } else {
             fac.expensive_raider_spam -= 1.0;
-            if fm.army_value > 2000.0 && kgb_rand() > 0.9 {
+            if allow_heavy && fm.army_value > 2000.0 && kgb_rand() > 0.9 {
                 fac.expensive_raider_spam -= 2.0;
                 fac.add_scout_allowance(1);
                 return "tankheavyassault";
             }
-            if rnd > 0.15 {
+            if allow_heavy && rnd > 0.15 {
                 fac.expensive_raider_spam -= 1.0;
                 "tankassault"
             } else {
@@ -1511,7 +1609,7 @@ impl Ai {
         }
     }
 
-    fn fac_get_spiders(&self, fac: &mut Factory) -> &'static str {
+    fn fac_get_spiders(&self, fac: &mut Factory, allow_heavy: bool) -> &'static str {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
@@ -1533,11 +1631,11 @@ impl Ai {
             return "spiderscout";
         }
 
-        // Raiders: Fleas in the opening, Venoms after it; the Fleas then are
-        // the stakeouts' alone (the scout detachment). Raiders owed in dense
-        // fights are dropped (`frontgate`).
-        let dropped = self.fac_front_cancel(&mut fac.raider_spam);
-        if fac.raider_spam < 0.0 && !dropped {
+        // Raiders (feature `venomraid`): Fleas in the opening, Venoms after
+        // it; the Fleas then are the stakeouts' alone (the scout detachment).
+        let venom_raid = !self.dev_off("venomraid");
+        let dropped = venom_raid && self.fac_front_cancel(&mut fac.raider_spam);
+        if venom_raid && fac.raider_spam < 0.0 && !dropped {
             return self.fac_spider_raider(fac);
         }
 
@@ -1545,20 +1643,34 @@ impl Ai {
             return "spideraa";
         }
 
-        if let Some(heavy) = self.fac_front_heavy("spidercrabe") {
+        if allow_heavy && let Some(heavy) = self.fac_front_heavy("spidercrabe") {
             fac.add_scout_allowance(6);
             return heavy;
         }
 
-        if self.phase_income() > 30.0
+        if allow_heavy
+            && self.phase_income() > 30.0
             && kgb_rand() < f64::from((tf / 5.0) * (1.0 - fm.arty_value / war.enemy_porc_value))
         {
             fac.add_scout_allowance(6);
             return "spidercrabe";
         }
 
+        // The raider phase (feature `venomphase`): past the opening the
+        // Venoms raid on, while the enemy fields only raiders and its
+        // commander and the map is open; its line and the map's density
+        // take orders over to our own line (see `fac_spider_line_share`).
+        if venom_raid
+            && !self.dev_off("venomphase")
+            && self.phase_frame() >= VENOM_RAIDERS_FROM
+            && kgb_rand() >= f64::from(self.fac_spider_line_share())
+        {
+            fac.add_scout_allowance(3);
+            return self.fac_spider_raider(fac);
+        }
+
         // Now and then a wave of raiders, as the cloak factory sends Glaives.
-        if !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
+        if venom_raid && !fm.highprio && kgb_rand() > 0.95 + f64::from(0.025f32.min(tf / 20.0)) {
             fac.raider_spam -= (((self.phase_income() / 5.0).floor() as i32).clamp(6, 12) - 1) as f32;
             return self.fac_spider_raider(fac);
         }
@@ -1588,6 +1700,16 @@ impl Ai {
         }
     }
 
+    /// The share of the spider factory's orders past the opening that go
+    /// to its line rather than to raiding Venoms: the enemy's line seen
+    /// alive over [`VENOM_PHASE_LINE`], plus the map's density over its
+    /// reference (the `density_ref` dial), at most all of them.
+    pub(crate) fn fac_spider_line_share(&self) -> f32 {
+        let line = self.intel.line_value() / VENOM_PHASE_LINE;
+        let dense = self.posture.density / self.posture_levers().density_ref.max(1.0);
+        (line + dense).min(1.0)
+    }
+
     /// A spider raider: a Flea in the opening, a Venom after it. The
     /// raider budget counts Glaive-sized raiders; a Venom costs as much as
     /// [`VENOM_RAIDER_SLOTS`] of them.
@@ -1610,7 +1732,7 @@ impl Ai {
     /// `war_unit_idle`); Firewalkers against masses of light skirmishers,
     /// Jugglenauts against crowds of close-range units, Puppies to eat the
     /// wrecks between the armies (see `puppies`), Skuttles for the jaegers.
-    fn fac_get_jumps(&self, fac: &mut Factory) -> &'static str {
+    fn fac_get_jumps(&self, fac: &mut Factory, allow_heavy: bool) -> &'static str {
         let fm = &self.fac;
         let war = &self.war;
         let tf = self.graph.territory_fraction;
@@ -1625,7 +1747,7 @@ impl Ai {
         }
 
         // Jacks walk through Fencer fire (6000 health).
-        if war.slasher_spam as f32 * 280.0 > fm.assault_value {
+        if allow_heavy && war.slasher_spam as f32 * 280.0 > fm.assault_value {
             return "jumpassault";
         }
 
@@ -1659,17 +1781,17 @@ impl Ai {
             return if kgb_rand() > 0.5 { "jumpaa" } else { "jumpskirm" };
         }
 
-        if let Some(heavy) = self.fac_front_heavy("jumpsumo") {
+        if allow_heavy && let Some(heavy) = self.fac_front_heavy("jumpsumo") {
             fac.add_scout_allowance(1);
             return heavy;
         }
 
         // An early Jack: a commander killer that jumps out again.
-        if fm.num_jacks == 0 && fm.num_pyros >= 2 {
+        if allow_heavy && fm.num_jacks == 0 && fm.num_pyros >= 2 {
             return "jumpassault";
         }
 
-        if self.fac_wants_jugglenaut() {
+        if allow_heavy && self.fac_wants_jugglenaut() {
             fac.add_scout_allowance(1);
             return "jumpsumo";
         }
@@ -1694,7 +1816,7 @@ impl Ai {
         let support = fm.num_mods + fm.num_placeholders;
         if fm.num_mods >= 4 * (fm.num_placeholders + 1) {
             "jumpblackhole"
-        } else if fm.num_jacks * 2 < support {
+        } else if allow_heavy && fm.num_jacks * 2 < support {
             "jumpassault"
         } else {
             "jumpskirm"
@@ -1704,9 +1826,10 @@ impl Ai {
     /// Constables early, in step with income, as CircuitAI does with jumpjets
     /// (its second by 1.5 minutes, then about one per 5.5 metal of income:
     /// 9 at minute 8 against our 3.5, when it had 18 mexes to our 10; we
-    /// built Pyros first). For the first EARLY_CONS_FRAMES.
+    /// built Pyros first). For the first EARLY_CONS_FRAMES; off with
+    /// `disable=earlycons`.
     fn fac_wants_early_constable(&self) -> bool {
-        if self.phase_frame() >= EARLY_CONS_FRAMES {
+        if self.phase_frame() >= EARLY_CONS_FRAMES || self.dev_off("earlycons") {
             return false;
         }
         // Constables begun or rolling out count too (`new_workers`, until
@@ -1720,8 +1843,8 @@ impl Ai {
     }
 
     /// A scout for the stakeouts from the opening factory of a 1v1 while
-    /// the map is sparse (density under the `density_ref` dial), where it
-    /// is one of those that open with scouts (see
+    /// the map is sparse (density under the `density_ref` dial), feature
+    /// `openscouts`, where it is one of those that open with scouts (see
     /// `stakeouts::opens_with_scouts`): right after the constructors, a
     /// wave of [`SCOUT_WAVE`] metal from its scout roster (4 Puppies, 1
     /// Kodachi, 2 Hunters or 4 Cutters), then a wave more per
@@ -1731,12 +1854,17 @@ impl Ai {
     /// (`stakeouts_capped`; not the delay after each loss: with a pick per
     /// Pyro, 40-60 s apart, it kept one Puppy to six Pyros on Comet).
     fn fac_opening_scout(&self, fac: &mut Factory) -> Option<&'static str> {
-        if !fac.opener
+        // Retirement uses the contact-density ratchet, while the opening
+        // gate below uses map-wide density. A retired picket must never
+        // create a replacement opening wave, even on a still-sparse map.
+        if self.front_retired()
+            || !fac.opener
             || !opens_with_scouts(fac.kind())
             || !self.is_1v1()
+            || self.dev_off("openscouts")
             || self.dev_off("stakeouts")
             || self.stakeouts_capped()
-            || self.regime.density >= self.regime_density_ref()
+            || self.posture.density >= self.posture_levers().density_ref
         {
             return None;
         }
@@ -1790,7 +1918,7 @@ impl Ai {
         herd < want.min(HERD_CAP) && kgb_rand() > 0.5
     }
 
-    fn fac_get_gunship(&self, fac: &mut Factory) -> &'static str {
+    fn fac_get_gunship(&self, fac: &mut Factory, allow_heavy: bool) -> &'static str {
         if let Some(name) = self.recovery_transport_order() {
             return name;
         }
@@ -1803,12 +1931,13 @@ impl Ai {
         // The C++ port no longer builds Blastwings (gunshipbomb) for
         // raider spam: the AI does not know how to use them.
 
-        if fac.expensive_raider_spam < 0.0 {
+        // (Owed Nimbuses wait out an `airstall` too.)
+        if fac.expensive_raider_spam < 0.0 && !self.air_stalled() {
             fac.expensive_raider_spam += 1.0;
             return "gunshipheavyskirm";
         }
 
-        if self.fac_need_workers(fac) || self.eco_wants_air_colonist() {
+        if self.fac_need_workers(fac) || self.eco_wants_air_colonist() || self.airstall_wants_con() {
             return "gunshipcon";
         }
         if let Some(name) = self.firefighters_order(FacKind::Gunship) {
@@ -1823,11 +1952,17 @@ impl Ai {
             return "gunshipaa";
         }
 
+        // `airstall`: no gunships while ours do not pay (see
+        // `military::airstall`); the metal goes elsewhere.
+        if self.air_stalled() {
+            return "";
+        }
+
         if kgb_rand() > 0.75 {
             fac.raider_spam -= 2.0;
         }
 
-        if eminent && kgb_rand() > 0.95 - 0.1f64.max(0.2 * f64::from(tf)) {
+        if allow_heavy && eminent && kgb_rand() > 0.95 - 0.1f64.max(0.2 * f64::from(tf)) {
             fac.raider_spam -= 3.0;
             fac.expensive_raider_spam -= 6.0;
             return "gunshipkrow";
@@ -1848,6 +1983,11 @@ impl Ai {
     }
 
     fn fac_get_planes(&self, fac: &mut Factory) -> &'static str {
+        // (Grounded but for the constructors an air-only `airstall` wants: they
+        // raise its plate or superweapon.)
+        if self.airstall_wants_con() {
+            return "planecon";
+        }
         // Reconnaissance is needed precisely when ordinary sorties are grounded.
         if self.sweeps_wants_swift() {
             return "planefighter";
@@ -1866,6 +2006,11 @@ impl Ai {
         }
         if self.scouts_air_needed(scouts::OWL, self.scouts_policy().owls) {
             return scouts::OWL;
+        }
+        // `airstall`: no bombers while ours do not pay (see
+        // `military::airstall`), whatever the missions say.
+        if self.air_stalled() {
+            return "";
         }
         // Primary missions buy aircraft; secondary missions only use the fleet.
         self.airstrike_production().unwrap_or("")
@@ -1926,6 +2071,178 @@ impl Ai {
 mod tests {
     use super::*;
 
+    /// Enough of the engine to exercise real production choices and the
+    /// taskforce build menu. Factory and plate deliberately share `tech`.
+    fn production_ai() -> Ai {
+        use std::ffi::{CStr, c_char};
+        const NAMES: [&CStr; 12] = [
+            c"factoryspider",
+            c"platespider",
+            c"spidercrabe",
+            c"tankassault",
+            c"tankheavyassault",
+            c"amphassault",
+            c"shipassault",
+            c"jumpassault",
+            c"jumpsumo",
+            c"gunshipkrow",
+            c"spideremp",
+            c"spidercon",
+        ];
+        unsafe extern "C" fn defs(_: i32, out: *mut i32, max: i32) -> i32 {
+            for i in 0..if out.is_null() { 0 } else { NAMES.len().min(max.max(0) as usize) } {
+                unsafe {
+                    *out.add(i) = i as i32 + 1;
+                }
+            }
+            NAMES.len() as i32
+        }
+        unsafe extern "C" fn name(_: i32, id: i32) -> *const c_char {
+            NAMES[id as usize - 1].as_ptr()
+        }
+        unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
+            id
+        }
+        unsafe extern "C" fn options(_: i32, id: i32, out: *mut i32, max: i32) -> i32 {
+            if id > 2 {
+                return 0;
+            }
+            for i in 0..if out.is_null() { 0 } else { 10.min(max.max(0) as usize) } {
+                unsafe {
+                    *out.add(i) = i as i32 + 3;
+                }
+            }
+            10
+        }
+        unsafe extern "C" fn cost(_: i32, _: i32, _: i32) -> f32 {
+            1000.0
+        }
+        let mut table = None;
+        let mut ai = super::super::commander::tests::test_ai_with(|t| {
+            t.UnitDef_getBuildOptions = Some(options);
+            t.UnitDef_getCost = Some(cost);
+            t.Unit_getDef = Some(def);
+            t.UnitDef_getName = Some(name);
+            table = Some(*t);
+        });
+        let mut table = table.unwrap();
+        table.getUnitDefs = Some(defs);
+        ai.cb = unsafe { Callback::from_raw(0, Box::leak(Box::new(table))) };
+        ai.defs = crate::defs::Defs::new(ai.cb);
+        // Isolate composition from map scouting and specialist requisitions.
+        for feature in [
+            "scouts",
+            "jaeger",
+            "teleport",
+            "reach",
+            "densgate",
+            "venomraid",
+            "earlycons",
+            "puppies",
+            "recovery",
+            "drops",
+            "lobsters",
+            "compush",
+        ] {
+            ai.set_feature_off(feature, true);
+        }
+        ai.frame = 1;
+        ai.eco.last_rc_value_frame.set(1);
+        ai.eco.adjusted_income = 60.0;
+        ai.fac.num_workers = 20;
+        ai.fac.mobile_bp = 1000.0;
+        ai.fac.fighter_value = 5000.0;
+        ai.fac.aa_value = 5000.0;
+        ai.fac.army_value = 5000.0;
+        ai.fac.num_pyros = 2;
+        ai.war.enemy_porc_value = 1000.0;
+        ai.war.faced.brawler = 4000.0;
+        ai.war.front.ratchet = 3000.0;
+        ai.graph.territory_fraction = 0.7;
+        ai.graph.eminent_territory = true;
+        ai
+    }
+
+    fn production_factory(ai: &Ai, id: i32, tech: &str) -> Factory {
+        let mut fac = Factory::new(Unit::from_id(ai.cb, id).unwrap(), tech, false, 1000.0);
+        fac.worker_bp = 5.0;
+        fac.cost_per_bp = 27.0;
+        fac.small_raider_spam = true;
+        // Start after the gunship factory's initial Nimbus wave.
+        fac.expensive_raider_spam = 0.0;
+        fac
+    }
+
+    #[test]
+    fn plates_leave_heavy_taskforce_requests_to_full_factories() {
+        let ai = production_ai();
+        let main = production_factory(&ai, 1, "factoryspider");
+        let plate = production_factory(&ai, 2, "factoryspider");
+        assert_eq!(main.tech, plate.tech);
+        assert!(ai.fac_allows_heavies(&main));
+        assert!(!ai.fac_allows_heavies(&plate));
+        let full_options = ai.fac_production_options(&main);
+        for name in ai.unit_classes.heavies.iter().copied().chain(["gunshipkrow"]) {
+            assert!(full_options.contains(&ai.defs.get(name).unwrap()), "{name}");
+        }
+        let plate_options: Vec<_> = ai.fac_production_options(&plate).iter().map(|d| ai.defs.name(*d)).collect();
+        assert_eq!(plate_options, ["spideremp", "spidercon"]);
+    }
+
+    #[test]
+    fn plate_choosers_keep_producing_without_heavies_and_still_build_constructors() {
+        type Choose = fn(&Ai, &mut Factory, bool) -> &'static str;
+        let choosers: [(&str, &str, Choose); 6] = [
+            ("factoryspider", "spidercon", Ai::fac_get_spiders),
+            ("factoryamph", "amphcon", Ai::fac_get_amphs),
+            ("factorytank", "tankcon", Ai::fac_get_tanks),
+            ("factoryjump", "jumpcon", Ai::fac_get_jumps),
+            ("factoryship", "shipcon", Ai::fac_get_boats),
+            ("factorygunship", "gunshipcon", Ai::fac_get_gunship),
+        ];
+        let mut ai = production_ai();
+        for (tech, con, choose) in choosers {
+            let mut full_heavies = BTreeSet::new();
+            // Cover ordinary composition, Fencer counters, and dense-front
+            // escalation at low and high income, with reproducible rolls.
+            for income in [20.0, 60.0] {
+                ai.eco.adjusted_income = income;
+                ai.graph.eminent_territory = income >= 35.0;
+                for dense in [false, true] {
+                    ai.set_feature_off("frontgate", !dense);
+                    for fencers in [0, 10] {
+                        ai.war.slasher_spam = fencers;
+                        for seed in 0..128 {
+                            for id in [1, 2] {
+                                let mut fac = production_factory(&ai, id, tech);
+                                let allow_heavy = ai.fac_allows_heavies(&fac);
+                                crate::util::seed_rand(seed);
+                                let choice = choose(&ai, &mut fac, allow_heavy);
+                                assert!(!choice.is_empty(), "{tech} id={id}");
+                                assert_ne!(choice, con, "fixture must exercise combat selection");
+                                let heavy = !factory_combat_allowed(false, choice, &ai.unit_classes);
+                                if id == 2 {
+                                    assert!(!heavy, "plate {tech} chose {choice}");
+                                } else if heavy {
+                                    full_heavies.insert(choice);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(!full_heavies.is_empty(), "{tech} must still build heavies");
+            if tech == "factoryspider" {
+                assert!(full_heavies.contains("spidercrabe"));
+            }
+            ai.fac.num_workers = 0;
+            let mut plate = production_factory(&ai, 2, tech);
+            let allow_heavy = ai.fac_allows_heavies(&plate);
+            assert_eq!(choose(&ai, &mut plate, allow_heavy), con);
+            ai.fac.num_workers = 20;
+        }
+    }
+
     #[test]
     fn lobsters_cover_each_full_2500_metal_of_amph_army() {
         for (metal, launchers) in [(0.0, 0), (2499.0, 0), (2500.0, 1), (4999.0, 1), (5000.0, 2), (7500.0, 3)] {
@@ -1952,6 +2269,26 @@ mod tests {
         ] {
             assert!(!lobster_cargo(name, armed, &classes), "{name}");
         }
+    }
+
+    #[test]
+    fn retired_scouts_do_not_restart_the_opening_wave() {
+        let mut ai = crate::military::roles::retirement_tests::raider_test_ai(c"tankraid");
+        ai.enemy_teams.insert(0);
+        ai.fac.num_workers = 3;
+        ai.posture.density = 0.0;
+        let unit = springai::Unit::from_id(ai.cb, 1).unwrap();
+        let mut fac = Factory::new(unit, "factorytank", true, 0.0);
+        // Reproduce the two density measures disagreeing in Comet Catcher.
+        assert_eq!(ai.fac_opening_scout(&mut fac), Some("tankraid"));
+        ai.war.front.ratchet = crate::military::front::HI + 2.0;
+        assert!(ai.front_retired());
+        fac.building_for = None;
+        assert_eq!(ai.fac_opening_scout(&mut fac), None);
+        assert_eq!(fac.building_for, None);
+        // Respect the existing opt-out of retirement.
+        ai.set_feature_off("frontretire", true);
+        assert_eq!(ai.fac_opening_scout(&mut fac), Some("tankraid"));
     }
 
     /// Scouts of `cost` built from none, with `raiders` raiders.

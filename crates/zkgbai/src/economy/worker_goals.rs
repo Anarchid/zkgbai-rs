@@ -326,7 +326,6 @@ mod tests {
             t.UnitDef_getWeaponMounts = Some(zero);
             t.UnitDef_getBuildSpeed = Some(scalar);
         });
-        ai.set_feature_off("lanes", false);
         let mut commander = Worker::new(Unit::from_id(ai.cb, 1).unwrap(), ai.team_id);
         commander.is_com = true;
         ai.eco.commanders.push(1);

@@ -552,8 +552,11 @@ impl Ai {
         }
     }
 
-    fn unified_capture_weight(&self, _spots: &[usize]) -> f32 {
-        1.0
+    fn unified_capture_weight(&self, spots: &[usize]) -> f32 {
+        if self.dev_off("invade") {
+            return 1.0;
+        }
+        if self.invade.captures.iter().any(|c| c.spots.iter().any(|k| spots.contains(k))) { 1.15 } else { 1.0 }
     }
 }
 
@@ -813,6 +816,23 @@ mod tests {
         let far = WorkerTask::construction(def, Vec3::xz(1400.0, 0.0), 0);
         let price = |t: &WorkerTask| distance(w.get_pos(), t.get_pos()) / 4.0 + ai.eco_unified_job_cost(w, t);
         assert!(price(&near) < price(&far), "reserving a catchment must not erase travel between its mexes");
+    }
+    #[test]
+    fn cleared_invasion_ground_overrides_stale_enemy_shadow_but_not_an_enemy_mex() {
+        let mut ai = mission_ai();
+        ai.graph.metal_spots[0].enemy_shadowed = true;
+        assert!(ai.unified_objectives().iter().all(|o| !o.spots.contains(&0)));
+        ai.invade.captures.push(crate::military::invade::Capture {
+            region: 0,
+            kind: crate::military::invade::Kind::Held,
+            center: Vec3::xz(1150.0, 0.0),
+            spots: vec![0],
+            radius: 300.0,
+            since: 0,
+        });
+        assert!(ai.unified_objectives().iter().any(|o| o.spots.contains(&0)));
+        ai.graph.metal_spots[0].hostile = true;
+        assert!(ai.unified_objectives().iter().all(|o| !o.spots.contains(&0)));
     }
     #[test]
     fn finished_strategic_objectives_do_not_pull_the_commander_back() {

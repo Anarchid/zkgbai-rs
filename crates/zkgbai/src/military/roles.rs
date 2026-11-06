@@ -57,13 +57,18 @@ impl Role {
         match self {
             // The retreat handler pulls back damaged pickets that cannot
             // cloak (cowards, see `stakeouts_add`), through a Djinn's lamp
-            // if there is one (`teleport`).
+            // if there is one (`teleport`). A raider gang that borrows an
+            // armed picket orders it (`coalesce`; stakeouts skip it then).
+            // An engine attack on an enemy factory's frame is turned to the
+            // factory (`facframe`), for every role.
             Role::Stakeout => Some(Owner {
                 module: "stakeouts",
-                helpers: &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water"],
+                helpers: &[SETUP[0], SETUP[1], SETUP[2], "retreat", "teleport", "water", "coalesce", "facframe"],
             }),
             // Solo raiders also take the retreat handler's orders, fire-shadow
-            // raids (`precision`, also on damage), jumps and dives.
+            // raids (`precision`, also on damage), jumps and dives, and a
+            // raider gang's while it borrows them (`coalesce`; the raider
+            // handler skips them then).
             Role::SoloRaider => Some(Owner {
                 module: "raider",
                 helpers: &[
@@ -76,6 +81,8 @@ impl Role {
                     "war.unitDamaged",
                     "jumps",
                     "water",
+                    "coalesce",
+                    "facframe",
                 ],
             }),
             Role::SquadRaider => None,
@@ -194,6 +201,15 @@ impl Ai {
         }
     }
 
+    /// A stakeout leaves for a module without a role (a Puppy for its
+    /// herd, see `frontretire`): the stakeouts forget it, its role ends.
+    pub(crate) fn role_end_stakeout(&mut self, unit: Unit) {
+        self.stakeouts_forget(unit);
+        if self.role_of(unit.id()) == Some(Role::Stakeout) {
+            self.role_release(unit.id());
+        }
+    }
+
     /// End the unit's role: any module may order it again.
     fn role_release(&mut self, id: i32) {
         if self.roles.of.remove(&id).is_some() {
@@ -231,6 +247,25 @@ impl Ai {
             .map(|(m, s)| (m, s.foreign))
             .collect();
         json!({"now": now, "assigned": assigned, "foreign_orders_dropped": foreign})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A raider gang borrows solo raiders and armed pickets and orders them
+    /// from `coalesce.update`; before 2026-11-03 their owners dropped every
+    /// such order (335 a game in the ordered A/B: the borrowed members stood
+    /// idle, skipped by their own handler too).
+    #[test]
+    fn raider_gangs_can_order_what_they_borrow() {
+        for role in [Role::SoloRaider, Role::Stakeout] {
+            let o = role.owner().unwrap();
+            assert!(o.admits("coalesce.update"), "{}", role.name());
+            assert!(o.admits("retreat.update"), "{}", role.name());
+            assert!(!o.admits("squad.update"), "{}", role.name());
+        }
     }
 }
 

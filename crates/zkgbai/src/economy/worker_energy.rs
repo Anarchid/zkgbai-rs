@@ -249,7 +249,6 @@ mod tests {
         let near = ai.eco.tasks.insert(WorkerTask::construction(solar, Vec3::xz(180.0, 100.0), 0));
         ai.eco.solar_tasks.extend([far, near]);
         assert_eq!(ai.eco_local_energy_task(10), None);
-        ai.set_feature_off("lanes", false);
         ai.eco.hard_estalled = true;
         assert_eq!(ai.eco_local_energy_task(10), Some(near));
         ai.eco.solar_tasks.retain(|&id| id != near);

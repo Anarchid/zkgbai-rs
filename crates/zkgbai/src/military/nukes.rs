@@ -863,7 +863,7 @@ impl Ai {
 /// attack-move through it. The
 /// missile goes at once, and the log tells how many of each the blast
 /// left; those left then blow themselves up (else the handlers take them
-/// on to win the game).
+/// on to win the game). With `disable=nukeclear` nobody is sent clear.
 /// With `test=nukeclearally` instead (allied to a `test=nukeclear` AI,
 /// hivemind off), no silo: the groups come each time Zero-K tells of an
 /// ally's nuke, at where it lands and short of there toward our base.
@@ -980,9 +980,10 @@ impl Ai {
             let round = t.rounds;
             (t.standing, t.walking, t.fired, t.over, t.inside, t.missile) =
                 (Vec::new(), Vec::new(), None, None, (0, 0), None);
-            let whose = if ally { " (an ally's nuke)" } else { "" };
+            let clear = if self.dev_off("nukeclear") { "off" } else { "on" };
+            let whose = if ally { "an ally's nuke, " } else { "" };
             self.log(&format!(
-                "nuke-clear test: round {round}{whose}: {standing} of {n} fighting at the aim and \
+                "nuke-clear test: round {round} ({whose}nukeclear {clear}): {standing} of {n} fighting at the aim and \
                  {walking} of {m} walking in alive; {si} and {wi} in the blast at the last look before it landed"
             ));
         }

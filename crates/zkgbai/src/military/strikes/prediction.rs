@@ -190,10 +190,15 @@ impl Ai {
                 let fits = !w.job.prey.needs_stun(w.tactic)
                     || stun_window_fits(self.strike_stun(&w.job).map_or(0, |(_, frames)| frames), a.kill_frames);
                 if launchable(a.probability) && fits {
+                    let chained = if w.phase == Phase::Chaining {
+                        format!(", chain link {}", w.chain.links + 1)
+                    } else {
+                        String::new()
+                    };
                     w.phase = Phase::Diving;
                     w.since = self.frame;
                     self.log(&format!(
-                        "strikes: {} {} dive {} (target death {:.0}%)",
+                        "strikes: {} {} dive {} (target death {:.0}%{chained})",
                         w.members.len(),
                         w.tactic.name(),
                         w.job.name,
@@ -215,11 +220,14 @@ impl Ai {
         }
         self.strikes.serial += 1;
         let key = self.strikes.serial;
+        // A chain is judged from where the wave stands, not its muster.
+        let from =
+            if w.phase == Phase::Chaining { self.strike_wave_center(&w.members).unwrap_or(w.home) } else { w.home };
         let Some(request) = self.strike_prediction_request(
             key,
             &w.job,
             &w.members,
-            if w.phase == Phase::Chaining { self.strike_members_center(&w.members).unwrap_or(w.home) } else { w.home },
+            from,
             self.defs.get(w.tactic.name()),
             w.job.prey.needs_stun(w.tactic),
         ) else {
@@ -256,6 +264,7 @@ impl Ai {
                 hp: f.unit.health(),
                 x: pos.x,
                 z: pos.z,
+                tubes: self.snap_tubes(*id),
             });
         }
         let def =
@@ -269,14 +278,9 @@ impl Ai {
             Arc::make_mut(&mut spec).health = e.unit.max_health().max(1.0);
         }
         let hp = seen.map_or(hp, |e| e.unit.health());
-        snapshot.units.push(SnapUnit {
-            reloads: job.id.map_or_else(Vec::new, |id| self.snap_reloads(id)),
-            side: 1,
-            spec,
-            hp,
-            x: job.pos.x,
-            z: job.pos.z,
-        });
+        let tubes = job.id.map_or_else(Vec::new, |id| self.snap_tubes(id));
+        let reloads = job.id.map_or_else(Vec::new, |id| self.snap_reloads(id));
+        snapshot.units.push(SnapUnit { reloads, side: 1, spec, hp, x: job.pos.x, z: job.pos.z, tubes });
         // Inferred extra Phantoms also shoot; never treat a three-Phantom fix as
         // just one defender merely because the current focus is one of them.
         if job.phantom() {
@@ -288,6 +292,7 @@ impl Ai {
                     hp: def.health(),
                     x: job.pos.x + i as f32 * 80.0,
                     z: job.pos.z,
+                    tubes: Vec::new(),
                 });
             }
         }
@@ -324,7 +329,36 @@ impl Ai {
                 hp: e.get_health() * e.def_health(),
                 x: e.position.x,
                 z: e.position.z,
+                tubes: self.snap_tubes(e.unit_id),
             });
+        }
+        // `fightpath`: the fight walks straight at the target; ours stand out
+        // at their ground route to it instead (a ridge between is a long way).
+        if !self.dev_off("fightpath")
+            && let Some(map) = (members.first())
+                .and_then(|id| self.fighters.get(id))
+                .and_then(|f| f.unit.def())
+                .and_then(crate::terrain::tier_of)
+                .and_then(|t| self.terrain()?.tier(t))
+        {
+            let paths = zk_terrain::paths::Paths::new(map, crate::terrain::pos(end), |_| false);
+            if paths.origin_region().is_some() {
+                snapshot.unfold(0, (end.x, end.z), 150.0, |x, z| paths.distance_to(zk_terrain::Pos::new(x, z)));
+            }
+        }
+        if job.prey == super::Prey::LoneTurret {
+            // What a Dirtbag pack is judged against (`dirtpack`).
+            let mut theirs: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+            for u in snapshot.units.iter().filter(|u| u.side == 1) {
+                *theirs.entry(u.spec.def.as_str()).or_default() += 1;
+            }
+            let near = (snapshot.units.iter().filter(|u| u.side == 0))
+                .map(|u| ((u.x - end.x).powi(2) + (u.z - end.z).powi(2)).sqrt())
+                .fold(f32::INFINITY, f32::min);
+            self.log(&format!(
+                "strikes: dirtpack judged: {} ours from {near:.0} elmos, against {theirs:?}",
+                members.len()
+            ));
         }
         let paralysis = self.strike_stun(job).map(|(ratio, _)| ratio);
         if stun_required && paralysis.is_none() {

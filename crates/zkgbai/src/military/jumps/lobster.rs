@@ -528,7 +528,7 @@ impl Ai {
             .filter(|(to, _)| self.lobster_clear(jd, lobster, &passengers, *to))
             .map_or((None, Vec::new()), |(to, clump)| (Some(to), clump));
         // An escape throws now or not at all: no walk to a take-off first.
-        let route = if strike.is_none() && !escape {
+        let route = if strike.is_none() && !escape && !self.dev_off("jumppath") {
             self.pathfinder.equipped_jump(&self.war, leader, target, PathCost::AvoidEnemies, jd)
         } else {
             None

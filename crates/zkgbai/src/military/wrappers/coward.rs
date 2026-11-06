@@ -155,6 +155,21 @@ impl Coward {
         healed
     }
 
+    /// Whether health alone keeps it from being healed: no capture, no
+    /// paralysis, no shield to recharge.
+    pub fn only_hurt(&self) -> bool {
+        let u = self.unit;
+        u.capture_progress() == 0.0 && u.paralyze_damage() == 0.0 && self.shield.is_none()
+    }
+
+    /// Back to work unhealed, as `is_healed` lets a healed unit go.
+    pub fn release(&mut self) {
+        if self.hold_fire {
+            self.unit.set_fire_state(2, 0);
+        }
+        self.is_retreating = false;
+    }
+
     /// Whether the shield is depleted enough to retreat; updates
     /// `is_retreating`. Units without a shield never retreat for this.
     pub fn check_shield(&mut self) -> bool {

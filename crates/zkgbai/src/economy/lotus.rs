@@ -168,7 +168,11 @@ impl Ai {
         if active.is_empty() {
             return;
         }
+        let posture = self.posture_on();
         let tempo = self.eco_fortify_tempo();
+        if posture && self.posture_waiting() >= (self.fac.num_workers / 2).max(2) as usize {
+            return;
+        }
         if self.eco.adjusted_income < 25.0 {
             return;
         }
@@ -177,10 +181,17 @@ impl Ai {
             let mut best: Option<(f32, UnitDef, Vec3, bool, f32)> = None;
             let Some(def) = self.defs.get(name) else { continue };
             let cost = def.cost(self.metal);
+            if posture && cost > self.posture_deficit() {
+                continue;
+            }
             let points: Vec<_> = active.iter().map(|&i| pos(self.eco.lotus_demand[i].at)).collect();
             for seed in super::fortify::seeds(&points, def.max_weapon_range()) {
                 let site = self.cb.map().find_closest_build_site(def, Vec3::xz(seed.x, seed.z), 160.0, 3, 0);
-                if site.x < 0.0 || !self.eco_porc_admissible(def, site, false) || !self.eco_build_check(def, site, 0) {
+                if site.x < 0.0
+                    || !self.eco_porc_admissible(def, site, false)
+                    || !self.eco_build_check(def, site, 0)
+                    || (posture && self.posture_shuns(site))
+                {
                     continue;
                 }
                 let requests: Vec<_> = active
@@ -207,9 +218,14 @@ impl Ai {
         let c = task.as_construction_mut().unwrap();
         c.fortification = true;
         c.point_defense = point;
-        c.frame_issued = frame;
+        c.frame_issued = if posture { 0 } else { frame };
         if let Some(id) = self.eco_add_construction(task, Some(List::Porc), Some(List::Porc)) {
             self.eco.fortify_tasks.insert(id);
+            if posture {
+                let cost = def.cost(self.metal);
+                self.posture_ordered(id, site, cost, cost * 2.0, "fortify: pooled Lotus demand");
+                self.posture.defense += cost;
+            }
             self.log(&format!(
                 "terrain: pooled {budget:.0} metal of Lotus requests (tempo weight {tempo:.2}) into {} at ({:.0}, {:.0})",
                 def.name(),

@@ -15,17 +15,20 @@
 //!
 //! From three allies a side (us included) an opening may be an air plant
 //! (user, 2026-11-02): [`AIR_OPENING`] of the rolls, the plane or gunship
-//! plant at random. Air moves as one type, so a second air roll in the
-//! alliance gives way at the plop.
+//! plant at random. Once an ally has air, both air plants give way to a
+//! viable surface opening, even if that repeats an allied movement type.
+//! Recheck unspent queued plops too; started factories and explicit picks
+//! remain binding. This policy adds no new behavioral state.
 
 use std::collections::BTreeSet;
 
-use springai::Vec3;
+use springai::{UnitDef, Vec3};
 use zk_terrain::Tier;
 
-use super::planning::factory_tier;
+use super::planning::{exit_lane, factory_tier, keeps_exit};
 use crate::Ai;
-use crate::util::{NULLPOS, distance};
+use crate::iq::CLAIM_LAPSES;
+use crate::util::{NULLPOS, distance, get_directional_point};
 
 /// Land constructors wade this deep, elmos (`maxWaterDepth`).
 const WADE: f32 = 22.0;
@@ -61,7 +64,8 @@ fn movetype(name: &str) -> &str {
     }
 }
 
-/// Ten seconds for an earlier controller to declare or place its factory.
+/// Ten seconds for an earlier controller to place its factory. Pregame
+/// declarations can change when reach and diversity are resolved at startup.
 /// Stagger the fallback by rank, too: a missing AI must neither block the
 /// opening forever nor release every waiting controller on the same frame.
 const WAIT: i32 = 300;
@@ -72,9 +76,15 @@ fn waits(frame: i32, team: i32, peers: &BTreeSet<i32>, known: impl Fn(i32) -> bo
     frame < WAIT + SLOT * rank && peers.range(..team).any(|&t| !known(t))
 }
 
-/// Of the `viable` openings, those whose units move unlike any of the
-/// `used` ones', else those not used, else all.
+/// Exclude a second air role when surface openings are viable. Of the
+/// remaining openings, prefer unused movement types, then unused factories.
 fn diverse(viable: &BTreeSet<String>, used: &BTreeSet<String>) -> BTreeSet<String> {
+    // Air is one opening role, not merely a diversity preference. Do not
+    // reintroduce the other air plant when every movement type is taken.
+    // Keep the air-only fallback for maps with no viable surface opening.
+    let surface: BTreeSet<_> = viable.iter().filter(|f| !AIR_FACTORIES.contains(&f.as_str())).cloned().collect();
+    let viable =
+        if used.iter().any(|f| AIR_FACTORIES.contains(&f.as_str())) && !surface.is_empty() { &surface } else { viable };
     let moved: BTreeSet<&str> = used.iter().map(|u| movetype(u)).collect();
     let fresh: BTreeSet<_> = viable.iter().filter(|v| !moved.contains(movetype(v))).cloned().collect();
     if !fresh.is_empty() {
@@ -83,6 +93,29 @@ fn diverse(viable: &BTreeSet<String>, used: &BTreeSet<String>) -> BTreeSet<Strin
     let unused: BTreeSet<_> = viable.difference(used).cloned().collect();
     // A duplicate that can play the map is better than no factory.
     if unused.is_empty() { viable.clone() } else { unused }
+}
+
+/// Half the sides (x, z) of `def`'s footprint at `facing`, padded by `pad`
+/// squares, elmos.
+fn half_extents(def: UnitDef, facing: i32, pad: f32) -> (f32, f32) {
+    let (x, z) = ((def.x_size() as f32 + pad) * 4.0, (def.z_size() as f32 + pad) * 4.0);
+    if facing % 2 == 0 { (x, z) } else { (z, x) }
+}
+
+/// Whether a footprint of half sides `(hx, hz)` at `pos` stays clear of a
+/// factory planned at `plan` (`(pdef, ppos, pface)`): its footprint padded
+/// by a square, and the lane its units leave by.
+fn clear_of_plan(pos: Vec3, (hx, hz): (f32, f32), plan: (UnitDef, Vec3, i32), name: &str) -> bool {
+    let (pdef, ppos, pface) = plan;
+    let (px, pz) = half_extents(pdef, pface, 1.0);
+    let on_frame = (ppos.x - pos.x).abs() < hx + px && (ppos.z - pos.z).abs() < hz + pz;
+    let lane = exit_lane(pdef, ppos, pface);
+    let in_lane = keeps_exit(name)
+        && pos.x + hx > lane[0]
+        && pos.x - hx < lane[2]
+        && pos.z + hz > lane[1]
+        && pos.z - hz < lane[3];
+    !on_frame && !in_lane
 }
 
 impl Ai {
@@ -178,11 +211,75 @@ impl Ai {
         Some((team, site))
     }
 
+    /// Whether commander `wid`'s plop job is gone with the plop unspent and
+    /// no factory of ours standing: dropped unbuilt, its site blocked (an
+    /// ally's plop landed on it first, as on AlienDesert 2026-11-03, where
+    /// a commander then built turrets for 15 minutes and never a factory).
+    /// The commander is then free for a new plop job (see
+    /// `eco_generate_tasks`), which this logs.
+    pub(super) fn eco_plop_lost(&mut self, wid: i32) -> bool {
+        let queued = (self.eco.factory_tasks.iter().filter_map(|&id| self.eco.tasks.get(id)))
+            .any(|t| t.as_construction().is_some_and(|c| c.fac_plop && c.assigned_plop == wid));
+        if queued || !self.fac.factories.is_empty() {
+            return false;
+        }
+        if let Some(w) = self.eco.workers.get_mut(&wid) {
+            w.assigned_plop = false;
+        }
+        self.log("economy: our plop job is gone and the plop unspent (its site blocked?); replanning it");
+        true
+    }
+
+    /// The factories queued by the allies we give way to (see
+    /// `iq_gives_way`) with none of theirs standing yet, until the claims
+    /// lapse: where they will plop. (def, position, facing, name) None
+    /// with `disable=plopclear`.
+    fn eco_allied_plop_plans(&self) -> Vec<(UnitDef, Vec3, i32, String)> {
+        if self.allies.is_empty() || self.frame >= CLAIM_LAPSES || self.dev_off("plopclear") {
+            return Vec::new();
+        }
+        (self.iq.teams.iter())
+            .filter(|&(&team, _)| self.iq_gives_way(team) && !self.iq.placed_factories.contains_key(&team))
+            .flat_map(|(_, plans)| plans.iter())
+            .filter(|p| p.def_name.starts_with("factory"))
+            .filter_map(|p| Some((self.defs.get(&p.def_name)?, p.pos, p.face, p.def_name.clone())))
+            .collect()
+    }
+
+    /// Whether `def` at `pos` facing `facing` stays clear of the factories
+    /// allies we give way to will plop (see `eco_allied_plop_plans`): a
+    /// plop lands at once, so ours queued on the same frame on top of theirs
+    /// is blocked when its builder gets there.
+    pub(crate) fn eco_clear_of_allied_plops(&self, def: UnitDef, pos: Vec3, facing: i32) -> bool {
+        let ours = half_extents(def, facing, 0.0);
+        (self.eco_allied_plop_plans().into_iter())
+            .all(|(pdef, ppos, pface, name)| clear_of_plan(pos, ours, (pdef, ppos, pface), &name))
+    }
+
+    /// Where to look for our first factory site from `from`: off the
+    /// factories allies we give way to will plop, by as much as our factory
+    /// plus the reach of the site search (commanders that start on top of
+    /// each other, as when a start box has fewer spots than players).
+    pub(crate) fn eco_plop_search_origin(&self, factory: UnitDef, from: Vec3, reach: f32) -> Vec3 {
+        let mut from = from;
+        let ours = factory.x_size().max(factory.z_size()) as f32 * 4.0;
+        for (pdef, ppos, _, _) in self.eco_allied_plop_plans() {
+            let theirs = (pdef.x_size().max(pdef.z_size()) as f32 + 1.0) * 4.0;
+            let need = theirs + ours + reach + 40.0;
+            let d = distance(ppos, from);
+            if d < need {
+                from = if d > 1.0 {
+                    get_directional_point(ppos, from, need)
+                } else {
+                    get_directional_point(ppos, self.graph.get_map_center(), -need)
+                };
+            }
+        }
+        from
+    }
+
     pub(super) fn eco_wait_for_allied_plop(&self) -> bool {
-        waits(self.frame, self.team_id, &self.iq.peers, |team| {
-            self.iq.placed_factories.contains_key(&team)
-                || self.iq.teams.get(&team).is_some_and(|ps| ps.iter().any(|p| p.def_name.starts_with("factory")))
-        })
+        waits(self.frame, self.team_id, &self.iq.peers, |team| self.iq.placed_factories.contains_key(&team))
     }
 
     pub(super) fn eco_coordinate_plops(&mut self) {
@@ -190,21 +287,38 @@ impl Ai {
             return;
         }
         self.iq.placed_factories.clear();
+        let mut ours = Vec::new();
         for u in self.cb.friendly_units() {
             let team = u.team();
-            if !self.allies.contains(&team) || u.health() <= 0.0 {
+            if u.health() <= 0.0 {
                 continue;
             }
             let name = self.defs.name_of(u);
             if name.starts_with("factory") {
-                self.iq.placed_factories.entry(team).or_default().insert(name.to_owned());
+                if team == self.team_id {
+                    ours.push(u);
+                } else if self.allies.contains(&team) {
+                    self.iq.placed_factories.entry(team).or_default().insert(name.to_owned());
+                }
             }
         }
+        // Update precedes UnitCreated, and facplop can still read as unspent.
+        // Bind an already placed opening before duplicate replanning can
+        // cancel its task and order a second factory (Adamantine, 2026-11-04).
+        for &id in &self.eco.factory_tasks {
+            let Some(t) = self.eco.tasks.get_mut(id) else { continue };
+            let pos = t.position;
+            let Some(c) = t.as_construction_mut().filter(|c| c.fac_plop && c.target.is_none()) else { continue };
+            c.target = ours
+                .iter()
+                .copied()
+                .find(|u| u.def() == Some(c.build_type) && distance(u.pos(), pos) < super::SITE_SLACK);
+        }
         // Explicit player/developer choices remain binding.
-        if !self.eco.user_fac.is_empty() || self.eco.dev_pick.is_some() {
+        // (And a rusher's opening: see `rush`.)
+        if !self.eco.user_fac.is_empty() || self.eco.dev_pick.is_some() || self.rush_binds_opening() {
             return;
         }
-        let used = self.eco_allied_plop_types();
         let duplicates: Vec<_> = self
             .eco
             .factory_tasks
@@ -213,16 +327,19 @@ impl Ai {
                 let c = self.eco.tasks.get(id)?.as_construction()?;
                 let worker = self.eco.workers.get(&c.assigned_plop)?;
                 let name = self.defs.name(c.build_type);
+                // Selection removed this task's type from the pool. Put
+                // it back for the same policy check used by a fresh plop.
+                let mut viable = self.eco.potential_fac_list.clone();
+                viable.insert(name.to_owned());
                 (c.fac_plop
                     && c.target.is_none()
                     && worker.has_plop()
-                    && used.contains(name)
-                    && self.eco.potential_fac_list.iter().any(|f| !used.contains(f)))
+                    && !self.eco_plop_choices(&viable).contains(name))
                 .then(|| (id, c.assigned_plop, name.to_owned()))
             })
             .collect();
         for (id, wid, name) in duplicates {
-            self.log(&format!("economy: ally placed or queued {name}; replanning our unspent plop"));
+            self.log(&format!("economy: {name} overlaps an allied opening; replanning our unspent plop"));
             self.eco.drop_construction_task(id);
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.assigned_plop = false;
@@ -292,6 +409,21 @@ mod tests {
         assert!(diverse(&BTreeSet::new(), &viable).is_empty());
     }
 
+    #[test]
+    fn allied_air_excludes_both_plants_even_after_surface_diversity_is_exhausted() {
+        for air in AIR_FACTORIES {
+            let viable = names(&["factoryplane", "factorygunship", "factorycloak", "factoryshield"]);
+            assert_eq!(diverse(&viable, &names(&[air])), names(&["factorycloak", "factoryshield"]));
+            assert_eq!(diverse(&viable, &names(&[air, "factorycloak"])), names(&["factoryshield"]));
+            assert_eq!(
+                diverse(&viable, &names(&[air, "factorycloak", "factoryshield"])),
+                names(&["factorycloak", "factoryshield"])
+            );
+            // Only air can play this map: a second air opening beats none.
+            assert!(!diverse(&names(&AIR_FACTORIES), &names(&[air])).is_empty());
+        }
+    }
+
     use crate::economy::{Worker, WorkerTask};
     use springai::{Callback, SkirmishAi, Unit, Vec3, ffi};
     use std::cell::Cell;
@@ -300,29 +432,42 @@ mod tests {
     thread_local! {
         static STOPS: Cell<usize> = const { Cell::new(0) };
         static DEFS_READY: Cell<bool> = const { Cell::new(false) };
+        static OWN_FRAME: Cell<bool> = const { Cell::new(false) };
     }
 
     fn pending_plop() -> (Ai, super::super::TaskId) {
+        pending_plop_of("factorygunship")
+    }
+
+    fn pending_plop_of(opening: &str) -> (Ai, super::super::TaskId) {
         unsafe extern "C" fn ids(_: i32, out: *mut i32, max: i32) -> i32 {
             if !DEFS_READY.with(Cell::get) {
                 return 0;
             }
-            if !out.is_null() && max >= 2 {
+            if !out.is_null() && max >= 3 {
                 unsafe {
                     out.write(1);
                     out.add(1).write(2);
+                    out.add(2).write(3);
                 }
             }
-            2
+            3
         }
         unsafe extern "C" fn name(_: i32, id: i32) -> *const c_char {
-            if id == 1 { c"dyntrainer".as_ptr() } else { c"factorygunship".as_ptr() }
+            match id {
+                1 => c"dyntrainer".as_ptr(),
+                2 => c"factorygunship".as_ptr(),
+                _ => c"factoryplane".as_ptr(),
+            }
         }
         unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
             if id == 10 { 1 } else { 2 }
         }
         unsafe extern "C" fn team(_: i32, id: i32) -> i32 {
-            if id == 10 { 2 } else { 0 }
+            if id == 10 || id == 30 { 2 } else { 0 }
+        }
+        unsafe extern "C" fn pos(_: i32, _: i32, out: *mut f32) {
+            unsafe { std::ptr::copy_nonoverlapping([100.0, 0.0, 100.0].as_ptr(), out, 3) };
         }
         unsafe extern "C" fn health(_: i32, _: i32) -> f32 {
             1000.0
@@ -337,25 +482,36 @@ mod tests {
             1.0
         }
         unsafe extern "C" fn units(_: i32, out: *mut i32, max: i32) -> i32 {
-            if !out.is_null() && max > 0 {
+            let count = if OWN_FRAME.get() { 2 } else { 1 };
+            if !out.is_null() && max >= count {
                 unsafe {
                     out.write(20);
+                    if OWN_FRAME.get() {
+                        out.add(1).write(30);
+                    }
                 }
             }
-            1
+            count
         }
         unsafe extern "C" fn command(_: i32, _: i32, _: i32, _: i32, _: *mut c_void) -> i32 {
             STOPS.with(|s| s.set(s.get() + 1));
             0
         }
+        unsafe extern "C" fn squares(_: i32, _: i32) -> i32 {
+            8
+        }
         DEFS_READY.with(|v| v.set(false));
+        OWN_FRAME.set(false);
         let mut ai = test_ai_with(|t| {
+            t.UnitDef_getXSize = Some(squares);
+            t.UnitDef_getZSize = Some(squares);
             t.getUnitDefs = Some(ids);
             t.UnitDef_getName = Some(name);
             t.UnitDef_getBuildSpeed = Some(power);
             t.Unit_getDef = Some(def);
             t.Unit_getTeam = Some(team);
             t.Unit_getHealth = Some(health);
+            t.Unit_getPos = Some(pos);
             t.Unit_getWeapons = Some(zero);
             t.Unit_getRulesParamFloat = Some(rules);
             t.getFriendlyUnits = Some(units);
@@ -369,8 +525,8 @@ mod tests {
         ai.iq.ai_allies = BTreeSet::from([0, 4]);
         ai.iq.peers = BTreeSet::from([0, 4]);
         ai.eco.potential_fac_list = names(&["factoryveh"]);
-        ai.eco.opening = Some("factorygunship".into());
-        let def = ai.defs.get("factorygunship").unwrap();
+        ai.eco.opening = Some(opening.into());
+        let def = ai.defs.get(opening).unwrap();
         ai.eco.opening_site = Some((def, Vec3::xz(100.0, 100.0), 0));
         ai.iq.sent = true;
         let mut task = WorkerTask::construction_plop(def, Vec3::xz(100.0, 100.0), 0, true);
@@ -385,6 +541,62 @@ mod tests {
         ai.eco.assigned.push_back(10);
         STOPS.with(|s| s.set(0));
         (ai, id)
+    }
+
+    #[test]
+    fn a_plop_job_dropped_unbuilt_frees_the_commander_for_another() {
+        let (mut ai, id) = pending_plop();
+        assert!(ai.eco.workers[&10].has_plop());
+        assert!(!ai.eco_plop_lost(10), "the job still stands");
+        assert!(ai.eco.workers[&10].assigned_plop);
+        // As `eco_clean_orders` drops it when an ally's plop blocks its site.
+        ai.eco.drop_construction_task(id);
+        assert!(ai.eco.workers[&10].assigned_plop, "the stuck state: assigned, plop unspent, no job");
+        assert!(ai.eco_plop_lost(10));
+        assert!(!ai.eco.workers[&10].assigned_plop);
+    }
+
+    #[test]
+    fn first_factory_sites_keep_off_the_plops_of_allies_we_give_way_to() {
+        let (mut ai, _) = pending_plop();
+        assert_eq!(ai.team_id, 2);
+        let def = ai.defs.get("factorygunship").unwrap(); // 8 x 8 squares
+        let plan = |x: f32| crate::iq::Plan {
+            def_name: "factorygunship".into(),
+            def_id: def.id(),
+            pos: Vec3::xz(x, 1000.0),
+            face: 0,
+            frame: 0,
+        };
+        ai.iq.teams.insert(0, vec![plan(1000.0)]); // a lower AI: we give way
+        ai.iq.teams.insert(4, vec![plan(3000.0)]); // a higher AI: it gives way
+        // Half sides 32 (ours) + 36 (theirs, padded a square) = 68.
+        assert!(!ai.eco_clear_of_allied_plops(def, Vec3::xz(1060.0, 1000.0), 0));
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(1070.0, 1000.0), 0));
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(3000.0, 1000.0), 0));
+        let from = ai.eco_plop_search_origin(def, Vec3::xz(1020.0, 1000.0), 52.0);
+        assert!((from.x - (1000.0 + 36.0 + 32.0 + 52.0 + 40.0)).abs() < 0.5 && (from.z - 1000.0).abs() < 0.5);
+        let far = Vec3::xz(1000.0, 1500.0);
+        assert_eq!(ai.eco_plop_search_origin(def, far, 52.0), far);
+        // Once theirs stands, the engine keeps us off it; the plan binds no more.
+        ai.iq.placed_factories.insert(0, names(&["factorygunship"]));
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(1060.0, 1000.0), 0));
+        ai.iq.placed_factories.clear();
+        // Nor once the claims lapse.
+        ai.frame = CLAIM_LAPSES;
+        assert!(ai.eco_clear_of_allied_plops(def, Vec3::xz(1060.0, 1000.0), 0));
+    }
+
+    #[test]
+    fn a_planned_factory_keeps_its_exit_lane_unless_it_makes_aircraft() {
+        let (ai, _) = pending_plop();
+        let def = ai.defs.get("factorygunship").unwrap();
+        let plan = (def, Vec3::xz(1000.0, 1000.0), 0); // facing south
+        let ours = half_extents(def, 0, 0.0);
+        let south = Vec3::xz(1000.0, 1000.0 + 36.0 + 32.0 + 40.0); // off its frame, in its lane
+        assert!(clear_of_plan(south, ours, plan, "factorygunship"));
+        assert!(!clear_of_plan(south, ours, plan, "factoryveh"));
+        assert!(clear_of_plan(Vec3::xz(1000.0, 1000.0 - 36.0 - 32.0 - 40.0), ours, plan, "factoryveh"));
     }
 
     #[test]
@@ -411,20 +623,53 @@ mod tests {
 
     #[test]
     fn preserves_started_factories_explicit_choices_and_exhausted_diversity() {
-        for case in 0..5 {
-            let (mut ai, id) = pending_plop();
-            match case {
-                0 => ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().target = Unit::from_id(ai.cb, 30),
-                1 => ai.eco.user_fac = "factorygunship".into(),
-                2 => ai.eco.dev_pick = Some(1),
-                3 => ai.eco.potential_fac_list.clear(),
-                _ => ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().fac_plop = false,
+        for opening in AIR_FACTORIES {
+            for case in 0..5 {
+                let (mut ai, id) = pending_plop_of(opening);
+                match case {
+                    0 => {
+                        ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().target =
+                            Unit::from_id(ai.cb, 30)
+                    }
+                    1 => ai.eco.user_fac = opening.into(),
+                    2 => ai.eco.dev_pick = Some(1),
+                    3 => ai.eco.potential_fac_list.clear(),
+                    _ => ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().fac_plop = false,
+                }
+                ai.eco_coordinate_plops();
+                assert!(ai.eco.tasks.get(id).is_some(), "{opening} case {case}");
+                assert!(ai.eco.workers[&10].assigned_plop);
+                STOPS.with(|s| assert_eq!(s.get(), 0));
             }
-            ai.eco_coordinate_plops();
-            assert!(ai.eco.tasks.get(id).is_some(), "case {case}");
-            assert!(ai.eco.workers[&10].assigned_plop);
-            STOPS.with(|s| assert_eq!(s.get(), 0));
         }
+    }
+
+    #[test]
+    fn allied_gunships_cancel_queued_planes_even_when_surface_types_are_taken() {
+        let (mut ai, id) = pending_plop_of("factoryplane");
+        // Even when all surface types are already represented, another
+        // ground plop is preferable to a second allied air plop.
+        ai.iq.teams.insert(
+            0,
+            vec![crate::iq::Plan { def_name: "factorygunship".into(), def_id: 2, pos: Vec3::ZERO, face: 0, frame: 7 }],
+        );
+        ai.iq.teams.insert(
+            4,
+            vec![crate::iq::Plan { def_name: "factoryveh".into(), def_id: 4, pos: Vec3::ZERO, face: 0, frame: 8 }],
+        );
+        ai.iq.ai_allies.remove(&4); // a human's ground plan takes priority
+        ai.eco.potential_fac_list.insert("factorygunship".into());
+        // The queue alone reserves the air role before any placement.
+        assert!(ai.iq.placed_factories.is_empty());
+        assert_eq!(ai.eco_plop_choices(&ai.eco.potential_fac_list), names(&["factoryveh"]));
+        ai.eco_coordinate_plops();
+        assert!(ai.eco.tasks.get(id).is_none());
+        assert!(!ai.eco.workers[&10].assigned_plop);
+        assert!(ai.eco.opening.is_none());
+        assert!(ai.eco.opening_site.is_none());
+        assert!(!ai.iq.sent);
+        assert_eq!(ai.eco_plop_choices(&ai.eco.potential_fac_list), names(&["factoryveh"]));
+        STOPS.with(|s| assert_eq!(s.get(), 1));
     }
 
     #[test]
@@ -437,9 +682,23 @@ mod tests {
         ai.iq.ai_allies.remove(&4); // human plans have priority regardless of id
         assert_eq!(ai.eco_allied_plop_types(), names(&["factoryveh"]));
         ai.iq.teams.insert(0, vec![plan("factorycloak")]);
-        assert!(!ai.eco_wait_for_allied_plop());
+        assert!(ai.eco_wait_for_allied_plop(), "a pregame declaration can still change at the plop");
         ai.eco_coordinate_plops(); // team 0 actually placed gunships
+        assert!(!ai.eco_wait_for_allied_plop());
         assert_eq!(ai.eco_allied_plop_types(), names(&["factoryveh", "factorygunship"]));
+    }
+
+    #[test]
+    fn an_own_plop_visible_before_its_event_is_not_replanned_as_a_second_factory() {
+        let (mut ai, id) = pending_plop();
+        OWN_FRAME.set(true);
+        assert!(ai.eco.workers[&10].has_plop(), "the rules param has not caught up either");
+        ai.eco_coordinate_plops();
+        let c = ai.eco.tasks.get(id).unwrap().as_construction().unwrap();
+        assert_eq!(c.target, Unit::from_id(ai.cb, 30));
+        assert!(ai.eco.workers[&10].assigned_plop);
+        assert_eq!(STOPS.get(), 0);
+        assert_eq!(ai.eco.factory_tasks, vec![id]);
     }
 
     fn test_ai_with(customize: impl FnOnce(&mut ffi::SSkirmishAICallback)) -> Ai {

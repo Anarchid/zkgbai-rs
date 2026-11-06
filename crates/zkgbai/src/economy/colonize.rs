@@ -128,7 +128,7 @@ impl Ai {
         if let Some(c) = &self.eco.colony {
             let scale = c.policy.utility_scale(
                 enemy_distance_scale(c.center, self.graph.get_enemy_center(), self.graph.get_start_pos()),
-                self.regime.density,
+                self.posture.density,
             );
             self.eco.colony.as_mut().unwrap().scale = scale;
         }
@@ -161,11 +161,11 @@ impl Ai {
         }
         let policy = Policy::parse(self.cb.option("colonize_policy").as_deref());
         // Use the same global standing-metal / usable-area estimate as
-        // missile-silo eligibility (see `regime`).
-        let density = policy.uses_density().then_some(self.regime.density);
+        // missile-silo eligibility, refreshed even when posture is disabled.
+        let density = policy.uses_density().then_some(self.posture.density);
         let distance_at =
             |center| enemy_distance_scale(center, self.graph.get_enemy_center(), self.graph.get_start_pos());
-        let scale_at = |center| policy.utility_scale(distance_at(center), self.regime.density);
+        let scale_at = |center| policy.utility_scale(distance_at(center), self.posture.density);
         let workers: Vec<Vec3> = self.eco.workers.values().map(|w| w.get_pos()).collect();
         let near = |p: Vec3| workers.iter().map(|&w| distance(w, p)).fold(f32::INFINITY, f32::min);
         // Conquered ground counts as free though the spot graph presumes it
@@ -227,6 +227,7 @@ impl Ai {
             (self.eco.colony_wants_air, self.eco.colony_after) = (Some(frame), frame + RETRY);
             return;
         };
+        self.eco_suspend_assignment(wid, "colonization mission");
         if let Some(w) = self.eco.workers.get_mut(&wid) {
             w.clear_task(&mut self.eco.tasks);
         }

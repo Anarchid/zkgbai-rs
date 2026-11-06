@@ -5,12 +5,12 @@ mod allied;
 mod army_support;
 mod artemis;
 mod assign;
+mod dispatch;
 pub mod build_ids;
+mod buildguard;
 mod colonize;
 pub mod comguard;
 mod commander;
-#[cfg(test)]
-pub(crate) use commander::tests::test_ai_with;
 mod conquest;
 pub mod factory;
 pub mod factory_manager;
@@ -24,7 +24,11 @@ pub(crate) mod planning;
 mod plate;
 mod plop;
 mod porc_policy;
+pub mod porcmix;
+mod raid_mex;
 mod rebuild;
+mod reclaim_post;
+pub mod rush;
 mod safespot;
 mod silo;
 mod sparrow;
@@ -40,7 +44,10 @@ mod worker_energy;
 mod worker_goals;
 mod worker_lanes;
 
+pub(crate) use assign::repair_loses_to_mex;
 pub use build_ids::BuildIds;
+#[cfg(test)]
+pub(crate) use commander::tests::test_ai_with;
 pub use factory::Factory;
 pub use factory_manager::FactoryManager;
 pub use tasks::{Nanotower, TaskId, TaskKind, TaskStore, WorkerTask};
@@ -66,7 +73,21 @@ fn is_energy_plant(name: &str) -> bool {
     matches!(name, "energysolar" | "energywind" | "energyfusion" | "energysingu" | "energygeo" | "energyheavygeo")
 }
 
+/// Airpads repair at 2.5 buildpower (`unit_refuel_pad_handler`: HP/s =
+/// 2.5 x max HP / (0.5 x cost), a Likho 5.9, an Odin 17, a Raptor 18; the
+/// staged fixture measured 18.8 for a Raptor). A caretaker repairs at 15
+/// buildpower (HP/s = 15 x max HP / cost: a Raptor 55, measured 55), three
+/// times the pad, one aircraft at a time, so
+/// once the air fleet is worth this much metal each airpad gets one
+/// (`padnano`), within `PAD_NANO_SITE` of it, repairing within
+/// `PAD_NANO_REACH` of the pad's center (caretaker build range 500).
+pub(super) const AIRPAD: &str = "staticrearm";
+pub(super) const PAD_NANO_FLEET_METAL: f32 = 1000.0;
+pub(super) const PAD_NANO_SITE: f32 = 200.0;
+pub(super) const PAD_NANO_REACH: f32 = 160.0;
+
 pub struct EconomyManager {
+    reclaim_posts: reclaim_post::ReclaimPosts,
     cb: Callback,
     /// Scouting Sparrows, including radars currently morphing into them.
     pub sparrows: Vec<Unit>,
@@ -107,6 +128,8 @@ pub struct EconomyManager {
     /// `densgate`'s map diagonal, once known (see `phase_map_diag`).
     phase_diag: Cell<Option<f32>>,
     pub mexes: Vec<Unit>,
+    /// Mexes that had a scout or raider within Lotus range, including unfinished ones.
+    raid_mexes: BTreeMap<i32, Vec3>,
 
     /// All worker tasks; the lists below hold ids into it.
     pub tasks: TaskStore,
@@ -117,6 +140,7 @@ pub struct EconomyManager {
     unified: unified_conquest::Unified,
     /// Commanders out of fights the predictor says they lose (see `comguard`).
     pub(super) guard: comguard::ComGuard,
+    build_guard: buildguard::BuildGuard,
     /// Workers waiting for a new assignment (worker ids).
     pub idlers: VecDeque<i32>,
     /// Workers with an assignment, re-evaluated round-robin (worker ids).
@@ -157,11 +181,15 @@ pub struct EconomyManager {
     potential_fac_list: BTreeSet<String>,
     new_workers: BTreeSet<i32>,
     new_mexes: Vec<Unit>,
+    /// Where our finished mexes died, and when (see [`REMEX_MEMORY`]).
+    lost_mexes: Vec<(Vec3, i32)>,
     /// Unfinished power plants of every type, for game build priority.
     new_energy: Vec<Unit>,
     reclaim_record: VecDeque<f32>,
 
     pub effective_income_energy: f32,
+    /// Live unit energy use beyond construction metal spending; excludes overdrive.
+    energy_upkeep: f32,
     raw_mex_income: f32,
     /// The energy income the economy wants (stalled below it).
     energy_target: f32,
@@ -201,6 +229,8 @@ pub struct EconomyManager {
     dev_pick: Option<usize>,
     /// The first factory, rolled at the start (see `eco_roll_opening`).
     opening: Option<String>,
+    /// Actual simulation frame when our first factory became usable.
+    pub factory_opened_at: Option<i32>,
     /// Where the opening factory goes and its facing, as announced to
     /// allies in the pregame (see `crate::iq`).
     pub(crate) opening_site: Option<(UnitDef, Vec3, i32)>,
@@ -218,6 +248,9 @@ pub struct EconomyManager {
     pub burned_fac_sites: Vec<(Vec3, i32)>,
     /// When the last rebuild site search found nothing (see `rebuild`).
     pub rebuild_tried_at: Option<i32>,
+    /// Whether an air factory was taken for firefighters or for tempo (see
+    /// `planning::is_air_requisition`): once a game.
+    pub air_asked: bool,
     /// Terraform commands issued (for their tags).
     pub terraform_tags: i32,
     /// Development aid: the terraform test, when on.
@@ -229,10 +262,9 @@ pub struct EconomyManager {
     lotus_demand: Vec<lotus::Demand>,
     pub ditched: Vec<Vec3>,
     pub ditch_tries: Vec<(Vec3, i32)>,
-    /// When a ditch none was worth digging was last journaled (see `terraform`).
+    /// When a ditch none was worth digging was last journaled (`detour`).
     pub ditch_noted: i32,
-    /// Turrets ordered for the chokepoints we fortify (priced as light porc,
-    /// see `assign`).
+    /// Turrets ordered for the chokepoints we fortify (see `detour`).
     pub fortify_tasks: BTreeSet<TaskId>,
     /// A watchtower for our strikes going up, and when to plan the next.
     watchtower: Option<watchtower::Watchtower>,
@@ -263,6 +295,8 @@ pub struct EconomyManager {
     /// The alliance's water side, decided in the pregame (see `plop`):
     /// (team, start spot).
     pub(crate) water_side: Option<(i32, Vec3)>,
+    /// The alliance's heavy rush (see `rush`).
+    pub(crate) rush: rush::Rush,
     /// When it was last said that no Bertha site was found.
     bertha_report: i32,
     last_repaired_unit: i32,
@@ -270,7 +304,7 @@ pub struct EconomyManager {
     wolv_mine_id: i32,
 
     build_ids: BuildIds,
-    height_map: HeightMap,
+    pub(crate) height_map: HeightMap,
 }
 
 /// The task category lists, for list-generic helpers.
@@ -336,6 +370,7 @@ impl EconomyManager {
         let (w, h) = (map.width() as f32, map.height() as f32);
         let map_diag = (w * w + h * h).sqrt();
         EconomyManager {
+            reclaim_posts: reclaim_post::ReclaimPosts::default(),
             cb,
             sparrows: Vec::new(),
             sparrow_radar_task: None,
@@ -365,11 +400,13 @@ impl EconomyManager {
             phase_cache: Cell::new((-1, 0.0, 1.0)),
             phase_diag: Cell::new(None),
             mexes: Vec::new(),
+            raid_mexes: BTreeMap::new(),
             tasks: TaskStore::default(),
             commanders: Vec::new(),
             conquest: conquest::Conquest::default(),
             unified: Default::default(),
             guard: comguard::ComGuard::default(),
+            build_guard: buildguard::BuildGuard::default(),
             idlers: VecDeque::new(),
             assigned: VecDeque::new(),
             seeders: VecDeque::new(),
@@ -405,9 +442,11 @@ impl EconomyManager {
             potential_fac_list: BTreeSet::new(),
             new_workers: BTreeSet::new(),
             new_mexes: Vec::new(),
+            lost_mexes: Vec::new(),
             new_energy: Vec::new(),
             reclaim_record: VecDeque::new(),
             effective_income_energy: 0.0,
+            energy_upkeep: 0.0,
             raw_mex_income: 0.0,
             energy_target: 0.0,
             grid_support: grid_support::Support::default(),
@@ -437,6 +476,7 @@ impl EconomyManager {
             dev_facs: Vec::new(),
             dev_pick: None,
             opening: None,
+            factory_opened_at: None,
             opening_site: None,
             requisition: None,
             requisition_value: 0.0,
@@ -445,6 +485,7 @@ impl EconomyManager {
             new_fac_due: false,
             burned_fac_sites: Vec::new(),
             rebuild_tried_at: None,
+            air_asked: false,
             terraform_tags: 0,
             terraform_test: None,
             ditch: None,
@@ -469,6 +510,7 @@ impl EconomyManager {
             plates: Vec::new(),
             plate_orphaned: BTreeMap::new(),
             water_side: None,
+            rush: rush::Rush::default(),
             bertha_report: i32::MIN / 2,
             last_repaired_unit: 0,
             nuke_wep_id: -1,
@@ -627,8 +669,8 @@ const OD_STORAGE_FROM: i32 = 30 * 60 * 5;
 const OD_STORAGE_FILL: f32 = 0.5;
 
 /// `eramp` (`disable=eramp` turns it off): the energy wanted ramps with
-/// the share of the metal spots the alliance holds, from this many times
-/// our metal income with none held to the overdrive target above at
+/// the share of the metal spots the alliance holds, from metal income
+/// plus a small energy margin with none held to the overdrive target above at
 /// [`ERAMP_FULL_SHARE`], and on past it as the share grows (user,
 /// 2026-11-03: a lower early target leaves the metal for expansion). At
 /// 6:00 against Wires v2 we made 2.4 energy per mex metal to its 1.9, the
@@ -638,18 +680,22 @@ const OD_STORAGE_FILL: f32 = 0.5;
 /// game still reaches the overdrive target in the end. The storage rule
 /// (from 5:00) is scaled by the same ramp, up to its full
 /// [`OD_STORAGE_FILL`].
-const ERAMP_FLOOR: f32 = 1.1;
+const ENERGY_MARGIN: f32 = 5.0;
+
+fn construction_energy_floor(metal_income: f32) -> f32 {
+    metal_income.max(0.0) + ENERGY_MARGIN
+}
 const ERAMP_FULL_SHARE: f32 = 0.35;
 const ERAMP_ESCALATE: f32 = 30.0 * 60.0 * 30.0;
 
-/// The energy wanted under `eramp`: `metal_income` x [`ERAMP_FLOOR`] with
+/// The energy wanted under `eramp`: metal income plus [`ENERGY_MARGIN`] with
 /// no spots held at frame 0, `full` (the overdrive target) at
 /// [`ERAMP_FULL_SHARE`] of them, linear in `share` plus `frame` /
 /// [`ERAMP_ESCALATE`] and on past `full` beyond one; never below the floor.
 /// Also the ramp, for the storage rule.
 fn eramp_wanted(full: f32, metal_income: f32, share: f32, frame: i32) -> (f32, f32) {
     let ramp = share.max(0.0) / ERAMP_FULL_SHARE + frame.max(0) as f32 / ERAMP_ESCALATE;
-    let floor = ERAMP_FLOOR * metal_income.max(0.0);
+    let floor = construction_energy_floor(metal_income);
     (floor + (full - floor).max(0.0) * ramp, ramp)
 }
 
@@ -663,11 +709,51 @@ const OD_PHASE_ENERGY: f32 = 100.0;
 const OD_FREE_SHARE: f32 = 0.15;
 const OD_FREE_INCOME: f32 = 20.0;
 
+/// `energyneed` (on; `disable=energyneed` restores the stall flag's
+/// prices): energy jobs pull workers by how far energy income falls short
+/// of what construction spends, not by the stall flag. The flag is on while
+/// energy income is under the wanted target (`eramp`: about 1.8x metal
+/// income at 1-5 min), which was 99% of the opening (battery b1, 36 games),
+/// and while on, every energy job got the full pull whatever the shortfall:
+/// the commander walked a median 237 elmos to energy against 520 to a mex
+/// and built energy 48% of its first five minutes; lowering the target
+/// (`eramp` A/B, 122 pairs) changed neither the energy built nor the
+/// commander's share. No pull once metal income plus [`ENERGY_MARGIN`] is
+/// covered, full [`NEED_PULL`] at [`NEED_SHORT`] x metal or less, linear between.
+const NEED_SHORT: f32 = 0.6;
+pub(crate) const NEED_PULL: f32 = 300.0;
+
+/// Remexes at high build priority (`remexfirst`): a mex frame within
+/// REMEX_SPOT of where a finished mex of ours died in the last REMEX_MEMORY
+/// frames, unless energy hard-stalls. In the staged smoke (11-04) a base
+/// raid took 56 -> 22 metal income and emptied storage in 18 s; at normal
+/// priority the remex frames then shared that with factory production
+/// and turrets at the front, sitting unbuilt for 40 s.
+const REMEX_MEMORY: i32 = 30 * 300;
+const REMEX_SPOT: f32 = 64.0;
+
+/// How short energy income falls of construction's need, 0 (enough) to 1
+/// (see [`construction_energy_floor`]).
+pub(crate) fn energy_shortfall(energy_income: f32, metal_income: f32) -> f32 {
+    let enough = construction_energy_floor(metal_income);
+    let urgent = NEED_SHORT * metal_income.max(0.0);
+    ((enough - energy_income.max(0.0)) / (enough - urgent)).clamp(0.0, 1.0)
+}
+
 /// Cross-module economy logic and module events.
 impl Ai {
+    /// `energyneed`: the economy's energy shortfall now (see
+    /// [`energy_shortfall`]).
+    pub(crate) fn eco_energy_shortfall(&self) -> f32 {
+        energy_shortfall(self.eco.effective_income_energy - self.eco.energy_upkeep, self.eco.static_income)
+    }
+
     /// Whether the overdrive phase has begun (see [`OD_PHASE_ENERGY`]); once
-    /// begun it stays.
+    /// begun it stays. `disable=odphase` keeps the old rule: two fusions.
     pub(crate) fn eco_overdrive_phase(&self) -> bool {
+        if self.dev_off("odphase") {
+            return self.eco.fusions.len() >= 2;
+        }
         self.eco.od_phase.is_some()
     }
 
@@ -802,15 +888,17 @@ impl Ai {
     /// 80% of storage is what a stall produces, and it used to call for a
     /// storage). Energy comes first.
     pub fn eco_energy_starved(&self) -> bool {
-        self.eco.estalled && self.eco.metal > 200.0
+        !self.dev_off("stallgate") && self.eco.estalled && self.eco.metal > 200.0
     }
 
     pub fn eco_update(&mut self, frame: i32) {
+        self.eco_reclaim_post_update(frame);
         if frame % 300 == self.offset % 300 {
             self.eco_check_nanos();
         }
 
         if frame % 15 == self.offset % 15 {
+            self.eco_observe_raiders();
             self.eco_update_income(frame);
         }
         self.eco_energy_survey(frame);
@@ -825,7 +913,7 @@ impl Ai {
             self.eco_bury_support_pylons(frame);
         }
         self.eco_update_requisition(frame);
-        if self.missiles.site.active() {
+        if self.missiles.site.due(frame) {
             self.guard("eco.siloPlanner", |ai| ai.eco_plan_missile_silo());
         }
         self.eco_update_new_factory(frame);
@@ -842,6 +930,7 @@ impl Ai {
             self.eco_watch_allied_projects();
             // remove finished or invalidated tasks
             self.eco_clean_orders();
+            self.eco_track_mex_defenses();
             self.eco_special_update();
             self.eco_plan_team_energy();
             self.eco_plan_army_support();
@@ -893,6 +982,8 @@ impl Ai {
         }
 
         self.eco_coordinate_plops();
+        self.rush_update(frame);
+        self.eco_guard_construction(frame);
         self.eco_guard_commanders(frame);
         self.eco_assign_workers();
         self.iq_tick();
@@ -903,6 +994,7 @@ impl Ai {
         self.eco_check_overdrive_phase();
         let merged = self.merged_allies as f32;
         let odreserve = !self.dev_off("odreserve");
+        let odphase_off = self.dev_off("odphase");
         let eramp = !self.dev_off("eramp");
         // (Overdrive storage from 5 min of the phase clock: `densgate`.)
         let phase_frame = self.phase_frame();
@@ -910,6 +1002,13 @@ impl Ai {
         let (m, e) = (self.metal, self.energy);
         let team = self.team_id;
         let eco = &mut self.eco;
+        eco.energy_upkeep = eco
+            .cb
+            .friendly_units()
+            .into_iter()
+            .filter(|u| u.team() == team && u.health() > 0.0)
+            .map(|u| (u.resource_use(e) - u.resource_use(m).max(0.0)).max(0.0))
+            .sum();
         eco.raw_mex_income = 0.0;
         eco.effective_income_metal = 2.0 * (1.0 + merged);
         eco.effective_income_energy = 2.0 * (1.0 + merged);
@@ -985,7 +1084,7 @@ impl Ai {
         // when stalled leaves almost none (CircuitAI: 37 E/s on overdrive at
         // minute 10 against our 13; energy 1.9x mex income at minute 5 to
         // our 1.3, 2.9x to 2.1 at minute 15).
-        let fusions = eco.fusions.len().max(if eco.od_phase.is_some() { 2 } else { 0 });
+        let fusions = eco.fusions.len().max(if eco.od_phase.is_some() && !odphase_off { 2 } else { 0 });
         let eratio = if odreserve { OD_ENERGY_RATIO } else { 2.0 } + fusions as f32;
         //float eratio = (eFac ? 1.5f : 1.f) + (graphManager.territoryFraction + (graphManager.territoryFraction * graphManager.territoryFraction)) / 2.f;
         let tf = self.graph.territory_fraction;
@@ -995,10 +1094,10 @@ impl Ai {
         } else {
             (eco.raw_mex_income * eratio, 1.0)
         };
-        eco.energy_target = target;
+        eco.energy_target = target + eco.energy_upkeep;
         eco.hard_estalled = (eco.max_storage > 1.0
             && eco.energy < (eco.effective_income_energy * (1.0 + tf)).min(eco.max_storage / 2.0))
-            || eco.static_income > eco.effective_income_energy;
+            || eco.static_income + eco.energy_upkeep > eco.effective_income_energy;
         eco.estalled = eco.hard_estalled
             || eco.energy_target > eco.effective_income_energy
             || (odreserve
@@ -1090,6 +1189,7 @@ impl Ai {
 
         if def_name == "staticmex" {
             self.eco_track_mex_construction(unit);
+            self.eco_observe_raiders();
         }
 
         self.eco_track_energy_construction(unit, def_name);
@@ -1251,11 +1351,6 @@ impl Ai {
 
         if matches!(def_name, "energysingu" | "staticnuke" | "zenith" | "raveparty") {
             self.eco_defend_singu(unit.pos());
-            for n in self.eco.nanos.values() {
-                if n.target == unit {
-                    n.unit.self_destruct(0);
-                }
-            }
             let unneeded: Vec<TaskId> = self
                 .eco
                 .nano_tasks
@@ -1324,19 +1419,15 @@ impl Ai {
             }
             if def_name == "staticcon" {
                 let ct_target = self.eco.tasks.get(id).and_then(|t| t.as_construction()).and_then(|c| c.ct_target);
-                match ct_target {
-                    Some(target) => {
-                        let nt = Nanotower { unit, target };
-                        self.eco.nanos.insert(unit.id(), nt);
-                        unit.set_repeat(true, 0);
-                        unit.guard(nt.target, 0);
-                        self.eco_defend_nano(nt);
+                if let Some(target) = ct_target {
+                    let nt = Nanotower { unit, target };
+                    self.eco.nanos.insert(unit.id(), nt);
+                    if self.defs.name_of(target) == AIRPAD {
+                        self.eco_adopt_pad_nano(unit, target);
+                    } else {
+                        self.eco_nano_post(nt);
                     }
-                    // port: a caretaker without a target would be self-destructed
-                    // by checkNanos anyway (the C++ stored a null target).
-                    None => {
-                        unit.self_destruct(0);
-                    }
+                    self.eco_defend_nano(nt);
                 }
             }
 
@@ -1358,6 +1449,7 @@ impl Ai {
     ) {
         let _ = (damage, dir, paralyzer);
         self.comguard_hit(unit, attacker);
+        self.eco_build_guard_hit(unit, attacker);
         let h = unit;
         let Some(hdef) = h.def() else {
             return;
@@ -1417,11 +1509,19 @@ impl Ai {
         let _ = attacker;
         let def = unit.def();
         let uid = unit.id();
+        self.eco.raid_mexes.remove(&uid);
         if def.is_some_and(|d| self.defs.name(d) == crate::military::missiles::SILO) {
             self.eco_silo_lost(unit);
         }
         if def.is_some_and(|d| d.speed() == 0.0) {
+            let frame = self.frame;
             let eco = &mut self.eco;
+            // A finished mex of ours lost: its replacement is a remex
+            // (see `eco_set_eco_priorities`).
+            if eco.mexes.contains(&unit) {
+                eco.lost_mexes.retain(|&(_, f)| frame - f <= REMEX_MEMORY);
+                eco.lost_mexes.push((unit.pos(), frame));
+            }
             for list in [
                 &mut eco.radars,
                 &mut eco.porcs,
@@ -1570,9 +1670,6 @@ impl Ai {
         }
 
         match def_name {
-            "staticcon" => {
-                unit.self_destruct(0);
-            }
             "staticmex" => {
                 if unit.is_being_built() {
                     self.eco_track_mex_construction(unit);
@@ -1617,6 +1714,7 @@ impl Ai {
             return;
         };
         let pos = enemy.pos();
+        self.eco_observe_raider(enemy, def);
         // capture combat reclaim for enemy building nanoframes that enter los
         if enemy.is_being_built() && def.speed() == 0.0 && self.war.get_porc_threat(pos) == 0.0 {
             self.eco.add_combat_reclaim_if_new(enemy);
@@ -1638,6 +1736,7 @@ impl Ai {
             return;
         };
         let pos = enemy.pos();
+        self.eco_observe_raider(enemy, def);
         // capture combat reclaim for undefended enemy buildings that are started within los
         if def.speed() == 0.0 && self.war.get_threat(pos) == 0.0 {
             self.eco.add_combat_reclaim_if_new(enemy);
@@ -1697,12 +1796,90 @@ impl Ai {
         farthest
     }
 
-    fn eco_check_nanos(&mut self) {
-        for n in self.eco.nanos.values() {
-            if n.target.health() <= 0.0 {
-                n.unit.self_destruct(0);
+    pub fn eco_get_fusion_dist(&self, position: Vec3) -> f32 {
+        let mut dist = 65535.0;
+        for f in &self.eco.fusions {
+            let tdist = distance(position, f.pos());
+            if tdist < dist {
+                dist = tdist;
             }
         }
+        dist
+    }
+
+    fn eco_check_nanos(&mut self) {
+        // An airpad's caretaker off its area repair (idle, or told something
+        // else) and not lent to the walk-in guard goes back to it: guarding
+        // the pad would repair the pad and nothing on it.
+        let mut off_post = Vec::new();
+        for n in self.eco.nanos.values() {
+            if n.target.health() > 0.0
+                && self.defs.name_of(n.target) == AIRPAD
+                && !self.walkin_lends(n.unit.id())
+                && !Self::eco_on_pad_post(n.unit)
+            {
+                off_post.push((*n, n.unit.current_commands().first().map(|c| c.id())));
+            }
+        }
+        for (n, order) in off_post {
+            Self::eco_pad_nano_order(n);
+            if let Some(order) = order {
+                self.log(&format!(
+                    "economy: airpad caretaker {} back on its area repair over pad {} (was on order {order})",
+                    n.unit.id(),
+                    n.target.id()
+                ));
+            }
+        }
+    }
+
+    /// Send a caretaker back to its post (after the walk-in guard lent it):
+    /// an airpad's to its area repair over the pad, any other to guard its
+    /// target (a factory, or a superweapon under construction).
+    pub(crate) fn eco_nano_post(&self, n: Nanotower) {
+        if self.defs.name_of(n.target) == AIRPAD {
+            Self::eco_pad_nano_order(n);
+        } else {
+            n.unit.set_repeat(true, 0);
+            n.unit.guard(n.target, 0);
+        }
+    }
+
+    /// Whether a caretaker holds an area repair (its airpad post; a repair
+    /// it found there goes in front of it, so look down the queue).
+    fn eco_on_pad_post(unit: Unit) -> bool {
+        unit.current_commands().iter().any(|c| c.id() == cmd::REPAIR && c.params().len() == 4)
+    }
+
+    /// Adopt a finished caretaker as this airpad's (`padnano`), as the
+    /// economy does when it builds one; the staged fixtures spawn theirs.
+    pub(crate) fn eco_adopt_pad_nano(&mut self, unit: Unit, pad: Unit) {
+        let nt = Nanotower { unit, target: pad };
+        self.eco.nanos.insert(unit.id(), nt);
+        Self::eco_pad_nano_order(nt);
+        let (p, q) = (unit.pos(), pad.pos());
+        self.log(&format!(
+            "economy: airpad caretaker {} at ({:.0}, {:.0}) repairs over pad {} at ({:.0}, {:.0})",
+            unit.id(),
+            p.x,
+            p.z,
+            pad.id(),
+            q.x,
+            q.z
+        ));
+    }
+
+    /// A caretaker by an airpad keeps a standing area repair over it: the
+    /// engine repairs whatever is damaged there, landed aircraft first (they
+    /// sit still). ALT keeps the order when nothing needs repair.
+    fn eco_pad_nano_order(n: Nanotower) {
+        let p = n.target.pos();
+        n.unit.execute_custom_command(
+            cmd::REPAIR,
+            &[p.x, p.y, p.z, PAD_NANO_REACH],
+            springai::opt::ALT_KEY,
+            NO_TIMEOUT,
+        );
     }
 
     /// Fund mexes as soon as construction starts, including gifted nanoframes.
@@ -1740,7 +1917,15 @@ impl Ai {
         // Expansion keeps its fast payback at higher incomes and in secure
         // territory too. Only a hard energy stall puts power plants first.
         let prio = if eco.hard_estalled { 1.0 } else { 2.0 };
+        // A remex goes first too (`remexfirst`): its metal was income a
+        // moment ago, and the raid that took it left storage empty, so at
+        // normal priority it waited behind factory production and turrets.
+        let remex = !eco.hard_estalled && !self.dev_off("remexfirst");
+        let frame = self.frame;
+        let lost =
+            |p: Vec3| eco.lost_mexes.iter().any(|&(q, f)| frame - f <= REMEX_MEMORY && distance(p, q) < REMEX_SPOT);
         for u in eco.new_mexes.iter().filter(|u| building(u)) {
+            let prio = if remex && lost(u.pos()) { 2.0 } else { prio };
             u.execute_custom_command(cmd::PRIORITY, &[prio], 0, NO_TIMEOUT);
         }
 
@@ -1759,6 +1944,35 @@ impl EconomyManager {
             let id = self.tasks.insert(t);
             self.combat_reclaim_tasks.push(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod energyneed_tests {
+    use super::energy_shortfall;
+
+    #[test]
+    fn upkeep_does_not_consume_the_construction_cushion() {
+        let mut ai = super::assign::tests::assignment_ai(|_| {});
+        ai.eco.static_income = 20.0;
+        ai.eco.effective_income_energy = 25.0;
+        assert_eq!(ai.eco_energy_shortfall(), 0.0);
+        ai.eco.energy_upkeep = 5.0;
+        assert!(ai.eco_energy_shortfall() > 0.0);
+        ai.eco.effective_income_energy = 30.0;
+        assert_eq!(ai.eco_energy_shortfall(), 0.0);
+    }
+
+    #[test]
+    fn fixed_energy_margin_does_not_grow_as_a_fraction_of_metal() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        for metal in [0.0, 5.0, 10.0, 20.0, 40.0, 100.0] {
+            assert_eq!(energy_shortfall(metal + 5.0, metal), 0.0);
+            assert!(energy_shortfall(metal + 4.0, metal) > 0.0);
+            assert_eq!(energy_shortfall(0.6 * metal, metal), 1.0);
+        }
+        assert!(close(energy_shortfall(20.0, 20.0), 5.0 / 13.0));
+        assert_eq!(energy_shortfall(45.0, 40.0), 0.0, "no 1.5x expansion tax");
     }
 }
 
@@ -1893,32 +2107,32 @@ mod priority_tests {
 
 #[cfg(test)]
 mod eramp_tests {
-    use super::{ERAMP_ESCALATE, ERAMP_FLOOR, ERAMP_FULL_SHARE, eramp_wanted};
+    use super::{ERAMP_ESCALATE, ERAMP_FULL_SHARE, construction_energy_floor, eramp_wanted};
 
     #[test]
     fn eramp_runs_from_the_floor_to_the_target_and_past_it() {
         let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
         let full_at = ERAMP_FULL_SHARE;
-        // No spots at the start: 1.1x metal income, the storage rule off.
+        // No spots at the start: metal + 5, the storage rule off.
         let (want, ramp) = eramp_wanted(44.5, 27.0, 0.0, 0);
-        assert!(close(want, ERAMP_FLOOR * 27.0) && close(ramp, 0.0));
+        assert!(close(want, construction_energy_floor(27.0)) && close(ramp, 0.0));
         // The full share: the overdrive target itself.
         let (want, ramp) = eramp_wanted(44.5, 27.0, full_at, 0);
         assert!(close(want, 44.5) && close(ramp, 1.0));
         // Half of it: halfway between.
         let (want, _) = eramp_wanted(44.5, 27.0, full_at / 2.0, 0);
-        assert!(close(want, (29.7 + 44.5) / 2.0));
+        assert!(close(want, (32.0 + 44.5) / 2.0));
         // Past it: on past the target.
         let (want, ramp) = eramp_wanted(44.5, 27.0, 1.5 * full_at, 0);
         assert!(want > 44.5 && close(ramp, 1.5));
         // A target under the floor (early, little mex income): the floor.
         let (want, _) = eramp_wanted(10.0, 11.0, 0.8, 0);
-        assert!(close(want, ERAMP_FLOOR * 11.0));
+        assert!(close(want, construction_energy_floor(11.0)));
         // The clock alone: halfway at half the escalation time, the target
         // at all of it, with no spots held.
         let half = (ERAMP_ESCALATE / 2.0) as i32;
         let (want, ramp) = eramp_wanted(44.5, 27.0, 0.0, half);
-        assert!(close(want, (29.7 + 44.5) / 2.0) && close(ramp, 0.5));
+        assert!(close(want, (32.0 + 44.5) / 2.0) && close(ramp, 0.5));
         let (want, _) = eramp_wanted(44.5, 27.0, 0.0, 2 * half);
         assert!(close(want, 44.5));
         // Both add up.

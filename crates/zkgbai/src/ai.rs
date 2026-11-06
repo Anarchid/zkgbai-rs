@@ -13,6 +13,7 @@ use crate::graph::GraphManager;
 use crate::kgbutil::Pathfinder;
 use crate::logistics::Logistics;
 use crate::los::LosManager;
+use crate::military::ammo::Ammo;
 use crate::military::blasts::Blasts;
 use crate::military::coalesce::Coalesce;
 use crate::military::drops::Drops;
@@ -32,69 +33,107 @@ use crate::military::sweeps::Sweeps;
 use crate::military::teleport::Teleports;
 use crate::military::{FighterStore, MilitaryManager, Squads, UnitClasses};
 use crate::operator::Operator;
-use crate::regime::Regime;
+use crate::posture::Posture;
 use crate::terrain::{Strategy, TerrainModel};
 use crate::util::{distance, get_directional_point, kgb_rand, seed_rand};
 
+/// Allied starts at least this far apart, elmos: where our start box has
+/// fewer metal spots than we are, the later ones start off the spots.
+const START_SPREAD: f32 = 300.0;
+/// No start is worth more for being farther than this from the others.
+const START_ROOM: f32 = 450.0;
+
 /// Experimental features that are off unless named in the `enable` option
-/// (or ZKGBAI_ENABLE).
+/// (or ZKGBAI_ENABLE): `pairs` (Constables pair up on builds) lost its
+/// mirror 3-5, expanding slower (12.5 mexes to 16.5 at minute 10) though
+/// losing fewer; `currency` (the danger of a job on an issue's crew priced
+/// as the worker's expected loss, and the crew holding where it pays) lost
+/// its mirrors 17-23 twice where the issue clients alone won 25-15.
+/// `permanence` (the interception planner keeps unseen enemy groups 45 s,
+/// dead reckoned toward our assets) doubled refuge orders (6→15 a game)
+/// without changing mex losses (9.1→9.7) or blocks (0.8→0.5) against the
+/// frozen hover baseline, 20 games each, Oct 22: the memory frightens
+/// workers more than it positions squads.
 /// `mexporc` (a turret by every mex and link) is off by default since
 /// Oct 24: with the home-defense force standing in for the turret it won
 /// 33-4-3 vs Circuit against 19-8-13 and 18-2 in self-play mirrors, with
 /// +9 income at 10:00 and +2000 army at 15:00, for +1.6 mexes lost by
-/// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek); on
-/// Nov 2 it gained nothing on the 18 clustered-mex maps either (-0.037).
-/// Turning it on is the operator's "porc every mex" beside its porc zones.
-/// Organic fire squads (`firesquads`) are unfinished and opt-in.
-/// The crushing-defeat veto (`fightsim`) is on. Ravager and Minotaur packs
-/// are on (disable=ravager,minotaur to opt out). `coalesce` (raider gangs
-/// judged by the fight predictor) is on (2026-10-31, disable=coalesce to
-/// opt out). `stayveto` (retreats the predictor says throw a won fight
-/// away) lost its 2026-11-01 batteries (zkgbai-runs/coalesce/RESULTS.md:
-/// its mirror 3-15, nothing changed against Circuit or Wires) but is on
-/// again since 2026-11-02, judged with the kiting fight and the latched
-/// veto (disable=stayveto). The shadow switches (journal only) stay off.
-/// `carpetspare`: Phoenix carpets burn friendlies under the line unless
-/// named (Phantoms are worth the friendly fire).
+/// 10:00 pooled (5-8 on the lane maps: Altair, Trojan, Hide and Seek).
+/// `airtempo` (an air factory weighed up by the clock and the map's size)
+/// is unverified: its A/B is queued (see economy/planning.rs AIR_TEMPO_*).
+/// `posture` (a fixed-defense budget from lanes and density) and
+/// `ecoladder` (fusions from 30 metal income) are off since Oct 27: in the
+/// Eye of Horus cloak mirror (zkgbai-runs/horus/mirror2, 10 games an arm)
+/// both off went 9-0-1 against 3-3-4 with both on, with the old economy at
+/// 10:00 (18.5 mexes to 12, 11.5 constructors to 8); either alone was no
+/// better than both, each taking up the metal the other left.
+/// The crushing-defeat veto (`fightsim`) is on. Raider packs and organic
+/// fire squads remain opt-in. Ravager and Minotaur packs are on for WIP
+/// observation (disable=ravager,minotaur to opt out). `coalesce` (raider
+/// gangs judged by the fight predictor) is on for WIP observation
+/// (2026-10-31, disable=coalesce to opt out). `stayveto` (retreats the
+/// predictor says throw a won fight away) is off since the 2026-11-01
+/// batteries (zkgbai-runs/coalesce/RESULTS.md): it lost its mirror 3-15
+/// and changed nothing against Circuit or Wires, and its standing units
+/// died more without killing more (enable=stayveto to opt in). The shadow
+/// switches (journal only) stay off.
 /// `densgate` (phase gates on the map's density clock) waits for its A/B
 /// (enable=densgate to opt in).
 /// `regionsplit` (terrain regions holding many metal spots cut into pieces
-/// around clusters of them, 2026-11-02) is on for eyeballing until its A/B
-/// (disable=regionsplit).
+/// around clusters of them, 2026-11-02) is on in the wip line for
+/// eyeballing (disable=regionsplit); off on main until its A/B.
 /// `chatcommands` (kgbdebug, kgbfac...): the engine hands every AI every
 /// chat line, whispers and the other side's ally chat included, with only
 /// its sender, so anyone in the game could set our first factory or switch
 /// our debug output.
-/// Removed on 2026-11-02, with the off paths of 31 settled defaults: the
-/// switches that lost or never had their A/B (`pairs`, `currency`,
-/// `permanence`, `airtempo`, `airfire`, `posture`, `ecoladder`, the
-/// `scorcher`, `dagger` and `blitz` packs); their results are in the
-/// history of this comment.
 /// `conquest` (the commander walks to forward ground a few turrets hold,
-/// takes its metal, and fortifies it when the denial pays) and `conquestsym`
-/// (both sides' walks to an objective measured alike) are on for
-/// observation (2026-11-02; batteries in zkgbai-runs/conquest: on - off
-/// +0.03, sym - on +0.07; disable=conquest to opt out). `conquestleash`
+/// takes its metal, and fortifies it when the denial pays) is off in the
+/// wip line since 2026-11-03 (user): in the cloak battery
+/// (zkgbai-runs/conquest/compush b1, 36 pairs against Wires 0.1.2) the trip
+/// was -0.15 +- 0.12 and compush -0.12 +- 0.12 against it off, and the
+/// 317 sweep had the trip -0.14 +- 0.04 over 116 maps (enable=conquest to
+/// opt in: the trip, or compush, below, with enable=compush). `conquestsym` (both
+/// sides' walks to an objective measured alike) stays on for it
+/// (2026-11-02; sym - on +0.07). `conquestleash`
 /// (the commander keeps near the ground it took, b3 -0.11) and
 /// `conquestseq` (a held objective leads on to the next, b4 -0.22 against
-/// sym) stay off.
+/// sym) stay off, as does `conquestescort` (a QRF team sized by the fight
+/// predictor stands on the objective, 2026-11-03; battery e1 -0.14).
+/// `compush` (with or without `conquest`): no conquest trip; the
+/// commander's mex jobs lean toward the enemy, a constructor builds the
+/// home energy, and objectives whose spots become ours by any hands get
+/// their turrets. Off in the wip line since 2026-11-03 evening (user: "a bit
+/// less certain" than energyneed; its 344 form never had a battery):
+/// enable=compush to opt in (with or without enable=conquest, compush wins
+/// over the trip). `conquestroute` (the trip's start and opening mexes planned
+/// with it, one on one) is off (enable=conquestroute, with compush off).
 /// `eramp` (energy wanted ramps with the alliance's share of the metal
-/// spots and the clock, see economy/mod.rs ERAMP_*) is on (user,
-/// 2026-11-03; disable=eramp to opt out) while its A/B runs.
-/// `bombcharge` (placed Imps and Snitches charge when the fight predictor
-/// says it beats sitting tight) is on for eyeballing (user, 2026-11-03;
-/// disable=bombcharge).
+/// spots and the clock, see economy/mod.rs ERAMP_*) is on in the wip line
+/// (user, 2026-11-03; disable=eramp to opt out) while its A/B runs.
+/// `ammo` (enemy tube-weapon shots counted from hits into the predictor's
+/// snapshots, military/ammo.rs) is off: its A/B (zkgbai-runs/ammo/ab,
+/// 2026-11-03) lost the mirror 19-33 and was -0.02 against Wires:v2 with a
+/// ledger that is 99.5% right; the ledger still counts and journals.
 /// `lanes` is opt-in. `unifiedconquest` supersedes colonize and lanes;
 /// it is on by default in wip, opt-in on main. Both off restores the
 /// worker policy from before the path experiment. Explicit conquest stays separate.
-pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
+pub(crate) const OFF_BY_DEFAULT: [&str; 30] = [
     "fightlicense",
+    "harasswide",
     "lanes",
-    "unifiedconquest",
     "raidcommit",
-    "limpet",
     "limpetshadow",
+    "pairs",
+    "currency",
+    "permanence",
     "mexporc",
+    "airtempo",
+    "airfire",
+    "posture",
+    "ecoladder",
+    "scorcher",
+    "dagger",
+    "blitz",
     "firesquads",
     "coalesceshadow",
     "stayshadow",
@@ -102,8 +141,13 @@ pub(crate) const OFF_BY_DEFAULT: [&str; 16] = [
     "chatcommands",
     "densgate",
     "fight2d",
+    "conquest",
+    "compush",
     "conquestleash",
     "conquestseq",
+    "conquestescort",
+    "conquestroute",
+    "ammo",
 ];
 // Siege unlocks after sitzkrieg; Crab support unlocks with a Crab.
 // Both can still be disabled with `disable=siege,crab`.
@@ -200,8 +244,8 @@ pub struct Ai {
     pub incursions: Incursions,
     /// The project tracker (see `logistics`).
     pub logistics: Logistics,
-    /// How much the map is lanes, and how full it is (see `regime`).
-    pub regime: Regime,
+    /// Fixed defenses' share and sites (see `posture`).
+    pub posture: Posture,
     /// Our teleport bridge and the squads going through it.
     pub teleports: Teleports,
     /// Our air transports and the drop under way.
@@ -215,6 +259,8 @@ pub struct Ai {
     pub missiles: Missiles,
     pub sweeps: Sweeps,
     pub strikes: Strikes,
+    /// Invasion targets (`invade`).
+    pub invade: crate::military::invade::Invade,
     /// Widows scouting for our strikes.
     pub scouts: Scouts,
     /// Squads hunting the enemy's heavies.
@@ -229,12 +275,15 @@ pub struct Ai {
     pub jumps: Jumps,
     /// Cyclopes driving into their cannon's reach.
     pub cyclopes: crate::military::cyclops::Cyclopes,
+    pub facframes: crate::military::facframe::FacFrames,
     /// The allies' initial queues, and our opening sent to them.
     pub iq: crate::iq::AllyPlans,
     pub puppies: Puppies,
     pub stakeouts: Stakeouts,
     /// Raider gangs judged by the fight predictor (`coalesce`).
     pub coalesce: Coalesce,
+    /// What the enemy's tube weapons have left (`ammo`).
+    pub ammo: Ammo,
     /// Retreats judged by the fight predictor (`stayveto`).
     pub stayveto: StayVeto,
     /// Which handler each unit belongs to (see `military::roles`).
@@ -341,7 +390,7 @@ impl SkirmishAi for Ai {
             strategy: None,
             incursions: Incursions::default(),
             logistics: Logistics::default(),
-            regime: Regime::default(),
+            posture: Posture::default(),
             teleports: Teleports::default(),
             drops: Drops::default(),
             recovery: crate::recovery::Recovery::default(),
@@ -351,6 +400,7 @@ impl SkirmishAi for Ai {
             missiles: Missiles::default(),
             sweeps: Sweeps::default(),
             strikes: Strikes::default(),
+            invade: Default::default(),
             scouts: Scouts::default(),
             jaegers: Jaegers::default(),
             impalers: Default::default(),
@@ -361,10 +411,12 @@ impl SkirmishAi for Ai {
             stomp_test: Default::default(),
             jumps: Jumps::default(),
             cyclopes: Default::default(),
+            facframes: Default::default(),
             iq: Default::default(),
             puppies: Puppies::default(),
             stakeouts: Stakeouts::default(),
             coalesce: Coalesce::default(),
+            ammo: Ammo::default(),
             stayveto: StayVeto::default(),
             roles: Default::default(),
             air_intel: Default::default(),
@@ -573,9 +625,12 @@ impl Ai {
         }
 
         if !saved_game {
+            // The start first: what the opening's units and the commander
+            // get to from it decides both (see `eco_opening_in_reach`).
             let opening = self.eco_roll_opening();
-            self.select_commander(opening.as_deref());
             self.choose_start_pos();
+            let (opening, penned) = self.eco_opening_in_reach(opening);
+            self.select_commander(opening.as_deref(), penned);
             self.guard("iq.init", |ai| ai.iq_init(opening.as_deref()));
         }
         if !self.disabled.is_empty() {
@@ -618,7 +673,7 @@ impl Ai {
         self.guard("terrain.strategy", |ai| ai.strategy_update(frame));
         self.guard("war.incursions", |ai| ai.incursions_update(frame));
         self.guard("logistics.update", |ai| ai.logistics_update(frame));
-        self.guard("regime.update", |ai| ai.regime_update(frame));
+        self.guard("posture.update", |ai| ai.posture_update(frame));
         if frame % 1800 == 0 {
             self.guard("pathfinder.updateSlopeMap", |ai| ai.pathfinder.update_slope_map());
         }
@@ -632,6 +687,10 @@ impl Ai {
 
         self.guard("los.update", |ai| ai.los.update(frame));
         self.guard("graph.update", |ai| ai.graph_update(frame));
+        if self.test.as_deref() == Some("reclaimpost") {
+            self.guard("eco.reclaimPostFixture", |ai| ai.reclaim_post_fixture(frame));
+            return;
+        }
         // A staged anti-nuke stands by (see `strike_test`).
         if matches!(
             self.test.as_deref(),
@@ -952,6 +1011,7 @@ impl Ai {
             }
             Event::WeaponFired { unit, weapon } => {
                 if weapon.is_none_or(|w| w.range() > 0.0 && !w.name().contains("fake")) {
+                    self.guard("harassment.weaponFired", |ai| ai.harassment_fired(unit));
                     self.guard("pack.weaponFired", |ai| ai.pack_fired(unit));
                 }
             }
@@ -965,21 +1025,20 @@ impl Ai {
     }
 
     fn select_random_commander(&mut self) {
-        self.select_commander(None);
+        self.select_commander(None, false);
     }
 
     /// The commander for opening with factory `opening`: a recon commander
-    /// for jumpjets and spiders (it jumps too, and goes where they go), a
-    /// support commander otherwise. ZKGBAI_COMMANDER=<def> overrides.
-    fn select_commander(&mut self, opening: Option<&str>) {
+    /// for jumpjets and spiders (it jumps too, and goes where they go), or
+    /// where a walking one would be `penned` in at the start (see
+    /// `eco_opening_in_reach`); a support commander otherwise.
+    /// ZKGBAI_COMMANDER=<def> overrides.
+    fn select_commander(&mut self, opening: Option<&str>, penned: bool) {
+        let jumper = penned || matches!(opening, Some("factoryjump" | "factoryspider"));
         let name = match std::env::var("ZKGBAI_COMMANDER").ok().filter(|c| self.defs.get(c).is_some()) {
             Some(c) => c,
-            None => match opening {
-                Some("factoryjump" | "factoryspider") if self.defs.get("dyntrainer_recon_base").is_some() => {
-                    "dyntrainer_recon_base".to_owned()
-                }
-                _ => "dyntrainer_support_base".to_owned(),
-            },
+            None if jumper && self.defs.get("dyntrainer_recon_base").is_some() => "dyntrainer_recon_base".to_owned(),
+            None => "dyntrainer_support_base".to_owned(),
         };
         let name = name.as_str();
         self.cb.call_lua_rules(&format!("ai_commander:{name}"));
@@ -1098,6 +1157,12 @@ impl Ai {
 
     fn choose_start_pos(&mut self) {
         let map_center = self.graph.get_map_center();
+        // A rush planned (see `economy::rush`): we start together.
+        if let Some(site) = self.rush_start() {
+            self.send_start_pos(site, map_center);
+            self.log("Teams Mode: Start Position together, for the rush.");
+            return;
+        }
         let mut spots: Vec<Vec3> = self.graph.get_ally_territory().iter().map(|s| s.get_pos()).collect();
         let all_spots: Vec<Vec3> = self.graph.get_metal_spots().iter().map(|s| s.get_pos()).collect();
         if spots.is_empty() {
@@ -1141,6 +1206,15 @@ impl Ai {
             best
         };
 
+        // One on one with `conquestroute`: the start for the conquest trip's
+        // walk (see economy/conquest/compush.rs).
+        if self.allies.is_empty()
+            && let Some(site) = self.conquest_route_start()
+        {
+            self.send_start_pos(site, map_center);
+            self.log("Solo Mode: Start Position for the conquest route!");
+            return;
+        }
         if self.allies.is_empty() || (self.allies.len() > 1 && priority_starts == 0) {
             // Starting solo (or first of a team): pick a spot near map center.
             let best = central_spot(&spots);
@@ -1155,18 +1229,21 @@ impl Ai {
         if self.allies.len() > 1 {
             cached.push(central_spot(&spots));
         }
+        // (Where the box has fewer spots than we are, a start off them: see
+        // `spread_start`.)
+        let box_spots = spots.clone();
         let mut best = *spots
             .iter()
             .max_by(|a, b| distance(**a, map_center).total_cmp(&distance(**b, map_center)))
             .expect("spots is not empty");
+        if cached.iter().any(|&c| distance(c, best) < START_SPREAD) {
+            best = self.spread_start(&cached, &box_spots).unwrap_or(best);
+        }
         cached.push(best);
         spots.retain(|&s| s != best);
 
         if priority_starts > 1 || (self.allies.len() == 1 && priority_starts > 0) {
             for _ in 0..priority_starts.saturating_sub(1).max(1) {
-                if spots.is_empty() {
-                    break;
-                }
                 // The spot farthest from its closest already-chosen position.
                 let mut dist = 0.0;
                 let mut chosen = None;
@@ -1177,7 +1254,15 @@ impl Ai {
                         chosen = Some(ms);
                     }
                 }
-                best = chosen.expect("spots is not empty");
+                if chosen.is_none() || dist < START_SPREAD {
+                    // Out of spots: AlienDesert's box has two for three of us,
+                    // and the third started on the first (2026-11-03).
+                    chosen = self.spread_start(&cached, &box_spots).or(chosen);
+                }
+                let Some(pick) = chosen else {
+                    break;
+                };
+                best = pick;
                 cached.push(best);
                 spots.retain(|&s| s != best);
             }
@@ -1185,6 +1270,54 @@ impl Ai {
 
         self.send_start_pos(best, map_center);
         self.log("Teams Mode: Start Position Selected!");
+    }
+
+    /// A start in our box at least [`START_SPREAD`] from each of `taken`,
+    /// for when the box has fewer metal spots than allies: on rings around
+    /// the taken starts, the most spread one (up to [`START_ROOM`]), then
+    /// the one nearest the box's metal (`spots`). Deterministic, since
+    /// later allies replay the earlier ones' picks. `None` if no ring point
+    /// is in the box that far from them all.
+    /// Off with `disable=startspread`.
+    fn spread_start(&self, taken: &[Vec3], spots: &[Vec3]) -> Option<Vec3> {
+        if self.dev_off("startspread") {
+            return None;
+        }
+        let size = self.graph.get_map_center() * 2.0;
+        let mut best: Option<(f32, Vec3)> = None;
+        for &t in taken {
+            for radius in [START_SPREAD, 1.5 * START_SPREAD] {
+                for k in 0..16 {
+                    let a = k as f32 * std::f32::consts::TAU / 16.0;
+                    let p = Vec3::xz(t.x + radius * a.cos(), t.z + radius * a.sin());
+                    if p.x < 64.0 || p.z < 64.0 || p.x > size.x - 64.0 || p.z > size.z - 64.0 {
+                        continue;
+                    }
+                    let spread = taken.iter().map(|&q| distance(q, p)).fold(f32::MAX, f32::min);
+                    if spread < START_SPREAD {
+                        continue;
+                    }
+                    let metal = spots.iter().map(|&s| distance(s, p)).fold(f32::MAX, f32::min);
+                    let score = spread.min(START_ROOM) - 0.25 * metal;
+                    if best.is_some_and(|(b, _)| b >= score) {
+                        continue;
+                    }
+                    let check = format!("ai_is_valid_startpos:{:.6}/{:.6}", p.x, p.z);
+                    if self.cb.call_lua_rules(&check).as_deref() == Some("1") {
+                        best = Some((score, p));
+                    }
+                }
+            }
+        }
+        if let Some((_, p)) = best {
+            self.log(&format!(
+                "Teams Mode: {} metal spots in our box for more starts: one off them at ({:.0}, {:.0})",
+                spots.len(),
+                p.x,
+                p.z
+            ));
+        }
+        best.map(|(_, p)| p)
     }
 
     /// Start a little toward the map center from the chosen spot, unless
@@ -1222,6 +1355,32 @@ impl Ai {
         self.disabled.contains(feature)
     }
 
+    /// Switch `feature` on for this game (the team's conquest roll, see
+    /// `economy::rush`).
+    pub(crate) fn dev_enable(&mut self, feature: &str) {
+        self.disabled.remove(feature);
+    }
+
+    /// The fight predictor's mechanics fight as the switches ask for it, on
+    /// every snapshot this AI builds: `fight2d` (units keep their places in
+    /// the plane, no overlaps, splash, least-health targeting) and
+    /// `fightfocus` (least-health targeting on the axis, on by default in the
+    /// wip line; `disable=fightfocus`). `fight2d` is off by default.
+    /// `sreload` (on; `disable=sreload`): tube weapons (Picket, Ogre, ...)
+    /// fire from tubes that each reload on their own clock. `capture` (on;
+    /// `disable=capture`): Dominatrix and Reef Gull capture rays take units
+    /// over instead of doing nothing.
+    pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
+        crate::military::fightsim::SimFlags {
+            capture: !self.dev_off("capture"),
+            ..crate::military::fightsim::SimFlags::from_switches(
+                !self.dev_off("fight2d"),
+                !self.dev_off("fightfocus"),
+                !self.dev_off("sreload"),
+            )
+        }
+    }
+
     /// Whom raiders shoot in the QRF predictor's raid-defense rollouts:
     /// `raidfire` (on by default; `disable=raidfire` restores the frozen
     /// rollout) lets them turn on our defenders once the asset they were seen
@@ -1229,22 +1388,6 @@ impl Ai {
     pub fn raid_aim(&self) -> crate::military::fightsim::mech::RaidAim {
         use crate::military::fightsim::mech::RaidAim;
         if self.dev_off("raidfire") { RaidAim::Assets } else { RaidAim::Hold }
-    }
-
-    /// The fight predictor's mechanics fight as the switches ask for it, on
-    /// every snapshot this AI builds: `fight2d` (units keep their places in
-    /// the plane, no overlaps, splash, least-health targeting) and
-    /// `fightfocus` (least-health targeting on the axis; on by default since
-    /// its confirmation A/B, zkgbai-runs/fight2d/ab2; `disable=fightfocus`).
-    /// `fight2d` is off by default. `sreload` (on; `disable=sreload`): tube
-    /// weapons (Picket, Ogre, ...) fire from tubes that each reload on their
-    /// own clock.
-    pub fn sim_flags(&self) -> crate::military::fightsim::SimFlags {
-        crate::military::fightsim::SimFlags::from_switches(
-            !self.dev_off("fight2d"),
-            !self.dev_off("fightfocus"),
-            !self.dev_off("sreload"),
-        )
     }
 
     pub fn features_off(&self) -> Vec<String> {

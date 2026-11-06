@@ -1,6 +1,7 @@
 //! Silo placement: bounded engine queries, then pure background scoring.
 //! Only one search is outstanding. Cached reachability belongs to that
-//! search's exact terrain; a result never supplies unchecked new trajectories.
+//! search's sampled terrain; a result never supplies unchecked new trajectories.
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use super::*;
@@ -24,14 +25,26 @@ impl Planner {
         self.preparing.is_some() || self.worker.as_ref().is_some_and(Worker::busy)
     }
 
+    pub(crate) fn due(&self, frame: i32) -> bool {
+        self.active() || (self.retry_after > 0 && frame >= self.retry_after)
+    }
+
     pub(crate) fn cancel(&mut self) {
         self.preparing = None;
+        self.retry_after = 0;
         // Do not join an in-flight calculation on the simulation thread.
         // Poll and discard its output; an idle worker is reusable.
         if let Some(worker) = &mut self.worker {
             worker.poll();
             self.discard = worker.busy();
         }
+    }
+
+    fn retry_now(&mut self, frame: i32) {
+        // Keep the planner due so the economy services it next frame,
+        // rather than waiting for the 20-second requisition cadence.
+        self.preparing = None;
+        self.retry_after = frame;
     }
 
     fn failed(&mut self, frame: i32) {
@@ -76,6 +89,7 @@ impl Demand {
     }
 }
 
+#[checkpoint::state]
 struct Ground {
     corners: Vec<f32>,
     w: usize,
@@ -89,11 +103,18 @@ impl Ground {
 
     /// Recoil's InterpolateCornerHeight: two triangles, not bilinear.
     fn at(&self, x: f32, z: f32) -> f32 {
+        self.sample(x, z, |_| {})
+    }
+
+    fn sample(&self, x: f32, z: f32, mut visit: impl FnMut(usize)) -> f32 {
         let x = x.clamp(0.0, (self.w * 8 - 1) as f32) / 8.0;
         let z = z.clamp(0.0, (self.h * 8 - 1) as f32) / 8.0;
         let (ix, iz) = (x as usize, z as usize);
         let (dx, dz) = (x - ix as f32, z - iz as f32);
         let i = ix + iz * (self.w + 1);
+        for corner in [i, i + 1, i + self.w + 1, i + self.w + 2] {
+            visit(corner);
+        }
         let (h00, h10, h01, h11) =
             (self.corners[i], self.corners[i + 1], self.corners[i + self.w + 1], self.corners[i + self.w + 2]);
         if dx + dz < 1.0 {
@@ -112,18 +133,27 @@ struct Job {
     flights: [Option<flight::Flight>; 2],
 }
 
+#[checkpoint::state]
 struct Result {
     frame: i32,
     ground: Ground,
     choice: Option<(SiloSite, HashMap<[u32; 3], bool>)>,
+    /// Every corner consulted for the winner, including target elevation and
+    /// blocked flights. Persisted with the cache; it is part of its validity.
+    terrain: Vec<usize>,
     predictions: usize,
     hits: usize,
 }
 
 impl Result {
+    fn terrain_valid(&self, corners: &[f32]) -> bool {
+        corners.len() == self.ground.corners.len()
+            && self.terrain.iter().all(|&i| corners.get(i).is_some_and(|v| Some(v) == self.ground.corners.get(i)))
+    }
+
     fn revalidate(&self, frame: i32, corners: &[f32], demand: &Demand) -> Option<SiloSite> {
         let (choice, cache) = self.choice.as_ref()?;
-        if frame < self.frame || frame - self.frame > MAX_AGE || corners != self.ground.corners {
+        if frame < self.frame || frame - self.frame > MAX_AGE || !self.terrain_valid(corners) {
             return None;
         }
         demand.score(choice.pos, |_, at| cache.get(&demand.key(at)).copied().unwrap_or(false))
@@ -132,7 +162,13 @@ impl Result {
 
 fn compute(job: Job) -> Result {
     let (mut predictions, mut hits) = (0, 0);
-    let mut score = |site| {
+    // Local scratch only. Recording the winner's samples avoids retaining
+    // terrain dependencies for every candidate or every trajectory separately.
+    let sampled: Vec<_> = job.ground.corners.iter().map(|_| Cell::new(false)).collect();
+    let mut score = |site, record| {
+        let ground = |x, z| {
+            if record { job.ground.sample(x, z, |i| sampled[i].set(true)) } else { job.ground.at(x, z) }
+        };
         // Cache per site: targets and territory can ask the same trajectory.
         // Memory is bounded by one site's targets, not sites × territory.
         let mut cache = HashMap::new();
@@ -143,24 +179,25 @@ fn compute(job: Job) -> Result {
                 return ok;
             }
             predictions += 1;
-            at.y = job.ground.at(at.x, at.z);
+            at.y = ground(at.x, at.z);
             let ok = job.flights[key[2] as usize]
-                .and_then(|f| f.predict(from, at, |x, z| job.ground.at(x, z)))
+                .and_then(|f| f.predict(from, at, ground))
                 .is_some_and(|p| p.blocked.is_none());
             cache.insert(key, ok);
             ok
         });
         choice.map(|s| (s, cache))
     };
-    let scored: Vec<_> = job.sites.iter().filter_map(|&p| score(p).map(|(s, _)| s)).collect();
+    let scored: Vec<_> = job.sites.iter().filter_map(|&p| score(p, false).map(|(s, _)| s)).collect();
     let best = scored.iter().map(|s| s.payoff.max(SILO_COST)).fold(0.0, f32::max);
     let winner = scored
         .into_iter()
         .filter(|s| s.payoff.max(SILO_COST) >= 0.8 * best)
         .max_by(|a, b| distance(a.pos, job.demand.enemy).total_cmp(&distance(b.pos, job.demand.enemy)));
     // Recompute just the winner to retain its cache for current-state scoring.
-    let choice = winner.and_then(|s| score(s.pos));
-    Result { frame: job.frame, ground: job.ground, choice, predictions, hits }
+    let choice = winner.and_then(|s| score(s.pos, true));
+    let terrain = sampled.into_iter().enumerate().filter_map(|(i, used)| used.get().then_some(i)).collect();
+    Result { frame: job.frame, ground: job.ground, choice, terrain, predictions, hits }
 }
 
 impl Ai {
@@ -199,33 +236,61 @@ impl Ai {
         self.missiles.site.last_step = Some(self.frame);
         let silo = self.defs.get(SILO)?;
         if let Some((result, elapsed)) = self.missiles.site.worker.as_mut().and_then(Worker::poll) {
-            let result = if std::mem::take(&mut self.missiles.site.discard) { None } else { result };
-            let choice = result.and_then(|result| {
-                self.log(&format!(
-                    "missiles: site worker {:.1}ms, {} predictions, {} cache hits, age {} frames",
-                    elapsed.as_secs_f64() * 1000.0,
-                    result.predictions,
-                    result.hits,
-                    self.frame - result.frame
-                ));
-                let (choice, _) = result.choice.as_ref()?;
-                if self.frame - result.frame > MAX_AGE
-                    || !self.missiles_site_safe(silo, choice.pos)
-                    // GetBuildHeight can differ from the centre's terrain
-                    // elevation. Preserve the engine's exact launch height,
-                    // and reject any shift since candidate collection.
-                    || self.cb.map().find_closest_build_site(silo, choice.pos, 0.0, 3, 0) != choice.pos
-                {
-                    return None;
+            if std::mem::take(&mut self.missiles.site.discard) {
+                self.missiles.site.retry_now(self.frame);
+                self.log("missiles: cancelled site search drained; retrying");
+                return None;
+            }
+            let Some(result) = result else {
+                self.missiles.site.failed(self.frame);
+                self.log("missiles: site worker failed; retry in 60s");
+                return None;
+            };
+            self.log(&format!(
+                "missiles: site worker {:.1}ms, {} predictions, {} cache hits, age {} frames",
+                elapsed.as_secs_f64() * 1000.0,
+                result.predictions,
+                result.hits,
+                self.frame - result.frame
+            ));
+            // A stale/changed answer is not evidence that no site exists. Retry
+            // on the next frame, while genuine completed misses back off.
+            let stale = self.frame < result.frame || self.frame - result.frame > MAX_AGE;
+            let Some((choice, _)) = result.choice.as_ref() else {
+                if stale {
+                    self.missiles.site.retry_now(self.frame);
+                    self.log("missiles: stale site search; retrying");
+                } else {
+                    self.missiles.site.failed(self.frame);
+                    self.missiles_report_no_site();
                 }
-                // Current values, ownership and allied coverage; never run
-                // the exhaustive flight simulation on the engine thread.
-                let demand = self.missiles_site_demand();
-                result.revalidate(self.frame, &self.cb.map().corner_height_map(), &demand)
-            });
-            self.missiles.site.failed(self.frame);
+                return None;
+            };
+            let corners = self.cb.map().corner_height_map();
+            let reason = if stale {
+                Some("stale result")
+            } else if !self.missiles_site_safe(silo, choice.pos)
+                || self.cb.map().find_closest_build_site(silo, choice.pos, 0.0, 3, 0) != choice.pos
+            {
+                Some("site safety or footprint changed")
+            } else if !result.terrain_valid(&corners) {
+                Some("flight terrain changed")
+            } else {
+                None
+            };
+            let choice = if reason.is_none() {
+                result.revalidate(self.frame, &corners, &self.missiles_site_demand())
+            } else {
+                None
+            };
             if choice.is_none() {
-                self.missiles_report_no_site();
+                self.missiles.site.retry_now(self.frame);
+                self.log(&format!(
+                    "missiles: {}; retrying",
+                    reason.unwrap_or("target demand or allied coverage changed")
+                ));
+            } else {
+                self.missiles.site.failed(self.frame);
             }
             return choice;
         }
@@ -246,7 +311,8 @@ impl Ai {
         }
         let mut prep = self.missiles.site.preparing.take()?;
         if self.frame - prep.frame > MAX_AGE {
-            self.missiles.site.failed(self.frame);
+            self.missiles.site.retry_now(self.frame);
+            self.log("missiles: stale site preparation; retrying");
             return None;
         }
         for _ in 0..SITES_PER_FRAME {
@@ -368,8 +434,13 @@ mod tests {
         assert!(result.revalidate(601, &current.ground.corners, &current.demand).is_some());
         assert!(result.revalidate(599, &current.ground.corners, &current.demand).is_none());
         assert!(result.revalidate(600 + MAX_AGE + 1, &current.ground.corners, &current.demand).is_none());
+        // A distant crater must not invalidate otherwise identical flights.
         current.ground.corners[0] = 1.0;
+        assert!(result.revalidate(601, &current.ground.corners, &current.demand).is_some());
+        let used = result.terrain[0];
+        current.ground.corners[used] = 1.0;
         assert!(result.revalidate(601, &current.ground.corners, &current.demand).is_none());
+        current.ground.corners[used] = 0.0;
         current.ground.corners[0] = 0.0;
         current.demand.allies.push(Vec3::xz(2000.0, 80.0));
         assert!(result.revalidate(601, &current.ground.corners, &current.demand).is_none());
@@ -384,6 +455,36 @@ mod tests {
         current.demand.targets[0].0.x = 3000.0;
         current.demand.stun.push(current.demand.targets[0].0);
         assert!(result.revalidate(601, &current.ground.corners, &current.demand).is_none());
+    }
+
+    #[test]
+    fn sampled_terrain_survives_checkpoint_and_recomputes_a_changed_flight() {
+        let result = compute(fixture());
+        let bytes = checkpoint::rmp_serde::to_vec_named(&result).unwrap();
+        let restored: Result = checkpoint::rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(checkpoint::rmp_serde::to_vec_named(&restored).unwrap(), bytes);
+        let mut current = fixture();
+        assert_eq!(restored.terrain, result.terrain);
+        assert!(restored.revalidate(601, &current.ground.corners, &current.demand).is_some());
+        for z in 0..=current.ground.h {
+            for x in 320..=335 {
+                current.ground.corners[z * (current.ground.w + 1) + x] = 2000.0;
+            }
+        }
+        assert!(restored.revalidate(601, &current.ground.corners, &current.demand).is_none());
+        assert!(compute(current).choice.is_none(), "a ridge on the flight must be rescored, not ignored");
+    }
+
+    #[test]
+    fn invalidated_result_retries_next_frame_but_completed_miss_backs_off() {
+        let mut planner = Planner::default();
+        planner.failed(600);
+        assert!(!planner.due(601));
+        assert!(planner.due(600 + RETRY));
+        planner.retry_now(601);
+        assert!(planner.due(602));
+        planner.cancel();
+        assert!(!planner.due(603));
     }
 
     #[test]

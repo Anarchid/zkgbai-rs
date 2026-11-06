@@ -275,7 +275,7 @@ impl Ai {
         }
         // An advanced plant without its box (one that came another way, or
         // whose box went up before the morph failed and was tried again).
-        if self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
+        if !self.dev_off("geobox") && self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
             let unboxed = (self.eco.geos.iter())
                 .find(|&&g| {
                     self.defs.name_of(g) == ADVANCED && !self.eco.geo.boxed.iter().any(|&b| distance(b, g.pos()) < 50.0)
@@ -313,7 +313,11 @@ impl Ai {
     /// the reactor the energy planner is about to order. Returns
     /// whether an upgrade started.
     pub(super) fn eco_upgrade_geo(&mut self, frame: i32) -> bool {
-        if self.dev_off("geo") || self.eco.geo.morph.is_some() || frame < self.eco.geo.upgrade_after {
+        if self.dev_off("geo")
+            || self.dev_off("advgeo")
+            || self.eco.geo.morph.is_some()
+            || frame < self.eco.geo.upgrade_after
+        {
             return false;
         }
         let Some(advanced) = self.defs.get(ADVANCED) else { return false };
@@ -391,7 +395,7 @@ impl Ai {
             eco.fusions.len()
         ));
         self.eco_link_geo(pos, advanced.id());
-        if self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
+        if !self.dev_off("geobox") && self.eco.geo.boxing.is_none() && frame >= self.eco.geo.box_after {
             self.eco_box_geo(pos, frame);
         }
         true
@@ -458,6 +462,7 @@ impl Ai {
         near.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut units = Vec::new();
         for (_, wid) in near.into_iter().take(RAISERS) {
+            self.eco_suspend_assignment(wid, "geothermal terraform");
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.clear_task(&mut self.eco.tasks);
                 units.push(w.unit);

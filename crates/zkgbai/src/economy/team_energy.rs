@@ -58,7 +58,8 @@ impl Budget {
         // Use the mature overdrive ratio. Reactors do not raise their own
         // demand; territory and the phase clock drive further escalation.
         let full = self.raw_metal * (if odreserve { OD_ENERGY_RATIO } else { 2.0 } + 2.0);
-        self.target = if eramp { eramp_wanted(full, self.metal, share, phase).0 } else { full.max(self.metal) };
+        self.target = (if eramp { eramp_wanted(full, self.metal, share, phase).0 } else { full.max(self.metal) })
+            + self.energy_only;
     }
 
     fn shortfall(self) -> f32 {
@@ -66,7 +67,7 @@ impl Budget {
     }
 
     fn needs_energy(self) -> bool {
-        self.made < self.metal.max(self.used) || self.shortfall() > 0.0
+        self.made < (self.metal + self.energy_only).max(self.used) || self.shortfall() > 0.0
     }
 
     fn spending(&mut self, energy: f32, metal: f32) {
@@ -510,6 +511,21 @@ mod tests {
     }
 
     #[test]
+    fn team_floor_reserves_upkeep_even_when_construction_is_idle() {
+        let mut b = Budget { raw_metal: 20.0, metal: 20.0, made: 24.0, pending: 100.0, ..Budget::default() };
+        b.spending(7.0, 0.0);
+        b.set_target(true, true, 0.0, 0);
+        assert_eq!(b.target, 32.0, "metal + five + energy-only draw");
+        assert_eq!(b.shortfall(), 0.0, "unfinished plants cover the eventual target");
+        assert!(b.needs_energy(), "unfinished plants cannot cover live upkeep");
+        b.set_target(true, true, super::super::ERAMP_FULL_SHARE, 0);
+        let ramped_with_upkeep = b.target;
+        b.energy_only = 0.0;
+        b.set_target(true, true, super::super::ERAMP_FULL_SHARE, 0);
+        assert!((ramped_with_upkeep - b.target - 7.0).abs() < 0.001, "upkeep is not multiplied by eramp");
+    }
+
+    #[test]
     fn goal_grows_with_economy_and_time_not_with_new_reactors() {
         let mut b = rich();
         b.set_target(true, true, 0.4, 18000);
@@ -522,7 +538,7 @@ mod tests {
         b.raw_metal *= 2.0;
         b.metal *= 2.0;
         b.set_target(true, true, 0.4, 18000);
-        assert!((b.target - target * 2.0).abs() < 0.001);
+        assert!(b.target > target, "a larger metal economy needs more energy");
     }
 
     #[test]

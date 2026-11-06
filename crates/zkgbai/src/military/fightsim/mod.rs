@@ -26,6 +26,8 @@ mod bomb;
 pub mod live;
 pub mod local;
 pub mod mech;
+pub use mech::{ExitTrigger, HarassOrder, HarassOutcome, HarassUnit};
+pub mod plan;
 mod reloads;
 pub mod scenario;
 pub mod worker;
@@ -147,10 +149,18 @@ pub struct SnapUnit {
     pub hp: f32,
     pub x: f32,
     pub z: f32,
+    /// Its tube weapon's empty tubes (the first of its weapons with tubes,
+    /// [`SimFlags::sreload`]): frames from now until each is loaded again.
+    /// Empty: every tube loaded, or not known (see `military::ammo`).
+    pub tubes: Vec<i32>,
     /// Observed engine cooldowns by weapon name, in frames from this snapshot.
     /// Missing = unknown; zero = observed ready (or still firing a burst).
     pub reloads: Vec<(String, i32)>,
 }
+
+/// Switch: coalesce gangs are judged with their units firing for certain
+/// ([`SimFlags::ordered`]; `disable=ordered`).
+pub const ORDERED: &str = "ordered";
 
 /// Which mechanics fight a consumer asks for (the AI's switches; both off
 /// = the frozen fight). `fight2d` (`twod`): units keep their places in the
@@ -174,12 +184,27 @@ pub struct SimFlags {
     /// Imp's radius and a Rogue's add up to 22), so there no bomb went off
     /// on contact. Set by the bomb-charge judgement ([`Model::bomb_charge`]).
     pub bombs: bool,
+    /// Side 0 is under our order and commits (a coalesce gang: borrowed,
+    /// committed, ordered): its units fire for certain, in place of the
+    /// engage prior (P(a unit fires at all), fitted on game logs where many
+    /// units never commit); side 1 keeps the prior (mech.py `ordered`). The
+    /// fight lab (zkgbai-runs/lab, 2026-11-03) found the prior made one or two
+    /// raiders ordered at a Picket look harmless: P(Picket dead in 10 s)
+    /// Brier 0.296 -> 0.183 with it off for the ordered side; on 20,522 live
+    /// coalesce forms the 10-s member-loss correlation rose +0.016 [+0.011,
+    /// +0.021] and the MAE fell 4.4 metal.
+    pub ordered: bool,
+    /// Capture rays (Dominatrix, Reef Gulls) fill their targets' capture
+    /// meters, and a full one hands the unit to their side (Rust only; the
+    /// AI's `capture` switch). Off, the rays fire as the logs saw them:
+    /// never landing a hit, since the gadget zeroes their damage.
+    pub capture: bool,
 }
 
 impl SimFlags {
     /// The flags as the AI's switches set them.
     pub fn from_switches(fight2d: bool, focus: bool, sreload: bool) -> SimFlags {
-        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false }
+        SimFlags { twod: fight2d, focus: focus || fight2d, sreload, bombs: false, ordered: false, capture: false }
     }
 
     /// Whether shots go to the least-health target (always in the plane).
@@ -200,7 +225,39 @@ impl FightSnapshot {
     pub fn armed(&self, side: u8) -> usize {
         self.units.iter().filter(|u| u.side == side && !u.spec.weapons.is_empty()).count()
     }
+
+    /// The fight walks every unit straight at its foe; the ground may not
+    /// (2026-11-04, Trojan Hills: shield bots 800 elmos from two turrets
+    /// across a ridge walked 2,000 round it and arrived after 50 s, where the
+    /// seizure fight had them there in 13). Each mobile unit of `side` moves
+    /// out along its own bearing from `at` until its distance is `route`'s
+    /// ground distance from it; `None` (no way there) puts it `UNREACHABLE`
+    /// elmos out. Units nearer than `range` keep their place (in reach
+    /// already, or round the corner of a straight route). Returns how many
+    /// moved.
+    pub fn unfold(&mut self, side: u8, at: (f32, f32), range: f32, route: impl Fn(f32, f32) -> Option<f32>) -> usize {
+        let mut moved = 0;
+        for u in self.units.iter_mut().filter(|u| u.side == side && u.spec.mobile && !u.spec.air) {
+            let (dx, dz) = (u.x - at.0, u.z - at.1);
+            let d = (dx * dx + dz * dz).sqrt();
+            if d <= range {
+                continue;
+            }
+            let walk = route(u.x, u.z).unwrap_or(UNREACHABLE);
+            if walk > d * 1.05 {
+                let k = walk / d;
+                u.x = at.0 + dx * k;
+                u.z = at.1 + dz * k;
+                moved += 1;
+            }
+        }
+        moved
+    }
 }
+
+/// Where `FightSnapshot::unfold` puts a unit with no ground way in: out of
+/// any fight's reach in its horizon.
+pub const UNREACHABLE: f32 = 20000.0;
 
 /// What the model expects of a fight.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -252,7 +309,7 @@ pub enum FateMode {
 /// One unit's fate at a fates query's horizon.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct UnitFate {
-    /// Dead by the horizon in the expected-damage fight.
+    /// Dead (or captured) by the horizon in the expected-damage fight.
     pub dead: bool,
     /// The frame it died at (to the sim's step).
     pub death_frame: Option<i32>,
@@ -264,6 +321,9 @@ pub struct UnitFate {
     /// The sim's own P(dead by the horizon): the hits' spread around the
     /// expected damage. It ranks units well but is far too sure of itself.
     pub p_raw: f32,
+    /// Held by the enemy at the horizon ([`SimFlags::capture`]): then also
+    /// `dead`, with no health left and `p_raw` 1, as lost to its owner.
+    pub captured: bool,
 }
 
 // ----------------------------------------------------------------------------- hit tables
@@ -587,7 +647,18 @@ impl Model {
         out
     }
 
-    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags, observed: Option<i32>) -> SimWeapon {
+    /// The sim's weapons of unit `u`: its first tube weapon starts with the
+    /// unit's empty tubes ([`SnapUnit::tubes`]), every other tube loaded.
+    fn sim_weapons(&self, u: &SnapUnit, flags: SimFlags) -> Vec<SimWeapon> {
+        let first =
+            flags.sreload.then(|| u.spec.weapons.iter().position(|w| self.sreload.contains_key(&w.name))).flatten();
+        (u.spec.weapons.iter().enumerate())
+            .map(|(i, w)| self.sim_weapon(w, flags, if Some(i) == first { &u.tubes } else { &[] }, u.reload(&w.name)))
+            .collect()
+    }
+
+    /// `empty`: frames until each empty tube is loaded (tube weapons only).
+    fn sim_weapon(&self, w: &WeaponSpec, flags: SimFlags, empty: &[i32], observed: Option<i32>) -> SimWeapon {
         let salvo = w.salvo.max(1);
         let hitscan = w.hitscan();
         let tubes = if flags.sreload { self.sreload.get(&w.name).copied() } else { None };
@@ -600,8 +671,12 @@ impl Model {
             nominal: if hitscan { w.damage as f64 * salvo as f64 } else { w.damage as f64 },
             next: observed.unwrap_or(0).max(0),
             observed_reload: observed.is_some(),
-            // Tubes start loaded.
-            tubes: tubes.map_or_else(Vec::new, |(n, _)| vec![0; n]),
+            // Tubes start loaded, but for those known empty.
+            tubes: tubes.map_or_else(Vec::new, |(n, _)| {
+                let mut t = vec![0; n.saturating_sub(empty.len())];
+                t.extend(empty.iter().take(n).map(|&f| f.max(0)));
+                t
+            }),
             tube_reload: tubes.map_or(0, |(_, r)| r),
             leading: if hitscan { None } else { w.leading },
         }
@@ -610,6 +685,7 @@ impl Model {
     fn sim_unit(&self, u: &SnapUnit, x: f64, weapons: Vec<SimWeapon>) -> SimUnit {
         SimUnit {
             side: u.side,
+            spent: SPENT_ON_FIRING.contains(&u.spec.def.as_str()),
             target: self.hits.target(&u.spec.def),
             hp: u.hp as f64,
             cost: u.spec.cost as f64,
@@ -652,17 +728,7 @@ impl Model {
     /// The snapshot's units on the fight's line, with table keys resolved.
     fn sim_units(&self, snap: &FightSnapshot) -> Vec<SimUnit> {
         let xs = project(snap);
-        snap.units
-            .iter()
-            .zip(xs)
-            .map(|(u, x)| {
-                self.sim_unit(
-                    u,
-                    x,
-                    u.spec.weapons.iter().map(|w| self.sim_weapon(w, snap.flags, u.reload(&w.name))).collect(),
-                )
-            })
-            .collect()
+        snap.units.iter().zip(xs).map(|(u, x)| self.sim_unit(u, x, self.sim_weapons(u, snap.flags))).collect()
     }
 }
 
@@ -708,6 +774,8 @@ impl SimWeapon {
 #[derive(Clone, Debug)]
 struct SimUnit {
     side: u8,
+    /// Spent by its first shot ([`SPENT_ON_FIRING`]).
+    spent: bool,
     target: (Option<u32>, Cls),
     hp: f64,
     cost: f64,
@@ -720,6 +788,14 @@ struct SimUnit {
     alive: bool,
     moving: bool,
 }
+
+/// Unit defs whose weapon is the unit itself: the first shot spends it.
+/// The Puppy's missile is the Puppy (ZK's unit_puppy_handler hides the
+/// unit as it fires), not a launcher that reloads in 1.5 s; the force
+/// planner had picked it 201 times on 782 recorded assaults as 410 damage
+/// every 1.5 s for 45 metal (zkgbai-runs/forceplan/post). Kamikazes that go
+/// off by their death blast are `mech::KAMIKAZE`.
+pub(super) const SPENT_ON_FIRING: [&str; 1] = ["jumpscout"];
 
 /// Positions along the axis from A's centroid to B's (A's centroid at 0).
 fn project(snap: &FightSnapshot) -> Vec<f64> {
@@ -890,6 +966,11 @@ fn simulate(template: &[SimUnit], hits: &HitTables, hazard: Option<&Hazard>, wit
                         target = nearest(&us);
                     }
                 }
+                if us[i].spent {
+                    us[i].alive = false;
+                    killed[side as usize] += us[i].cost;
+                    break;
+                }
             }
         }
         quiet = if shot_fired || (moved && !withdraw) { 0 } else { quiet + DT };
@@ -961,6 +1042,7 @@ mod tests {
                             hp: p[2].parse().unwrap(),
                             x: p[3].parse().unwrap(),
                             z: p[4].parse().unwrap(),
+                            tubes: Vec::new(),
                         }
                     })
                     .collect();
@@ -994,6 +1076,93 @@ mod tests {
         assert_eq!(speed_band(2.0), 2);
         assert_eq!(speed_band(4.0), 3);
         assert_eq!(speed_band(9.0), 3);
+    }
+
+    fn unit(
+        side: u8,
+        def: &str,
+        cost: f32,
+        health: f32,
+        speed: f32,
+        w: Option<(&str, &str, f32, f32, f32)>,
+        x: f32,
+    ) -> SnapUnit {
+        let weapons = w.map_or_else(Vec::new, |(name, kind, range, reload, damage)| {
+            vec![WeaponSpec { leading: None, name: name.into(), weapon_type: kind.into(), range, reload, salvo: 1, damage }]
+        });
+        let spec = UnitSpec {
+            def: def.into(),
+            cost,
+            health,
+            speed,
+            mobile: speed > 0.0,
+            weapons,
+            radius: 12.0,
+            ..UnitSpec::default()
+        };
+        SnapUnit { reloads: Vec::new(), side, hp: health, x, z: 0.0, spec: Arc::new(spec), tubes: Vec::new() }
+    }
+
+    /// A unit whose ground route is longer than the straight line stands
+    /// as far out as the route; one in reach, or straight, keeps its place.
+    #[test]
+    fn unfold_puts_units_at_their_route_distance() {
+        let mk = |side: u8, x: f32, z: f32, speed: f32| SnapUnit {
+            reloads: Vec::new(),
+            side,
+            hp: 100.0,
+            x,
+            z,
+            spec: Arc::new(UnitSpec {
+                def: "u".into(),
+                cost: 50.0,
+                health: 100.0,
+                speed,
+                mobile: speed > 0.0,
+                ..UnitSpec::default()
+            }),
+            tubes: Vec::new(),
+        };
+        let mut snap = FightSnapshot {
+            units: vec![mk(0, 800.0, 0.0, 2.0), mk(0, 0.0, 300.0, 2.0), mk(0, 0.0, -900.0, 2.0), mk(1, 0.0, 0.0, 0.0)],
+            flags: SimFlags::default(),
+        };
+        let moved = snap.unfold(0, (0.0, 0.0), 400.0, |x, _| if x > 100.0 { Some(2000.0) } else { Some(910.0) });
+        assert_eq!(moved, 1);
+        assert!((snap.units[0].x - 2000.0).abs() < 1e-3 && snap.units[0].z.abs() < 1e-3);
+        assert_eq!((snap.units[1].x, snap.units[1].z), (0.0, 300.0));
+        assert_eq!((snap.units[2].x, snap.units[2].z), (0.0, -900.0));
+        assert_eq!((snap.units[3].x, snap.units[3].z), (0.0, 0.0));
+        snap.unfold(0, (0.0, 0.0), 400.0, |_, _| None);
+        assert!(snap.units[2].z <= -UNREACHABLE + 1.0);
+    }
+
+    /// The Puppy is its own missile: one shot, then it is gone, in both
+    /// fights (it had refired every 1.5 s).
+    #[test]
+    fn a_puppy_is_spent_by_its_one_missile() {
+        let m = Model::load().unwrap();
+        let puppy = || {
+            unit(
+                0,
+                "jumpscout",
+                45.0,
+                80.0,
+                3.5,
+                Some(("jumpscout_missile", "MissileLauncher", 168.0, 1.5, 410.1)),
+                0.0,
+            )
+        };
+        let wall = unit(1, "staticstorage", 100.0, 5000.0, 0.0, None, 400.0);
+        let snap = FightSnapshot { units: vec![puppy(), wall], flags: SimFlags::from_switches(false, true, true) };
+        let fates = m.fates(&snap, 30 * 20, FateMode::AMove);
+        assert!(fates[0].dead, "the Puppy is gone once it fires: {:?}", fates[0]);
+        assert!(fates[1].hp_left >= 5000.0 - 420.0, "one missile at most in 20 s: {:?}", fates[1]);
+        // A short-ranged tough turret outlasts one missile in the plain
+        // fight (refiring, eight would have killed it).
+        let stub = unit(1, "turretstub", 100.0, 3000.0, 0.0, Some(("turretstub_gun", "Cannon", 50.0, 1.0, 1.0)), 400.0);
+        let out = m.predict(&FightSnapshot { units: vec![puppy(), stub], flags: SimFlags::default() });
+        assert!(out.killed_b == 0.0, "one Puppy, one missile: {out:?}");
     }
 
     /// The hand-built snapshots against the Python model's numbers
@@ -1067,6 +1236,7 @@ mod tests {
                 hp: 230.0,
                 x: 0.0,
                 z: 0.0,
+                tubes: Vec::new(),
             }],
         };
         let out = m.predict(&snap);
@@ -1101,6 +1271,7 @@ mod commit_tests {
                 }],
                 ..Default::default()
             }),
+            tubes: Vec::new(),
         }
     }
 
@@ -1120,6 +1291,21 @@ mod commit_tests {
         // Unknown observations retain the previous ready-at-start behavior.
         snap.units[1].reloads.clear();
         assert_eq!(model.fates(&snap, 15, FateMode::AMove)[0].hp_left, ready[0].hp_left);
+    }
+
+    #[test]
+    fn tube_inventory_and_engine_spacing_both_apply() {
+        let model = Model::load().unwrap();
+        let (name, &(n, _)) = model.sreload.iter().find(|(_, (n, _))| *n > 1).unwrap();
+        let mut unit = gun(1, 250.0, 400.0);
+        Arc::make_mut(&mut unit.spec).weapons[0].name = name.clone();
+        unit.reloads = vec![(name.clone(), 12)];
+        unit.tubes = vec![90; n];
+        let mut weapons = model.sim_weapons(&unit, SimFlags { sreload: true, ..Default::default() });
+        let weapon = &mut weapons[0];
+        assert_eq!(weapon.next, 12);
+        assert!(!weapon.take_tube(12, 0.0));
+        assert_eq!(weapon.next, 90);
     }
 
     #[test]
