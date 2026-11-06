@@ -70,16 +70,6 @@ impl Ai {
         if emergency {
             return self.eco_factory_emergency_at(site);
         }
-        // Raid memory requests sparse light coverage for this mex's lifetime.
-        // Check the final turret site (usually offset from the mex), so both
-        // admission and queued-task revalidation honor the same request.
-        // This is ordinary budgeted defense, not a factory emergency.
-        if matches!(def.name().as_str(), "turretlaser" | "turrettorp")
-            && def.max_weapon_range() > 0.0
-            && self.eco.raid_mexes.values().any(|&mex| distance(site, mex) <= def.max_weapon_range())
-        {
-            return true;
-        }
         if self
             .strategy
             .as_ref()
@@ -179,7 +169,6 @@ mod tests {
                 1 => c"turretlaser".as_ptr(),
                 2 => c"turrettorp".as_ptr(),
                 3 => c"turretaalaser".as_ptr(),
-                5 => c"turretheavylaser".as_ptr(),
                 _ => c"factorycloak".as_ptr(),
             }
         }
@@ -189,9 +178,6 @@ mod tests {
                 2 => 280.0,
                 _ => 1000.0,
             }
-        }
-        unsafe extern "C" fn range(_: i32, _: i32) -> f32 {
-            300.0
         }
         unsafe extern "C" fn units(_: i32, out: *mut i32, max: i32) -> i32 {
             if !out.is_null() && max >= 3 {
@@ -230,7 +216,6 @@ mod tests {
         let mut ai = super::super::test_ai_with(|cb| {
             cb.UnitDef_getName = Some(name);
             cb.UnitDef_getCost = Some(cost);
-            cb.UnitDef_getMaxWeaponRange = Some(range);
             cb.getTeamUnits = Some(units);
             cb.Unit_getDef = Some(def);
             cb.Unit_getHealth = Some(health);
@@ -274,43 +259,6 @@ mod tests {
         ai.incursions.predicted[0].seconds = 30.0;
         ai.incursions.predicted[0].pos = Vec3::xz(3000.0, 1000.0);
         assert!(!ai.eco_porc_admissible(def, near, true));
-    }
-
-    #[test]
-    fn raided_mex_allows_offset_light_coverage_through_shared_admission_and_revalidation() {
-        let mut ai = ai();
-        let lotus = UnitDef::from_id(ai.cb, 1).unwrap();
-        let site = Vec3::xz(1200.0, 1000.0);
-        assert!(!ai.eco_porc_site_allowed(lotus, site, false));
-        ai.eco.raid_mexes.insert(30, Vec3::xz(1000.0, 1000.0));
-        let id = ai
-            .eco_add_simple(lotus, site, List::Porc, Some(List::Porc))
-            .expect("a raided interior mex must be able to request a turret");
-        let task = ai.eco.tasks.get(id).unwrap();
-        let c = task.as_construction().unwrap();
-        assert!(!c.emergency_porc);
-        assert!(ai.eco_porc_site_allowed(c.build_type, task.position, c.emergency_porc));
-        // Loss of the mex removes the request; no permanent geographic exception.
-        ai.eco.raid_mexes.remove(&30);
-        assert!(!ai.eco_porc_site_allowed(lotus, site, false));
-    }
-
-    #[test]
-    fn raid_memory_does_not_unlock_heavy_remote_or_over_budget_porc() {
-        let mut ai = ai();
-        let site = Vec3::xz(1200.0, 1000.0);
-        ai.eco.raid_mexes.insert(30, Vec3::xz(1000.0, 1000.0));
-        for id in [1, 2] {
-            let def = UnitDef::from_id(ai.cb, id).unwrap();
-            assert!(ai.eco_porc_admissible(def, site, false));
-            assert!(!ai.eco_porc_site_allowed(def, Vec3::xz(1301.0, 1000.0), false));
-            assert!(!ai.eco_porc_site_allowed(def, site, true), "raid history is not an emergency");
-        }
-        assert!(!ai.eco_porc_site_allowed(UnitDef::from_id(ai.cb, 5).unwrap(), site, false));
-        ai.eco.adjusted_income = 10.0; // Existing 370 metal of porc already exceeds the routine cap.
-        let lotus = UnitDef::from_id(ai.cb, 1).unwrap();
-        assert!(!ai.eco_porc_admissible(lotus, site, false));
-        assert!(ai.eco_add_simple(lotus, site, List::Porc, Some(List::Porc)).is_none());
     }
 
     #[test]
