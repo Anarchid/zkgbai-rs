@@ -9,6 +9,7 @@ use springai::NO_TIMEOUT;
 const PROBE_EVERY: i32 = 90;
 const COMMIT_FOR: i32 = 240;
 const STEP: f32 = 650.0;
+const WAYPOINT_REACHED: f32 = 180.0;
 const ARRIVED: f32 = 900.0;
 const SHOT_FOR: i32 = 90;
 const MOVE_BETWEEN_SHOTS: i32 = 90;
@@ -82,6 +83,12 @@ fn directions(pos: Vec3, goal: Vec3, axis: (f32, f32)) -> Vec<Vec3> {
         .collect()
 }
 
+// Completed offensive waypoints cannot win another probe merely by avoiding
+// combat. A short repair route is still useful and must remain eligible.
+fn probe_pending(pos: Vec3, at: Vec3, assault: bool) -> bool {
+    !assault || distance(pos, at) >= WAYPOINT_REACHED
+}
+
 fn replace_route(age: i32, reached: bool, old_score: f32, fresh_score: f32, unsafe_old: bool) -> bool {
     reached || unsafe_old || (age >= COMMIT_FOR && fresh_score > old_score + old_score.abs().max(400.0) * 0.25)
 }
@@ -122,6 +129,9 @@ impl Ai {
         blocked: &[(i32, i32)],
     ) -> Option<Probe> {
         let pos = heavy.pos();
+        if !probe_pending(pos, at, assault) {
+            return None;
+        }
         let def = heavy.def()?;
         let map = self.cb.map();
         if at.x < 32.0
@@ -211,7 +221,7 @@ impl Ai {
                 (Some(old), Some(new))
                     if !replace_route(
                         frame - st.committed,
-                        distance(pos, old.at) < 180.0,
+                        distance(pos, old.at) < WAYPOINT_REACHED,
                         old.score,
                         new.score,
                         old.danger > 0.45 && new.danger < old.danger,
@@ -543,6 +553,17 @@ mod tests {
         assert!(dirs.iter().all(|&d| distance(d, goal) < distance(p, goal) && d.x > p.x));
         assert_eq!(directions(goal, goal, (1.0, 0.0)).len(), 8);
     }
+    #[test]
+    fn reached_agalta_waypoint_releases_the_heavy_to_sweep_the_start_zone() {
+        let pos = Vec3::xz(5805.4, 2392.7);
+        let goal = Vec3::xz(5804.0, 2408.0);
+        assert!(!probe_pending(pos, goal, true), "the completed goal must not win another offensive probe");
+        let next = directions(pos, goal, heading(Vec3::ZERO, pos, goal));
+        assert_eq!(next.len(), 8);
+        assert!(next.into_iter().all(|at| probe_pending(pos, at, true)));
+        assert!(probe_pending(pos, pos, false), "being near home must not prevent repair decisions");
+    }
+
     #[test]
     fn small_score_changes_do_not_oscillate_a_committed_route() {
         assert!(!replace_route(90, false, 100.0, 500.0, false));
