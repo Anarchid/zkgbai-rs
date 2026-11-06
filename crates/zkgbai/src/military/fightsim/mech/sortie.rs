@@ -1,4 +1,4 @@
-//! Experimental, stateless attack/exit queries. No live controller uses this yet.
+//! Stateless attack/exit queries for the experimental harassment controller.
 //! The caller supplies a reachable exit; this flat-plane query cannot certify
 //! terrain, unseen reinforcement, turn rates or protection at that destination.
 use super::*;

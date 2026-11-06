@@ -47,6 +47,7 @@ struct Sortie {
     attack_until: i32,
     until: i32,
     withdrawing: bool,
+    exit_ordered: bool,
     first_shot: Option<i32>,
     /// Read before issuing Attack/Fight, so an already-reloading gun is not a shot.
     reloads: Vec<(i32, i32)>,
@@ -217,14 +218,15 @@ impl Ai {
             self.harassment_release(id, reason);
             return;
         }
-        if p.withdrawing && distance(unit.pos(), p.exit) <= 40.0 {
+        if p.withdrawing && p.exit_ordered && distance(unit.pos(), p.exit) <= 40.0 {
             // The forecast includes stopping here through its horizon. Keep the
             // lease, or the parent controller could charge again before the
             // predicted pursuers die. Firing stays enabled while we wait.
             return;
         }
-        if p.withdrawing && (turn || frame - p.last_order >= 30) {
+        if p.withdrawing && (!p.exit_ordered || turn || frame - p.last_order >= 30) {
             if unit.move_to(p.exit, 0) {
+                p.exit_ordered = true;
                 p.last_order = frame;
             }
             if turn {
@@ -388,6 +390,7 @@ impl Ai {
                 attack_until: frame + (choice.shot + 60).clamp(60, 300),
                 until: frame + HORIZON,
                 withdrawing: false,
+                exit_ordered: false,
                 first_shot: None,
                 reloads,
                 last_order: frame,
@@ -417,6 +420,7 @@ mod tests {
             attack_until: 220,
             until: 700,
             withdrawing: false,
+            exit_ordered: false,
             first_shot: None,
             reloads: vec![(0, 115)],
             last_order: 100,
@@ -550,6 +554,7 @@ mod continuation_tests {
             attack_until: 220,
             until: 700,
             withdrawing: true,
+            exit_ordered: true,
             first_shot: Some(137),
             reloads: vec![(0, 150)],
             last_order: 137,
@@ -570,6 +575,41 @@ mod continuation_tests {
         assert!(!ai.harassment_owns(1));
         assert_eq!(reserved::owner(ai.cb, 1).unwrap().module, "stakeouts");
         assert_eq!(ai.war.harassment.next_check[&1], 820);
+        reserved::clear(ai.cb);
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+    #[test]
+    fn rejected_move_retries_and_arrival_does_not_preserve_an_attack() {
+        let mut ai = crate::military::qrf::loan_test_ai();
+        let u = Unit::from_id(ai.cb, 1).unwrap();
+        let p = Sortie {
+            target: 91,
+            exit: u.pos(),
+            started: 100,
+            attack_until: 220,
+            until: 700,
+            withdrawing: false,
+            exit_ordered: false,
+            first_shot: Some(137),
+            reloads: vec![],
+            last_order: 100,
+            lease: reserved::lend(ai.cb, 1, OWNER).token(),
+            start_hp: 660.0,
+            fight: false,
+        };
+        ai.war.harassment.plans.insert(1, p);
+        reserved::mute(ai.cb, "harassment");
+        reserved::as_module("harassment", || ai.harassment_drive(1, 137));
+        assert!(ai.war.harassment.plans[&1].withdrawing);
+        assert!(!ai.war.harassment.plans[&1].exit_ordered);
+        reserved::unmute(ai.cb, "harassment");
+        reserved::as_module("harassment", || ai.harassment_drive(1, 138));
+        assert!(ai.war.harassment.plans[&1].exit_ordered);
+        assert_eq!(ai.war.harassment.plans[&1].last_order, 138);
         reserved::clear(ai.cb);
     }
 }
