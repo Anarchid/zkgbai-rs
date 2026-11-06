@@ -13,7 +13,7 @@ const IMP_RESPONSE: f32 = 4.0;
 
 #[derive(Clone)]
 pub(super) struct Clump {
-    members: BTreeSet<i32>,
+    members: BTreeMap<i32, f32>,
     tier: Tier,
     position: Vec3,
     range: f32,
@@ -48,7 +48,7 @@ fn observed_clumps(mut contacts: Vec<Contact>) -> Vec<Clump> {
         }
         let (tier, center) = (seed.tier, seed.position);
         let mut group = Clump {
-            members: BTreeSet::new(),
+            members: BTreeMap::new(),
             tier,
             position: Vec3::ZERO,
             range: 0.0,
@@ -60,7 +60,7 @@ fn observed_clumps(mut contacts: Vec<Contact>) -> Vec<Clump> {
             if c.tier != tier || distance(center, c.position) > CLUMP_RADIUS {
                 return true;
             }
-            group.members.insert(c.id);
+            group.members.insert(c.id, c.value);
             group.position.x += c.position.x;
             group.position.z += c.position.z;
             group.range = group.range.max(c.range);
@@ -78,21 +78,30 @@ fn observed_clumps(mut contacts: Vec<Contact>) -> Vec<Clump> {
 }
 
 fn remember_clumps(memory: &mut Vec<Clump>, fresh: Vec<Clump>, dead: &BTreeSet<i32>, frame: i32) {
-    let observed: BTreeSet<_> = fresh.iter().flat_map(|g| g.members.iter().copied()).collect();
+    let observed: BTreeSet<_> = fresh.iter().flat_map(|g| g.members.keys().copied()).collect();
     for g in memory.iter_mut() {
-        let before = g.members.len();
-        g.members.retain(|id| !dead.contains(id) && !observed.contains(id));
-        if before > 0 {
-            g.value *= g.members.len() as f32 / before as f32;
-        }
+        g.members.retain(|id, _| !dead.contains(id) && !observed.contains(id));
+        g.value = g.members.values().sum();
     }
     memory.retain(|g| frame - g.seen <= CLUMP_KEEP && g.members.len() >= CLUMP_UNITS);
     memory.extend(fresh);
-    memory.sort_by_key(|g| g.members.first().copied());
+    memory.sort_by_key(|g| g.members.keys().next().copied());
 }
 
-pub(super) fn mine_quota(clumps: &[Clump]) -> usize {
-    clumps.iter().map(|g| g.members.len() / CLUMP_UNITS).sum::<usize>().min(RESERVE_MINES)
+pub(super) fn mine_quota(clumps: &[Clump], mine_cost: f32) -> usize {
+    if !mine_cost.is_finite() || mine_cost <= 0.0 {
+        return 0;
+    }
+    clumps
+        .iter()
+        .map(|g| {
+            // Each slot needs a pair of clustered combat units and twice the
+            // producing mine's metal cost. One expensive escort is not eight jobs.
+            let affordable = (g.value / (2.0 * mine_cost)).floor() as usize;
+            affordable.min(g.members.len() / CLUMP_UNITS).min(RESERVE_MINES)
+        })
+        .sum::<usize>()
+        .min(RESERVE_MINES)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -273,13 +282,17 @@ impl Ai {
             })
             .collect();
         let dead = self.war.targets.values().filter(|e| e.is_dead).map(|e| e.unit_id).collect();
-        let before = mine_quota(&self.misc_handler.mines.clumps);
+        let before = (self.sapper_mine_quota("cloakbomb"), self.sapper_mine_quota("shieldbomb"));
         remember_clumps(&mut self.misc_handler.mines.clumps, observed_clumps(contacts), &dead, frame);
-        let after = mine_quota(&self.misc_handler.mines.clumps);
+        let after = (self.sapper_mine_quota("cloakbomb"), self.sapper_mine_quota("shieldbomb"));
         if before != after {
             self.log(&format!(
-                "sappers: {} observed clumps, mine target {before} -> {after}",
-                self.misc_handler.mines.clumps.len()
+                "sappers: {} observed clumps, mine targets Imp {} -> {}, Snitch {} -> {}",
+                self.misc_handler.mines.clumps.len(),
+                before.0,
+                after.0,
+                before.1,
+                after.1
             ));
         }
     }
@@ -497,31 +510,50 @@ mod tests {
     }
 
     #[test]
-    fn five_contacts_unlock_one_mine_and_large_or_distinct_squads_scale_it() {
-        assert_eq!(mine_quota(&test_clumps(4)), 0);
-        assert_eq!(mine_quota(&test_clumps(5)), 1);
-        assert_eq!(mine_quota(&test_clumps(9)), 1);
-        assert_eq!(mine_quota(&test_clumps(10)), 2);
-        assert_eq!(mine_quota(&test_clumps(100)), RESERVE_MINES);
-        let mut two = test_clumps(5);
-        let mut other = test_clumps(5).remove(0);
-        other.members = (10..15).collect();
+    fn pack_value_relative_to_mine_cost_controls_demand() {
+        let mut three = test_clumps(3);
+        three[0].members.values_mut().for_each(|v| *v = 130.0);
+        three[0].value = 390.0;
+        assert_eq!(mine_quota(&three, 170.0), 1, "three Scorchers pay for a Snitch");
+        assert_eq!(mine_quota(&three, 125.0), 1, "and an Imp");
+        assert_eq!(mine_quota(&three, 200.0), 0, "use the actual producer cost");
+        let mut cheap = three.clone();
+        cheap[0].value = 120.0;
+        assert_eq!(mine_quota(&cheap, 170.0), 0, "three cheap scouts do not pay");
+        assert_eq!(mine_quota(&test_clumps(1), 25.0), 0, "a lone unit is not a pack");
+        assert_eq!(mine_quota(&test_clumps(10), 170.0), 2);
+        assert_eq!(mine_quota(&test_clumps(100), 170.0), RESERVE_MINES);
+        let mut two = three.clone();
+        let mut other = three.remove(0);
+        other.members = (10..13).map(|id| (id, 130.0)).collect();
         other.position.x += 2000.0;
         two.push(other);
-        assert_eq!(mine_quota(&two), 2);
+        assert_eq!(mine_quota(&two, 170.0), 2);
+        assert_eq!(mine_quota(&two, 0.0), 0);
+    }
+
+    #[test]
+    fn a_dead_expensive_member_does_not_leave_phantom_pack_value() {
+        let mut memory = test_clumps(3);
+        memory[0].members = [(0, 1000.0), (1, 40.0), (2, 40.0)].into_iter().collect();
+        memory[0].value = 1080.0;
+        assert_eq!(mine_quota(&memory, 170.0), 1);
+        remember_clumps(&mut memory, vec![], &[0].into_iter().collect(), 100);
+        assert_eq!(memory[0].value, 80.0);
+        assert_eq!(mine_quota(&memory, 170.0), 0);
     }
 
     #[test]
     fn repeated_sightings_merges_deaths_and_fog_do_not_inflate_demand() {
         let mut memory = test_clumps(10);
         remember_clumps(&mut memory, test_clumps(10), &BTreeSet::new(), 100);
-        assert_eq!(mine_quota(&memory), 2);
+        assert_eq!(mine_quota(&memory, 250.0), 2);
         remember_clumps(&mut memory, vec![], &[0, 1, 2, 3, 4].into_iter().collect(), 200);
-        assert_eq!(mine_quota(&memory), 1);
+        assert_eq!(mine_quota(&memory, 250.0), 1);
         remember_clumps(&mut memory, vec![], &BTreeSet::new(), CLUMP_KEEP);
-        assert_eq!(mine_quota(&memory), 1);
+        assert_eq!(mine_quota(&memory, 250.0), 1);
         remember_clumps(&mut memory, vec![], &BTreeSet::new(), CLUMP_KEEP + 1);
-        assert_eq!(mine_quota(&memory), 0);
+        assert_eq!(mine_quota(&memory, 250.0), 0);
     }
 
     #[test]
@@ -539,11 +571,12 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert!(observed_clumps(contacts(250.0)).is_empty());
-        assert_eq!(mine_quota(&observed_clumps(contacts(100.0))), 1);
+        assert_eq!(mine_quota(&observed_clumps(contacts(250.0)), 170.0), 0);
+        assert_eq!(mine_quota(&observed_clumps(contacts(100.0)), 170.0), 1);
         let mut mixed = contacts(0.0);
+        mixed.truncate(3);
         mixed[0].tier = Tier::Spider;
-        assert!(observed_clumps(mixed).is_empty());
+        assert_eq!(mine_quota(&observed_clumps(mixed), 125.0), 0);
     }
 
     #[test]

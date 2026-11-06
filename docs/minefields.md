@@ -1,16 +1,20 @@
 # Mine ambushes
 
-Cloak and shield factories share a demand target based on observed enemy ground
-combat squads. Five identified combat units within 300 elmos of a common member
-unlock one mine; every additional five in that squad unlock another. Distinct
-squads add together, capped at eight mines. The grouping separates movement tiers
-and does not join long chains of scattered units. Existing mines, nanoframes and
-accepted production orders all count. Conquest no longer creates a separate
-unconditional quota. The older random bomb choices are removed, so neither
-factory can bypass observed-clump demand. Excess mines are retained when demand falls.
+Cloak and shield factories share a reserve counted across completed mines,
+nanoframes and accepted production orders. Demand uses the observed enemy pack's
+metal value divided by twice the producing mine's actual metal cost, rounded down.
+Each slot also requires at least two pack members; a lone expensive unit cannot
+justify a minefield. Distinct packs add together, capped at eight mines.
+
+For example, three 130-metal Scorchers (390 metal) justify one 170-metal Snitch;
+three 40-metal scouts do not. Packs contain identified ground combat units within
+300 elmos of a common member, separated by movement tier. Long chains do not count
+as a single pack. Conquest and random factory choices cannot bypass this demand.
+Excess mines are retained when demand falls.
 
 Squad membership is remembered for 90 seconds after the last qualifying sighting.
-Repeated sightings replace overlapping membership; confirmed deaths remove it.
+Repeated sightings replace overlapping membership; confirmed deaths subtract
+the dead members’ actual stored metal values.
 This is observation memory, not a permanent high-water mark.
 
 Every three seconds, deployment considers actual friendly buildings and committed
@@ -55,3 +59,7 @@ The currently shipped older main/wip branches do not yet implement checkpoints.
 Their mine-only port omits checkpoint annotations and the codec-specific test;
 no save/load capability is advertised. The compatibility delta is kept with the
 mine shipping records for the separate checkpoint integration.
+
+Value-based demand preserves existing mine assignments and production reservations.
+Remembered member values are owned checkpoint state; the older membership-set
+schema is rejected rather than guessing per-member values.

@@ -1025,7 +1025,7 @@ impl Ai {
         }
 
         // Shared mine demand, scaled by recently observed enemy clumps.
-        if self.sapper_wants_mines() {
+        if self.sapper_wants_mines("cloakbomb") {
             return "cloakbomb";
         }
 
@@ -1187,7 +1187,7 @@ impl Ai {
         }
 
         // Shared mine demand, scaled by recently observed enemy clumps.
-        if self.sapper_wants_mines() {
+        if self.sapper_wants_mines("shieldbomb") {
             return "shieldbomb";
         }
 
