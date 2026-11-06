@@ -15,8 +15,10 @@
 //!
 //! From three allies a side (us included) an opening may be an air plant
 //! (user, 2026-11-02): [`AIR_OPENING`] of the rolls, the plane or gunship
-//! plant at random. Air moves as one type, so a second air roll in the
-//! alliance gives way at the plop.
+//! plant at random. Once an ally has air, both air plants give way to a
+//! viable surface opening, even if that repeats an allied movement type.
+//! Recheck unspent queued plops too; started factories and explicit picks
+//! remain binding. This policy adds no new behavioral state.
 
 use std::collections::BTreeSet;
 
@@ -74,9 +76,15 @@ fn waits(frame: i32, team: i32, peers: &BTreeSet<i32>, known: impl Fn(i32) -> bo
     frame < WAIT + SLOT * rank && peers.range(..team).any(|&t| !known(t))
 }
 
-/// Of the `viable` openings, those whose units move unlike any of the
-/// `used` ones', else those not used, else all.
+/// Exclude a second air role when surface openings are viable. Of the
+/// remaining openings, prefer unused movement types, then unused factories.
 fn diverse(viable: &BTreeSet<String>, used: &BTreeSet<String>) -> BTreeSet<String> {
+    // Air is one opening role, not merely a diversity preference. Do not
+    // reintroduce the other air plant when every movement type is taken.
+    // Keep the air-only fallback for maps with no viable surface opening.
+    let surface: BTreeSet<_> = viable.iter().filter(|f| !AIR_FACTORIES.contains(&f.as_str())).cloned().collect();
+    let viable =
+        if used.iter().any(|f| AIR_FACTORIES.contains(&f.as_str())) && !surface.is_empty() { &surface } else { viable };
     let moved: BTreeSet<&str> = used.iter().map(|u| movetype(u)).collect();
     let fresh: BTreeSet<_> = viable.iter().filter(|v| !moved.contains(movetype(v))).cloned().collect();
     if !fresh.is_empty() {
@@ -311,7 +319,6 @@ impl Ai {
         if !self.eco.user_fac.is_empty() || self.eco.dev_pick.is_some() || self.rush_binds_opening() {
             return;
         }
-        let used = self.eco_allied_plop_types();
         let duplicates: Vec<_> = self
             .eco
             .factory_tasks
@@ -320,16 +327,19 @@ impl Ai {
                 let c = self.eco.tasks.get(id)?.as_construction()?;
                 let worker = self.eco.workers.get(&c.assigned_plop)?;
                 let name = self.defs.name(c.build_type);
+                // Selection removed this task's type from the pool. Put
+                // it back for the same policy check used by a fresh plop.
+                let mut viable = self.eco.potential_fac_list.clone();
+                viable.insert(name.to_owned());
                 (c.fac_plop
                     && c.target.is_none()
                     && worker.has_plop()
-                    && used.contains(name)
-                    && self.eco.potential_fac_list.iter().any(|f| !used.contains(f)))
+                    && !self.eco_plop_choices(&viable).contains(name))
                 .then(|| (id, c.assigned_plop, name.to_owned()))
             })
             .collect();
         for (id, wid, name) in duplicates {
-            self.log(&format!("economy: ally placed or queued {name}; replanning our unspent plop"));
+            self.log(&format!("economy: {name} overlaps an allied opening; replanning our unspent plop"));
             self.eco.drop_construction_task(id);
             if let Some(w) = self.eco.workers.get_mut(&wid) {
                 w.assigned_plop = false;
@@ -399,6 +409,21 @@ mod tests {
         assert!(diverse(&BTreeSet::new(), &viable).is_empty());
     }
 
+    #[test]
+    fn allied_air_excludes_both_plants_even_after_surface_diversity_is_exhausted() {
+        for air in AIR_FACTORIES {
+            let viable = names(&["factoryplane", "factorygunship", "factorycloak", "factoryshield"]);
+            assert_eq!(diverse(&viable, &names(&[air])), names(&["factorycloak", "factoryshield"]));
+            assert_eq!(diverse(&viable, &names(&[air, "factorycloak"])), names(&["factoryshield"]));
+            assert_eq!(
+                diverse(&viable, &names(&[air, "factorycloak", "factoryshield"])),
+                names(&["factorycloak", "factoryshield"])
+            );
+            // Only air can play this map: a second air opening beats none.
+            assert!(!diverse(&names(&AIR_FACTORIES), &names(&[air])).is_empty());
+        }
+    }
+
     use crate::economy::{Worker, WorkerTask};
     use springai::{Callback, SkirmishAi, Unit, Vec3, ffi};
     use std::cell::Cell;
@@ -411,20 +436,29 @@ mod tests {
     }
 
     fn pending_plop() -> (Ai, super::super::TaskId) {
+        pending_plop_of("factorygunship")
+    }
+
+    fn pending_plop_of(opening: &str) -> (Ai, super::super::TaskId) {
         unsafe extern "C" fn ids(_: i32, out: *mut i32, max: i32) -> i32 {
             if !DEFS_READY.with(Cell::get) {
                 return 0;
             }
-            if !out.is_null() && max >= 2 {
+            if !out.is_null() && max >= 3 {
                 unsafe {
                     out.write(1);
                     out.add(1).write(2);
+                    out.add(2).write(3);
                 }
             }
-            2
+            3
         }
         unsafe extern "C" fn name(_: i32, id: i32) -> *const c_char {
-            if id == 1 { c"dyntrainer".as_ptr() } else { c"factorygunship".as_ptr() }
+            match id {
+                1 => c"dyntrainer".as_ptr(),
+                2 => c"factorygunship".as_ptr(),
+                _ => c"factoryplane".as_ptr(),
+            }
         }
         unsafe extern "C" fn def(_: i32, id: i32) -> i32 {
             if id == 10 { 1 } else { 2 }
@@ -491,8 +525,8 @@ mod tests {
         ai.iq.ai_allies = BTreeSet::from([0, 4]);
         ai.iq.peers = BTreeSet::from([0, 4]);
         ai.eco.potential_fac_list = names(&["factoryveh"]);
-        ai.eco.opening = Some("factorygunship".into());
-        let def = ai.defs.get("factorygunship").unwrap();
+        ai.eco.opening = Some(opening.into());
+        let def = ai.defs.get(opening).unwrap();
         ai.eco.opening_site = Some((def, Vec3::xz(100.0, 100.0), 0));
         ai.iq.sent = true;
         let mut task = WorkerTask::construction_plop(def, Vec3::xz(100.0, 100.0), 0, true);
@@ -589,20 +623,53 @@ mod tests {
 
     #[test]
     fn preserves_started_factories_explicit_choices_and_exhausted_diversity() {
-        for case in 0..5 {
-            let (mut ai, id) = pending_plop();
-            match case {
-                0 => ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().target = Unit::from_id(ai.cb, 30),
-                1 => ai.eco.user_fac = "factorygunship".into(),
-                2 => ai.eco.dev_pick = Some(1),
-                3 => ai.eco.potential_fac_list.clear(),
-                _ => ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().fac_plop = false,
+        for opening in AIR_FACTORIES {
+            for case in 0..5 {
+                let (mut ai, id) = pending_plop_of(opening);
+                match case {
+                    0 => {
+                        ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().target =
+                            Unit::from_id(ai.cb, 30)
+                    }
+                    1 => ai.eco.user_fac = opening.into(),
+                    2 => ai.eco.dev_pick = Some(1),
+                    3 => ai.eco.potential_fac_list.clear(),
+                    _ => ai.eco.tasks.get_mut(id).unwrap().as_construction_mut().unwrap().fac_plop = false,
+                }
+                ai.eco_coordinate_plops();
+                assert!(ai.eco.tasks.get(id).is_some(), "{opening} case {case}");
+                assert!(ai.eco.workers[&10].assigned_plop);
+                STOPS.with(|s| assert_eq!(s.get(), 0));
             }
-            ai.eco_coordinate_plops();
-            assert!(ai.eco.tasks.get(id).is_some(), "case {case}");
-            assert!(ai.eco.workers[&10].assigned_plop);
-            STOPS.with(|s| assert_eq!(s.get(), 0));
         }
+    }
+
+    #[test]
+    fn allied_gunships_cancel_queued_planes_even_when_surface_types_are_taken() {
+        let (mut ai, id) = pending_plop_of("factoryplane");
+        // Even when all surface types are already represented, another
+        // ground plop is preferable to a second allied air plop.
+        ai.iq.teams.insert(
+            0,
+            vec![crate::iq::Plan { def_name: "factorygunship".into(), def_id: 2, pos: Vec3::ZERO, face: 0, frame: 7 }],
+        );
+        ai.iq.teams.insert(
+            4,
+            vec![crate::iq::Plan { def_name: "factoryveh".into(), def_id: 4, pos: Vec3::ZERO, face: 0, frame: 8 }],
+        );
+        ai.iq.ai_allies.remove(&4); // a human's ground plan takes priority
+        ai.eco.potential_fac_list.insert("factorygunship".into());
+        // The queue alone reserves the air role before any placement.
+        assert!(ai.iq.placed_factories.is_empty());
+        assert_eq!(ai.eco_plop_choices(&ai.eco.potential_fac_list), names(&["factoryveh"]));
+        ai.eco_coordinate_plops();
+        assert!(ai.eco.tasks.get(id).is_none());
+        assert!(!ai.eco.workers[&10].assigned_plop);
+        assert!(ai.eco.opening.is_none());
+        assert!(ai.eco.opening_site.is_none());
+        assert!(!ai.iq.sent);
+        assert_eq!(ai.eco_plop_choices(&ai.eco.potential_fac_list), names(&["factoryveh"]));
+        STOPS.with(|s| assert_eq!(s.get(), 1));
     }
 
     #[test]
