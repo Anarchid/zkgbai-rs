@@ -158,6 +158,7 @@ pub enum Kind {
     Antinuke,
     Energy,
     Operator,
+    Special,
 }
 
 impl Kind {
@@ -169,6 +170,7 @@ impl Kind {
             Kind::Antinuke => "antinuke",
             Kind::Energy => "energy",
             Kind::Operator => "operator",
+            Kind::Special => "special",
         }
     }
 }
@@ -196,8 +198,8 @@ pub struct Issue {
     pub started: bool,
     progress: projects::Progress,
     retry_at: i32,
-    state: &'static str,
-    reason: &'static str,
+    pub(crate) state: &'static str,
+    pub(crate) reason: &'static str,
     assigned: usize,
 }
 
@@ -443,6 +445,17 @@ impl Ai {
         let pos = t.get_pos();
         let (cost, build_time) = (c.build_type.cost(self.metal), c.build_type.build_time());
         if let Some(i) = self.logistics.issues.get_mut(&task) {
+            // Allied adoption can move a task without changing its identity.
+            // Travel, remaining work and crew progress must follow that frame.
+            if i.pos != pos || i.what != what {
+                i.pos = pos;
+                i.what = what;
+                i.cost = cost;
+                i.build_time = build_time;
+                i.crew.clear();
+                i.retry_at = 0;
+                i.progress.start(self.frame);
+            }
             i.worth = worth;
             i.why = why.to_owned();
             i.against = against;

@@ -151,6 +151,7 @@ impl Ai {
     /// waits until its site has it, while the planner links it up.
     pub(super) fn eco_add_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
         if self.eco_super_project_exposed(def, pos) {
+            self.eco_special_report(&def.name(), "blocked", "missile_exposure", None);
             return;
         }
         let needs = self.eco.grid_defs.needs(def.id());
@@ -166,6 +167,7 @@ impl Ai {
                 pos.z
             ));
             self.eco.pending_power = Some(PendingPower { def, pos, list, since: self.frame });
+            self.eco_special_report(&def.name(), "waiting", "power_connection", None);
         }
     }
 
@@ -188,7 +190,14 @@ impl Ai {
         if let Some(c) = ct.as_construction_mut() {
             c.frame_issued = self.frame;
         }
-        self.eco_add_construction(ct, Some(list), Some(list));
+        let task = self.eco_add_construction(ct, Some(list), Some(list));
+        match task {
+            Some(id) => {
+                self.eco_track_special(id);
+                self.eco_special_report(&def.name(), "accepted", "awaiting_crew", Some(id));
+            }
+            None => self.eco_special_report(&def.name(), "blocked", "construction_admission", None),
+        }
     }
 
     /// Link starved buildings to power, and (late) the grids to each other.
@@ -703,5 +712,24 @@ mod tests {
         assert_eq!(points.len(), 4);
         // Close by, one does.
         assert_eq!(chain(a, ra, Vec3::xz(800.0, 0.0), rb, pr).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod special_dependency_tests {
+    use super::*;
+    #[test]
+    fn power_dependency_keeps_its_site_without_starting_a_duplicate() {
+        let mut ai = crate::economy::test_ai_with(|_| {});
+        ai.eco.chose_sup_wep = true;
+        ai.eco.s_wep = 1;
+        let pos = Vec3::xz(1500.0, 1000.0);
+        ai.eco.pending_power = Some(PendingPower {
+            def: UnitDef::from_id(ai.cb, 2).unwrap(), pos, list: List::SuperWep, since: 30,
+        });
+        ai.eco_special_update();
+        assert_eq!(ai.eco_special_json()["reason"], "power_connection");
+        assert_eq!(ai.eco.pending_power.as_ref().unwrap().pos, pos);
+        assert!(ai.eco.super_wep_tasks.is_empty());
     }
 }
