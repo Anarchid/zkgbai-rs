@@ -1099,7 +1099,11 @@ impl Ai {
         let new_type = if nfac > 0 && !is_plop && self.eco.new_fac_due { self.eco_new_factory_type() } else { None };
         let mut timed_expansion = false;
 
-        if self.eco.potential_fac_list.is_empty() && reach_fac.is_none() && new_type.is_none() {
+        if self.eco.potential_fac_list.is_empty()
+            && reach_fac.is_none()
+            && new_type.is_none()
+            && self.rush_opening().is_none()
+        {
             self.eco.added_facs = false;
             return;
         }
@@ -1138,6 +1142,11 @@ impl Ai {
             factory = self.defs.get(&dev_fac);
             self.eco.potential_fac_list.remove(&dev_fac);
             fac_name = dev_fac;
+        } else if let Some(rushed) = self.rush_opening().filter(|_| nfac == 0) {
+            // The rush commitment survives failed placement and candidate pruning.
+            fac_name = rushed.to_owned();
+            factory = self.defs.get(rushed);
+            self.eco.potential_fac_list.remove(rushed);
         } else if let Some(reach_fac) = reach_fac {
             factory = self.defs.get(&reach_fac);
             self.eco.potential_fac_list.remove(&reach_fac);
@@ -1173,7 +1182,7 @@ impl Ai {
             fac_name = weighted_pick(&choices, weight, kgb_rand()).unwrap_or_default();
             self.eco_air_tempo_rolled(&fac_name, weight(&fac_name));
             // The opening rolled at the start (the commander suits it).
-            if let Some(opening) = self.eco.opening.take().filter(|f| nfac == 0 && choices.contains(f)) {
+            if let Some(opening) = self.eco.opening.clone().filter(|f| nfac == 0 && choices.contains(f)) {
                 fac_name = opening;
             }
             factory = self.defs.get(&fac_name);
@@ -1264,7 +1273,7 @@ impl Ai {
             (position, facing) = site;
         } else if self.fac.factories.is_empty() || is_plop {
             // Where the pregame announced it to allies, if it still fits.
-            let announced = (self.eco.opening_site.take())
+            let announced = (self.eco.opening_site)
                 .filter(|&(def, pos, face)| {
                     def.id() == factory.id()
                         && self.eco_build_check(factory, pos, face)
@@ -1389,6 +1398,11 @@ impl Ai {
             let id = self.eco.tasks.insert(ct);
             self.eco.construction_tasks.push(id);
             self.eco.factory_tasks.push(id);
+            if nfac == 0 {
+                // A placement attempt is not yet a committed construction task.
+                self.eco.opening = None;
+                self.eco.opening_site = None;
+            }
             // Selecting a type is only an attempt. Failed siting, reachability
             // or energy checks must leave the timed request pending.
             if timed_expansion {

@@ -536,9 +536,7 @@ impl Ai {
             units.into_iter().find(|u| u.team() == rusher && u.health() > 0.0 && self.defs.name_of(*u) == factory);
         let Some(unit) = found else {
             if frame > FACTORY_BY {
-                self.log(&format!("rush: over: team {rusher}'s {factory} never stood"));
-                self.op_emit("rush", json!({"over": "no factory"}));
-                self.eco.rush.state = State::Over;
+                self.rush_end("no factory");
             }
             return;
         };
@@ -620,21 +618,30 @@ impl Ai {
     }
 
     fn rush_end(&mut self, why: &str) {
-        let State::On(plan) = std::mem::replace(&mut self.eco.rush.state, State::Over) else { return };
-        let minutes = (self.frame - plan.since) as f32 / 1800.0;
-        self.log(&format!("rush: over after {minutes:.1} min: {why}"));
-        self.op_emit("rush", json!({"over": why, "minutes": minutes}));
-        // The commanders stop guarding (the factory builds on), and go back
-        // to work.
-        for wid in self.eco.rush.commander.into_iter() {
-            let Some(w) = self.eco.workers.get(&wid) else { continue };
-            if guards(w.unit, plan.factory) {
-                w.unit.stop(0);
+        // Planned rushes hold factories too. Every exit must release them;
+        // the engine does not repeatedly emit idle events for an empty queue.
+        match std::mem::replace(&mut self.eco.rush.state, State::Over) {
+            State::Planned { rusher, factory, .. } => {
+                self.log(&format!("rush: over: team {rusher}'s {factory} never stood"));
+                self.op_emit("rush", json!({"over": why}));
             }
-            super::erase_one_dq(&mut self.eco.assigned, wid);
-            if !self.eco.idlers.contains(&wid) {
-                self.eco.idlers.push_back(wid);
+            State::On(plan) => {
+                let minutes = (self.frame - plan.since) as f32 / 1800.0;
+                self.log(&format!("rush: over after {minutes:.1} min: {why}"));
+                self.op_emit("rush", json!({"over": why, "minutes": minutes}));
+                // Release only the commanders recruited to an active rush.
+                for wid in self.eco.rush.commander.take().into_iter() {
+                    let Some(w) = self.eco.workers.get(&wid) else { continue };
+                    if guards(w.unit, plan.factory) {
+                        w.unit.stop(0);
+                    }
+                    super::erase_one_dq(&mut self.eco.assigned, wid);
+                    if !self.eco.idlers.contains(&wid) {
+                        self.eco.idlers.push_back(wid);
+                    }
+                }
             }
+            _ => return,
         }
         // The factories held go back to work.
         let idle: Vec<i32> = (self.fac.factories.iter())
@@ -691,8 +698,18 @@ impl Ai {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    pub(crate) fn planned_rush(ai: &mut Ai) {
+        ai.eco.rush.participating = true;
+        ai.eco.rush.state = crate::economy::rush::State::Planned {
+            rusher: ai.team_id,
+            factory: "factoryamph",
+            heavy: ai.defs.get("amphassault").unwrap(),
+            called: "Grizzly",
+        };
+    }
 
     #[test]
     fn odds_rise_as_the_front_crowds() {
