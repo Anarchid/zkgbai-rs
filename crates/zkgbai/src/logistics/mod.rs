@@ -172,6 +172,7 @@ pub enum Kind {
     Antinuke,
     Energy,
     Operator,
+    Special,
     Allied,
 }
 
@@ -186,6 +187,7 @@ impl Kind {
             Kind::Antinuke => "antinuke",
             Kind::Energy => "energy",
             Kind::Operator => "operator",
+            Kind::Special => "special",
             Kind::Allied => "allied",
         }
     }
@@ -217,8 +219,8 @@ pub struct Issue {
     target_team: Option<i32>,
     progress: projects::Progress,
     retry_at: i32,
-    state: &'static str,
-    reason: &'static str,
+    pub(crate) state: &'static str,
+    pub(crate) reason: &'static str,
     assigned: usize,
 }
 

@@ -1731,20 +1731,9 @@ impl Ai {
             }
         }
 
-        for &id in &self.eco.super_wep_tasks {
-            if invalid.contains(&id) {
-                continue;
-            }
-            let stale = self
-                .eco
-                .tasks
-                .get(id)
-                .and_then(|t| t.as_construction())
-                .is_some_and(|c| frame - c.frame_issued > 900 && c.target.is_none());
-            if stale {
-                invalid.push(id);
-            }
-        }
+        // Special projects retain their identity while crews travel or wait
+        // for resources. Invalid sites still fail the shared checks above;
+        // lack of progress is handled by the project coordinator, not age.
         // remove old porc push tasks, so as not to waste metal on unneeded porc.
         for &id in &self.eco.porc_tasks {
             if invalid.contains(&id) {

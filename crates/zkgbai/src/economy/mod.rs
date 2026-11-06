@@ -32,6 +32,7 @@ pub mod rush;
 mod safespot;
 mod silo;
 mod sparrow;
+mod special;
 pub mod tasks;
 mod team_energy;
 pub mod terraform;
@@ -174,6 +175,7 @@ pub struct EconomyManager {
     aas: Vec<Unit>,
     screamers: Vec<Unit>,
     pub(crate) super_weps: Vec<Unit>,
+    special: special::Status,
     storages: Vec<Unit>,
     initial_fac_list: BTreeSet<String>,
     potential_fac_list: BTreeSet<String>,
@@ -434,6 +436,7 @@ impl EconomyManager {
             aas: Vec::new(),
             screamers: Vec::new(),
             super_weps: Vec::new(),
+            special: special::Status::default(),
             storages: Vec::new(),
             initial_fac_list: BTreeSet::new(),
             potential_fac_list: BTreeSet::new(),
@@ -927,6 +930,7 @@ impl Ai {
             self.eco_watch_allied_projects();
             // remove finished or invalidated tasks
             self.eco_clean_orders();
+            self.eco_special_update();
             self.eco_plan_team_energy();
             self.eco_plan_army_support();
 

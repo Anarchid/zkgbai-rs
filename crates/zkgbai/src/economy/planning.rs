@@ -726,12 +726,13 @@ impl Ai {
         if !self.eco.has_super_wep
             && self.eco.super_wep_tasks.is_empty()
             && self.eco.s_wep != 1
+            && !self.eco_awaiting_power()
             && self.eco_alliance_nuke().is_none()
             && self.nukes_wanted()
         {
             if let Some((p, v)) = self.nukes_build_target() {
                 self.log(&format!(
-                    "nukes: {v:.0} metal in one blast at ({:.0}, {:.0}) unguarded; building a silo",
+                    "nukes: {v:.0} metal in one blast at ({:.0}, {:.0}) unguarded; requesting a silo",
                     p.x, p.z
                 ));
             }
@@ -739,13 +740,8 @@ impl Ai {
             self.eco.chose_sup_wep = true;
         }
 
-        if self.eco.chose_sup_wep {
-            if (self.eco.s_wep == 0 || self.eco.has_super_wep) && self.eco.super_wep_tasks.is_empty() {
-                self.eco_create_bertha_task();
-            } else if self.eco.s_wep > 0 && !self.eco.has_super_wep && self.eco.super_wep_tasks.is_empty() {
-                self.eco_create_super_wep_task();
-            }
-        }
+        // Execution is serviced every second, independently of which worker
+        // happens to request another job (see `special`).
 
         // do we need a protector? (also when the enemy could be hiding one)
         let suspicious = self.intel_wants_anti();
@@ -1497,7 +1493,7 @@ impl Ai {
 
     /// Superweapons need a rear site beyond tactical strikes from enemy
     /// territory, clear of the front and factory yards.
-    fn eco_bad_super_wep_site(&self, position: Vec3) -> bool {
+    pub(super) fn eco_bad_super_wep_site(&self, position: Vec3) -> bool {
         position.x < 0.0
             || self.missiles_enemy_reaches(position)
             || self.graph.is_enemy_territory(position)
@@ -1505,17 +1501,20 @@ impl Ai {
             || self.eco_get_nearest_fac(position).is_some_and(|f| distance(position, f.get_pos()) < 300.0)
     }
 
-    fn eco_create_bertha_task(&mut self) {
-        if self.fac.factories.is_empty() || self.eco.radars.is_empty() || self.eco_awaiting_power() {
-            return; // Eh, no.
+    pub(super) fn eco_create_bertha_task(&mut self) {
+        if self.fac.factories.is_empty() || self.eco.radars.is_empty() {
+            self.eco_special_report("staticheavyarty", "blocked", "factory_or_radar", None);
+            return;
         }
         let Some(bertha) = self.defs.get("staticheavyarty") else {
+            self.eco_special_report("staticheavyarty", "blocked", "definition_missing", None);
             return;
         };
-        if self.eco_assist_ally(bertha) {
+        if self.eco_assist_ally(bertha) { return; }
+        let Some(position) = self.eco_bertha_site(bertha) else {
+            self.eco_special_report("staticheavyarty", "blocked", "no_safe_firing_site", None);
             return;
-        }
-        let Some(position) = self.eco_bertha_site(bertha) else { return };
+        };
         self.eco_add_powered(bertha, position, List::SuperWep);
     }
 
@@ -1586,65 +1585,32 @@ impl Ai {
         Some(site)
     }
 
-    fn eco_create_super_wep_task(&mut self) {
-        if self.fac.factories.is_empty() || self.eco.radars.is_empty() || self.eco_awaiting_power() {
-            return; // Eh, no.
-        }
-        let name = match self.eco.s_wep {
-            1 => "staticnuke",
-            2 => "zenith",
-            _ => "raveparty",
-        };
-        let Some(death) = self.defs.get(name) else {
-            return;
-        };
-        // An ally's frame of it first; else in our turn (see `allied`).
-        if self.eco_assist_ally(death) {
+    pub(super) fn eco_create_super_wep_task(&mut self) {
+        let name = match self.eco.s_wep { 1 => "staticnuke", 2 => "zenith", _ => "raveparty" };
+        if self.fac.factories.is_empty() {
+            self.eco_special_report(name, "blocked", "no_factory", None);
             return;
         }
-        // The alliance's one nuke stands or rises (the ally's we helped,
-        // say): our wish is answered, Berthas next.
-        if self.eco.s_wep == 1
-            && let Some(silo) = self.eco_alliance_nuke()
-        {
-            let p = silo.pos();
-            self.log(&format!(
-                "economy: the alliance has its nuke (team {}'s at ({:.0}, {:.0})); one is enough, none of ours",
-                silo.team(),
-                p.x,
-                p.z
-            ));
+        let Some(def) = self.defs.get(name) else {
+            self.eco_special_report(name, "blocked", "definition_missing", None);
+            return;
+        };
+        // Part-paid allied frames precede our own site search and turn-taking.
+        if self.eco_assist_ally(def) { return; }
+        if self.eco.s_wep == 1 && self.eco_alliance_nuke().is_some() {
+            self.eco_special_report(name, "satisfied", "alliance_silo", None);
             self.eco.s_wep = 0;
             return;
         }
         if !self.eco_ally_turn("superweapon", &super::allied::SUPERWEAPONS) {
+            self.eco_special_report(name, "blocked", "allied_turn", None);
             return;
         }
-
-        let ally_base = self.graph.get_ally_base();
-        let ally_center = self.graph.get_ally_center();
-        let mut position = get_directional_point(ally_base, ally_center, distance(ally_base, ally_center) * 0.3);
-        // port: the original guarded this with try/catch; a degenerate
-        // direction (base == center) yields NaN instead.
-        if !position.x.is_finite() || !position.z.is_finite() {
+        let Some(site) = self.eco_special_site(def) else {
+            self.eco_special_report(name, "blocked", "no_safe_reachable_site", None);
             return;
-        }
-        position = self.eco_build_site(death, position, 0);
-
-        let mut i = 0;
-        loop {
-            i += 1;
-            if i > 3 {
-                return;
-            }
-            if !self.eco_bad_super_wep_site(position) {
-                break;
-            }
-            position = get_radial_point(position, 400.0);
-            position = self.eco_build_site(death, position, 0);
-        }
-
-        self.eco_add_powered(death, position, List::SuperWep);
+        };
+        self.eco_add_powered(def, site, List::SuperWep);
     }
 
     /// Rule out first factories whose units get to much less of the metal

@@ -165,6 +165,7 @@ impl Ai {
     /// waits until its site has it, while the planner links it up.
     pub(super) fn eco_add_powered(&mut self, def: UnitDef, pos: Vec3, list: List) {
         if self.eco_super_project_exposed(def, pos) {
+            self.eco_special_report(&def.name(), "blocked", "missile_exposure", None);
             return;
         }
         let needs = self.eco.grid_defs.needs(def.id());
@@ -180,6 +181,7 @@ impl Ai {
                 pos.z
             ));
             self.eco.pending_power = Some(PendingPower { def, pos, list, since: self.frame });
+            self.eco_special_report(&def.name(), "waiting", "power_connection", None);
         }
     }
 
@@ -202,7 +204,14 @@ impl Ai {
         if let Some(c) = ct.as_construction_mut() {
             c.frame_issued = self.frame;
         }
-        self.eco_add_construction(ct, Some(list), Some(list));
+        let task = self.eco_add_construction(ct, Some(list), Some(list));
+        match task {
+            Some(id) => {
+                self.eco_track_special(id);
+                self.eco_special_report(&def.name(), "accepted", "awaiting_crew", Some(id));
+            }
+            None => self.eco_special_report(&def.name(), "blocked", "construction_admission", None),
+        }
     }
 
     /// Link starved buildings to power, and (late) the grids to each other.
