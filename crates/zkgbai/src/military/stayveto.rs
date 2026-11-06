@@ -211,6 +211,8 @@ impl Ai {
         let u = c.unit;
         (!c.is_plane
             && !c.is_flyer
+            // Crab's retreat guard must hold position, not issue a moving Fight.
+            && self.defs.name_of(u) != "spidercrabe"
             && c.shield_ok()
             && u.health() > 0.0
             && u.team() == self.team_id

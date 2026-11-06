@@ -117,6 +117,7 @@ impl Model {
             defense_engagement: None,
             hazard: None,
             withdraw: false,
+            retreat_path: None,
             pass: false,
             focus: order.target,
             insertion: None,

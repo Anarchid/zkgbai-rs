@@ -223,6 +223,16 @@ impl Ai {
     /// seen (statics as known). `None` when one of ours is submerged or the
     /// fight is too big.
     pub(crate) fn local_fight(&mut self, units: &[Unit]) -> Option<Local> {
+        self.local_fight_with_horizon(units, None)
+    }
+
+    /// Include anything that could reach weapon range during the escape,
+    /// including long-range guns and aircraft outside the usual local radius.
+    pub(crate) fn local_retreat_fight(&mut self, unit: Unit, horizon: i32) -> Option<Local> {
+        self.local_fight_with_horizon(&[unit], Some(horizon))
+    }
+
+    fn local_fight_with_horizon(&mut self, units: &[Unit], retreat_horizon: Option<i32>) -> Option<Local> {
         let frame = self.frame;
         let mut ours: Vec<(Unit, UnitDef, f32)> = Vec::new();
         for &u in units {
@@ -253,20 +263,33 @@ impl Ai {
             }
             let contact = near(e.position);
             let armed = e.can_attack() && !e.is_aa;
-            let joins = armed
-                && !e.can_fly()
-                && (distance(e.position, mid) <= SUPPORT
-                    || (self.raidcommit_on()
-                        && positions.iter().any(|p| distance(e.position, *p) <= e.def_max_weapon_range() + CONTACT)));
+            let escape_contact = (armed || !e.identified)
+                && retreat_horizon.is_some_and(|horizon| {
+                    ours.iter().any(|(u, def, _)| {
+                        distance(u.pos(), e.position)
+                            <= e.def_max_weapon_range()
+                                + (def.speed() + e.def_speed()) * horizon as f32 / 30.0
+                                + CONTACT
+                    })
+                });
+            let joins = escape_contact
+                || armed
+                    && !e.can_fly()
+                    && (distance(e.position, mid) <= SUPPORT
+                        || (self.raidcommit_on()
+                            && positions
+                                .iter()
+                                .any(|p| distance(e.position, *p) <= e.def_max_weapon_range() + CONTACT)));
             if !contact && !joins {
                 continue;
             }
             let Some(def) = e.ud.filter(|_| e.identified) else {
-                unknown |= if self.raidcommit_on() { contact || joins } else { contact && !e.is_static };
+                unknown |=
+                    escape_contact || if self.raidcommit_on() { contact || joins } else { contact && !e.is_static };
                 continue;
             };
             // Aircraft only over the fight itself.
-            if e.can_fly() && !contact {
+            if e.can_fly() && !contact && !escape_contact {
                 continue;
             }
             theirs.push((eid, def, e.get_health() * e.def_health(), e.position, armed, e.def_name.clone()));

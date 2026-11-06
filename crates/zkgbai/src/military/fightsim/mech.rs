@@ -603,6 +603,8 @@ struct Run<'a> {
     defense_engagement: Option<(&'a FightSnapshot, &'a [f64; 13])>,
     hazard: Option<&'a Hazard>,
     withdraw: bool,
+    /// Side A follows these world-space waypoints, then stops (Crab escape).
+    retreat_path: Option<&'a [(f32, f32)]>,
     /// A's mobile units drive through B (fates' pass mode).
     pass: bool,
     focus: Option<usize>,
@@ -741,7 +743,23 @@ impl Model {
     /// A committed Fight order: our units engage, while both sides retain
     /// tactical movement. Other kiting queries keep their engagement prior.
     pub(crate) fn ordered_kiting_fates(&self, snap: &FightSnapshot, horizon: i32) -> Vec<UnitFate> {
-        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, true, &[], None, true, None).0
+        self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, true, &[], None, true, None, None).0
+    }
+
+    /// Forecast an exposed retreat along the actual command queue. Health is
+    /// unarmored HP; no stationary armor multiplier carries into this query.
+    /// Both sides fire whenever able, without the fitted non-engagement prior.
+    pub(crate) fn retreat_fates(
+        &self,
+        snap: &FightSnapshot,
+        horizon: i32,
+        path: &[(f32, f32)],
+        paralysis: &[(usize, f32)],
+    ) -> Vec<UnitFate> {
+        let mut snap = snap.clone();
+        snap.flags.twod = true;
+        self.fates_run(&snap, horizon, FateMode::AMove, paralysis, None, None, false, &[], None, true, None, Some(path))
+            .0
     }
 
     pub fn defense_fates(
@@ -765,7 +783,7 @@ impl Model {
         defense: Option<&Defense>,
         kiting: bool,
     ) -> Vec<UnitFate> {
-        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false, None).0
+        self.fates_run(snap, horizon, mode, paralysis, insertion, defense, kiting, &[], None, false, None, None).0
     }
 
     /// Hold the working builders at their posts, add construction HP while
@@ -791,6 +809,7 @@ impl Model {
             None,
             false,
             Some(construction),
+            None,
         );
         (fates, progress)
     }
@@ -808,7 +827,7 @@ impl Model {
         ordered: bool,
     ) -> (Vec<UnitFate>, f64) {
         let (fates, survive, _) =
-            self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered, None);
+            self.fates_run(snap, horizon, FateMode::AMove, &[], None, None, false, phase, bomb, ordered, None, None);
         (fates, survive)
     }
 
@@ -826,10 +845,11 @@ impl Model {
         bomb: Option<BombRun>,
         ordered: bool,
         construction: Option<&Construction>,
+        retreat_path: Option<&[(f32, f32)]>,
     ) -> (Vec<UnitFate>, f64, f32) {
         let mut units = self.mech_units(snap);
         if ordered {
-            for m in units.iter_mut().filter(|m| m.u.side == 0) {
+            for m in units.iter_mut().filter(|m| m.u.side == 0 || retreat_path.is_some()) {
                 m.engage = 1.0;
             }
         }
@@ -841,7 +861,7 @@ impl Model {
             }
         }
         let kiting = kiting.then(|| self.kiting(snap, &units));
-        if defense.is_some() {
+        if defense.is_some() || retreat_path.is_some() {
             for (m, u) in units.iter_mut().zip(&snap.units) {
                 m.u.x = u.x as f64;
                 m.lat = u.z as f64;
@@ -897,6 +917,7 @@ impl Model {
             defense_engagement: defense.map(|_| (snap, &self.mech.engage)),
             hazard: None,
             withdraw: false,
+            retreat_path,
             pass,
             focus,
             insertion,
@@ -1241,6 +1262,7 @@ pub(super) fn simulate_mech_kiting(
         defense_engagement: None,
         hazard,
         withdraw,
+        retreat_path: None,
         pass: false,
         focus: None,
         insertion: None,
@@ -1337,6 +1359,7 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
     let mut sides: [Vec<usize>; 2] = [Vec::with_capacity(n), Vec::with_capacity(n)];
     let mut foes: Vec<usize> = Vec::with_capacity(n);
     let mut raid_focus = vec![None; n];
+    let mut retreat_waypoint = if run.retreat_path.is_some() { vec![0; n] } else { Vec::new() };
     let mut engagement_members = Vec::new();
     // A unit has changed sides (capture): look for capturers that died.
     let mut captures = false;
@@ -1552,6 +1575,28 @@ fn run_mech(template: &[MechUnit], hits: &HitTables, stun_cap_s: f64, run: &mut 
                 continue;
             }
             let side = us[i].u.side as usize;
+            if let Some(path) = run.retreat_path.filter(|_| side == 0) {
+                let mut remaining = us[i].u.speed * (1.0 - us[i].slowed()) * dt;
+                while let Some(&(x, z)) = path.get(retreat_waypoint[i]) {
+                    let (dx, dz) = (x as f64 - us[i].u.x, z as f64 - us[i].lat);
+                    let dist = dx.hypot(dz);
+                    if dist <= 1e-6 {
+                        retreat_waypoint[i] += 1;
+                        continue;
+                    }
+                    let step = remaining.min(dist);
+                    us[i].u.x += dx * step / dist;
+                    us[i].lat += dz * step / dist;
+                    us[i].u.moving |= step > 0.0;
+                    moved |= step > 0.0;
+                    remaining -= step;
+                    if step < dist {
+                        break;
+                    }
+                    retreat_waypoint[i] += 1;
+                }
+                continue;
+            }
             // A planned exit is one persistent Move destination. Keep firing,
             // cooldowns and status effects; do not rebuild the fight snapshot.
             if side == 0
@@ -1898,6 +1943,80 @@ mod tests {
     }
     /// Absolute tolerance on killed shares against the Python model.
     const TOL: f64 = 1e-3;
+
+    fn crab_escape_case(range: f32) -> FightSnapshot {
+        let crab = Arc::new(UnitSpec {
+            def: "spidercrabe".into(),
+            cost: 1600.0,
+            health: 4000.0,
+            speed: 1.0,
+            mobile: true,
+            radius: 20.0,
+            ..Default::default()
+        });
+        let gun = Arc::new(UnitSpec {
+            def: "escape_test_gun".into(),
+            cost: 100.0,
+            health: 1000.0,
+            weapons: vec![WeaponSpec {
+                name: "escape_test_beam".into(),
+                weapon_type: "BeamLaser".into(),
+                range,
+                reload: 1.0,
+                salvo: 1,
+                damage: 100.0,
+                leading: None,
+            }],
+            ..Default::default()
+        });
+        FightSnapshot {
+            units: vec![
+                SnapUnit { side: 0, spec: crab, hp: 1000.0, x: 1000.0, z: 1000.0, ..Default::default() },
+                SnapUnit { side: 1, spec: gun, hp: 1000.0, x: 1200.0, z: 1000.0, ..Default::default() },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn crab_escape_uses_exposed_hp_for_all_fifteen_seconds() {
+        let model = Model::load().unwrap();
+        let mut snap = crab_escape_case(5000.0);
+        let path = [(500.0, 1000.0)];
+        assert!(!model.retreat_fates(&snap, 300, &path, &[])[0].dead);
+        let exposed = model.retreat_fates(&snap, 450, &path, &[])[0];
+        assert!(exposed.dead, "{exposed:?}");
+        assert!(exposed.death_frame.unwrap() >= 300);
+        snap.units[0].hp *= 3.0;
+        assert!(
+            !model.retreat_fates(&snap, 450, &path, &[])[0].dead,
+            "carrying stationary effective HP into the forecast would incorrectly permit retreat"
+        );
+    }
+
+    #[test]
+    fn crab_escape_follows_the_world_route_then_stops() {
+        let model = Model::load().unwrap();
+        let snap = crab_escape_case(300.0);
+        let away = model.retreat_fates(&snap, 450, &[(500.0, 1000.0)], &[])[0];
+        let toward = model.retreat_fates(&snap, 450, &[(1100.0, 1000.0)], &[])[0];
+        assert!(!away.dead && away.p_raw < 0.1, "{away:?}");
+        assert!(toward.dead, "must stop at the queued endpoint, not walk through the gun: {toward:?}");
+        let dogleg = model.retreat_fates(&snap, 450, &[(1100.0, 1000.0), (500.0, 1000.0)], &[])[0];
+        assert!(!dogleg.dead, "must advance through queued waypoints: {dogleg:?}");
+        let stunned = model.retreat_fates(&snap, 450, &[(500.0, 1000.0)], &[(0, 2.0)])[0];
+        assert!(stunned.dead, "a paralyzed Crab cannot escape at full speed: {stunned:?}");
+    }
+
+    #[test]
+    fn crab_escape_waits_for_late_reloads() {
+        let model = Model::load().unwrap();
+        let mut snap = crab_escape_case(5000.0);
+        snap.units[0].hp = 50.0;
+        snap.units[1].reloads = vec![("escape_test_beam".into(), 360)];
+        let fate = model.retreat_fates(&snap, 450, &[(1000.0, 1000.0)], &[])[0];
+        assert!(fate.dead && fate.death_frame.unwrap() >= 360, "{fate:?}");
+    }
 
     #[test]
     fn moving_target_can_enter_led_range_before_nominal_range() {
@@ -2952,6 +3071,7 @@ mod tests {
             defense_engagement: None,
             hazard: None,
             withdraw: false,
+            retreat_path: None,
             pass: false,
             focus: None,
             insertion: None,

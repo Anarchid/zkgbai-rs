@@ -81,7 +81,8 @@ impl Coward {
         }
     }
 
-    pub fn retreat_to(&mut self, pos: Vec3, nav: &mut Nav) {
+    /// The exact waypoints we will issue, also used to forecast a Crab's escape.
+    pub(crate) fn retreat_path(&self, pos: Vec3, nav: &mut Nav) -> Vec<Vec3> {
         let mut path = nav.pathfinder.find_path(nav.war, self.unit, pos, PathCost::AvoidEnemies);
         if path.len() > 1 && self.is_flyer {
             path.pop_front();
@@ -90,9 +91,9 @@ impl Coward {
             path.pop_front();
         }
         let Some(first) = path.pop_front() else {
-            return;
+            return Vec::new();
         };
-        kgb_move_to(self.unit, first, 0, nav.frame);
+        let mut waypoints = vec![first];
 
         // Queue up to the first 3 waypoints.
         let path_size = path.len().min(3);
@@ -107,9 +108,16 @@ impl Coward {
                 path.pop_front();
             }
             if let Some(wp) = path.pop_front() {
-                kgb_move_to(self.unit, wp, OPTION_SHIFT_KEY, nav.frame);
+                waypoints.push(wp);
             }
             i += 1;
+        }
+        waypoints
+    }
+
+    pub(crate) fn retreat_along(&self, path: &[Vec3], frame: i32) {
+        for (i, &wp) in path.iter().enumerate() {
+            kgb_move_to(self.unit, wp, if i == 0 { 0 } else { OPTION_SHIFT_KEY }, frame);
         }
     }
 
