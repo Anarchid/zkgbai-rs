@@ -47,7 +47,7 @@ const SIGHT_MEMORY: i32 = 300;
 /// Sight assumed for a contact not yet identified.
 const UNKNOWN_SIGHT: f32 = 450.0;
 const RESERVE_MINES: usize = 8;
-const CLUMP_UNITS: usize = 5;
+const CLUMP_UNITS: usize = 2;
 const CLUMP_RADIUS: f32 = 300.0;
 const CLUMP_MEMORY: i32 = 30 * 10;
 
@@ -308,8 +308,12 @@ fn rows(center: Vec3, forward: Vec3, width: f32, spacing: f32) -> Vec<(Vec3, usi
 impl Ai {
     /// One shared reserve, counting completed mines and nanoframes exactly
     /// once, plus accepted orders that have not created a unit yet.
-    pub(crate) fn sapper_wants_mines(&self) -> bool {
-        let wanted = mine_quota(&self.misc_handler.mines.clumps);
+    fn sapper_mine_quota(&self, mine_name: &str) -> usize {
+        self.defs.get(mine_name).map_or(0, |def| mine_quota(&self.misc_handler.mines.clumps, def.cost(self.metal)))
+    }
+
+    pub(crate) fn sapper_wants_mines(&self, mine_name: &str) -> bool {
+        let wanted = self.sapper_mine_quota(mine_name);
         if wanted == 0 {
             return false;
         }
@@ -877,12 +881,20 @@ mod tests {
         unsafe extern "C" fn health(_: i32, id: i32) -> f32 {
             if id == 51 { 0.0 } else { 100.0 }
         }
+        unsafe extern "C" fn cost(_: i32, id: i32, _: i32) -> f32 {
+            match id {
+                1 => 125.0,
+                2 => 170.0,
+                _ => 100.0,
+            }
+        }
         MINE_ROSTER.with_borrow_mut(Vec::clear);
         MINE_DEFS_READY.set(false);
         let mut ai = crate::economy::test_ai_with(|t| {
             t.getTeamUnits = Some(roster);
             t.getUnitDefs = Some(defs);
             t.UnitDef_getName = Some(name);
+            t.UnitDef_getCost = Some(cost);
             t.Unit_getDef = Some(def);
             t.Unit_getTeam = Some(team);
             t.Unit_getHealth = Some(health);
@@ -897,30 +909,30 @@ mod tests {
         let mut ai = reserve_ai();
         ai.set_feature_off("conquest", true);
         assert!(ai.dev_off("conquest"));
-        assert!(!ai.sapper_wants_mines());
-        ai.misc_handler.mines.clumps = test_clumps(20);
-        assert!(ai.sapper_wants_mines());
+        assert!(!ai.sapper_wants_mines("shieldbomb"));
+        ai.misc_handler.mines.clumps = test_clumps(14);
+        assert!(ai.sapper_wants_mines("shieldbomb"));
         // Two Imps and a Snitch; other bomb types, allies and dead units
         // cannot satisfy this reserve. None need be in the finished handler.
         MINE_ROSTER.with_borrow_mut(|ids| *ids = vec![11, 12, 21, 31, 41, 51]);
-        assert!(ai.sapper_wants_mines());
+        assert!(ai.sapper_wants_mines("shieldbomb"));
         let factory = Unit::from_id(ai.cb, 100).unwrap();
         let snitch = ai.defs.get("shieldbomb").unwrap();
         ai.sapper_ordered(factory.id(), snitch);
-        assert!(!ai.sapper_wants_mines(), "accepted order fills the fourth slot");
+        assert!(!ai.sapper_wants_mines("shieldbomb"), "accepted order fills the fourth slot");
         MINE_ROSTER.with_borrow_mut(|ids| ids.push(22));
         ai.sapper_created(Unit::from_id(ai.cb, 22).unwrap(), Some(factory));
         assert!(ai.misc_handler.mines.orders.is_empty());
-        assert!(!ai.sapper_wants_mines(), "nanoframe replaces its reservation");
+        assert!(!ai.sapper_wants_mines("shieldbomb"), "nanoframe replaces its reservation");
         MINE_ROSTER.with_borrow_mut(|ids| ids.retain(|&id| id != 11));
-        assert!(ai.sapper_wants_mines(), "spent mine gets replaced");
+        assert!(ai.sapper_wants_mines("shieldbomb"), "spent mine gets replaced");
         ai.sapper_ordered(factory.id(), snitch);
         ai.sapper_factory_idle(factory.id());
-        assert!(ai.sapper_wants_mines(), "canceled order releases its slot");
+        assert!(ai.sapper_wants_mines("shieldbomb"), "canceled order releases its slot");
         ai.sapper_update_reserve(1000);
-        assert!(ai.sapper_wants_mines(), "short fog gaps preserve observed demand");
+        assert!(ai.sapper_wants_mines("shieldbomb"), "short fog gaps preserve observed demand");
         ai.sapper_update_reserve(30 * 91);
-        assert!(!ai.sapper_wants_mines(), "old sightings expire");
+        assert!(!ai.sapper_wants_mines("shieldbomb"), "old sightings expire");
     }
 
     fn site(x: f32, gate: f32, value: f32) -> Site {
