@@ -112,7 +112,9 @@ and blocked preparation sites are abandoned. Existing defenses can satisfy the p
 Quiet sites build immediately, and completed silos still receive caretakers and missile priority.
 
 Besides the Eos/Shockley payoff trigger, reaching **at least 80%** of known and inferred
-enemy static value warrants a silo independently of battlefield density. The existing
+enemy static value warrants a silo once battlefield density exceeds **half** the terrain-adjusted
+siege threshold: **750 on open terrain, 500 on fully lane-like terrain** at the default slider.
+This high-coverage route is the small-map allowance; it needs no separate map-size cutoff. The existing
 siege trigger also admits a silo when it covers **more than 70%** of
 known and inferred enemy static metal **or held enemy territory**, and battlefield density exceeds the
 **Missile silo siege density** slider (`missile_silo_density`: default 1500, range 0–10000,
@@ -120,10 +122,10 @@ step 100), divided by `1 + 0.5 * laneness`. This bounded, experimental terrain a
 requires 1500 on open terrain and 1000 on fully lane-like terrain at the default setting.
 Density is `posture.density`: all allied standing metal plus known enemy metal, divided by usable
 ground area in millions of square elmos. Enemy mobiles count while seen within the last minute;
-remembered live statics remain counted. The 70% siege trigger also requires battlefield density;
+remembered live statics remain counted. Both coverage triggers require battlefield density;
 the missile firing disk is not the density denominator. Density and lanes are measured even
-with defense posture disabled; before lanes are available the full slider threshold applies.
-Decision logs and the operator `regime` view report the adjusted threshold. Static value
+with defense posture disabled; before lanes are available the open-terrain thresholds apply.
+Decision logs report both adjusted thresholds; the operator `regime` view reports the full siege threshold. Static value
 includes remembered buildings and inferred mexes (shadow-only spots at the income model's 10%
 confidence), without double-counting known mexes or assigning locations to unobserved spending.
 Territory coverage measures the union of held enemy territory cells around hostile mexes;
@@ -132,7 +134,10 @@ by allied silos, while retaining the whole enemy area/value as the denominator.
 
 Site searches survive temporary income dips and hard energy stalls; these pause construction
 admission, while growth/overdrive energy demand does not block it. An accepted own or allied
-project remains committed. Background results retain the exact terrain samples used for the
+project remains committed, including after density falls or the admission policy changes.
+Uncommitted search results are rescored against current demand and density before admission,
+including results restored from checkpoints. This density rule adds no persistent state.
+Background results retain the exact terrain samples used for the
 chosen site's flights: unrelated terrain changes are harmless, while relevant changes or stale
 results trigger a fresh search immediately. Only a completed search finding no site waits a
 minute before retrying. Disabling missiles/requisition or selecting another silo cancels search.

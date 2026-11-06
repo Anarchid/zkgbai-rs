@@ -458,6 +458,26 @@ mod tests {
     }
 
     #[test]
+    fn restored_coverage_result_rechecks_current_density_before_admission() {
+        let mut job = fixture();
+        job.demand.targets.clear();
+        job.demand.siege = SiegeReadiness::new(751.0, 1500.0, 0.0);
+        let result = compute(job);
+        assert!(result.choice.is_some());
+        let bytes = checkpoint::rmp_serde::to_vec_named(&result).unwrap();
+        let restored: Result = checkpoint::rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(checkpoint::rmp_serde::to_vec_named(&restored).unwrap(), bytes);
+        let mut current = fixture();
+        current.demand.targets.clear();
+        for density in [751.0, 750.0, 0.0, 800.0] {
+            current.demand.siege = SiegeReadiness::new(density, 1500.0, 0.0);
+            for answer in [&result, &restored] {
+                assert_eq!(answer.revalidate(601, &current.ground.corners, &current.demand).is_some(), density > 750.0);
+            }
+        }
+    }
+
+    #[test]
     fn sampled_terrain_survives_checkpoint_and_recomputes_a_changed_flight() {
         let result = compute(fixture());
         let bytes = checkpoint::rmp_serde::to_vec_named(&result).unwrap();
