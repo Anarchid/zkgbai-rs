@@ -24,6 +24,8 @@ use crate::kgbutil::{FireGround, Flight, Gun, Shadow, Shape, Volume};
 use crate::military::handlers::precision::{Mission, MissionStats};
 use crate::military::wrappers::weapon_power;
 
+mod blind_fire;
+
 /// Share of a defense's model height that its weapons fire from, at the
 /// least; and how far above its aim point (ZK's `aimposoffset` over its
 /// middle: where the turret head is) they are taken to fire from. Staged
@@ -261,6 +263,8 @@ pub struct Approach {
 
 #[derive(Default)]
 pub struct Precision {
+    /// Coordinate targets owned by the Pyro fallback, including across saves.
+    blind_fire: blind_fire::BlindFire,
     ground: Option<Arc<FireGround>>,
     revision: u64,
     worker: Option<Worker<ShadowJob, ShadowResult>>,
@@ -1021,6 +1025,7 @@ impl Ord for Visit {
 impl Ai {
     /// Keep the precision map current, and report on it now and then.
     pub fn precision_update(&mut self, frame: i32) {
+        self.pyro_blind_fire_update(frame);
         self.precision.poll_shadows();
         if frame % SYNC_FRAMES != (self.offset + 11) % SYNC_FRAMES {
             return;
